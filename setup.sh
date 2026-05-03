@@ -74,6 +74,20 @@ install_prereqs_mac() {
         return 1
     fi
 
+    # Check SSH key permissions
+    local key_perms
+    key_perms=$(stat -f "%Lp" "${SSH_KEY_DEFAULT}" 2>/dev/null || stat -c "%a" "${SSH_KEY_DEFAULT}" 2>/dev/null)
+    if [ "$key_perms" != "600" ]; then
+        warn "SSH key has incorrect permissions (${key_perms}). Fixing..."
+        chmod 600 "${SSH_KEY_DEFAULT}"
+    fi
+
+    # Check for rsync
+    if ! command -v rsync &>/dev/null; then
+        warn "rsync not found. Installing via Homebrew..."
+        brew install rsync
+    fi
+
     success "macOS prerequisites OK"
 }
 
@@ -227,8 +241,24 @@ select_server_interactive() {
 
 # Main
 main() {
-    local target="${1:-auto}"
+    local target="auto"
+    local DEPLOY_FLAG=false
     local context
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --deploy) DEPLOY_FLAG=true; shift ;;
+            -h|--help) 
+                echo "Usage: $0 [--deploy] [server-name|auto]"
+                echo "  --deploy    Deploy services after SSH setup"
+                echo "  server-name: \"2 - VPN\", \"3 - apps\", \"4 - n8n + claw\", or \"auto\""
+                exit 0
+                ;;
+            *) target="$1"; shift ;;
+        esac
+    done
+
     context=$(detect_local_or_remote)
 
     echo ""
@@ -255,6 +285,12 @@ main() {
 
         install_prereqs_mac || true
         configure_ssh "$target" "$host_ip" "${SSH_KEY_DEFAULT}"
+
+        if [ "$DEPLOY_FLAG" = true ]; then
+            echo ""
+            info "Running deployment scripts..."
+            deploy_from_mac "$target" "$host_ip" "${SSH_KEY_DEFAULT}"
+        fi
 
         echo ""
         echo "============================================"
