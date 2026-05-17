@@ -19,4 +19,7 @@ for f in SOUL.md IDENTITY.md USER.md AGENTS.md MEMORY.md; do
     "${HERMES_USER}@${HERMES_IP}:${OPS_DIR}/${f}"
 done
 
-echo "Brain deployed to ${OPS_DIR}. Restart: ssh hermes 'systemctl restart opencrabs-ops'"
+echo "Brain deployed to ${OPS_DIR} (overwrites live files; re-run after OpenCrabs RSI template sync)."
+ssh -p "$HERMES_PORT" -i "$SSH_KEY" "${HERMES_USER}@${HERMES_IP}" \
+  'systemctl --user restart opencrabs-ops'
+echo "Restarted opencrabs-ops."
