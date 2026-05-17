@@ -1,5 +1,8 @@
 # Copy to ~/.opencrabs/profiles/ops/keys.toml on hermes (chmod 600).
 # Set REDEVEST_ADMIN_BOT_TOKEN in environment when deploying — do not commit.
 
-[telegram]
-bot_token = "REPLACE_ME"
+[channels.telegram]
+token = "REPLACE_ME"
+
+[providers.minimax]
+api_key = "COPY_FROM_DEFAULT_PROFILE"

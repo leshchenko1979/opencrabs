@@ -33,25 +33,46 @@ OPS=~/.opencrabs/profiles/ops
 mkdir -p "\$OPS"
 
 if ! opencrabs profile list 2>/dev/null | grep -qE '^ops\$'; then
-  opencrabs profile create ops || true
+  if [[ -d "\$OPS" ]]; then
+    mv "\$OPS" "\${OPS}.bak.\$(date +%s)"
+  fi
+  opencrabs profile create ops
 fi
 
-# Fresh config for admin bot — do not migrate from default
-cat > "\$OPS/config.toml" <<'CFG'
+# MiniMax from default profile; admin Telegram token only in ops keys
+TEMPLATE="\${OPS}/config.toml"
+if [[ -f /root/vds-servers/5\\ -\\ hermes/opencrabs-profiles/ops/config.toml.template ]]; then
+  cp "/root/vds-servers/5 - hermes/opencrabs-profiles/ops/config.toml.template" "\$OPS/config.toml"
+else
+  cat > "\$OPS/config.toml" <<'CFG'
 auto_update = false
 max_concurrent = 2
 
-[telegram]
+[providers.minimax]
+enabled = true
+default_model = "MiniMax-M2.7"
+
+[channels.telegram]
 enabled = true
 
 [agent]
-model = "anthropic/claude-sonnet-4-20250514"
-CFG
+default_model = "MiniMax-M2.7"
 
-mkdir -p "\$OPS"
+[mcp]
+enabled = false
+
+[memory]
+vector_enabled = false
+CFG
+fi
+
+minimax_key=\$(grep -A1 '^\[providers.minimax\]' ~/.opencrabs/keys.toml | grep api_key | sed -E 's/.*"([^"]+)".*/\\1/')
 cat > "\$OPS/keys.toml" <<KEYS
-[telegram]
-bot_token = "\${REDEVEST_ADMIN_BOT_TOKEN}"
+[channels.telegram]
+token = "\${REDEVEST_ADMIN_BOT_TOKEN}"
+
+[providers.minimax]
+api_key = "\${minimax_key}"
 KEYS
 chmod 600 "\$OPS/keys.toml"
 

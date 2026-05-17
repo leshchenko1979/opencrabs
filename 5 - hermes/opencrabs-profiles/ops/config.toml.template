@@ -1,0 +1,20 @@
+# Deployed to ~/.opencrabs/profiles/ops/config.toml — admin bot only (not @oc_l1979_bot).
+
+auto_update = false
+max_concurrent = 2
+
+[providers.minimax]
+enabled = true
+default_model = "MiniMax-M2.7"
+
+[channels.telegram]
+enabled = true
+
+[agent]
+default_model = "MiniMax-M2.7"
+
+[mcp]
+enabled = false
+
+[memory]
+vector_enabled = false

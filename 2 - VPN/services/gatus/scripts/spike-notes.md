@@ -22,6 +22,10 @@ Option A. **Full plan:** `.cursor/plans/gatus_opencrabs_dm_bridge_6607474a.plan.
 
 Phase 1 scrub/git → Phase 2 hermes → Phase 3 bridge → Phase 4 Gatus custom → Phase 5 docs
 
+## Post-deploy fix (2026-05-17)
+
+- **Ops bot silent:** `keys.toml` must use `[channels.telegram] token` and `[providers.minimax] api_key` (not `[telegram] bot_token`). Profile must be registered via `opencrabs profile create ops`.
+
 ## Implementation artifacts
 
 - `gatus_opencrabs_bridge.py` + `deploy-gatus-bridge.sh` on VPN
