@@ -14,10 +14,14 @@ HERMES_PORT="${REMOTE_SSH_PORT:-18718}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
 OPS_DIR="/root/.opencrabs/profiles/ops"
 
-for f in SOUL.md IDENTITY.md USER.md AGENTS.md MEMORY.md; do
+for f in SOUL.md USER.md AGENTS.md MEMORY.md; do
   scp -P "$HERMES_PORT" -i "$SSH_KEY" "${BRAIN_SRC}/${f}" \
     "${HERMES_USER}@${HERMES_IP}:${OPS_DIR}/${f}"
 done
+
+# Remove legacy IDENTITY.md if present (merged into USER.md; not core in OC 0.3.19)
+ssh -p "$HERMES_PORT" -i "$SSH_KEY" "${HERMES_USER}@${HERMES_IP}" \
+  'rm -f ~/.opencrabs/profiles/ops/IDENTITY.md' 2>/dev/null || true
 
 echo "Brain deployed to ${OPS_DIR} (overwrites live files; re-run after OpenCrabs RSI template sync)."
 ssh -p "$HERMES_PORT" -i "$SSH_KEY" "${HERMES_USER}@${HERMES_IP}" \

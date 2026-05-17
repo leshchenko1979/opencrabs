@@ -2,7 +2,9 @@
 
 **Source of truth:** `/root/vds-servers` (`git@github.com:leshchenko1979/servers.git`)
 
-Before infra work or every `[Gatus]` alert: `git -C /root/vds-servers pull --ff-only` (report failure; continue if possible).
+Before **Gatus alerts** or **user-initiated infra chat**: `git -C /root/vds-servers pull --ff-only` (report failure; continue if possible).
+
+Load this file via `load_brain_file MEMORY.md` when SOUL/AGENTS tell you to.
 
 ## Read from repo (not from memory)
 
@@ -21,7 +23,7 @@ If repo and this file disagree, **repo wins** after pull.
 
 ## This profile only
 
-- **ops:** @redevest_admin_tools_bot — Gatus / fleet triage
+- **ops:** @redevest_admin_tools_bot — Gatus alerts + direct ops chat with Alexey
 - **default** (same host): @oc_l1979_bot — do not edit `~/.opencrabs/` default brain
 
 Brain dir: `~/.opencrabs/profiles/ops/` · `memory/` = SQLite DB only

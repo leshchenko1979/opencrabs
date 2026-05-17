@@ -1,26 +1,41 @@
-# AGENTS — Gatus workflow (behavior only; facts in repo)
+# AGENTS — ops behavior (facts in repo)
 
-## Before acting
+OpenCrabs **core** prompt only includes SOUL.md + USER.md. You **must** load this file and MEMORY.md yourself:
 
-1. `git -C /root/vds-servers pull --ff-only`
-2. Read paths listed in **MEMORY.md** (at least `CLAUDE.md` + `2 - VPN/README.md`; for `[Gatus]` also `config/config.yaml`)
+```text
+load_brain_file AGENTS.md
+load_brain_file MEMORY.md
+```
 
-Do not rely on recalled fleet IPs or service lists — load them from the repo files above.
+Do that at the **start of each session** and again when a new topic needs infra context.
+
+## Before acting (any infra / fleet work)
+
+Applies to **`[Gatus]` alerts** and **user-initiated chat** (questions, “check vpn”, deploy help, etc.).
+
+1. `git -C /root/vds-servers pull --ff-only` (report failure; continue if possible).
+2. `load_brain_file MEMORY.md` — then read repo paths it lists (at least `CLAUDE.md`; for Gatus also `2 - VPN/README.md` + `config/config.yaml`).
+3. Do not rely on recalled IPs, services, or host-diag rules — load from repo after pull.
+
+## User-initiated chat (no `[Gatus]` prefix)
+
+- Treat as a normal ops conversation: answer questions, run safe diagnostics, explain findings.
+- Same safety rules as Gatus (see `/root/vds-servers/CLAUDE.md`).
+- Pull repo when the question touches fleet config, Gatus, deploy paths, or “what’s on box N”.
 
 ## On every `[Gatus]` message
 
-1. Map `[ENDPOINT_NAME]` → SSH target using **current** `config.yaml` (host group; typically box2→`ssh vpn`, box3→`apps`, box4→`n8n`, box5→local).
-2. Run `/usr/local/bin/host-diag` on that target.
-3. If exit ≠ 0: `uptime`, `free -h`, `df -h`, `docker ps` or `systemctl` as appropriate.
-4. Reply: metrics, likely cause, **safe** fixes only — or ask the user.
-
-Safety limits: follow **Critical Rules** in `/root/vds-servers/CLAUDE.md` (Sablier, VPN cleanup, no prune without approval, etc.).
+1. Run the **Before acting** steps above.
+2. Map `[ENDPOINT_NAME]` → SSH target from **current** `config/config.yaml` (host group).
+3. Run `/usr/local/bin/host-diag` on that target (SSH or local for box5).
+4. If exit ≠ 0: `uptime`, `free -h`, `df -h`, `docker ps` or `systemctl` as needed.
+5. Reply: metrics, likely cause, **safe** fixes only — or ask Alexey.
 
 ## Respond first (Telegram)
 
-Short acknowledgment → then git pull / SSH / logs. Reading brain + repo files is fine before the first reply.
+Short acknowledgment → then `git pull` / `load_brain_file` / SSH / logs. Loading SOUL + USER is automatic; loading AGENTS + MEMORY is your job.
 
-## Session
+## Session rules
 
 - Do not edit @oc_l1979_bot default profile or `~/.opencrabs/` (non-ops) brain files.
-- Prefer `memory_search` before loading large files when available.
+- Prefer `memory_search` before loading large memory when available.
