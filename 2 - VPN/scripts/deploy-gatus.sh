@@ -57,16 +57,29 @@ scp -i "$SSH_KEY" -o BatchMode=yes \
   "${GATUS_DIR}/.env.gatus.example" \
   "${REMOTE_USER}@${VDS_SSH_TARGET}:${DEPLOY_PATH}/"
 
+if [[ -f "${GATUS_DIR}/.env.gatus" ]]; then
+  scp -i "$SSH_KEY" -o BatchMode=yes \
+    "${GATUS_DIR}/.env.gatus" \
+    "${REMOTE_USER}@${VDS_SSH_TARGET}:${DEPLOY_PATH}/.env.gatus"
+elif [[ -f "${GATUS_DIR}/.env" ]]; then
+  scp -i "$SSH_KEY" -o BatchMode=yes \
+    "${GATUS_DIR}/.env" \
+    "${REMOTE_USER}@${VDS_SSH_TARGET}:${DEPLOY_PATH}/.env.gatus"
+fi
+
 scp -i "$SSH_KEY" -o BatchMode=yes "$TMP_CONFIG" \
   "${REMOTE_USER}@${VDS_SSH_TARGET}:${DEPLOY_PATH}/config/config.yaml"
 
 # Preserve remote .env.gatus if present; seed from example only when missing
-ssh -i "$SSH_KEY" -o BatchMode=yes "${REMOTE_USER}@${VDS_SSH_TARGET}" bash -s <<REMOTE
+ssh -i "$SSH_KEY" -o BatchMode=yes "${REMOTE_USER}@${VDS_SSH_TARGET}" \
+  "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" <<'REMOTE'
 set -euo pipefail
-cd ${DEPLOY_PATH}
+cd "${DEPLOY_PATH}"
 if [[ ! -f .env.gatus ]]; then
   if [[ -f .env ]]; then
     cp .env .env.gatus
+  elif [[ -f /opt/gatus/.env ]]; then
+    cp /opt/gatus/.env .env.gatus
   else
     cp .env.gatus.example .env.gatus
     echo "WARNING: created .env.gatus from example — set tokens on server"

@@ -13,8 +13,10 @@ HERMES_PORT="${REMOTE_SSH_PORT:-18718}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
 
 ssh -p "$HERMES_PORT" -i "$SSH_KEY" "${HERMES_USER}@${HERMES_IP}" 'mkdir -p ~/.ssh && chmod 700 ~/.ssh'
-scp -P "$HERMES_PORT" -i "$SSH_KEY" "$SSH_KEY" "${SSH_KEY}.pub" \
+scp -P "$HERMES_PORT" -i "$SSH_KEY" "$SSH_KEY" \
   "${HERMES_USER}@${HERMES_IP}:/root/.ssh/id_ed25519"
+scp -P "$HERMES_PORT" -i "$SSH_KEY" "${SSH_KEY}.pub" \
+  "${HERMES_USER}@${HERMES_IP}:/root/.ssh/id_ed25519.pub"
 ssh -p "$HERMES_PORT" -i "$SSH_KEY" "${HERMES_USER}@${HERMES_IP}" \
   'chmod 600 ~/.ssh/id_ed25519 && chmod 644 ~/.ssh/id_ed25519.pub'
 scp -P "$HERMES_PORT" -i "$SSH_KEY" "${HERMES_DIR}/config/ssh-config" \

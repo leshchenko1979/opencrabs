@@ -61,8 +61,8 @@ opencrabs -p ops service start 2>/dev/null || systemctl restart opencrabs-ops ||
 # Nightly git pull
 opencrabs -p ops cron remove vds-servers-nightly-pull 2>/dev/null || true
 opencrabs -p ops cron add --name vds-servers-nightly-pull \\
-  --cron "0 3 * * *" --timezone Europe/Moscow \\
-  --message "Run only: git -C /root/vds-servers pull --ff-only. One-line reply."
+  --cron "0 3 * * *" --tz Europe/Moscow \\
+  --prompt "Run only: git -C /root/vds-servers pull --ff-only. One-line reply."
 
 echo "ops profile ready"
 REMOTE
