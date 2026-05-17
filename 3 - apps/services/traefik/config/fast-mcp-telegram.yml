@@ -1,0 +1,31 @@
+http:
+  middlewares:
+    replace-mcp-legacy:
+      replacepath:
+        path: /v1/mcp
+  routers:
+    fast-mcp-telegram-legacy:
+      rule: "Host(`tg-mcp.l1979.ru`) && PathRegexp(`^/mcp/?$`)"
+      entryPoints:
+        - websecure
+      service: fast-mcp-telegram-backend
+      tls:
+        certResolver: le
+      middlewares:
+        - replace-mcp-legacy
+    fast-mcp-telegram:
+      rule: >
+        Host(`tg-mcp.l1979.ru`) &&
+        (Path(`/health`) || Path(`/setup`) || PathPrefix(`/v1/mcp`) || PathPrefix(`/v1/url_auth/`)
+        || PathPrefix(`/setup/`) || PathPrefix(`/download-config/`) || PathPrefix(`/mtproto-api/`))
+        || PathPrefix(`/v1/attachments/`)
+      entryPoints:
+        - websecure
+      service: fast-mcp-telegram-backend
+      tls:
+        certResolver: le
+  services:
+    fast-mcp-telegram-backend:
+      loadBalancer:
+        servers:
+          - url: "http://fast-mcp-telegram:8000"

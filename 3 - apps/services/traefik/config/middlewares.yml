@@ -1,0 +1,9 @@
+http:
+  middlewares:
+    compression:
+      compress: {}
+    # pdf-extract: allow multipart PDF uploads up to 32 MiB (align with service MAX_UPLOAD_BYTES)
+    pdf-extract-buffering:
+      buffering:
+        maxRequestBodyBytes: 33554432
+        memRequestBodyBytes: 2097152

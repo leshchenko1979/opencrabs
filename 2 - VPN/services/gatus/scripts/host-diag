@@ -1,0 +1,23 @@
+#!/bin/bash
+# Host diagnostics for Gatus SSH checks (host-box2–5, 15m).
+# Docs: 2 - VPN/README.md (Gatus section). Deploy: deploy-host-diag.sh
+# Prints "load disk mem_mb" and exits 1 if unhealthy.
+LOAD_MAX=150   # load average 1.5 on single-core
+DISK_MAX=90
+MEM_MIN_MB=80  # MemAvailable
+
+LOAD=$(awk '{printf "%d", $1 * 100}' /proc/loadavg)
+DISK=$(df / | awk 'NR==2 {print int($5)}')
+MEM=$(awk '/MemAvailable/ {print int($2 / 1024)}' /proc/meminfo)
+echo "$LOAD $DISK $MEM"
+
+if [ "$DISK" -ge "$DISK_MAX" ]; then
+  exit 1
+fi
+if [ "$LOAD" -ge "$LOAD_MAX" ]; then
+  exit 1
+fi
+if [ "$MEM" -lt "$MEM_MIN_MB" ]; then
+  exit 1
+fi
+exit 0

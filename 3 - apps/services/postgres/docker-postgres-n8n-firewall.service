@@ -1,0 +1,12 @@
+[Unit]
+Description=Restrict Docker-published Postgres 5432 to n8n host (DOCKER-USER)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/iptables-docker-n8n.sh
+
+[Install]
+WantedBy=multi-user.target

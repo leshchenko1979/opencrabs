@@ -1,0 +1,85 @@
+services:
+  traefik:
+    container_name: traefik
+    image: traefik:latest
+    restart: always
+    command:
+      - "--log.level=INFO"
+      - "--api=true"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
+      - "--serversTransport.insecureSkipVerify=true"
+      - "--entrypoints.websecure.http.tls=true"
+      - "--ping=true"
+      - "--accesslog=true"
+      - "--accesslog.filepath=/var/log/traefik/access.log"
+      - "--accesslog.bufferingsize=100"
+      - "--certificatesresolvers.le.acme.email=leshchenko@gmail.com"
+      - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.le.acme.httpchallenge=true"
+      - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
+      - "--experimental.plugins.sablier.modulename=github.com/sablierapp/sablier-traefik-plugin"
+      - "--experimental.plugins.sablier.version=v1.1.0"
+      - "--providers.docker.allowEmptyServices=true"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"  # Traefik Dashboard
+    volumes:
+      - ./letsencrypt:/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config:/etc/traefik/dynamic:ro
+      - ./logs:/var/log/traefik
+    environment:
+      - TZ=Europe/Moscow
+    networks:
+      - traefik-public
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+          cpus: "0.5"
+        reservations:
+          memory: 96M
+          cpus: "0.25"
+
+  sablier:
+    container_name: sablier
+    image: sablierapp/sablier:latest
+    restart: always
+    command:
+      - start
+      - --provider.name=docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sablier-state:/etc/sablier
+    networks:
+      - traefik-public
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.5"
+        reservations:
+          memory: 32M
+          cpus: "0.05"
+
+networks:
+  traefik-public:
+    external: true
+
+volumes:
+  sablier-state:

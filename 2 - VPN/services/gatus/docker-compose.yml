@@ -1,0 +1,22 @@
+services:
+  gatus:
+    image: ghcr.io/twin/gatus:stable
+    container_name: gatus
+    restart: unless-stopped
+    env_file:
+      - .env.gatus
+    volumes:
+      - ./config/config.yaml:/config/config.yaml:ro
+      - ./data:/data
+    environment:
+      - TZ=Europe/Moscow
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.gatus.rule=Host(`gatus.l1979.ru`)"
+      - "traefik.http.routers.gatus.entrypoints=websecure"
+      - "traefik.http.routers.gatus.tls.certResolver=le"
+      - "traefik.http.services.gatus.loadbalancer.server.port=8080"
+
+networks:
+  default:
+    name: traefik-public

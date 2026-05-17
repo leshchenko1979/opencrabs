@@ -1,0 +1,30 @@
+Host vpn
+    HostName 104.128.131.166
+    User root
+    IdentityFile ~/.ssh/id_ed25519
+    StrictHostKeyChecking accept-new
+
+Host apps
+    HostName 144.31.188.163
+    User root
+    IdentityFile ~/.ssh/id_ed25519
+    StrictHostKeyChecking accept-new
+
+Host n8n
+    HostName 2.27.120.75
+    User root
+    IdentityFile ~/.ssh/id_ed25519
+    StrictHostKeyChecking accept-new
+
+Host hermes
+    HostName 132.243.213.9
+    Port 18718
+    User root
+    IdentityFile ~/.ssh/id_ed25519
+    StrictHostKeyChecking accept-new
+
+Host github-vds-servers
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/github_vds_servers
+    IdentitiesOnly yes

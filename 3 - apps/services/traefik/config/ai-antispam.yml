@@ -1,0 +1,15 @@
+# AI Antispam Telegram webhook (container on traefik-public).
+http:
+  routers:
+    ai-antispam:
+      rule: Host(`ai-antispam.l1979.ru`) && (Path(`/process-tg-updates`) || Path(`/health`))
+      entryPoints:
+        - websecure
+      service: ai-antispam-backend
+      tls:
+        certResolver: le
+  services:
+    ai-antispam-backend:
+      loadBalancer:
+        servers:
+          - url: http://ai-antispam:8080

@@ -1,0 +1,7 @@
+# Example crontab entries (run: crontab -e)
+# Adjust paths to your clone of servers/mac-workstation-backup and ensure the external volume
+# is mounted before 03:00. Full Disk Access: add /usr/sbin/cron in System Settings.
+# Optional wake: sudo pmset repeat wake MTWRFSU 02:55:00
+
+# Daily backup apps + n8n + hermes (莫斯科时区 = Mac 本地时间)
+0 3 * * * caffeinate -i /Users/les/coding_projects/vds/servers/mac-workstation-backup/backup-all.sh

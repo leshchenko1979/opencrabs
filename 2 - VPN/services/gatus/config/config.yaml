@@ -1,0 +1,255 @@
+storage:
+  type: sqlite
+  path: /data/gatus.db
+
+web:
+  port: 8080
+
+alerting:
+  telegram:
+    token: ${TELEGRAM_BOT_TOKEN}
+    id: ${TELEGRAM_CHAT_ID}
+  custom:
+    url: "http://172.18.0.1:9081/gatus/alert"
+    method: POST
+    headers:
+      X-Gatus-Secret: ${GATUS_BRIDGE_SECRET}
+    body: |
+      {"endpoint":"[ENDPOINT_NAME]","status":"[ALERT_TRIGGERED_OR_RESOLVED]","conditions":"[RESULT_CONDITIONS]","errors":"[RESULT_ERRORS]"}
+
+external-endpoints:
+  - name: sender
+    group: messaging
+    token: ${SENDER_HEARTBEAT_TOKEN}
+    heartbeat:
+      interval: 25h
+    alerts:
+      - type: telegram
+        enabled: true
+        failure-threshold: 1
+
+  - name: business-tinder-notifications
+    group: messaging
+    token: ${BUSINESS_TINDER_HEARTBEAT_TOKEN}
+    heartbeat:
+      interval: 25h
+    alerts:
+      - type: telegram
+        enabled: true
+        failure-threshold: 1
+
+endpoints:
+  - name: ai-antispam
+    group: always-on
+    url: "https://ai-antispam.l1979.ru/health"
+    interval: 60s
+    conditions:
+      - "[STATUS] == 200"
+      - "[RESPONSE_TIME] < 2000"
+    alerts:
+      - type: telegram
+        failure-threshold: 3
+        success-threshold: 1
+        send-on-resolved: true
+
+  - name: ai-gateway
+    group: always-on
+    url: "https://ai-gateway.l1979.ru/health"
+    interval: 60s
+    conditions:
+      - "[STATUS] == 200"
+      - "[RESPONSE_TIME] < 5000"
+    alerts:
+      - type: telegram
+        failure-threshold: 3
+        success-threshold: 1
+        send-on-resolved: true
+
+  - name: business-tinder
+    group: always-on
+    url: "https://business-tinder.l1979.ru/health"
+    interval: 60s
+    conditions:
+      - "[STATUS] == 200"
+      - "[RESPONSE_TIME] < 5000"
+    alerts:
+      - type: telegram
+        failure-threshold: 3
+        success-threshold: 1
+        send-on-resolved: true
+
+  - name: fast-mcp-telegram
+    group: always-on
+    url: "https://tg-mcp.l1979.ru/health"
+    interval: 60s
+    conditions:
+      - "[STATUS] == 200"
+      - "[RESPONSE_TIME] < 5000"
+    alerts:
+      - type: telegram
+        failure-threshold: 3
+        success-threshold: 1
+        send-on-resolved: true
+
+  - name: pdf-extract
+    group: always-on
+    url: "https://pdf-extract.l1979.ru/health"
+    interval: 60s
+    conditions:
+      - "[STATUS] == 200"
+      - "[RESPONSE_TIME] < 5000"
+    alerts:
+      - type: telegram
+        failure-threshold: 3
+        success-threshold: 1
+        send-on-resolved: true
+
+  - name: redevest-crm
+    group: sablier
+    url: "https://redevest-crm.ru/health"
+    interval: 3h
+    client:
+      timeout: 60s
+    conditions:
+      - "[STATUS] == 200"
+      - "[RESPONSE_TIME] < 60000"
+    alerts:
+      - type: telegram
+        failure-threshold: 1
+        success-threshold: 1
+        send-on-resolved: true
+
+  - name: hermes
+    enabled: false
+    group: always-on
+    url: "ssh://132.243.213.9:18718"
+    ssh:
+      username: "root"
+    body: |
+      {"command": "systemctl is-active hermes-gateway.service"}
+    interval: 60s
+    conditions:
+      - "[CONNECTED] == true"
+      - "[BODY] == active"
+    alerts:
+      - type: telegram
+        failure-threshold: 3
+        success-threshold: 1
+        send-on-resolved: true
+
+  - name: n8n
+    group: always-on
+    url: "https://n8n.l1979.ru/healthz/readiness"
+    interval: 60s
+    conditions:
+      - "[STATUS] == 200"
+      - "[RESPONSE_TIME] < 5000"
+    alerts:
+      - type: telegram
+        failure-threshold: 3
+        success-threshold: 1
+        send-on-resolved: true
+
+  - name: postgres
+    group: databases
+    url: "tcp://144.31.188.163:5432"
+    interval: 60s
+    conditions:
+      - "[CONNECTED] == true"
+    alerts:
+      - type: telegram
+        failure-threshold: 3
+        success-threshold: 1
+        send-on-resolved: true
+
+  - name: redis
+    group: databases
+    url: "tcp://144.31.188.163:6379"
+    interval: 60s
+    conditions:
+      - "[CONNECTED] == true"
+    alerts:
+      - type: telegram
+        failure-threshold: 3
+        success-threshold: 1
+        send-on-resolved: true
+
+  - name: host-box2
+    group: host
+    url: "ssh://104.128.131.166:22"
+    ssh:
+      username: "root"
+    body: |
+      {"command": "/usr/local/bin/host-diag"}
+    interval: 15m
+    conditions:
+      - "[CONNECTED] == true"
+      - "[STATUS] == 0"
+    alerts:
+      - type: telegram
+        failure-threshold: 2
+        success-threshold: 1
+        send-on-resolved: true
+      - type: custom
+        failure-threshold: 2
+        send-on-resolved: false
+
+  - name: host-box3
+    group: host
+    url: "ssh://144.31.188.163:22"
+    ssh:
+      username: "root"
+    body: |
+      {"command": "/usr/local/bin/host-diag"}
+    interval: 15m
+    conditions:
+      - "[CONNECTED] == true"
+      - "[STATUS] == 0"
+    alerts:
+      - type: telegram
+        failure-threshold: 2
+        success-threshold: 1
+        send-on-resolved: true
+      - type: custom
+        failure-threshold: 2
+        send-on-resolved: false
+
+  - name: host-box4
+    group: host
+    url: "ssh://2.27.120.75:22"
+    ssh:
+      username: "root"
+    body: |
+      {"command": "/usr/local/bin/host-diag"}
+    interval: 15m
+    conditions:
+      - "[CONNECTED] == true"
+      - "[STATUS] == 0"
+    alerts:
+      - type: telegram
+        failure-threshold: 2
+        success-threshold: 1
+        send-on-resolved: true
+      - type: custom
+        failure-threshold: 2
+        send-on-resolved: false
+
+  - name: host-box5
+    group: host
+    url: "ssh://132.243.213.9:18718"
+    ssh:
+      username: "root"
+    body: |
+      {"command": "/usr/local/bin/host-diag"}
+    interval: 15m
+    conditions:
+      - "[CONNECTED] == true"
+      - "[STATUS] == 0"
+    alerts:
+      - type: telegram
+        failure-threshold: 2
+        success-threshold: 1
+        send-on-resolved: true
+      - type: custom
+        failure-threshold: 2
+        send-on-resolved: false

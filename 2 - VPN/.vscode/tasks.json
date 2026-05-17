@@ -1,0 +1,70 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run Cleanup Script",
+            "type": "shell",
+            "command": "source \"${workspaceFolder}/config/server.conf\" && \"${workspaceFolder}/scripts/cleanup.sh\"",
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Connect Script",
+            "type": "shell",
+            "command": "source \"${workspaceFolder}/config/server.conf\" && \"${workspaceFolder}/scripts/connect.sh\"",
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Diagnostics Script",
+            "type": "shell",
+            "command": "source \"${workspaceFolder}/config/server.conf\" && \"${workspaceFolder}/scripts/diagnostics.sh\"",
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Disk Usage Script",
+            "type": "shell",
+            "command": "source \"${workspaceFolder}/config/server.conf\" && \"${workspaceFolder}/scripts/disk-usage.sh\"",
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run System Update Script",
+            "type": "shell",
+            "command": "source \"${workspaceFolder}/config/server.conf\" && \"${workspaceFolder}/scripts/system-update.sh\"",
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        }
+    ]
+}

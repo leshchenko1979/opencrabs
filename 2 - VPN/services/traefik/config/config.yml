@@ -1,0 +1,25 @@
+api:
+  dashboard: true
+  insecure: true
+
+entryPoints:
+  web:
+    address: ":80"
+  websecure:
+    address: ":443"
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+  file:
+    directory: "/config"
+    watch: true
+
+certificatesResolvers:
+  le:
+    acme:
+      email: "admin@l1979.ru"
+      storage: "/config/acme.json"
+      httpChallenge:
+        entryPoint: web

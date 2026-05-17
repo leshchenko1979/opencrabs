@@ -1,0 +1,16 @@
+# Business Tinder Telegram webhook (bot container on traefik-public).
+http:
+  routers:
+    business-tinder:
+      rule: Host(`business-tinder.l1979.ru`) && (Path(`/process-tg-updates`) || Path(`/health`))
+      priority: 200
+      entryPoints:
+        - websecure
+      service: business-tinder-backend
+      tls:
+        certResolver: le
+  services:
+    business-tinder-backend:
+      loadBalancer:
+        servers:
+          - url: http://business-tinder-bot:8080

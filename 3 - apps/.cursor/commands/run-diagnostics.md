@@ -1,0 +1,3 @@
+1. Read @README.md, @progress-log.md, and @docs/maintenance.md (service catalog: @docs/services.md).
+2. From repo root run `cd ../scripts && ./diagnostics-unified.sh` (auto-discovers all servers via `.env` in numbered dirs). Full output appended to **`logs/diagnostics.log`** and echoed to terminal. **Do not rely on captured terminal output alone** — agent/tool runs often truncate long stdout; **read `logs/diagnostics.log` after the run** and base analysis on that file.
+3. Analyse results from `logs/diagnostics.log`. Pay attention to memory management recommendations given limited RAM on these boxes.

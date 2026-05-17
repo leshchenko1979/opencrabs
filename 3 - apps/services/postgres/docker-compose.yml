@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:${POSTGRES_MAJOR:-16}-alpine
+    container_name: postgres
+    restart: unless-stopped
+    mem_limit: 384m
+    mem_reservation: 128m
+    cpus: 0.5
+    environment:
+      - TZ=Europe/Moscow
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - /data/projects/postgres/data:/var/lib/postgresql/data
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    # Published on host 5432. Docker bypasses UFW unless DOCKER-USER rules exist — see docs/postgres-migration.md, scripts/open-postgres-public-firewall.sh
+    ports:
+      - "5432:5432"
+    networks:
+      - traefik-public
+    command:
+      - postgres
+      - -c
+      - listen_addresses=*
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - max_connections=100
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+networks:
+  traefik-public:
+    external: true

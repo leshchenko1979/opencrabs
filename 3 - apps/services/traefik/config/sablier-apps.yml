@@ -1,0 +1,151 @@
+# Sablier scale-to-zero: redevest-crm, redevest-crm-test (backends on traefik-public)
+#
+# Traefik file provider runs Go text/template over this file (sprig). The next line defines the
+# crawler User-Agent regexp once; bot bypass routers use the same variable in HeaderRegexp.
+# Edit the pattern only there. Do not add template delimiters to other files in this directory.
+{{- $crawlerUA := "(?i)(ClaudeBot|GPTBot|ChatGPT-User|OAI-SearchBot|PerplexityBot|Google-Extended|Bytespider|Amazonbot|Applebot|Applebot-Extended|CCBot|Googlebot|bingbot|DuckDuckBot|facebookexternalhit|LinkedInBot|SemrushBot|AhrefsBot|DotBot|PetalBot|YandexBot|Baiduspider|Twitterbot|Slurp|Discordbot|Chrome-Lighthouse|Embedly|Pinterest|Meta-ExternalAgent|AI2Bot|omgili|omgilibot)" -}}
+
+# Anchors only: paerser strips unknown root keys after YAML merge; http.* may reference these.
+_x:
+  sablier_plugin_core: &sablier_plugin_core
+    sablierUrl: http://sablier:10000
+    sessionDuration: 30m
+  bots_entrypoints: &bots_entrypoints
+    - websecure
+  bots_tls: &bots_tls
+    certResolver: le
+  bots_priority: &bots_priority 150
+
+http:
+  routers:
+    redevest-crm-dynamic:
+      rule: >
+        Host(`redevest-crm.ru`) && (Path(`/`) || PathPrefix(`/lead`))
+      priority: 100
+      entryPoints:
+        - websecure
+      middlewares:
+        - sablier-redevest-crm-dynamic@file
+      service: redevest-crm-backend
+      tls:
+        certResolver: le
+    redevest-crm-blocking:
+      rule: >
+        Host(`redevest-crm.ru`) && (Path(`/health`) || PathPrefix(`/api`) || PathPrefix(`/static`)
+        || PathPrefix(`/assets`) || PathPrefix(`/auth`) || PathPrefix(`/docs`) || PathPrefix(`/redoc`)
+        || Path(`/openapi.json`) || Path(`/favicon.ico`) || Path(`/robots.txt`))
+      priority: 50
+      entryPoints:
+        - websecure
+      middlewares:
+        - sablier-redevest-crm-blocking@file
+      service: redevest-crm-backend
+      tls:
+        certResolver: le
+    redevest-crm-test-dynamic:
+      rule: >
+        Host(`test.redevest-crm.ru`) && (Path(`/`) || PathPrefix(`/lead`))
+      priority: 100
+      entryPoints:
+        - websecure
+      middlewares:
+        - sablier-redevest-crm-test-dynamic@file
+      service: redevest-crm-test-backend
+      tls:
+        certResolver: le
+    redevest-crm-test-blocking:
+      rule: >
+        Host(`test.redevest-crm.ru`) && (Path(`/health`) || PathPrefix(`/api`)
+        || PathPrefix(`/static`) || PathPrefix(`/assets`) || PathPrefix(`/auth`) || PathPrefix(`/docs`)
+        || PathPrefix(`/redoc`) || Path(`/openapi.json`) || Path(`/favicon.ico`) || Path(`/robots.txt`))
+      priority: 50
+      entryPoints:
+        - websecure
+      middlewares:
+        - sablier-redevest-crm-test-blocking@file
+      service: redevest-crm-test-backend
+      tls:
+        certResolver: le
+    pdf-extract:
+      rule: >
+        Host(`pdf-extract.l1979.ru`) && (Path(`/health`) || Path(`/v1/health`) || PathPrefix(`/v1`))
+      entryPoints:
+        - websecure
+      middlewares:
+        - pdf-extract-buffering@file
+      service: pdf-extract-backend
+      tls:
+        certResolver: le
+    # No Sablier middleware: crawlers must not start idle Sablier-managed app containers (502 if down).
+    redevest-crm-bots-no-wake:
+      rule: >-
+        Host(`redevest-crm.ru`) &&
+        (Path(`/`) || PathPrefix(`/lead`) || Path(`/health`) || PathPrefix(`/api`)
+        || PathPrefix(`/static`) || PathPrefix(`/assets`) || PathPrefix(`/auth`)
+        || PathPrefix(`/docs`) || PathPrefix(`/redoc`) || Path(`/openapi.json`)
+        || Path(`/favicon.ico`) || Path(`/robots.txt`)) &&
+        HeaderRegexp(`User-Agent`, `{{ $crawlerUA }}`)
+      priority: *bots_priority
+      entryPoints: *bots_entrypoints
+      tls: *bots_tls
+      service: redevest-crm-backend
+    redevest-crm-test-bots-no-wake:
+      rule: >-
+        Host(`test.redevest-crm.ru`) &&
+        (Path(`/`) || PathPrefix(`/lead`) || Path(`/health`) || PathPrefix(`/api`)
+        || PathPrefix(`/static`) || PathPrefix(`/assets`) || PathPrefix(`/auth`)
+        || PathPrefix(`/docs`) || PathPrefix(`/redoc`) || Path(`/openapi.json`)
+        || Path(`/favicon.ico`) || Path(`/robots.txt`)) &&
+        HeaderRegexp(`User-Agent`, `{{ $crawlerUA }}`)
+      priority: *bots_priority
+      entryPoints: *bots_entrypoints
+      tls: *bots_tls
+      service: redevest-crm-test-backend
+  services:
+    redevest-crm-backend:
+      loadBalancer:
+        servers:
+          - url: http://redevest-crm:8000
+    redevest-crm-test-backend:
+      loadBalancer:
+        servers:
+          - url: http://redevest-crm-test:8000
+    pdf-extract-backend:
+      loadBalancer:
+        servers:
+          - url: http://pdf-extract:8000
+  middlewares:
+    sablier-redevest-crm-dynamic:
+      plugin:
+        sablier:
+          <<: *sablier_plugin_core
+          names: redevest-crm
+          dynamic:
+            displayName: CRM
+            refreshFrequency: 5s
+            showDetails: "true"
+            theme: hacker-terminal
+    sablier-redevest-crm-blocking:
+      plugin:
+        sablier:
+          <<: *sablier_plugin_core
+          names: redevest-crm
+          blocking:
+            timeout: 60s
+    sablier-redevest-crm-test-dynamic:
+      plugin:
+        sablier:
+          <<: *sablier_plugin_core
+          names: redevest-crm-test
+          dynamic:
+            displayName: CRM Test
+            refreshFrequency: 5s
+            showDetails: "true"
+            theme: hacker-terminal
+    sablier-redevest-crm-test-blocking:
+      plugin:
+        sablier:
+          <<: *sablier_plugin_core
+          names: redevest-crm-test
+          blocking:
+            timeout: 60s

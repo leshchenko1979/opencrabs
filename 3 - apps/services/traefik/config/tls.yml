@@ -1,0 +1,2 @@
+# TLS certificates via Let's Encrypt (certResolver: le) configured in docker-compose command.
+# Add custom TLS config here if needed.

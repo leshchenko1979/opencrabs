@@ -1,0 +1,42 @@
+services:
+  redis:
+    image: redis:alpine
+    container_name: redis
+    restart: unless-stopped
+    mem_limit: 160m
+    mem_reservation: 64m
+    cpus: 0.25
+    environment:
+      - TZ=Europe/Moscow
+      - REDIS_PASSWORD: ${REDIS_PASSWORD}
+    command:
+      - redis-server
+      - --bind
+      - "0.0.0.0"
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --requirepass
+      - ${REDIS_PASSWORD}
+    volumes:
+      - /data/projects/redis/data:/data
+    # Host access + remote clients; Docker bypasses UFW — use scripts/open-redis-public-firewall.sh
+    ports:
+      - "6379:6379"
+    networks:
+      - traefik-public
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'redis-cli --no-auth-warning -a "$$REDIS_PASSWORD" ping | grep -q PONG',
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+networks:
+  traefik-public:
+    external: true

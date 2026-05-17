@@ -1,0 +1,76 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Configure SSH keys only",
+      "type": "shell",
+      "command": "./scripts/configure-ssh-keys-only.sh",
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "Run Diagnostics",
+      "type": "shell",
+      "command": "./scripts/diagnostics.sh",
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": false
+      }
+    },
+    {
+      "label": "SSH: operations_4 OpenClaw",
+      "type": "shell",
+      "command": "ssh",
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      },
+      "args": [
+        "-i",
+        "${env:HOME}/.ssh/id_ed25519",
+        "root@claw"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "focus": true
+      }
+    },
+    {
+      "label": "SSH: legacy operations",
+      "type": "shell",
+      "command": "ssh",
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      },
+      "args": [
+        "-i",
+        "${env:HOME}/.ssh/id_ed25519",
+        "root@94.250.254.232"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "focus": true
+      }
+    }
+  ]
+}
