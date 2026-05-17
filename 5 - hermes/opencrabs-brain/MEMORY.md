@@ -1,50 +1,27 @@
-# MEMORY — l1979.ru ops (Alexey)
+# MEMORY — repo pointers (do not duplicate fleet tables here)
 
-## Paths
+**Source of truth:** `/root/vds-servers` (`git@github.com:leshchenko1979/servers.git`)
 
-- Brain: `~/.opencrabs/profiles/ops/` (markdown at profile root)
-- `memory/` under the profile = SQLite session DB only (not daily markdown logs unless you create `memory/YYYY-MM-DD.md`)
-- Infra repo: `/root/vds-servers` (`git@github.com:leshchenko1979/servers.git`)
+Before infra work or every `[Gatus]` alert: `git -C /root/vds-servers pull --ff-only` (report failure; continue if possible).
 
-## Bots (do not confuse)
+## Read from repo (not from memory)
 
-| Profile | Telegram bot | Role |
-|---------|--------------|------|
-| **ops** (this profile) | @redevest_admin_tools_bot | Gatus host alerts, fleet SSH triage |
-| **default** on same host | @oc_l1979_bot | General chat — do not edit its brain |
+| Need | File |
+|------|------|
+| Fleet, SSH aliases, safety rules, scripts | `/root/vds-servers/CLAUDE.md` |
+| Gatus, host-diag, bridge, deploy | `/root/vds-servers/2 - VPN/README.md` |
+| Gatus endpoints (`host-box2`…`host-box5`) | `/root/vds-servers/2 - VPN/services/gatus/config/config.yaml` |
+| `host-diag` script | `/root/vds-servers/2 - VPN/services/gatus/scripts/host-diag` |
+| Hermes / dual OpenCrabs | `/root/vds-servers/5 - hermes/docs/services.md` |
+| Apps services | `/root/vds-servers/3 - apps/docs/services.md` |
+| n8n | `/root/vds-servers/4 - n8n/docs/services.md` |
+| Mac backups | `/root/vds-servers/mac-workstation-backup/README.md` |
 
-## Rules
+If repo and this file disagree, **repo wins** after pull.
 
-- Ask before destructive ops: prune DB/Redis, `authorized_keys`, AmneziaWG restart, `docker system prune`
-- No `bc` on boxes — use `awk`
-- VPN `cleanup.sh`: `remove_unused_services()` stays **disabled** (wipes PG/Redis dirs)
-- Sablier: do not stop/prune `redevest-crm`, `redevest-crm-test`, `pdf-extract`, `sablier`
+## This profile only
 
-## Fleet
+- **ops:** @redevest_admin_tools_bot — Gatus / fleet triage
+- **default** (same host): @oc_l1979_bot — do not edit `~/.opencrabs/` default brain
 
-| Box | IP | SSH | Services |
-|-----|-----|-----|----------|
-| 2 VPN | 104.128.131.166 | `ssh vpn` | AmneziaWG, Traefik, Gatus, reverse SSH :4444 |
-| 3 apps | 144.31.188.163 | `ssh apps` | Traefik/Sablier, PostgreSQL, Redis, CRM, pdf-extract, antispam, tg-mcp |
-| 4 n8n | 2.27.120.75 | `ssh n8n` | Caddy, n8n |
-| 5 hermes | 132.243.213.9:18718 | local / `ssh hermes` | OpenCrabs (default + ops), tg-mcp |
-
-## host-diag
-
-Script: **`/usr/local/bin/host-diag`** on each box (source in repo: `2 - VPN/services/gatus/scripts/host-diag`).
-
-- Output one line: `load disk mem_mb` (e.g. `13 58 371`)
-- `load` = 1-min load × 100 (`LOAD_MAX=150` → fail at avg ≥ 1.5)
-- Exit **1** if disk ≥ 90%, load ≥ 150, or MemAvailable &lt; 80 MiB
-- **Not** the same as `scripts/diagnostics-unified.sh` (full multi-box report from Mac)
-
-## Gatus
-
-- Runs on VPN; UI https://gatus.l1979.ru
-- Host checks `host-box2`–`host-box5` every 15m via SSH + `host-diag`
-- Bridge test alert `Conditions: test / Errors: e2e` = manual E2E, ignore
-
-## Backups
-
-- Daily from Mac: `mac-workstation-backup/backup-all.sh` → external volume, 7-day retention
-- See `mac-workstation-backup/README.md` in `/root/vds-servers`
+Brain dir: `~/.opencrabs/profiles/ops/` · `memory/` = SQLite DB only

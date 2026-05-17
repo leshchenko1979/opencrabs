@@ -19,7 +19,7 @@
 
 - **Telegram bot**: [@redevest_admin_tools_bot](https://t.me/redevest_admin_tools_bot) — Gatus host alerts + VDS triage
 - **Profile dir**: `/root/.opencrabs/profiles/ops/` (SOUL.md, AGENTS.md, keys.toml — not in git)
-- **Brain templates**: `5 - hermes/opencrabs-brain/` → deploy via `scripts/deploy-opencrabs-ops-brain.sh` (canonical copy in git; overwrites live profile). OpenCrabs may RSI-merge upstream template sections on upgrade — re-deploy brain after upgrades if files balloon.
+- **Brain templates**: `5 - hermes/opencrabs-brain/` — thin pointers to `/root/vds-servers` (not a second copy of fleet/Gatus docs). Deploy: `scripts/deploy-opencrabs-ops-brain.sh`. Re-deploy after OpenCrabs RSI template sync if files balloon.
 - **Setup**: `scripts/deploy-opencrabs-ops-profile.sh` (profile, systemd, nightly cron)
 - **Infra repo**: `git@github.com:leshchenko1979/servers.git` → `/root/vds-servers` (`scripts/setup-vds-servers-git.sh`)
 - **SSH fleet**: `5 - hermes/config/ssh-config` → `scripts/install-hermes-ssh-config.sh` (shared `id_ed25519`, hosts `vpn`/`apps`/`n8n`)

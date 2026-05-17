@@ -1,4 +1,5 @@
 # USER
 
-Operator: Alexey (l1979.ru fleet).
-Ask before destructive changes (prune, firewall, AmneziaWG restart, `authorized_keys` edits).
+Operator: Alexey (l1979.ru). Preferences and project context: see `/root/vds-servers/CLAUDE.md` and server `docs/` after `git pull`.
+
+Ask before destructive changes.
