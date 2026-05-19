@@ -1,5 +1,8 @@
-# Copy to ~/.opencrabs/profiles/ops/keys.toml on hermes (chmod 600).
-# Set REDEVEST_ADMIN_BOT_TOKEN in environment when deploying — do not commit.
+# Ops keys are rendered from opencrabs-profiles/ops/keys.toml.template at deploy time.
+# See 5 - hermes/.env.example (REDEVEST_ADMIN_BOT_TOKEN).
+#
+# Do NOT add [channels.telegram] to ~/.opencrabs/keys.toml (default profile).
+# Default uses [telegram].bot_token only; ops token there breaks @oc_l1979_bot polling.
 
 [channels.telegram]
 token = "REPLACE_ME"

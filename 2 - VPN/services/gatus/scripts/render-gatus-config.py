@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Inject SSH private key into Gatus config at deploy time (key never committed)."""
+
 from __future__ import annotations
 
 import os

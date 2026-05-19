@@ -29,7 +29,22 @@ if [[ -z "$MCP_BEARER" ]]; then
   exit 1
 fi
 
-BRIDGE_SECRET="${GATUS_BRIDGE_SECRET:-$(openssl rand -hex 32)}"
+GATUS_ENV="${GATUS_DIR}/.env.gatus"
+if [[ -f "$GATUS_ENV" ]]; then
+  # shellcheck source=/dev/null
+  source "$GATUS_ENV"
+fi
+
+BRIDGE_SECRET="${GATUS_BRIDGE_SECRET:-}"
+if [[ -z "$BRIDGE_SECRET" ]]; then
+  BRIDGE_SECRET="$(ssh -i "$SSH_KEY" -o BatchMode=yes "root@${SSH_TARGET}" \
+    "grep -E '^GATUS_BRIDGE_SECRET=' /etc/gatus-bridge.env 2>/dev/null | cut -d= -f2-" || true)"
+fi
+if [[ -z "$BRIDGE_SECRET" ]]; then
+  echo "ERROR: set GATUS_BRIDGE_SECRET in 2 - VPN/services/gatus/.env.gatus before first deploy" >&2
+  echo "       (or export GATUS_BRIDGE_SECRET=... for this run)" >&2
+  exit 1
+fi
 
 echo "Deploying bridge to ${SSH_TARGET}..."
 

@@ -1,20 +1,77 @@
-# Deployed to ~/.opencrabs/profiles/ops/config.toml — admin bot only (not @oc_l1979_bot).
+# Rendered to ~/.opencrabs/profiles/ops/config.toml via render-opencrabs-ops-config.sh
+# Placeholders: __OPS_TELEGRAM_TOKEN__, __MINIMAX_API_KEY__, __TG_MCP_BEARER__
 
-auto_update = false
-max_concurrent = 2
+[crabrace]
+enabled = true
+base_url = "http://localhost:8080"
+auto_update = true
+update_interval_seconds = 3600
 
+[database]
+path = "/root/.opencrabs/profiles/ops/opencrabs.db"
+
+[logging]
+level = "info"
+
+[debug]
+debug_lsp = false
+profiling = false
+
+[providers]
 [providers.minimax]
 enabled = true
+api_key = "__MINIMAX_API_KEY__"
+base_url = "https://api.minimax.io/v1"
 default_model = "MiniMax-M2.7"
+models = ["MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-Text-01"]
+vision_model = "MiniMax-Text-01"
+
+[providers.web_search.exa]
+enabled = true
+
+[providers.web_search.duckduckgo]
+enabled = true
+
+[providers.web_search.brave]
+enabled = false
 
 [channels.telegram]
 enabled = true
-
-[agent]
-default_model = "MiniMax-M2.7"
+allowed_users = ["133526395"]
+allowed_channels = []
+respond_to = "all"
+token = "__OPS_TELEGRAM_TOKEN__"
 
 [mcp]
+enabled = true
+url = "https://tg-mcp.l1979.ru/v1/mcp"
+bearer = "__TG_MCP_BEARER__"
+
+[agent]
+approval_policy = "auto-always"
+max_concurrent = 4
+context_limit = 200000
+max_tokens = 65536
+auto_update = true
+default_model = "MiniMax-M2.7"
+
+[daemon]
+
+[a2a]
+enabled = true
+bind = "127.0.0.1"
+port = 18791
+allowed_origins = []
+
+[image.generation]
 enabled = false
 
+[image.vision]
+enabled = false
+
+[cron]
+
 [memory]
-vector_enabled = false
+vector_enabled = true
+auto_update = false
+max_concurrent = 2

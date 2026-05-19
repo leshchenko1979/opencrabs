@@ -1,0 +1,7 @@
+# Rendered to ~/.opencrabs/profiles/ops/keys.toml via render-opencrabs-ops-config.sh (chmod 600 on deploy)
+
+[channels.telegram]
+token = "__OPS_TELEGRAM_TOKEN__"
+
+[providers.minimax]
+api_key = "__MINIMAX_API_KEY__"

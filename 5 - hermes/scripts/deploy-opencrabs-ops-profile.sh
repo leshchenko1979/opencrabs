@@ -5,84 +5,47 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${HERMES_DIR}/.." && pwd)"
+
 # shellcheck source=/dev/null
-source "${REPO_ROOT}/scripts/ssh-vds-host.sh"
+source "${REPO_ROOT}/scripts/hermes-ssh.sh"
 
-if [[ -f "${HERMES_DIR}/.env" ]]; then
-  set -a
-  # shellcheck source=/dev/null
-  source "${HERMES_DIR}/.env"
-  set +a
-fi
+hermes_ssh_init
 
-TOKEN="${REDEVEST_ADMIN_BOT_TOKEN:-}"
-if [[ -z "$TOKEN" ]]; then
+if [[ -z "${REDEVEST_ADMIN_BOT_TOKEN:-}" ]]; then
   echo "Set REDEVEST_ADMIN_BOT_TOKEN (Gatus/admin bot) in env or 5 - hermes/.env" >&2
   exit 1
 fi
 
-HERMES_IP="${REMOTE_HOST_IP:-132.243.213.9}"
-HERMES_USER="${REMOTE_USER:-root}"
-HERMES_PORT="${REMOTE_SSH_PORT:-18718}"
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
+RENDER_DIR="$(mktemp -d)"
+trap 'rm -rf "$RENDER_DIR"' EXIT
+"${SCRIPT_DIR}/render-opencrabs-ops-config.sh" "$RENDER_DIR"
 
-ssh -p "$HERMES_PORT" -i "$SSH_KEY" "${HERMES_USER}@${HERMES_IP}" "bash -s" <<REMOTE
+hermes_ssh bash -s <<'REMOTE'
 set -euo pipefail
-export REDEVEST_ADMIN_BOT_TOKEN='${TOKEN}'
 OPS=~/.opencrabs/profiles/ops
-mkdir -p "\$OPS"
+mkdir -p "$OPS"
 
-if ! opencrabs profile list 2>/dev/null | grep -qE '^ops\$'; then
-  if [[ -d "\$OPS" ]]; then
-    mv "\$OPS" "\${OPS}.bak.\$(date +%s)"
+if ! opencrabs profile list 2>/dev/null | grep -qE '^ops$'; then
+  if [[ -d "$OPS" ]] && [[ -n "$(ls -A "$OPS" 2>/dev/null)" ]]; then
+    mv "$OPS" "${OPS}.bak.$(date +%s)"
+    mkdir -p "$OPS"
   fi
   opencrabs profile create ops
 fi
+REMOTE
 
-# MiniMax from default profile; admin Telegram token only in ops keys
-TEMPLATE="\${OPS}/config.toml"
-if [[ -f /root/vds-servers/5\\ -\\ hermes/opencrabs-profiles/ops/config.toml.template ]]; then
-  cp "/root/vds-servers/5 - hermes/opencrabs-profiles/ops/config.toml.template" "\$OPS/config.toml"
-else
-  cat > "\$OPS/config.toml" <<'CFG'
-auto_update = false
-max_concurrent = 2
+hermes_scp "${RENDER_DIR}/config.toml" "/root/.opencrabs/profiles/ops/config.toml"
+hermes_scp "${RENDER_DIR}/keys.toml" "/root/.opencrabs/profiles/ops/keys.toml"
+hermes_ssh 'chmod 600 ~/.opencrabs/profiles/ops/keys.toml'
 
-[providers.minimax]
-enabled = true
-default_model = "MiniMax-M2.7"
-
-[channels.telegram]
-enabled = true
-
-[agent]
-default_model = "MiniMax-M2.7"
-
-[mcp]
-enabled = false
-
-[memory]
-vector_enabled = false
-CFG
-fi
-
-minimax_key=\$(grep -A1 '^\[providers.minimax\]' ~/.opencrabs/keys.toml | grep api_key | sed -E 's/.*"([^"]+)".*/\\1/')
-cat > "\$OPS/keys.toml" <<KEYS
-[channels.telegram]
-token = "\${REDEVEST_ADMIN_BOT_TOKEN}"
-
-[providers.minimax]
-api_key = "\${minimax_key}"
-KEYS
-chmod 600 "\$OPS/keys.toml"
-
+hermes_ssh bash -s <<'REMOTE'
+set -euo pipefail
+opencrabs service install 2>/dev/null || true
 opencrabs -p ops service install 2>/dev/null || true
-opencrabs -p ops service start 2>/dev/null || systemctl restart opencrabs-ops || true
 
-# Nightly git pull
 opencrabs -p ops cron remove vds-servers-nightly-pull 2>/dev/null || true
-opencrabs -p ops cron add --name vds-servers-nightly-pull \\
-  --cron "0 3 * * *" --tz Europe/Moscow \\
+opencrabs -p ops cron add --name vds-servers-nightly-pull \
+  --cron "0 3 * * *" --tz Europe/Moscow \
   --prompt "Run only: git -C /root/vds-servers pull --ff-only. One-line reply."
 
 echo "ops profile ready"

@@ -35,6 +35,20 @@ Applies to **`[Gatus]` alerts** and **user-initiated chat** (questions, “check
 
 Short acknowledgment → then `git pull` / `load_brain_file` / SSH / logs. Loading SOUL + USER is automatic; loading AGENTS + MEMORY is your job.
 
+## Git and brain files (important)
+
+| Location | Role |
+|----------|------|
+| `/root/vds-servers` | Infra source of truth — **pull only** (`git pull --ff-only`) |
+| `~/.opencrabs/profiles/ops/*.md` | Live OpenCrabs brain — may be edited by you, RSI, or RSI template sync |
+| `5 - hermes/opencrabs-brain/` in repo | Canonical policy files — updated on Mac, deployed via `deploy-opencrabs-ops-brain.sh` |
+
+**Do not** `git commit`, `git push`, or open PRs from hermes unless Alexey explicitly asks in chat.
+
+RSI and session edits on the profile brain are **not** auto-synced to GitHub. Pushing them would often re-introduce upstream template bloat or wrong facts. Nightly cron (`vds-servers-nightly-pull`) only pulls the repo — it does not push brain changes.
+
+If Alexey wants something preserved in git, say what to copy and wait for instruction (or suggest he run deploy from Mac after editing repo).
+
 ## Session rules
 
 - Do not edit @oc_l1979_bot default profile or `~/.opencrabs/` (non-ops) brain files.

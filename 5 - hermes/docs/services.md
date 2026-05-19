@@ -19,11 +19,53 @@
 
 - **Telegram bot**: [@redevest_admin_tools_bot](https://t.me/redevest_admin_tools_bot) — Gatus host alerts + VDS triage
 - **Profile dir**: `/root/.opencrabs/profiles/ops/` (SOUL.md, AGENTS.md, keys.toml — not in git)
-- **Brain templates**: `5 - hermes/opencrabs-brain/` — thin pointers to `/root/vds-servers` (not a second copy of fleet/Gatus docs). Deploy: `scripts/deploy-opencrabs-ops-brain.sh`. Re-deploy after OpenCrabs RSI template sync if files balloon.
-- **Setup**: `scripts/deploy-opencrabs-ops-profile.sh` (profile, systemd, nightly cron)
+- **Config templates**: `5 - hermes/opencrabs-profiles/ops/config.toml.template` + `keys.toml.template` (placeholders only; rendered on Mac)
+- **Brain templates**: `5 - hermes/opencrabs-brain/` — thin pointers to `/root/vds-servers`. Deploy: `scripts/deploy-opencrabs-ops-brain.sh`. Re-deploy after OpenCrabs RSI template sync if files balloon.
+- **Setup**: `scripts/deploy-opencrabs-ops-profile.sh` (profile, systemd, nightly cron) — calls brain deploy at end
+- **Systemd**: units from `opencrabs service install` / `opencrabs -p ops service install` (do not hand-edit unit files)
+- **Token guard**: `scripts/opencrabs-guard-default-keys.sh` runs on brain deploy (strips `[channels.*]` from default `keys.toml`, verifies distinct bots via Telegram `getMe`)
+- **Deploy secrets**: copy `5 - hermes/.env.example` → `.env` with `REDEVEST_ADMIN_BOT_TOKEN` (optional `TG_MCP_BEARER`; MiniMax/MCP otherwise read from default profile on hermes)
 - **Infra repo**: `git@github.com:leshchenko1979/servers.git` → `/root/vds-servers` (`scripts/setup-vds-servers-git.sh`)
 - **SSH fleet**: `5 - hermes/config/ssh-config` → `scripts/install-hermes-ssh-config.sh` (shared `id_ed25519`, hosts `vpn`/`apps`/`n8n`)
-- **Nightly**: `opencrabs -p ops cron` `vds-servers-nightly-pull` @ 03:00 Europe/Moscow — `git pull --ff-only` on `/root/vds-servers`
+- **Nightly**: `opencrabs -p ops cron` `vds-servers-nightly-pull` @ 03:00 Europe/Moscow — `git pull --ff-only` on `/root/vds-servers` only (no push; brain policy files are deployed from Mac via `deploy-opencrabs-ops-brain.sh`)
+
+### Brain files per profile (deployed from repo)
+
+| File | default `@oc_l1979_bot` | ops `@redevest_admin_tools_bot` |
+|------|------------------------|--------------------------------|
+| SOUL.md | `opencrabs-brain/SOUL.md` | `opencrabs-brain/OPS_SOUL.md` |
+| USER.md | `opencrabs-brain/DEFAULT_USER.md` | `opencrabs-brain/USER.md` |
+| AGENTS.md | — | yes |
+| MEMORY.md | not overwritten (live RedeVest context) | yes |
+| SYSTEM.md | yes | yes |
+| config.toml / keys.toml | default profile only | rendered from `opencrabs-profiles/ops/*.template` |
+
+## OpenCrabs Repo Clones
+
+OpenCrabs operates from repo clones in `/root/` — not a single git monorepo. Each clone serves a specific profile:
+
+| Repo | Size | OpenCrabs Profile | Purpose |
+|------|------|-------------------|---------|
+| `/root/vds-servers/` | 1.5M | ops (`@redevest_admin_tools_bot`) | Fleet docs, Gatus config, brain templates, SSH fleet config |
+| `/root/redevest-ai/` | 75M | default (`@oc_l1979_bot`) | RedeVest business assistant — website, memory-bank, channel posts, scripts |
+| `/root/tgproxy/` | 1.2M | — (cron-driven) | Telegram proxy list publisher at tgproxy.l1979.ru (A2A channel [@telemtrs](https://t.me/telemtrs)) |
+
+**`vds-servers` clone details:**
+- Source: `git@github.com:leshchenko1979/servers.git`
+- Setup: `5 - hermes/scripts/setup-vds-servers-git.sh`
+- Nightly pull: `opencrabs -p ops cron` `vds-servers-nightly-pull` @ 03:00 Europe/Moscow (`git pull --ff-only` only, no push)
+- Brain templates live at `5 - hermes/opencrabs-brain/` and are deployed via `scripts/deploy-opencrabs-ops-brain.sh`
+
+**`redevest-ai` clone details:**
+- Source: `git@github.com:leshchenko1979/redevest-ai.git`
+- Contains: website at rede-vest.ru, `memory-bank/Редевест/`, `channel-posts/`, `scripts/`, `docs/`
+- OpenCrabs default profile uses it as working context
+
+**`tgproxy` details:**
+- Script: `update_proxies.py` — fetches from [@telemtrs](https://t.me/telemtrs) topic "Free proxy" (topic_id: 16160)
+- Published to: GitHub Pages at tgproxy.l1979.ru
+- Cron: daily @ 06:00 Moscow time (OpenCrabs job ID: `6da1f200`)
+- Live proxy list: 30 entries in `docs/proxies.txt`
 
 ## Hermes Agent
 
