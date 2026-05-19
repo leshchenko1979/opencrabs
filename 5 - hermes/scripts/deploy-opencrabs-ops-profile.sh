@@ -11,11 +11,6 @@ source "${REPO_ROOT}/scripts/hermes-ssh.sh"
 
 hermes_ssh_init
 
-if [[ -z "${REDEVEST_ADMIN_BOT_TOKEN:-}" ]]; then
-  echo "Set REDEVEST_ADMIN_BOT_TOKEN (Gatus/admin bot) in env or 5 - hermes/.env" >&2
-  exit 1
-fi
-
 RENDER_DIR="$(mktemp -d)"
 trap 'rm -rf "$RENDER_DIR"' EXIT
 "${SCRIPT_DIR}/render-opencrabs-ops-config.sh" "$RENDER_DIR"

@@ -13,7 +13,7 @@ Option A. **Full plan:** `.cursor/plans/gatus_opencrabs_dm_bridge_6607474a.plan.
 
 ## Locked (post-spike)
 
-- Ops bot: **@redevest_admin_tools_bot** (`7357853620`, same as Gatus Telegram)
+- Ops bot: **@redevest_admin_tools_bot** (same token as Gatus Telegram bot)
 - OpenCrabs: **`ops` profile** + `default` (@oc_l1979_bot) both running
 - Hermes: **`/root/vds-servers`** from **leshchenko1979/servers**; pull before `[Gatus]` + nightly ops cron
 - Bridge MCP target: **@redevest_admin_tools_bot**
@@ -22,9 +22,11 @@ Option A. **Full plan:** `.cursor/plans/gatus_opencrabs_dm_bridge_6607474a.plan.
 
 Phase 1 scrub/git → Phase 2 hermes → Phase 3 bridge → Phase 4 Gatus custom → Phase 5 docs
 
-## Post-deploy fix (2026-05-17)
+## Post-deploy fixes
 
-- **Ops bot silent:** `keys.toml` must use `[channels.telegram] token` and `[providers.minimax] api_key` (not `[telegram] bot_token`). Profile must be registered via `opencrabs profile create ops`.
+**2026-05-17:** Ops bot silent — ops `keys.toml` uses `[channels.telegram] token`; profile via `opencrabs profile create ops`.
+
+**2026-05-19:** Default bot silent when ops token landed in `~/.opencrabs/keys.toml` under `[channels.telegram]`. Fix: `opencrabs-guard-default-keys.sh` on brain deploy; templates in `opencrabs-profiles/ops/`; no secrets in git.
 
 ## Implementation artifacts
 

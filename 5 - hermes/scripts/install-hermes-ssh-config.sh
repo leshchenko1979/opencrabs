@@ -4,26 +4,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${HERMES_DIR}/.." && pwd)"
+
 # shellcheck source=/dev/null
-source "${REPO_ROOT}/scripts/ssh-vds-host.sh"
+source "${REPO_ROOT}/scripts/hermes-ssh.sh"
 
-HERMES_IP="${REMOTE_HOST_IP:-132.243.213.9}"
-HERMES_USER="${REMOTE_USER:-root}"
-HERMES_PORT="${REMOTE_SSH_PORT:-18718}"
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
+hermes_ssh_init
 
-ssh -p "$HERMES_PORT" -i "$SSH_KEY" "${HERMES_USER}@${HERMES_IP}" 'mkdir -p ~/.ssh && chmod 700 ~/.ssh'
-scp -P "$HERMES_PORT" -i "$SSH_KEY" "$SSH_KEY" \
-  "${HERMES_USER}@${HERMES_IP}:/root/.ssh/id_ed25519"
-scp -P "$HERMES_PORT" -i "$SSH_KEY" "${SSH_KEY}.pub" \
-  "${HERMES_USER}@${HERMES_IP}:/root/.ssh/id_ed25519.pub"
-ssh -p "$HERMES_PORT" -i "$SSH_KEY" "${HERMES_USER}@${HERMES_IP}" \
-  'chmod 600 ~/.ssh/id_ed25519 && chmod 644 ~/.ssh/id_ed25519.pub'
-scp -P "$HERMES_PORT" -i "$SSH_KEY" "${HERMES_DIR}/config/ssh-config" \
-  "${HERMES_USER}@${HERMES_IP}:/root/.ssh/config"
-ssh -p "$HERMES_PORT" -i "$SSH_KEY" "${HERMES_USER}@${HERMES_IP}" 'chmod 600 ~/.ssh/config'
+hermes_ssh 'mkdir -p ~/.ssh && chmod 700 ~/.ssh'
+hermes_scp "$HERMES_SSH_KEY" "/root/.ssh/id_ed25519"
+hermes_scp "${HERMES_SSH_KEY}.pub" "/root/.ssh/id_ed25519.pub"
+hermes_ssh 'chmod 600 ~/.ssh/id_ed25519 && chmod 644 ~/.ssh/id_ed25519.pub'
+hermes_scp "${HERMES_DIR}/config/ssh-config" "/root/.ssh/config"
+hermes_ssh 'chmod 600 ~/.ssh/config'
 
-ssh -p "$HERMES_PORT" -i "$SSH_KEY" "${HERMES_USER}@${HERMES_IP}" 'bash -s' <<'REMOTE'
+hermes_ssh bash -s <<'REMOTE'
 set -euo pipefail
 touch ~/.ssh/known_hosts
 for h in vpn apps n8n; do

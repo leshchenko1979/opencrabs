@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Render ops config.toml and keys.toml from templates (run from Mac).
 # Usage: render-opencrabs-ops-config.sh <output_dir>
-#   Writes config.toml and keys.toml into output_dir (must exist).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,37 +23,27 @@ hermes_ssh_init
 
 OPS_TOKEN="${REDEVEST_ADMIN_BOT_TOKEN:-}"
 if [[ -z "$OPS_TOKEN" ]]; then
-  OPS_TOKEN="$(hermes_ssh "grep -E '^token[[:space:]]*=' /root/.opencrabs/profiles/ops/keys.toml /root/.opencrabs/profiles/ops/config.toml 2>/dev/null | head -1 | sed -E 's/.*=[[:space:]]*\"([^\"]+)\".*/\\1/'" || true)"
+  OPS_TOKEN="$(hermes_ssh "grep -E '^token[[:space:]]*=' \
+    /root/.opencrabs/profiles/ops/keys.toml \
+    /root/.opencrabs/profiles/ops/config.toml 2>/dev/null | head -1 \
+    | sed -E 's/.*=[[:space:]]*\"([^\"]+)\".*/\\1/'" || true)"
 fi
 if [[ -z "$OPS_TOKEN" ]]; then
   echo "Set REDEVEST_ADMIN_BOT_TOKEN in env or ${HERMES_DIR}/.env" >&2
   exit 1
 fi
 
-# MiniMax from default profile on hermes: [minimax] or [providers.minimax]
 MINIMAX_KEY="$(hermes_ssh "awk '
-  /^\[minimax\]/ { in_minimax=1; next }
-  /^\[/ { in_minimax=0 }
-  in_minimax && /^api_key/ {
+  /^\[minimax\]/ { in_m=1; in_p=0; next }
+  /^\[providers\.minimax\]/ { in_p=1; in_m=0; next }
+  /^\[/ { in_m=0; in_p=0 }
+  (in_m || in_p) && /^api_key/ {
     gsub(/.*=[[:space:]]*\"/, \"\")
     gsub(/\".*$/, \"\")
     print
     exit
   }
-' /root/.opencrabs/keys.toml" 2>/dev/null || true)"
-
-if [[ -z "$MINIMAX_KEY" ]]; then
-  MINIMAX_KEY="$(hermes_ssh "awk '
-    /^\[providers\.minimax\]/ { in_p=1; next }
-    /^\[/ { in_p=0 }
-    in_p && /^api_key/ {
-      gsub(/.*=[[:space:]]*\"/, \"\")
-      gsub(/\".*$/, \"\")
-      print
-      exit
-    }
-  ' /root/.opencrabs/keys.toml /root/.opencrabs/config.toml 2>/dev/null" | head -1)"
-fi
+' /root/.opencrabs/keys.toml /root/.opencrabs/config.toml 2>/dev/null" | head -1)"
 
 if [[ -z "$MINIMAX_KEY" ]]; then
   echo "ERROR: could not read MiniMax api_key from hermes default profile" >&2
@@ -70,23 +59,17 @@ if [[ -z "$MCP_BEARER" ]]; then
   exit 1
 fi
 
-render_file() {
-  local template="$1"
-  local out="$2"
+substitute_placeholders() {
   sed \
     -e "s|__OPS_TELEGRAM_TOKEN__|${OPS_TOKEN}|g" \
     -e "s|__MINIMAX_API_KEY__|${MINIMAX_KEY}|g" \
-    -e "s|__TG_MCP_BEARER__|${MCP_BEARER}|g" \
-    "$template" >"$out"
+    -e "s|__TG_MCP_BEARER__|${MCP_BEARER}|g"
 }
 
 for t in "$CONFIG_TEMPLATE" "$KEYS_TEMPLATE"; do
-  if [[ ! -f "$t" ]]; then
-    echo "ERROR: missing template $t" >&2
-    exit 1
-  fi
+  [[ -f "$t" ]] || { echo "ERROR: missing template $t" >&2; exit 1; }
 done
 
-render_file "$CONFIG_TEMPLATE" "${OUTPUT_DIR}/config.toml"
-render_file "$KEYS_TEMPLATE" "${OUTPUT_DIR}/keys.toml"
+substitute_placeholders <"$CONFIG_TEMPLATE" >"${OUTPUT_DIR}/config.toml"
+substitute_placeholders <"$KEYS_TEMPLATE" >"${OUTPUT_DIR}/keys.toml"
 echo "Rendered ops config + keys to ${OUTPUT_DIR}/"
