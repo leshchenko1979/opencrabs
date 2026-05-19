@@ -47,11 +47,19 @@ opencrabs -p ops cron add --name vds-servers-nightly-pull \
   --cron "0 3 * * *" --tz Europe/Moscow \
   --prompt "Run only: git -C /root/vds-servers pull --ff-only. One-line reply."
 
-# Disable ChromaDB vector memory on default profile (1GB Hermes — not in git template)
-if grep -qE '^vector_enabled[[:space:]]*=[[:space:]]*true' /root/.opencrabs/config.toml 2>/dev/null; then
-  sed -i '/^vector_enabled[[:space:]]*=[[:space:]]*true/d' /root/.opencrabs/config.toml
-  echo "Removed vector_enabled from default config.toml"
-fi
+# Memory section: vectors off (1GB Hermes), auto_update on for all profiles
+set_memory_key() {
+  local file="$1" key="$2" value="$3"
+  [[ -f "$file" ]] || return 0
+  grep -qE '^\[memory\]' "$file" || return 0
+  sed -i "/^${key}[[:space:]]*=/d" "$file"
+  sed -i "/^\[memory\]/a ${key} = ${value}" "$file"
+}
+set_memory_key /root/.opencrabs/config.toml vector_enabled false
+set_memory_key /root/.opencrabs/config.toml auto_update true
+set_memory_key /root/.opencrabs/profiles/ops/config.toml vector_enabled false
+set_memory_key /root/.opencrabs/profiles/ops/config.toml auto_update true
+echo "Memory: vector_enabled=false, auto_update=true (default + ops)"
 
 systemctl restart opencrabs opencrabs-ops
 echo "ops profile ready (opencrabs restarted)"

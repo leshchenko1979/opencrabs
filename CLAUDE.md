@@ -156,7 +156,7 @@ Project-level skill: `.claude/skills/diagnosing-servers/SKILL.md`
 - **Issue**: Hermes `tools.toml` used `/root/.local/bin/mcp tg-mcp` (14MB proxy); hung on 1GB RAM. Removing the proxy broke `tgproxy` cron before `update_proxies.py` was migrated.
   - **Correct approach**: Use `fastmcp-slim[client]` + `/usr/local/bin/tg-mcp-call` (wraps `fastmcp call` with bearer from `config.toml`). Deploy via `5 - hermes/scripts/deploy-opencrabs-tg-tools.sh`. Migrate tgproxy to `tg-mcp-call` before deleting the old `mcp` binary. `fastmcp call` with `--json` duplicates data for agents — wrapper uses default CLI output (lean JSON only). Wrapper logs to `/var/log/tg-mcp/tg-mcp-call.log` (no bearer; args truncated).
 - **Issue**: OpenCrabs ops `vector_enabled = true` (ChromaDB) → ~800MB RSS, OOM loop, SSH banner timeouts on 1GB Hermes.
-  - **Correct approach**: Remove `vector_enabled` from ops template and default `config.toml`; redeploy via `deploy-opencrabs-ops-profile.sh` (restarts both daemons). Keep `MemoryMax=512M` drop-in on `opencrabs-ops`. Ops brain: `load_brain_file MEMORY.md`, not `memory_search`.
+  - **Correct approach**: Set `vector_enabled = false` in ops template and default `config.toml` (omitting the key may still load ChromaDB); redeploy via `deploy-opencrabs-ops-profile.sh` (restarts both daemons). Keep `MemoryMax=512M` drop-in on `opencrabs-ops`. Ops brain: `load_brain_file MEMORY.md`, not `memory_search`.
 
 ### 2026-05-04
 - **Issue**: Failed to find gatus redeployment script — searched for "gatus" in yaml files and globbed for docker-compose, found the location but missed the deploy scripts

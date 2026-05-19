@@ -12,7 +12,7 @@
 - **Systemd**: `opencrabs.service`
 - **Data dir**: `/root/.opencrabs/` (opencrabs.db, logs/, tools.toml, keys.toml, config.toml)
 - **Config**: `/root/.opencrabs/config.toml` — MiniMax provider, Telegram channel
-- **Memory**: `vector_enabled` disabled (1GB RAM — ChromaDB caused OOM; markdown/`memory.db` only). Patched on deploy via `deploy-opencrabs-ops-profile.sh`
+- **Memory**: `vector_enabled = false`, `auto_update = true` (1GB RAM — no ChromaDB; FTS + daily notes re-indexed). Set on deploy via `deploy-opencrabs-ops-profile.sh`
 - **8 dynamic tools**: `tools.toml` → `/usr/local/bin/tg-mcp-call` (source `scripts/tg-mcp-call.py`) → `fastmcp call` → `https://tg-mcp.l1979.ru/v1/mcp` (lean tool JSON on stdout; config `/etc/tg-mcp/mcp.json`; logs `/var/log/tg-mcp/tg-mcp-call.log`). Deploy: `scripts/deploy-opencrabs-tg-tools.sh` (`fastmcp-slim[client]`)
 - **Known issue**: tools.toml tools work via Telegram channel but not in `run`/`agent` modes ([opencrabs#79](https://github.com/adolfousier/opencrabs/issues/79))
 
@@ -23,7 +23,7 @@
 - **Config templates**: `5 - hermes/opencrabs-profiles/ops/config.toml.template` + `keys.toml.template` (placeholders only; rendered on Mac)
 - **Brain templates**: `5 - hermes/opencrabs-brain/` — thin pointers to `/root/vds-servers`. Deploy: `scripts/deploy-opencrabs-ops-brain.sh`. Re-deploy after OpenCrabs RSI template sync if files balloon.
 - **Setup**: `scripts/deploy-opencrabs-ops-profile.sh` (profile, systemd, nightly cron) — calls brain deploy at end
-- **Memory**: `vector_enabled` omitted in `opencrabs-profiles/ops/config.toml.template` (same 1GB constraint; use `load_brain_file MEMORY.md`, not `memory_search`)
+- **Memory**: `vector_enabled = false`, `auto_update = true` in `opencrabs-profiles/ops/config.toml.template` (same 1GB constraint; use `load_brain_file MEMORY.md`, not `memory_search`)
 - **Systemd**: `opencrabs-ops.service.d/memory.conf` — `MemoryMax=512M` safety cap; units from `opencrabs service install` / `opencrabs -p ops service install` (do not hand-edit unit files)
 - **Token guard**: `scripts/opencrabs-guard-default-keys.sh` runs on brain deploy (strips `[channels.*]` from default `keys.toml`, verifies distinct bots via Telegram `getMe`)
 - **Deploy secrets**: copy `5 - hermes/.env.example` → `.env` with `REDEVEST_ADMIN_BOT_TOKEN` (optional `TG_MCP_BEARER`; MiniMax/MCP otherwise read from default profile on hermes)
