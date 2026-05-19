@@ -1,35 +1,33 @@
-# Gatus → OpenCrabs bridge — spike notes (2026-05-17)
+# Gatus → OpenCrabs bridge — notes
 
-Option A. **Full plan:** `.cursor/plans/gatus_opencrabs_dm_bridge_6607474a.plan.md`
+## Production (locked)
 
-## Spike results
+| Item | Detail |
+|------|--------|
+| Bridge | `http://172.18.0.1:9081/gatus/alert` → tg-mcp → @redevest_admin_tools_bot |
+| Alerts | Custom on `host-box2`–`host-box5` only |
+| Ops brain | `git pull /root/vds-servers` before `[Gatus]`; deploy brain from Mac via `deploy-opencrabs-ops-brain.sh` |
 
-| ID | Result |
-|----|--------|
-| 0a | `http://172.18.0.1:9081/gatus/alert`, bind `0.0.0.0:9081` |
-| 0b | Gatus placeholders documented; log first POST at bridge deploy |
-| 0c | MCP `send_message` works (Bearer + SSE Accept) |
-| 0e | Hermes needs Mac `id_ed25519` + ssh config |
+**Post-deploy fixes:** ops `keys.toml` uses `[channels.telegram]`; `opencrabs-guard-default-keys.sh` on brain deploy (2026-05-19).
 
-## Locked (post-spike)
+## Hermes SSH loopback (fixed 2026-05-19)
 
-- Ops bot: **@redevest_admin_tools_bot** (same token as Gatus Telegram bot)
-- OpenCrabs: **`ops` profile** + `default` (@oc_l1979_bot) both running
-- Hermes: **`/root/vds-servers`** from **leshchenko1979/servers**; pull before `[Gatus]` + nightly ops cron
-- Bridge MCP target: **@redevest_admin_tools_bot**
+From **inside** Hermes, `ssh hermes` (→ public IP `:18718`) still times out — no hairpin. **box5:** use `ssh hermes-local` (`127.0.0.1:22`) or `/usr/local/bin/host-diag` directly. Deploy: `5 - hermes/scripts/install-hermes-ssh-config.sh`. See `AGENTS.md` **SSH targets**.
 
-## Build order
+## A2A trigger spike — ON ICE (2026-05-19)
 
-Phase 1 scrub/git → Phase 2 hermes → Phase 3 bridge → Phase 4 Gatus custom → Phase 5 docs
+**Tracking:** [servers#1](https://github.com/leshchenko1979/servers/issues/1) · **Blocker:** [opencrabs#92](https://github.com/adolfousier/opencrabs/issues/92)
 
-## Post-deploy fixes
+**Decision:** Keep tg-mcp → Telegram trigger. Do not switch Gatus to A2A until #92 is fixed and `spike_a2a_telegram.py a2a-trigger` ×3 passes.
 
-**2026-05-17:** Ops bot silent — ops `keys.toml` uses `[channels.telegram] token`; profile via `opencrabs profile create ops`.
+| Hypothesis | Result |
+|------------|--------|
+| H1 — A2A vs Telegram sessions separate | Pass |
+| H3 — thin trigger + AGENTS → tools + Telegram | Fail — tools blocked (*no approval mechanism*) despite `approval_policy = auto-always` |
+| H4 — VPN → Hermes SSH → A2A | Fail — pubkey not on VPN (orthogonal to #92) |
 
-**2026-05-19:** Default bot silent when ops token landed in `~/.opencrabs/keys.toml` under `[channels.telegram]`. Fix: `opencrabs-guard-default-keys.sh` on brain deploy; templates in `opencrabs-profiles/ops/`; no secrets in git.
+**Root cause:** OpenCrabs 0.3.22 — A2A `create_agent_service()` omits `with_auto_approve_tools`; `send.rs` has no approval callback (Telegram uses `check_approval_policy()` via callback).
 
-## Implementation artifacts
+**Harness (re-test later):** `spike_a2a_telegram.py` — `health`, `baseline`, `a2a-trigger`, `ssh-path`
 
-- `gatus_opencrabs_bridge.py` + `deploy-gatus-bridge.sh` on VPN
-- `5 - hermes/opencrabs-brain/`, `deploy-opencrabs-ops-profile.sh`
-- Custom alerts on `host-box2`–`host-box5` only
+**Revisit:** upgrade Hermes `opencrabs` after #92 release → deploy brain → `a2a-trigger` ×3 → optional VPN SSH key → only then consider bridge `A2A_MODE`.

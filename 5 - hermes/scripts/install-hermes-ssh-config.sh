@@ -26,8 +26,12 @@ for h in vpn apps n8n; do
   port=${port:-22}
   ssh-keyscan -p "$port" -H "$host" 2>/dev/null >> ~/.ssh/known_hosts || true
 done
+ssh-keyscan -p 22 -H 127.0.0.1 2>/dev/null >> ~/.ssh/known_hosts || true
 chmod 600 ~/.ssh/known_hosts
 echo "SSH config installed; known_hosts updated"
 REMOTE
 
-echo "Done. Verify: ssh hermes 'for h in vpn apps n8n; do ssh -o BatchMode=yes \"\$h\" /usr/local/bin/host-diag; done'"
+echo "=== Verify fleet SSH from Hermes ==="
+hermes_ssh 'for h in vpn apps n8n; do ssh -o BatchMode=yes -o ConnectTimeout=10 "$h" /usr/local/bin/host-diag; echo "$h exit:$?"; done'
+hermes_ssh 'ssh -o BatchMode=yes -o ConnectTimeout=5 hermes-local /usr/local/bin/host-diag; echo "hermes-local exit:$?"'
+echo "Done."

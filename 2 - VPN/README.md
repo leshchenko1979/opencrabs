@@ -106,7 +106,7 @@ Gatus provides health monitoring with Telegram alerting and **OpenCrabs ops** fo
 - **Repo config**: `services/gatus/config/config.yaml` (secrets via `${VAR}` in `.env.gatus`, not in git)
 - **Deploy Gatus**: `./scripts/deploy-gatus.sh` (from `2 - VPN/`)
 - **Deploy host-diag script on all boxes**: `services/gatus/scripts/deploy-host-diag.sh`
-- **OpenCrabs bridge** (host alerts only): `services/gatus/scripts/deploy-gatus-bridge.sh` → systemd `gatus-opencrabs-bridge` on `0.0.0.0:9081`, POST `/gatus/alert` → tg-mcp → @redevest_admin_tools_bot
+- **OpenCrabs bridge** (host alerts only): `services/gatus/scripts/deploy-gatus-bridge.sh` → systemd `gatus-opencrabs-bridge` on `0.0.0.0:9081`, POST `/gatus/alert` → tg-mcp → @redevest_admin_tools_bot. **A2A alternative on ice** — see `services/gatus/scripts/spike-notes.md` and [opencrabs#92](https://github.com/adolfousier/opencrabs/issues/92).
 
 **Secrets (not in git):**
 

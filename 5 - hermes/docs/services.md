@@ -18,7 +18,7 @@
 ### Ops profile (`opencrabs-ops.service`)
 
 - **Telegram bot**: [@redevest_admin_tools_bot](https://t.me/redevest_admin_tools_bot) — Gatus host alerts + VDS triage
-- **Profile dir**: `/root/.opencrabs/profiles/ops/` (SOUL.md, AGENTS.md, keys.toml — not in git)
+- **Profile dir**: `/root/.opencrabs/profiles/ops/` (SOUL.md, AGENTS.md, CODE.md, keys.toml — not in git)
 - **Config templates**: `5 - hermes/opencrabs-profiles/ops/config.toml.template` + `keys.toml.template` (placeholders only; rendered on Mac)
 - **Brain templates**: `5 - hermes/opencrabs-brain/` — thin pointers to `/root/vds-servers`. Deploy: `scripts/deploy-opencrabs-ops-brain.sh`. Re-deploy after OpenCrabs RSI template sync if files balloon.
 - **Setup**: `scripts/deploy-opencrabs-ops-profile.sh` (profile, systemd, nightly cron) — calls brain deploy at end
@@ -28,6 +28,7 @@
 - **Infra repo**: `git@github.com:leshchenko1979/servers.git` → `/root/vds-servers` (`scripts/setup-vds-servers-git.sh`)
 - **SSH fleet**: `5 - hermes/config/ssh-config` → `scripts/install-hermes-ssh-config.sh` (shared `id_ed25519`, hosts `vpn`/`apps`/`n8n`)
 - **Nightly**: `opencrabs -p ops cron` `vds-servers-nightly-pull` @ 03:00 Europe/Moscow — `git pull --ff-only` on `/root/vds-servers` only (no push; brain policy files are deployed from Mac via `deploy-opencrabs-ops-brain.sh`)
+- **A2A (ops):** loopback `:18791` — spike to replace Gatus tg-mcp trigger **on ice** until [opencrabs#92](https://github.com/adolfousier/opencrabs/issues/92); see `2 - VPN/services/gatus/scripts/spike-notes.md`
 
 ### Brain files per profile (deployed from repo)
 
@@ -36,6 +37,7 @@
 | SOUL.md | `opencrabs-brain/SOUL.md` | `opencrabs-brain/OPS_SOUL.md` |
 | USER.md | `opencrabs-brain/DEFAULT_USER.md` | `opencrabs-brain/USER.md` |
 | AGENTS.md | — | yes |
+| CODE.md | — | yes (plan + TDD; load via SOUL/AGENTS) |
 | MEMORY.md | not overwritten (live RedeVest context) | yes |
 | SYSTEM.md | yes | yes |
 | config.toml / keys.toml | default profile only | rendered from `opencrabs-profiles/ops/*.template` |
@@ -87,4 +89,6 @@ OpenCrabs operates from repo clones in `/root/` — not a single git monorepo. E
 
 ## SSH
 
-Connect: `ssh hermes` (configured in `~/.ssh/config`)
+Connect from Mac/VPN: `ssh hermes` (public `132.243.213.9:18718`, in `~/.ssh/config`).
+
+On Hermes itself: `ssh hermes-local` → `127.0.0.1:22` for box5 diagnostics (never `ssh hermes` from Hermes — no NAT hairpin). Fleet config: `5 - hermes/config/ssh-config`; install: `scripts/install-hermes-ssh-config.sh`.

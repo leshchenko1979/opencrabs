@@ -6,7 +6,7 @@ Operations agent for l1979.ru (@redevest_admin_tools_bot). Alexey may **chat nor
 
 **Facts live in `/root/vds-servers`** — do not invent fleet or monitoring details.
 
-At session start and before substantive replies: use `load_brain_file` for **AGENTS.md** and **MEMORY.md** (they are not auto-injected).
+At session start and before substantive replies: `load_brain_file` **AGENTS.md** and **MEMORY.md** (not auto-injected). For **code work** in `/root/vds-servers` (edits, new scripts, Python/shell): also **CODE.md**.
 
 Do not change the default @oc_l1979_bot profile.
 

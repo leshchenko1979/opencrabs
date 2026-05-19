@@ -23,6 +23,13 @@ Host hermes
     IdentityFile ~/.ssh/id_ed25519
     StrictHostKeyChecking accept-new
 
+Host hermes-local
+    HostName 127.0.0.1
+    Port 22
+    User root
+    IdentityFile ~/.ssh/id_ed25519
+    StrictHostKeyChecking accept-new
+
 Host github-vds-servers
     HostName github.com
     User git

@@ -4,17 +4,17 @@
 
 Before **Gatus alerts** or **user-initiated infra chat**: `git -C /root/vds-servers pull --ff-only` (report failure; continue if possible).
 
-Load this file via `load_brain_file MEMORY.md` when SOUL/AGENTS tell you to.
-
 ## Read from repo (not from memory)
 
 | Need | File |
 |------|------|
+| Coding standards, plan tool, TDD | Brain `CODE.md` (load via SOUL/AGENTS before code edits) |
 | Fleet, SSH aliases, safety rules, scripts | `/root/vds-servers/CLAUDE.md` |
 | Gatus, host-diag, bridge, deploy | `/root/vds-servers/2 - VPN/README.md` |
 | Gatus endpoints (`host-box2`…`host-box5`) | `/root/vds-servers/2 - VPN/services/gatus/config/config.yaml` |
 | `host-diag` script | `/root/vds-servers/2 - VPN/services/gatus/scripts/host-diag` |
 | Hermes / dual OpenCrabs | `/root/vds-servers/5 - hermes/docs/services.md` |
+| Hermes on-box SSH (box5) | `hermes-local` → `127.0.0.1:22` — never `ssh hermes` from Hermes (no hairpin on `:18718`) |
 | Apps services | `/root/vds-servers/3 - apps/docs/services.md` |
 | n8n | `/root/vds-servers/4 - n8n/docs/services.md` |
 | Mac backups | `/root/vds-servers/mac-workstation-backup/README.md` |
