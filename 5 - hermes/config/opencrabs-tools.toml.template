@@ -1,0 +1,122 @@
+# Telegram MCP tools — OpenCrabs dynamic tools config
+# Source: fast-mcp-telegram (https://github.com/leshchenko1979/fast-mcp-telegram)
+# Tool descriptions and parameter docs: https://github.com/leshchenko1979/fast-mcp-telegram/blob/main/docs/Tools-Reference.md
+
+[[tools]]
+name = "tg_get_messages"
+description = "Read or search messages in one chat: browse latest, search text, fetch by ids, or load replies to a message (comments, forum topics, threads). Do not combine message_ids with query or reply_to_id. Success: messages, has_more, optional total_count and discussion fields. Full documentation: https://github.com/leshchenko1979/fast-mcp-telegram/blob/main/docs/Tools-Reference.md"
+executor = "shell"
+command = "/usr/local/bin/tg-mcp-call get_messages '{\"chat_id\":\"{{chat_id}}\",\"query\":\"{{query}}\",\"message_ids\":{{message_ids}},\"reply_to_id\":{{reply_to_id}},\"limit\":{{limit}},\"min_date\":\"{{min_date}}\",\"max_date\":\"{{max_date}}\",\"auto_expand_batches\":{{auto_expand_batches}},\"include_total_count\":{{include_total_count}}}' 2>&1"
+timeout_secs = 30
+params = [
+    { name = "chat_id", type = "string", description = "Target chat: numeric id (e.g. -100…), username without @, or 'me' for Saved Messages.", required = true },
+    { name = "query", type = "string", description = "Search within this chat only; comma-separated terms. Omit to browse latest or use message_ids / reply_to_id modes.", required = false },
+    { name = "message_ids", type = "array", description = "Exact message ids to fetch. Mutually exclusive with query and reply_to_id.", required = false },
+    { name = "reply_to_id", type = "integer", description = "Get replies in the thread for this message id (comments, forum topic, or replies). Optional query filters within that thread.", required = false },
+    { name = "limit", type = "integer", description = "Maximum messages to return (recommended 50 or less).", required = false, default = "50" },
+    { name = "min_date", type = "string", description = "Inclusive minimum date filter (ISO 8601 date or datetime). Omit for no lower bound.", required = false },
+    { name = "max_date", type = "string", description = "Inclusive maximum date filter (ISO 8601 date or datetime). Omit for no upper bound.", required = false },
+    { name = "auto_expand_batches", type = "integer", description = "Extra search batches to run when filters narrow results. Higher values may return more matches at the cost of latency.", required = false, default = "2" },
+    { name = "include_total_count", type = "boolean", description = "If true, response may include total_count where supported (per-chat search; ignored for global search).", required = false, default = "false" }
+]
+
+[[tools]]
+name = "tg_send_message"
+description = "Send text and optional attachments to a chat. Success: send result dict. Full documentation: https://github.com/leshchenko1979/fast-mcp-telegram/blob/main/docs/Tools-Reference.md"
+executor = "shell"
+command = "/usr/local/bin/tg-mcp-call send_message '{\"chat_id\":\"{{chat_id}}\",\"message\":\"{{message}}\",\"reply_to_id\":{{reply_to_id}},\"parse_mode\":\"{{parse_mode}}\",\"files\":{{files}}}' 2>&1"
+timeout_secs = 30
+params = [
+    { name = "chat_id", type = "string", description = "Target chat: numeric id (e.g. -100…), username without @, or 'me' for Saved Messages.", required = true },
+    { name = "message", type = "string", description = "Message text. When sending files, used as caption.", required = true },
+    { name = "reply_to_id", type = "integer", description = "Telegram message id to reply to. For forums, topic root id; for channel posts, post id (may create a comment). Omit for a new top-level message.", required = false },
+    { name = "parse_mode", type = "string", description = "'markdown', 'html', or 'auto' (detect from content). Default is 'auto'.", required = false, default = "auto" },
+    { name = "files", type = "array", description = "List of attachment URLs or local paths (one or more strings). Local paths work in stdio mode only.", required = false }
+]
+
+[[tools]]
+name = "tg_find_chats"
+description = "Find users/groups/channels by name, username, or phone. Global search (query required) searches all Telegram; with min_date, max_date, or filter, search uses dialog list or a named filter; include_peers filters use last-activity from GetPeerDialogs; flag-based filters use dialog list dates. Success: dict with key chats (list of chat objects). Full documentation: https://github.com/leshchenko1979/fast-mcp-telegram/blob/main/docs/Tools-Reference.md"
+executor = "shell"
+command = "/usr/local/bin/tg-mcp-call find_chats '{\"query\":\"{{query}}\",\"limit\":{{limit}},\"chat_type\":\"{{chat_type}}\",\"public\":{{public}},\"min_date\":\"{{min_date}}\",\"max_date\":\"{{max_date}}\",\"folder\":\"{{folder}}\"}' 2>&1"
+timeout_secs = 30
+params = [
+    { name = "query", type = "string", description = "Name, username (no @), phone (+country…), or comma-separated multi-queries. Required for global search unless you use min_date/max_date or folder alone.", required = false },
+    { name = "limit", type = "integer", description = "Maximum chats to return (recommended 50 or less).", required = false, default = "20" },
+    { name = "chat_type", type = "string", description = "Comma-separated chat kinds: private, bot, group, channel. Case-insensitive; extra spaces allowed.", required = false },
+    { name = "public", type = "boolean", description = "If true, prefer chats with a public username; if false, without. Does not apply to private DMs. Omit to skip this filter.", required = false },
+    { name = "min_date", type = "string", description = "Inclusive minimum date filter (ISO 8601 date or datetime). Omit for no lower bound.", required = false },
+    { name = "max_date", type = "string", description = "Inclusive maximum date filter (ISO 8601 date or datetime). Omit for no upper bound.", required = false },
+    { name = "folder", type = "string", description = "Telegram folder name (case-insensitive exact match after normalization). In Telegram's UI these are called folders; internally they are \"dialog filters\" — saved filter presets that group chats by custom criteria (pinned, unread, business, etc.). See Filters-vs-Folders.md for the technical distinction.", required = false }
+]
+
+[[tools]]
+name = "tg_get_chat_info"
+description = "Load profile and metadata for one user, bot, group, or channel. Success: info dict; forum chats may include topics up to topics_limit. Full documentation: https://github.com/leshchenko1979/fast-mcp-telegram/blob/main/docs/Tools-Reference.md"
+executor = "shell"
+command = "/usr/local/bin/tg-mcp-call get_chat_info '{\"chat_id\":\"{{chat_id}}\",\"topics_limit\":{{topics_limit}}}' 2>&1"
+timeout_secs = 30
+params = [
+    { name = "chat_id", type = "string", description = "Target chat: numeric id (e.g. -100…), username without @, or 'me' for Saved Messages.", required = true },
+    { name = "topics_limit", type = "integer", description = "Max forum topics to list when the chat is a forum.", required = false, default = "20" }
+]
+
+[[tools]]
+name = "tg_search_global"
+description = "Search all Telegram chats at once (not scoped to one chat). Comma-separated query terms; optional filters by date, chat kind, and public username. Success: message list and metadata dict. Global search ignores include_total_count. Full documentation: https://github.com/leshchenko1979/fast-mcp-telegram/blob/main/docs/Tools-Reference.md"
+executor = "shell"
+command = "/usr/local/bin/tg-mcp-call search_messages_globally '{\"query\":\"{{query}}\",\"limit\":{{limit}},\"chat_type\":\"{{chat_type}}\",\"public\":{{public}},\"min_date\":\"{{min_date}}\",\"max_date\":\"{{max_date}}\",\"auto_expand_batches\":{{auto_expand_batches}},\"include_total_count\":{{include_total_count}}}' 2>&1"
+timeout_secs = 30
+params = [
+    { name = "query", type = "string", description = "Search terms, comma-separated for multiple terms (OR-style global search). Required.", required = true },
+    { name = "limit", type = "integer", description = "Maximum messages to return (recommended 50 or less).", required = false, default = "50" },
+    { name = "chat_type", type = "string", description = "Comma-separated chat kinds: private, bot, group, channel. Case-insensitive; extra spaces allowed.", required = false },
+    { name = "public", type = "boolean", description = "If true, prefer chats with a public username; if false, without. Does not apply to private DMs. Omit to skip this filter.", required = false },
+    { name = "min_date", type = "string", description = "Inclusive minimum date filter (ISO 8601 date or datetime). Omit for no lower bound.", required = false },
+    { name = "max_date", type = "string", description = "Inclusive maximum date filter (ISO 8601 date or datetime). Omit for no upper bound.", required = false },
+    { name = "auto_expand_batches", type = "integer", description = "Extra search batches to run when filters narrow results. Higher values may return more matches at the cost of latency.", required = false, default = "2" },
+    { name = "include_total_count", type = "boolean", description = "If true, response may include total_count where supported (per-chat search; ignored for global search).", required = false, default = "false" }
+]
+
+[[tools]]
+name = "tg_edit_message"
+description = "Replace text of an existing message you can edit in this chat. Success: edit result dict. Full documentation: https://github.com/leshchenko1979/fast-mcp-telegram/blob/main/docs/Tools-Reference.md"
+executor = "shell"
+command = "/usr/local/bin/tg-mcp-call edit_message '{\"chat_id\":\"{{chat_id}}\",\"message_id\":{{message_id}},\"message\":\"{{message}}\",\"parse_mode\":\"{{parse_mode}}\"}' 2>&1"
+timeout_secs = 30
+params = [
+    { name = "chat_id", type = "string", description = "Target chat: numeric id (e.g. -100…), username without @, or 'me' for Saved Messages.", required = true },
+    { name = "message_id", type = "integer", description = "Message id in this chat to edit (from get_messages or Telegram).", required = true },
+    { name = "message", type = "string", description = "Message text. When sending files, used as caption.", required = true },
+    { name = "parse_mode", type = "string", description = "'markdown', 'html', or 'auto' (detect from content). Default is 'auto'.", required = false, default = "auto" }
+]
+
+[[tools]]
+name = "tg_send_to_phone"
+description = "Send to a phone number: may create a temporary contact, then send text or files. Success: send result plus contact_was_new / contact_removed when applicable. Full documentation: https://github.com/leshchenko1979/fast-mcp-telegram/blob/main/docs/Tools-Reference.md"
+executor = "shell"
+command = "/usr/local/bin/tg-mcp-call send_message_to_phone '{\"phone_number\":\"{{phone_number}}\",\"message\":\"{{message}}\",\"first_name\":\"{{first_name}}\",\"last_name\":\"{{last_name}}\",\"remove_if_new\":{{remove_if_new}},\"reply_to_msg_id\":{{reply_to_msg_id}},\"parse_mode\":\"{{parse_mode}}\",\"files\":{{files}}}' 2>&1"
+timeout_secs = 30
+params = [
+    { name = "phone_number", type = "string", description = "E.164 phone number with country code, e.g. +1234567890 (must be on Telegram).", required = true },
+    { name = "message", type = "string", description = "Message text. When sending files, used as caption.", required = true },
+    { name = "first_name", type = "string", description = "First name when creating a temporary contact.", required = false, default = "Contact" },
+    { name = "last_name", type = "string", description = "Last name when creating a temporary contact.", required = false, default = "Name" },
+    { name = "remove_if_new", type = "boolean", description = "If true, delete the contact after send when it was created only for this send.", required = false, default = "false" },
+    { name = "reply_to_msg_id", type = "integer", description = "Reply to this message id in the target chat after resolve.", required = false },
+    { name = "parse_mode", type = "string", description = "'markdown', 'html', or 'auto' (detect from content). Default is 'auto'.", required = false, default = "auto" },
+    { name = "files", type = "array", description = "List of attachment URLs or local paths (one or more strings). Local paths work in stdio mode only.", required = false }
+]
+
+[[tools]]
+name = "tg_mtproto"
+description = "Low-level Telegram API (MTProto) invoke for methods not wrapped by other tools. Dangerous methods require allow_dangerous=true. Success: API result dict or normalized error. Full documentation: https://github.com/leshchenko1979/fast-mcp-telegram/blob/main/docs/Tools-Reference.md"
+executor = "shell"
+command = "/usr/local/bin/tg-mcp-call invoke_mtproto '{\"method_full_name\":\"{{method_full_name}}\",\"params_json\":\"{{params_json}}\",\"allow_dangerous\":{{allow_dangerous}},\"resolve\":{{resolve}}}' 2>&1"
+timeout_secs = 30
+params = [
+    { name = "method_full_name", type = "string", description = "Telegram API method, e.g. \"messages.GetHistory\" or \"users.GetFullUser\" (normalization applied).", required = true },
+    { name = "params_json", type = "string", description = "JSON object string of TL parameters as in Telegram API docs; nested TL uses \"_\": \"typeName\" discriminator.", required = true },
+    { name = "allow_dangerous", type = "boolean", description = "If false, destructive methods (e.g. deletes) are blocked. Set true only when intended.", required = false, default = "false" },
+    { name = "resolve", type = "boolean", description = "If true, resolve string/int peer-like fields to TL Input* entities before invoke.", required = false, default = "true" }
+]

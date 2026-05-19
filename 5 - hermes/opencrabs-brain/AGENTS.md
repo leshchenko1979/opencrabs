@@ -78,4 +78,3 @@ When the task is **not** in an active Telegram channel session but the message c
 ## Session rules
 
 - Do not edit @oc_l1979_bot default profile or `~/.opencrabs/` (non-ops) brain files.
-- Prefer `memory_search` before loading large memory when available.

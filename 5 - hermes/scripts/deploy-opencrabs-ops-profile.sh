@@ -20,12 +20,16 @@ set -euo pipefail
 OPS=~/.opencrabs/profiles/ops
 mkdir -p "$OPS"
 
-if ! opencrabs profile list 2>/dev/null | grep -qE '^ops$'; then
-  if [[ -d "$OPS" ]] && [[ -n "$(ls -A "$OPS" 2>/dev/null)" ]]; then
+if [[ ! -d "$OPS" ]] || [[ -z "$(ls -A "$OPS" 2>/dev/null)" ]]; then
+  if [[ -d "$OPS" ]]; then
     mv "$OPS" "${OPS}.bak.$(date +%s)"
     mkdir -p "$OPS"
   fi
-  opencrabs profile create ops
+  if ! opencrabs profile list 2>/dev/null | grep -qE '(^|[[:space:]])ops($|[[:space:]])'; then
+    opencrabs profile create ops
+  else
+    mkdir -p "$OPS"
+  fi
 fi
 REMOTE
 
@@ -43,7 +47,14 @@ opencrabs -p ops cron add --name vds-servers-nightly-pull \
   --cron "0 3 * * *" --tz Europe/Moscow \
   --prompt "Run only: git -C /root/vds-servers pull --ff-only. One-line reply."
 
-echo "ops profile ready"
+# Disable ChromaDB vector memory on default profile (1GB Hermes — not in git template)
+if grep -qE '^vector_enabled[[:space:]]*=[[:space:]]*true' /root/.opencrabs/config.toml 2>/dev/null; then
+  sed -i '/^vector_enabled[[:space:]]*=[[:space:]]*true/d' /root/.opencrabs/config.toml
+  echo "Removed vector_enabled from default config.toml"
+fi
+
+systemctl restart opencrabs opencrabs-ops
+echo "ops profile ready (opencrabs restarted)"
 REMOTE
 
 "${SCRIPT_DIR}/deploy-opencrabs-ops-brain.sh"

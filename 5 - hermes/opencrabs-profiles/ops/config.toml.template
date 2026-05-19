@@ -72,6 +72,5 @@ enabled = false
 [cron]
 
 [memory]
-vector_enabled = true
 auto_update = false
 max_concurrent = 2

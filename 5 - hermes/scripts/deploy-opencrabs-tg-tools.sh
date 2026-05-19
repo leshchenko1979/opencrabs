@@ -1,55 +1,91 @@
 #!/usr/bin/env bash
-# Install tg-mcp-call wrapper and point default tools.toml at fastmcp (not mcp proxy).
-# Run from Mac. Requires fastmcp on hermes: pip3 install 'fastmcp>=3.3'
+# Install tg-mcp-call, mcp.json, fastmcp-slim[client]; patch tools.toml if needed.
+# Run from Mac. See 5 - hermes/docs/services.md
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${HERMES_DIR}/.." && pwd)"
-WRAPPER_SRC="${SCRIPT_DIR}/tg-mcp-call.sh"
-TOOLS_TOML="/root/.opencrabs/tools.toml"
+WRAPPER_SRC="${SCRIPT_DIR}/tg-mcp-call.py"
+MCP_JSON_SRC="${HERMES_DIR}/config/mcp.json"
+TOOLS_TEMPLATE="${HERMES_DIR}/config/opencrabs-tools.toml.template"
+MCP_JSON_DST="/etc/tg-mcp/mcp.json"
 WRAPPER_DST="/usr/local/bin/tg-mcp-call"
-OLD_PREFIX="/root/.local/bin/mcp tg-mcp"
-NEW_PREFIX="/usr/local/bin/tg-mcp-call"
+TOOLS_TOML="/root/.opencrabs/tools.toml"
 
 # shellcheck source=/dev/null
 source "${REPO_ROOT}/scripts/hermes-ssh.sh"
 
 hermes_ssh_init
 
-if [[ ! -f "$WRAPPER_SRC" ]]; then
-  echo "ERROR: missing $WRAPPER_SRC" >&2
+for f in "$WRAPPER_SRC" "$MCP_JSON_SRC"; do
+  if [[ ! -f "$f" ]]; then
+    echo "ERROR: missing $f" >&2
+    exit 1
+  fi
+done
+
+hermes_scp "$WRAPPER_SRC" "/tmp/tg-mcp-call.py"
+hermes_scp "$MCP_JSON_SRC" "/tmp/tg-mcp-mcp.json"
+if [[ -f "$TOOLS_TEMPLATE" ]]; then
+  hermes_scp "$TOOLS_TEMPLATE" "/tmp/opencrabs-tools.toml.template"
+fi
+
+hermes_ssh bash -s <<'REMOTE'
+set -euo pipefail
+
+pip3 uninstall -y fastmcp --break-system-packages 2>/dev/null || true
+pip3 install --break-system-packages --upgrade 'fastmcp-slim[client]==3.3.0'
+command -v fastmcp
+fastmcp --version
+
+mkdir -p /etc/tg-mcp /var/log/tg-mcp
+chmod 755 /var/log/tg-mcp
+install -m 644 /tmp/tg-mcp-mcp.json /etc/tg-mcp/mcp.json
+rm -f /tmp/tg-mcp-mcp.json
+
+install -m 755 /tmp/tg-mcp-call.py /usr/local/bin/tg-mcp-call
+rm -f /tmp/tg-mcp-call.py
+
+if [[ -f /tmp/opencrabs-tools.toml.template ]]; then
+  install -m 644 /tmp/opencrabs-tools.toml.template /root/.opencrabs/tools.toml.new
+  if [[ ! -f /root/.opencrabs/tools.toml ]] || ! grep -q '/usr/local/bin/tg-mcp-call' /root/.opencrabs/tools.toml; then
+    mv /root/.opencrabs/tools.toml.new /root/.opencrabs/tools.toml
+    echo "Installed tools.toml from template"
+  else
+    rm -f /root/.opencrabs/tools.toml.new
+    echo "tools.toml already uses tg-mcp-call — template not overwritten"
+  fi
+  rm -f /tmp/opencrabs-tools.toml.template
+elif [[ -f /root/.opencrabs/tools.toml ]]; then
+  if grep -q '/root/.local/bin/mcp tg-mcp' /root/.opencrabs/tools.toml; then
+    sed -i 's|/root/.local/bin/mcp tg-mcp|/usr/local/bin/tg-mcp-call|g' /root/.opencrabs/tools.toml
+    echo "Updated tools.toml: mcp proxy -> tg-mcp-call"
+  elif grep -q '/usr/local/bin/tg-mcp-call' /root/.opencrabs/tools.toml; then
+    echo "tools.toml already uses tg-mcp-call"
+  else
+    echo "WARN: unexpected tools.toml command= lines" >&2
+    grep -E '^command[[:space:]]*=' /root/.opencrabs/tools.toml | head -3 >&2 || true
+  fi
+else
+  echo "ERROR: /root/.opencrabs/tools.toml not found and no template" >&2
   exit 1
 fi
 
-REMOTE_TMP="/tmp/tg-mcp-call.sh"
-hermes_scp "$WRAPPER_SRC" "$REMOTE_TMP"
-hermes_ssh "set -e
-  install -m 755 ${REMOTE_TMP} ${WRAPPER_DST}
-  rm -f ${REMOTE_TMP}
-  if ! command -v fastmcp >/dev/null; then
-    echo 'Installing fastmcp (uses fastmcp-slim deps)...'
-    pip3 install --break-system-packages 'fastmcp>=3.3'
-  fi
-  fastmcp --version
-  if [[ ! -f ${TOOLS_TOML} ]]; then
-    echo 'ERROR: ${TOOLS_TOML} not found' >&2
-    exit 1
-  fi
-  if grep -q '${OLD_PREFIX}' ${TOOLS_TOML}; then
-    sed -i 's|${OLD_PREFIX}|${NEW_PREFIX}|g' ${TOOLS_TOML}
-    echo 'Updated tools.toml: mcp proxy -> tg-mcp-call (fastmcp)'
-  elif grep -q '${NEW_PREFIX}' ${TOOLS_TOML}; then
-    echo 'tools.toml already uses tg-mcp-call'
-  else
-    echo 'WARN: tools.toml has unexpected command= lines — check manually' >&2
-    grep 'command =' ${TOOLS_TOML} | head -3 >&2
-  fi
-  echo 'Smoke test (get_chat_info me)...'
-  timeout 30 ${WRAPPER_DST} get_chat_info "$(printf '%s' '{"chat_id":"me","topics_limit":1}')" | head -c 200
-  echo
-  echo 'Optional: remove heavy mcp proxy if unused elsewhere:'
-  echo '  rm -f /root/.local/bin/mcp'
-"
+mkdir -p /root/tgproxy
+ln -sf /etc/tg-mcp/mcp.json /root/tgproxy/mcp.json
 
-echo "Done. Restart default opencrabs if tools were mid-session: ssh hermes 'systemctl restart opencrabs'"
+rm -f /root/.local/bin/mcp
+
+echo "Smoke test get_chat_info..."
+out=$(/usr/local/bin/tg-mcp-call get_chat_info '{"chat_id":"me","topics_limit":1}')
+echo "$out" | head -c 200
+echo
+if echo "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'content' not in d and 'structured_content' not in d else 1)"; then
+  echo "OK: lean stdout (no MCP envelope keys)"
+else
+  echo "WARN: output may include MCP envelope keys" >&2
+fi
+REMOTE
+
+echo "Done. Restart if needed: ssh hermes 'systemctl restart opencrabs'"
