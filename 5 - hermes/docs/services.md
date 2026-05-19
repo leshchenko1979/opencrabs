@@ -12,7 +12,7 @@
 - **Systemd**: `opencrabs.service`
 - **Data dir**: `/root/.opencrabs/` (opencrabs.db, logs/, tools.toml, keys.toml, config.toml)
 - **Config**: `/root/.opencrabs/config.toml` — MiniMax provider, Telegram channel
-- **8 dynamic tools**: via `fastmcp call` to `https://tg-mcp.l1979.ru/v1/mcp`
+- **8 dynamic tools**: `tools.toml` shell executor → `/usr/local/bin/tg-mcp-call` → `fastmcp call` → `https://tg-mcp.l1979.ru/v1/mcp` (not the 14MB `mcp` proxy in `~/.local/bin`). Deploy wrapper: `scripts/deploy-opencrabs-tg-tools.sh`
 - **Known issue**: tools.toml tools work via Telegram channel but not in `run`/`agent` modes ([opencrabs#79](https://github.com/adolfousier/opencrabs/issues/79))
 
 ### Ops profile (`opencrabs-ops.service`)

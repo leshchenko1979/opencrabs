@@ -35,7 +35,7 @@ You run on **Hermes (box5)**. Map endpoint → how to run `host-diag`:
 
 **Never `ssh hermes` from Hermes** — `Host hermes` uses the public IP (`132.243.213.9:18718`); loopback via that address **hangs/times out** (no hairpin). **Use `hermes-local`** when SSH is needed for box5 (same pattern as `ssh vpn` / `ssh apps`).
 
-If `host-diag` exits 1 on box5: check load (`uptime`), then stuck MCP — `ps aux | grep 'mcp tg-mcp'`; kill PIDs running >30m at high CPU, then re-run diag.
+If `host-diag` exits 1 on box5: check load (`uptime`), then stuck MCP — `ps aux | grep -E 'tg-mcp-call|fastmcp call|mcp tg-mcp'`; kill PIDs running >30m at high CPU, then re-run diag.
 
 ## On every `[Gatus]` message
 
