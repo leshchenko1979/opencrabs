@@ -155,6 +155,8 @@ Project-level skill: `.claude/skills/diagnosing-servers/SKILL.md`
 ### 2026-05-19
 - **Issue**: Hermes `tools.toml` used `/root/.local/bin/mcp tg-mcp` (14MB proxy); hung on 1GB RAM. Removing the proxy broke `tgproxy` cron before `update_proxies.py` was migrated.
   - **Correct approach**: Use `fastmcp-slim[client]` + `/usr/local/bin/tg-mcp-call` (wraps `fastmcp call` with bearer from `config.toml`). Deploy via `5 - hermes/scripts/deploy-opencrabs-tg-tools.sh`. Migrate tgproxy to `tg-mcp-call` before deleting the old `mcp` binary. `fastmcp call` with `--json` duplicates data for agents — wrapper uses default CLI output (lean JSON only). Wrapper logs to `/var/log/tg-mcp/tg-mcp-call.log` (no bearer; args truncated).
+- **Issue**: `tg_send_message` failed with red ✗ but opaque log (`invalid json args` only) — omitted optionals in `tools.toml` expand to invalid JSON (`"reply_to_id":,`) or leave `{{placeholders}}` unexpanded.
+  - **Correct approach**: Check `/var/log/tg-mcp/tg-mcp-call.log` for `raw_preview`. JSON-safe defaults (`null` / `[]` / `""`) on every optional param in `opencrabs-tools.toml.template`; deploy with `deploy-opencrabs-tg-tools.sh --update-tools` then `systemctl restart opencrabs opencrabs-ops`. Built-in `telegram_send` is a separate path (not in tg-mcp-call.log).
 - **Issue**: OpenCrabs ops `vector_enabled = true` (ChromaDB) → ~800MB RSS, OOM loop, SSH banner timeouts on 1GB Hermes.
   - **Correct approach**: Set `vector_enabled = false` in ops template and default `config.toml` (omitting the key may still load ChromaDB); redeploy via `deploy-opencrabs-ops-profile.sh` (restarts both daemons). Keep `MemoryMax=512M` drop-in on `opencrabs-ops`. Ops brain: `load_brain_file MEMORY.md`, not `memory_search`.
 

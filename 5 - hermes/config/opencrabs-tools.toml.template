@@ -1,6 +1,7 @@
 # Telegram MCP tools — OpenCrabs dynamic tools config
 # Source: fast-mcp-telegram (https://github.com/leshchenko1979/fast-mcp-telegram)
 # Tool descriptions and parameter docs: https://github.com/leshchenko1979/fast-mcp-telegram/blob/main/docs/Tools-Reference.md
+# Optional params use JSON-safe defaults (null / [] / "") so shell command expansion never produces invalid JSON.
 
 [[tools]]
 name = "tg_get_messages"
@@ -10,12 +11,12 @@ command = "/usr/local/bin/tg-mcp-call get_messages '{\"chat_id\":\"{{chat_id}}\"
 timeout_secs = 30
 params = [
     { name = "chat_id", type = "string", description = "Target chat: numeric id (e.g. -100…), username without @, or 'me' for Saved Messages.", required = true },
-    { name = "query", type = "string", description = "Search within this chat only; comma-separated terms. Omit to browse latest or use message_ids / reply_to_id modes.", required = false },
-    { name = "message_ids", type = "array", description = "Exact message ids to fetch. Mutually exclusive with query and reply_to_id.", required = false },
-    { name = "reply_to_id", type = "integer", description = "Get replies in the thread for this message id (comments, forum topic, or replies). Optional query filters within that thread.", required = false },
+    { name = "query", type = "string", description = "Search within this chat only; comma-separated terms. Omit to browse latest or use message_ids / reply_to_id modes.", required = false, default = "" },
+    { name = "message_ids", type = "array", description = "Exact message ids to fetch. Mutually exclusive with query and reply_to_id.", required = false, default = "[]" },
+    { name = "reply_to_id", type = "integer", description = "Get replies in the thread for this message id (comments, forum topic, or replies). Optional query filters within that thread.", required = false, default = "null" },
     { name = "limit", type = "integer", description = "Maximum messages to return (recommended 50 or less).", required = false, default = "50" },
-    { name = "min_date", type = "string", description = "Inclusive minimum date filter (ISO 8601 date or datetime). Omit for no lower bound.", required = false },
-    { name = "max_date", type = "string", description = "Inclusive maximum date filter (ISO 8601 date or datetime). Omit for no upper bound.", required = false },
+    { name = "min_date", type = "string", description = "Inclusive minimum date filter (ISO 8601 date or datetime). Omit for no lower bound.", required = false, default = "" },
+    { name = "max_date", type = "string", description = "Inclusive maximum date filter (ISO 8601 date or datetime). Omit for no upper bound.", required = false, default = "" },
     { name = "auto_expand_batches", type = "integer", description = "Extra search batches to run when filters narrow results. Higher values may return more matches at the cost of latency.", required = false, default = "2" },
     { name = "include_total_count", type = "boolean", description = "If true, response may include total_count where supported (per-chat search; ignored for global search).", required = false, default = "false" }
 ]
@@ -29,9 +30,9 @@ timeout_secs = 30
 params = [
     { name = "chat_id", type = "string", description = "Target chat: numeric id (e.g. -100…), username without @, or 'me' for Saved Messages.", required = true },
     { name = "message", type = "string", description = "Message text. When sending files, used as caption.", required = true },
-    { name = "reply_to_id", type = "integer", description = "Telegram message id to reply to. For forums, topic root id; for channel posts, post id (may create a comment). Omit for a new top-level message.", required = false },
+    { name = "reply_to_id", type = "integer", description = "Telegram message id to reply to. For forums, topic root id; for channel posts, post id (may create a comment). Omit for a new top-level message.", required = false, default = "null" },
     { name = "parse_mode", type = "string", description = "'markdown', 'html', or 'auto' (detect from content). Default is 'auto'.", required = false, default = "auto" },
-    { name = "files", type = "array", description = "List of attachment URLs or local paths (one or more strings). Local paths work in stdio mode only.", required = false }
+    { name = "files", type = "array", description = "List of attachment URLs or local paths (one or more strings). Local paths work in stdio mode only.", required = false, default = "[]" }
 ]
 
 [[tools]]
@@ -41,13 +42,13 @@ executor = "shell"
 command = "/usr/local/bin/tg-mcp-call find_chats '{\"query\":\"{{query}}\",\"limit\":{{limit}},\"chat_type\":\"{{chat_type}}\",\"public\":{{public}},\"min_date\":\"{{min_date}}\",\"max_date\":\"{{max_date}}\",\"folder\":\"{{folder}}\"}' 2>&1"
 timeout_secs = 30
 params = [
-    { name = "query", type = "string", description = "Name, username (no @), phone (+country…), or comma-separated multi-queries. Required for global search unless you use min_date/max_date or folder alone.", required = false },
+    { name = "query", type = "string", description = "Name, username (no @), phone (+country…), or comma-separated multi-queries. Required for global search unless you use min_date/max_date or folder alone.", required = false, default = "" },
     { name = "limit", type = "integer", description = "Maximum chats to return (recommended 50 or less).", required = false, default = "20" },
-    { name = "chat_type", type = "string", description = "Comma-separated chat kinds: private, bot, group, channel. Case-insensitive; extra spaces allowed.", required = false },
-    { name = "public", type = "boolean", description = "If true, prefer chats with a public username; if false, without. Does not apply to private DMs. Omit to skip this filter.", required = false },
-    { name = "min_date", type = "string", description = "Inclusive minimum date filter (ISO 8601 date or datetime). Omit for no lower bound.", required = false },
-    { name = "max_date", type = "string", description = "Inclusive maximum date filter (ISO 8601 date or datetime). Omit for no upper bound.", required = false },
-    { name = "folder", type = "string", description = "Telegram folder name (case-insensitive exact match after normalization). In Telegram's UI these are called folders; internally they are \"dialog filters\" — saved filter presets that group chats by custom criteria (pinned, unread, business, etc.). See Filters-vs-Folders.md for the technical distinction.", required = false }
+    { name = "chat_type", type = "string", description = "Comma-separated chat kinds: private, bot, group, channel. Case-insensitive; extra spaces allowed.", required = false, default = "" },
+    { name = "public", type = "boolean", description = "If true, prefer chats with a public username; if false, without. Does not apply to private DMs. Omit to skip this filter.", required = false, default = "null" },
+    { name = "min_date", type = "string", description = "Inclusive minimum date filter (ISO 8601 date or datetime). Omit for no lower bound.", required = false, default = "" },
+    { name = "max_date", type = "string", description = "Inclusive maximum date filter (ISO 8601 date or datetime). Omit for no upper bound.", required = false, default = "" },
+    { name = "folder", type = "string", description = "Telegram folder name (case-insensitive exact match after normalization). In Telegram's UI these are called folders; internally they are \"dialog filters\" — saved filter presets that group chats by custom criteria (pinned, unread, business, etc.). See Filters-vs-Folders.md for the technical distinction.", required = false, default = "" }
 ]
 
 [[tools]]
@@ -70,10 +71,10 @@ timeout_secs = 30
 params = [
     { name = "query", type = "string", description = "Search terms, comma-separated for multiple terms (OR-style global search). Required.", required = true },
     { name = "limit", type = "integer", description = "Maximum messages to return (recommended 50 or less).", required = false, default = "50" },
-    { name = "chat_type", type = "string", description = "Comma-separated chat kinds: private, bot, group, channel. Case-insensitive; extra spaces allowed.", required = false },
-    { name = "public", type = "boolean", description = "If true, prefer chats with a public username; if false, without. Does not apply to private DMs. Omit to skip this filter.", required = false },
-    { name = "min_date", type = "string", description = "Inclusive minimum date filter (ISO 8601 date or datetime). Omit for no lower bound.", required = false },
-    { name = "max_date", type = "string", description = "Inclusive maximum date filter (ISO 8601 date or datetime). Omit for no upper bound.", required = false },
+    { name = "chat_type", type = "string", description = "Comma-separated chat kinds: private, bot, group, channel. Case-insensitive; extra spaces allowed.", required = false, default = "" },
+    { name = "public", type = "boolean", description = "If true, prefer chats with a public username; if false, without. Does not apply to private DMs. Omit to skip this filter.", required = false, default = "null" },
+    { name = "min_date", type = "string", description = "Inclusive minimum date filter (ISO 8601 date or datetime). Omit for no lower bound.", required = false, default = "" },
+    { name = "max_date", type = "string", description = "Inclusive maximum date filter (ISO 8601 date or datetime). Omit for no upper bound.", required = false, default = "" },
     { name = "auto_expand_batches", type = "integer", description = "Extra search batches to run when filters narrow results. Higher values may return more matches at the cost of latency.", required = false, default = "2" },
     { name = "include_total_count", type = "boolean", description = "If true, response may include total_count where supported (per-chat search; ignored for global search).", required = false, default = "false" }
 ]
@@ -103,9 +104,9 @@ params = [
     { name = "first_name", type = "string", description = "First name when creating a temporary contact.", required = false, default = "Contact" },
     { name = "last_name", type = "string", description = "Last name when creating a temporary contact.", required = false, default = "Name" },
     { name = "remove_if_new", type = "boolean", description = "If true, delete the contact after send when it was created only for this send.", required = false, default = "false" },
-    { name = "reply_to_msg_id", type = "integer", description = "Reply to this message id in the target chat after resolve.", required = false },
+    { name = "reply_to_msg_id", type = "integer", description = "Reply to this message id in the target chat after resolve.", required = false, default = "null" },
     { name = "parse_mode", type = "string", description = "'markdown', 'html', or 'auto' (detect from content). Default is 'auto'.", required = false, default = "auto" },
-    { name = "files", type = "array", description = "List of attachment URLs or local paths (one or more strings). Local paths work in stdio mode only.", required = false }
+    { name = "files", type = "array", description = "List of attachment URLs or local paths (one or more strings). Local paths work in stdio mode only.", required = false, default = "[]" }
 ]
 
 [[tools]]

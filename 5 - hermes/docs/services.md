@@ -13,7 +13,9 @@
 - **Data dir**: `/root/.opencrabs/` (opencrabs.db, logs/, tools.toml, keys.toml, config.toml)
 - **Config**: `/root/.opencrabs/config.toml` — MiniMax provider, Telegram channel
 - **Memory**: `vector_enabled = false`, `auto_update = true` (1GB RAM — no ChromaDB; FTS + daily notes re-indexed). Set on deploy via `deploy-opencrabs-ops-profile.sh`
-- **8 dynamic tools**: `tools.toml` → `/usr/local/bin/tg-mcp-call` (source `scripts/tg-mcp-call.py`) → `fastmcp call` → `https://tg-mcp.l1979.ru/v1/mcp` (lean tool JSON on stdout; config `/etc/tg-mcp/mcp.json`; logs `/var/log/tg-mcp/tg-mcp-call.log`). Deploy: `scripts/deploy-opencrabs-tg-tools.sh` (`fastmcp-slim[client]`)
+- **8 dynamic tools**: `tools.toml` → `/usr/local/bin/tg-mcp-call` (source `scripts/tg-mcp-call.py`; strips JSON `null` keys before MCP — tg-mcp rejects null optional ints) → `fastmcp call` → `https://tg-mcp.l1979.ru/v1/mcp` (lean tool JSON on stdout; config `/etc/tg-mcp/mcp.json`; logs `/var/log/tg-mcp/tg-mcp-call.log`). Deploy: `scripts/deploy-opencrabs-tg-tools.sh` (`fastmcp-slim[client]`)
+- **Debugging tg tools**: `ssh hermes 'tail -f /var/log/tg-mcp/tg-mcp-call.log'`. Lines: `call start` / `call ok` / `call failed` / `exit_code=N`. Parse errors include `raw_preview` (malformed JSON from `tools.toml` shell expansion). MCP errors: `fastmcp_rc`, `stderr_preview`. One-off verbose args: `TG_MCP_LOG_LEVEL=DEBUG` (up to 2KB preview). No bearer in logs.
+- **tools.toml updates**: `opencrabs-tools.toml.template` uses JSON-safe `default` on optional params (`null`, `[]`, `""`). Deploy: `./scripts/deploy-opencrabs-tg-tools.sh --update-tools` then restart `opencrabs` / `opencrabs-ops`.
 - **Known issue**: tools.toml tools work via Telegram channel but not in `run`/`agent` modes ([opencrabs#79](https://github.com/adolfousier/opencrabs/issues/79))
 
 ### Ops profile (`opencrabs-ops.service`)

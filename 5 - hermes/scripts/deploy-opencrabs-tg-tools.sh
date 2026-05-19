@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # Install tg-mcp-call, mcp.json, fastmcp-slim[client]; patch tools.toml if needed.
 # Run from Mac. See 5 - hermes/docs/services.md
+#   --update-tools   overwrite /root/.opencrabs/tools.toml from template (JSON-safe param defaults)
 set -euo pipefail
+
+UPDATE_TOOLS=false
+for arg in "$@"; do
+  case "$arg" in
+    --update-tools) UPDATE_TOOLS=true ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -31,8 +39,9 @@ if [[ -f "$TOOLS_TEMPLATE" ]]; then
   hermes_scp "$TOOLS_TEMPLATE" "/tmp/opencrabs-tools.toml.template"
 fi
 
-hermes_ssh bash -s <<'REMOTE'
+hermes_ssh bash -s -- "$UPDATE_TOOLS" <<'REMOTE'
 set -euo pipefail
+UPDATE_TOOLS=${1:-false}
 
 pip3 uninstall -y fastmcp --break-system-packages 2>/dev/null || true
 pip3 install --break-system-packages --upgrade 'fastmcp-slim[client]==3.3.0'
@@ -49,12 +58,15 @@ rm -f /tmp/tg-mcp-call.py
 
 if [[ -f /tmp/opencrabs-tools.toml.template ]]; then
   install -m 644 /tmp/opencrabs-tools.toml.template /root/.opencrabs/tools.toml.new
-  if [[ ! -f /root/.opencrabs/tools.toml ]] || ! grep -q '/usr/local/bin/tg-mcp-call' /root/.opencrabs/tools.toml; then
+  if [[ "$UPDATE_TOOLS" == "true" ]]; then
+    mv /root/.opencrabs/tools.toml.new /root/.opencrabs/tools.toml
+    echo "Installed tools.toml from template (--update-tools)"
+  elif [[ ! -f /root/.opencrabs/tools.toml ]] || ! grep -q '/usr/local/bin/tg-mcp-call' /root/.opencrabs/tools.toml; then
     mv /root/.opencrabs/tools.toml.new /root/.opencrabs/tools.toml
     echo "Installed tools.toml from template"
   else
     rm -f /root/.opencrabs/tools.toml.new
-    echo "tools.toml already uses tg-mcp-call — template not overwritten"
+    echo "tools.toml already uses tg-mcp-call — template not overwritten (use --update-tools)"
   fi
   rm -f /tmp/opencrabs-tools.toml.template
 elif [[ -f /root/.opencrabs/tools.toml ]]; then
