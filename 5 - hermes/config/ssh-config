@@ -16,6 +16,8 @@ Host n8n
     IdentityFile ~/.ssh/id_ed25519
     StrictHostKeyChecking accept-new
 
+# Hermes-only install (install-hermes-ssh-config.sh). Mac ~/.ssh/config: hermes → public IP :18718.
+# On Hermes, Host hermes must be loopback so agents' ssh hermes does not hairpin to :18718.
 Host hermes
     HostName 127.0.0.1
     Port 22

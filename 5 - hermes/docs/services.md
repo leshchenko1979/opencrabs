@@ -95,4 +95,4 @@ OpenCrabs operates from repo clones in `/root/` — not a single git monorepo. E
 
 Connect from Mac/VPN: `ssh hermes` (public `132.243.213.9:18718`, in `~/.ssh/config`).
 
-On Hermes itself: `ssh hermes-local` → `127.0.0.1:22` for box5 diagnostics (never `ssh hermes` from Hermes — no NAT hairpin). Fleet config: `5 - hermes/config/ssh-config`; install: `scripts/install-hermes-ssh-config.sh`.
+On Hermes itself: `ssh hermes` → `127.0.0.1:22` (fleet `config/ssh-config`; commit `a39070ca` — avoids agents hairpinning to public `:18718`). Mac still uses public IP in `~/.ssh/config`. Install/redeploy: `scripts/install-hermes-ssh-config.sh`.

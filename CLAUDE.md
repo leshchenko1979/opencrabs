@@ -46,6 +46,8 @@ On your **macOS workstation**, add matching `Host` blocks in `~/.ssh/config` so 
 
 Each block should use `User root`, `IdentityFile ~/.ssh/id_ed25519`, and `AddKeysToAgent yes` (or the key you use in per-server `.env`).
 
+**On Hermes itself**, `5 - hermes/config/ssh-config` redefines `Host hermes` → `127.0.0.1:22` so OpenCrabs ops can run `ssh hermes` without hairpinning to public `:18718` (`a39070ca`).
+
 Repo scripts that SSH from your Mac source `scripts/ssh-vds-host.sh` and call `vds_ssh_connect_host` so connections use `vpn` / `apps` / `n8n` / `hermes` when `REMOTE_HOST_IP` matches a canonical box IP (URLs and `.env` stay on real IPs).
 
 ### macOS SSH Tunnel (Box 2)
@@ -151,6 +153,10 @@ Project-level skill: `.claude/skills/diagnosing-servers/SKILL.md`
 - **`2 - VPN/scripts/cleanup.sh` `remove_unused_services()` is DISABLED**: That function unconditionally deletes PostgreSQL and Redis data directories if they appear "unused" (no active connections). This would destroy production databases. The function was gutted on 2026-05-04 to just log a warning. Never re-enable the body without extensive review.
 
 ## Session Corrections
+
+### 2026-05-20 (`a39070ca`)
+- **Issue**: OpenCrabs ops on Hermes kept running `ssh hermes` for `host-box5` (same alias as Mac). On-box `Host hermes` pointed at public `132.243.213.9:18718` — no NAT hairpin → SSH hung/timeouts and wasted agent turns.
+  - **Correct approach**: Hermes fleet config (`5 - hermes/config/ssh-config`) defines **one** `Host hermes` → `127.0.0.1:22` (replaces removed `hermes-local`). Mac `~/.ssh/config` stays on public `:18718`. Redeploy: `5 - hermes/scripts/install-hermes-ssh-config.sh`. Ops brain: `ssh hermes /usr/local/bin/host-diag` or run `host-diag` locally. Same commit: `tg-mcp-call.py` omits empty JSON arrays (optional list params).
 
 ### 2026-05-19
 - **Issue**: Hermes `tools.toml` used `/root/.local/bin/mcp tg-mcp` (14MB proxy); hung on 1GB RAM. Removing the proxy broke `tgproxy` cron before `update_proxies.py` was migrated.

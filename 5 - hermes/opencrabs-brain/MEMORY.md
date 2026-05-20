@@ -14,7 +14,7 @@ Before **Gatus alerts** or **user-initiated infra chat**: `git -C /root/vds-serv
 | Gatus endpoints (`host-box2`…`host-box5`) | `/root/vds-servers/2 - VPN/services/gatus/config/config.yaml` |
 | `host-diag` script | `/root/vds-servers/2 - VPN/services/gatus/scripts/host-diag` |
 | Hermes / dual OpenCrabs | `/root/vds-servers/5 - hermes/docs/services.md` |
-| Hermes on-box SSH (box5) | `hermes-local` → `127.0.0.1:22` — never `ssh hermes` from Hermes (no hairpin on `:18718`) |
+| Hermes on-box SSH (box5) | `ssh hermes` → `127.0.0.1:22` via `5 - hermes/config/ssh-config` — not public `:18718` (no hairpin; see CLAUDE.md `a39070ca`) |
 | Apps services | `/root/vds-servers/3 - apps/docs/services.md` |
 | n8n | `/root/vds-servers/4 - n8n/docs/services.md` |
 | Mac backups | `/root/vds-servers/mac-workstation-backup/README.md` |

@@ -33,5 +33,5 @@ REMOTE
 
 echo "=== Verify fleet SSH from Hermes ==="
 hermes_ssh 'for h in vpn apps n8n; do ssh -o BatchMode=yes -o ConnectTimeout=10 "$h" /usr/local/bin/host-diag; echo "$h exit:$?"; done'
-hermes_ssh 'ssh -o BatchMode=yes -o ConnectTimeout=5 hermes-local /usr/local/bin/host-diag; echo "hermes-local exit:$?"'
+hermes_ssh 'ssh -o BatchMode=yes -o ConnectTimeout=5 hermes /usr/local/bin/host-diag; echo "hermes loopback exit:$?"'
 echo "Done."

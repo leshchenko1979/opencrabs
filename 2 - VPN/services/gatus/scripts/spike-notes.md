@@ -10,9 +10,9 @@
 
 **Post-deploy fixes:** ops `keys.toml` uses `[channels.telegram]`; `opencrabs-guard-default-keys.sh` on brain deploy (2026-05-19).
 
-## Hermes SSH loopback (fixed 2026-05-19)
+## Hermes SSH loopback (fixed `a39070ca`, 2026-05-20)
 
-From **inside** Hermes, `ssh hermes` (→ public IP `:18718`) still times out — no hairpin. **box5:** use `ssh hermes-local` (`127.0.0.1:22`) or `/usr/local/bin/host-diag` directly. Deploy: `5 - hermes/scripts/install-hermes-ssh-config.sh`. See `AGENTS.md` **SSH targets**.
+On Hermes, fleet `ssh-config` sets **`Host hermes` → `127.0.0.1:22`** so `ssh hermes` works for ops agents (public `:18718` from inside the box still has no hairpin). **box5:** `ssh hermes /usr/local/bin/host-diag` or `/usr/local/bin/host-diag`. Deploy: `5 - hermes/scripts/install-hermes-ssh-config.sh`. See `AGENTS.md` **SSH targets** and `CLAUDE.md` Session Corrections.
 
 ## A2A trigger spike — ON ICE (2026-05-19)
 

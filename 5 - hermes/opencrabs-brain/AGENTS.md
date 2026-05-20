@@ -31,9 +31,9 @@ You run on **Hermes (box5)**. Map endpoint → how to run `host-diag`:
 | `host-box2` | `ssh vpn /usr/local/bin/host-diag` |
 | `host-box3` | `ssh apps /usr/local/bin/host-diag` |
 | `host-box4` | `ssh n8n /usr/local/bin/host-diag` |
-| `host-box5` | `ssh hermes-local /usr/local/bin/host-diag` **or** `/usr/local/bin/host-diag` |
+| `host-box5` | `ssh hermes /usr/local/bin/host-diag` **or** `/usr/local/bin/host-diag` |
 
-**Never `ssh hermes` from Hermes** — `Host hermes` uses the public IP (`132.243.213.9:18718`); loopback via that address **hangs/times out** (no hairpin). **Use `hermes-local`** when SSH is needed for box5 (same pattern as `ssh vpn` / `ssh apps`).
+On Hermes, `~/.ssh/config` maps **`Host hermes` → `127.0.0.1:22`** (not the Mac public `:18718` — that path has no hairpin and hangs). **`ssh hermes` is correct on-box** after `install-hermes-ssh-config.sh`; do not use raw `132.243.213.9:18718` from Hermes.
 
 If `host-diag` exits 1 on box5: check load (`uptime`), then stuck MCP — `ps aux | grep -E 'tg-mcp-call|fastmcp call|mcp tg-mcp'`; kill PIDs running >30m at high CPU, then re-run diag. For failed `tg_*` tools: `tail -30 /var/log/tg-mcp/tg-mcp-call.log` — look for `raw_preview` (broken JSON from template), `fastmcp_rc`, or `call failed`.
 
