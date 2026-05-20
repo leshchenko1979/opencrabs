@@ -6,7 +6,7 @@
 |------|--------|
 | Bridge | `http://172.18.0.1:9081/gatus/alert` → tg-mcp → @redevest_admin_tools_bot |
 | Alerts | Custom on `host-box2`–`host-box5` only |
-| Ops brain | `git pull /root/vds-servers` before `[Gatus]`; deploy brain from Mac via `deploy-opencrabs-ops-brain.sh` |
+| Ops brain | `git pull /root/vds-servers` before `[Gatus]`; deploy brain from Mac via `deploy-opencrabs.sh --brain` |
 
 **Post-deploy fixes:** ops `keys.toml` uses `[channels.telegram]`; `opencrabs-guard-default-keys.sh` on brain deploy (2026-05-19).
 

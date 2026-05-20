@@ -1,5 +1,5 @@
 # Rendered to ~/.opencrabs/profiles/ops/config.toml via render-opencrabs-ops-config.sh
-# Placeholders: __OPS_TELEGRAM_TOKEN__, __MINIMAX_API_KEY__, __OPENROUTER_API_KEY__, __GEMINI_API_KEY__, __TG_MCP_BEARER__
+# Placeholders: __OPS_TELEGRAM_TOKEN__, __MINIMAX_API_KEY__, __OPENROUTER_API_KEY__, __GEMINI_API_KEY__
 
 [crabrace]
 enabled = true
@@ -49,11 +49,6 @@ allowed_users = ["133526395"]
 allowed_channels = []
 respond_to = "all"
 token = "__OPS_TELEGRAM_TOKEN__"
-
-[mcp]
-enabled = true
-url = "https://tg-mcp.l1979.ru/v1/mcp"
-bearer = "__TG_MCP_BEARER__"
 
 [agent]
 approval_policy = "auto-always"

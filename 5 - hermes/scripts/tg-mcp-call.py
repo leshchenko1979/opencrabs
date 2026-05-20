@@ -7,12 +7,10 @@ import os
 import subprocess
 import sys
 import time
-import tomllib
 from logging.handlers import RotatingFileHandler
 
 MCP_JSON = os.environ.get("TG_MCP_CONFIG", "/etc/tg-mcp/mcp.json")
 DEFAULT_URL = "https://tg-mcp.l1979.ru/v1/mcp"
-OPENCRABS_CONFIG = os.environ.get("OPENCRABS_CONFIG", "/root/.opencrabs/config.toml")
 DEFAULT_TIMEOUT = 30
 LOG_DIR = os.environ.get("TG_MCP_LOG_DIR", "/var/log/tg-mcp")
 LOG_FILE = os.environ.get("TG_MCP_LOG_FILE", os.path.join(LOG_DIR, "tg-mcp-call.log"))
@@ -79,11 +77,14 @@ def _read_server_url() -> str:
 def _read_bearer() -> str:
     if bearer := os.environ.get("TG_MCP_BEARER", "").strip():
         return bearer
-    if not os.path.isfile(OPENCRABS_CONFIG):
-        return ""
-    with open(OPENCRABS_CONFIG, "rb") as f:
-        mcp = tomllib.load(f).get("mcp") or {}
-    return str(mcp.get("bearer") or "").strip()
+    if os.path.isfile(MCP_JSON):
+        with open(MCP_JSON, encoding="utf-8") as f:
+            for entry in (json.load(f).get("mcpServers") or {}).values():
+                if isinstance(entry, dict) and (
+                    b := str(entry.get("bearer") or "").strip()
+                ):
+                    return b
+    return ""
 
 
 def _drop_nulls(value: object) -> object:
@@ -219,9 +220,13 @@ def main() -> None:
 
     bearer = _read_bearer()
     if not bearer:
-        logger.error("missing bearer tool=%s config_path=%s", tool, OPENCRABS_CONFIG)
+        logger.error("missing bearer tool=%s mcp_json=%s", tool, MCP_JSON)
         print(
-            json.dumps({"error": "TG_MCP_BEARER unset and no [mcp] bearer in config"})
+            json.dumps(
+                {
+                    "error": "Set TG_MCP_BEARER or bearer in /etc/tg-mcp/mcp.json"
+                }
+            )
         )
         _exit(1)
 

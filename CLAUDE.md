@@ -70,7 +70,7 @@ Services are deployed via Docker with **Traefik** as the reverse proxy (except o
 
 ### Monitoring
 
-**Gatus** (on VPN server) monitors endpoints across all servers with Telegram alerting. **Host failures** (`host-box2`–`host-box5`) also POST to `gatus-opencrabs-bridge` (`:9081` on VPN host) → tg-mcp → **@redevest_admin_tools_bot** → OpenCrabs **ops** profile on hermes (`git pull /root/vds-servers`, SSH `host-diag`). General chat stays on **@oc_l1979_bot** (default profile). Deploy: `2 - VPN/services/gatus/scripts/deploy-gatus-bridge.sh` (set `GATUS_BRIDGE_SECRET` in `.env.gatus` on first run) then `deploy-gatus.sh`; hermes: `5 - hermes/scripts/deploy-opencrabs-ops-profile.sh` (needs `5 - hermes/.env` from `.env.example`). Ops brain **`CODE.md`** (`5 - hermes/opencrabs-brain/CODE.md`): plan tool + TDD — deploy via `deploy-opencrabs-ops-brain.sh`.
+**Gatus** (on VPN server) monitors endpoints across all servers with Telegram alerting. **Host failures** (`host-box2`–`host-box5`) also POST to `gatus-opencrabs-bridge` (`:9081` on VPN host) → tg-mcp → **@redevest_admin_tools_bot** → OpenCrabs **ops** profile on hermes (`git pull /root/vds-servers`, SSH `host-diag`). General chat stays on **@oc_l1979_bot** (default profile). Deploy: `2 - VPN/services/gatus/scripts/deploy-gatus-bridge.sh` (set `GATUS_BRIDGE_SECRET` in `.env.gatus` on first run) then `deploy-gatus.sh`; hermes: `5 - hermes/scripts/deploy-opencrabs.sh` (needs `5 - hermes/.env` from `.env.example`). Ops brain **`CODE.md`**: deploy via `deploy-opencrabs.sh --brain`. tg-mcp bearer lives in `/etc/tg-mcp/mcp.json` (not OpenCrabs `[mcp]` config).
 
 ## Common Commands
 
@@ -160,11 +160,13 @@ Project-level skill: `.claude/skills/diagnosing-servers/SKILL.md`
 
 ### 2026-05-19
 - **Issue**: Hermes `tools.toml` used `/root/.local/bin/mcp tg-mcp` (14MB proxy); hung on 1GB RAM. Removing the proxy broke `tgproxy` cron before `update_proxies.py` was migrated.
-  - **Correct approach**: Use `fastmcp-slim[client]` + `/usr/local/bin/tg-mcp-call` (wraps `fastmcp call` with bearer from `config.toml`). Deploy via `5 - hermes/scripts/deploy-opencrabs-tg-tools.sh`. Migrate tgproxy to `tg-mcp-call` before deleting the old `mcp` binary. `fastmcp call` with `--json` duplicates data for agents — wrapper uses default CLI output (lean JSON only). Wrapper logs to `/var/log/tg-mcp/tg-mcp-call.log` (no bearer; args truncated).
-- **Issue**: `tg_send_message` failed with red ✗ but opaque log (`invalid json args` only) — omitted optionals in `tools.toml` expand to invalid JSON (`"reply_to_id":,`) or leave `{{placeholders}}` unexpanded.
-  - **Correct approach**: Check `/var/log/tg-mcp/tg-mcp-call.log` for `raw_preview`. JSON-safe defaults (`null` / `[]` / `""`) on every optional param in `opencrabs-tools.toml.template`; deploy with `deploy-opencrabs-tg-tools.sh --update-tools` then `systemctl restart opencrabs opencrabs-ops`. Built-in `telegram_send` is a separate path (not in tg-mcp-call.log).
-- **Issue**: OpenCrabs ops `vector_enabled = true` (ChromaDB) → ~800MB RSS, OOM loop, SSH banner timeouts on 1GB Hermes.
-  - **Correct approach**: Set `vector_enabled = false` in ops template and default `config.toml` (omitting the key may still load ChromaDB); redeploy via `deploy-opencrabs-ops-profile.sh` (restarts both daemons). Keep `MemoryMax=512M` drop-in on `opencrabs-ops`. Ops brain: `load_brain_file MEMORY.md`, not `memory_search`.
+  - **Correct approach**: Use `fastmcp-slim[client]` + `/usr/local/bin/tg-mcp-call` (bearer from `/etc/tg-mcp/mcp.json` or `TG_MCP_BEARER`). Deploy via `5 - hermes/scripts/deploy-opencrabs.sh --tg-tools`. Wrapper logs to `/var/log/tg-mcp/tg-mcp-call.log` (no bearer in logs).
+  - **Issue**: `tg_send_message` failed with red ✗ but opaque log (`invalid json args` only) — omitted optionals in `tools.toml` expand to invalid JSON (`"reply_to_id":,`) or leave `{{placeholders}}` unexpanded.
+  - **Correct approach**: Check `/var/log/tg-mcp/tg-mcp-call.log` for `raw_preview`. JSON-safe defaults on optional params in `opencrabs-tools.toml.template`; `deploy-opencrabs.sh --tg-tools --update-tools` then restart.
+  - **Issue**: OpenCrabs ops `vector_enabled = true` (ChromaDB) → OOM on 1GB Hermes.
+  - **Correct approach**: `vector_enabled = false` via `deploy-opencrabs.sh --config`. Keep `MemoryMax=512M` on `opencrabs-ops`. Ops brain: `load_brain_file MEMORY.md`, not `memory_search`.
+  - **Issue**: Deploy scripts always overwrote brain/config; hallucinated `[mcp]` in ops `config.toml.template`.
+  - **Correct approach**: Unified `deploy-opencrabs.sh` with flags; patch-only config after bootstrap; bearer in `mcp.json`; `--brain` opt-in and excludes ops `MEMORY.md`. Polluted brain = manual SSH or explicit `--brain`.
 
 ### 2026-05-04
 - **Issue**: Failed to find gatus redeployment script — searched for "gatus" in yaml files and globbed for docker-compose, found the location but missed the deploy scripts

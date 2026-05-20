@@ -55,7 +55,7 @@ Short acknowledgment → then `git pull` / `load_brain_file` / SSH / logs. SOUL 
 |----------|------|
 | `/root/vds-servers` | Infra source of truth — **pull only** (`git pull --ff-only`) |
 | `~/.opencrabs/profiles/ops/*.md` | Live OpenCrabs brain — may be edited by you, RSI, or RSI template sync |
-| `5 - hermes/opencrabs-brain/` in repo | Canonical policy files — updated on Mac, deployed via `deploy-opencrabs-ops-brain.sh` |
+| `5 - hermes/opencrabs-brain/` in repo | Canonical policy files — updated on Mac, deployed via `deploy-opencrabs.sh --brain` |
 
 **Do not** `git commit`, `git push`, or open PRs from hermes unless Alexey explicitly asks in chat.
 

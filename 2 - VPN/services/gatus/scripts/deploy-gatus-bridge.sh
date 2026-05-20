@@ -21,11 +21,30 @@ if [[ -f "$HERMES_ENV" ]]; then
   source "$HERMES_ENV"
 fi
 
-MCP_BEARER=$(ssh -i "$SSH_KEY" -o BatchMode=yes root@hermes \
-  "grep -E '^bearer\\s*=' /root/.opencrabs/config.toml 2>/dev/null | head -1 | sed -E 's/^[^\"]*\"([^\"]+)\".*/\\1/'" || true)
-
+MCP_BEARER="${TG_MCP_BEARER:-}"
 if [[ -z "$MCP_BEARER" ]]; then
-  echo "ERROR: could not read tg-mcp bearer from hermes /root/.opencrabs/config.toml"
+  MCP_BEARER=$(ssh -i "$SSH_KEY" -o BatchMode=yes root@hermes \
+    "python3 -c \"
+import json, sys
+try:
+    with open('/etc/tg-mcp/mcp.json') as f:
+        d = json.load(f)
+    for e in (d.get('mcpServers') or {}).values():
+        if isinstance(e, dict) and e.get('bearer'):
+            print(e['bearer'])
+            break
+except FileNotFoundError:
+    pass
+\"" 2>/dev/null | head -1)
+fi
+if [[ -z "$MCP_BEARER" ]]; then
+  MCP_BEARER=$(ssh -i "$SSH_KEY" -o BatchMode=yes root@hermes \
+    "grep -hE '^bearer[[:space:]]*=' /root/.opencrabs/config.toml \
+      /root/.opencrabs/profiles/ops/config.toml 2>/dev/null | head -1 \
+      | sed -E 's/^[^\"]*\"([^\"]+)\".*/\1/'" || true)
+fi
+if [[ -z "$MCP_BEARER" ]]; then
+  echo "ERROR: set TG_MCP_BEARER in 5 - hermes/.env or deploy mcp.json on hermes (deploy-opencrabs.sh --tg-tools)" >&2
   exit 1
 fi
 

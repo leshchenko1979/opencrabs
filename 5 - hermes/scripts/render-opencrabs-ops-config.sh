@@ -66,22 +66,12 @@ if [[ -z "$GEMINI_KEY" ]]; then
   exit 1
 fi
 
-MCP_BEARER="${TG_MCP_BEARER:-}"
-if [[ -z "$MCP_BEARER" ]]; then
-  MCP_BEARER="$(hermes_ssh "grep -E '^bearer[[:space:]]*=' /root/.opencrabs/config.toml 2>/dev/null | head -1 | sed -E 's/^[^\"]*\"([^\"]+)\".*/\\1/'" || true)"
-fi
-if [[ -z "$MCP_BEARER" ]]; then
-  echo "ERROR: set TG_MCP_BEARER in .env or ensure default /root/.opencrabs/config.toml has [mcp] bearer" >&2
-  exit 1
-fi
-
 substitute_placeholders() {
   sed \
     -e "s|__OPS_TELEGRAM_TOKEN__|${OPS_TOKEN}|g" \
     -e "s|__MINIMAX_API_KEY__|${MINIMAX_KEY}|g" \
     -e "s|__OPENROUTER_API_KEY__|${OPENROUTER_KEY}|g" \
-    -e "s|__GEMINI_API_KEY__|${GEMINI_KEY}|g" \
-    -e "s|__TG_MCP_BEARER__|${MCP_BEARER}|g"
+    -e "s|__GEMINI_API_KEY__|${GEMINI_KEY}|g"
 }
 
 for t in "$CONFIG_TEMPLATE" "$KEYS_TEMPLATE"; do
