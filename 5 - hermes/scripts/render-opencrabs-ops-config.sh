@@ -33,20 +33,36 @@ if [[ -z "$OPS_TOKEN" ]]; then
   exit 1
 fi
 
-MINIMAX_KEY="$(hermes_ssh "awk '
-  /^\[minimax\]/ { in_m=1; in_p=0; next }
-  /^\[providers\.minimax\]/ { in_p=1; in_m=0; next }
-  /^\[/ { in_m=0; in_p=0 }
-  (in_m || in_p) && /^api_key/ {
-    gsub(/.*=[[:space:]]*\"/, \"\")
-    gsub(/\".*$/, \"\")
-    print
-    exit
-  }
-' /root/.opencrabs/keys.toml /root/.opencrabs/config.toml 2>/dev/null" | head -1)"
+# Read provider api_keys from default profile keys.toml (canonical source).
+read_default_provider_key() {
+  local provider="$1"
+  hermes_ssh "awk '
+    /^\['\"${provider}\"'\]/ { in_b=1; in_p=0; next }
+    /^\[providers\.'\"${provider}\"'\]/ { in_p=1; in_b=0; next }
+    /^\[/ { in_b=0; in_p=0 }
+    (in_b || in_p) && /^api_key/ {
+      gsub(/.*=[[:space:]]*\"/, \"\")
+      gsub(/\".*$/, \"\")
+      print
+      exit
+    }
+  ' /root/.opencrabs/keys.toml 2>/dev/null" | head -1
+}
+
+MINIMAX_KEY="$(read_default_provider_key minimax)"
+OPENROUTER_KEY="$(read_default_provider_key openrouter)"
+GEMINI_KEY="$(read_default_provider_key gemini)"
 
 if [[ -z "$MINIMAX_KEY" ]]; then
-  echo "ERROR: could not read MiniMax api_key from hermes default profile" >&2
+  echo "ERROR: could not read MiniMax api_key from default keys.toml" >&2
+  exit 1
+fi
+if [[ -z "$OPENROUTER_KEY" ]]; then
+  echo "ERROR: could not read OpenRouter api_key from default keys.toml" >&2
+  exit 1
+fi
+if [[ -z "$GEMINI_KEY" ]]; then
+  echo "ERROR: could not read Gemini api_key from default keys.toml" >&2
   exit 1
 fi
 
@@ -63,6 +79,8 @@ substitute_placeholders() {
   sed \
     -e "s|__OPS_TELEGRAM_TOKEN__|${OPS_TOKEN}|g" \
     -e "s|__MINIMAX_API_KEY__|${MINIMAX_KEY}|g" \
+    -e "s|__OPENROUTER_API_KEY__|${OPENROUTER_KEY}|g" \
+    -e "s|__GEMINI_API_KEY__|${GEMINI_KEY}|g" \
     -e "s|__TG_MCP_BEARER__|${MCP_BEARER}|g"
 }
 
