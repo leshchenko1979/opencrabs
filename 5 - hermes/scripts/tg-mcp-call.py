@@ -87,14 +87,17 @@ def _read_bearer() -> str:
 
 
 def _drop_nulls(value: object) -> object:
-    """Remove dict keys with None — tg-mcp rejects null for optional ints.
+    """Remove dict keys with None or "" — tg-mcp rejects null for optional ints,
+    and empty strings cause validation errors on date/folder fields.
     Empty arrays are omitted (not passed at all)."""
     if isinstance(value, dict):
         result = {}
         for k, v in value.items():
             if isinstance(v, list) and not v:  # empty list -> omit entirely
                 continue
-            elif v is not None:
+            elif v is None or v == "":
+                continue
+            else:
                 result[k] = _drop_nulls(v)
         return result
     if isinstance(value, list):
