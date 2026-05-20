@@ -17,13 +17,6 @@ Host n8n
     StrictHostKeyChecking accept-new
 
 Host hermes
-    HostName 132.243.213.9
-    Port 18718
-    User root
-    IdentityFile ~/.ssh/id_ed25519
-    StrictHostKeyChecking accept-new
-
-Host hermes-local
     HostName 127.0.0.1
     Port 22
     User root

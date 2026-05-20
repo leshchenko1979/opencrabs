@@ -87,9 +87,16 @@ def _read_bearer() -> str:
 
 
 def _drop_nulls(value: object) -> object:
-    """Remove dict keys with None — tg-mcp rejects null for optional ints."""
+    """Remove dict keys with None — tg-mcp rejects null for optional ints.
+    Empty arrays are omitted (not passed at all)."""
     if isinstance(value, dict):
-        return {k: _drop_nulls(v) for k, v in value.items() if v is not None}
+        result = {}
+        for k, v in value.items():
+            if isinstance(v, list) and not v:  # empty list -> omit entirely
+                continue
+            elif v is not None:
+                result[k] = _drop_nulls(v)
+        return result
     if isinstance(value, list):
         return [_drop_nulls(item) for item in value]
     return value
