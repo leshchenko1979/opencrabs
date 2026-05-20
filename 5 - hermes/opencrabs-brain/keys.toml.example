@@ -9,3 +9,9 @@ token = "REPLACE_ME"
 
 [providers.minimax]
 api_key = "COPY_FROM_DEFAULT_PROFILE"
+
+[providers.openrouter]
+api_key = "COPY_FROM_DEFAULT_PROFILE"
+
+[providers.gemini]
+api_key = "COPY_FROM_DEFAULT_PROFILE"

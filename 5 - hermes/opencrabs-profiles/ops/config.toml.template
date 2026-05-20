@@ -1,5 +1,5 @@
 # Rendered to ~/.opencrabs/profiles/ops/config.toml via render-opencrabs-ops-config.sh
-# Placeholders: __OPS_TELEGRAM_TOKEN__, __MINIMAX_API_KEY__, __TG_MCP_BEARER__
+# Placeholders: __OPS_TELEGRAM_TOKEN__, __MINIMAX_API_KEY__, __OPENROUTER_API_KEY__, __GEMINI_API_KEY__, __TG_MCP_BEARER__
 
 [crabrace]
 enabled = true
@@ -18,13 +18,21 @@ debug_lsp = false
 profiling = false
 
 [providers]
+[providers.gemini]
+enabled = true
+default_model = "gemini-2.0-flash"
+models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-pro"]
+
 [providers.minimax]
 enabled = true
-api_key = "__MINIMAX_API_KEY__"
 base_url = "https://api.minimax.io/v1"
 default_model = "MiniMax-M2.7"
 models = ["MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-Text-01"]
 vision_model = "MiniMax-Text-01"
+
+[providers.openrouter]
+enabled = false
+default_model = "openai/gpt-oss-120b:free"
 
 [providers.web_search.exa]
 enabled = true
