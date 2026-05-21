@@ -10,9 +10,9 @@ SERVERS_REPO="$(cd "${VPN_ROOT}/.." && pwd)"
 # shellcheck source=/dev/null
 source "${SERVERS_REPO}/scripts/ssh-vds-host.sh"
 
-SSH_TARGET="$(vds_ssh_connect_host "${REMOTE_HOST:-vpn}")"
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
-FLEET_SSH_KEY="${GATUS_SSH_KEY:-$SSH_KEY}"
+SSH_ALIAS="$(vds_ssh_connect_host "${SSH_ALIAS:-vpn}")"
+SSH_OPTS=(-o BatchMode=yes)
+FLEET_SSH_KEY="${GATUS_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 HERMES_HOST="${HERMES_HOST:-132.243.213.9}"
 HERMES_SSH_PORT="${HERMES_SSH_PORT:-18718}"
 TUNNEL_BIND="${TUNNEL_BIND:-172.18.0.1}"
@@ -22,15 +22,15 @@ if [[ ! -f "$FLEET_SSH_KEY" ]]; then
   exit 1
 fi
 
-echo "Deploying A2A SSH tunnel to ${SSH_TARGET} (${TUNNEL_BIND}:18791 → Hermes ops A2A)..."
+echo "Deploying A2A SSH tunnel to ${SSH_ALIAS} (${TUNNEL_BIND}:18791 → Hermes ops A2A)..."
 
-scp -i "$SSH_KEY" -o BatchMode=yes \
+scp "${SSH_OPTS[@]}" \
   "$FLEET_SSH_KEY" \
   "${SCRIPT_DIR}/gatus-a2a-tunnel.env.example" \
   "${GATUS_DIR}/systemd/gatus-a2a-tunnel.service" \
-  "root@${SSH_TARGET}:/tmp/"
+  "${SSH_ALIAS}:/tmp/"
 
-ssh -i "$SSH_KEY" -o BatchMode=yes "root@${SSH_TARGET}" bash -s <<REMOTE
+ssh "${SSH_OPTS[@]}" "$SSH_ALIAS" bash -s <<REMOTE
 set -euo pipefail
 install -d -m 700 /root/.ssh
 install -m 600 /tmp/$(basename "$FLEET_SSH_KEY") /root/.ssh/id_ed25519
@@ -66,5 +66,5 @@ systemctl disable --now gatus-opencrabs-bridge.service 2>/dev/null || true
 REMOTE
 
 echo ""
-echo "A2A tunnel active on ${SSH_TARGET} at http://${TUNNEL_BIND}:18791/a2a/v1"
+echo "A2A tunnel active on ${SSH_ALIAS} at http://${TUNNEL_BIND}:18791/a2a/v1"
 echo "Bridge stopped. Redeploy Gatus config: cd \"2 - VPN\" && ./scripts/deploy-gatus.sh"
