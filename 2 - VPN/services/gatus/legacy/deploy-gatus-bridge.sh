@@ -1,4 +1,5 @@
 #!/bin/bash
+# LEGACY: tg-mcp bridge (replaced by A2A tunnel — see scripts/deploy-gatus-a2a-tunnel.sh).
 # Deploy Gatus → OpenCrabs bridge on VPN box
 set -euo pipefail
 
@@ -70,7 +71,7 @@ echo "Deploying bridge to ${SSH_TARGET}..."
 scp -i "$SSH_KEY" -o BatchMode=yes \
   "${SCRIPT_DIR}/gatus-opencrabs-bridge.sh" \
   "${SCRIPT_DIR}/gatus_opencrabs_bridge.py" \
-  "${GATUS_DIR}/systemd/gatus-opencrabs-bridge.service" \
+  "${SCRIPT_DIR}/gatus-opencrabs-bridge.service" \
   "root@${SSH_TARGET}:/tmp/"
 
 ssh -i "$SSH_KEY" -o BatchMode=yes "root@${SSH_TARGET}" bash -s <<REMOTE

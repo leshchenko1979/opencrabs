@@ -1,79 +1,59 @@
 # AGENTS — ops runbook
 
-You are reading **AGENTS.md** (loaded via SOUL bootstrap). Ensure **MEMORY.md** is loaded. For code work, also load **CODE.md**.
+Load **MEMORY.md** after pull. For repo edits, also load **CODE.md**.
 
-## Before acting (any infra / fleet work)
+## Before acting
 
-Applies to **`[Gatus]` alerts** and **user-initiated chat** (questions, “check vpn”, deploy help, etc.).
+For **`[Gatus]` alerts** and **infra chat** (fleet config, deploy, “check box N”):
 
 1. `git -C /root/vds-servers pull --ff-only` (report failure; continue if possible).
-2. `load_brain_file MEMORY.md` — then read repo paths it lists (at least `CLAUDE.md`; for Gatus also `2 - VPN/README.md` + `config/config.yaml`).
-3. Do not rely on recalled IPs, services, or host-diag rules — load from repo after pull.
+2. `load_brain_file MEMORY.md` — use repo paths listed there, not recalled IPs or services.
+3. For Gatus: also read `2 - VPN/services/gatus/config/config.yaml` after pull.
 
-## Code changes
+## `[Gatus]` alerts
 
-**Load CODE.md** when: editing scripts in `/root/vds-servers`, multi-step fixes, new Python/shell, deploy logic, or Alexey asks about coding style. **Skip** for pure Gatus triage with no repo edits.
+Host alerts arrive via **A2A** (not Telegram ingress). Same triage either way.
 
-**Workflow:** `git pull` → `load_brain_file CODE.md` → `plan` tool (`create` → `add_task` → `finalize`, unless exempt) → `start_task` / implement / `complete_task` with test evidence. No `edit_file` or large `bash` rewrites until `finalize` (and Alexey approved if prompted).
+1. **Ack first** — one-line `telegram_send` to chat `133526395`, then investigate.
+2. Map endpoint → **SSH targets** (below); run `host-diag` on that box.
+3. If exit ≠ 0: `uptime`, `free -h`, `df -h`, `docker ps` or `systemctl` as needed.
+4. Report: metrics, likely cause, **safe** fixes only — or ask Alexey.
+5. **Final** `telegram_send` when done (required for A2A; overrides OPS_SOUL “no telegram in active Telegram session” — that rule is Telegram-channel sessions only).
 
-## User-initiated chat (no `[Gatus]` prefix)
-
-- Treat as a normal ops conversation: answer questions, run safe diagnostics, explain findings.
-- Same safety rules as Gatus (see `/root/vds-servers/CLAUDE.md`).
-- Pull repo when the question touches fleet config, Gatus, deploy paths, or “what’s on box N”.
+Safety rules: `/root/vds-servers/CLAUDE.md`.
 
 ## SSH targets (host-box2–5)
 
-You run on **Hermes (box5)**. Map endpoint → how to run `host-diag`:
+On **Hermes (box5)**. `Host hermes` → `127.0.0.1:22` in `~/.ssh/config` (not public `:18718` — no hairpin).
 
-| Endpoint | Run diagnostics |
-|----------|-----------------|
+| Endpoint | `host-diag` |
+|----------|-------------|
 | `host-box2` | `ssh vpn /usr/local/bin/host-diag` |
 | `host-box3` | `ssh apps /usr/local/bin/host-diag` |
 | `host-box4` | `ssh n8n /usr/local/bin/host-diag` |
-| `host-box5` | `ssh hermes /usr/local/bin/host-diag` **or** `/usr/local/bin/host-diag` |
+| `host-box5` | `/usr/local/bin/host-diag` or `ssh hermes /usr/local/bin/host-diag` |
 
-On Hermes, `~/.ssh/config` maps **`Host hermes` → `127.0.0.1:22`** (not the Mac public `:18718` — that path has no hairpin and hangs). **`ssh hermes` is correct on-box** after `install-hermes-ssh-config.sh`; do not use raw `132.243.213.9:18718` from Hermes.
+Box5 MCP stuck: `ps aux | grep -E 'tg-mcp-call|fastmcp call'` — kill PIDs >30m at high CPU; `tail -30 /var/log/tg-mcp/tg-mcp-call.log` on `tg_*` failures (`raw_preview`, `fastmcp_rc`).
 
-If `host-diag` exits 1 on box5: check load (`uptime`), then stuck MCP — `ps aux | grep -E 'tg-mcp-call|fastmcp call|mcp tg-mcp'`; kill PIDs running >30m at high CPU, then re-run diag. For failed `tg_*` tools: `tail -30 /var/log/tg-mcp/tg-mcp-call.log` — look for `raw_preview` (broken JSON from template), `fastmcp_rc`, or `call failed`.
+## User chat (no `[Gatus]` prefix)
 
-## On every `[Gatus]` message
+Normal ops conversation — same safety and pull rules when the question touches fleet config.
 
-1. Run the **Before acting** steps above.
-2. Map `[ENDPOINT_NAME]` using the **SSH targets** table above (not raw IPs from memory).
-3. Run `/usr/local/bin/host-diag` per that row (local on box5; `ssh vpn` / `ssh apps` / `ssh n8n` elsewhere).
-4. If exit ≠ 0: `uptime`, `free -h`, `df -h`, `docker ps` or `systemctl` as needed.
-5. Reply: metrics, likely cause, **safe** fixes only — or ask Alexey.
+## Code changes
 
-## Respond first (Telegram)
+Load **CODE.md** for scripts in `/root/vds-servers`, multi-step fixes, or deploy logic. Skip for read-only Gatus triage.
 
-Short acknowledgment → then `git pull` / `load_brain_file` / SSH / logs. SOUL + USER are automatic; AGENTS, MEMORY, and CODE (when coding) are your job.
+`git pull` → `load_brain_file CODE.md` → `plan` (`create` → `add_task` → `finalize`) → implement with test evidence. No large rewrites before `finalize` (and Alexey approval if prompted).
 
-## Git and brain files (important)
+## Git and brain files
 
 | Location | Role |
 |----------|------|
-| `/root/vds-servers` | Infra source of truth — **pull only** (`git pull --ff-only`) |
-| `~/.opencrabs/profiles/ops/*.md` | Live OpenCrabs brain — may be edited by you, RSI, or RSI template sync |
-| `5 - hermes/opencrabs-brain/` in repo | Canonical policy files — updated on Mac, deployed via `deploy-opencrabs.sh --brain` |
+| `/root/vds-servers` | Infra source — **pull only** |
+| `~/.opencrabs/profiles/ops/*.md` | Live brain (RSI/session edits) |
+| `5 - hermes/opencrabs-brain/` | Canonical policy — deploy via `deploy-opencrabs.sh --brain` from Mac |
 
-**Do not** `git commit`, `git push`, or open PRs from hermes unless Alexey explicitly asks in chat.
-
-RSI and session edits on the profile brain are **not** auto-synced to GitHub. Pushing them would often re-introduce upstream template bloat or wrong facts. Nightly cron (`vds-servers-nightly-pull`) only pulls the repo — it does not push brain changes.
-
-If Alexey wants something preserved in git, say what to copy and wait for instruction (or suggest he run deploy from Mac after editing repo).
-
-## A2A ingress
-
-**On ice** until [opencrabs#92](https://github.com/adolfousier/opencrabs/issues/92) — production Gatus alerts use Telegram only ([servers#1](https://github.com/leshchenko1979/servers/issues/1)).
-
-When the task is **not** in an active Telegram channel session but the message contains `[Gatus]` (A2A / programmatic trigger):
-
-1. `load_brain_file AGENTS.md` and `MEMORY.md` if not already loaded.
-2. Run the same steps as **On every `[Gatus]` message** (pull, map endpoint via **SSH targets**, `host-diag`, investigate).
-3. **MUST** `telegram_send` to chat `133526395`: one-line ack immediately; final report when done.
-4. If no safe fix: send investigation results and concrete proposals via `telegram_send`.
-5. Overrides OPS_SOUL “do not telegram_send in active Telegram session” — that rule applies only to Telegram-channel sessions.
+Do not `git commit`, `git push`, or open PRs from Hermes unless Alexey asks. Nightly cron pulls repo only — never pushes brain changes.
 
 ## Session rules
 

@@ -70,7 +70,7 @@ Services are deployed via Docker with **Traefik** as the reverse proxy (except o
 
 ### Monitoring
 
-**Gatus** (on VPN server) monitors endpoints across all servers with Telegram alerting. **Host failures** (`host-box2`–`host-box5`) also POST to `gatus-opencrabs-bridge` (`:9081` on VPN host) → tg-mcp → **@redevest_admin_tools_bot** → OpenCrabs **ops** profile on hermes (`git pull /root/vds-servers`, SSH `host-diag`). General chat stays on **@oc_l1979_bot** (default profile). Deploy: `2 - VPN/services/gatus/scripts/deploy-gatus-bridge.sh` (set `GATUS_BRIDGE_SECRET` in `.env.gatus` on first run) then `deploy-gatus.sh`; hermes: `5 - hermes/scripts/deploy-opencrabs.sh` (needs `5 - hermes/.env` from `.env.example`). Ops brain **`CODE.md`**: deploy via `deploy-opencrabs.sh --brain`. tg-mcp bearer lives in `/etc/tg-mcp/mcp.json` (not OpenCrabs `[mcp]` config).
+**Gatus** (on VPN server) monitors endpoints with Telegram alerting (general endpoints). **Host failures** (`host-box2`–`host-box5`) POST A2A JSON-RPC to OpenCrabs **ops** via SSH tunnel (`gatus-a2a-tunnel`: VPN `172.18.0.1:18791` → Hermes loopback) → agent runs `host-diag` and `telegram_send` to **@redevest_admin_tools_bot**. Deploy: `./scripts/deploy-gatus.sh` from `2 - VPN/` (includes tunnel). Ops brain **`CODE.md`**: deploy via `deploy-opencrabs.sh --brain`. See `2 - VPN/services/gatus/scripts/spike-notes.md`.
 
 ## Common Commands
 

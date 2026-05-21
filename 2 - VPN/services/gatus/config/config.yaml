@@ -10,17 +10,16 @@ alerting:
     token: ${TELEGRAM_BOT_TOKEN}
     id: ${TELEGRAM_CHAT_ID}
   custom:
-    url: "http://172.18.0.1:9081/gatus/alert"
+    url: "http://172.18.0.1:18791/a2a/v1"
     method: POST
     headers:
-      X-Gatus-Secret: ${GATUS_BRIDGE_SECRET}
-    body: |
-      {"endpoint":"[ENDPOINT_NAME]","status":"[ALERT_TRIGGERED_OR_RESOLVED]","conditions":"[RESULT_CONDITIONS]","errors":"[RESULT_ERRORS]"}
+      Content-Type: "application/json"
+    body: '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"role":"user","parts":[{"text":"[Gatus] [ENDPOINT_NAME] TRIGGERED\nConditions: [RESULT_CONDITIONS]\nErrors: [RESULT_ERRORS]\nFollow AGENTS.md [Gatus] alerts (load_brain_file AGENTS.md + MEMORY.md if not loaded)."}]}}}'
 
 external-endpoints:
   - name: sender
     group: messaging
-    token: ${SENDER_HEARTBEAT_TOKEN}
+    token: ${GATUS_EXTERNAL_TOKEN}
     heartbeat:
       interval: 25h
     alerts:
@@ -30,7 +29,7 @@ external-endpoints:
 
   - name: business-tinder-notifications
     group: messaging
-    token: ${BUSINESS_TINDER_HEARTBEAT_TOKEN}
+    token: ${GATUS_EXTERNAL_TOKEN}
     heartbeat:
       interval: 25h
     alerts:

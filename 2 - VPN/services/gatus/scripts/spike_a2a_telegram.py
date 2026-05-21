@@ -37,7 +37,7 @@ ALIASES = {
 
 A2A_PORT = 18791
 A2A_INGRESS_POINTER = (
-    'Follow AGENTS.md sections "On every [Gatus] message" and "A2A ingress" '
+    'Follow AGENTS.md "[Gatus] alerts" '
     "(load_brain_file AGENTS.md + MEMORY.md if not loaded)."
 )
 
@@ -254,22 +254,16 @@ def cmd_stream_capture(endpoint: str, out_path: str) -> None:
 
 
 def cmd_ssh_path() -> None:
-    ssh_opts = (
-        "-o BatchMode=yes -o ConnectTimeout=15 "
-        "-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null"
-    )
-    log("H4: VPN -> Hermes SSH -> A2A health")
+    log("H4: VPN -> Hermes SSH -> A2A health (fleet key on VPN)")
     health = vpn_cmd(
-        f"ssh {ssh_opts} -p 18718 root@132.243.213.9 "
-        f"'curl -sS http://127.0.0.1:{A2A_PORT}/a2a/health'"
+        "ssh -o BatchMode=yes -o ConnectTimeout=15 -p 18718 "
+        "-i /root/.ssh/id_ed25519 root@132.243.213.9 "
+        f"'curl -sS --max-time 10 http://127.0.0.1:{A2A_PORT}/a2a/health'"
     )
     print(health)
-    log("H4: VPN -> Hermes SSH -> agent card (first line)")
-    card = vpn_cmd(
-        f"ssh {ssh_opts} -p 18718 root@132.243.213.9 "
-        "'curl -sS http://127.0.0.1:18791/.well-known/agent.json | head -c 200'"
-    )
-    print(card)
+    log("H4: VPN docker gateway -> tunneled A2A health")
+    tun = vpn_cmd(f"curl -sS --max-time 10 http://172.18.0.1:{A2A_PORT}/a2a/health")
+    print(tun)
 
 
 def cmd_poll_task(task_id: str) -> None:

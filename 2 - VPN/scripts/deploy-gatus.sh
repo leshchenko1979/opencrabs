@@ -39,6 +39,11 @@ fi
 
 echo "Deploying Gatus to ${REMOTE_USER}@${VDS_SSH_TARGET} (${DEPLOY_PATH})..."
 
+TUNNEL_DEPLOY="${GATUS_DIR}/scripts/deploy-gatus-a2a-tunnel.sh"
+if [[ -x "$TUNNEL_DEPLOY" ]]; then
+  REMOTE_HOST="${REMOTE_HOST_IP}" SSH_KEY="$SSH_KEY" GATUS_SSH_KEY="$GATUS_SSH_KEY" bash "$TUNNEL_DEPLOY"
+fi
+
 TMP_CONFIG="$(mktemp)"
 trap 'rm -f "$TMP_CONFIG"' EXIT
 
@@ -60,11 +65,11 @@ scp -i "$SSH_KEY" -o BatchMode=yes \
 if [[ -f "${GATUS_DIR}/.env.gatus" ]]; then
   scp -i "$SSH_KEY" -o BatchMode=yes \
     "${GATUS_DIR}/.env.gatus" \
-    "${REMOTE_USER}@${VDS_SSH_TARGET}:${DEPLOY_PATH}/.env.gatus"
+    "${REMOTE_USER}@${VDS_SSH_TARGET}:${DEPLOY_PATH}/.env.gatus.local"
 elif [[ -f "${GATUS_DIR}/.env" ]]; then
   scp -i "$SSH_KEY" -o BatchMode=yes \
     "${GATUS_DIR}/.env" \
-    "${REMOTE_USER}@${VDS_SSH_TARGET}:${DEPLOY_PATH}/.env.gatus"
+    "${REMOTE_USER}@${VDS_SSH_TARGET}:${DEPLOY_PATH}/.env.gatus.local"
 fi
 
 scp -i "$SSH_KEY" -o BatchMode=yes "$TMP_CONFIG" \
@@ -75,7 +80,10 @@ ssh -i "$SSH_KEY" -o BatchMode=yes "${REMOTE_USER}@${VDS_SSH_TARGET}" \
   "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" <<'REMOTE'
 set -euo pipefail
 cd "${DEPLOY_PATH}"
-if [[ ! -f .env.gatus ]]; then
+if [[ -f .env.gatus.local ]]; then
+  install -m 600 .env.gatus.local .env.gatus
+  rm -f .env.gatus.local
+elif [[ ! -f .env.gatus ]]; then
   if [[ -f .env ]]; then
     cp .env .env.gatus
   elif [[ -f /opt/gatus/.env ]]; then
@@ -85,10 +93,6 @@ if [[ ! -f .env.gatus ]]; then
     echo "WARNING: created .env.gatus from example — set tokens on server"
   fi
   chmod 600 .env.gatus
-fi
-if [[ -f /etc/gatus-bridge.env ]] && ! grep -q '^GATUS_BRIDGE_SECRET=' .env.gatus 2>/dev/null; then
-  secret=$(grep '^GATUS_BRIDGE_SECRET=' /etc/gatus-bridge.env | cut -d= -f2-)
-  echo "GATUS_BRIDGE_SECRET=${secret}" >> .env.gatus
 fi
 REMOTE
 

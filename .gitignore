@@ -22,3 +22,8 @@
 **/*.db-wal
 logs/
 **/logs/
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/*.pyo

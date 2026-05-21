@@ -1,17 +1,38 @@
 #!/usr/bin/env python3
-"""Inject SSH private key into Gatus config at deploy time (key never committed)."""
+"""Inject SSH private key into Gatus config at deploy time (key never committed).
+
+Line-based injection — preserves YAML structure and custom A2A JSON body verbatim.
+"""
 
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
-try:
-    import yaml
-except ImportError:
-    print("PyYAML required: pip3 install pyyaml", file=sys.stderr)
-    sys.exit(1)
+
+def inject_private_keys(config_text: str, private_key: str) -> str:
+    key_lines = private_key.strip().splitlines()
+    out: list[str] = []
+    lines = config_text.splitlines(keepends=True)
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        if re.match(r"^      username:", line):
+            window = "".join(lines[max(0, i - 8) : i + 1])
+            if "ssh:" not in window:
+                i += 1
+                continue
+            if i + 1 < len(lines) and re.match(r"^      private-key:", lines[i + 1]):
+                i += 1
+                continue
+            out.append("      private-key: |\n")
+            for kl in key_lines:
+                out.append(f"        {kl}\n")
+        i += 1
+    return "".join(out)
 
 
 def main() -> None:
@@ -24,17 +45,7 @@ def main() -> None:
         os.environ.get("GATUS_SSH_KEY", Path.home() / ".ssh" / "id_ed25519")
     ).expanduser()
 
-    config = yaml.safe_load(config_path.read_text())
-    private_key = key_path.read_text()
-
-    for ep in config.get("endpoints", []):
-        url = ep.get("url") or ""
-        if not str(url).startswith("ssh://"):
-            continue
-        ssh = ep.setdefault("ssh", {})
-        ssh["private-key"] = private_key
-
-    sys.stdout.write(yaml.dump(config, default_flow_style=False, sort_keys=False))
+    sys.stdout.write(inject_private_keys(config_path.read_text(), key_path.read_text()))
 
 
 if __name__ == "__main__":

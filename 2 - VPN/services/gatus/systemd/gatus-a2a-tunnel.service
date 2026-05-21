@@ -1,0 +1,25 @@
+[Unit]
+Description=SSH tunnel VPN to Hermes OpenCrabs ops A2A (172.18.0.1:18791)
+After=network-online.target docker.service
+Wants=network-online.target
+Documentation=file:///data/projects/gatus/scripts/spike-notes.md
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/gatus-a2a-tunnel.env
+ExecStart=/usr/bin/ssh -N \
+  -o BatchMode=yes \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o StrictHostKeyChecking=accept-new \
+  -p ${HERMES_SSH_PORT} \
+  -i ${FLEET_SSH_KEY} \
+  -L ${TUNNEL_BIND}:18791:127.0.0.1:18791 \
+  root@${HERMES_HOST}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

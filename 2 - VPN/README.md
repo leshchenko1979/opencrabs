@@ -99,24 +99,24 @@ Traefik v2.11 provides reverse proxy and Let's Encrypt TLS.
 
 ### Gatus (Monitoring)
 
-Gatus provides health monitoring with Telegram alerting and **OpenCrabs ops** for host failures (boxes 2–5).
+Gatus provides health monitoring with Telegram alerting (general endpoints) and **OpenCrabs ops A2A** for host failures (boxes 2–5).
 
 - **URL**: https://gatus.l1979.ru (via Traefik)
 - **Deploy path**: `/data/projects/gatus/` on box 2
 - **Repo config**: `services/gatus/config/config.yaml` (secrets via `${VAR}` in `.env.gatus`, not in git)
-- **Deploy Gatus**: `./scripts/deploy-gatus.sh` (from `2 - VPN/`)
+- **Deploy Gatus**: `./scripts/deploy-gatus.sh` (from `2 - VPN/`) — includes A2A SSH tunnel + config render
 - **Deploy host-diag script on all boxes**: `services/gatus/scripts/deploy-host-diag.sh`
-- **OpenCrabs bridge** (host alerts only): `services/gatus/scripts/deploy-gatus-bridge.sh` → systemd `gatus-opencrabs-bridge` on `0.0.0.0:9081`, POST `/gatus/alert` → tg-mcp → @redevest_admin_tools_bot. **A2A alternative on ice** — see `services/gatus/scripts/spike-notes.md` and [opencrabs#92](https://github.com/adolfousier/opencrabs/issues/92).
+- **OpenCrabs A2A** (host alerts): `services/gatus/scripts/deploy-gatus-a2a-tunnel.sh` → systemd `gatus-a2a-tunnel` forwards `172.18.0.1:18791` → Hermes ops A2A. Gatus `custom` webhook POSTs JSON-RPC `message/send` directly. See `services/gatus/scripts/spike-notes.md`.
 
 **Secrets (not in git):**
 
 | File | Purpose |
 |------|---------|
-| `services/gatus/.env.gatus` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, heartbeat tokens, `GATUS_BRIDGE_SECRET` |
-| `/etc/gatus-bridge.env` (VPN host) | `TG_MCP_BEARER`, `GATUS_BRIDGE_SECRET` (bridge); copied into `.env.gatus` on Gatus deploy |
-| `config/keys/gatus_ssh` | SSH private key for Gatus SSH checks (rendered at deploy from Mac `id_ed25519`) |
+| `services/gatus/.env.gatus` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GATUS_EXTERNAL_TOKEN` (all external-endpoint heartbeats) |
+| `/etc/gatus-a2a-tunnel.env` (VPN host) | Tunnel bind + Hermes SSH target (written by deploy script) |
+| `/root/.ssh/id_ed25519` (VPN host) | Fleet SSH key for tunnel + Gatus SSH checks (deployed from Mac `id_ed25519`) |
 
-**Deploy order:** `deploy-gatus-bridge.sh` first (creates bridge secret) → `deploy-gatus.sh` (syncs secret into container env).
+**Legacy bridge** (tg-mcp, disabled): `services/gatus/legacy/` — do not deploy unless rolling back.
 
 **Monitored endpoints** (see `config/config.yaml` for full list):
 | Endpoint | Interval | Notes |

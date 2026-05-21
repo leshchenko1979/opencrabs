@@ -31,7 +31,7 @@ cd "5 - hermes/scripts"
 ./deploy-opencrabs.sh --brain              # repo policy docs only (rare)
 ```
 
-**Migration** (existing host after redesign): `--tg-tools` then `--config`; redeploy Gatus bridge from VPN (`deploy-gatus-bridge.sh` reads bearer from `/etc/tg-mcp/mcp.json`).
+**Migration** (existing host after redesign): `--tg-tools` then `--config`; Gatus uses A2A tunnel (`2 - VPN/scripts/deploy-gatus.sh`).
 
 **Secrets:** `5 - hermes/.env` from `.env.example` — `REDEVEST_ADMIN_BOT_TOKEN`, optional `TG_MCP_BEARER` (rendered into `/etc/tg-mcp/mcp.json`, not OpenCrabs `config.toml`).
 
@@ -41,14 +41,13 @@ cd "5 - hermes/scripts"
 
 - **Role**: General AI agent — Telegram bot with dynamic tools via remote MCP (`tg-mcp.l1979.ru`)
 - **Telegram bot**: [@oc_l1979_bot](https://t.me/oc_l1979_bot)
-- **Binary**: `/usr/local/bin/opencrabs` (linux-amd64)
+- **Binary**: `/usr/local/bin/opencrabs` (linux-amd64, v0.3.24)
 - **Systemd**: `opencrabs.service`
 - **Data dir**: `/root/.opencrabs/` (opencrabs.db, logs/, tools.toml, keys.toml, config.toml)
 - **Memory**: `vector_enabled = false`, `auto_update = true` (1GB RAM). Patched via `deploy-opencrabs.sh --config`
 - **8 dynamic tools**: `tools.toml` → `/usr/local/bin/tg-mcp-call` → `fastmcp call` → `https://tg-mcp.l1979.ru/v1/mcp` (auth from `/etc/tg-mcp/mcp.json`; logs `/var/log/tg-mcp/tg-mcp-call.log`)
 - **Debugging tg tools**: `ssh hermes 'tail -f /var/log/tg-mcp/tg-mcp-call.log'`
 - **tools.toml updates**: `./deploy-opencrabs.sh --tg-tools --update-tools`
-- **Known issue**: tools.toml tools work via Telegram channel but not in `run`/`agent` modes ([opencrabs#79](https://github.com/adolfousier/opencrabs/issues/79))
 
 ### Ops profile (`opencrabs-ops.service`)
 
@@ -61,7 +60,7 @@ cd "5 - hermes/scripts"
 - **Token guard**: `opencrabs-guard-default-keys.sh` on `--brain` deploy
 - **Infra repo**: `/root/vds-servers` — `setup-vds-servers-git.sh`; nightly `git pull` via ops cron
 - **SSH fleet**: `config/ssh-config` → `install-hermes-ssh-config.sh` or `deploy-opencrabs.sh --ssh`
-- **A2A (ops):** loopback `:18791` — on ice until [opencrabs#92](https://github.com/adolfousier/opencrabs/issues/92); see `2 - VPN/services/gatus/scripts/spike-notes.md`
+- **A2A (ops):** loopback `:18791` — production Gatus host alerts via VPN SSH tunnel → `message/send` (see `2 - VPN/services/gatus/scripts/spike-notes.md`)
 
 ### Brain files per profile (`--brain` deploy)
 

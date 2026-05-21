@@ -10,7 +10,7 @@ Before **Gatus alerts** or **user-initiated infra chat**: `git -C /root/vds-serv
 |------|------|
 | Coding standards, plan tool, TDD | Brain `CODE.md` (load via SOUL/AGENTS before code edits) |
 | Fleet, SSH aliases, safety rules, scripts | `/root/vds-servers/CLAUDE.md` |
-| Gatus, host-diag, bridge, deploy | `/root/vds-servers/2 - VPN/README.md` |
+| Gatus, host-diag, A2A tunnel, deploy | `/root/vds-servers/2 - VPN/README.md` |
 | Gatus endpoints (`host-box2`…`host-box5`) | `/root/vds-servers/2 - VPN/services/gatus/config/config.yaml` |
 | `host-diag` script | `/root/vds-servers/2 - VPN/services/gatus/scripts/host-diag` |
 | Hermes / dual OpenCrabs | `/root/vds-servers/5 - hermes/docs/services.md` |
