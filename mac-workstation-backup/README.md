@@ -15,10 +15,7 @@ Daily backup to external volume (same pattern as former legacy `vds-daily-backup
    - `n8n` → 2.27.120.75
    - `hermes` → 132.243.213.9:18718
 
-2. **PostgreSQL / Redis passwords** — set as env vars at runtime:
-   ```bash
-   POSTGRES_PASSWORD=... REDIS_PASSWORD=... ./backup-all.sh
-   ```
+2. **Passwords / env**: stored in `~/.env/vds-backup.env` (auto-sourced by backup-all.sh if missing from environment)
 
 3. **External volume** mounted before cron runs; `BACKUP_ROOT` must exist and be writable (e.g. `/Volumes/leshchenko/vds-backups`)
 
@@ -29,7 +26,7 @@ Daily backup to external volume (same pattern as former legacy `vds-daily-backup
 ## Cron
 
 ```cron
-0 3 * * * caffeinate -i /path/to/servers/mac-workstation-backup/backup-all.sh
+0 3 * * * /path/to/servers/mac-workstation-backup/backup-all.sh
 ```
 
 ## Output structure
@@ -46,7 +43,8 @@ ${BACKUP_ROOT}/
 │   │   ├── n8n-data.tar.gz
 │   │   └── n8n.env
 │   └── hermes/
-│       └── hermes-data.tar.gz        # /root/.hermes (excludes venv, bin, cache, logs)
+│       ├── hermes-data.tar.gz        # /root/.hermes (excludes sessions, snapshots, bin, cache, logs)
+│       └── opencrabs-data.tar.gz     # /root/.opencrabs (excludes *.bak, profiles/ops.bak.*, logs)
 └── backup-YYYY-MM-DD_HHMMSS.log
 ```
 
@@ -56,9 +54,7 @@ Retention: `full-*` and old `backup-*.log` files older than 7 days are removed o
 
 ```bash
 cd mac-workstation-backup
-BACKUP_ROOT=/Volumes/leshchenko/vds-backups \
-  POSTGRES_PASSWORD=... REDIS_PASSWORD=... \
-  ./backup-all.sh
+./backup-all.sh  # env vars auto-loaded from ~/.env/vds-backup.env
 ```
 
 ## Recovery procedures

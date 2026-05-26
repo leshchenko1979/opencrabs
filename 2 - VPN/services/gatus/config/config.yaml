@@ -18,7 +18,7 @@ alerting:
 
 external-endpoints:
   - name: sender
-    group: messaging
+    group: apps
     token: ${GATUS_EXTERNAL_TOKEN}
     heartbeat:
       interval: 25h
@@ -28,7 +28,7 @@ external-endpoints:
         failure-threshold: 1
 
   - name: business-tinder-notifications
-    group: messaging
+    group: apps
     token: ${GATUS_EXTERNAL_TOKEN}
     heartbeat:
       interval: 25h
@@ -37,9 +37,19 @@ external-endpoints:
         enabled: true
         failure-threshold: 1
 
+  - name: mac-backup
+    group: infra
+    token: ${GATUS_EXTERNAL_TOKEN}
+    heartbeat:
+      interval: 25h
+    alerts:
+      - type: telegram
+        enabled: true
+        failure-threshold: 3
+
 endpoints:
   - name: ai-antispam
-    group: always-on
+    group: apps
     url: "https://ai-antispam.l1979.ru/health"
     interval: 60s
     conditions:
@@ -52,7 +62,7 @@ endpoints:
         send-on-resolved: true
 
   - name: ai-gateway
-    group: always-on
+    group: apps
     url: "https://ai-gateway.l1979.ru/health"
     interval: 60s
     conditions:
@@ -65,7 +75,7 @@ endpoints:
         send-on-resolved: true
 
   - name: business-tinder
-    group: always-on
+    group: apps
     url: "https://business-tinder.l1979.ru/health"
     interval: 60s
     conditions:
@@ -78,7 +88,7 @@ endpoints:
         send-on-resolved: true
 
   - name: fast-mcp-telegram
-    group: always-on
+    group: apps
     url: "https://tg-mcp.l1979.ru/health"
     interval: 60s
     conditions:
@@ -91,7 +101,7 @@ endpoints:
         send-on-resolved: true
 
   - name: pdf-extract
-    group: always-on
+    group: apps
     url: "https://pdf-extract.l1979.ru/health"
     interval: 60s
     conditions:
@@ -104,7 +114,7 @@ endpoints:
         send-on-resolved: true
 
   - name: redevest-crm
-    group: sablier
+    group: apps
     url: "https://redevest-crm.ru/health"
     interval: 3h
     client:
@@ -120,7 +130,7 @@ endpoints:
 
   - name: hermes
     enabled: false
-    group: always-on
+    group: infra
     url: "ssh://132.243.213.9:18718"
     ssh:
       username: "root"
@@ -137,7 +147,7 @@ endpoints:
         send-on-resolved: true
 
   - name: n8n
-    group: always-on
+    group: apps
     url: "https://n8n.l1979.ru/healthz/readiness"
     interval: 60s
     conditions:
@@ -150,7 +160,7 @@ endpoints:
         send-on-resolved: true
 
   - name: postgres
-    group: databases
+    group: infra
     url: "tcp://144.31.188.163:5432"
     interval: 60s
     conditions:
@@ -162,7 +172,7 @@ endpoints:
         send-on-resolved: true
 
   - name: redis
-    group: databases
+    group: infra
     url: "tcp://144.31.188.163:6379"
     interval: 60s
     conditions:
@@ -174,7 +184,7 @@ endpoints:
         send-on-resolved: true
 
   - name: host-box2
-    group: host
+    group: infra
     url: "ssh://104.128.131.166:22"
     ssh:
       username: "root"
@@ -194,7 +204,7 @@ endpoints:
         send-on-resolved: false
 
   - name: host-box3
-    group: host
+    group: infra
     url: "ssh://144.31.188.163:22"
     ssh:
       username: "root"
@@ -214,7 +224,7 @@ endpoints:
         send-on-resolved: false
 
   - name: host-box4
-    group: host
+    group: infra
     url: "ssh://2.27.120.75:22"
     ssh:
       username: "root"
@@ -234,7 +244,7 @@ endpoints:
         send-on-resolved: false
 
   - name: host-box5
-    group: host
+    group: infra
     url: "ssh://132.243.213.9:18718"
     ssh:
       username: "root"

@@ -4,4 +4,5 @@
 # Optional wake: sudo pmset repeat wake MTWRFSU 02:55:00
 
 # Daily backup apps + n8n + hermes (莫斯科时区 = Mac 本地时间)
-0 3 * * * caffeinate -i /Users/les/coding_projects/vds/servers/mac-workstation-backup/backup-all.sh
+# Env vars auto-loaded from ~/.env/vds-backup.env
+0 3 * * * /Users/leshchenko/coding_projects/vds/servers/mac-workstation-backup/backup-all.sh

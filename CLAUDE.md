@@ -154,6 +154,11 @@ Project-level skill: `.claude/skills/diagnosing-servers/SKILL.md`
 
 ## Session Corrections
 
+### 2026-05-26 (OpenCrabs Telegram sessions / #121)
+- **Issue**: Telegram DM sessions looked identical; auto-rename did not stick; `/sessions` switch felt broken. Root cause: **label drift** in `handler.rs` compared full title to the default `Telegram: DM … [chat:ID]` template on every message and overwrote auto-titled names; `auto_title_attempted` stayed true so rename never retried. Switching used suffix + `updated_at` only (`chat_sessions` map was written on switch but not read on ingest).
+- **Correct approach**: Upstream fix in `session_resolve.rs` + chat-bound resolve ([opencrabs#122](https://github.com/adolfousier/opencrabs/pull/122)). Verify with `cargo test telegram_session_resolve`. After deploy: second Telegram message must not revert auto-title; `/sessions` switch must route the next message to the chosen session.
+- **Upstream**: [adolfousier/opencrabs#121](https://github.com/adolfousier/opencrabs/issues/121)
+
 ### 2026-05-20 (`a39070ca`)
 - **Issue**: OpenCrabs ops on Hermes kept running `ssh hermes` for `host-box5` (same alias as Mac). On-box `Host hermes` pointed at public `132.243.213.9:18718` — no NAT hairpin → SSH hung/timeouts and wasted agent turns.
   - **Correct approach**: Hermes fleet config (`5 - hermes/config/ssh-config`) defines **one** `Host hermes` → `127.0.0.1:22` (replaces removed `hermes-local`). Mac `~/.ssh/config` stays on public `:18718`. Redeploy: `5 - hermes/scripts/install-hermes-ssh-config.sh`. Ops brain: `ssh hermes /usr/local/bin/host-diag` or run `host-diag` locally. Same commit: `tg-mcp-call.py` omits empty JSON arrays (optional list params).

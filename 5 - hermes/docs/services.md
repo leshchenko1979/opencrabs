@@ -56,6 +56,7 @@ cd "5 - hermes/scripts"
 - **Config templates**: `opencrabs-profiles/ops/*.template` — full seed only on `--bootstrap` when files missing; otherwise `--config` patches
 - **Brain templates**: `opencrabs-brain/` — deploy with `--brain` only
 - **Memory**: `vector_enabled = false`, `auto_update = true`; use `load_brain_file MEMORY.md`, not `memory_search`
+- **Telegram sessions (#121)**: Fixed upstream in [opencrabs#122](https://github.com/adolfousier/opencrabs/pull/122) (`session_resolve.rs`, chat-bound resolve). Deploy new `opencrabs` binary after merge; confirm auto-title survives a second message and `/sessions` switch routes correctly.
 - **Systemd**: `opencrabs-ops.service.d/memory.conf` — `MemoryMax=512M`; units from `opencrabs service install` / `opencrabs -p ops service install`
 - **Token guard**: `opencrabs-guard-default-keys.sh` on `--brain` deploy
 - **Infra repo**: `/root/vds-servers` — `setup-vds-servers-git.sh`; nightly `git pull` via ops cron

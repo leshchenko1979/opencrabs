@@ -153,12 +153,8 @@ else
             echo -e "  ${RED}$svc: $STATUS${NC}"
         fi
     done
-    # n8n health
-    if curl -sf http://127.0.0.1:5678/healthz/readiness &>/dev/null; then
-        echo "  n8n healthz: OK"
-    else
-        echo -e "  ${RED}n8n healthz: FAILED${NC}"
-    fi
+    # n8n health — box 3 (apps) and box 4 (n8n) only via docker health check above
+    # box 5 (hermes) uses hermes-gateway for Telegram, not n8n
     # hermes Telegram status
     if systemctl is-active hermes-gateway &>/dev/null; then
         if grep -q '"state":"connected"' /root/.hermes/gateway_state.json 2>/dev/null; then
