@@ -262,3 +262,23 @@ endpoints:
       - type: custom
         failure-threshold: 2
         send-on-resolved: false
+
+  - name: vpn-box2-wg
+    group: infra
+    url: "ssh://104.128.131.166:22"
+    ssh:
+      username: "root"
+    body: |
+      {"command": "/usr/local/bin/vpn-check"}
+    interval: 3m
+    conditions:
+      - "[CONNECTED] == true"
+      - "[STATUS] == 0"
+    alerts:
+      - type: telegram
+        failure-threshold: 2
+        success-threshold: 1
+        send-on-resolved: true
+      - type: custom
+        failure-threshold: 2
+        send-on-resolved: false
