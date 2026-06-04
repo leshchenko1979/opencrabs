@@ -14,7 +14,7 @@ alerting:
     method: POST
     headers:
       Content-Type: "application/json"
-    body: '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"role":"user","parts":[{"text":"[Gatus] [ENDPOINT_NAME] TRIGGERED\nConditions: [RESULT_CONDITIONS]\nErrors: [RESULT_ERRORS]\nFollow AGENTS.md [Gatus] alerts (load_brain_file AGENTS.md + MEMORY.md if not loaded)."}]}}}'
+    body: '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"role":"user","parts":[{"text":"[Gatus] [ENDPOINT_NAME] TRIGGERED\nFollow AGENTS.md [Gatus] alerts (load_brain_file AGENTS.md + MEMORY.md if not loaded)."}]}}}'
 
 external-endpoints:
   - name: sender
