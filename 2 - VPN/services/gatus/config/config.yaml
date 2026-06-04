@@ -179,7 +179,11 @@ endpoints:
       - "[STATUS] == 0"
     alerts:
       - type: telegram
-        failure-threshold: 2
+        failure-threshold: 1
+        success-threshold: 1
+        send-on-resolved: true
+      - type: custom
+        failure-threshold: 1
         success-threshold: 1
         send-on-resolved: true
 
@@ -196,7 +200,11 @@ endpoints:
       - "[STATUS] == 0"
     alerts:
       - type: telegram
-        failure-threshold: 2
+        failure-threshold: 1
+        success-threshold: 1
+        send-on-resolved: true
+      - type: custom
+        failure-threshold: 1
         success-threshold: 1
         send-on-resolved: true
 
@@ -213,7 +221,11 @@ endpoints:
       - "[STATUS] == 0"
     alerts:
       - type: telegram
-        failure-threshold: 2
+        failure-threshold: 1
+        success-threshold: 1
+        send-on-resolved: true
+      - type: custom
+        failure-threshold: 1
         success-threshold: 1
         send-on-resolved: true
 
@@ -230,7 +242,11 @@ endpoints:
       - "[STATUS] == 0"
     alerts:
       - type: telegram
-        failure-threshold: 2
+        failure-threshold: 1
+        success-threshold: 1
+        send-on-resolved: true
+      - type: custom
+        failure-threshold: 1
         success-threshold: 1
         send-on-resolved: true
 
