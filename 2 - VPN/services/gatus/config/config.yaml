@@ -128,23 +128,6 @@ endpoints:
         success-threshold: 1
         send-on-resolved: true
 
-  - name: hermes
-    enabled: false
-    group: infra
-    url: "ssh://132.243.213.9:18718"
-    ssh:
-      username: "root"
-    body: |
-      {"command": "systemctl is-active hermes-gateway.service"}
-    interval: 60s
-    conditions:
-      - "[CONNECTED] == true"
-      - "[BODY] == active"
-    alerts:
-      - type: telegram
-        failure-threshold: 3
-        success-threshold: 1
-        send-on-resolved: true
 
   - name: n8n
     group: apps
