@@ -166,14 +166,14 @@ endpoints:
         success-threshold: 1
         send-on-resolved: true
 
-  - name: host-box2
+  - name: diag-vpn
     group: infra
-    url: "ssh://104.128.131.166:22"
+    url: "ssh://172.18.0.1:22"
     ssh:
       username: "root"
     body: |
       {"command": "/usr/local/bin/host-diag"}
-    interval: 15m
+    interval: 5m
     conditions:
       - "[CONNECTED] == true"
       - "[STATUS] == 0"
@@ -182,18 +182,15 @@ endpoints:
         failure-threshold: 2
         success-threshold: 1
         send-on-resolved: true
-      - type: custom
-        failure-threshold: 2
-        send-on-resolved: false
 
-  - name: host-box3
+  - name: diag-apps
     group: infra
     url: "ssh://144.31.188.163:22"
     ssh:
       username: "root"
     body: |
       {"command": "/usr/local/bin/host-diag"}
-    interval: 15m
+    interval: 5m
     conditions:
       - "[CONNECTED] == true"
       - "[STATUS] == 0"
@@ -202,18 +199,15 @@ endpoints:
         failure-threshold: 2
         success-threshold: 1
         send-on-resolved: true
-      - type: custom
-        failure-threshold: 2
-        send-on-resolved: false
 
-  - name: host-box4
+  - name: diag-n8n
     group: infra
     url: "ssh://2.27.120.75:22"
     ssh:
       username: "root"
     body: |
       {"command": "/usr/local/bin/host-diag"}
-    interval: 15m
+    interval: 5m
     conditions:
       - "[CONNECTED] == true"
       - "[STATUS] == 0"
@@ -222,18 +216,15 @@ endpoints:
         failure-threshold: 2
         success-threshold: 1
         send-on-resolved: true
-      - type: custom
-        failure-threshold: 2
-        send-on-resolved: false
 
-  - name: host-box5
+  - name: diag-hermes
     group: infra
     url: "ssh://132.243.213.9:18718"
     ssh:
       username: "root"
     body: |
       {"command": "/usr/local/bin/host-diag"}
-    interval: 15m
+    interval: 5m
     conditions:
       - "[CONNECTED] == true"
       - "[STATUS] == 0"
@@ -242,9 +233,6 @@ endpoints:
         failure-threshold: 2
         success-threshold: 1
         send-on-resolved: true
-      - type: custom
-        failure-threshold: 2
-        send-on-resolved: false
 
   - name: vpn-box2-wg
     group: infra
