@@ -1,9 +1,10 @@
 name: Quick Linux Build
 
-# Super-quick Linux amd64 binary, on demand. Minimal feature set:
-# telegram only — skips every heavy dep (whisper.cpp,
-# rodio/ALSA, serenity, slack-morphism, whatsapp-rust, pdfium,
-# profiling, eval). No tests, no matrix, no multi-platform.
+# Super-quick Linux amd64 binary, on demand. Feature set is a
+# dispatch parameter (`features`, default `telegram`) — the single
+# source of truth for what we ship lives in THIS file's default,
+# not in any skill doc. Comma-separated sets are valid, e.g.
+# "telegram,browser". No tests, no matrix, no multi-platform.
 #
 # Sync-from-origin-first: the checkout step pins the UPSTREAM repo
 # (main), so every dispatch compiles adolfousier/opencrabs main tip
@@ -20,6 +21,10 @@ on:
         description: 'Git ref to build (branch/tag/sha)'
         required: false
         default: 'main'
+      features:
+        description: 'Cargo feature set passed to --features (comma-separated)'
+        required: false
+        default: 'telegram'
 
 env:
   CARGO_TERM_COLOR: always
@@ -27,7 +32,7 @@ env:
 
 jobs:
   build:
-    name: Linux amd64 (${{ inputs.source_ref }}, minimal features)
+    name: Linux amd64 (${{ inputs.source_ref }}, ${{ inputs.features }})
     runs-on: ubuntu-latest
     steps:
       - name: Sync from origin
@@ -44,15 +49,17 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Build (release, minimal features, no tests)
-        run: cargo build --locked --release --no-default-features --features "telegram"
+      - name: Build (release, no tests)
+        run: cargo build --locked --release --no-default-features --features "${{ inputs.features }}"
 
       - name: Strip
         run: strip target/release/opencrabs
 
+      # Binary filename stays `opencrabs-linux-amd64` (swap scripts
+      # depend on it); only the ARTIFACT name carries the set.
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: opencrabs-linux-amd64
+          name: opencrabs-linux-amd64-${{ inputs.features }}
           path: target/release/opencrabs
           if-no-files-found: error
