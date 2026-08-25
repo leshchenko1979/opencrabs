@@ -67,7 +67,19 @@ pub(crate) fn build_enqueue_callback(
                 return;
             };
 
-            let thread_id = super::send::latest_thread_id_for_chat(chat_id).await;
+            // Route to the SESSION'S forum topic (#1200), not whatever topic
+            // saw the chat's most recent message: a detached command started
+            // in topic A must not have its result pushed into topic B just
+            // because B got traffic while it ran. register_session_chat
+            // records the topic per session (#215) and approval callbacks
+            // already route this way (#247). Covers background-task pushes
+            // AND subagent result pushes — they share this callback. The
+            // chat-wide lookup stays as fallback (in-memory map is empty
+            // after a restart; non-forum chats store None).
+            let thread_id = match state.session_topic(session_id).await {
+                Some(tid) => Some(teloxide::types::ThreadId(teloxide::types::MessageId(tid))),
+                None => super::send::latest_thread_id_for_chat(chat_id).await,
+            };
             if let Err(e) = resume_session(
                 bot,
                 teloxide::types::ChatId(chat_id),
