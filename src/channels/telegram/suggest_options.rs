@@ -224,13 +224,16 @@ pub(crate) async fn render_suggestions(
     if let Some(host) = merge_host {
         let mid = host.message_id;
         // Base body + surface: classic bubbles keep their exact delivered
-        // HTML; rich bubbles re-render from the captured markdown. Table-
-        // bearing answers never reach this arm as Markdown — capture skips
+        // HTML; rich bubbles re-render from the captured markdown through
+        // markdown_to_html_p — the same <p>/<br> dialect the original
+        // sendRichMessage delivery used. The plain markdown_to_html here
+        // collapsed paragraphs/newlines on the merged bubble (#1204).
+        // Table-bearing answers never reach this arm as Markdown — capture skips
         // them because rich HTML input flattens tables (#679).
         let (mut new_html, rich) = match host.body {
             super::state::BubbleBody::Html(html) => (html, false),
             super::state::BubbleBody::Markdown(md) => {
-                (super::rich::markdown_to_html(&md), true)
+                (super::rich::markdown_to_html_p(&md), true)
             }
         };
         if layout == SuggestLayout::NumberedProse {
