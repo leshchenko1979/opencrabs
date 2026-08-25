@@ -269,6 +269,11 @@ pub(crate) async fn render_suggestions(
         match outcome {
             Ok(()) => {
                 placed = true;
+                tracing::info!(
+                    "Telegram suggest_options: display=merged msg={mid} rich={rich} \
+                     layout={layout:?} options={}",
+                    options.len()
+                );
                 state
                     .set_pending_followups(
                         session_id,
