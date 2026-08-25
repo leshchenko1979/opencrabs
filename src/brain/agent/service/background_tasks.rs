@@ -196,7 +196,27 @@ impl BackgroundTaskManager {
             // runs on the TUI's service, so `this.enqueue` would answer into
             // the TUI and leave the channel that asked for the work waiting on
             // a reply that never comes (#940).
-            super::session_routes::resolve_route(session_id, &this.enqueue)(session_id, msg);
+            //
+            // But only when a route is actually CLAIMED: resolve_route's
+            // fallback is this manager's own callback, and a session revived
+            // by startup crash-recovery keeps executing on the boot surface
+            // until its channel sees the next inbound message (claims happen
+            // only in ingress handlers). Completions for its detached commands
+            // then vanished with no resume, no queue log, no warn — observed
+            // 2026-08-25, two finishes inside an hour on a long-running
+            // daemon. Park unclaimed completions instead: the next
+            // claim_for_channel flushes them to the owning channel (#1037).
+            if super::session_routes::session_route(session_id).is_some() {
+                super::session_routes::resolve_route(session_id, &this.enqueue)(session_id, msg);
+            } else {
+                tracing::warn!(
+                    target: "background_task",
+                    "No route claims session {session_id} yet — parking its completion \
+                     until the owning channel re-claims it"
+                );
+                super::restart_recovery::deliver_or_park(session_id, msg);
+            }
+
         });
     }
 }

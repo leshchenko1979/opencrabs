@@ -5,6 +5,7 @@
 
 use super::manager::{SubAgent, SubAgentManager};
 use super::status::AgentStatus;
+use crate::brain::agent::service::restart_recovery;
 use crate::brain::tools::error::{Result, ToolError};
 use crate::brain::tools::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
@@ -87,8 +88,18 @@ pub(crate) fn push_result(
     outcome: std::result::Result<&str, &str>,
 ) {
     let msg = completion_message(label, agent_id, outcome);
-    if crate::brain::agent::service::session_routes::deliver_to_session(parent_session_id, msg) {
+    // deliver_to_session falls back to the boot surface when nothing claims
+    // the parent session — on a headless channel daemon that surface is a
+    // void, and a parent resumed by startup crash-recovery stays unclaimed
+    // until its next inbound message. Route-or-park instead, mirroring
+    // background-task completions: the next claim flushes what was parked.
+    if restart_recovery::deliver_or_park(parent_session_id, msg) {
         tracing::info!("Sub-agent {agent_id} reported its result to session {parent_session_id}");
+    } else {
+        tracing::warn!(
+            "No route claims parent session {parent_session_id} yet — parked sub-agent \
+             {agent_id} result until the owning channel re-claims it"
+        );
     }
 }
 
