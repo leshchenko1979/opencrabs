@@ -393,13 +393,6 @@ impl TelegramAgent {
                                                 // whole-text replace would ERASE the answer.
                                                 // When this bubble is the recorded host,
                                                 // keep its HTML and append the pick record
-                                                // instead — and strip the now-dead buttons
-                                                // with an empty markup.
-                                                // Merged keyboard (#tg-suggest-merge): the
-                                                // buttons live ON the answer bubble, so a
-                                                // whole-text replace would ERASE the answer.
-                                                // When this bubble is the recorded host,
-                                                // keep its HTML and append the pick record
                                                 // instead — and strip the now-dead controls.
                                                 // Rich hosts ride edit_rich_html; classic
                                                 // hosts ride teloxide's edit_message_text.
