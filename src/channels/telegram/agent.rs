@@ -291,6 +291,29 @@ impl TelegramAgent {
                                                  session {sid} idx {idx} (stash empty — consumed \
                                                  or never set)"
                                             );
+                                            // Defect E (#1204 field 2026-08-25): a consumed
+                                            // set leaves its buttons rendered, so every later
+                                            // tap lands here — silently, forever. Strip the
+                                            // keyboard so the UI stops inviting taps.
+                                            // editMessageReplyMarkup touches ONLY the
+                                            // keyboard, so it works on rich bubbles too
+                                            // (a text-less editMessageText would 400).
+                                            // Best-effort, fire-and-forget.
+                                            if let Some(msg) = query.message.as_ref() {
+                                                let bot2 = bot.clone();
+                                                let (c, m) = (msg.chat().id, msg.id());
+                                                tokio::spawn(async move {
+                                                    if let Err(e) = bot2
+                                                        .edit_message_reply_markup(c, m)
+                                                        .await
+                                                    {
+                                                        tracing::warn!(
+                                                            "Telegram followup tap: stale \
+                                                             keyboard strip failed on {m}: {e}"
+                                                        );
+                                                    }
+                                                });
+                                            }
                                         }
                                         // (session, chosen text, merged host). The host is
                                         // Some when the keyboard was merged onto the answer
