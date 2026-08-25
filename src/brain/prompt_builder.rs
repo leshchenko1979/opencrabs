@@ -522,8 +522,9 @@ impl BrainLoader {
             }
             if has("TOOLS.md") {
                 prompt.push_str(
-                    "- Tool routing and rules, skills and commands, server details, cron format, \
-                     voice config, or per-skill notes → load TOOLS.md\n",
+                    "- Using non-core tools (Telegram, cron, browser, agents, dynamic tools), \
+                     debugging tool failures, sending channel messages, or scheduling work \
+                     → load TOOLS.md\n",
                 );
             }
             prompt.push('\n');
