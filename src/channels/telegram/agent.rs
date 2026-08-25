@@ -409,7 +409,14 @@ impl TelegramAgent {
                                                         let req = match host_info {
                                                             Some((full, _)) => bot_clone
                                                                 .edit_message_text(
-                                                                    chat_id, mid, &full,
+                                                                    chat_id, mid,
+                                                                    // Defect F (#1204 field
+                                                                    // 2026-08-25): this arm
+                                                                    // stripped the keyboard but
+                                                                    // dropped the pick record.
+                                                                    // Append it like the rich
+                                                                    // arm does.
+                                                                    &format!("{full}\n\n{picked}"),
                                                                 )
                                                                 .parse_mode(
                                                                     teloxide::types::ParseMode::
