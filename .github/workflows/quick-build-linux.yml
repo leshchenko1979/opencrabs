@@ -1,7 +1,7 @@
 name: Quick Linux Build
 
 # Super-quick Linux amd64 binary, on demand. Minimal feature set:
-# telegram + browser + rtk — skips every heavy dep (whisper.cpp,
+# telegram only — skips every heavy dep (whisper.cpp,
 # rodio/ALSA, serenity, slack-morphism, whatsapp-rust, pdfium,
 # profiling, eval). No tests, no matrix, no multi-platform.
 #
@@ -45,7 +45,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build (release, minimal features, no tests)
-        run: cargo build --locked --release --no-default-features --features "telegram,browser,rtk"
+        run: cargo build --locked --release --no-default-features --features "telegram"
 
       - name: Strip
         run: strip target/release/opencrabs
