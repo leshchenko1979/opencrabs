@@ -423,7 +423,13 @@ impl TelegramAgent {
                                                                 .parse_mode(
                                                                     teloxide::types::ParseMode::
                                                                         Html,
-                                                                ),
+                                                                )
+                                                                // Standalone pickers keep their
+                                                                // InlineKeyboardMarkup; omitting
+                                                                // reply_markup here LEAVES dead
+                                                                // buttons clickable (#1204 field
+                                                                // report 2026-08-25).
+                                                                .reply_markup(empty_kb),
                                                         };
                                                         req.await
                                                             .map(|_| ())
