@@ -6,6 +6,10 @@ name: Quick Linux Build
 # not in any skill doc. Comma-separated sets are valid, e.g.
 # "telegram,browser". No tests, no matrix, no multi-platform.
 #
+# v0.4.17 SPEED: builds use the tree's own [profile.ci] (thin LTO,
+# 16 codegen-units — wall-clock-tuned, ships in upstream Cargo.toml).
+# Fat-LTO [profile.release] stays reserved for real release artifacts.
+#
 # Sync-from-origin-first: the checkout step pins the UPSTREAM repo
 # (main), so every dispatch compiles adolfousier/opencrabs main tip
 # — never a stale fork branch.
@@ -53,11 +57,24 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Build (release, no tests)
-        run: cargo build --locked --release --no-default-features --features "${{ inputs.features }}"
+      - name: Build ([profile.ci], no tests)
+        run: cargo build --locked --profile ci --no-default-features --features "${{ inputs.features }}"
 
       - name: Strip
-        run: strip target/release/opencrabs
+        run: strip target/ci/opencrabs
+
+      # Provenance rider (v0.4.17): what produced this binary travels with
+      # it — the IDENTITY chain records flags, not just shas.
+      - name: Record build provenance
+        run: |
+          {
+            echo "source_repository=${{ inputs.source_repository }}"
+            echo "source_ref=${{ inputs.source_ref }}"
+            echo "features=${{ inputs.features }}"
+            echo "cargo_profile=ci"
+            echo "lto=thin codegen_units=16"
+            rustc -vV | grep -E '^(host|release):'
+          } > build-flags.txt
 
       # Binary filename stays `opencrabs-linux-amd64` (swap scripts
       # depend on it); only the ARTIFACT name carries the set.
@@ -65,5 +82,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: opencrabs-linux-amd64-${{ inputs.features }}
-          path: target/release/opencrabs
+          path: |
+            target/ci/opencrabs
+            build-flags.txt
           if-no-files-found: error
