@@ -30,6 +30,10 @@ env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+concurrency:
+  group: quick-build-linux
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Linux amd64 (${{ inputs.source_ref }}, ${{ inputs.features }})
