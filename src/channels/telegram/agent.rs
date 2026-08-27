@@ -320,6 +320,7 @@ impl TelegramAgent {
                                             && state.suggestion_surface_is_stale(
                                                 sid, msg.chat.id, msg.id,
                                             )
+                                            .await
                                         {
                                             tracing::warn!(
                                                 "Telegram followup tap: zombie panel chat {} msg {} \

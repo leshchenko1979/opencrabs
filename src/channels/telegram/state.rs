@@ -672,7 +672,7 @@ impl TelegramState {
     /// panel, so resolving it would deliver the WRONG label.
     /// `None` surface = pre-recording legacy or not yet placed — keep the
     /// historical resolve behavior for those.
-    pub(crate) fn suggestion_surface_is_stale(
+    pub(crate) async fn suggestion_surface_is_stale(
         &self,
         session_id: Uuid,
         chat_id: ChatId,
