@@ -290,6 +290,26 @@ impl TelegramAgent {
                                 });
                                 let taken = match parsed {
                                     Some((sid, idx)) => {
+                                        // Busy-session guard (#1226-G): the tap can only be
+                                        // delivered by resuming the session, and the turn gate
+                                        // would silently drop that (choice already consumed,
+                                        // keyboard still up, zero feedback). Probe BEFORE
+                                        // consuming: tell the tapper and leave both the pending
+                                        // set and the keyboard intact for an immediate retap.
+                                        if state.is_turn_active(sid) {
+                                            tracing::info!(
+                                                "Telegram followup tap: session {sid} busy — \
+                                                 deferred to tapper, keyboard kept for retry"
+                                            );
+                                            crate::channels::telegram::keyboards::ack_callback(
+                                                &bot,
+                                                &query,
+                                                "Still finishing the previous reply — tap again \
+                                                 once it lands.",
+                                            )
+                                            .await;
+                                            return ResponseResult::Ok(());
+                                        }
                                         let t = state.take_pending_followup(sid, idx).await;
                                         if t.is_none() {
                                             tracing::warn!(
