@@ -1,0 +1,91 @@
+name: PR-lane gates
+
+# PR-lane gates — the pre-upstream-PR checks of the deploy-model ontology
+# (v0.4.22 fmt/clippy CONTRIBUTING.md compliance + v0.4.23 all-features test).
+#
+# Why this workflow exists: PR-head branches (leshchenko1979/<slug>) are
+# harvested off adolfousier/main, so they never pass fork main — the carrier
+# gates job never sees them — and upstream's own full gate only fires AFTER
+# the PR opens. This box cannot run cargo, so this dispatch-triggered workflow
+# is the only place the PR-lane gates can run BEFORE the PR exists.
+#
+# Invocation (carrier-law shape, mirrors quick-build-linux.yml):
+#   gh workflow run pr-checks.yml --ref ci/quick-build-linux -f ref=<branch-or-sha>
+# The workflow yaml is read from this carrier branch (workflow_dispatch needs
+# the file on the dispatched ref); the job then checks out `inputs.ref`.
+# Keeping the yml here means PR-head branches carry zero infra commits into
+# Adolfo's diff, and fork main stays clean of workflow files (2026-08-26 law).
+#
+# Fidelity rule: every cargo invocation below mirrors adolfousier/opencrabs
+# .github/workflows/ci.yml EXACTLY, so a green run here predicts a green
+# upstream full gate on the same ref. Do not drift.
+#
+# The green run URL is the v0.4.22 citation for the PR body.
+# Revert = delete this file.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or full sha to gate (the PR-head branch, e.g. leshchenko1979/<slug>)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+# Deliberately NO concurrency group: these checks are read-only (no artifact,
+# no prod exposure), so parallel per-ref runs are correct and a mutex would
+# only serialize unrelated branches behind each other.
+
+jobs:
+  gates:
+    name: PR-lane gates (${{ inputs.ref }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          save-if: true # pre-PR branches re-run on fix-forward; warm cache turns the second dispatch into minutes
+
+      - name: Install pkg-config + ALSA dev
+        # Mirrors upstream ci.yml's libasound2-dev (local-stt/cpal) plus the
+        # pkg-config that alsa-sys needs to compile at all (carrier lesson,
+        # 378a68a8).
+        run: sudo apt-get update -qq && sudo apt-get install -y pkg-config libasound2-dev
+
+      - name: Check formatting
+        # Soft-fail, mirroring upstream ci.yml verbatim: "legacy un-formatted
+        # code blocks shouldn't block PRs yet. Promote to hard-fail once a fmt
+        # sweep lands on main." When upstream promotes it, so do we — not before.
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --lib --bins --tests --all-features -- -D warnings
+
+      - name: Install mold + clang (test link speed)
+        run: sudo apt-get install -y mold clang
+
+      - name: Run tests
+        # v0.4.23 law: the all-features test gate. Flags mirror upstream's
+        # `test` job exactly (profile ci + mold linker).
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+        run: cargo test --locked --profile ci --all-features --verbose
