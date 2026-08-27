@@ -23,18 +23,11 @@ name: PR-lane gates
 # The green run URL is the v0.4.22 citation for the PR body.
 # Revert = delete this file.
 on:
-  # TEMP bootstrap (removed in the very next commit): workflows register in
-  # the Actions index only once they have executed from a branch — a yml that
-  # is dispatch-only and never on the default branch cannot be dispatched at
-  # all (404 "not found"). This one-shot push trigger creates the founding
-  # run; registration then persists (quick-build-linux.yml precedent).
-  push:
-    branches: [ci/quick-build-linux]
   workflow_dispatch:
     inputs:
       ref:
         description: "Branch or full sha to gate (the PR-head branch, e.g. leshchenko1979/<slug>)"
-        required: true
+        required: false
         default: main
         type: string
 
