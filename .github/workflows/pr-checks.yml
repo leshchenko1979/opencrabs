@@ -11,6 +11,12 @@ name: PR-lane gates
 #
 # Invocation (carrier-law shape, mirrors quick-build-linux.yml):
 #   gh workflow run pr-checks.yml --ref ci/quick-build-linux -f ref=<branch-or-sha>
+# Fix mode (fmt sweep helper, owner-approved 2026-08-27):
+#   gh workflow run pr-checks.yml --ref ci/quick-build-linux -f ref=<branch-or-sha> -f fix=true
+# runs `cargo fmt --all` with the exact gate toolchain and uploads the
+# resulting diff as the `fmt-fix` artifact — apply the sweep locally, no
+# cargo needed on the box. Fix mode skips the gate steps; the fidelity rule
+# below covers check mode only.
 # The workflow yaml is read from this carrier branch (workflow_dispatch needs
 # the file on the dispatched ref); the job then checks out `inputs.ref`.
 # Keeping the yml here means PR-head branches carry zero infra commits into
@@ -30,6 +36,11 @@ on:
         required: false
         default: main
         type: string
+      fix:
+        description: "true = run cargo fmt --all and upload the diff as the fmt-fix artifact instead of gating"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -45,7 +56,7 @@ env:
 
 jobs:
   gates:
-    name: PR-lane gates (${{ inputs.ref }})
+    name: PR-lane gates (${{ inputs.ref }}${{ inputs.fix && ' — FIX MODE' || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -65,12 +76,14 @@ jobs:
           save-if: true # pre-PR branches re-run on fix-forward; warm cache turns the second dispatch into minutes
 
       - name: Install pkg-config + ALSA dev
+        if: ${{ !inputs.fix }}
         # Mirrors upstream ci.yml's libasound2-dev (local-stt/cpal) plus the
         # pkg-config that alsa-sys needs to compile at all (carrier lesson,
         # 378a68a8).
         run: sudo apt-get update -qq && sudo apt-get install -y pkg-config libasound2-dev
 
       - name: Check formatting
+        if: ${{ !inputs.fix }}
         # Soft-fail, mirroring upstream ci.yml verbatim: "legacy un-formatted
         # code blocks shouldn't block PRs yet. Promote to hard-fail once a fmt
         # sweep lands on main." When upstream promotes it, so do we — not before.
@@ -78,15 +91,38 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
+        if: ${{ !inputs.fix }}
         run: cargo clippy --locked --lib --bins --tests --all-features -- -D warnings
 
       - name: Install mold + clang (test link speed)
+        if: ${{ !inputs.fix }}
         run: sudo apt-get install -y mold clang
 
       - name: Run tests
+        if: ${{ !inputs.fix }}
         # v0.4.23 law: the all-features test gate. Flags mirror upstream's
         # `test` job exactly (profile ci + mold linker).
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
         run: cargo test --locked --profile ci --all-features --verbose
+
+      - name: Apply cargo fmt (fix mode)
+        if: ${{ inputs.fix }}
+        run: |
+          cargo fmt --all
+          git diff > fmt-fix.patch
+          git diff --stat | tee fmt-fix.stat
+          echo "ref=${{ inputs.ref }}" > fmt-fix.meta
+          echo "patch_bytes=$(wc -c < fmt-fix.patch)" >> fmt-fix.meta
+
+      - name: Upload fmt-fix patch
+        if: ${{ inputs.fix }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fmt-fix
+          path: |
+            fmt-fix.patch
+            fmt-fix.stat
+            fmt-fix.meta
+          if-no-files-found: error
