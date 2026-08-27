@@ -7,7 +7,7 @@
 use super::cowork;
 use std::collections::HashMap;
 use teloxide::prelude::Bot;
-use teloxide::types::MessageId;
+use teloxide::types::{ChatId, MessageId};
 use tokio::sync::{Mutex, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -50,12 +50,25 @@ pub(crate) enum BubbleBody {
     Markdown(String),
 }
 
+/// Where a session's suggestion keyboard actually lives: the bubble carrying
+/// its buttons (merge target or standalone lamp). Recorded at render time so
+/// taps can prove they came from the live picker, not an overwritten one
+/// (#1226-H2).
+#[derive(Clone, Copy)]
+pub(crate) struct SuggestionSurface {
+    pub chat_id: ChatId,
+    pub message_id: MessageId,
+}
+
 /// One session's pending follow-up suggestion set: the options themselves
 /// plus, when the buttons were merged onto the answer bubble, that host.
 #[derive(Clone)]
 pub(crate) struct PendingFollowupSet {
     pub options: Vec<String>,
     pub host: Option<MergedHost>,
+    /// Bubble this picker rendered onto. `None` = armed before recording
+    /// existed (legacy keyboard) or not yet placed.
+    pub surface: Option<SuggestionSurface>,
 }
 
 /// Photo buffer entry: (img_marker, Optional caption)
@@ -635,7 +648,7 @@ impl TelegramState {
         self.pending_followups
             .lock()
             .await
-            .insert(session_id, PendingFollowupSet { options, host });
+            .insert(session_id, PendingFollowupSet { options, host, surface: None });
     }
 
     /// Take a tapped follow-up suggestion by index, consuming the WHOLE set for
@@ -651,6 +664,27 @@ impl TelegramState {
         let set = self.pending_followups.lock().await.remove(&session_id)?;
         let host = set.host;
         set.options.get(idx).cloned().map(|text| (text, host))
+    }
+
+    /// True when `tap` names a bubble that is NOT this session's live picker
+    /// surface (#1226-H2). Only recorded surfaces can go stale: a keyboard
+    /// from an overwritten arm resolves to a stash that belongs to the new
+    /// panel, so resolving it would deliver the WRONG label.
+    /// `None` surface = pre-recording legacy or not yet placed — keep the
+    /// historical resolve behavior for those.
+    pub(crate) fn suggestion_surface_is_stale(
+        &self,
+        session_id: Uuid,
+        chat_id: ChatId,
+        message_id: MessageId,
+    ) -> bool {
+        match self.pending_followups.lock().await.get(&session_id) {
+            Some(set) => match set.surface {
+                Some(s) => s.chat_id != chat_id || s.message_id != message_id,
+                None => false,
+            },
+            None => false,
+        }
     }
 
     /// Drop this session's pending follow-up suggestions (the user sent their

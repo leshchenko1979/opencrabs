@@ -307,7 +307,34 @@ impl TelegramAgent {
                                                 "Still finishing the previous reply — tap again \
                                                  once it lands.",
                                             )
-                                            .await;
+                                             .await;
+                                            return ResponseResult::Ok(());
+                                        }
+                                        // Zombie-panel guard (#1226-H2): if this keyboard isn't
+                                        // the bubble the live stash rendered onto, its tap must
+                                        // never resolve against that stash (wrong-label risk).
+                                        // Strip the dead keyboard instead; leave the live set
+                                        // untouched for its own picker.
+                                        if let Some(msg) =
+                                            query.message.as_ref().and_then(|m| m.regular_message())
+                                            && state.suggestion_surface_is_stale(
+                                                sid, msg.chat.id, msg.id,
+                                            )
+                                        {
+                                            tracing::warn!(
+                                                "Telegram followup tap: zombie panel chat {} msg {} \
+                                                 - not the live surface, stripping",
+                                                msg.chat.id,
+                                                msg.id.0
+                                            );
+                                            if let Err(e) =
+                                                bot.edit_message_reply_markup(msg.chat.id, msg.id).await
+                                            {
+                                                tracing::warn!(
+                                                    "Telegram followup tap: zombie keyboard strip \
+                                                     failed: {e}"
+                                                );
+                                            }
                                             return ResponseResult::Ok(());
                                         }
                                         let t = state.take_pending_followup(sid, idx).await;
