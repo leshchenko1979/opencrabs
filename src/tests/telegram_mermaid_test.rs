@@ -373,31 +373,25 @@ async fn resolve_markdown_media_passes_through_without_fences() {
 // local-mermaid feature: fence resolved to locally-rendered PNG bytes
 // ---------------------------------------------------------------------------
 
-/// Under `local-mermaid`, a valid fence resolves through the in-process
-/// renderer (`resolve_fence` → `local_render_result`) to a `MediaEntry`
-/// carrying PNG bytes (no URL) and a `tg://photo` markdown reference. Runs
-/// only when the feature is compiled in — the default build keeps the
-/// mermaid.ink URL path, so this test would otherwise send no bytes.
+/// With `local-mermaid` compiled in, a failed mermaid.ink prevalidation
+/// falls back to the in-process renderer: `local_fallback` must yield a
+/// PNG-carrying [`MermaidResult::ImageBytes`] (media entry construction and
+/// multipart delivery are covered by the `replacement_for` tests above).
+/// Drives the fallback seam directly so no HTTP is performed — under the
+/// hybrid the primary URL path in `resolve_fence` would otherwise hit the
+/// network. Runs only when the feature is compiled in.
 #[cfg(feature = "local-mermaid")]
-#[tokio::test]
-async fn resolve_markdown_media_local_render_yields_bytes_entry() {
+#[test]
+fn local_fallback_renders_png_bytes_after_prevalidate_failure() {
+    use crate::channels::telegram::rich::mermaid::local_fallback;
+
     let src = "graph TD\n    A[\"i start\"] --> B[\"i end\"]";
-    let text = format!("before\n```mermaid\n{src}\n```\nafter");
-    let (resolved, media) = resolve_markdown_media(&text).await;
-
-    let e = media
-        .first()
-        .expect("a valid fence under local-mermaid must produce a media entry");
-    assert_eq!(e.id, "diag0");
-    let png = e.bytes.as_deref().expect("bytes source carries PNG data");
+    let outcome = local_fallback(src, "diagram renderer unreachable".to_string());
+    let png = match outcome {
+        MermaidResult::ImageBytes(bytes) => bytes,
+        other => panic!("expected local fallback PNG bytes, got {other:?}"),
+    };
     assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
-    assert!(e.url.is_none());
-
-    // The fence is replaced by the attach-style photo reference; non-fence
-    // text survives byte-identical.
-    assert!(resolved.contains("![diagram](tg://photo?id=diag0)"));
-    assert!(resolved.starts_with("before\n"));
-    assert!(resolved.ends_with("\nafter"));
 }
 
 // ---------------------------------------------------------------------------
