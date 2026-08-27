@@ -687,6 +687,23 @@ impl TelegramState {
         }
     }
 
+    /// Record where this session's picker just rendered and hand back any
+    /// surface it displaced (#1226-H): the caller best-effort strips that
+    /// previous keyboard once the new placement is confirmed live.
+    pub(crate) async fn record_suggestion_surface(
+        &self,
+        session_id: Uuid,
+        surface: SuggestionSurface,
+    ) -> Option<SuggestionSurface> {
+        let mut map = self.pending_followups.lock().await;
+        let entry = map.entry(session_id).or_insert_with(|| PendingFollowupSet {
+            options: Vec::new(),
+            host: None,
+            surface: None,
+        });
+        entry.surface.replace(surface)
+    }
+
     /// Drop this session's pending follow-up suggestions (the user sent their
     /// own message, so the buttons are stale).
     pub async fn clear_pending_followups(&self, session_id: Uuid) {

@@ -301,6 +301,9 @@ pub(crate) async fn render_suggestions(
                         }),
                     )
                     .await;
+                // Buttons are live on `mid` — register the surface and evict any
+                // keyboard a previous arm of this session left behind (#1226-H).
+                record_suggestion_surface(bot, state, session_id, chat_id, mid).await;
             }
             Err(e) => {
                 tracing::warn!(
@@ -328,11 +331,54 @@ pub(crate) async fn render_suggestions(
         if let Some(tid) = thread_id {
             req = req.message_thread_id(tid);
         }
-        if let Err(e) = req.await {
-            tracing::warn!("Telegram suggest_options: send failed: {e}");
-            // The buttons never landed — drop the stash so a stale entry can't
-            // swallow an unrelated future tap.
-            state.clear_pending_followups(session_id).await;
+        match req.await {
+            Ok(sent) => {
+                // Standalone lamp placed — register its surface and evict any
+                // zombie keyboard from a previous arm (#1226-H).
+                record_suggestion_surface(bot, state, session_id, chat_id, sent.id).await;
+            }
+            Err(e) => {
+                tracing::warn!("Telegram suggest_options: send failed: {e}");
+                // The buttons never landed — drop the stash so a stale entry can't
+                // swallow an unrelated future tap.
+                state.clear_pending_followups(session_id).await;
+            }
         }
+    }
+}
+
+/// Register where this session's picker landed and strip the keyboard of any
+/// surface it displaced (#1226-H). Called only after the NEW placement is
+/// confirmed, so an eviction failure never leaves both panels dead.
+async fn record_suggestion_surface(
+    bot: &teloxide::Bot,
+    state: &Arc<TelegramState>,
+    session_id: Uuid,
+    chat_id: ChatId,
+    message_id: teloxide::types::MessageId,
+) {
+    use teloxide::prelude::Requester;
+
+    match state
+        .record_suggestion_surface(
+            session_id,
+            super::state::SuggestionSurface { chat_id, message_id },
+        )
+        .await
+    {
+        Some(prev) if !(prev.chat_id == chat_id && prev.message_id == message_id) => {
+            if let Err(e) = bot.edit_message_reply_markup(prev.chat_id, prev.message_id).await {
+                tracing::warn!(
+                    "Telegram suggest_options: zombie keyboard eviction failed on msg {}: {e}",
+                    prev.message_id.0
+                );
+            } else {
+                tracing::info!(
+                    "Telegram suggest_options: evicted zombie keyboard from msg {}",
+                    prev.message_id.0
+                );
+            }
+        }
+        _ => {}
     }
 }
