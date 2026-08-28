@@ -17,6 +17,16 @@ name: PR-lane gates
 # resulting diff as the `fmt-fix` artifact — apply the sweep locally, no
 # cargo needed on the box. Fix mode skips the gate steps; the fidelity rule
 # below covers check mode only.
+# Lock-regen mode (compiler, 2026-08-28; owner-GO'd resvg-stack item 00:57Z,
+# mechanism per the fix-mode precedent above):
+#   gh workflow run pr-checks.yml --ref ci/quick-build-linux -f ref=<branch-with-Cargo.toml-edit> -f lockregen=true
+# runs `cargo metadata` with the EXISTING Cargo.lock present — a MINIMAL
+# re-resolve: every surviving package keeps its locked version, packages made
+# unreachable by the Cargo.toml edit are pruned, zero semver churn
+# (generate-lockfile / bare update would bump; deliberately not used) — and
+# uploads the regenerated lock as the `regen-lock` artifact for box-side
+# application (box law 2026-08-28: no cargo on the box). Lock-regen mode
+# skips the gate steps. Revert = delete the lockregen input + its steps.
 # The workflow yaml is read from this carrier branch (workflow_dispatch needs
 # the file on the dispatched ref); the job then checks out `inputs.ref`.
 # Keeping the yml here means PR-head branches carry zero infra commits into
@@ -41,6 +51,11 @@ on:
         required: false
         default: false
         type: boolean
+      lockregen:
+        description: "true = cargo metadata minimal re-resolve with the existing Cargo.lock; uploads the regenerated lock as the regen-lock artifact instead of gating"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -56,7 +71,7 @@ env:
 
 jobs:
   gates:
-    name: PR-lane gates (${{ inputs.ref }}${{ inputs.fix && ' — FIX MODE' || '' }})
+    name: PR-lane gates (${{ inputs.ref }}${{ inputs.fix && ' — FIX MODE' || inputs.lockregen && ' — LOCK REGEN' || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -76,14 +91,14 @@ jobs:
           save-if: true # pre-PR branches re-run on fix-forward; warm cache turns the second dispatch into minutes
 
       - name: Install pkg-config + ALSA dev
-        if: ${{ !inputs.fix }}
+        if: ${{ !inputs.fix && !inputs.lockregen }}
         # Mirrors upstream ci.yml's libasound2-dev (local-stt/cpal) plus the
         # pkg-config that alsa-sys needs to compile at all (carrier lesson,
         # 378a68a8).
         run: sudo apt-get update -qq && sudo apt-get install -y pkg-config libasound2-dev
 
       - name: Check formatting
-        if: ${{ !inputs.fix }}
+        if: ${{ !inputs.fix && !inputs.lockregen }}
         # Soft-fail, mirroring upstream ci.yml verbatim: "legacy un-formatted
         # code blocks shouldn't block PRs yet. Promote to hard-fail once a fmt
         # sweep lands on main." When upstream promotes it, so do we — not before.
@@ -91,15 +106,15 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        if: ${{ !inputs.fix }}
+        if: ${{ !inputs.fix && !inputs.lockregen }}
         run: cargo clippy --locked --lib --bins --tests --all-features -- -D warnings
 
       - name: Install mold + clang (test link speed)
-        if: ${{ !inputs.fix }}
+        if: ${{ !inputs.fix && !inputs.lockregen }}
         run: sudo apt-get install -y mold clang
 
       - name: Run tests
-        if: ${{ !inputs.fix }}
+        if: ${{ !inputs.fix && !inputs.lockregen }}
         # v0.4.23 law: the all-features test gate. Flags mirror upstream's
         # `test` job exactly (profile ci + mold linker).
         env:
@@ -125,4 +140,27 @@ jobs:
             fmt-fix.patch
             fmt-fix.stat
             fmt-fix.meta
+          if-no-files-found: error
+
+      - name: "Guard: existing Cargo.lock present (lock-regen mode)"
+        if: ${{ inputs.lockregen }}
+        # Minimal re-resolve REQUIRES the existing lock: cargo metadata with
+        # no lock does a full re-resolve (the semver churn we're avoiding).
+        # Fail loudly instead of churning.
+        run: test -f Cargo.lock
+
+      - name: Minimal lock re-resolve (lock-regen mode)
+        if: ${{ inputs.lockregen }}
+        run: |
+          cargo metadata --format-version=1 > /dev/null
+          echo "=== lock delta ==="
+          git diff --stat Cargo.lock
+          git diff Cargo.lock | head -300
+
+      - name: Upload regen-lock (lock-regen mode)
+        if: ${{ inputs.lockregen }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: regen-lock
+          path: Cargo.lock
           if-no-files-found: error
