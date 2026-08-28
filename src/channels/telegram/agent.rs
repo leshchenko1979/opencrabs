@@ -516,6 +516,7 @@ impl TelegramAgent {
                                                 text,
                                                 agent_clone,
                                                 state_clone,
+                                                false, // user button tap, not a push wake (#12)
                                             )
                                             .await
                                         {
@@ -1562,6 +1563,7 @@ impl TelegramAgent {
                                                     prompt,
                                                     agent2,
                                                     state2,
+                                                    false, // user button tap, not a push wake (#12)
                                                 )
                                                 .await
                                             {
@@ -1679,6 +1681,7 @@ impl TelegramAgent {
                                                     format!("[callback:{data_owned}]"),
                                                     agent_cb,
                                                     state_cb,
+                                                    false, // user-initiated callback tap (#12)
                                                 )
                                                 .await
                                             {
