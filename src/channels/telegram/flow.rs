@@ -1633,15 +1633,39 @@ pub(crate) async fn restick_flow_if_buried(
 /// without it (header-only when it empties), and returns the text.
 /// Returns `None` when the flow ended on a tool call — then the answer is in
 /// `response.content` and the normal delivery path handles it.
+///
+/// `options_pending`: the turn ends on a `suggest_options` surface (#1226 K).
+/// The substantive answer then sits in the Text run BEFORE the trailing Tool
+/// entry — the halted turn never moves it into `response.content`, so the
+/// stock "flow ended on a tool -> answer is in content" invariant breaks.
+/// The popper lifts the trailing Tool run aside, reclaims that Text run, and
+/// restores the Tool run on top: only the answer text leaves the block, the
+/// tool history stays.
 pub(crate) async fn take_folded_final(
     bot: &Bot,
     chat: ChatId,
     streaming: &Arc<std::sync::Mutex<StreamingState>>,
+    options_pending: bool,
 ) -> Option<String> {
-    let text = {
+    let (text, none_kind): (Option<String>, Option<&'static str>) = {
         let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
-        pop_trailing_folded_texts(&mut s.flow_entries)
+        let popped = pop_trailing_folded_texts(&mut s.flow_entries, options_pending);
+        // #1226: a None here used to be silent, which made the K failure mode
+        // (answer stranded in the collapsed flow) undiagnosable from logs.
+        // Name what the flow ended on.
+        let kind = popped.is_none().then(|| match s.flow_entries.last() {
+            Some(FlowEntry::Tool(_)) => "Tool",
+            Some(FlowEntry::Text(_)) => "Text",
+            None => "empty",
+        });
+        (popped, kind)
     };
+    if let Some(kind) = none_kind {
+        tracing::info!(
+            "Telegram: take_folded_final reclaimed nothing (flow ended on {kind}, \
+             options_pending={options_pending}) (#1226)"
+        );
+    }
     text.as_ref()?;
     // Re-render the block without the promoted answer. An emptied block is
     // NOT deleted anymore: the flow message is the turn's chrome surface
@@ -1657,7 +1681,25 @@ pub(crate) async fn take_folded_final(
 /// since #475 keeps ONE block across queued follow-ups, that answer can
 /// be multi-part. Popping only the last entry left earlier parts
 /// imprisoned in the block.
-pub(crate) fn pop_trailing_folded_texts(entries: &mut Vec<FlowEntry>) -> Option<String> {
+///
+/// `options_pending` (#1226 K): the turn halted on a `suggest_options`
+/// call, so a Tool entry sits LAST and the answer is the Text run
+/// immediately BEFORE it. Lift the trailing Tool run aside, pop that Text
+/// run, then restore the Tool run in its original order — the block keeps
+/// its tool history; only the answer text is reclaimed. When no Text run
+/// precedes the tools nothing is popped and the entries are untouched.
+pub(crate) fn pop_trailing_folded_texts(
+    entries: &mut Vec<FlowEntry>,
+    options_pending: bool,
+) -> Option<String> {
+    let mut aside: Vec<FlowEntry> = Vec::new();
+    if options_pending {
+        while matches!(entries.last(), Some(FlowEntry::Tool(_))) {
+            if let Some(e) = entries.pop() {
+                aside.push(e);
+            }
+        }
+    }
     let mut parts: Vec<String> = Vec::new();
     while matches!(entries.last(), Some(FlowEntry::Text(_))) {
         match entries.pop() {
@@ -1669,6 +1711,9 @@ pub(crate) fn pop_trailing_folded_texts(entries: &mut Vec<FlowEntry>) -> Option<
                 break;
             }
         }
+    }
+    while let Some(e) = aside.pop() {
+        entries.push(e);
     }
     if parts.is_empty() {
         return None;
