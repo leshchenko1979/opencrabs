@@ -57,6 +57,14 @@ on:
         default: false
         type: boolean
 
+# Owner-approved 2026-08-30 (fix batch): when the head moves on the carrier,
+# a re-dispatch must CANCEL the superseded run instead of letting it burn to
+# completion. All dispatches land on this branch (github.ref_name == the branch
+# the workflow was dispatched on), so this groups them and cancels-in-progress.
+concurrency:
+  group: prchecks-${{ github.ref_name }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
