@@ -11,8 +11,10 @@ name: Quick Linux Build
 # Fat-LTO [profile.release] stays reserved for real release artifacts.
 #
 # v0.4.28 PHASE 1 (target-process-20260827.md, step 5): a gates job runs the
-# 4 ORDER gates + `cargo test --all-features` BEFORE the build; build
-# `needs: gates` — RED gates = no artifact (step 6, fail fast).
+# 4 ORDER gates BEFORE the build; build `needs: gates` — RED gates =
+# no artifact (step 6, fail fast). All-features TESTS run on the PR gate
+# (pr-checks.yml, fidelity-mirrored) — carrier gates are pure git
+# verification, seconds not minutes (owner 2026-08-31: de-duplicate).
 #
 # v0.4.28+: the checkout step pins whatever the DISPATCH says
 # (source_repository x source_ref — default upstream main; ship dispatches
@@ -46,7 +48,8 @@ concurrency:
 
 jobs:
   # ------------------------------------------------------------------ gates --
-  # ORDER gates x4 + all-features test suite (design: single CI job, 18:29Z).
+  # ORDER gates x4 — pure git/sha verification (test leg removed 2026-08-31,
+  # owner word: duplication of the PR-gate test deleted, not optimized).
   # Gate 4 checks the Session-Id trailer SHAPE only — the workers ledger lives
   # on the ops box and GitHub never sees it (design ruling); ledger-membership
   # is verified box-side by oc-order-validate pre-dispatch. Defense in depth.
@@ -80,29 +83,6 @@ jobs:
         run: |
           git log -1 --format=%B "${{ inputs.source_ref }}" | grep -Eq '^Session-Id:[[:space:]]*[0-9a-fA-F-]{36}' \
             || { echo "GATE SIGNATURE FAIL: no Session-Id trailer on ${{ inputs.source_ref }} (attribution mandatory)"; exit 1; }
-
-      - name: Install system deps (alsa for local-stt/local-tts)
-        run: sudo apt-get update -y && sudo apt-get install -y pkg-config libasound2-dev
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Install mold + clang (test link speed)
-        run: sudo apt-get install -y mold clang
-
-      - name: All-features test suite
-        # Budget alignment (owner 05:11Z "Go"): flags mirror the PR-lane
-        # gate and upstream's `test` job exactly — profile ci + mold
-        # linker. Same suite, minutes faster than the dev-profile run.
-        env:
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-        run: cargo test --locked --profile ci --all-features --verbose
 
   build:
     needs: gates
