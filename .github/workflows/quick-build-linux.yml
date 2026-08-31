@@ -14,9 +14,11 @@ name: Quick Linux Build
 # 4 ORDER gates + `cargo test --all-features` BEFORE the build; build
 # `needs: gates` — RED gates = no artifact (step 6, fail fast).
 #
-# Sync-from-origin-first: the checkout step pins the UPSTREAM repo
-# (main), so every dispatch compiles adolfousier/opencrabs main tip
-# — never a stale fork branch.
+# v0.4.28+: the checkout step pins whatever the DISPATCH says
+# (source_repository x source_ref — default upstream main; ship dispatches
+# send the fork repo + an ordered full sha). ORDER gates 1-3 validate the
+# dispatch input itself, so a stale or hostile ref fails loudly instead of
+# compiling silently.
 
 on:
   workflow_dispatch:
@@ -51,6 +53,7 @@ jobs:
   gates:
     name: ORDER gates (${{ inputs.source_ref }})
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Gate 1 SHAPE — source_ref is a FULL 40-hex sha
         run: |
@@ -89,13 +92,23 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Install mold + clang (test link speed)
+        run: sudo apt-get install -y mold clang
+
       - name: All-features test suite
-        run: cargo test --locked --all-features
+        # Budget alignment (owner 05:11Z "Go"): flags mirror the PR-lane
+        # gate and upstream's `test` job exactly — profile ci + mold
+        # linker. Same suite, minutes faster than the dev-profile run.
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+        run: cargo test --locked --profile ci --all-features --verbose
 
   build:
     needs: gates
     name: Linux amd64 (${{ inputs.source_ref }}, ${{ inputs.features }})
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Sync from origin
         uses: actions/checkout@v5
