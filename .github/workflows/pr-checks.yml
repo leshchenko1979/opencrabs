@@ -57,12 +57,19 @@ on:
         default: false
         type: boolean
 
-# Owner-approved 2026-08-30 (fix batch): when the head moves on the carrier,
-# a re-dispatch must CANCEL the superseded run instead of letting it burn to
-# completion. All dispatches land on this branch (github.ref_name == the branch
-# the workflow was dispatched on), so this groups them and cancels-in-progress.
+# Owner-approved 2026-08-30 (fix batch, a87b66dc; group KEY corrected same
+# day, owner "Fix it" 02:32Z on the cancel-storm finding): every
+# workflow_dispatch lands on this carrier branch, so github.ref_name is
+# CONSTANT across lanes — the original ref_name key put ALL lanes into one
+# kill-group and each new dispatch cancelled the previous lane's gate
+# (08-30 22:06-23:20Z: 4 runs mutually cancelled, no gate could finish while
+# two lanes dispatched within the same window). The group now keys on
+# inputs.ref — the branch-or-sha each dispatch passes (oc-prchecks sends the
+# gated ref) — so distinct refs run in PARALLEL and only a re-dispatch of the
+# SAME ref (head moved) cancels its superseded run. cancel-in-progress keeps
+# that owner-mandated supersede behavior per-ref.
 concurrency:
-  group: prchecks-${{ github.ref_name }}
+  group: prchecks-${{ inputs.ref || github.ref_name }}
   cancel-in-progress: true
 
 permissions:
@@ -72,10 +79,6 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
-
-# Deliberately NO concurrency group: these checks are read-only (no artifact,
-# no prod exposure), so parallel per-ref runs are correct and a mutex would
-# only serialize unrelated branches behind each other.
 
 jobs:
   gates:
