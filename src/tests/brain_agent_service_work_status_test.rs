@@ -329,3 +329,29 @@ fn legacy_migration_with_no_legacy_dir_is_a_noop() {
     isolate("legacy_none");
     assert_eq!(migrate_legacy_dir(&legacy_dir()), 0);
 }
+
+#[test]
+fn parent_session_id_round_trips_and_defaults_to_none() {
+    // #73: the parent is stamped at spawn so recovery can route the death
+    // report to a live listener. Files written before the field existed
+    // must read back as None, not fail to parse.
+    isolate("parent_roundtrip");
+    let mut s = WorkStatus::new_agent("test-p1", "review", "child-1", "read things").unwrap();
+    assert!(s.parent_session_id.is_none());
+    s.parent_session_id = Some("parent-1".to_string());
+    s.write().unwrap();
+
+    let read_back = WorkStatus::read("test-p1").expect("read");
+    assert_eq!(read_back.parent_session_id.as_deref(), Some("parent-1"));
+
+    // A pre-#73 file carries no parent field at all.
+    let path = test_override::get().join("test-legacy.json");
+    std::fs::write(
+        &path,
+        r#"{"id":"test-legacy","kind":"agent","session_id":"child-2","label":"old","task":"t","spawned_at":"2026-01-01T00:00:00Z","state":"Running"}"#,
+    )
+    .unwrap();
+    let legacy = WorkStatus::read("test-legacy").expect("read legacy");
+    assert!(legacy.parent_session_id.is_none());
+    assert_eq!(legacy.session_id, "child-2");
+}

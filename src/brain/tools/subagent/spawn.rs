@@ -490,13 +490,21 @@ impl Tool for SpawnAgentTool {
         // Create the status file in Pending state before spawning. new()
         // writes the file; we don't need the returned handle, but we do
         // propagate any write error.
-        let _ = WorkStatus::new_agent(
+        // The session that asked for this agent, so a death report has a
+        // live listener to route to (#73). Captured before the status file
+        // is written and again on any fallback rewrite below.
+        let parent_session_id = context.session_id;
+        let mut status = WorkStatus::new_agent(
             &agent_id,
             &label,
             &child_session_id.to_string(),
             &full_prompt,
         )
         .map_err(|e| ToolError::Execution(format!("Failed to create status file: {e}")))?;
+        status.parent_session_id = Some(parent_session_id.to_string());
+        status
+            .write()
+            .map_err(|e| ToolError::Execution(format!("Failed to write status file: {e}")))?;
 
         // Spawn background task with input loop
         let cancel_clone = cancel_token.clone();
@@ -509,7 +517,6 @@ impl Tool for SpawnAgentTool {
         // The session that asked for this agent, so a result nobody is waiting
         // on still reaches the caller instead of sitting in the manager map
         // (#1036). Not the child's session, which nothing is listening to.
-        let parent_session_id = context.session_id;
 
         let handle = tokio::spawn(async move {
             tracing::info!("Sub-agent {} starting: {}", agent_id_clone, prompt_clone);
@@ -524,6 +531,7 @@ impl Tool for SpawnAgentTool {
                 )
                 .expect("status file")
             });
+            status.parent_session_id = Some(parent_session_id.to_string());
             if !matches!(status.state, WorkState::Completed | WorkState::Failed)
                 && let Err(e) = status.mark_running()
             {

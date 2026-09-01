@@ -197,10 +197,15 @@ pub struct WorkStatus {
     pub id: String,
     #[serde(default)]
     pub kind: WorkKind,
-    /// The session recorded at spawn. For agents this is what recovery
-    /// routes the interruption report by (the pre-#26 `parent_session_id`
-    /// value); for commands, the owning session.
+    /// The session recorded at spawn. For agents this is the child's own
+    /// session; for commands, the owning session.
     pub session_id: String,
+    /// The session that spawned the agent, captured at spawn so recovery can
+    /// route the death report to a listener that exists (#73). `None` on
+    /// records written before the field existed — recovery then falls back
+    /// to `session_id`, the pre-#73 behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     pub label: String,
     /// The work itself: the shell command for [`WorkKind::Command`], the
     /// prompt for [`WorkKind::Agent`].
@@ -228,6 +233,7 @@ impl WorkStatus {
             id: id.to_string(),
             kind: WorkKind::Agent,
             session_id: session_id.to_string(),
+            parent_session_id: None,
             label: label.to_string(),
             task: prompt.to_string(),
             spawned_at: now_rfc3339(),
@@ -253,6 +259,7 @@ impl WorkStatus {
             id: id.to_string(),
             kind: WorkKind::Command,
             session_id: session_id.to_string(),
+            parent_session_id: None,
             label: label.to_string(),
             task: command.to_string(),
             spawned_at: now_rfc3339(),
@@ -277,6 +284,7 @@ impl WorkStatus {
             id: id.to_string(),
             kind: WorkKind::Command,
             session_id: session_id.to_string(),
+            parent_session_id: None,
             label: label.to_string(),
             task: command.to_string(),
             spawned_at: now_rfc3339(),
@@ -484,6 +492,8 @@ pub fn migrate_legacy_dir(legacy: &Path) -> usize {
             id: old.id.clone(),
             kind: WorkKind::Agent,
             session_id: old.parent_session_id,
+            // Legacy files already stored the parent here; no separate field needed.
+            parent_session_id: None,
             label: old.label,
             task: old.prompt,
             spawned_at: old.started_at,
