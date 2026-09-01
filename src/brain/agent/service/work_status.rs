@@ -390,7 +390,7 @@ impl WorkStatus {
     }
 
     /// Persist status to disk. Uses atomic rename for crash safety.
-    fn write(&self) -> std::io::Result<()> {
+    pub(crate) fn write(&self) -> std::io::Result<()> {
         let path = status_path(&self.id);
         ensure_dir()?;
         let tmp = path.with_extension("json.tmp");

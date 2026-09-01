@@ -409,7 +409,9 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
         match Uuid::parse_str(target) {
             Ok(session_id) => {
                 let msg = subagent_interrupted_message(&orphan);
-                if deliver_or_park(session_id, msg) {
+                // Clone: the parked branch still needs the message content
+                // for the durable copy below.
+                if deliver_or_park(session_id, msg.clone()) {
                     // Delivered to a live route; nothing durable to keep.
                 } else {
                     // Parked in memory only — persist it so the restart that

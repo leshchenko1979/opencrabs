@@ -345,7 +345,9 @@ fn parent_session_id_round_trips_and_defaults_to_none() {
     assert_eq!(read_back.parent_session_id.as_deref(), Some("parent-1"));
 
     // A pre-#73 file carries no parent field at all.
-    let path = test_override::get().join("test-legacy.json");
+    let path = test_override::get()
+        .expect("test override set by isolate()")
+        .join("test-legacy.json");
     std::fs::write(
         &path,
         r#"{"id":"test-legacy","kind":"agent","session_id":"child-2","label":"old","task":"t","spawned_at":"2026-01-01T00:00:00Z","state":"Running"}"#,
