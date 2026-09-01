@@ -525,7 +525,7 @@ impl Tool for SpawnAgentTool {
                     &agent_id,
                     parent_session_id,
                     &label,
-                    &full_prompt,
+                    &prompt_clone,
                     "",
                     crate::db::KIND_AGENT,
                 )

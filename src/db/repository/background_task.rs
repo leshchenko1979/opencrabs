@@ -66,6 +66,7 @@ impl BackgroundTaskRepository {
     ) -> Result<()> {
         let (id, session_id) = (id.to_string(), session_id.to_string());
         let (label, command, cwd) = (label.to_string(), command.to_string(), cwd.to_string());
+        let kind = kind.to_string();
         self.pool
             .get()
             .await
