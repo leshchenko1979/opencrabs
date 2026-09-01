@@ -13,74 +13,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// How much of a sub-agent's output the pushed message carries. Enough to act
-/// on, short of pasting a long transcript into the parent's context.
-const PUSHED_OUTPUT_LIMIT: usize = 4000;
-
-/// Build the message a finished sub-agent injects into the session that
-/// spawned it. Pure, so the framing is testable without spawning anything.
-///
-/// `outcome` is the output on success or the error on failure.
-pub(crate) fn completion_message(
-    label: &str,
-    agent_id: &str,
-    outcome: std::result::Result<&str, &str>,
-) -> crate::brain::agent::QueuedUserMessage {
-    let (context_text, display_text) = match outcome {
-        Ok(output) => {
-            let full_report_hint = if output.chars().count() > PUSHED_OUTPUT_LIMIT {
-                format!(
-                    "Preview truncated - the FULL untruncated report is available via the \
-                     wait_agent tool with agent id {agent_id}.\n"
-                )
-            } else {
-                String::new()
-            };
-            (
-                format!(
-                    "[System: the sub-agent you spawned has finished.\n\
-                     Agent: {label} (id {agent_id})\n\
-                     Status: completed\n\
-                     Output:\n{}\n\n\
-                     {full_report_hint}\
-                     Report the result to the user and continue anything that was waiting on it. \
-                     Do not re-spawn the agent — this IS its result.]",
-                    truncate_output(output)
-                ),
-                format!("🤖 sub-agent finished: {label}"),
-            )
-        }
-        Err(error) => (
-            format!(
-                "[System: the sub-agent you spawned has failed.\n\
-                 Agent: {label} (id {agent_id})\n\
-                 Status: failed\n\
-                 Error: {error}\n\n\
-                 Report the failure to the user and decide what to do about it. Do not assume the \
-                 work was completed.]"
-            ),
-            format!("🤖 sub-agent failed: {label}"),
-        ),
-    };
-    crate::brain::agent::QueuedUserMessage {
-        context_text,
-        display_text,
-        origin: crate::brain::agent::PushOrigin::SubAgent,
-        bg_meta: None,
-    }
-}
-
-/// Keep the tail of a long output: the conclusion matters more than the
-/// opening, same as the detached-command completion path.
-fn truncate_output(output: &str) -> String {
-    if output.chars().count() <= PUSHED_OUTPUT_LIMIT {
-        return output.to_string();
-    }
-    let skip = output.chars().count() - PUSHED_OUTPUT_LIMIT;
-    let tail: String = output.chars().skip(skip).collect();
-    format!("…(truncated)\n{tail}")
-}
-
 /// Deliver a finished sub-agent's outcome to the session that spawned it.
 pub(crate) fn push_result(
     parent_session_id: uuid::Uuid,
@@ -88,54 +20,25 @@ pub(crate) fn push_result(
     agent_id: &str,
     outcome: std::result::Result<&str, &str>,
 ) {
-    use crate::brain::agent::service::session_routes::{Delivery, deliver_to_session};
+    use crate::brain::agent::service::work_delivery::{
+        WorkKind, WorkPayload, deliver_work_result, work_completion,
+    };
 
-    let msg = completion_message(label, agent_id, outcome);
-    // interrupt=true (fork #13): a sub-agent completion is the parent's own
-    // awaited work — it must reach the parent even mid-turn, exactly as
-    // before the gate existed.
-    match deliver_to_session(parent_session_id, msg, true) {
-        Delivery::Delivered => {
-            tracing::info!(
-                "Sub-agent {agent_id} reported its result to session {parent_session_id}"
-            );
-        }
-        Delivery::Parked => {
-            // Not lost: it leaves when the owning channel claims the session.
-            tracing::info!(
-                "Sub-agent {agent_id}'s result is parked for session {parent_session_id} until \
-                 its channel claims it"
-            );
-        }
-        Delivery::NoRoute => {
-            // The parent is waiting on this either way, so say so rather than
-            // returning quietly.
-            tracing::warn!(
-                "Sub-agent {agent_id}'s result had nowhere to go for session \
-                 {parent_session_id}; the parent will not hear about it"
-            );
-        }
-        Delivery::RefusedInFlight { redirected_to } => {
-            // Unreachable by construction: interrupt=true is passed above and
-            // the fork #13 gate refuses only when interrupt is unset. Arm kept
-            // explicit so a future call-site change cannot drop the outcome
-            // silently (port seam: upstream's match has no catch-all).
-            tracing::warn!(
-                "Sub-agent {agent_id}'s result was refused by the interrupt gate \
-                 for session {parent_session_id} (redirected to {redirected_to:?}); the \
-                 parent will not hear about it"
-            );
-        }
-        Delivery::Redirected { to } => {
-            // The parent was replaced on its channel while the sub-agent ran
-            // (fork #17), so the result was REDIRECTED to the session that
-            // owns the channel now (fork #19) — delivered, not dropped.
-            tracing::info!(
-                "Sub-agent {agent_id}'s result was redirected from session \
-                 {parent_session_id} to session {to}, which now owns its channel"
-            );
-        }
-    }
+    // The ONE completion path (design #26 items 4+5): framing and the gated
+    // delivery route live in `work_delivery`, shared with detached commands.
+    let msg = work_completion(WorkPayload::Agent {
+        label: label.to_string(),
+        agent_id: agent_id.to_string(),
+        outcome: outcome.map(str::to_string).map_err(str::to_string),
+    });
+    deliver_work_result(
+        parent_session_id,
+        WorkKind::Agent,
+        label,
+        agent_id,
+        "subagent",
+        msg,
+    );
 }
 
 /// Tool that spawns a child agent to handle a sub-task.

@@ -4,10 +4,11 @@
 use crate::brain::agent::service::MessageEnqueueCallback;
 use crate::brain::agent::service::QueuedUserMessage;
 use crate::brain::agent::service::background_tasks::{
-    BackgroundTaskManager, CmdResult, completion_message, format_elapsed, short_label, tail_lines,
+    BackgroundTaskManager, CmdResult, format_elapsed, short_label, tail_lines,
 };
 use crate::brain::agent::service::restart_recovery;
 use crate::brain::agent::service::session_routes;
+use crate::brain::agent::service::work_delivery::{WorkPayload, work_completion};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -25,16 +26,16 @@ fn tail_keeps_last_n_lines() {
 
 #[test]
 fn completion_message_reflects_success_and_failure() {
-    let ok = completion_message(
-        "cargo test",
-        "cargo test --all-features",
-        &CmdResult {
+    let ok = work_completion(WorkPayload::Command {
+        label: "cargo test".into(),
+        command: "cargo test --all-features".into(),
+        result: CmdResult {
             success: true,
             code: 0,
             output: "test result: ok. 5 passed".into(),
         },
-        12.0,
-    );
+        elapsed_secs: 12.0,
+    });
     assert!(ok.context_text.contains("exit 0 (success)"));
     assert!(ok.context_text.contains("cargo test --all-features"));
     assert!(ok.context_text.contains("Do not re-run"));
@@ -46,16 +47,16 @@ fn completion_message_reflects_success_and_failure() {
     assert_eq!(meta.elapsed_secs, 12.0);
     assert_eq!(meta.tail, "test result: ok. 5 passed");
 
-    let fail = completion_message(
-        "build",
-        "cargo build",
-        &CmdResult {
+    let fail = work_completion(WorkPayload::Command {
+        label: "build".into(),
+        command: "cargo build".into(),
+        result: CmdResult {
             success: false,
             code: 101,
             output: "error[E0001]".into(),
         },
-        3.0,
-    );
+        elapsed_secs: 3.0,
+    });
     assert!(fail.context_text.contains("exit 101 (failure)"));
     assert!(fail.display_text.contains("failed"));
     let meta = fail.bg_meta.expect("failed completion still carries meta");

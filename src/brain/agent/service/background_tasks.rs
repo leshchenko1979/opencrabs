@@ -1,18 +1,16 @@
 //! Background task manager (#722).
 //!
 //! Runs a genuinely long command detached (so it doesn't churn the bash 600s
-//! cap) and, on completion, enqueues a synthetic `QueuedUserMessage` into the
-//! originating session via the surface enqueue callback. The tool loop drains
-//! that at the next iteration boundary — injected mid-turn if the agent is still
-//! working, or starting a fresh turn if it went idle.
+//! cap) and, on completion, delivers a synthetic `QueuedUserMessage` into the
+//! originating session through the shared `work_delivery` path. The tool loop
+//! drains that at the next iteration boundary — injected mid-turn if the agent
+//! is still working, or starting a fresh turn if it went idle.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use uuid::Uuid;
-
-use super::types::{BgTaskMeta, PushOrigin, QueuedUserMessage};
 
 /// Result of a finished background command.
 #[derive(Debug, Clone)]
@@ -192,7 +190,6 @@ impl BackgroundTaskManager {
                     "Could not write detached status for {task_id}: {e}"
                 );
             }
-            let msg = completion_message(&label, &command, &result, elapsed_secs);
             if let Some(repo) = task_repo()
                 && let Err(e) = repo.clear(task_id).await
             {
@@ -214,54 +211,30 @@ impl BackgroundTaskManager {
             // Only touches the in-memory map, so moving it earlier cannot
             // affect what gets delivered.
             this.mark_finished(session_id, &label);
-            // Deliver through the ONE gated route (fork #19): the same
-            // `deliver_to_session` that sub-agent completions and the
-            // session_notify tool use, so channel-ownership, mid-turn and
-            // redirect decisions live in exactly one place instead of being
-            // re-derived per surface. Resolves the owner by SESSION, never by
-            // whichever service executed the command — a channel session
-            // driven from the TUI runs on the TUI's service, and the old
-            // direct-resolve would answer into the TUI and leave the channel
-            // that asked for the work waiting on a reply that never comes
-            // (#940). interrupt=true: a completion is the origin's own
-            // awaited work, exactly like a sub-agent's; it must reach it even
-            // mid-turn (fork #13).
-            let outcome = super::session_routes::deliver_to_session(session_id, msg, true);
-            match outcome {
-                super::session_routes::Delivery::Redirected { to } => {
-                    tracing::info!(
-                        target: "background_task",
-                        "Background task '{label}' completion for session {session_id} was \
-                         redirected to session {to}, which now owns its channel"
-                    );
-                }
-                super::session_routes::Delivery::Parked => {
-                    tracing::info!(
-                        target: "background_task",
-                        "Background task '{label}' completion for session {session_id} is \
-                         parked until its channel claims the session"
-                    );
-                }
-                super::session_routes::Delivery::NoRoute => {
-                    tracing::warn!(
-                        target: "background_task",
-                        "Background task '{label}' completion for session {session_id} had \
-                         nowhere to go; the session will not hear about it"
-                    );
-                }
-                super::session_routes::Delivery::RefusedInFlight { .. } => {
-                    // Unreachable by construction: interrupt=true is passed
-                    // above, so the fork #13 gate cannot refuse. Kept explicit
-                    // so a future change to the flag cannot drop the outcome
-                    // silently (port seam: upstream's match has no catch-all).
-                    tracing::warn!(
-                        target: "background_task",
-                        "Background task '{label}' completion for session {session_id} was \
-                         refused by the mid-turn gate despite interrupt=true"
-                    );
-                }
-                super::session_routes::Delivery::Delivered => {}
-            }
+            // Build and deliver through the ONE completion path (design #26
+            // items 4+5): the same builder and the same gated route the
+            // sub-agent completions use, so framing and delivery decisions
+            // live in exactly one place. `deliver_work_result` resolves the
+            // owner by SESSION, never by whichever service executed the
+            // command — a channel session driven from the TUI runs on the
+            // TUI's service, and the old direct-resolve would answer into the
+            // TUI and leave the channel that asked for the work waiting on a
+            // reply that never comes (#940).
+            let msg =
+                super::work_delivery::work_completion(super::work_delivery::WorkPayload::Command {
+                    label: label.clone(),
+                    command: command.clone(),
+                    result: result.clone(),
+                    elapsed_secs,
+                });
+            super::work_delivery::deliver_work_result(
+                session_id,
+                super::work_delivery::WorkKind::Command,
+                &label,
+                "",
+                "background_task",
+                msg,
+            );
         });
     }
 }
@@ -335,50 +308,6 @@ pub(crate) fn tail_lines(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(n);
     lines[start..].join("\n")
-}
-
-/// Build the resume message from a finished background command (#722). Pure so
-/// the framing is unit-testable without spawning anything. `elapsed_secs` is
-/// the detached command's wall-clock runtime; it rides along in the typed
-/// `BgTaskMeta` payload (#15) so the receipt card renders a duration without
-/// parsing the context text.
-pub(crate) fn completion_message(
-    label: &str,
-    command: &str,
-    result: &CmdResult,
-    elapsed_secs: f32,
-) -> QueuedUserMessage {
-    let status = if result.success {
-        "exit 0 (success)".to_string()
-    } else {
-        format!("exit {} (failure)", result.code)
-    };
-    let tail = tail_lines(&result.output, 50);
-    let context = format!(
-        "[System: the background task you started has finished.\n\
-         Task: {label}\n\
-         Command: {command}\n\
-         Status: {status}\n\
-         Output (last 50 lines):\n{tail}\n\n\
-         Report the result to the user and continue anything that was waiting on it. \
-         Do not re-run the command — this IS its result.]"
-    );
-    let display = format!(
-        "🔧 background task {}: {label}",
-        if result.success { "finished" } else { "failed" }
-    );
-    let mut msg = QueuedUserMessage::system(context, display);
-    // #1221: marks this delivery for the Telegram collapsible echo bubble.
-    msg.origin = PushOrigin::BackgroundTask;
-    // #15: typed receipt payload — the echo renders the card from this,
-    // never from the `[System: ...]` context text.
-    msg.bg_meta = Some(BgTaskMeta {
-        success: result.success,
-        label: label.to_string(),
-        elapsed_secs,
-        tail,
-    });
-    msg
 }
 
 /// Human duration for the receipt card (#15): `42s`, `3m 5s`, `1h 12m`.

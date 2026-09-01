@@ -6,8 +6,20 @@
 //! parent already blocked on `wait_agent` receives the output as that tool's
 //! result, so pushing as well would deliver it twice.
 
+use crate::brain::agent::service::work_delivery::{WorkPayload, work_completion};
 use crate::brain::tools::subagent::manager::{SubAgent, SubAgentManager};
-use crate::brain::tools::subagent::spawn::completion_message;
+
+fn agent_message(
+    label: &str,
+    agent_id: &str,
+    outcome: std::result::Result<&str, &str>,
+) -> crate::brain::agent::QueuedUserMessage {
+    work_completion(WorkPayload::Agent {
+        label: label.to_string(),
+        agent_id: agent_id.to_string(),
+        outcome: outcome.map(str::to_string).map_err(str::to_string),
+    })
+}
 use uuid::Uuid;
 
 fn manager_with_agent(id: &str) -> SubAgentManager {
@@ -106,7 +118,7 @@ fn leaving_a_wait_never_underflows() {
 
 #[test]
 fn a_completion_message_carries_the_output_and_forbids_a_respawn() {
-    let msg = completion_message("build docs", "abc123", Ok("42 pages written"));
+    let msg = agent_message("build docs", "abc123", Ok("42 pages written"));
 
     assert!(msg.context_text.contains("42 pages written"));
     assert!(msg.context_text.contains("completed"));
@@ -119,7 +131,7 @@ fn a_completion_message_carries_the_output_and_forbids_a_respawn() {
 
 #[test]
 fn a_failure_message_says_so_rather_than_implying_success() {
-    let msg = completion_message("deploy", "def456", Err("connection refused"));
+    let msg = agent_message("deploy", "def456", Err("connection refused"));
 
     assert!(msg.context_text.contains("connection refused"));
     assert!(msg.context_text.contains("failed"));
@@ -138,7 +150,7 @@ fn a_long_output_keeps_its_tail() {
     let long: String = std::iter::repeat_n('x', 5000)
         .chain("THE-CONCLUSION".chars())
         .collect();
-    let msg = completion_message("big", "ghi789", Ok(&long));
+    let msg = agent_message("big", "ghi789", Ok(&long));
 
     assert!(msg.context_text.contains("THE-CONCLUSION"));
     assert!(msg.context_text.contains("truncated"));
