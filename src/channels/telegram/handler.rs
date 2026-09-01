@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{
-    ChatKind, FileId, InlineKeyboardMarkup, MessageId, ParseMode, ReplyParameters,
+    ChatKind, FileId, InlineKeyboardMarkup, MessageId, ParseMode, ReplyParameters, ThreadId,
 };
 
 use super::send::{best_effort_delete, message_in_thread};
@@ -398,6 +398,73 @@ pub(crate) fn is_split_candidate(text: &str) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Shared plan-card settle tail (#580, #621, #69): finalize a just-archived
+/// plan's card, or re-stick + refresh the live card to the bottom of the
+/// thread. Called from the normal settle path AND the interrupt-superseded
+/// exit (#69) — see the call sites for the gate discussion.
+#[allow(clippy::too_many_arguments)]
+async fn restick_plan_card_settle(
+    bot: &Bot,
+    chat_id: ChatId,
+    thread_id: Option<ThreadId>,
+    streaming: &Arc<std::sync::Mutex<StreamingState>>,
+    telegram_state: &Arc<TelegramState>,
+    agent: &AgentService,
+    session_id: Uuid,
+) {
+    let plan_kb = {
+        streaming
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sections
+            .plan_kb
+    };
+    // Re-stick on EVERY user-message settle (owner-approved #62): the card
+    // must stay reachable for the Approve button while a pre-approval plan
+    // is being discussed, and a restick per human turn is paced by typing
+    // speed, not by machine loops. Flood safety is NOT this gate's job:
+    // the fresh post goes through the G3 sends governor, the in-place
+    // refresh rides G2 (#1211), so the old 90s RESTICK_COOLDOWN (#814) was a
+    // pre-governor duplicate — deleted. The ONLY gate left is the shared
+    // sticky-stack budget (#1150): a flow restick moments ago already spent
+    // this chat's delete+create allowance; skipping here costs nothing (no
+    // cooldown is recorded — retry next settle) and the refresh still edits
+    // in place.
+    if crate::utils::plan_files::peek_plan_just_archived(session_id).await {
+        // Plan completed THIS settle (#1158, #1231): finalize the tracked
+        // card (✅ header, keyboard stripped, one-shot untrack) and re-stick
+        // the completed card to the bottom of the thread instead of
+        // re-sticking or refreshing a now-archived plan. Finalize consumes
+        // the flag only after the notice LANDED (#16): a flood-aborted
+        // finalize leaves it in place, so the next settle retries instead
+        // of losing the completion notice forever.
+        super::plan_card::finalize_plan_card(bot, chat_id, thread_id, telegram_state, session_id)
+            .await;
+    } else {
+        // Gate the claim on a tracked card (in-memory only — cheap): a
+        // cardless settle must not spend the sticky budget, or the
+        // flow-block restick starves for 15s after EVERY settle (#62).
+        if telegram_state.plan_card_cached(session_id).await.is_some()
+            && telegram_state.claim_sticky_action(
+                chat_id.0,
+                super::state::TelegramState::STICKY_STACK_MIN_INTERVAL,
+            )
+        {
+            super::plan_card::remove_plan_card(bot, chat_id, telegram_state, session_id).await;
+        }
+        super::plan_card::refresh_plan_card(
+            bot,
+            chat_id,
+            thread_id,
+            telegram_state,
+            agent,
+            session_id,
+            plan_kb,
+        )
+        .await;
+    }
+}
+
 pub(crate) async fn handle_message(
     bot: Bot,
     msg: Message,
@@ -2610,6 +2677,26 @@ pub(crate) async fn handle_message(
         if let Some(mid) = streaming_msg_id {
             best_effort_delete(&bot, msg.chat.id, mid, "keep-history teardown").await;
         }
+        // #69: an interrupt-superseded turn exits here, BEFORE the settle tail
+        // below — so its plan card never re-sticks. During a rapid-fire
+        // discussion every turn is superseded and the card stays buried until
+        // the storm ends. Run the same card tail before returning: the
+        // finalize check (a plan archived during an interrupted turn must not
+        // wait), the sticky-budgeted restick (#1150), and the in-place
+        // refresh. Stale display items stay suppressed above — the card is
+        // state-derived chrome, not queued turn content. Flood safety is
+        // unchanged: the fresh post rides the G3 sends governor, and the
+        // replacement turn's own settle reuses this same tail.
+        restick_plan_card_settle(
+            &bot,
+            msg.chat.id,
+            thread_id,
+            &streaming,
+            &telegram_state,
+            &agent,
+            session_id,
+        )
+        .await;
         return Ok(());
     }
 
@@ -2708,67 +2795,18 @@ pub(crate) async fn handle_message(
     // so refresh_plan_card posts a fresh one at the bottom. This re-stick keeps
     // the card at the latest position instead of editing a buried message far
     // up in history. The keyboard and (in Editing) the folded prose ride the
-    // fresh message.
-    {
-        let plan_kb = {
-            streaming
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .sections
-                .plan_kb
-        };
-        // Re-stick on EVERY user-message settle (owner-approved #62): the card
-        // must stay reachable for the Approve button while a pre-approval plan
-        // is being discussed, and a restick per human turn is paced by typing
-        // speed, not by machine loops. Flood safety is NOT this gate's job:
-        // the fresh post goes through the G3 sends governor, the in-place
-        // refresh below rides G2 (#1211), so the old 90s RESTICK_COOLDOWN
-        // (#814) was a pre-governor duplicate — deleted. The ONLY gate left is
-        // the shared sticky-stack budget (#1150): a flow restick moments ago
-        // already spent this chat's delete+create allowance; skipping here
-        // costs nothing (no cooldown is recorded — retry next settle) and the
-        // refresh below still edits in place.
-        if crate::utils::plan_files::peek_plan_just_archived(session_id).await {
-            // Plan completed THIS settle (#1158, #1231): finalize the tracked
-            // card (✅ header, keyboard stripped, one-shot untrack) and re-stick
-            // the completed card to the bottom of the thread instead of
-            // re-sticking or refreshing a now-archived plan. Finalize consumes
-            // the flag only after the notice LANDED (#16): a flood-aborted
-            // finalize leaves it in place, so the next settle retries instead
-            // of losing the completion notice forever.
-            super::plan_card::finalize_plan_card(
-                &bot,
-                msg.chat.id,
-                thread_id,
-                &telegram_state,
-                session_id,
-            )
-            .await;
-        } else {
-            // Gate the claim on a tracked card (in-memory only — cheap): a
-            // cardless settle must not spend the sticky budget, or the
-            // flow-block restick starves for 15s after EVERY settle (#62).
-            if telegram_state.plan_card_cached(session_id).await.is_some()
-                && telegram_state.claim_sticky_action(
-                    msg.chat.id.0,
-                    super::state::TelegramState::STICKY_STACK_MIN_INTERVAL,
-                )
-            {
-                super::plan_card::remove_plan_card(&bot, msg.chat.id, &telegram_state, session_id)
-                    .await;
-            }
-            super::plan_card::refresh_plan_card(
-                &bot,
-                msg.chat.id,
-                thread_id,
-                &telegram_state,
-                &agent,
-                session_id,
-                plan_kb,
-            )
-            .await;
-        }
-    }
+    // fresh message. Shared tail since #69 — the interrupt-superseded exit
+    // runs the same block (see restick_plan_card_settle).
+    restick_plan_card_settle(
+        &bot,
+        msg.chat.id,
+        thread_id,
+        &streaming,
+        &telegram_state,
+        &agent,
+        session_id,
+    )
+    .await;
 
     // Drop the active-turn guard before flushing so any reaction arriving during
     // the flush is treated as fresh, not re-queued against a finished turn.
