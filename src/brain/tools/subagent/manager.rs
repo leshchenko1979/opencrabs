@@ -288,16 +288,20 @@ impl SubAgentManager {
     /// arriving concurrently either registers first (and we do not push) or
     /// arrives after and reads the finished state directly.
     pub fn mark_completed(&self, id: &str, output: String) -> bool {
-        let mut agents = self.agents.write().expect("subagent manager lock poisoned");
-        match agents.get_mut(id) {
-            Some(agent) => {
-                agent.state = SubAgentState::Completed;
-                agent.output = Some(output);
-                agent.input_tx = None;
-                agent.waiters == 0
+        let pushed = {
+            let mut agents = self.agents.write().expect("subagent manager lock poisoned");
+            match agents.get_mut(id) {
+                Some(agent) => {
+                    agent.state = SubAgentState::Completed;
+                    agent.output = Some(output);
+                    agent.input_tx = None;
+                    agent.waiters == 0
+                }
+                None => false,
             }
-            None => false,
-        }
+        };
+        Self::clear_recovery_row(id);
+        pushed
     }
 
     /// Mark the child completed AND deliver its final output to the spawning
@@ -329,14 +333,69 @@ impl SubAgentManager {
     /// terms as [`Self::mark_completed`]: a failure nobody is waiting on is
     /// still a result the parent needs.
     pub fn mark_failed(&self, id: &str, error: String) -> bool {
-        let mut agents = self.agents.write().expect("subagent manager lock poisoned");
-        match agents.get_mut(id) {
-            Some(agent) => {
-                agent.state = SubAgentState::Failed(error);
-                agent.input_tx = None;
-                agent.waiters == 0
+        let pushed = {
+            let mut agents = self.agents.write().expect("subagent manager lock poisoned");
+            match agents.get_mut(id) {
+                Some(agent) => {
+                    agent.state = SubAgentState::Failed(error);
+                    agent.input_tx = None;
+                    agent.waiters == 0
+                }
+                None => false,
             }
-            None => false,
+        };
+        Self::clear_recovery_row(id);
+        pushed
+    }
+
+    /// Drop the agent's crash-recovery row (#26 P2). The work reached a
+    /// terminal state, so a restart must not report it as interrupted.
+    /// Fire-and-forget: a clear that never lands only makes the NEXT startup
+    /// report a phantom interruption — noisy, recoverable, and visible in the
+    /// log, same tolerance the command path documents.
+    pub fn clear_recovery_row(id: &str) {
+        if let Some(pool) = crate::db::global_pool() {
+            let repo = crate::db::BackgroundTaskRepository::new(pool.clone());
+            let id = id.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = repo.clear(id).await {
+                    tracing::warn!(
+                        target: "subagent",
+                        "Failed to clear sub-agent recovery row: {e:#}"
+                    );
+                }
+            });
+        }
+    }
+
+    /// Re-record the crash-recovery row for a resumed agent (#26 P2). Resume
+    /// restarts live work, so the #763 contract (row before run) applies
+    /// again; the original prompt is not retained on the struct, and the
+    /// label is what the interruption report needs to be actionable.
+    pub fn record_recovery_row(agent: &SubAgent) {
+        if let Some(pool) = crate::db::global_pool() {
+            let repo = crate::db::BackgroundTaskRepository::new(pool.clone());
+            let id = agent.id.clone();
+            let label = agent.label.clone();
+            let parent = agent.parent_session_id;
+            tokio::spawn(async move {
+                if let Err(e) = repo
+                    .record(
+                        &id,
+                        parent,
+                        &label,
+                        &format!("resumed sub-agent: {label}"),
+                        "",
+                        crate::db::KIND_AGENT,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        target: "subagent",
+                        "Failed to persist resumed sub-agent '{label}' recovery row: {e:#}"
+                    );
+                }
+            });
         }
     }
 
@@ -358,6 +417,7 @@ impl SubAgentManager {
             agent.cancel_token = cancel_token;
             agent.input_tx = Some(input_tx);
             agent.output = None;
+            Self::record_recovery_row(agent);
             return true;
         }
         false

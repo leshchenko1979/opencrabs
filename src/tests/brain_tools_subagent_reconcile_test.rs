@@ -1,12 +1,13 @@
-//! Startup reconciliation of orphaned detached-work status files
-//! (#1038, unified #26).
+//! Boot hygiene of orphaned detached-work status files (#1038, unified #26).
 //!
-//! A sub-agent or detached command dies with the process; its status file
-//! does not. Every file still `Pending` or `Running` at startup belongs to
-//! work that no longer exists, and must stop reading as live.
+//! Since #26 P2 this pass is MARKING-ONLY: the interruption reports come from
+//! the recovery-table scan (`restart_recovery::report_interrupted`), which
+//! covers both kinds. These tests therefore assert file states, not returned
+//! reports — a report asserted here AND from the table would be the
+//! double-message the unification exists to kill.
 
 use crate::brain::agent::service::work_status::*;
-use crate::brain::tools::subagent::reconcile::reconcile_orphaned_agents;
+use crate::brain::tools::subagent::reconcile::mark_orphans_and_sweep;
 use std::fs;
 
 /// Point the test override at a NESTED dir so [`legacy_dir`] (the
@@ -28,13 +29,9 @@ fn a_running_agent_becomes_interrupted() {
     let mut s = WorkStatus::new_agent("agent-1", "build docs", "sess-a", "do things").unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    mark_orphans_and_sweep();
 
-    assert_eq!(orphans.len(), 1);
-    assert_eq!(orphans[0].id, "agent-1");
-    assert_eq!(orphans[0].state, WorkState::Interrupted);
-
-    // Persisted, not just returned: the next reader must see it too.
+    // Persisted, not just logged: the next reader must see it too.
     let reread = WorkStatus::read("agent-1").expect("status file still present");
     assert_eq!(reread.state, WorkState::Interrupted);
 }
@@ -45,10 +42,12 @@ fn a_pending_agent_becomes_interrupted() {
     isolate("pending");
     WorkStatus::new_agent("agent-2", "lint", "sess-b", "do things").unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    mark_orphans_and_sweep();
 
-    assert_eq!(orphans.len(), 1);
-    assert_eq!(orphans[0].state, WorkState::Interrupted);
+    assert_eq!(
+        WorkStatus::read("agent-2").unwrap().state,
+        WorkState::Interrupted
+    );
 }
 
 #[test]
@@ -62,10 +61,8 @@ fn a_parked_agent_becomes_interrupted() {
     s.mark_running().unwrap();
     s.mark_awaiting_input().unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    mark_orphans_and_sweep();
 
-    assert_eq!(orphans.len(), 1);
-    assert_eq!(orphans[0].state, WorkState::Interrupted);
     let reread = WorkStatus::read("agent-4").expect("status file still present");
     assert_eq!(reread.state, WorkState::Interrupted);
 }
@@ -79,12 +76,10 @@ fn interrupted_carries_a_reason_and_a_completion_stamp() {
     let mut s = WorkStatus::new_agent("agent-3", "test", "sess-c", "do things").unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    mark_orphans_and_sweep();
 
-    let finish = orphans[0]
-        .finish
-        .as_ref()
-        .expect("interrupted stamps a finish");
+    let reread = WorkStatus::read("agent-3").expect("status file still present");
+    let finish = reread.finish.as_ref().expect("interrupted stamps a finish");
     assert!(
         finish.error.as_deref().unwrap_or("").contains("restart"),
         "was: {:?}",
@@ -101,9 +96,8 @@ fn terminal_agents_are_left_alone() {
     let mut failed = WorkStatus::new_agent("agent-failed", "b", "sess-d", "p").unwrap();
     failed.mark_failed("boom".to_string()).unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    mark_orphans_and_sweep();
 
-    assert!(orphans.is_empty(), "nothing mid-flight to reconcile");
     assert_eq!(
         WorkStatus::read("agent-done").unwrap().state,
         WorkState::Completed
@@ -115,33 +109,46 @@ fn terminal_agents_are_left_alone() {
 }
 
 #[test]
-fn the_parent_session_survives_so_the_report_can_be_routed() {
-    // The whole point of returning the statuses: the caller needs to know
-    // which session to tell.
+fn the_status_file_keeps_its_session_stamp() {
+    // The report is routed from the DB row now, but the file's session stamp
+    // must survive the marking untouched — settle cards read it.
     isolate("parent");
     let mut s = WorkStatus::new_agent("agent-4", "deploy", "sess-parent", "p").unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    mark_orphans_and_sweep();
 
-    assert_eq!(orphans[0].session_id, "sess-parent");
+    assert_eq!(
+        WorkStatus::read("agent-4").unwrap().session_id,
+        "sess-parent"
+    );
 }
 
 #[test]
-fn reconciling_is_idempotent() {
-    // A second startup must not re-report an agent already accounted for.
+fn marking_is_idempotent() {
+    // A second startup must not re-stamp an agent already accounted for.
     isolate("idempotent");
     let mut s = WorkStatus::new_agent("agent-5", "x", "sess-e", "p").unwrap();
     s.mark_running().unwrap();
 
-    assert_eq!(reconcile_orphaned_agents().len(), 1);
-    assert!(reconcile_orphaned_agents().is_empty());
+    mark_orphans_and_sweep();
+    let first = WorkStatus::read("agent-5").unwrap();
+    assert_eq!(first.state, WorkState::Interrupted);
+
+    mark_orphans_and_sweep();
+    let second = WorkStatus::read("agent-5").unwrap();
+    assert_eq!(second.state, WorkState::Interrupted);
+    assert_eq!(
+        first.finish.as_ref().map(|f| f.completed_at.clone()),
+        second.finish.as_ref().map(|f| f.completed_at.clone()),
+        "the second pass must not restamp the finish"
+    );
 }
 
 #[test]
 fn a_missing_status_dir_is_not_an_error() {
     isolate("missing");
-    assert!(reconcile_orphaned_agents().is_empty());
+    mark_orphans_and_sweep();
 }
 
 #[test]
@@ -152,29 +159,28 @@ fn unparseable_files_do_not_abort_the_pass() {
     let mut s = WorkStatus::new_agent("agent-6", "y", "sess-f", "p").unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    mark_orphans_and_sweep();
 
-    assert_eq!(orphans.len(), 1, "the healthy file is still reconciled");
-    assert_eq!(orphans[0].id, "agent-6");
+    assert_eq!(
+        WorkStatus::read("agent-6").unwrap().state,
+        WorkState::Interrupted,
+        "the healthy file is still marked"
+    );
 }
 
-// ── #26 P1: two kinds share the dir ─────────────────────────────────
+// ── #26 P1/P2: two kinds share the dir, reports live in the table ──
 
 #[test]
 fn a_running_command_is_interrupted_on_disk_but_not_reported() {
     // Commands share the dir since #26, so the pass must stop them reading
-    // as live too — but their interruption report still rides the DB row
-    // (#763): returning them here as well would double-message until the
-    // boot pass unifies (P2).
+    // as live too. Since P2 NEITHER kind is reported from files: the row
+    // scan owns both reports, and reporting here as well would
+    // double-message.
     isolate("command");
     WorkStatus::new_command("cmd-1", "sess-g", "nightly build", "cargo build").unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    mark_orphans_and_sweep();
 
-    assert!(
-        orphans.is_empty(),
-        "commands are not returned for reporting"
-    );
     let reread = WorkStatus::read("cmd-1").expect("command file still present");
     assert_eq!(reread.state, WorkState::Interrupted, "marked on disk");
     assert!(
@@ -189,24 +195,29 @@ fn a_running_command_is_interrupted_on_disk_but_not_reported() {
 }
 
 #[test]
-fn mixed_kinds_report_only_the_agents() {
+fn mixed_kinds_are_both_marked() {
     isolate("mixed");
     let mut agent = WorkStatus::new_agent("agent-m", "docs", "sess-m", "p").unwrap();
     agent.mark_running().unwrap();
     WorkStatus::new_command("cmd-m", "sess-m", "build", "make").unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    mark_orphans_and_sweep();
 
-    assert_eq!(orphans.len(), 1);
-    assert_eq!(orphans[0].id, "agent-m");
-    assert_eq!(orphans[0].kind, WorkKind::Agent);
+    assert_eq!(
+        WorkStatus::read("agent-m").unwrap().state,
+        WorkState::Interrupted
+    );
+    assert_eq!(
+        WorkStatus::read("cmd-m").unwrap().state,
+        WorkState::Interrupted
+    );
 }
 
 #[test]
-fn a_legacy_running_agent_is_migrated_then_reported() {
+fn a_legacy_running_agent_is_migrated_then_marked() {
     // End-to-end upgrade path (#1038 survives the dir move): a pre-#26
     // agent file in the old dir is migrated into the unified dir first,
-    // then interrupted and returned like any other orphan.
+    // then interrupted like any other orphan.
     isolate("legacy_e2e");
     fs::create_dir_all(legacy_dir()).unwrap();
     let legacy = serde_json::json!({
@@ -223,16 +234,8 @@ fn a_legacy_running_agent_is_migrated_then_reported() {
     )
     .unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    mark_orphans_and_sweep();
 
-    assert_eq!(orphans.len(), 1);
-    assert_eq!(orphans[0].id, "agent-old");
-    assert_eq!(orphans[0].kind, WorkKind::Agent);
-    assert_eq!(
-        orphans[0].session_id, "sess-old",
-        "routing survives migration"
-    );
-    assert_eq!(orphans[0].state, WorkState::Interrupted);
-    assert!(!legacy_dir().exists(), "legacy dir consumed");
-    assert!(status_path("agent-old").exists(), "file moved, not lost");
+    let reread = WorkStatus::read("agent-old").expect("migrated into the unified dir");
+    assert_eq!(reread.state, WorkState::Interrupted);
 }

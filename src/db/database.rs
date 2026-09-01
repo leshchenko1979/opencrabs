@@ -135,6 +135,9 @@ pub(crate) fn build_migrations() -> Migrations<'static> {
             "../migrations/20260725000001_add_background_tasks.sql"
         )),
         M::up(include_str!(
+            "../migrations/20260901000001_add_background_tasks_kind.sql"
+        )),
+        M::up(include_str!(
             "../migrations/20260726000001_add_plan_cards.sql"
         )),
         M::up(include_str!(

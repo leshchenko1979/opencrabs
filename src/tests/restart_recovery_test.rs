@@ -127,3 +127,53 @@ fn flushing_with_nothing_parked_is_a_no_op() {
     assert_eq!(flush_parked(&local), 0);
     assert!(seen.lock().unwrap().is_empty());
 }
+
+// ── #26 P2: one builder frames both kinds ───────────────────────────
+
+use crate::brain::agent::service::restart_recovery::interrupted_message;
+use crate::db::{BackgroundTaskRow, KIND_AGENT, KIND_COMMAND};
+
+fn row(kind: &str) -> BackgroundTaskRow {
+    BackgroundTaskRow {
+        id: "deadbeef".to_string(),
+        session_id: Uuid::new_v4(),
+        label: "nightly build".to_string(),
+        command: if kind == KIND_AGENT {
+            "summarize the docs".to_string()
+        } else {
+            "cargo build --release".to_string()
+        },
+        started_at: 0,
+        kind: kind.to_string(),
+    }
+}
+
+#[test]
+fn a_command_row_reports_background_task_framing() {
+    let msg = interrupted_message(&row(KIND_COMMAND));
+
+    assert!(
+        msg.context_text.contains("[BACKGROUND TASK INTERRUPTED]"),
+        "was: {}",
+        msg.context_text
+    );
+    assert!(msg.context_text.contains("cargo build --release"));
+    assert!(msg.display_text.starts_with("⚠️ Background task"));
+}
+
+#[test]
+fn an_agent_row_reports_sub_agent_framing() {
+    // Same table, same builder, but the agent must read as a sub-agent so the
+    // parent decides whether to re-SPAWN rather than re-run a command.
+    let msg = interrupted_message(&row(KIND_AGENT));
+
+    assert!(
+        msg.context_text.contains("[SUB-AGENT INTERRUPTED]"),
+        "was: {}",
+        msg.context_text
+    );
+    assert!(msg.context_text.contains("summarize the docs"));
+    assert!(msg.display_text.starts_with("⚠️ Sub-agent"));
+    // Both framings hand the decision back — never claim an outcome.
+    assert!(msg.context_text.contains("did NOT complete"));
+}

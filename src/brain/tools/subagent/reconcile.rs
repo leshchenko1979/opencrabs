@@ -1,4 +1,4 @@
-//! Startup reconciliation of orphaned status files (#1038, unified #26).
+//! Boot-time hygiene of orphaned status files (#1038, unified #26).
 //!
 //! A sub-agent runs inside a `tokio::spawn`ed task, so it dies with the
 //! process. Its status file does not: it stays on disk in whatever state it
@@ -6,16 +6,13 @@
 //! Anything reading those files then sees a live agent that no longer exists.
 //! Detached commands share the dir and the failure mode since #26.
 //!
-//! Nothing reconciled them, and the sweep the module documented was never
-//! wired: [`crate::brain::agent::service::work_status::cleanup_stale`] had
-//! no caller outside tests, so orphaned files accumulated indefinitely.
-//!
-//! This pass runs once at startup, before any new work is spawned. Every
-//! non-terminal file belongs to a dead process by definition, so each is
-//! moved to `Interrupted` on disk. Only AGENT files are
-//! returned for reporting: a command's interruption is still reported from
-//! its DB row (#763), and reporting both kinds here would double-message
-//! until the boot pass unifies (issue #26 P2).
+//! #26 P2 moved the interruption REPORTING to the recovery-table scan
+//! (`restart_recovery::report_interrupted`), which covers both kinds from one
+//! source. What remains here is marking-only: every non-terminal file belongs
+//! to a dead process by definition, so each is moved to `Interrupted` on disk
+//! so `tasks_list` and the settle cards stop reading dead work as live, and
+//! aged-out files are swept. No reporting, no return value — the row scan
+//! owns the messages, and reporting from both sides would double-message.
 
 use std::time::Duration;
 
@@ -25,22 +22,20 @@ use crate::brain::agent::service::work_status::{self, WorkKind, WorkStatus, stat
 /// Matches the 7 days the module has always documented.
 pub const STALE_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Move every non-terminal status file to `Interrupted`, then sweep files
-/// that have aged out.
+/// Mark every non-terminal status file `Interrupted`, then sweep files that
+/// have aged out.
 ///
-/// Returns the AGENTS that were interrupted, oldest file first, so the
-/// caller can tell their sessions. An agent whose file cannot be re-written
-/// is still returned: the session deserves the report even when the file is
-/// stuck, and the write failure is logged rather than swallowed. Interrupted
-/// COMMAND files are marked on disk (their state must stop reading as live)
-/// but not returned — the DB row scan owns their report (#763).
+/// Marking-only by design (#26 P2): the caller reports interruptions from the
+/// recovery table, so nothing is returned and nothing is messaged from here.
+/// A file that cannot be re-written still gets its log line: it would keep
+/// reading as live otherwise, and going quiet is how the original bug hid.
 ///
 /// Ordering matters. Legacy migration runs first so pre-#26 agent files are
-/// already home when reconciliation looks. Reconciliation runs before the
-/// sweep so an interrupted item gets its finish stamped first and ages out
-/// on the same schedule as any other terminal state, instead of lingering
-/// as an unexplained file.
-pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
+/// already home when the marking pass looks. Marking runs before the sweep so
+/// an interrupted item gets its finish stamped first and ages out on the same
+/// schedule as any other terminal state, instead of lingering as an
+/// unexplained file.
+pub fn mark_orphans_and_sweep() {
     let migrated = work_status::migrate_legacy_dir(&work_status::legacy_dir());
     if migrated > 0 {
         tracing::info!(
@@ -49,7 +44,7 @@ pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
         );
     }
 
-    let interrupted = mark_orphans_interrupted();
+    mark_orphans_interrupted();
 
     match work_status::cleanup_stale(STALE_AFTER) {
         Ok((scanned, removed)) if removed > 0 => {
@@ -64,18 +59,14 @@ pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
             tracing::warn!(target: "subagent", "Detached-work status sweep failed: {e}");
         }
     }
-
-    interrupted
-        .into_iter()
-        .filter(|status| status.kind == WorkKind::Agent)
-        .collect()
 }
 
-/// Walk the status directory and interrupt everything still mid-flight.
-fn mark_orphans_interrupted() -> Vec<WorkStatus> {
+/// Walk the status directory and mark everything still mid-flight as
+/// interrupted.
+fn mark_orphans_interrupted() {
     let dir = status_dir();
     if !dir.exists() {
-        return Vec::new();
+        return;
     }
 
     let entries = match std::fs::read_dir(&dir) {
@@ -86,11 +77,10 @@ fn mark_orphans_interrupted() -> Vec<WorkStatus> {
                 "Could not read detached-work status dir {}: {e}",
                 dir.display()
             );
-            return Vec::new();
+            return;
         }
     };
 
-    let mut orphans: Vec<WorkStatus> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "json") {
@@ -151,9 +141,5 @@ fn mark_orphans_interrupted() -> Vec<WorkStatus> {
                 status.session_id
             ),
         }
-        orphans.push(status);
     }
-
-    orphans.sort_by(|a, b| a.spawned_at.cmp(&b.spawned_at));
-    orphans
 }

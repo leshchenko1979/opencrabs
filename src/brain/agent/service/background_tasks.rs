@@ -138,7 +138,14 @@ impl BackgroundTaskManager {
             if let Some(repo) = task_repo() {
                 let cwd_str = cwd.to_string_lossy().to_string();
                 if let Err(e) = repo
-                    .record(task_id, session_id, &label, &command, &cwd_str)
+                    .record(
+                        &task_id.to_string(),
+                        session_id,
+                        &label,
+                        &command,
+                        &cwd_str,
+                        crate::db::KIND_COMMAND,
+                    )
                     .await
                 {
                     // Not fatal: the command still runs and still resumes the

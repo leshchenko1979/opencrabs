@@ -511,6 +511,33 @@ impl Tool for SpawnAgentTool {
         // (#1036). Not the child's session, which nothing is listening to.
         let parent_session_id = context.session_id;
 
+        // Persist BEFORE spawning, same contract as detached commands (#763):
+        // a restart mid-agent must find a row to report as interrupted, so the
+        // parent session is never left waiting on a resume that cannot come
+        // (#26 P2 — agents previously lived only in status files and needed a
+        // separate file-scanning reconcile pass at boot). NOT fatal on error:
+        // the agent still runs and its result still reaches the parent in this
+        // process; only restart accounting is lost.
+        if let Some(repo) = crate::db::global_pool() {
+            let repo = crate::db::BackgroundTaskRepository::new(repo.clone());
+            if let Err(e) = repo
+                .record(
+                    &agent_id,
+                    parent_session_id,
+                    &label,
+                    &full_prompt,
+                    "",
+                    crate::db::KIND_AGENT,
+                )
+                .await
+            {
+                tracing::error!(
+                    target: "subagent",
+                    "Failed to persist sub-agent '{label}' recovery row: {e:#}"
+                );
+            }
+        }
+
         let handle = tokio::spawn(async move {
             tracing::info!("Sub-agent {} starting: {}", agent_id_clone, prompt_clone);
 

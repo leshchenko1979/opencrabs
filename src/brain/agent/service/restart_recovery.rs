@@ -297,13 +297,17 @@ pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// Account for background tasks that were running when a previous process
-/// died, then clear them.
+/// Account for every row a restart orphaned: report it to its session, then
+/// clear it.
 ///
 /// Every surviving row belonged to a process that no longer exists, so its
-/// child is gone too: there is nothing to reattach to and no result coming.
+/// work is gone too: there is nothing to reattach to and no result coming.
 /// Each one is reported into its session as an interruption so the agent can
 /// decide whether to re-run it, rather than waiting forever on a resume that
-/// can never arrive (#763). Returns how many were reported.
+/// can never arrive (#763). Since #26 P2 the table covers BOTH kinds of
+/// detached work — commands and sub-agents — so this one scan is the whole
+/// boot accounting; the old file-scanning agent reconcile pass is gone.
+/// Returns how many were reported.
 pub async fn report_interrupted() -> usize {
     let Some(repo) = super::background_tasks::task_repo() else {
         return 0;
@@ -322,7 +326,8 @@ pub async fn report_interrupted() -> usize {
     for row in rows {
         tracing::warn!(
             target: "background_task",
-            "Background task '{}' for session {} was interrupted by a restart",
+            "Detached {} '{}' for session {} was interrupted by a restart",
+            row.kind,
             row.label,
             row.session_id
         );
@@ -337,13 +342,14 @@ pub async fn report_interrupted() -> usize {
         // Clear per row, only after it is accounted for. clear_all() used to
         // run regardless, so a row whose report never got produced was
         // dropped from the table anyway and its session never heard anything.
-        if let Err(e) = repo.clear(row.id).await {
+        if let Err(e) = repo.clear(row.id.clone()).await {
             // A surviving row re-reports the same interruption next start,
             // which is noisy but recoverable; the report itself already
             // landed, so this is not fatal.
             tracing::error!(
                 target: "background_task",
-                "Failed to clear background task '{}' after reporting it: {e:#}",
+                "Failed to clear interrupted {} '{}' after reporting it: {e:#}",
+                row.kind,
                 row.label
             );
         }
@@ -351,20 +357,32 @@ pub async fn report_interrupted() -> usize {
     count
 }
 
-/// What the agent is told about a command a restart killed. Deliberately
-/// states that it did NOT finish and hands the decision back, rather than
-/// re-running something expensive on the agent's behalf.
-fn interrupted_message(row: &crate::db::BackgroundTaskRow) -> QueuedUserMessage {
+/// What the agent is told about a unit of detached work a restart killed —
+/// the ONE builder for both kinds (#26 P2). Deliberately states that the work
+/// did NOT finish and hands the decision back, rather than re-running
+/// something expensive on the agent's behalf.
+pub(crate) fn interrupted_message(row: &crate::db::BackgroundTaskRow) -> QueuedUserMessage {
+    let is_agent = row.kind == crate::db::KIND_AGENT;
+    let (tag, noun) = if is_agent {
+        ("[SUB-AGENT INTERRUPTED]", "sub-agent")
+    } else {
+        ("[BACKGROUND TASK INTERRUPTED]", "task")
+    };
     let context_text = format!(
-        "[BACKGROUND TASK INTERRUPTED] `{}` was still running when OpenCrabs restarted, so it \
-         was killed and produced no result. The command was:\n\n```\n{}\n```\n\nIt did NOT \
-         complete. Decide whether to run it again based on what you were doing; do not assume \
-         it passed or failed.",
+        "{tag} `{}` (a {noun}) was still running when OpenCrabs restarted, so it \
+         was killed and produced no result. What it was doing:\n\n```\n{}\n```\n\nIt \
+         did NOT complete. Decide whether to run it again based on what you were doing; do not \
+         assume it passed or failed.",
         row.label, row.command
     );
+    let display_verb = if is_agent {
+        "Sub-agent"
+    } else {
+        "Background task"
+    };
     QueuedUserMessage {
         context_text,
-        display_text: format!("⚠️ Background task interrupted by restart: {}", row.label),
+        display_text: format!("⚠️ {} interrupted by restart: {}", display_verb, row.label),
         origin: PushOrigin::Recovery,
         bg_meta: None,
     }
@@ -386,32 +404,13 @@ fn interrupted_message(row: &crate::db::BackgroundTaskRow) -> QueuedUserMessage 
 /// for a channel to claim their session instead of being handed to a
 /// destination that would discard them (#1206).
 pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
-    // Sub-agents first: they die with the process but their status files do
-    // not, so every file still mid-flight is an agent that no longer exists.
-    let orphans = crate::brain::tools::subagent::reconcile::reconcile_orphaned_agents();
-    let mut reported = 0usize;
-    for orphan in orphans {
-        match Uuid::parse_str(&orphan.session_id) {
-            Ok(session_id) => {
-                deliver_or_park(session_id, subagent_interrupted_message(&orphan));
-                reported += 1;
-            }
-            Err(e) => {
-                // Nothing to route to. Say so rather than dropping it, since
-                // the agent's parent is waiting on a result either way.
-                tracing::error!(
-                    target: "background_task",
-                    "Sub-agent '{}' has an unparseable parent session '{}', its interruption \
-                     cannot be reported: {e}",
-                    orphan.label,
-                    orphan.session_id
-                );
-            }
-        }
-    }
-
-    // Then detached commands, which keep their own table.
-    reported += report_interrupted().await;
+    // One boot scan over the recovery table now covers BOTH kinds (#26 P2).
+    // Status files keep a marking-only pass below: they must stop reading as
+    // live (tasks_list, settle cards), but their interruption REPORT comes
+    // from the row scan above — never from the files, or both kinds would
+    // double-message.
+    crate::brain::tools::subagent::reconcile::mark_orphans_and_sweep();
+    let reported = report_interrupted().await;
 
     if reported > 0 {
         tracing::info!(
@@ -430,27 +429,4 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
         ),
     }
     reported
-}
-
-/// What the parent agent is told about a sub-agent a restart killed.
-///
-/// Mirrors the framing used for detached commands: state plainly that it did
-/// not finish and hand the decision back, rather than letting the agent read
-/// an absent result as either success or failure.
-fn subagent_interrupted_message(
-    status: &crate::brain::agent::service::work_status::WorkStatus,
-) -> QueuedUserMessage {
-    let context_text = format!(
-        "[SUB-AGENT INTERRUPTED] The sub-agent `{}` (id {}) was still running when OpenCrabs \
-         restarted, so it was killed and produced no result. Its task was:\n\n```\n{}\n```\n\nIt \
-         did NOT complete. Decide whether to spawn it again based on what you were doing; do not \
-         assume it succeeded or failed.",
-        status.label, status.id, status.task
-    );
-    QueuedUserMessage {
-        context_text,
-        display_text: format!("⚠️ Sub-agent interrupted by restart: {}", status.label),
-        origin: PushOrigin::Recovery,
-        bg_meta: None,
-    }
 }
