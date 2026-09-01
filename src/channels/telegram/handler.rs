@@ -397,12 +397,10 @@ pub(crate) fn is_split_candidate(text: &str) -> bool {
     text.encode_utf16().count() >= TELEGRAM_TEXT_LIMIT - SPLIT_MARGIN
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Shared plan-card settle tail (#580, #621, #69): finalize a just-archived
 /// plan's card, or re-stick + refresh the live card to the bottom of the
 /// thread. Called from the normal settle path AND the interrupt-superseded
 /// exit (#69) — see the call sites for the gate discussion.
-#[allow(clippy::too_many_arguments)]
 async fn restick_plan_card_settle(
     bot: &Bot,
     chat_id: ChatId,
@@ -465,6 +463,7 @@ async fn restick_plan_card_settle(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_message(
     bot: Bot,
     msg: Message,
