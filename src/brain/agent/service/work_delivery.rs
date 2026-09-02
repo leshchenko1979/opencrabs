@@ -104,7 +104,11 @@ pub(crate) fn work_completion(payload: WorkPayload) -> QueuedUserMessage {
             label,
             agent_id,
             outcome,
-        } => agent_completion(&label, &agent_id, outcome.as_deref()),
+        } => agent_completion(
+            &label,
+            &agent_id,
+            outcome.as_deref().map_err(String::as_str),
+        ),
     }
 }
 
