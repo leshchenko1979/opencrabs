@@ -27,6 +27,16 @@ name: PR-lane gates
 # uploads the regenerated lock as the `regen-lock` artifact for box-side
 # application (box law 2026-08-28: no cargo on the box). Lock-regen mode
 # skips the gate steps. Revert = delete the lockregen input + its steps.
+# Swap mode (owner 2026-09-03, fleet-directives 'Swap-head signature for
+# merge-derived binaries'):
+#   gh workflow run pr-checks.yml --ref ci/quick-build-linux -f ref=<swap-head-sha> -f swap=true
+# mirrors build-leg ORDER gate 4 (Session-Id trailer) on the gated ref
+# BEFORE the gates — a swap-mode GREEN means the head is swappable: the
+# quick-build leg has no remaining semantic failure mode (clippy+tests
+# subsume build success; the binary build itself stays quick-build's job,
+# no duplicate artifact per the 2026-08-31 de-dup ruling). Ordinary runs
+# are unchanged (input-gated). 2026-09-03 finding this prevents: bare
+# merge d02f4e08 passed this lane GREEN and died at the build leg.
 # The workflow yaml is read from this carrier branch (workflow_dispatch needs
 # the file on the dispatched ref); the job then checks out `inputs.ref`.
 # Keeping the yml here means PR-head branches carry zero infra commits into
@@ -56,6 +66,11 @@ on:
         required: false
         default: false
         type: boolean
+      swap:
+        description: "true = swap prep: mirror build-leg gate 4 (Session-Id trailer) on the gated ref before the gates; swap-mode GREEN means swappable"
+        required: false
+        default: false
+        type: boolean
 
 # Owner-approved 2026-08-30 (fix batch, a87b66dc; group KEY corrected same
 # day, owner "Fix it" 02:32Z on the cancel-storm finding): every
@@ -82,13 +97,22 @@ env:
 
 jobs:
   gates:
-    name: PR-lane gates (${{ inputs.ref }}${{ inputs.fix && ' — FIX MODE' || inputs.lockregen && ' — LOCK REGEN' || '' }})
+    name: PR-lane gates (${{ inputs.ref }}${{ inputs.fix && ' — FIX MODE' || inputs.lockregen && ' — LOCK REGEN' || inputs.swap && ' — SWAP MODE' || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.ref }}
+
+      - name: Gate 4 mirror — Session-Id trailer on the gated ref (swap mode)
+        if: ${{ inputs.swap && !inputs.fix && !inputs.lockregen }}
+        # Mirrors quick-build-linux.yml ORDER gate 4 EXACTLY (same regex), so
+        # a swap-mode RED here equals the build-leg refusal — caught minutes
+        # earlier, before a wasted build dispatch.
+        run: |
+          git log -1 --format=%B "${{ inputs.ref }}" | grep -Eq '^Session-Id:[[:space:]]*[0-9a-fA-F-]{36}' \
+            || { echo "GATE 4 MIRROR FAIL: no Session-Id trailer on ${{ inputs.ref }} (swap heads must be trailer-signed; for merge heads land an empty trailer-signed marker commit — fleet-directives 2026-09-03)"; exit 1; }
 
       - name: Install Rust (from rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
