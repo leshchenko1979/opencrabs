@@ -196,6 +196,7 @@ pub mod config_types_loader_test;
 pub mod config_update_test;
 pub mod config_voice_migration_test;
 pub mod config_watcher_test;
+pub mod config_write_existing_section_test;
 pub mod config_write_path_test;
 pub mod content_vectors_heal_test;
 pub mod context_provider_anchor_test;

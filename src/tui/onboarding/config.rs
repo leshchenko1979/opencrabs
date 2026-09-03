@@ -839,6 +839,10 @@ impl OnboardingWizard {
                 // read-only view assembled from providers.tts (#1385), and
                 // writing voice.tts_voice was rejected on save, which reverted
                 // the step and trapped the wizard on VoiceSetup (#1387).
+                // Write selected voice under providers.tts.openai.voice — the
+                // struct registry's real location. The legacy `[voice]` table
+                // is migration-only; writing it directly would now be an
+                // orphan table the write guard rejects (#83).
                 try_write!(
                     write_errors,
                     "providers.tts.openai",

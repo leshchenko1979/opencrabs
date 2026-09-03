@@ -63,23 +63,21 @@ impl Config {
             .and_then(|s| s.local.as_ref())
             .map(|l| l.model.clone())
             .unwrap_or_else(default_local_stt_model);
-        // A disabled engine contributes NOTHING to the runtime view (#1399).
-        // The dispatcher picks providers by the presence of these fields, so
-        // a disabled openai_compatible block that still carries its
-        // base_url used to be dispatched first and fail on every voice note
-        // while the enabled provider waited behind it.
-        let stt_compat = stt
+        let stt_base_url = stt
             .and_then(|s| s.openai_compatible.as_ref())
-            .filter(|c| c.enabled);
-        let stt_base_url = stt_compat.and_then(|c| c.base_url.clone());
-        let stt_model = stt_compat
+            .and_then(|c| c.base_url.clone())
+            .or_else(|| groq_enabled.then(|| "https://api.groq.com/openai/v1".to_string()));
+        let stt_model = stt
+            .and_then(|s| s.openai_compatible.as_ref())
             .and_then(|c| c.model.clone())
             .or_else(|| Some("whisper-large-v3-turbo".to_string()));
-        let stt_api_key = stt_compat.and_then(|c| c.api_key.clone()).or_else(|| {
-            stt.and_then(|s| s.groq.as_ref())
-                .filter(|g| g.enabled)
-                .and_then(|g| g.api_key.clone())
-        });
+        let stt_api_key = stt
+            .and_then(|s| s.openai_compatible.as_ref())
+            .and_then(|c| c.api_key.clone())
+            .or_else(|| {
+                stt.and_then(|s| s.groq.as_ref())
+                    .and_then(|g| g.api_key.clone())
+            });
 
         // TTS: detect all modes
         let openai_tts_enabled = tts
@@ -120,20 +118,17 @@ impl Config {
                     .and_then(|c| c.model.clone())
             })
             .unwrap_or_else(default_tts_model);
-        // Same rule as STT (#1399): only an ENABLED openai_compatible block
-        // feeds tts_base_url / tts_api_key, and only an enabled openai block
-        // lends its key. The OpenAI kind never reads tts_base_url, so no
-        // synthetic api.openai.com URL is planted here any more; it only
-        // made the dispatcher label real OpenAI calls as openai_compatible.
-        let tts_compat = tts
+        let tts_base_url = tts
             .and_then(|t| t.openai_compatible.as_ref())
-            .filter(|c| c.enabled);
-        let tts_base_url = tts_compat.and_then(|c| c.base_url.clone());
-        let tts_api_key = tts_compat.and_then(|c| c.api_key.clone()).or_else(|| {
-            tts.and_then(|t| t.openai.as_ref())
-                .filter(|o| o.enabled)
-                .and_then(|o| o.api_key.clone())
-        });
+            .and_then(|c| c.base_url.clone())
+            .or_else(|| openai_tts_enabled.then(|| "https://api.openai.com".to_string()));
+        let tts_api_key = tts
+            .and_then(|t| t.openai_compatible.as_ref())
+            .and_then(|c| c.api_key.clone())
+            .or_else(|| {
+                tts.and_then(|t| t.openai.as_ref())
+                    .and_then(|o| o.api_key.clone())
+            });
         let local_tts_voice = tts
             .and_then(|t| t.local.as_ref())
             .map(|l| l.voice.clone())
@@ -157,11 +152,8 @@ impl Config {
             .map(|v| v.engine.clone())
             .unwrap_or_default();
 
-        // The provider blocks the Groq and OpenAI kinds read their key from
-        // are present only while enabled (#1399), so a switched-off engine
-        // with a stored key is not a candidate.
-        let stt_provider = stt.and_then(|s| s.groq.clone()).filter(|g| g.enabled);
-        let tts_provider = tts.and_then(|t| t.openai.clone()).filter(|o| o.enabled);
+        let stt_provider = stt.and_then(|s| s.groq.clone());
+        let tts_provider = tts.and_then(|t| t.openai.clone());
 
         // STT fallback chain: empty by default (dispatcher uses its built-
         // in priority). User configures via [providers.stt].fallback_chain
@@ -439,31 +431,6 @@ impl Config {
         Ok(config)
     }
 
-    /// Known top-level sections in config.toml.
-    ///
-    /// Pinned to the compiled schema by the drift-guard test in
-    /// `src/tests/rsi_stale_scan_test.rs` — extend that test's array when a
-    /// section is added here (or vice versa).
-    pub(crate) const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
-        "provider_registry",
-        "database",
-        "logging",
-        "debug",
-        "providers",
-        "channels",
-        "agent",
-        "daemon",
-        "a2a",
-        "gateway",
-        "image",
-        "cron",
-        "memory",
-        "brain",
-        "browser",
-        "doctor",
-        "tui",
-    ];
-
     /// Check for unknown top-level keys and log warnings.
     /// Only collects warnings once — subsequent calls are no-ops.
     fn warn_unknown_keys(path: &Path) {
@@ -473,18 +440,17 @@ impl Config {
             return;
         }
 
+        // #83: the same serde_ignored pass the write guard uses — the
+        // compiled `Config` struct is the registry, so this warning can
+        // never drift (its predecessor, the hand-maintained
+        // `KNOWN_TOP_LEVEL_KEYS` list, was missing `doctor`, so a live
+        // [doctor] section warned as a possible typo).
         let Ok(raw) = std::fs::read_to_string(path) else {
             return;
         };
-        let Ok(table) = raw.parse::<toml::Table>() else {
+        let Ok(unknown) = crate::config::sections::unknown_top_level_sections(&raw) else {
             return;
         };
-        let mut unknown: Vec<String> = Vec::new();
-        for key in table.keys() {
-            if !Self::KNOWN_TOP_LEVEL_KEYS.contains(&key.as_str()) {
-                unknown.push(key.clone());
-            }
-        }
         if !unknown.is_empty() {
             tracing::warn!(
                 "Unknown top-level keys in config.toml (possible typos): {}",
@@ -594,9 +560,7 @@ impl Config {
         }
 
         // ── Migration 2: [voice] → providers.stt.* / providers.tts.* ──
-        let mut voice_migrated = false;
         if let Some(voice) = doc.get("voice").and_then(|v| v.as_table()).cloned() {
-            voice_migrated = true;
             let root = doc.as_table_mut().unwrap();
 
             // Ensure providers.stt and providers.tts tables exist
@@ -623,25 +587,22 @@ impl Config {
                 .and_then(|v| v.as_str())
                 .unwrap_or("api")
                 .to_string();
-            // A legacy [voice] that says enabled MEANS enabled (#1399). The
-            // old `entry("enabled").or_insert(true)` was a no-op whenever the
-            // provider table already carried `enabled = false`, so the
-            // migration could never re-enable what the user had on.
             if stt_enabled {
                 let stt = providers.get_mut("stt").unwrap().as_table_mut().unwrap();
-                let engine = if stt_mode == "local" { "local" } else { "groq" };
-                if !stt.contains_key(engine) {
-                    stt.insert(
-                        engine.to_string(),
-                        toml::Value::Table(toml::map::Map::new()),
-                    );
-                }
-                let table = stt.get_mut(engine).unwrap().as_table_mut().unwrap();
-                table.insert("enabled".to_string(), toml::Value::Boolean(true));
-                if engine == "local"
-                    && let Some(model) = voice.get("local_stt_model")
-                {
-                    table.entry("model").or_insert(model.clone());
+                if stt_mode == "local" {
+                    if !stt.contains_key("local") {
+                        stt.insert(
+                            "local".to_string(),
+                            toml::Value::Table(toml::map::Map::new()),
+                        );
+                    }
+                    let local = stt.get_mut("local").unwrap().as_table_mut().unwrap();
+                    local.entry("enabled").or_insert(toml::Value::Boolean(true));
+                    if let Some(model) = voice.get("local_stt_model") {
+                        local.entry("model").or_insert(model.clone());
+                    }
+                } else if let Some(groq) = stt.get_mut("groq").and_then(|g| g.as_table_mut()) {
+                    groq.entry("enabled").or_insert(toml::Value::Boolean(true));
                 }
             }
 
@@ -657,29 +618,27 @@ impl Config {
                 .to_string();
             if tts_enabled {
                 let tts = providers.get_mut("tts").unwrap().as_table_mut().unwrap();
-                let engine = if tts_mode == "local" {
-                    "local"
-                } else {
-                    "openai"
-                };
-                if !tts.contains_key(engine) {
-                    tts.insert(
-                        engine.to_string(),
-                        toml::Value::Table(toml::map::Map::new()),
-                    );
-                }
-                let table = tts.get_mut(engine).unwrap().as_table_mut().unwrap();
-                table.insert("enabled".to_string(), toml::Value::Boolean(true));
-                if engine == "local" {
-                    if let Some(voice_name) = voice.get("local_tts_voice") {
-                        table.entry("voice").or_insert(voice_name.clone());
+                if tts_mode == "local" {
+                    if !tts.contains_key("local") {
+                        tts.insert(
+                            "local".to_string(),
+                            toml::Value::Table(toml::map::Map::new()),
+                        );
                     }
-                } else {
+                    let local = tts.get_mut("local").unwrap().as_table_mut().unwrap();
+                    local.entry("enabled").or_insert(toml::Value::Boolean(true));
+                    if let Some(voice_name) = voice.get("local_tts_voice") {
+                        local.entry("voice").or_insert(voice_name.clone());
+                    }
+                } else if let Some(openai) = tts.get_mut("openai").and_then(|o| o.as_table_mut()) {
+                    openai
+                        .entry("enabled")
+                        .or_insert(toml::Value::Boolean(true));
                     if let Some(v) = voice.get("tts_voice") {
-                        table.entry("voice").or_insert(v.clone());
+                        openai.entry("voice").or_insert(v.clone());
                     }
                     if let Some(m) = voice.get("tts_model") {
-                        table.entry("model").or_insert(m.clone());
+                        openai.entry("model").or_insert(m.clone());
                     }
                 }
             }
@@ -750,13 +709,8 @@ impl Config {
         {
             trello.insert("board_ids", val);
         }
-        // Migration 2: remove [voice] section and carry the provider
-        // enablement it produced into this document (#1399); the removal
-        // alone left every migrated flag on the value document only.
+        // Migration 2: remove [voice] section
         edit_doc.as_table_mut().remove("voice");
-        if voice_migrated {
-            super::voice_port::port_voice_providers(&doc, &mut edit_doc);
-        }
 
         // Migration 4: seed bot_owner per channel where missing.
         for (channel, list_key) in Self::OWNER_SEED_CHANNELS {
@@ -765,10 +719,7 @@ impl Config {
 
         Self::backup_config(path, 7);
         if crate::config::types::io::atomic_write(path, &edit_doc.to_string()).is_ok() {
-            tracing::info!(
-                "Config migrated: rewrote {} (structural changes written)",
-                path.display()
-            );
+            tracing::info!("Config migrated (structural changes written)");
         }
 
         // Migration 3: inject subagent defaults after structural migration
@@ -921,7 +872,6 @@ impl Config {
             memory: overlay.memory,
             brain: overlay.brain,
             browser: overlay.browser,
-            tui: overlay.tui,
         }
     }
 
@@ -1039,14 +989,6 @@ impl Config {
     fn write_item(section: &str, key: &str, parsed: toml_edit::Item) -> Result<()> {
         use toml_edit::DocumentMut;
 
-        // Reject a section that is not a real config path BEFORE touching the
-        // file (#1199). The navigation below creates any table it is asked
-        // for, so an unknown section wrote successfully into an orphan table
-        // that serde discards on load: tooling reported success, the setting
-        // never applied, and reads kept honestly returning the old value.
-        crate::config::sections::validate_write_path(section)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-
         // Hold lock for entire read-modify-write to prevent races between
         // concurrent write_key calls (e.g. fallback provider switching fires
         // multiple writes in rapid succession).
@@ -1109,6 +1051,28 @@ impl Config {
                 "config write denied: setting [{section}].{key} would make config.toml invalid \
                  ({e}). The file was NOT changed."
             );
+        }
+
+        // Schema guard (#83): deserialize the candidate through `Config`
+        // with serde_ignored and refuse iff the struct would ignore a key at
+        // the target path. The compiled struct is the registry — a section
+        // the struct knows ([memory], [daemon], ...) writes without ceremony;
+        // anything the struct would discard on load is an orphan by
+        // construction and is refused (the #1199 rule, now struct-derived so
+        // no hand-maintained section list can drift). The parse guard above
+        // runs first, so a type error keeps surfacing with the #714 message.
+        let doc_path_owned = parts.join(".");
+        let doc_path = if doc_path_owned.is_empty() {
+            section
+        } else {
+            doc_path_owned.as_str()
+        };
+        if let Err(e) = crate::config::sections::write_guard(doc_path, key, &serialized) {
+            tracing::error!(
+                target: "config_guard",
+                "Denied config.toml write [{section}].{key}: {e}"
+            );
+            anyhow::bail!("config write denied: {e}");
         }
 
         // Back up before overwriting
