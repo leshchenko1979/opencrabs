@@ -392,25 +392,6 @@ impl WorkStatus {
         f.sync_all()?;
         fs::rename(tmp, path)
     }
-
-    /// List all known status files (by work id).
-    pub fn list_all() -> std::io::Result<Vec<String>> {
-        let dir = status_dir();
-        if !dir.exists() {
-            return Ok(Vec::new());
-        }
-        let mut ids = Vec::new();
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
-            if let Some(name) = entry.file_name().to_str()
-                && let Some(id) = name.strip_suffix(".json")
-            {
-                ids.push(id.to_string());
-            }
-        }
-        ids.sort();
-        Ok(ids)
-    }
 }
 
 // ── Legacy migration ─────────────────────────────────────────────────

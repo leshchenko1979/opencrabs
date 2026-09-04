@@ -142,7 +142,7 @@ impl BackgroundTaskManager {
                         &label,
                         &command,
                         &cwd_str,
-                        crate::db::KIND_COMMAND,
+                        super::work_delivery::WorkKind::Command.as_str(),
                     )
                     .await
                 {

@@ -386,7 +386,7 @@ impl SubAgentManager {
                         &label,
                         &format!("resumed sub-agent: {label}"),
                         "",
-                        crate::db::KIND_AGENT,
+                        crate::brain::agent::service::work_delivery::WorkKind::Agent.as_str(),
                     )
                     .await
                 {

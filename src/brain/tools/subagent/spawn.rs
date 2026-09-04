@@ -430,7 +430,7 @@ impl Tool for SpawnAgentTool {
                     &label,
                     &prompt_clone,
                     "",
-                    crate::db::KIND_AGENT,
+                    WorkKind::Agent.as_str(),
                 )
                 .await
             {
