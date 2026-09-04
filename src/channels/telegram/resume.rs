@@ -1510,6 +1510,7 @@ mod boot_classifier_tests {
     #[tokio::test]
     async fn user_last_without_bot_reply_recovers() {
         let db = Database::connect_in_memory().await.unwrap();
+        db.run_migrations().await.unwrap();
         let repo = ChannelMessageRepository::new(db.pool().clone());
         let t0 = Utc.timestamp_opt(1_788_000_000, 0).unwrap();
         repo.insert(&row("-100A", Some(7), "user:42", "check box 9", t0))
@@ -1525,6 +1526,7 @@ mod boot_classifier_tests {
     #[tokio::test]
     async fn bot_last_is_log_only() {
         let db = Database::connect_in_memory().await.unwrap();
+        db.run_migrations().await.unwrap();
         let repo = ChannelMessageRepository::new(db.pool().clone());
         let t0 = Utc.timestamp_opt(1_788_000_000, 0).unwrap();
         repo.insert(&row("-100B", Some(3), "user:42", "fix it", t0))
@@ -1542,6 +1544,7 @@ mod boot_classifier_tests {
     #[tokio::test]
     async fn empty_topic_is_log_only() {
         let db = Database::connect_in_memory().await.unwrap();
+        db.run_migrations().await.unwrap();
         let repo = ChannelMessageRepository::new(db.pool().clone());
         assert!(matches!(
             classify_topic(&repo, "-100C", Some(1)).await,
@@ -1552,6 +1555,7 @@ mod boot_classifier_tests {
     #[tokio::test]
     async fn classification_is_scoped_to_the_topic() {
         let db = Database::connect_in_memory().await.unwrap();
+        db.run_migrations().await.unwrap();
         let repo = ChannelMessageRepository::new(db.pool().clone());
         let t0 = Utc.timestamp_opt(1_788_000_000, 0).unwrap();
         let t1 = Utc.timestamp_opt(1_788_000_001, 0).unwrap();
