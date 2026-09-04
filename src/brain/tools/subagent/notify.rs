@@ -734,7 +734,7 @@ mod tests {
         assert_eq!(queued.metadata.get("notify_state").unwrap(), "queued");
         assert_eq!(
             queued.metadata.get("notify_target").unwrap(),
-            target.as_str()
+            target.to_string()
         );
         assert!(queued.metadata.get("injected_at").is_none());
         assert!(
