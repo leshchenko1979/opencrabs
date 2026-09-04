@@ -1200,37 +1200,192 @@ fn short_session_id(uuid: Uuid) -> String {
 /// window are recorded.
 pub const WAKE_RECENT_SECS: i64 = 600;
 
-/// Log every Telegram-bound session that was active shortly before boot but
-/// is not currently being resumed, so the stranded set is auditable (#1227).
+/// Continuation prompt for classifier-recovered turns (#33). The same seam
+/// the journal boot replay uses (ui.rs), kept as a constant here so the two
+/// recovery surfaces cannot drift apart in wording.
+pub(crate) const BOOT_RECOVERY_PROMPT: &str = "[System: A restart just occurred while you were \
+processing a request. Read the conversation context and continue where you left off naturally. \
+Do not mention the restart or any interruption — just pick up seamlessly.]";
+
+/// Cap on the stranded user message re-injected into a recovery prompt (#33).
+/// The full text already lives in `channel_messages` and usually in the
+/// session history too; this reminder only covers the kill window where it
+/// never reached the session history, so a bound keeps pathological inputs
+/// from turning a recovery prompt into a wall.
+const RECOVERY_CONTEXT_MAX_CHARS: usize = 2000;
+
+/// Truncate to `max` chars without panicking on a multi-byte boundary.
+fn truncate_chars(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((idx, _)) => s[..idx].to_string(),
+        None => s.to_string(),
+    }
+}
+
+/// What the boot classifier (#33) decides to do with one stranded session.
+#[derive(Debug)]
+enum TopicVerdict {
+    /// The topic's last stored message is from a user and no bot reply
+    /// followed: the turn died between turns. Recover with a real
+    /// continuation turn; `context` carries the stranded user text.
+    Recover { context: String },
+    /// The bot spoke last (turn completed before the kill), or the topic has
+    /// no stored messages to classify from. Log-only, exactly as #34 shipped.
+    LogOnly,
+}
+
+/// Sender id the bot's own outbound bubbles are stored under
+/// (`channel_messages`, see `bot_message_with_thread`).
+const BOT_SENDER_ID: &str = "bot:opencrabs";
+
+/// Classify one stranded session's topic by its last stored message (#33).
+///
+/// DB-only — no bot handle, no turn is run here — so it is testable against
+/// an in-memory database. Reads exactly one row: the newest message for the
+/// binding's chat/thread.
+async fn classify_topic(
+    repo: &ChannelMessageRepository,
+    chat_id: &str,
+    thread_id: Option<i32>,
+) -> TopicVerdict {
+    let tid = thread_id.map(|t| t.to_string());
+    let last = match repo
+        .recent(Some("telegram"), chat_id, 1, tid.as_deref(), None)
+        .await
+    {
+        Ok(rows) => rows.into_iter().next(),
+        Err(e) => {
+            tracing::warn!(
+                target: "telegram",
+                "Boot classifier (#33) could not read topic messages for chat {chat_id}: {e}"
+            );
+            return TopicVerdict::LogOnly;
+        }
+    };
+    match last {
+        // Nothing stored: nothing to classify from, nothing to answer.
+        None => TopicVerdict::LogOnly,
+        // Bot has the last word: the turn completed before the kill.
+        Some(m) if m.sender_id == BOT_SENDER_ID => TopicVerdict::LogOnly,
+        // A user holds the last word and no reply followed: the request was
+        // never answered — recover it.
+        Some(m) => TopicVerdict::Recover {
+            context: truncate_chars(&m.content, RECOVERY_CONTEXT_MAX_CHARS),
+        },
+    }
+}
+
+/// Spawn one classifier-recovered continuation turn (#33).
+///
+/// Mirrors the boot-replay readiness dance (ui.rs): wait for the transport,
+/// then for the bot to authenticate, then run the FULL streaming resume
+/// pipeline with `track_push_turn = true` — this is a push-initiated wake
+/// (#12), so a kill mid-tool leaves a boot-visible pending row and the next
+/// boot's journal resume picks the recovery up instead of losing it again
+/// (the exact `2fbfb2f8` signature the coma audit caught).
+fn spawn_boot_recovery(
+    telegram_state: Arc<TelegramState>,
+    agent: Arc<AgentService>,
+    session_id: Uuid,
+    chat_id_str: String,
+    thread_id: Option<i32>,
+    context: String,
+) {
+    tokio::spawn(async move {
+        let Some(_woken) =
+            crate::channels::transport_ready::await_transport("telegram", session_id, || {
+                telegram_state.bot()
+            })
+            .await
+        else {
+            tracing::warn!(
+                "Telegram: boot-classifier recovery for {session_id} skipped — transport never came up"
+            );
+            return;
+        };
+        let Some(bot) = crate::channels::bg_resume::wait_ready(
+            || telegram_state.bot(),
+            "boot classifier recovery: telegram bot",
+        )
+        .await
+        else {
+            tracing::warn!(
+                "Telegram: boot-classifier recovery for {session_id} skipped — bot never authenticated"
+            );
+            return;
+        };
+        let Ok(chat_raw) = chat_id_str.parse::<i64>() else {
+            tracing::warn!(
+                "Telegram: boot-classifier recovery for {session_id} skipped — unparsable chat id"
+            );
+            return;
+        };
+        let chat = ChatId(chat_raw);
+        let thread = super::session_resolve::delivery_thread_id(thread_id);
+        let mut prompt = BOOT_RECOVERY_PROMPT.to_string();
+        if !context.is_empty() {
+            prompt.push_str(
+                "\n\nThe user's last message, which may not have been answered yet, was:\n",
+            );
+            prompt.push_str(&context);
+        }
+        if let Err(e) = resume_session(
+            bot,
+            chat,
+            thread,
+            session_id,
+            prompt,
+            agent,
+            telegram_state,
+            true, // push-initiated recovery wake (#12/#33): tracked so a mid-tool kill stays visible
+        )
+        .await
+        {
+            tracing::warn!(
+                "Telegram: boot-classifier recovery turn for session {session_id} failed: {e}"
+            );
+        }
+    });
+}
+
+/// Boot-time classifier over recently-active Telegram sessions (#33).
 ///
 /// The on-disk journal only rescues turns that were literally mid-loop at the
 /// kill instant; between-turn sessions have no row (#1224 re-registers their
 /// delivery routes, which drains parked reports, but that happens quietly).
-/// This pass names them in the log instead: it runs no turn, re-executes
-/// nothing, and sends no message — the former "I'm back" bubble was removed
-/// per #34 (owner direction 2026-08-29: remove the UX message, leave
-/// logging), because it promised resumption the feature does not yet deliver
-/// and was never persisted in `channel_messages`, so it could not be audited.
+/// Since #34 this pass logs the stranded set; #33 (owner-approved design,
+/// 2026-08-29) turns discovery into recovery: each stranded session's topic
+/// is classified by its LAST stored message — user-last with no bot reply
+/// means the turn died between turns and gets a REAL continuation turn via
+/// [`resume_session`]; bot-last means the turn completed and the session
+/// stays log-only.
 ///
 /// Sessions whose ids are in `already_resumed` are skipped: those were roused
 /// by a full continuation prompt via `resume_session` already. Returns how
-/// many sessions landed in the log.
+/// many sessions the pass acted on (recovered + still log-only).
 pub async fn wake_recently_active(
     pool: crate::db::Pool,
     already_resumed: &std::collections::HashSet<Uuid>,
+    agent: Arc<AgentService>,
+    telegram_state: Arc<TelegramState>,
 ) -> usize {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let since_epoch = now.saturating_sub(WAKE_RECENT_SECS);
-    let repo = crate::db::SessionBindingRepository::new(pool);
-    let Ok(bindings) = repo.recent_for_channel("telegram", since_epoch).await else {
+    let bindings_repo = crate::db::SessionBindingRepository::new(pool.clone());
+    let Ok(bindings) = bindings_repo
+        .recent_for_channel("telegram", since_epoch)
+        .await
+    else {
         tracing::warn!(target: "telegram", "Boot wake could not read recent session bindings");
         return 0;
     };
+    let messages_repo = ChannelMessageRepository::new(pool);
 
     let mut stranded: Vec<String> = Vec::new();
+    let mut recovered: Vec<String> = Vec::new();
     for b in bindings {
         let Ok(sid) = Uuid::parse_str(&b.session_id) else {
             continue;
@@ -1238,22 +1393,50 @@ pub async fn wake_recently_active(
         if already_resumed.contains(&sid) {
             continue;
         }
-        stranded.push(short_session_id(sid));
+        match classify_topic(&messages_repo, &b.chat_id, b.thread_id).await {
+            TopicVerdict::LogOnly => stranded.push(short_session_id(sid)),
+            TopicVerdict::Recover { context } => {
+                tracing::info!(
+                    target: "telegram",
+                    "Boot classifier (#33): session {} stranded between turns with an unanswered user message — recovering",
+                    short_session_id(sid)
+                );
+                spawn_boot_recovery(
+                    telegram_state.clone(),
+                    agent.clone(),
+                    sid,
+                    b.chat_id.clone(),
+                    b.thread_id,
+                    context,
+                );
+                recovered.push(short_session_id(sid));
+            }
+        }
     }
 
-    let scheduled = stranded.len();
-    if scheduled > 0 {
+    let acted = stranded.len() + recovered.len();
+    if !recovered.is_empty() {
+        tracing::info!(
+            target: "telegram",
+            "Boot wake recovery (#33): resumed {} between-turn session(s): [{}]",
+            recovered.len(),
+            recovered.join(",")
+        );
+    }
+    if !stranded.is_empty() {
         tracing::info!(
             target: "telegram",
             "Boot wake pass (log-only, #34): recently-active sessions not resumed: [{}]",
             stranded.join(",")
         );
+    }
+    if acted > 0 {
         tracing::info!(
             target: "telegram",
-            "Scheduled boot wake for {scheduled} recently-active session(s) (#1227)"
+            "Scheduled boot wake for {acted} recently-active session(s) (#1227)"
         );
     }
-    scheduled
+    acted
 }
 
 #[cfg(test)]
@@ -1290,5 +1473,114 @@ mod sender_label_dm_tests {
             sender_label(&state, &bot, sender, -100_999).await,
             short_session_id(sender)
         );
+    }
+}
+
+#[cfg(test)]
+mod boot_classifier_tests {
+    use super::*;
+    use crate::db::Database;
+    use chrono::{TimeZone, Utc};
+
+    fn row(
+        chat: &str,
+        thread: Option<i32>,
+        sender: &str,
+        content: &str,
+        at: chrono::DateTime<Utc>,
+    ) -> crate::db::ChannelMessage {
+        // Explicit timestamps: `recent` orders by created_at DESC at
+        // second precision, so same-second inserts would race. The field
+        // is pub; set it directly (no builder exists for it upstream).
+        let mut m = crate::db::ChannelMessage::new(
+            "telegram".to_string(),
+            chat.to_string(),
+            None,
+            sender.to_string(),
+            "someone".to_string(),
+            content.to_string(),
+            "text".to_string(),
+            None,
+        )
+        .with_thread(thread.map(|t| t.to_string()), None);
+        m.created_at = at;
+        m
+    }
+
+    #[tokio::test]
+    async fn user_last_without_bot_reply_recovers() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = ChannelMessageRepository::new(db.pool().clone());
+        let t0 = Utc.timestamp_opt(1_788_000_000, 0).unwrap();
+        repo.insert(&row("-100A", Some(7), "user:42", "check box 9", t0))
+            .await
+            .unwrap();
+        let verdict = classify_topic(&repo, "-100A", Some(7)).await;
+        match verdict {
+            TopicVerdict::Recover { context } => assert_eq!(context, "check box 9"),
+            other => panic!("expected Recover, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bot_last_is_log_only() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = ChannelMessageRepository::new(db.pool().clone());
+        let t0 = Utc.timestamp_opt(1_788_000_000, 0).unwrap();
+        repo.insert(&row("-100B", Some(3), "user:42", "fix it", t0))
+            .await
+            .unwrap();
+        repo.insert(&row("-100B", Some(3), BOT_SENDER_ID, "done, shipped", t0))
+            .await
+            .unwrap();
+        assert!(matches!(
+            classify_topic(&repo, "-100B", Some(3)).await,
+            TopicVerdict::LogOnly
+        ));
+    }
+
+    #[tokio::test]
+    async fn empty_topic_is_log_only() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = ChannelMessageRepository::new(db.pool().clone());
+        assert!(matches!(
+            classify_topic(&repo, "-100C", Some(1)).await,
+            TopicVerdict::LogOnly
+        ));
+    }
+
+    #[tokio::test]
+    async fn classification_is_scoped_to_the_topic() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = ChannelMessageRepository::new(db.pool().clone());
+        let t0 = Utc.timestamp_opt(1_788_000_000, 0).unwrap();
+        let t1 = Utc.timestamp_opt(1_788_000_001, 0).unwrap();
+        // Topic 5: user-last (unanswered). Topic 6, same chat: bot-last.
+        repo.insert(&row("-100D", Some(5), "user:42", "unanswered ask", t1))
+            .await
+            .unwrap();
+        repo.insert(&row("-100D", Some(6), "user:42", "older ask", t0))
+            .await
+            .unwrap();
+        repo.insert(&row("-100D", Some(6), BOT_SENDER_ID, "answered", t1))
+            .await
+            .unwrap();
+        assert!(matches!(
+            classify_topic(&repo, "-100D", Some(5)).await,
+            TopicVerdict::Recover { .. }
+        ));
+        assert!(matches!(
+            classify_topic(&repo, "-100D", Some(6)).await,
+            TopicVerdict::LogOnly
+        ));
+    }
+
+    #[test]
+    fn truncate_never_splits_a_char() {
+        let s = "проверка границ"; // multi-byte Cyrillic
+        let cut = truncate_chars(s, 5);
+        assert_eq!(cut.chars().count(), 5);
+        // Shorter than the cap: unchanged.
+        assert_eq!(truncate_chars("hi", 2000), "hi");
     }
 }

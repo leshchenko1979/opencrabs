@@ -1597,16 +1597,20 @@ async fn cmd_chat_inner(
         });
     }
 
-    // Wake (#1227): recently-active bound sessions that were NOT mid-turn at
-    // boot have no journal row, so they look dead until someone pokes one.
-    // #1224 re-registers their routes (draining parked reports) at connect,
-    // but quietly. Log the stranded set so it is auditable; purely
-    // informational — it runs no turn, re-executes nothing, sends no message
-    // (the former "I'm back" bubble was removed per #34).
+    // Wake (#1227) + boot classifier (#33): recently-active bound sessions
+    // that were NOT mid-turn at boot have no journal row, so they look dead
+    // until someone pokes one. #1224 re-registers their routes (draining
+    // parked reports) at connect, but quietly. Since #34 the pass logs the
+    // stranded set; since #33 (owner-approved design 2026-08-29) each
+    // stranded topic whose last stored message is a user's unanswered one
+    // gets a REAL continuation turn via resume_session; bot-last topics
+    // stay log-only.
     #[cfg(feature = "telegram")]
     crate::channels::telegram::resume::wake_recently_active(
         db.pool().clone(),
         &resumed_session_ids,
+        app.agent_service().clone(),
+        telegram_state.clone(),
     )
     .await;
 
