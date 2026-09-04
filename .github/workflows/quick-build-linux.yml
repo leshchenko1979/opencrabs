@@ -1,7 +1,7 @@
 name: Quick Linux Build
 
 # Super-quick Linux amd64 binary, on demand. Feature set is a
-# dispatch parameter (`features`, default `telegram`) — the single
+# dispatch parameter (`features`, default `telegram,code-graph`) — the single
 # source of truth for what we ship lives in THIS file's default,
 # not in any skill doc. Comma-separated sets are valid, e.g.
 # "telegram,browser". No tests, no matrix, no multi-platform.
@@ -36,7 +36,7 @@ on:
       features:
         description: 'Cargo feature set passed to --features (comma-separated)'
         required: false
-        default: 'telegram'
+        default: 'telegram,code-graph'
 
 env:
   CARGO_TERM_COLOR: always
