@@ -108,3 +108,30 @@ async fn test_fresh_db_runs_all_migrations() {
         .unwrap();
     assert_eq!(after, Database::MIGRATION_COUNT as i64);
 }
+
+/// Order contract guard (#26 P2, 2026-09-05): `build_migrations` entries are
+/// `user_version` slots — inserting a new migration anywhere but the end
+/// renumbers every later migration and corrupts existing deployments' schema
+/// versioning (this exact bug shipped in the P2 branch and broke the
+/// migration-33 heal tests). The doc comment on `build_migrations` says
+/// "never reorder … only append new ones"; this pin enforces it mechanically:
+/// the filenames referenced in the list must be strictly sorted and the count
+/// must equal `MIGRATION_COUNT`.
+#[test]
+fn migration_list_order_matches_filename_sort() {
+    let source = include_str!("../db/database.rs");
+    let mut names: Vec<&str> = Vec::new();
+    let mut rest = source;
+    while let Some(pos) = rest.find("../migrations/") {
+        let start = pos + "../migrations/".len();
+        let end = rest[start..]
+            .find(".sql")
+            .expect("migration reference ends with .sql");
+        names.push(&rest[start..start + end + 4]);
+        rest = &rest[start + end + 4..];
+    }
+    assert_eq!(names.len(), Database::MIGRATION_COUNT);
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "build_migrations must append, never reorder");
+}
