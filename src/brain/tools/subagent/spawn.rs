@@ -4,6 +4,7 @@
 //! so the main orchestrator can track status without session_search.
 
 use super::manager::{SubAgent, SubAgentManager};
+use crate::brain::agent::service::work_delivery::WorkKind;
 use crate::brain::agent::service::work_status::{WorkState, WorkStatus};
 use crate::brain::tools::error::{Result, ToolError};
 use crate::brain::tools::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
