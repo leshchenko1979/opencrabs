@@ -1249,11 +1249,11 @@ async fn classify_topic(
     thread_id: Option<i32>,
 ) -> TopicVerdict {
     let tid = thread_id.map(|t| t.to_string());
-    let last = match repo
-        .recent(Some("telegram"), chat_id, 1, tid.as_deref(), None)
+    let rows = match repo
+        .recent(Some("telegram"), chat_id, 2, tid.as_deref(), None)
         .await
     {
-        Ok(rows) => rows.into_iter().next(),
+        Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(
                 target: "telegram",
@@ -1262,6 +1262,24 @@ async fn classify_topic(
             return TopicVerdict::LogOnly;
         }
     };
+    // `recent` orders by created_at DESC, stored at SECOND precision — a user
+    // ask and the bot reply inside the same second tie, and the winner is
+    // sqlite's whim. If the newest row is user-last but a bot row sits in the
+    // same second, the topic may already be answered: treat as ambiguous and
+    // stay log-only (a genuine between-turn death has NOTHING after the ask).
+    if let [first, second, ..] = rows.as_slice() {
+        if first.sender_id != BOT_SENDER_ID
+            && second.sender_id == BOT_SENDER_ID
+            && first.created_at.timestamp() == second.created_at.timestamp()
+        {
+            tracing::info!(
+                target: "telegram",
+                "Boot classifier (#33): topic last messages tie within one second (user + bot) — ambiguous, log-only"
+            );
+            return TopicVerdict::LogOnly;
+        }
+    }
+    let last = rows.into_iter().next();
     match last {
         // Nothing stored: nothing to classify from, nothing to answer.
         None => TopicVerdict::LogOnly,
@@ -1529,14 +1547,38 @@ mod boot_classifier_tests {
         db.run_migrations().await.unwrap();
         let repo = ChannelMessageRepository::new(db.pool().clone());
         let t0 = Utc.timestamp_opt(1_788_000_000, 0).unwrap();
+        let t1 = Utc.timestamp_opt(1_788_000_001, 0).unwrap();
         repo.insert(&row("-100B", Some(3), "user:42", "fix it", t0))
             .await
             .unwrap();
-        repo.insert(&row("-100B", Some(3), BOT_SENDER_ID, "done, shipped", t0))
+        // Bot reply a second later — `recent` orders by created_at at
+        // second precision, so same-second inserts would tie.
+        repo.insert(&row("-100B", Some(3), BOT_SENDER_ID, "done, shipped", t1))
             .await
             .unwrap();
         assert!(matches!(
             classify_topic(&repo, "-100B", Some(3)).await,
+            TopicVerdict::LogOnly
+        ));
+    }
+
+    #[tokio::test]
+    async fn same_second_user_then_bot_is_ambiguous_log_only() {
+        let db = Database::connect_in_memory().await.unwrap();
+        db.run_migrations().await.unwrap();
+        let repo = ChannelMessageRepository::new(db.pool().clone());
+        // Same-second tie: whichever row `recent` returns first, the verdict
+        // must be LogOnly — bot-first goes through the bot-last arm, user-first
+        // through the same-second ambiguity guard. Deterministic assertion.
+        let t0 = Utc.timestamp_opt(1_788_000_000, 0).unwrap();
+        repo.insert(&row("-100E", Some(9), "user:42", "quick ask", t0))
+            .await
+            .unwrap();
+        repo.insert(&row("-100E", Some(9), BOT_SENDER_ID, "quick answer", t0))
+            .await
+            .unwrap();
+        assert!(matches!(
+            classify_topic(&repo, "-100E", Some(9)).await,
             TopicVerdict::LogOnly
         ));
     }
