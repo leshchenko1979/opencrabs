@@ -361,7 +361,10 @@ pub(crate) async fn refresh_plan_card(
         load_goal_section(agent, session_id)
             .await
             .filter(|&(_, completed)| !completed)
-            .map(|(text, _)| GoalSection { text, completed: false })
+            .map(|(text, _)| GoalSection {
+                text,
+                completed: false,
+            })
     } else {
         None
     };

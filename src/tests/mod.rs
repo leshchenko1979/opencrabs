@@ -746,6 +746,7 @@ pub mod web_search_test;
 pub mod whatsapp_state_test;
 
 // Channel handler tests (moved from inline #[cfg(test)] modules)
+pub mod boot_classifier_test;
 pub mod brain_tools_whatsapp_send_test;
 pub mod channel_commands_test;
 pub mod cron_scheduler_dedup_job_test;
@@ -845,4 +846,3 @@ pub mod whatsapp_store_test;
 pub mod word_delete_keybinding_test;
 pub mod write_partial_view_guard_test;
 pub mod zhipu_endpoint_test;
-pub mod boot_classifier_test;
