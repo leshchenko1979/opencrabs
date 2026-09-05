@@ -736,7 +736,7 @@ mod tests {
             queued.metadata.get("notify_target").unwrap(),
             &target.to_string()
         );
-        assert!(queued.metadata.get("injected_at").is_none());
+        assert!(!queued.metadata.contains_key("injected_at"));
         assert!(
             queued.output.contains("NOT yet observed"),
             "got: {}",
@@ -746,7 +746,7 @@ mod tests {
         assert_eq!(notify_receipts::mark_injected_for_target(target), 1);
         let injected = status_verdict(&input).expect("verdict builds");
         assert_eq!(injected.metadata.get("notify_state").unwrap(), "injected");
-        assert!(injected.metadata.get("injected_at").is_some());
+        assert!(injected.metadata.contains_key("injected_at"));
         assert!(
             injected.output.contains("INJECTED"),
             "got: {}",
