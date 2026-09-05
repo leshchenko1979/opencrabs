@@ -76,9 +76,11 @@ fn test_schema_requires_target_and_message() {
         .iter()
         .map(|v| v.as_str().expect("required entry is a string"))
         .collect();
-    assert_eq!(required, vec!["target_session", "message"]);
+    assert_eq!(required, vec!["target_session"]);
     assert!(schema["properties"]["target_session"].is_object());
     assert!(schema["properties"]["message"].is_object());
+    // Depth 3: `message` is optional since `action:"status"` carries only
+    // `notify_id` — the send path still refuses a missing/empty message.
 }
 
 #[test]
