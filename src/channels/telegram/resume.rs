@@ -1267,17 +1267,16 @@ async fn classify_topic(
     // sqlite's whim. If the newest row is user-last but a bot row sits in the
     // same second, the topic may already be answered: treat as ambiguous and
     // stay log-only (a genuine between-turn death has NOTHING after the ask).
-    if let [first, second, ..] = rows.as_slice() {
-        if first.sender_id != BOT_SENDER_ID
-            && second.sender_id == BOT_SENDER_ID
-            && first.created_at.timestamp() == second.created_at.timestamp()
-        {
-            tracing::info!(
-                target: "telegram",
-                "Boot classifier (#33): topic last messages tie within one second (user + bot) — ambiguous, log-only"
-            );
-            return TopicVerdict::LogOnly;
-        }
+    if let [first, second, ..] = rows.as_slice()
+        && first.sender_id != BOT_SENDER_ID
+        && second.sender_id == BOT_SENDER_ID
+        && first.created_at.timestamp() == second.created_at.timestamp()
+    {
+        tracing::info!(
+            target: "telegram",
+            "Boot classifier (#33): topic last messages tie within one second (user + bot) — ambiguous, log-only"
+        );
+        return TopicVerdict::LogOnly;
     }
     let last = rows.into_iter().next();
     match last {
