@@ -170,7 +170,12 @@ pub(crate) fn migrate_flat_attachments_in(base: &std::path::Path, platform: &str
     moved
 }
 
-pub(crate) async fn save_incoming_files_to_tmp(bot: &Bot, msg: &Message, bot_token: &str) {
+pub(crate) async fn save_incoming_files_to_tmp(
+    bot: &Bot,
+    msg: &Message,
+    bot_token: &str,
+    topic_id: Option<i32>,
+) {
     use std::path::PathBuf;
 
     // Skip private chats — the bot will process those directly
@@ -185,6 +190,10 @@ pub(crate) async fn save_incoming_files_to_tmp(bot: &Bot, msg: &Message, bot_tok
 
     let chat_id = msg.chat.id.0;
     let ts = chrono::Utc::now().timestamp();
+    // #124: scope tmp saves to the originating forum topic so the pickup
+    // scan can never hand one topic's media to another topic's session.
+    // None (DMs, non-forum groups) keeps the legacy unscoped names.
+    let topic_seg = topic_id.map(|t| format!("t{t}-")).unwrap_or_default();
 
     // Voice messages (.ogg)
     if let Some(voice) = msg.voice() {
@@ -193,7 +202,7 @@ pub(crate) async fn save_incoming_files_to_tmp(bot: &Bot, msg: &Message, bot_tok
             bot_token,
             voice.file.id.clone(),
             &tmp_dir,
-            &format!("voice-{chat_id}-{ts}.ogg"),
+            &format!("voice-{chat_id}-{topic_seg}{ts}.ogg"),
         )
         .await;
     }
@@ -228,7 +237,7 @@ pub(crate) async fn save_incoming_files_to_tmp(bot: &Bot, msg: &Message, bot_tok
             bot_token,
             largest.file.id.clone(),
             &tmp_dir,
-            &format!("photo-{chat_id}-{ts}.jpg"),
+            &format!("photo-{chat_id}-{topic_seg}{ts}.jpg"),
         )
         .await;
     }
@@ -270,21 +279,56 @@ pub(crate) async fn save_telegram_file(
     }
 }
 
+/// #124 consume-once: true when a `.injected` sentinel exists for this tmp
+/// file, meaning a turn already picked it up and pushed its `<<IMG:>>`
+/// marker. Sentinel files are skipped by the pickup scanners so a photo
+/// cannot re-leak to later mention turns.
+pub(crate) fn tmp_file_injected(path: &std::path::Path) -> bool {
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    let sentinel = path.with_file_name(format!("{}.injected", name.to_string_lossy()));
+    sentinel.exists()
+}
+
+/// Parse the topic segment out of a tmp filename body. Bodies after the
+/// `{kind}-{chat_id}-` prefix are either `t{topic}-{ts}.{ext}` (topic-scoped,
+/// #124) or legacy bare `{ts}.{ext}`. Returns `(Some(topic), ts_body)` or
+/// `(None, body)`.
+pub(crate) fn split_topic_from_tmp_body(body: &str) -> (Option<i64>, &str) {
+    match body.strip_prefix('t').and_then(|rest| {
+        let (topic_part, tail) = rest.split_once('-')?;
+        let topic: i64 = topic_part.parse().ok()?;
+        Some((topic, tail))
+    }) {
+        Some((topic, tail)) => (Some(topic), tail),
+        None => (None, body),
+    }
+}
+
 /// Check `~/.opencrabs/tmp/` for the most recent voice/audio file from a
 /// specific chat (within `max_age_secs`). Returns the path if found.
 pub(crate) fn find_recent_voice_in_tmp(
     chat_id: i64,
+    topic: Option<i32>,
     max_age_secs: i64,
 ) -> Option<std::path::PathBuf> {
-    find_recent_tmp_file(chat_id, "voice", max_age_secs)
+    find_recent_tmp_file(chat_id, topic, "voice", max_age_secs)
 }
 
-/// Find the newest `~/.opencrabs/tmp/{kind}-{chat_id}-{ts}.*` file within
-/// `max_age_secs`. Used to pick up a voice/photo a user sent to a mention-only
-/// group *before* tagging the bot (the file was stored fire-and-forget on
-/// arrival; this retrieves it when the follow-up @mention finally triggers us).
+/// Find the newest `~/.opencrabs/tmp/{kind}-{chat_id}-[t{topic}-]{ts}.*` file
+/// within `max_age_secs`. Used to pick up a voice/photo a user sent to a
+/// mention-only group *before* tagging the bot (the file was stored
+/// fire-and-forget on arrival; this retrieves it when the follow-up @mention
+/// finally triggers us).
+///
+/// #124 isolation: `topic` is the requesting turn's forum topic. `Some(t)`
+/// matches only files saved from topic `t`; `None` matches only legacy
+/// (pre-#124) or topic-less saves — a photo dropped in one topic is never
+/// picked up by another topic's session.
 pub(crate) fn find_recent_tmp_file(
     chat_id: i64,
+    topic: Option<i32>,
     kind: &str,
     max_age_secs: i64,
 ) -> Option<std::path::PathBuf> {
@@ -296,6 +340,7 @@ pub(crate) fn find_recent_tmp_file(
 
     let now = chrono::Utc::now().timestamp();
     let prefix = format!("{kind}-{chat_id}-");
+    let want = topic.map(i64::from);
 
     let mut best: Option<(i64, PathBuf)> = None;
 
@@ -306,9 +351,21 @@ pub(crate) fn find_recent_tmp_file(
         if !name_str.starts_with(&prefix) {
             continue;
         }
-        // Extract timestamp from filename: voice-{chat_id}-{ts}.ogg
-        let ts_str = name_str.strip_prefix(&prefix)?.split('.').next()?;
-        let ts: i64 = ts_str.parse().ok()?;
+        // Skip the #124 .injected sentinels themselves — they share the
+        // scanned prefix and would otherwise parse as candidates.
+        if name_str.ends_with(".injected") {
+            continue;
+        }
+        // Extract timestamp from filename: voice-{chat_id}-[t{topic}-]{ts}.ogg
+        let (file_topic, ts_str) = split_topic_from_tmp_body(name_str.strip_prefix(&prefix)?);
+        if file_topic != want {
+            continue;
+        }
+        // #124 consume-once: skip files already injected into a turn.
+        if tmp_file_injected(&entry.path()) {
+            continue;
+        }
+        let ts: i64 = ts_str.split('.').next()?.parse().ok()?;
         if now - ts > max_age_secs {
             continue;
         }
@@ -322,9 +379,11 @@ pub(crate) fn find_recent_tmp_file(
 
 /// Like [`find_recent_tmp_file`] but returns ALL matching files, sorted
 /// oldest-first. Used for multi-photo pickup so every image the user
-/// dropped is included, not just the last one.
+/// dropped is included, not just the last one. Topic-scoped per #124 —
+/// see [`find_recent_tmp_file`].
 pub(crate) fn find_all_recent_tmp_files(
     chat_id: i64,
+    topic: Option<i32>,
     kind: &str,
     max_age_secs: i64,
 ) -> Vec<std::path::PathBuf> {
@@ -333,6 +392,7 @@ pub(crate) fn find_all_recent_tmp_files(
     let tmp_dir: PathBuf = crate::config::opencrabs_home().join("tmp");
     let now = chrono::Utc::now().timestamp();
     let prefix = format!("{kind}-{chat_id}-");
+    let want = topic.map(i64::from);
 
     let mut results: Vec<(i64, PathBuf)> = Vec::new();
     let entries = match std::fs::read_dir(&tmp_dir) {
@@ -345,16 +405,26 @@ pub(crate) fn find_all_recent_tmp_files(
         if !name_str.starts_with(&prefix) {
             continue;
         }
-        let ts_str = match name_str
-            .strip_prefix(&prefix)
-            .and_then(|s| s.split('.').next())
-        {
-            Some(s) => s,
+        // Skip the #124 .injected sentinels themselves — they share the
+        // scanned prefix and would otherwise parse as candidates.
+        if name_str.ends_with(".injected") {
+            continue;
+        }
+        let body = match name_str.strip_prefix(&prefix) {
+            Some(b) => b,
             None => continue,
         };
-        let ts: i64 = match ts_str.parse() {
-            Ok(t) => t,
-            Err(_) => continue,
+        let (file_topic, ts_str) = split_topic_from_tmp_body(body);
+        if file_topic != want {
+            continue;
+        }
+        // #124 consume-once: skip files already injected into a turn.
+        if tmp_file_injected(&entry.path()) {
+            continue;
+        }
+        let ts: i64 = match ts_str.split('.').next().and_then(|s| s.parse().ok()) {
+            Some(t) => t,
+            None => continue,
         };
         if now - ts <= max_age_secs {
             results.push((ts, entry.path()));
