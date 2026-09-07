@@ -278,8 +278,9 @@ mod tests {
         // No closer → whole thing is literal text, escaped downstream.
         assert_eq!(kinds("<b>unclosed"), vec!["text"]);
         assert_eq!(text_of("<b>unclosed"), "<b>unclosed");
-        // Empty body → literal, same law as `**` pairs.
-        assert_eq!(kinds("<b></b>"), vec!["text", "text"]);
+        // Empty body → no pair matches, whole thing stays literal text.
+        assert_eq!(kinds("<b></b>"), vec!["text"]);
+        assert_eq!(text_of("<b></b>"), "<b></b>");
     }
 
     #[test]
