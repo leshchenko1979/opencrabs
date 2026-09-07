@@ -21,10 +21,18 @@ use crate::db::Database;
 ///
 /// Browser, channel-send, media, and rebuild/evolve tools are registered
 /// separately by the interactive path — they need managers the daemon lacks.
+///
+/// `headless` scopes the surface to what a headless run can actually deliver
+/// (fork #129): one-shot/cron runs have no TUI and no channel state, so
+/// `suggest_options` (renders nowhere) and `session_notify` (no in-process
+/// routes; cron delivery uses `deliver_to`) are NOT registered — a call that
+/// slips through fails as "Tool not found" instead of lying with a success
+/// verdict. Interactive callers pass `false` and get the full core set.
 pub(crate) fn register_core_agent_tools(
     tool_registry: &Arc<ToolRegistry>,
     db: &Database,
     config: &Config,
+    headless: bool,
 ) -> Arc<crate::brain::tools::subagent::SubAgentManager> {
     use crate::brain::tools::{
         bash::BashTool, code_exec::CodeExecTool, config_tool::ConfigTool, context::ContextTool,
@@ -108,7 +116,13 @@ pub(crate) fn register_core_agent_tools(
     tool_registry.register(Arc::new(RenameSessionTool));
     // Follow-up question — agent asks the user a multi-choice question
     // mid-task and blocks until they click an option button.
-    tool_registry.register(Arc::new(SuggestOptionsTool));
+    // Suggested next-step options: render via TUI event loop or channel
+    // handlers only. Headless runs have neither sink, so the tool is
+    // unregistered (#129) — asking in the reply body is the only headless
+    // ask surface.
+    if !headless {
+        tool_registry.register(Arc::new(SuggestOptionsTool));
+    }
     // Tool discovery — lets the agent activate extended tools on demand
     // (lazy-tools mode). Holds the registry Arc so it can search all tools;
     // harmless when lazy_tools is off (just one more always-available tool).
@@ -144,8 +158,13 @@ pub(crate) fn register_core_agent_tools(
         ),
     ));
     // Cross-session push (issue #1203): needs no manager — deliver_to_session
-    // is a free function on the in-process session-route registry.
-    tool_registry.register(Arc::new(crate::brain::tools::subagent::SessionNotifyTool));
+    // is a free function on the in-process session-route registry. Headless
+    // runs are excluded (#129): the in-process session-route registry is
+    // empty there, so delivery can only Park and the run dies with the
+    // message — delivery belongs to the final message / scheduler deliver_to.
+    if !headless {
+        tool_registry.register(Arc::new(crate::brain::tools::subagent::SessionNotifyTool));
+    }
 
     // Phase 6: Team orchestration
     let team_manager = Arc::new(crate::brain::tools::subagent::TeamManager::new());

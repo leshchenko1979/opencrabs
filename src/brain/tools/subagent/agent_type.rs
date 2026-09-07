@@ -19,6 +19,9 @@ use crate::brain::tools::tool_search::ToolSearchTool;
 use std::sync::Arc;
 
 /// Tools that sub-agents must NEVER have access to (prevents recursion / dangerous ops).
+/// `session_notify` is owner-ruled out for sub-agents (fork #129): children
+/// report through the harness's final-message relay to the parent, not
+/// cross-session pushes.
 pub(crate) const ALWAYS_EXCLUDED: &[&str] = &[
     "spawn_agent",
     "resume_agent",
@@ -30,6 +33,7 @@ pub(crate) const ALWAYS_EXCLUDED: &[&str] = &[
     "team_broadcast",
     "rebuild",
     "evolve",
+    "session_notify",
 ];
 
 /// Build a child registry from the parent's, minus recursive/dangerous tools.

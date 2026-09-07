@@ -968,6 +968,28 @@ pub(crate) fn push_compiled_features(prompt: &mut String) {
     ));
 }
 
+/// Headless preamble (fork #129): injected ONLY on headless paths — one-shot
+/// CLI runs and the cron daemon — never on TUI/channel sessions, where the
+/// user watches the whole turn. Carries the visibility law the owner set for
+/// headless sessions plus the delivery rules that follow from the gated tool
+/// surface (no `session_notify`, no `suggest_options` headless).
+pub(crate) const HEADLESS_PREAMBLE: &str = "\
+Headless session (cron, one-shot, detached): the user sees ONLY your final \
+message, and it must be self-contained — never reference your own intermediate \
+messages, they are not visible to the user. Cite re-verified artifacts (files, \
+logs, command output), not narrated intent. `session_notify` and \
+`suggest_options` are NOT available here: deliver everything in the final \
+message (cron delivery uses the scheduler's deliver_to), and ask questions in \
+the reply body instead of option buttons.";
+
+/// Append the headless preamble (fork #129). Called by headless entry points
+/// after the brain is built; a no-op for interactive sessions.
+pub(crate) fn push_headless_preamble(prompt: &mut String) {
+    prompt.push_str("\n\n--- Headless session rules ---\n");
+    prompt.push_str(HEADLESS_PREAMBLE);
+    prompt.push('\n');
+}
+
 /// Append a "Known paths" section to the runtime info so when the
 /// user says "check the logs" the agent knows EXACTLY where to look
 /// instead of grepping random places in the working directory.
