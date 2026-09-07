@@ -70,6 +70,9 @@ fn ladder_order_drops_clock_first_and_final_never_drops() {
     }
     // Final outranks everything and is refused by the dropper.
     assert_eq!(EditClass::Final.drop_rank(), 4);
+    // #117: Interactive outranks Final — taps are real-time UX, never
+    // dropped and never queued.
+    assert_eq!(EditClass::Interactive.drop_rank(), 5);
     let c = Counters {
         admitted_typing: 12,
         admitted_edits: 34,
@@ -87,10 +90,13 @@ fn ladder_order_drops_clock_first_and_final_never_drops() {
         throttled_send_ms: 2500,
         admitted_rich: 11,
         throttled_rich_ms: 3500,
+        admitted_interactive: 13,
+        interactive_overflow: 14,
     };
     let line = format_summary(-100123, &c, 2).expect("active peer must summarize");
     assert!(line.contains("chat=-100123"));
-    assert!(line.contains("admitted{typing=12,edits=34,sends=5,rich=11}"));
+    assert!(line.contains("admitted{typing=12,edits=34,sends=5,ri,interactive=13}"));
+    assert!(line.contains("interactive_overflow=14"));
     assert!(line.contains("dropped{clock=1,brain_preview=2,intermediary=3,status=4,typing=6}"));
     assert!(line.contains("finals{queued=7,superseded=8,delivered=9,failed=10,pending=2}"));
     assert!(line.contains("throttled_ms{typing=1500,send=2500,rich=3500}"));
@@ -106,4 +112,66 @@ fn permanent_edit_error_vocabulary_is_exact() {
     ));
     assert!(!is_permanent_edit_error("Too Many Requests: retry after 3"));
     assert!(!is_permanent_edit_error("timeout"));
+}
+
+#[test]
+fn reserve_blocks_bulk_take_but_not_interactive() {
+    // #117: bulk takes stop at the reserve floor; take_any dips below it.
+    let mut b = Bucket::new(5, 1.0);
+    b.set_reserve(2);
+    assert_eq!(b.reserve_peek(), 2.0, "reserve stored unclamped at 2 of 5");
+
+    let t0 = Instant::now();
+    // Drain to exactly the reserve: bulk is now blocked, interactive is not.
+    for _ in 0..3 {
+        b.take(t0).expect("bulk take above the floor");
+    }
+    assert!(
+        b.take(t0).is_err(),
+        "bulk take must not dip below the reserve floor"
+    );
+
+    // Interactive consumes the reserve: two more takes work, the third
+    // finds a truly empty bucket.
+    assert!(
+        b.take_any(t0).is_ok(),
+        "interactive take consumes the reserve"
+    );
+    assert!(
+        b.take_any(t0).is_ok(),
+        "second interactive take reaches zero"
+    );
+    assert!(
+        b.take_any(t0).is_err(),
+        "take_any can drive tokens to zero but not below it"
+    );
+
+    // Refill crosses the floor again: bulk unlocks once tokens > reserve.
+    assert!(
+        b.take(t0 + Duration::from_secs(2)).is_err(),
+        "1 token still under the floor of 2"
+    );
+    assert!(
+        b.take(t0 + Duration::from_secs(3)).is_ok(),
+        "bulk unlocks once refill crosses the floor"
+    );
+}
+
+#[test]
+fn reserve_clamped_to_capacity() {
+    // #117: a tiny bucket can never have a floor at or above its capacity,
+    // or it would be permanently dry for the bulk plane.
+    let mut b = Bucket::new(1, 1.0);
+    b.set_reserve(2);
+    assert_eq!(b.reserve_peek(), 1.0, "reserve clamped to capacity");
+}
+
+#[test]
+fn zero_reserve_keeps_legacy_semantics() {
+    // Buckets without an interactive reserve behave exactly as before #117.
+    let mut b = Bucket::new(2, 1.0);
+    let t0 = Instant::now();
+    b.take(t0).expect("first take");
+    b.take(t0).expect("second take");
+    assert!(b.take(t0).is_err(), "empty bucket still blocks bulk");
 }

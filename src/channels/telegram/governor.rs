@@ -165,6 +165,10 @@ pub(crate) struct Bucket {
     capacity: f64,
     refill_per_sec: f64,
     last_refill: Instant,
+    /// Reserved floor (tokens): bulk takes cannot dip below this — the
+    /// reserve is what interactive taps (#117) consume when the bulk plane
+    /// is dry. 0.0 = no reservation.
+    reserve: f64,
 }
 
 impl Bucket {
@@ -174,6 +178,7 @@ impl Bucket {
             capacity: f64::from(capacity),
             refill_per_sec,
             last_refill: Instant::now(),
+            reserve: 0.0,
         }
     }
 
@@ -185,8 +190,19 @@ impl Bucket {
     }
 
     /// Consume one token, or report how long until the next refills.
+    /// Bulk-plane entry: respects the interactive reserve (#117).
     pub(crate) fn take(&mut self, now: Instant) -> Result<(), Duration> {
-        let wait = self.next_token_in(now);
+        self.take_reserved(now, true)
+    }
+
+    /// Consume one token ignoring the reserve — the interactive plane only
+    /// (tap legs, #117). Can drive tokens to zero.
+    pub(crate) fn take_any(&mut self, now: Instant) -> Result<(), Duration> {
+        self.take_reserved(now, false)
+    }
+
+    fn take_reserved(&mut self, now: Instant, respect_reserve: bool) -> Result<(), Duration> {
+        let wait = self.next_token_in_for(now, if respect_reserve { self.reserve } else { 0.0 });
         if wait.is_zero() {
             self.tokens -= 1.0;
             Ok(())
@@ -197,12 +213,28 @@ impl Bucket {
 
     /// Peek without consuming: when the next token becomes available.
     fn next_token_in(&mut self, now: Instant) -> Duration {
+        self.next_token_in_for(now, 0.0)
+    }
+
+    fn next_token_in_for(&mut self, now: Instant, floor: f64) -> Duration {
         self.refill(now);
-        if self.tokens >= 1.0 {
+        if self.tokens >= 1.0 + floor {
             Duration::ZERO
         } else {
-            Duration::from_secs_f64((1.0 - self.tokens) / self.refill_per_sec)
+            Duration::from_secs_f64((1.0 + floor - self.tokens) / self.refill_per_sec)
         }
+    }
+
+    /// Set the reserved floor, clamped to capacity (#117: hardcoded 2, but
+    /// clamped so a tiny capacity bucket can never go permanently dry).
+    pub(crate) fn set_reserve(&mut self, reserve: u32) {
+        self.reserve = f64::from(reserve).min(self.capacity);
+    }
+
+    /// Test/telemetry peek at the current reserve floor.
+    #[cfg(test)]
+    pub(crate) fn reserve_peek(&self) -> f64 {
+        self.reserve
     }
 }
 
@@ -250,6 +282,8 @@ pub(crate) struct Counters {
     pub(crate) admitted_edits: u64,
     pub(crate) admitted_sends: u64,
     pub(crate) admitted_rich: u64,
+    pub(crate) admitted_interactive: u64,
+    pub(crate) interactive_overflow: u64,
     pub(crate) dropped_typing: u64,
     pub(crate) dropped_clock: u64,
     pub(crate) dropped_brain_preview: u64,
@@ -274,6 +308,9 @@ impl Counters {
             EditClass::Intermediary => self.dropped_intermediary += 1,
             EditClass::Status => self.dropped_status += 1,
             EditClass::Final => {}
+            // Interactive is never dropped (rank 5, #117); the arm exists so
+            // a future ladder addition can't silently miss this match.
+            EditClass::Interactive => {}
         }
     }
 
@@ -283,6 +320,8 @@ impl Counters {
         self.admitted_typing == 0
             && self.admitted_edits == 0
             && self.admitted_sends == 0
+            && self.admitted_interactive == 0
+            && self.interactive_overflow == 0
             && self.dropped_typing == 0
             && self.dropped_clock == 0
             && self.dropped_brain_preview == 0
@@ -329,7 +368,8 @@ pub(crate) fn format_summary(chat_id: i64, c: &Counters, finals_pending: usize) 
     }
     Some(format!(
         "Telegram rate-limiter chat={chat_id}: \
-         admitted{{typing={},edits={},sends={},rich={}}} \
+         admitted{{typing={},edits={},sends={},rich={},interactive={}}} \
+         interactive_overflow={} \
          dropped{{clock={},brain_preview={},intermediary={},status={},typing={}}} \
          finals{{queued={},superseded={},delivered={},failed={},pending={}}} \
          throttled_ms{{typing={},send={},rich={}}}",
@@ -337,6 +377,8 @@ pub(crate) fn format_summary(chat_id: i64, c: &Counters, finals_pending: usize) 
         c.admitted_edits,
         c.admitted_sends,
         c.admitted_rich,
+        c.admitted_interactive,
+        c.interactive_overflow,
         c.dropped_clock,
         c.dropped_brain_preview,
         c.dropped_intermediary,
@@ -519,6 +561,12 @@ pub(crate) enum EditClass {
     /// Settle renders and plan-card refreshes — NEVER dropped, queued
     /// latest-wins per message id until the edit bucket refills.
     Final,
+    /// User-initiated tap feedback (suggestion pick records, #117). Ranks
+    /// ABOVE `Final`: taps are real-time UX — a queued pick record lands
+    /// after the user moved on, which reads as a lost tap. Never dropped
+    /// and never queued: the reactive `edit_retry` floor (#68/#76) owns the
+    /// failure contract for these legs instead.
+    Interactive,
 }
 
 impl EditClass {
@@ -531,6 +579,7 @@ impl EditClass {
             EditClass::Intermediary => 2,
             EditClass::Status => 3,
             EditClass::Final => 4,
+            EditClass::Interactive => 5,
         }
     }
 }
@@ -577,7 +626,25 @@ pub(crate) async fn edit_admission(
             return true;
         }
         let bucket = ensure_bucket(&mut peer.edits, lim.edit_burst, lim.edit_rate_per_sec);
-        if bucket.take(now).is_ok() {
+        // #117: the edits bucket carries a hardcoded interactive reserve of
+        // 2 tokens (clamped to capacity inside set_reserve). Bulk classes
+        // cannot dip below it; only Interactive consumes into it.
+        bucket.set_reserve(2);
+        if class == EditClass::Interactive {
+            if bucket.take_any(now).is_ok() {
+                peer.counters.admitted_interactive += 1;
+                Admission::Now
+            } else {
+                // Reserve dry AND bucket dry — a tap is NEVER queued (it
+                // would land after the user moved on) and never dropped
+                // (a lost tap reads as a broken button). Pass through
+                // anyway; the reactive edit_retry floor (#68/#76) on the
+                // tap legs owns the failure contract.
+                peer.counters.interactive_overflow += 1;
+                peer.counters.admitted_interactive += 1;
+                Admission::Now
+            }
+        } else if bucket.take(now).is_ok() {
             peer.counters.admitted_edits += 1;
             Admission::Now
         } else if class == EditClass::Final {
@@ -638,7 +705,10 @@ fn take_due_final(chat_id: i64, lim: &Limits) -> Option<(i32, PendingFinal)> {
         peer.draining = false;
         return None;
     }
+    // #117: the drainer is a bulk-plane consumer — it must not dip into the
+    // interactive reserve; a final waits one more tick instead.
     let bucket = ensure_bucket(&mut peer.edits, lim.edit_burst, lim.edit_rate_per_sec);
+    bucket.set_reserve(2);
     if bucket.take(gate_now()).is_err() {
         return None;
     }
@@ -1126,6 +1196,8 @@ pub(crate) mod test_support {
         pub typing_admitted: u64,
         pub typing_dropped: u64,
         pub edits_admitted: u64,
+        pub admitted_interactive: u64,
+        pub interactive_overflow: u64,
         pub dropped_clock: u64,
         pub dropped_brain_preview: u64,
         pub dropped_intermediary: u64,
@@ -1150,6 +1222,8 @@ pub(crate) mod test_support {
             typing_admitted: p.counters.admitted_typing,
             typing_dropped: p.counters.dropped_typing,
             edits_admitted: p.counters.admitted_edits,
+            admitted_interactive: p.counters.admitted_interactive,
+            interactive_overflow: p.counters.interactive_overflow,
             dropped_clock: p.counters.dropped_clock,
             dropped_brain_preview: p.counters.dropped_brain_preview,
             dropped_intermediary: p.counters.dropped_intermediary,

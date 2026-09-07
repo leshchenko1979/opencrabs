@@ -567,3 +567,98 @@ async fn a_disabled_limiter_governs_nothing() {
     ts::burn_bucket(CHAT, ts::BucketKind::Typing, 1, 1.0);
     assert!(governor::admit_chat_action(CHAT, Some(9)).await);
 }
+
+#[tokio::test(start_paused = true)]
+async fn interactive_taps_never_queue_and_never_drop() {
+    // #117: the Interactive class ranks above Final — on a dry bucket a tap
+    // is admitted anyway (overflow counted), never queued, never dropped.
+    let _guard = ts::registry_guard().await;
+    ts::reset(1_000);
+    rl_config!(
+        enabled: true,
+        edits_per_minute: 60, // 1 token/s steady state
+        edit_burst: 2,
+    );
+
+    const CHAT: ChatId = ChatId(-100_888);
+    let bot = Bot::new("TESTTOKEN");
+
+    ts::mark_forum(CHAT);
+    ts::burn_bucket(CHAT, ts::BucketKind::Edits, 2, 1.0);
+
+    // Dry bucket: bulk classes still drop, but Interactive passes through
+    // and counts BOTH counters — admitted (it went out) and overflow (the
+    // reserve could not cover it).
+    assert!(
+        !governor::edit_admission(
+            &bot,
+            CHAT,
+            MessageId(30),
+            governor::EditClass::Status,
+            "h".into(),
+            false,
+        )
+        .await,
+        "bulk class must still drop on a dry bucket"
+    );
+    assert!(
+        governor::edit_admission(
+            &bot,
+            CHAT,
+            MessageId(31),
+            governor::EditClass::Interactive,
+            "<b>pick</b>".into(),
+            false,
+        )
+        .await,
+        "a tap must NEVER be dropped"
+    );
+    assert!(
+        governor::edit_admission(
+            &bot,
+            CHAT,
+            MessageId(32),
+            governor::EditClass::Interactive,
+            "<b>pick</b>".into(),
+            false,
+        )
+        .await,
+        "a tap must NEVER be dropped, even with the reserve dry"
+    );
+    let snap = ts::snapshot(CHAT).unwrap();
+    assert_eq!(snap.admitted_interactive, 2, "both taps admitted");
+    assert_eq!(
+        snap.interactive_overflow, 2,
+        "both taps exceeded the reserve"
+    );
+    assert_eq!(snap.finals_pending, 0, "a tap must NEVER be queued");
+    assert_eq!(snap.edits_admitted, 0, "the bulk plane gained nothing");
+
+    // Bulk classes stay locked out of the reserve the taps just consumed:
+    // refill first, then the chrome ladder unlocks as tokens return.
+    assert!(
+        !governor::edit_admission(
+            &bot,
+            CHAT,
+            MessageId(33),
+            governor::EditClass::Clock,
+            "h".into(),
+            false,
+        )
+        .await,
+        "bulk must not steal the interactive reserve"
+    );
+    ts::advance(3_100);
+    assert!(
+        governor::edit_admission(
+            &bot,
+            CHAT,
+            MessageId(33),
+            governor::EditClass::Clock,
+            "h".into(),
+            false,
+        )
+        .await,
+        "bulk unlocks once refill crosses the reserve floor"
+    );
+}

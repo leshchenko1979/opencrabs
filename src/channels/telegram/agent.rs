@@ -527,61 +527,80 @@ impl TelegramAgent {
                                                 // site, so no arm can drop the choice again
                                                 // (the classic merged host used to edit the
                                                 // answer HTML alone and lose the record).
-                                                let rewrite =
-                                                    super::suggest_options::pick_rewrite(
-                                                        host_info.as_ref().map(|(full, rich, md)| {
-                                                            (full.as_str(), *rich, md.as_deref())
-                                                        }),
-                                                        &picked,
-                                                        &picked_md,
-                                                        picked_idx,
-                                                    );
-                                                let outcome: Result<(), String> = match rewrite.clone() {
-                                                    super::suggest_options::PickRewrite::RichMarkdownHost(
-                                                        body,
-                                                    ) => super::suggest_options::edit_rich_md_fencesafe(
-                                                        bot_clone.api_url().as_str(),
-                                                        bot_clone.token(),
-                                                        chat_id.0,
-                                                        mid.0,
-                                                        &body,
-                                                        Some(&serde_json::json!(empty_kb)),
-                                                        "turn",
-                                                        "-",
-                                                    )
-                                                    .await,
-                                                    super::suggest_options::PickRewrite::RichHost(
-                                                        body,
-                                                    ) => super::rich::api::edit_rich_html(
-                                                        bot_clone.api_url().as_str(),
-                                                        bot_clone.token(),
-                                                        chat_id.0,
-                                                        mid.0,
-                                                        &body,
-                                                        Some(&serde_json::json!(empty_kb)),
-                                                        "turn",
-                                                        "-",
-                                                    )
-                                                    .await
-                                                    .map(|_| ())
-                                                    .map_err(|e| e.to_string()),
-                                                    super::suggest_options::PickRewrite::ClassicHost(
-                                                        body,
-                                                    ) => bot_clone
-                                                        .edit_message_text(chat_id, mid, &body)
-                                                        .parse_mode(teloxide::types::ParseMode::Html)
-                                                        .reply_markup(empty_kb.clone())
+                                                // #117: this tap leg enters the G2 edit gate
+                                                // as EditClass::Interactive — rank 5, never
+                                                // dropped, never queued; the reserve floor
+                                                // makes room even on a dry bulk plane. The
+                                                // deferred 429 retry below stays gate-free:
+                                                // it IS the reactive floor of the design.
+                                                let gated = super::governor::edit_admission(
+                                                    &bot_clone,
+                                                    chat_id,
+                                                    mid,
+                                                    super::governor::EditClass::Interactive,
+                                                    picked.clone(),
+                                                    false,
+                                                )
+                                                .await;
+                                                let outcome: Result<(), String> = if !gated {
+                                                    Ok(())
+                                                } else {
+                                                    let rewrite =
+                                                        super::suggest_options::pick_rewrite(
+                                                            host_info.as_ref().map(|(full, rich, md)| {
+                                                                (full.as_str(), *rich, md.as_deref())
+                                                            }),
+                                                            &picked,
+                                                            &picked_md,
+                                                            picked_idx,
+                                                        );
+                                                    match rewrite.clone() {
+                                                        super::suggest_options::PickRewrite::RichMarkdownHost(
+                                                            body,
+                                                        ) => super::suggest_options::edit_rich_md_fencesafe(
+                                                            bot_clone.api_url().as_str(),
+                                                            bot_clone.token(),
+                                                            chat_id.0,
+                                                            mid.0,
+                                                            &body,
+                                                            Some(&serde_json::json!(empty_kb)),
+                                                            "turn",
+                                                            "-",
+                                                        )
+                                                        .await,
+                                                        super::suggest_options::PickRewrite::RichHost(
+                                                            body,
+                                                        ) => super::rich::api::edit_rich_html(
+                                                            bot_clone.api_url().as_str(),
+                                                            bot_clone.token(),
+                                                            chat_id.0,
+                                                            mid.0,
+                                                            &body,
+                                                            Some(&serde_json::json!(empty_kb)),
+                                                            "turn",
+                                                            "-",
+                                                        )
                                                         .await
                                                         .map(|_| ())
                                                         .map_err(|e| e.to_string()),
-                                                    super::suggest_options::PickRewrite::Standalone(
-                                                        body,
-                                                    ) => bot_clone
-                                                        .edit_message_text(chat_id, mid, &body)
-                                                        .parse_mode(teloxide::types::ParseMode::Html)
-                                                        .await
-                                                        .map(|_| ())
-                                                        .map_err(|e| e.to_string()),
+                                                        super::suggest_options::PickRewrite::ClassicHost(
+                                                            body,
+                                                        ) => bot_clone
+                                                            .edit_message_text(chat_id, mid, &body)
+                                                            .parse_mode(teloxide::types::ParseMode::Html)
+                                                            .reply_markup(empty_kb.clone())
+                                                            .await
+                                                            .map(|_| ())
+                                                            .map_err(|e| e.to_string()),
+                                                        super::suggest_options::PickRewrite::Standalone(
+                                                            body,
+                                                        ) => bot_clone
+                                                            .edit_message_text(chat_id, mid, &body)
+                                                            .parse_mode(teloxide::types::ParseMode::Html)
+                                                            .await
+                                                            .map(|_| ())
+                                                            .map_err(|e| e.to_string()),
+                                                    }
                                                 };
                                                 if let Err(e) = outcome {
                                                     match super::edit_retry::classify_str(&e) {
