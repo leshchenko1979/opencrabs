@@ -10,8 +10,8 @@
 
 use crate::channels::telegram::suggest_options::{
     BUTTON_LABEL_MAX_UNITS, FOLLOWUP_PREFIX, MAX_NUMBERS_PER_ROW, SHARED_ROW_MAX_CHARS,
-    SINGLE_BUTTON_MAX_UNITS, SuggestLayout, append_rows_and_trailer_md, enforce_button_fit,
-    folded_list_html, pick_layout, suggestion_rows_rich_html,
+    SHARED_ROW_TOTAL_UNITS, SINGLE_BUTTON_MAX_UNITS, SuggestLayout, append_rows_and_trailer_md,
+    enforce_button_fit, folded_list_html, pick_layout, suggestion_rows_rich_html,
 };
 
 fn opts(v: &[&str]) -> Vec<String> {
@@ -206,6 +206,55 @@ fn test_enforce_button_fit_folds_rows_over_the_total_budget() {
     );
     assert!(out.contains("<li>Полёт норм!!</li>"), "{out}");
     assert!(out.contains("<li>Всё чётко!!!</li>"), "{out}");
+}
+
+/// #119 follow-up: the enforce_button_fit funnel (rich/api.rs chokepoint)
+/// must honor the solo full-width budget, or it re-folds the exact row
+/// pick_layout deliberately shipped — observed live 2026-09-07 on ship
+/// ed0ae1d9: 26-char n=1 label arrived as Column, was re-folded to a bare
+/// "1" digit button + <ol> by THIS gate (pick_layout's own test passed).
+#[test]
+fn test_enforce_button_fit_solo_fullwidth_row_gets_single_budget() {
+    // 26 chars: over the shared-row total (20), inside the solo budget (30).
+    let label = "Ride the full-width button".to_string();
+    assert!(label.chars().count() > SHARED_ROW_TOTAL_UNITS);
+    assert!(label.chars().count() <= SINGLE_BUTTON_MAX_UNITS);
+    let body = format!(
+        "<tg-button-row><tg-button type=\"callback_data\" \
+         data=\"followup:t:0\">{label}</tg-button></tg-button-row>"
+    );
+    // Byte-identical: the funnel must NOT re-fold a solo row pick_layout
+    // already cleared under SINGLE_BUTTON_MAX_UNITS.
+    assert_eq!(enforce_button_fit(&body), body);
+    // Past the solo budget the fold still applies — the clip point holds.
+    let over = "x".repeat(SINGLE_BUTTON_MAX_UNITS + 1);
+    let over_body = format!(
+        "<tg-button-row><tg-button type=\"callback_data\" \
+         data=\"followup:t:0\">{over}</tg-button></tg-button-row>"
+    );
+    let out = enforce_button_fit(&over_body);
+    assert!(out.contains(">1</tg-button>"), "{out}");
+    assert!(out.contains("<li>"), "{out}");
+}
+
+#[test]
+fn test_enforce_button_fit_multi_row_and_labels_keep_shared_budgets() {
+    // n=2 solo-row carve-out must NOT leak: two 12-char labels = 24 total
+    // still folds under the shared budget (#79 regression guard).
+    let body = "<tg-button-row>\
+                <tg-button type=\"callback_data\" data=\"followup:t:0\">Полёт норм!!\
+                </tg-button><tg-button type=\"callback_data\" data=\"followup:t:1\">\
+                Всё чётко!!!</tg-button></tg-button-row>";
+    let out = enforce_button_fit(body);
+    assert!(out.contains(">1</tg-button>") && out.contains(">2</tg-button>"));
+    // And a solo row whose LABEL alone exceeds the shared per-label cap but
+    // sits inside the solo budget stays untouched (label_cap = 30 solo).
+    let label = "Ride the full-width button".to_string();
+    let solo = format!(
+        "<tg-button-row><tg-button type=\"callback_data\" \
+         data=\"followup:t:0\">{label}</tg-button></tg-button-row>"
+    );
+    assert_eq!(enforce_button_fit(&solo), solo);
 }
 
 /// #108: the button rows and the trailer must start a FRESH markdown block.

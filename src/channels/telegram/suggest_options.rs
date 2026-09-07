@@ -416,6 +416,7 @@ pub(crate) fn enforce_button_fit(html: &str) -> String {
         let row_end = row_start + crel + ROW_CLOSE.len();
         let block = &html[row_start + ROW_OPEN.len()..row_end - ROW_CLOSE.len()];
         let mut row_total = 0usize;
+        let mut max_label = 0usize;
         let mut tags_in_row: Vec<&str> = Vec::new();
         let mut bscan = 0usize;
         while let Some(brel) = block[bscan..].find(BTN_OPEN) {
@@ -436,12 +437,25 @@ pub(crate) fn enforce_button_fit(html: &str) -> String {
             };
             let label = &block[label_start..label_start + lrel];
             row_total += width(label);
-            fits &= width(label) <= BUTTON_LABEL_MAX_UNITS;
+            max_label = max_label.max(width(label));
             tags_in_row.push(open_tag);
             labels.push(label);
             bscan = label_start + lrel + BTN_CLOSE.len();
         }
-        fits &= row_total <= SHARED_ROW_TOTAL_UNITS;
+        // #119 follow-up: a SOLO full-width row is laid out by pick_layout
+        // under SINGLE_BUTTON_MAX_UNITS (30) — the shared-row budgets below
+        // do not apply to it, and without this carve-out the funnel
+        // re-folds what the emitter deliberately shipped full-width
+        // (observed live: 26-char n=1 label → Column row → re-folded to
+        // digits + <ol> by this very gate).
+        let solo_fullwidth_row = rows.is_empty() && tags_in_row.len() == 1;
+        let (label_cap, total_cap) = if solo_fullwidth_row {
+            (SINGLE_BUTTON_MAX_UNITS, SINGLE_BUTTON_MAX_UNITS)
+        } else {
+            (BUTTON_LABEL_MAX_UNITS, SHARED_ROW_TOTAL_UNITS)
+        };
+        fits &= max_label <= label_cap;
+        fits &= row_total <= total_cap;
         rows.push((row_start, row_end));
         open_tags.push(tags_in_row);
         scan_from = row_end;
