@@ -53,6 +53,15 @@ const PREVALIDATE_TIMEOUT_SECS: u64 = 10;
 /// error page can't blow up the message.
 const ERROR_NOTE_MAX_CHARS: usize = 400;
 
+/// Transient mermaid.ink failures worth a retry (#65): service unavailable
+/// (503) and rate-limit (429). Deterministic 4xx stays single-shot — the
+/// renderer's parse rejection will repeat identically.
+pub(crate) const MERMAID_INK_RETRYABLE: [u16; 2] = [503, 429];
+/// Attempts for a transient failure: initial try + max 2 retries (#65).
+pub(crate) const MERMAID_INK_MAX_ATTEMPTS: u32 = 3;
+/// Base backoff between attempts; doubles each round (1s, 2s).
+pub(crate) const MERMAID_INK_BACKOFF_SECS: u64 = 1;
+
 /// One media reference embedded via the markdown `media` field (#1044).
 /// `id` matches the `tg://photo?id=<id>` reference in the markdown text.
 ///
@@ -323,6 +332,47 @@ fn finish(source: &str, outcome: MermaidResult) -> MermaidResult {
     outcome
 }
 
+/// GET mermaid.ink with retry-with-backoff on transient failures (#65).
+/// Transport errors (timeout/unreachable) stay single-shot — the caller
+/// degrades to a legible failure block either way. A 503/429 status is
+/// retried up to [`MERMAID_INK_MAX_ATTEMPTS`] with doubling backoff; each
+/// retry round is logged so #64's telemetry shows the whole ladder.
+async fn ink_get_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<reqwest::Response, MermaidResult> {
+    for attempt in 1..=MERMAID_INK_MAX_ATTEMPTS {
+        if attempt > 1 {
+            tracing::warn!(attempt, url = %url, "mermaid.ink transient failure; retrying");
+        }
+        let resp = match client.get(url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let note = if e.is_timeout() {
+                    "diagram renderer timed out".to_string()
+                } else {
+                    "diagram renderer unreachable".to_string()
+                };
+                return Err(MermaidResult::Failed(note));
+            }
+        };
+        let status = resp.status().as_u16();
+        if !MERMAID_INK_RETRYABLE.contains(&status) || attempt == MERMAID_INK_MAX_ATTEMPTS {
+            return Ok(resp);
+        }
+        let backoff =
+            std::time::Duration::from_secs(MERMAID_INK_BACKOFF_SECS << (attempt - 1).min(4));
+        tracing::warn!(
+            status,
+            attempt,
+            backoff_secs = backoff.as_secs(),
+            "mermaid.ink transient status; backing off before retry"
+        );
+        tokio::time::sleep(backoff).await;
+    }
+    unreachable!("loop returns on every branch")
+}
+
 /// Pre-validate a single mermaid diagram against the renderer. On HTTP 200
 /// with an `image/*` content type it DOWNLOADS the rendered PNG and returns
 /// [`MermaidResult::ImageBytes`] — Telegram never fetches a URL from us
@@ -356,16 +406,9 @@ pub(crate) async fn resolve(source: &str) -> MermaidResult {
         Err(_) => return MermaidResult::Failed("diagram renderer unavailable".into()),
     };
 
-    let resp = match client.get(&url).send().await {
+    let resp = match ink_get_with_retry(&client, &url).await {
         Ok(r) => r,
-        Err(e) => {
-            let note = if e.is_timeout() {
-                "diagram renderer timed out".to_string()
-            } else {
-                "diagram renderer unreachable".to_string()
-            };
-            return MermaidResult::Failed(note);
-        }
+        Err(e) => return e,
     };
 
     let status = resp.status().as_u16();
