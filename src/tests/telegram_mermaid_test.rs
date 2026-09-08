@@ -790,3 +790,29 @@ fn png_dims_rejects_non_png_and_short_buffers() {
     hdr.extend_from_slice(&[0u8; 16]);
     assert_eq!(png_dims(&hdr), None);
 }
+
+// ---------------------------------------------------------------------------
+// #65 retry-with-backoff helpers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn retryable_statuses_are_503_and_429_only() {
+    use crate::channels::telegram::rich::mermaid::{
+        MERMAID_INK_MAX_ATTEMPTS, MERMAID_INK_RETRYABLE,
+    };
+
+    assert_eq!(MERMAID_INK_RETRYABLE, [503, 429]);
+    assert_eq!(MERMAID_INK_MAX_ATTEMPTS, 3);
+}
+
+#[test]
+fn backoff_doubles_per_attempt_capped() {
+    use crate::channels::telegram::rich::mermaid::MERMAID_INK_BACKOFF_SECS;
+
+    let secs = |attempt: u32| MERMAID_INK_BACKOFF_SECS << (attempt - 1).min(4);
+    assert_eq!(secs(1), 1);
+    assert_eq!(secs(2), 2);
+    assert_eq!(secs(3), 4);
+    // cap at 16s even for hypothetical higher attempt counts
+    assert_eq!(secs(7), 16);
+}
