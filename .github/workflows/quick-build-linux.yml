@@ -36,7 +36,7 @@ on:
       features:
         description: 'Cargo feature set passed to --features (comma-separated)'
         required: false
-        default: 'telegram,code-graph'
+        default: 'telegram,code-graph,browser'
 
 env:
   CARGO_TERM_COLOR: always
