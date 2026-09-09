@@ -53,8 +53,20 @@ pub enum MermaidResult {
     /// The renderer accepted the diagram; carries the image URL to embed.
     Image(String),
     /// Local (in-process) rendering produced PNG bytes ready for multipart
-    /// upload to Telegram. Carries the raw encoded PNG.
-    ImageBytes(Vec<u8>),
+    /// upload to Telegram. `natural_width` is the renderer's own natural
+    /// PNG width when known (None for degenerate/unknown bodies) — #134
+    /// uses it to gate the svg link at the emit point.
+    ImageBytes {
+        bytes: Vec<u8>,
+        natural_width: Option<u32>,
+        /// #134: the renderer's own natural-width SVG URL — same source,
+        /// vector form. Attached so the emit point can append a small
+        /// "svg" link under the inline image when the natural render is
+        /// too wide to stay crisp at phone width (owner-ratified trigger:
+        /// natural width > the SVG-link width threshold). `None` for
+        /// outcomes that carry no diagram source (defensive fallbacks).
+        svg_url: Option<String>,
+    },
     /// The renderer rejected the diagram or was unreachable; carries a
     /// legible error note for the failure block. Transient in nature
     /// (timeout, unreachable, photo-box bust, server error) — the same

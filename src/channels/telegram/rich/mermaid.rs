@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 /// base64url-appended. NOTE: this sends the diagram text to a third party.
 const MERMAID_INK_BASE: &str = "https://mermaid.ink/img/";
 /// Vector endpoint base for [`ink_url_svg`] (owner directive 2026-09-10).
+/// #134: SVG escape hatch — same payload, vector rendering, openable when
+/// the raster render is too wide for the photo box.
 const MERMAID_INK_SVG_BASE: &str = "https://mermaid.ink/svg/";
 
 /// Query parameters appended to every mermaid.ink render request.
@@ -250,6 +252,32 @@ fn ink_url_params(source: &str, params: &str) -> String {
     format!("{}{}{}", MERMAID_INK_BASE, base64url(source), params)
 }
 
+/// #134: natural-width **SVG** URL for a diagram source — same base64
+/// payload, the dedicated vector endpoint (the `?type=svg` parameter on
+/// the img endpoint is ignored by mermaid.ink; only this path serves
+/// `image/svg+xml`). Build-only: no network call, the browser does the
+/// fetch when the owner taps the link. Wide-diagram sharpness escape
+/// hatch (owner-ratified #134 prototype).
+pub(crate) fn svg_url(source: &str) -> String {
+    ink_url_svg(source)
+}
+
+/// #134: width above which the natural render gets an svg escape-hatch
+/// link under the inline image. Telegram's photo budget (9600 w+h) is an
+/// upload constraint, not a readability one — a 5000×4600 diagram sails
+/// through it and still lands as mud in a ~450 px phone column. 1600 px
+/// ≈ 3–4× display width: text below ~4 px equivalent once downscaled.
+/// Owner-calibrated against live specimens (1547 → no link, 1840 → link).
+const SVG_LINK_WIDTH_THRESHOLD: u32 = 1_600;
+
+/// #134: whether this outcome earns the small svg link under the image.
+/// `true` when the natural render is wider than the readability threshold
+/// (the photo box may not even have complained — mud at max dimensions is
+/// still mud). Pure, so the gating is unit-testable without a network.
+pub(crate) fn wants_svg_link(natural_width: Option<u32>) -> bool {
+    natural_width.is_some_and(|w| w > SVG_LINK_WIDTH_THRESHOLD)
+}
+
 /// Whether a render fits Telegram's photo box (width + height budget).
 /// Pure f32 arithmetic with no renderer deps — kept out of the
 /// feature-gated local-render module so every build can dimension-check
@@ -319,7 +347,7 @@ pub(crate) fn cache_put(source: &str, outcome: &MermaidResult) {
     let source = source.trim_end_matches('\n'); // #100: shared normalized key
     if !matches!(
         outcome,
-        MermaidResult::ImageBytes(_) | MermaidResult::ParseError(_)
+        MermaidResult::ImageBytes { .. } | MermaidResult::ParseError(_)
     ) {
         return;
     }
@@ -490,7 +518,14 @@ pub(crate) async fn resolve(source: &str) -> MermaidResult {
                     bytes = cbytes.len(),
                     "mermaid.ink clamp render ok; delivering bytes"
                 );
-                return finish(source, MermaidResult::ImageBytes(cbytes.to_vec()));
+                return finish(
+                    source,
+                    MermaidResult::ImageBytes {
+                        bytes: cbytes.to_vec(),
+                        natural_width: Some(w),
+                        svg_url: Some(svg_url(source)),
+                    },
+                );
             }
             _ => {}
         }
@@ -498,7 +533,14 @@ pub(crate) async fn resolve(source: &str) -> MermaidResult {
             bytes = body.len(),
             "mermaid.ink render ok; delivering bytes"
         );
-        return finish(source, MermaidResult::ImageBytes(body.to_vec()));
+        return finish(
+            source,
+            MermaidResult::ImageBytes {
+                bytes: body.to_vec(),
+                natural_width: png_dims(&body).map(|(w, _)| w),
+                svg_url: Some(svg_url(source)),
+            },
+        );
     }
 
     // Not a usable image: surface the renderer's own error text (mermaid.ink
@@ -584,10 +626,22 @@ pub(crate) fn replacement_for(
                 }),
             )
         }
-        MermaidResult::ImageBytes(bytes) => {
+        MermaidResult::ImageBytes {
+            bytes,
+            natural_width,
+            svg_url,
+        } => {
             let id = format!("diag{index}");
+            // #134: wide renders get a small svg link under the image —
+            // same source, vector endpoint, opens crisp in the browser.
+            // Narrow renders stay link-free (zero noise). Form is the
+            // owner-ratified 07:37Z prototype: bare [svg](url) line.
+            let svg_line = match (svg_url, wants_svg_link(natural_width)) {
+                (Some(url), true) => format!("\n[svg]({url})"),
+                _ => String::new(),
+            };
             (
-                format!("![diagram](tg://photo?id={id})"),
+                format!("![diagram](tg://photo?id={id}){svg_line}"),
                 Some(MediaEntry {
                     id,
                     url: None,
@@ -721,6 +775,15 @@ pub(crate) fn failure_html(err: &str, source: &str) -> String {
         escape(err),
         escape(source)
     )
+}
+
+/// #134: generic svg escape-hatch link fragment for HTML-fallback
+/// contexts — a small `[svg]` anchor to the vector render (generic
+/// [`ink_url_svg`] hatch, ruling (a) 2026-09-10: ONE semantic — the
+/// generic hatch lives here, callers add the trigger copy, e.g. the
+/// "too wide for the photo path" note on the dimension-rejected leg).
+pub(crate) fn svg_link_html(source: &str) -> String {
+    format!("\n<a href=\"{}\">[svg]</a>", escape(&svg_url(source)))
 }
 
 /// Minimal HTML entity escaping (matches render_html's escaping).

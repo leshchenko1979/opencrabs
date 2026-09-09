@@ -83,15 +83,14 @@ fn render_block(block: &Block, wrap_p: bool) -> String {
             // markdown path, never through vector HTML `<img>` (Telegram
             // rejects it). This arm is a defensive fallback — but a
             // SUCCESSFUL render is never discarded as a failure (owner
-            // directive 2026-09-10 03:56Z): degrade to the clamped-image
-            // note plus a small [svg] link the reader can open in a
-            // browser. Broken fences keep the legible failure block.
+            // directive 2026-09-10 03:56Z): degrade to the note plus the
+            // svg escape hatch (generic ink_url_svg link — ruling (a):
+            // one semantic, generic hatch + caller-side trigger).
             MermaidResult::ImageBytes(_) => {
-                let svg = super::mermaid::ink_url_svg(source);
                 super::mermaid::failure_html(
                     "diagram rendered as image — open the svg link for the full-size vector",
                     source,
-                ) + &format!("\n<a href=\"{}\">[svg]</a>", escape(&svg))
+                ) + &super::mermaid::svg_link_html(source)
             }
             MermaidResult::Failed(err) | MermaidResult::ParseError(err) => {
                 super::mermaid::failure_html(err, source)
