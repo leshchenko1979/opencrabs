@@ -500,14 +500,16 @@ impl Tool for SpawnAgentTool {
         // propagate any write error. The parent is captured FIRST so the
         // status file carries it: if a restart kills this agent mid-turn
         // and boot-resume revives its session, the revived result must
-        // reach this session (#110).
+        // reach this session (#110). Kept as a `Uuid` too — the follow-up
+        // loop and the completion path below capture it by value (#110).
         let parent_session_id = context.session_id;
+        let parent_session_for_status = context.session_id.to_string();
         let _ = WorkStatus::new_agent(
             &agent_id,
             &label,
             &child_session_id.to_string(),
             &full_prompt,
-            Some(&parent_session_id.to_string()),
+            Some(&parent_session_for_status),
         )
         .map_err(|e| ToolError::Execution(format!("Failed to create status file: {e}")))?;
 
@@ -531,7 +533,7 @@ impl Tool for SpawnAgentTool {
                     &label_clone,
                     &child_session_id.to_string(),
                     &prompt_clone,
-                    Some(&parent_session_id.to_string()),
+                    Some(&parent_session_for_status),
                 )
                 .expect("status file")
             });

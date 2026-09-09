@@ -475,6 +475,20 @@ async fn cmd_chat_inner(
     // Create service context
     let service_context = ServiceContext::new(db.pool().clone());
 
+    // Link sessions that predate the project they belong to, or that were
+    // created before anything linked them at all (#1445). One sweep of the
+    // unassigned rows, idempotent, so a later run only picks up what this one
+    // could not. Backgrounded because it touches every unassigned session and
+    // nothing on the startup path is waiting on the answer.
+    {
+        let project_svc = crate::services::ProjectService::new(service_context.clone());
+        tokio::spawn(async move {
+            if let Err(e) = project_svc.backfill_unassigned_sessions().await {
+                tracing::warn!(error = %e, "session/project backfill failed");
+            }
+        });
+    }
+
     // Spawn RSI background engine (digest + periodic analysis). #1063: the
     // engine task always spawns and gates itself per cycle from the live
     // config mirror (headless daemons default OFF, TUI default ON).
@@ -515,7 +529,7 @@ async fn cmd_chat_inner(
     // capability is missing. Without this nudge the model can give up on a task
     // whose tool simply wasn't injected.
     if config.agent.lazy_tools {
-        system_brain.push_str(&crate::brain::tools::catalog::tool_access_prompt());
+        system_brain.push_str(&crate::brain::tools::catalog::tool_access_prompt(headless));
     }
 
     // Propagate persisted auto-always approval policy to the agent service so

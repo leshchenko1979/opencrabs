@@ -505,6 +505,7 @@ pub(crate) async fn resume_session_inner(
         let st = streaming.clone();
         let bot_typing = bot.clone();
         let chat_typing = chat_id;
+        let ctx_max = agent.context_limit_for_session(session_id);
         Arc::new(move |_sid, event| match event {
             // Auto-compaction silent window — immediate typing refresh plus
             // the visible start line in the flow body (#29).
@@ -650,6 +651,8 @@ pub(crate) async fn resume_session_inner(
             ProgressEvent::CompactionSummary {
                 before_pct,
                 after_pct,
+                before_tokens,
+                after_tokens,
                 elapsed,
                 ..
             } => {
@@ -658,8 +661,20 @@ pub(crate) async fn resume_session_inner(
                     s.header_preview = None;
                     s.display_queue
                         .push(DisplayItem::Intermediate(compacted_flow_line(
-                            before_pct, after_pct, elapsed,
+                            before_pct,
+                            after_pct,
+                            before_tokens,
+                            after_tokens,
+                            elapsed,
                         )));
+                    // Resumed turns get the same live-meter treatment (#135):
+                    // post-compaction token count lands in the footer slot.
+                    s.sections.ctx = Some(crate::utils::format_ctx_footer(
+                        u32::try_from(after_tokens).unwrap_or(u32::MAX),
+                        ctx_max,
+                        None,
+                    ));
+                    s.dirty = true;
                 }
             }
             _ => {}
@@ -1116,6 +1131,19 @@ pub(crate) fn build_bg_receipt_card(meta: &crate::brain::agent::BgTaskMeta) -> (
         label
     };
     let duration = background_tasks::format_elapsed(meta.elapsed_secs);
+    // Empty-body guard: a whitespace-only tail leaves nothing inside the
+    // <details> wrapper — the rich API rejects the whole card with 400
+    // RICH_MESSAGE_EMPTY and the outbox fallback escapes the literal
+    // wrapper tags into the chat. Emit a flat one-line card instead —
+    // nothing to reject, no wrapper to leak on any wire.
+    if meta.tail.trim().is_empty() {
+        let markdown = format!("{icon} `{label}` 🕒 {duration}");
+        let classic = format!(
+            "<b>{icon} {} 🕒 {duration}</b>",
+            super::markdown::escape_html(label)
+        );
+        return (markdown, classic);
+    }
     let fence = receipt_fence(&meta.tail);
     let markdown = format!(
         "<details>\n<summary><sub>{icon} `{label}` 🕒 {duration}</sub></summary>\n\n\
@@ -1158,6 +1186,15 @@ pub(crate) fn build_notify_receipt_card(sender_label: &str, body: &str) -> (Stri
     } else {
         sender
     };
+    // Empty-body guard: whitespace-only body = an empty card inside the
+    // <details> wrapper = 400 RICH_MESSAGE_EMPTY (same defect class as the
+    // bg card). Flat one-line card instead — no wrapper to reject.
+    if body.trim().is_empty() {
+        return (
+            format!("📨 From **{sender}**"),
+            format!("📨 From <b>{sender}</b>"),
+        );
+    }
     let preview = first_line_preview(body);
     let truncated = body.chars().count() > BG_ECHO_BODY_CAP_CHARS;
     let body = crate::utils::string::truncate_chars(body, BG_ECHO_BODY_CAP_CHARS);

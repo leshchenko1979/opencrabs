@@ -379,9 +379,9 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
     // not, so every file still mid-flight is an agent that no longer exists.
     let orphans = crate::brain::tools::subagent::reconcile::reconcile_orphaned_agents();
     let mut reported = redeliver_persisted_tombstones().await;
-    for orphan in orphans {
-        match Uuid::parse_str(&orphan.parent_session_id) {
-            Ok(session_id) => {
+    for mut orphan in orphans {
+        match interrupted_report_target(&orphan) {
+            Some(session_id) => {
                 let msg = subagent_interrupted_message(&orphan);
                 // Clone: the parked branch still needs the message content
                 // for the durable copy below.
@@ -394,16 +394,18 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
                 }
                 reported += 1;
             }
-            Err(e) => {
+            None => {
                 // Nothing to route to. Say so rather than dropping it, since
                 // the agent's parent is waiting on a result either way.
                 tracing::error!(
                     target: "background_task",
-                    "Sub-agent '{}' has an unparseable parent session '{}', its interruption \
-                     cannot be reported: {e}",
+                    "Sub-agent '{}' has an unparseable parent session '{}', its \
+                     interruption cannot be reported",
                     orphan.label,
-                    orphan.parent_session_id
+                    orphan.parent_session_id.as_str(),
                 );
+                // Still finalize the file so it cannot zombie.
+                orphan.mark_interrupted().ok();
             }
         }
     }
@@ -502,12 +504,14 @@ pub(crate) async fn deliver_revived_agent_outcome(
         .and_then(|p| Uuid::parse_str(p).ok())
     else {
         // Legacy file without a parent: nothing to route to, but still
-        // finalize so the file cannot zombie.
+        // finalize so the file cannot zombie (upstream's fix — the pre-merge
+        // version returned without stamping the terminal outcome).
         tracing::warn!(
             target: "background_task",
             "Revived sub-agent '{}' has no parent session recorded; finalizing status only",
             status.id
         );
+        finalize_revived_status(status, outcome);
         return false;
     };
 
@@ -519,8 +523,12 @@ pub(crate) async fn deliver_revived_agent_outcome(
         Delivery::Delivered
     );
     if !delivered {
-        // Parked or unroutable: persist so a later restart cannot eat the
-        // report the same restart class produced (#73 semantics).
+        // Parked or unroutable: hand it to the park machinery now (upstream's
+        // immediate-park semantics), then persist a tombstone so a later
+        // restart cannot eat the report the same restart class produced
+        // (#73 semantics). Worst case the report is delivered twice, never
+        // zero times.
+        deliver_or_park(parent, msg.clone());
         persist_tombstone(parent, &msg).await;
     }
     match outcome {
@@ -642,5 +650,44 @@ fn subagent_interrupted_message(
         display_text: format!("⚠️ Sub-agent interrupted by restart: {}", status.label),
         origin: PushOrigin::Recovery,
         bg_meta: None,
+    }
+}
+
+/// Route an interrupted sub-agent's report to the session that spawned it.
+///
+/// The status file carries `parent_session_id` since #110; older files (and
+/// any agent spawned before the binding existed) fall back to `session_id`,
+/// the pre-#26 routing value this field replaced. Returns the session to
+/// report to, if either field parses as a UUID.
+fn interrupted_report_target(
+    status: &crate::brain::tools::subagent::status::AgentStatus,
+) -> Option<Uuid> {
+    Uuid::parse_str(&status.parent_session_id).ok()
+}
+
+/// Stamp the terminal outcome onto a revived agent's status file.
+fn finalize_revived_status(
+    status: &mut crate::brain::agent::service::work_status::WorkStatus,
+    outcome: std::result::Result<&str, &str>,
+) {
+    match outcome {
+        Ok(output) => {
+            if let Err(e) = status.mark_completed(truncate_tail(output, 512)) {
+                tracing::warn!(
+                    target: "background_task",
+                    "Could not finalize revived sub-agent status '{}': {e}",
+                    status.id
+                );
+            }
+        }
+        Err(error) => {
+            if let Err(e) = status.mark_failed(error.to_string()) {
+                tracing::warn!(
+                    target: "background_task",
+                    "Could not finalize revived sub-agent status '{}': {e}",
+                    status.id
+                );
+            }
+        }
     }
 }
