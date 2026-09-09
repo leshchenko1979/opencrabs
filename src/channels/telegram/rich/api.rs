@@ -529,9 +529,6 @@ pub(crate) async fn send_rich_markdown_media_target_id(
 
 /// Scalar string form parts for a rich multipart request: the JSON body's
 /// top-level fields Telegram needs as form parts. Split out so the part
-/// shape is unit-testable without a live bot. `message_id` is edit-only
-/// (#102): `editMessageText` multipart rejects with `message to edit not
-/// found` when the part is missing; `sendRichMessage` bodies carry no
 /// shape is unit-testable without a live bot. `message_id` is edit-only:
 /// `editMessageText` multipart rejects with `message to edit not found`
 /// when the part is missing; `sendRichMessage` bodies carry no
@@ -556,10 +553,6 @@ pub(crate) fn multipart_scalar_fields(body: &serde_json::Value) -> Vec<(String, 
     fields
 }
 
-/// Build the multipart/form-data request whose media array references
-/// uploaded PNG bytes via `attach://<id>`. Scalar parts come from
-/// [`multipart_scalar_fields`]; each byte entry becomes a file part named
-/// exactly `<id>` so Telegram's `attach://<id>` reference resolves
 /// Build the multipart/form-data request for a `sendRichMessage` whose media
 /// array references uploaded PNG bytes via `attach://<id>`. Scalar parts come
 /// from [`multipart_scalar_fields`]; each byte entry becomes a file part

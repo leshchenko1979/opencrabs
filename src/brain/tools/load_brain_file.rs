@@ -69,8 +69,6 @@ impl Tool for LoadBrainFileTool {
         }
 
         // Optional: return only matching sections rather than the whole file.
-        // Extracted BEFORE the skill-slug branch: the slug form supports
-        // section-filtered reloads too.
         let query = input
             .get("query")
             .and_then(|v| v.as_str())
@@ -84,6 +82,8 @@ impl Tool for LoadBrainFileTool {
         // filename form cannot (skills live in subdirectories). A success
         // here marks the skill as SEEN for this session, feeding the
         // post-compaction inventory stamp (#125/#131 union).
+        // Extracted BEFORE the skill-slug branch: the slug form supports
+        // section-filtered reloads too.
         if !name.ends_with(".md")
             && !name.contains('/')
             && !name.contains('\\')
@@ -108,6 +108,7 @@ impl Tool for LoadBrainFileTool {
                 matches.render(&format!("skill: {}", skill.name), query)
             }));
         }
+
 
         // Filename form of a skill (issue #138): "<slug>.md" resolves through
         // the skill registry exactly like the bare slug form — same marking,

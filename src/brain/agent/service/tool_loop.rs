@@ -1,6 +1,6 @@
 use super::builder::AgentService;
-use super::compaction::CompactionOutcome;
 use super::compaction_prompts::CompactionKind;
+use super::compaction::CompactionOutcome;
 use super::types::*;
 use crate::brain::agent::context::AgentContext;
 use crate::brain::agent::error::{AgentError, Result};
@@ -554,6 +554,7 @@ impl AgentService {
         override_progress_callback: Option<ProgressCallback>,
         channel: &str,
         channel_chat_id: Option<&str>,
+        channel_thread_id: Option<&str>,
         track_origin: Option<PendingOrigin>,
     ) -> Result<AgentResponse> {
         // #1008: one-shot proactive fallback-chain setup suggestion. Rides
@@ -589,6 +590,7 @@ impl AgentService {
                     &user_message,
                     channel,
                     channel_chat_id,
+                    channel_thread_id,
                     origin.as_db_str(),
                 )
                 .await
@@ -700,7 +702,25 @@ impl AgentService {
         // Request finished — delete the tracking row. Only PROCESSING rows
         // survive (meaning the process crashed/restarted mid-request).
         // Untracked (resume) turns never inserted a row, so nothing to clean up.
+        //
+        // Exception: a turn cancelled *because the process is shutting down*
+        // keeps its row, so the next boot resumes it (#1462). Quitting with
+        // Ctrl+C twice cancels the in-flight token before exiting, and the
+        // cancelled turn then unwound through here and deleted its own
+        // recovery ticket — the work was gone with nothing left to resume.
+        // A turn the user deliberately stopped (Esc twice, /stop, /discard)
+        // is still deleted: they abandoned it and must not have it replayed.
+        // Both arrive as AgentError::Cancelled, so the shutdown flag is the
+        // only thing that tells them apart.
+        let cancelled_by_shutdown = super::shutdown::keeps_recovery_row(&result);
+        if cancelled_by_shutdown {
+            tracing::info!(
+                "Turn cancelled by shutdown — keeping the recovery row so the next boot \
+                 resumes it (#1462)"
+            );
+        }
         if track_origin.is_some()
+            && !cancelled_by_shutdown
             && let Err(e) = pending_repo.delete(request_id).await
         {
             tracing::warn!("Failed to clean up pending request: {}", e);
@@ -1268,7 +1288,7 @@ impl AgentService {
                 .await
             {
                 Ok(summary) => {
-                    // #134 helper below persists marker + stamped continuation.
+                    // Persist summary as the assistant response (for DB/search continuity)
                     message_service
                         .append_content(assistant_db_msg.id, &summary)
                         .await
@@ -1276,7 +1296,8 @@ impl AgentService {
 
                     // Add a brief continuation prompt to context — matches
                     // auto-compaction behavior but uses a short sentence instead
-                    // of the full POST-COMPACTION PROTOCOL.
+                    // of the full POST-COMPACTION PROTOCOL (#134 helper below
+                    // persists marker + stamped continuation).
                     self.apply_compaction_continuation(
                         session_id,
                         &message_service,
@@ -5125,9 +5146,10 @@ impl AgentService {
                     // new responses from the correction feedback itself.
                     // Naming the fabricated command outranks the generic
                     // wording: it cites a fact instead of a category, so the
-                    // model cannot rationalise it (#797). Falls back to the
-                    // generic correction for the other phantom triggers, which
-                    // identify no specific command.
+                    // model cannot rationalise it (#797). An invented sha or
+                    // tally is the same argument one level down (#1423), and
+                    // the generic correction covers the triggers that identify
+                    // nothing specific.
                     let nudge = if !uncalled_commands.is_empty() {
                         super::nudge::uncalled_commands_nudge(&uncalled_commands)
                     } else if !unbacked_facts.is_empty() {
@@ -6525,6 +6547,7 @@ impl AgentService {
                                     env_vars: tool_context.env_vars.clone(),
                                     auto_approve: true, // User approved this execution
                                     timeout_secs: tool_context.timeout_secs,
+                                    headless: tool_context.headless,
                                     sudo_callback: tool_context.sudo_callback.clone(),
                                     ssh_callback: tool_context.ssh_callback.clone(),
                                     shared_working_directory: tool_context
@@ -6536,7 +6559,6 @@ impl AgentService {
                                     plan_session_override: tool_context.plan_session_override,
                                     subagent_manager: tool_context.subagent_manager.clone(),
                                     parent_tool_registry: tool_context.parent_tool_registry.clone(),
-                                    headless: tool_context.headless,
                                 };
 
                                 // Execute the tool with approved context, racing against cancel

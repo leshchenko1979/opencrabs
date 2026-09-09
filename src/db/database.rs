@@ -90,11 +90,18 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     include_str!("../migrations/20260905000000_add_pending_tombstones.sql"),
     // FORK (#111): durable notify queue — parked session_notify /
     // background-task pushes survive restarts and re-offer at boot.
+    // Kept in filename order per the list invariant; databases already
+    // stamped past this index are repaired by `heal_notify_queue` after
+    // `to_latest` (#1401).
     include_str!("../migrations/20260906000001_add_notify_queue.sql"),
     // FORK (#138): durable seen-skills store — the post-compaction skill
     // inventory stamp (#125/#131) survives daemon restarts: every
     // mark_seen writes a row, boot hydrates the in-memory registry back.
     include_str!("../migrations/20260908000000_add_session_seen_skills.sql"),
+    // Upstream (#1462-class): pending-requests thread id — slots AFTER the
+    // fork's 20260908000000 (no version collision); prod DBs already past
+    // this index are covered by the heal pass below.
+    include_str!("../migrations/20260908000001_pending_requests_thread_id.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
@@ -359,6 +366,7 @@ impl Database {
                     // be skipped with the stamp already past it (#1401), and only
                     // the schema itself can say so.
                     crate::db::migration_heal::heal_pending_requests_origin(conn)?;
+                    crate::db::migration_heal::heal_notify_queue(conn)?;
                     Ok(())
                 },
             )

@@ -76,18 +76,14 @@ pub enum ProgressEvent {
     },
     /// Compaction finished — carry the summary so the TUI can display it,
     /// plus before/after fill levels and the wall-clock duration of the
-    /// silent window so channels can render a completion line (#29). The
-    /// token counts are ABSOLUTE context sizes taken at the same boundaries
-    /// as the percentages (#135): `before_tokens` is the size the
-    /// summariser was invoked on, `after_tokens` the size the next request
-    /// starts with.
+    /// silent window so channels can render a completion line (#29).
     CompactionSummary {
         summary: String,
         before_pct: f64,
         after_pct: f64,
+        elapsed: std::time::Duration,
         before_tokens: usize,
         after_tokens: usize,
-        elapsed: std::time::Duration,
     },
     /// A single build-output line (e.g. "Compiling foo v1.0"). The TUI keeps a
     /// rolling window of the last few lines and clears them on RestartReady.
@@ -239,7 +235,7 @@ pub enum PushOrigin {
 /// receipt card from these fields instead of parsing `context_text` — the
 /// `[System: ...]` shape belongs to the LLM and must stay free to evolve
 /// without breaking the bubble.
-/// Receipt payload for BackgroundTask-origin pushes (#15). Derives serde so
+/// Receipt payload for BackgroundTask-origin pushes (#111). Derives serde so
 /// the durable notify queue (#111) can round-trip it through its JSON
 /// column.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
