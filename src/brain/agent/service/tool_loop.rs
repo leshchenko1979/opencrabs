@@ -1,4 +1,5 @@
 use super::builder::AgentService;
+use super::compaction_prompts::CompactionKind;
 use super::types::*;
 use crate::brain::agent::context::AgentContext;
 use crate::brain::agent::error::{AgentError, Result};

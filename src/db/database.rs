@@ -101,7 +101,7 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // Upstream (#1462-class): pending-requests thread id — slots AFTER the
     // fork's 20260908000000 (no version collision); prod DBs already past
     // this index are covered by the heal pass below.
-    include_str!("../migrations/20260908000001_pending_requests_thread_id.sql"), upstream/main
+    include_str!("../migrations/20260908000001_pending_requests_thread_id.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
