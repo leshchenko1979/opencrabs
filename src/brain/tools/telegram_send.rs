@@ -14,7 +14,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 use teloxide::payloads::SendDocumentSetters;
-use teloxide::payloads::SendMessageSetters;
 use teloxide::payloads::SendPhotoSetters;
 use teloxide::prelude::*;
 use teloxide::types::{
@@ -120,10 +119,11 @@ pub(crate) async fn resolve_input_file(
 ///      agent route messages to a topic OTHER than the most recent
 ///      one (e.g. "post the release notes in #announcements even
 ///      though the last message came from #dev").
-///   2. Session origin topic via `session_topic(session_id)` — the
-///      forum topic this interaction started in, the same in-memory
-///      map the interactive-question tool routed through (#450). Makes replies
-///      land back in the originating topic with no explicit routing.
+///   2. Session origin topic via `session_topic(session_id)` — ONLY when the
+///      resolved target chat IS the session-origin chat (#127). The forum
+///      topic this interaction started in; makes replies land back in the
+///      originating topic with no explicit routing, without leaking the
+///      topic into other chats (the #116 poisoning chain).
 ///   3. Auto-lookup via `latest_thread_id_for_chat(chat_id)` — the
 ///      fallback that closed #130, picking up the most recently
 ///      stored topic so non-forum chats and routine replies still
@@ -153,15 +153,29 @@ pub(crate) async fn resolve_thread_id(
         // General is addressed by the ABSENCE of a thread.
         return crate::channels::telegram::session_resolve::delivery_thread_id(Some(tid_i32));
     }
-    // Session origin topic — the forum topic this interaction started in, the
-    // same in-memory map the interactive-question tool routed through (#450). This is why
-    // a reply sent from a topic lands back in that topic without the agent
-    // passing thread_id. Cold/cron sessions have no entry, so this is skipped.
-    if let Some(tid) = state.session_topic(session_id).await {
+    // Session origin topic — the forum topic this interaction started in.
+    // SAME-ORIGIN ONLY (#127): the origin topic is applied ONLY when the
+    // resolved target chat IS the session-origin chat. Inheriting a topic
+    // across chats is what poisoned cross-chat sends (#116): a session
+    // living in group topic 7198, sending to the owner DM with thread_id
+    // omitted, had topic 7198 — which does not exist in the DM — put on the
+    // wire. A session bound to General has a KNOWN same-origin address (no
+    // thread), so falling through to the chat-wide lookup below is still
+    // correct for that case (#1319).
+    if let Some(tid) = state.session_topic(session_id).await
+        && state.session_chat(session_id).await == Some(chat_id)
+    {
         // Returns even when the boundary yields None: a session bound to
         // General has a KNOWN address (no thread), so falling through to the
         // chat-wide lookup below would post into whichever topic spoke last
         // (#1319).
+        //
+        // A remembered topic can outlive its existence on Telegram's side
+        // (deleted while we were away). Its first hard evidence is the send
+        // itself failing with `message thread not found` (#116) — handled at
+        // the send seams (rich + HTML ladder), which evict chat-scoped and
+        // retry unthreaded. Here we just resolve the address; the map
+        // re-registers on the chat's next inbound topic message.
         return crate::channels::telegram::session_resolve::delivery_thread_id(Some(tid));
     }
     crate::channels::telegram::send::latest_thread_id_for_chat(chat_id).await
@@ -210,6 +224,44 @@ pub(crate) async fn resolve_new_target(
     let chat_id = chat_or_err(input, state, session_id).await?;
     let thread_id = resolve_thread_id(input, chat_id, session_id, state).await;
     Ok(NewTarget { chat_id, thread_id })
+}
+
+/// Landing echo for success output (#127): names the RESOLVED destination —
+/// chat always, topic when one is on the route (name when the DB can supply
+/// it, numeric id otherwise). Every message-creating action appends this to
+/// its success text so the calling model sees where the message actually
+/// landed, regardless of how resolution happened (explicit ids, session
+/// origin, chat-wide lookup) — a stale-topic route or session-origin
+/// fallback becomes visible without a human complaint.
+pub(crate) async fn landing_echo(
+    chat_id: i64,
+    thread_id: Option<teloxide::types::ThreadId>,
+) -> String {
+    let topic = match thread_id {
+        None => "no topic (General/DM)".to_string(),
+        Some(tid) => {
+            let numeric = tid.0.0;
+            match thread_name(chat_id, numeric).await {
+                Some(name) => format!("topic {numeric} ({name})"),
+                None => format!("topic {numeric}"),
+            }
+        }
+    };
+    format!(" Landed: chat {chat_id}, {topic}.")
+}
+
+/// Best-effort topic name lookup for the landing echo (#127): the most
+/// recent non-null `topic_name` persisted for this chat+thread. Any failure
+/// (no pool, DB error, unnamed topic) degrades to the numeric id — the echo
+/// must never fail a successful send.
+async fn thread_name(chat_id: i64, thread_id: i32) -> Option<String> {
+    let pool = crate::db::global_pool()?;
+    let repo = crate::db::ChannelMessageRepository::new(pool.clone());
+    repo.latest_topic_name("telegram", &chat_id.to_string(), &thread_id.to_string())
+        .await
+        .ok()
+        .flatten()
+        .filter(|n| !n.trim().is_empty())
 }
 
 /// Resolve a message-addressing target. Chat fallback, then the required
@@ -536,7 +588,8 @@ impl TelegramSendTool {
         // (a report/cron post replied-to would otherwise be unrecoverable).
         crate::channels::telegram::send::record_outgoing(None, chat_id, thread_id, &sent).await;
         Ok(ToolResult::success(format!(
-            "Message sent to chat {chat_id}."
+            "Message sent to chat {chat_id}.{}",
+            landing_echo(chat_id, thread_id).await
         )))
     }
 
@@ -574,7 +627,8 @@ impl TelegramSendTool {
         // Persist for reply-recovery (a user can reply to this bot reply).
         crate::channels::telegram::send::record_outgoing(None, chat_id, thread_id, &sent).await;
         Ok(ToolResult::success(format!(
-            "Reply sent to message {message_id}."
+            "Reply sent to message {message_id}.{}",
+            landing_echo(chat_id, thread_id).await
         )))
     }
 
@@ -863,7 +917,8 @@ impl TelegramSendTool {
                     "-",
                 );
                 Ok(ToolResult::success(format!(
-                    "Message {message_id} forwarded from chat {from_chat} to {to_chat}."
+                    "Message {message_id} forwarded from chat {from_chat} to {to_chat}.{}",
+                    landing_echo(to_chat, thread_id).await
                 )))
             }
             Err(e) => {
@@ -947,7 +1002,8 @@ impl TelegramSendTool {
                     &content_hash8(&reference),
                 );
                 Ok(ToolResult::success(format!(
-                    "Photo sent to chat {chat_id}."
+                    "Photo sent to chat {chat_id}.{}",
+                    landing_echo(chat_id, thread_id).await
                 )))
             }
             Err(e) => {
@@ -1032,7 +1088,8 @@ impl TelegramSendTool {
                     &content_hash8(&reference),
                 );
                 Ok(ToolResult::success(format!(
-                    "Document sent to chat {chat_id}."
+                    "Document sent to chat {chat_id}.{}",
+                    landing_echo(chat_id, thread_id).await
                 )))
             }
             Err(e) => {
@@ -1104,7 +1161,8 @@ impl TelegramSendTool {
                     &content_hash8(&coords),
                 );
                 Ok(ToolResult::success(format!(
-                    "Location ({lat}, {lng}) sent to chat {chat_id}."
+                    "Location ({lat}, {lng}) sent to chat {chat_id}.{}",
+                    landing_echo(chat_id, thread_id).await
                 )))
             }
             Err(e) => {
@@ -1177,7 +1235,10 @@ impl TelegramSendTool {
                     question.len(),
                     &content_hash8(&question),
                 );
-                Ok(ToolResult::success(format!("Poll sent to chat {chat_id}.")))
+                Ok(ToolResult::success(format!(
+                    "Poll sent to chat {chat_id}.{}",
+                    landing_echo(chat_id, thread_id).await
+                )))
             }
             Err(e) => {
                 log_send_failure(
@@ -1240,47 +1301,53 @@ impl TelegramSendTool {
             .register_callback_origins(context.session_id, origin_keys);
         let keyboard = InlineKeyboardMarkup::new(rows);
         let html = crate::channels::telegram::handler::markdown_to_telegram_html(&text);
-        match send_retrying_rate_limit("telegram_send send_buttons", || {
-            crate::channels::telegram::send::message_in_thread(
-                bot,
-                ChatId(chat_id),
-                thread_id,
-                html.clone(),
-            )
-            .parse_mode(teloxide::types::ParseMode::Html)
-            .reply_markup(keyboard.clone())
-        })
+        // Raw Bot API JSON path (#118): the teloxide request chain on this
+        // build silently drops BOTH `.parse_mode(Html)` and
+        // `.reply_markup(keyboard)` (stored probes carry no entities and no
+        // reply_markup, while the request arm logs ok). The raw-JSON path is
+        // the proven wire in this codebase — the rich plane, plan cards and
+        // ephemeral sends all ride it and keyboards store correctly — so the
+        // buttons arm rides it too.
+        let token = bot.token();
+        match crate::channels::telegram::send::send_buttons_raw(
+            token, chat_id, thread_id, &html, &keyboard,
+        )
         .await
         {
             Ok(m) => {
+                let mid = m
+                    .get("message_id")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0) as i32;
                 log_send_success(
                     "tool",
                     "send_buttons",
-                    "send_buttons",
                     &context.session_id.to_string(),
+                    "send_buttons",
                     "html",
                     chat_id,
                     thread_id.map(|t| t.0.0),
-                    m.id.0,
+                    mid,
                     html.len(),
                     &content_hash8(&html),
                 );
                 Ok(ToolResult::success(format!(
-                    "Message with buttons sent to chat {chat_id}."
+                    "Message with buttons sent to chat {chat_id}.{}",
+                    landing_echo(chat_id, thread_id).await
                 )))
             }
             Err(e) => {
                 log_send_failure(
                     "tool",
                     "send_buttons",
-                    "send_buttons",
                     &context.session_id.to_string(),
+                    "send_buttons",
                     "html",
                     chat_id,
                     thread_id.map(|t| t.0.0),
                     html.len(),
                     &content_hash8(&html),
-                    &e.to_string(),
+                    &e,
                 );
                 Ok(ToolResult::error(format!(
                     "Failed to send message with buttons: {e}"

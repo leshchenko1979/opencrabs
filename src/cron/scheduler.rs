@@ -674,6 +674,9 @@ async fn resolve_job_agent(
     if let Some(registry) = factory.tool_registry() {
         builder = builder.with_tool_registry(registry);
     }
+    // #129: cron execution is headless — backstop flag on the agent so
+    // interactive-only tools hard-error even if re-registered.
+    builder = builder.with_headless(true);
     Ok((config, Arc::new(builder)))
 }
 
@@ -1287,7 +1290,8 @@ async fn deliver_telegram(
                 );
                 // Persist keyed by message id so a reply to the cron post
                 // resolves to this exact content (#234).
-                crate::channels::telegram::send::record_outgoing(pool, chat_id, thread, &sent).await;
+                crate::channels::telegram::send::record_outgoing(pool, chat_id, thread, &sent)
+                    .await;
             }
             Err(e) => {
                 if let Some(t) = thread_id {

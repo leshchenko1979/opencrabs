@@ -39,6 +39,13 @@ struct BrainRebuildInner {
     core: bool,
     /// Append `LAZY_TOOLS_PROMPT` after the brain, matching startup assembly.
     lazy_tools: bool,
+    /// Headless surface (#129): the lazy-tools roster filters out the
+    /// interactive-only pair (`suggest_options`, `session_notify`) so the
+    /// prompt never advertises a tool the registry gate removed. Shared
+    /// atomically so `set_headless` can flip it on an existing handle whose
+    /// `Arc` is cloned elsewhere (channel factory sets headless after
+    /// `with_brain_rebuild`) — every clone observes the flip.
+    headless: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Live working-directory handle shared with tool execution. `/cd` mutates
     /// it, so reading it each render lets the project-directive scan follow the
     /// current directory instead of the frozen startup path baked into
@@ -71,6 +78,7 @@ impl BrainRebuild {
         lazy_tools: bool,
         seed: String,
         live_cwd: Option<Arc<std::sync::RwLock<std::path::PathBuf>>>,
+        headless: bool,
     ) -> Self {
         let mtime = loader.brain_files_mtime();
         let cwd = live_cwd
@@ -85,6 +93,7 @@ impl BrainRebuild {
                 runtime_info,
                 core,
                 lazy_tools,
+                headless: Arc::new(std::sync::atomic::AtomicBool::new(headless)),
                 live_cwd,
                 cache: std::sync::RwLock::new(BrainCache {
                     mtime,
@@ -94,6 +103,24 @@ impl BrainRebuild {
                 }),
             }),
         }
+    }
+
+    /// Flip the headless roster filter (#129) on this handle. Called via
+    /// `AgentService::with_headless` (the channel factory sets headless AFTER
+    /// `with_brain_rebuild`, so the handle already exists and must be
+    /// updated in place). Any cached render made under the OLD flag is
+    /// invalidated so the next render rebuilds with the new roster.
+    pub fn set_headless(&mut self, headless: bool) {
+        self.inner
+            .headless
+            .store(headless, std::sync::atomic::Ordering::SeqCst);
+        // A cached render made under the OLD flag is now wrong — drop it so
+        // the next render rebuilds with the new roster instead of returning
+        // the stale (full-roster) render verbatim on the warm path. No clone
+        // fork: the atomic flag is shared, so every handle clone observes
+        // the flip; only the cache needs clearing.
+        let mut cache = self.inner.cache.write().expect("brain cache lock poisoned");
+        cache.mtime = std::time::SystemTime::UNIX_EPOCH;
     }
 
     /// The system brain for this turn. Returns the cached render unless a
@@ -124,7 +151,9 @@ impl BrainRebuild {
             i.loader.build_system_brain(runtime_info.as_ref())
         };
         if i.lazy_tools {
-            brain.push_str(&crate::brain::tools::catalog::tool_access_prompt());
+            brain.push_str(&crate::brain::tools::catalog::tool_access_prompt(
+                i.headless.load(std::sync::atomic::Ordering::SeqCst),
+            ));
         }
         let mut cache = i.cache.write().expect("brain cache lock poisoned");
         *cache = BrainCache {
@@ -294,6 +323,13 @@ pub struct AgentService {
     /// Whether to auto-approve tool execution
     pub(super) auto_approve_tools: bool,
 
+    /// Headless session (#129): no live user surface (CLI one-shot run, cron
+    /// daemon execute, sub-agent spawn). Stamped into every
+    /// ToolExecutionContext so interactive-only tools (session_notify,
+    /// suggest_options) hard-error if invoked anyway — the belt-and-braces
+    /// backstop behind the registry-level exclusion. Default `false`.
+    pub(super) headless: bool,
+
     /// When true, suppress the playful post-compaction narration.
     /// Mirrors `[agent] silent_compaction` from config.toml. Default
     /// is `false` — users have called out the post-compaction
@@ -420,7 +456,17 @@ impl AgentService {
             plan_mode_swap: std::sync::RwLock::new(HashMap::new()),
             session_context_limits: std::sync::RwLock::new(HashMap::new()),
             session_primary_failure_streak: std::sync::RwLock::new(HashMap::new()),
-            active_skills: std::sync::RwLock::new(HashMap::new()),
+            // #138: hydrate the seen-skills registry from the DB before the
+            // first surface can stamp — detached, so construction never
+            // blocks (and a no-pool test env just skips, see hydrate fn).
+            // Fired here because AgentService::new is the chokepoint every
+            // surface (TUI, daemon, cron) constructs its service through;
+            // hydrating once per process is sufficient (registry is
+            // process-wide and hydrate is once-only by flag).
+            active_skills: {
+                crate::brain::tools::seen_skills::hydrate_from_db();
+                std::sync::RwLock::new(HashMap::new())
+            },
             session_pressure_warned: std::sync::RwLock::new(HashMap::new()),
             last_compaction_elapsed: std::sync::RwLock::new(HashMap::new()),
             session_outgoing_text_ring: std::sync::RwLock::new(HashMap::new()),
@@ -442,6 +488,7 @@ impl AgentService {
             auto_approve_tools: crate::utils::approval::policy_auto_approves(
                 &config.agent.approval_policy,
             ),
+            headless: false,
             silent_compaction: config.agent.silent_compaction,
             background_compaction: config.agent.background_compaction,
             pending_compactions: std::sync::Mutex::new(HashMap::new()),
@@ -662,8 +709,11 @@ impl AgentService {
         let seed = self.default_system_brain.clone().unwrap_or_default();
         // Share the live working-directory handle so the directive scan follows
         // `/cd`. Same Arc that tool execution and `set_working_directory` use,
-        // so runtime mutations are visible to `render`.
+        // so runtime mutations are visible on `render`.
         let live_cwd = Some(Arc::clone(&self.working_directory));
+        // Headless propagates into the roster filter: a headless service's
+        // rebuilt brain must not advertise the interactive-only pair (#129).
+        let headless = self.headless;
         self.brain_rebuild = Some(BrainRebuild::new(
             loader,
             runtime_info,
@@ -671,6 +721,7 @@ impl AgentService {
             lazy_tools,
             seed,
             live_cwd,
+            headless,
         ));
         self
     }
@@ -721,7 +772,17 @@ impl AgentService {
         let wd = crate::brain::tools::error::collapse_home(
             &self.get_working_directory_for_session(session_id),
         );
-        Some(crate::brain::prompt_builder::override_runtime_working_directory(&brain, &wd))
+        let brain = crate::brain::prompt_builder::override_runtime_working_directory(&brain, &wd);
+        // Headless sessions (#129, owner-approved strip): the FOLLOW-UP
+        // SUGGESTIONS paragraph tells the model it MUST call `suggest_options`
+        // — a tool the registry gate removes from every headless surface.
+        // Strip the paragraph so the prompt stops advertising an absent tool.
+        let brain = if self.headless {
+            crate::brain::prompt_builder::strip_followup_suggestions(&brain)
+        } else {
+            brain
+        };
+        Some(brain)
     }
 
     /// Set maximum tool iterations
@@ -755,6 +816,22 @@ impl AgentService {
     /// subagents whose spawn the parent already approved.
     pub fn with_auto_approve_tools(mut self, auto_approve: bool) -> Self {
         self.auto_approve_tools |= auto_approve;
+        self
+    }
+
+    /// Mark this service headless (#129): no live user surface. Stamped into
+    /// every ToolExecutionContext so interactive-only tools hard-error on
+    /// invocation — the backstop behind the registry-level exclusion at
+    /// `register_core_agent_tools(headless = true)`. Also propagates into an
+    /// existing live-brain handle so the rebuilt roster drops the
+    /// interactive-only pair (the channel factory sets headless AFTER
+    /// `with_brain_rebuild`, so the handle already exists here and is updated
+    /// in place via `BrainRebuild::set_headless`).
+    pub fn with_headless(mut self, headless: bool) -> Self {
+        self.headless = headless;
+        if let Some(rebuild) = self.brain_rebuild.as_mut() {
+            rebuild.set_headless(headless);
+        }
         self
     }
 
@@ -1800,6 +1877,11 @@ impl AgentService {
     /// body is re-injected into the system brain on every turn so it
     /// survives context compaction (#219).
     pub fn register_active_skill(&self, session_id: Uuid, skill_name: &str) {
+        // #138: slash invocation is skill consumption too — marking seen
+        // (which persists to the DB) makes the compaction stamp's union
+        // survive restarts for slash-invoked skills, not just read-loaded
+        // ones. In-memory active_skills stays the re-injection driver.
+        crate::brain::tools::seen_skills::mark_seen(session_id, skill_name);
         let mut map = self
             .active_skills
             .write()

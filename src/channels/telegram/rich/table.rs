@@ -30,9 +30,19 @@ pub(crate) fn reflow_collapsed_tables(text: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     for line in text.lines() {
         if is_collapsed_table_line(line) {
+            // #132: a prose label before the first pipe (e.g. "Состояние
+            // данных: | Что | Статус |...") would stay glued to the split
+            // header row — unparseable as a table AND rendered inside the
+            // header cell. Detach everything before the first '|' onto its
+            // own line so the table block starts clean.
+            let pipe = line.find('|').unwrap_or(0);
+            let (prefix, rest) = line.split_at(pipe);
+            if !prefix.trim().is_empty() {
+                out.push(prefix.trim_end().to_string());
+            }
             out.push(
                 COLLAPSED_ROW_BOUNDARY
-                    .replace_all(line, "|\n|")
+                    .replace_all(rest, "|\n|")
                     .into_owned(),
             );
         } else {
@@ -195,4 +205,16 @@ fn parse_alignment(sep: &str, cols: usize) -> Vec<Align> {
         .collect();
     align.resize(cols, Align::None);
     align
+}
+
+/// Single canonical table-normalization entry for the rich plane (#132):
+/// expand collapsed one-line tables first (so [`try_parse`] can see them),
+/// then insert the blank line Telegram's rich parser demands before a table
+/// block (#95). Every rich-build entry point and the structure-detection gate
+/// call THIS — never the two passes individually — so gate and renderer always
+/// agree on the same text and a new send path inherits both fixes (#690,
+/// #980, #1085 whack-a-mole retired). Both passes are idempotent and
+/// fence-safe; pipe-free input returns unchanged.
+pub(crate) fn normalize_tables(text: &str) -> String {
+    ensure_blank_line_before_tables(&reflow_collapsed_tables(text))
 }

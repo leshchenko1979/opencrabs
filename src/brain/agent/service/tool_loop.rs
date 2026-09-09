@@ -1,8 +1,10 @@
 use super::builder::AgentService;
+use super::compaction::CompactionOutcome;
+use super::compaction_prompts::CompactionKind;
 use super::types::*;
 use crate::brain::agent::context::AgentContext;
 use crate::brain::agent::error::{AgentError, Result};
-use crate::brain::provider::{ContentBlock, LLMRequest, LLMResponse, Message};
+use crate::brain::provider::{ContentBlock, LLMRequest, LLMResponse, Message, Role};
 use crate::brain::tools::ToolExecutionContext;
 use crate::services::{MessageService, SessionService};
 use serde_json::Value;
@@ -453,6 +455,84 @@ pub fn is_user_correction(msg: &str) -> bool {
 }
 
 impl AgentService {
+    /// Build the post-compaction continuation prompt for `kind` — the single
+    /// construction path shared by all five compaction sites (Regular,
+    /// MidLoop, Emergency, PostTool, Manual): continuation body + plan
+    /// recovery + advisory skill-inventory stamp (issue #125).
+    async fn continuation_prompt(
+        &self,
+        session_id: Uuid,
+        kind: super::compaction_prompts::CompactionKind,
+    ) -> String {
+        // Union (issue #131): slash-invoked skills (#219 registry) plus
+        // skills the session CONSUMED by reading (seen_skills registry) —
+        // the inventory must reflect every way the agent loaded a skill.
+        // Deduped by BTreeSet; slash-invocation wins nothing extra because
+        // both registries store the same slug strings.
+        let active: std::collections::BTreeSet<String> = self
+            .active_skills_for_session(session_id)
+            .into_iter()
+            .collect();
+        let seen: std::collections::BTreeSet<String> =
+            crate::brain::tools::seen_skills::seen_for_session(session_id)
+                .into_iter()
+                .collect();
+        let skills: Vec<String> = active.union(&seen).cloned().collect();
+        tracing::debug!(
+            "continuation_prompt({kind:?}): skill inventory stamp = {skills:?} \
+             (active {}/{} + seen {}/{})",
+            skills.len(),
+            active.len(),
+            seen.len(),
+            skills.len()
+        );
+        super::compaction_prompts::append_skill_stamp(
+            super::compaction_prompts::build_continuation(
+                kind,
+                self.silent_compaction,
+                self.auto_approve_tools,
+                super::compaction_prompts::PlanRecovery::for_session(session_id).await,
+            ),
+            &skills,
+        )
+    }
+
+    /// Persist the compaction marker, then inject the stamped continuation
+    /// (issue #134): the single adoption path for all six compaction sites.
+    /// A site adopting this helper cannot skip the continuation or its
+    /// #125/#131 skill stamp. Errors are returned so each site keeps its
+    /// own handling (Manual propagates; budget sites log and continue).
+    #[allow(clippy::too_many_arguments)] // 8 args = outcome + kind + suffix + persist
+    async fn apply_compaction_continuation(
+        &self,
+        session_id: Uuid,
+        message_service: &MessageService,
+        context: &mut AgentContext,
+        outcome: &CompactionOutcome,
+        kind: super::compaction_prompts::CompactionKind,
+        marker_suffix: &str,
+        persist: bool,
+    ) -> Result<()> {
+        message_service
+            .create_message(
+                session_id,
+                "user".to_string(),
+                outcome.marker(marker_suffix),
+            )
+            .await
+            .map_err(AgentError::db)?;
+
+        let cont_text = self.continuation_prompt(session_id, kind).await;
+        if persist {
+            message_service
+                .create_message(session_id, "user".to_string(), cont_text.clone())
+                .await
+                .map_err(AgentError::db)?;
+        }
+        context.add_message(Message::user(cont_text));
+        Ok(())
+    }
+
     /// Core tool-execution loop — called by all public shims.
     /// `override_approval_callback` and `override_progress_callback` take
     /// precedence over the service-level callbacks (used by Telegram, etc.)
@@ -665,6 +745,49 @@ impl AgentService {
         );
     }
 
+    /// Everything the conversation has actually seen, for fact-checking a
+    /// text-only iteration against it (#1423).
+    ///
+    /// Evidence only: what tools printed, what was actually run, and the user's
+    /// own words. Assistant text and thinking are deliberately left out,
+    /// because the model's earlier claims must not vouch for its later ones. A
+    /// sha invented three iterations ago would otherwise count as known by the
+    /// time it is repeated, and the check would go quiet on exactly the
+    /// fabrication it exists to catch.
+    ///
+    /// Built on demand rather than accumulated, so it also covers results from
+    /// earlier turns. That is what keeps the check honest about a sha the model
+    /// legitimately cites from work it did ten minutes ago.
+    fn conversation_evidence(context: &AgentContext, turn_tool_output: &[String]) -> String {
+        let mut evidence = String::new();
+        for msg in &context.messages {
+            for block in &msg.content {
+                match block {
+                    ContentBlock::ToolResult { content, .. } => {
+                        evidence.push_str(content);
+                        evidence.push('\n');
+                    }
+                    ContentBlock::Text { text } if msg.role == Role::User => {
+                        evidence.push_str(text);
+                        evidence.push('\n');
+                    }
+                    // What was actually run: a sha in a `git show` argument is
+                    // as real as one in its output.
+                    ContentBlock::ToolUse { input, .. } => {
+                        evidence.push_str(&input.to_string());
+                        evidence.push('\n');
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for out in turn_tool_output {
+            evidence.push_str(out);
+            evidence.push('\n');
+        }
+        evidence
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn run_tool_loop_inner(
         &self,
@@ -784,6 +907,20 @@ impl AgentService {
         // But if the LLM call fails (provider down, 5xx, timeout), the flag
         // stays true forever and the session is stuck. The Err arm now
         // resets the flag so the next message retries.
+        // Link the session to the project its working directory names, on the
+        // same first turn that titles it (#1445). Deliberately NOT inside the
+        // spawned title future: the title is an LLM call that can fail, time
+        // out, or hit a rate-limited provider, while this is a string match
+        // and one UPDATE. Nesting it would make a provider outage leave
+        // sessions unlinked, which is the failure this fixes. Gated on the
+        // first turn so it is attempted once, and idempotent besides.
+        if !session.auto_title_attempted && session.project_id.is_none() {
+            let project_svc = crate::services::ProjectService::new(self.context.clone());
+            if let Err(e) = project_svc.link_session_by_directory(&session).await {
+                tracing::warn!(error = %e, "failed to link session to a project");
+            }
+        }
+
         if !user_message.trim().is_empty()
             && !session.auto_title_attempted
             && session
@@ -1131,18 +1268,7 @@ impl AgentService {
                 .await
             {
                 Ok(summary) => {
-                    // Persist compaction marker to DB so restarts load from this point
-                    let compaction_marker = format!(
-                        "[CONTEXT COMPACTION — The conversation was automatically compacted. \
-                         Below is a structured summary of everything before this point.]\n\n{}",
-                        summary
-                    );
-                    message_service
-                        .create_message(session_id, "user".to_string(), compaction_marker)
-                        .await
-                        .map_err(AgentError::db)?;
-
-                    // Persist summary as the assistant response (for DB/search continuity)
+                    // #134 helper below persists marker + stamped continuation.
                     message_service
                         .append_content(assistant_db_msg.id, &summary)
                         .await
@@ -1150,19 +1276,17 @@ impl AgentService {
 
                     // Add a brief continuation prompt to context — matches
                     // auto-compaction behavior but uses a short sentence instead
-                    // of the full POST-COMPACTION PROTOCOL. Persisted to DB so
-                    // the next turn sees it.
-                    let cont_text = super::compaction_prompts::build_continuation(
-                        super::compaction_prompts::CompactionKind::Manual,
-                        self.silent_compaction,
-                        self.auto_approve_tools,
-                        super::compaction_prompts::PlanRecovery::for_session(session_id).await,
-                    );
-                    message_service
-                        .create_message(session_id, "user".to_string(), cont_text.clone())
-                        .await
-                        .map_err(AgentError::db)?;
-                    context.add_message(Message::user(cont_text));
+                    // of the full POST-COMPACTION PROTOCOL.
+                    self.apply_compaction_continuation(
+                        session_id,
+                        &message_service,
+                        &mut context,
+                        &CompactionOutcome::Summarised(summary),
+                        CompactionKind::Manual,
+                        "",
+                        true,
+                    )
+                    .await?;
 
                     if let Some(ref cb) = progress_callback {
                         cb(session_id, ProgressEvent::TokenCount(context.token_count));
@@ -1257,21 +1381,17 @@ impl AgentService {
         };
 
         if let Some(ref outcome) = compaction_result {
-            // Persist compaction marker to DB so restarts load from this point
-            if let Err(e) = message_service
-                .create_message(session_id, "user".to_string(), outcome.marker(""))
-                .await
-            {
-                tracing::error!("Failed to persist compaction marker to DB: {}", e);
-            }
-
-            let cont_text = super::compaction_prompts::build_continuation(
-                super::compaction_prompts::CompactionKind::Regular,
-                self.silent_compaction,
-                self.auto_approve_tools,
-                super::compaction_prompts::PlanRecovery::for_session(session_id).await,
-            );
-            context.add_message(Message::user(cont_text));
+            self.apply_compaction_continuation(
+                session_id,
+                &message_service,
+                &mut context,
+                outcome,
+                CompactionKind::Regular,
+                "",
+                false,
+            )
+            .await
+            .unwrap_or_else(|e| tracing::error!("compaction marker persist failed: {e}"));
         }
 
         // Restore the directory `/cd` persisted for this session before the
@@ -1328,6 +1448,9 @@ impl AgentService {
         // ask AgentService for it, and this loop has both.
         tool_context.session_provider = Some(self.provider_name_for_session(session_id));
         tool_context.parent_tool_registry = Some(self.tool_registry.clone());
+        // #129 belt-and-braces: interactive-only tools check this flag and
+        // hard-error instead of parking a verdict nobody sees.
+        tool_context.headless = self.headless;
 
         // Tool execution loop
         let mut iteration = 0;
@@ -1735,21 +1858,17 @@ impl AgentService {
                 )
                 .await
             } {
-                // Persist compaction marker to DB so restarts load from this point
-                if let Err(e) = message_service
-                    .create_message(session_id, "user".to_string(), outcome.marker(""))
-                    .await
-                {
-                    tracing::error!("Failed to persist mid-loop compaction marker to DB: {}", e);
-                }
-
-                let cont_text = super::compaction_prompts::build_continuation(
-                    super::compaction_prompts::CompactionKind::MidLoop,
-                    self.silent_compaction,
-                    self.auto_approve_tools,
-                    super::compaction_prompts::PlanRecovery::for_session(session_id).await,
-                );
-                context.add_message(Message::user(cont_text));
+                self.apply_compaction_continuation(
+                    session_id,
+                    &message_service,
+                    &mut context,
+                    outcome,
+                    CompactionKind::MidLoop,
+                    "",
+                    false,
+                )
+                .await
+                .unwrap_or_else(|e| tracing::error!("mid-loop persist failed: {e}"));
             }
 
             // Build LLM request with tools if available
@@ -2006,30 +2125,17 @@ impl AgentService {
                         .await
                     {
                         Ok(summary) => {
-                            // Persist compaction marker to DB so restarts load from this point
-                            let compaction_marker = format!(
-                                "[CONTEXT COMPACTION — The conversation was automatically compacted. \
-                                 Below is a structured summary of everything before this point.]\n\n{}",
-                                summary
-                            );
-                            if let Err(e) = message_service
-                                .create_message(session_id, "user".to_string(), compaction_marker)
-                                .await
-                            {
-                                tracing::error!(
-                                    "Failed to persist emergency compaction marker to DB: {}",
-                                    e
-                                );
-                            }
-
-                            let cont_text = super::compaction_prompts::build_continuation(
-                                super::compaction_prompts::CompactionKind::Emergency,
-                                self.silent_compaction,
-                                self.auto_approve_tools,
-                                super::compaction_prompts::PlanRecovery::for_session(session_id)
-                                    .await,
-                            );
-                            context.add_message(Message::user(cont_text));
+                            self.apply_compaction_continuation(
+                                session_id,
+                                &message_service,
+                                &mut context,
+                                &CompactionOutcome::Summarised(summary),
+                                CompactionKind::Emergency,
+                                "",
+                                false,
+                            )
+                            .await
+                            .unwrap_or_else(|e| tracing::error!("emergency persist failed: {e}"));
 
                             // Notify user about emergency compaction
                             if let Some(ref cb) = progress_callback {
@@ -3850,26 +3956,17 @@ impl AgentService {
                 )
                 .await
             } {
-                if let Err(e) = message_service
-                    .create_message(
-                        session_id,
-                        "user".to_string(),
-                        outcome.marker(" after token calibration revealed high context usage"),
-                    )
-                    .await
-                {
-                    tracing::error!(
-                        "Failed to persist post-calibration compaction marker: {}",
-                        e
-                    );
-                }
-                context.add_message(Message::user(
-                    "[SYSTEM: Context was auto-compacted after calibration. \
-                     Review the summary above. The \"IMMEDIATE TASK\" section tells you \
-                     exactly what to do next. Continue that task immediately. \
-                     Do NOT start a new topic or deviate to unrelated work.]"
-                        .to_string(),
-                ));
+                self.apply_compaction_continuation(
+                    session_id,
+                    &message_service,
+                    &mut context,
+                    outcome,
+                    CompactionKind::MidLoop,
+                    " after token calibration revealed high context usage",
+                    false,
+                )
+                .await
+                .unwrap_or_else(|e| tracing::error!("post-calibration persist failed: {e}"));
             }
 
             // --- CANCEL CHECK BEFORE STREAM DROP RETRY ---
@@ -4676,6 +4773,30 @@ impl AgentService {
                 // correction quotes them back rather than gesturing (#797).
                 let uncalled_commands =
                     super::phantom::claims_uncalled_commands(&iteration_text, &turn_tool_input);
+                // Facts the iteration states that exist nowhere in the
+                // conversation (#1423). This is the check the post-success
+                // exemption was missing: it classed a 4,664-character report
+                // of invented counts and shas as a completion ack because 24
+                // tools had succeeded earlier in the turn, and every other
+                // fact-based branch here reads a shape that report prose does
+                // not have.
+                //
+                // Post-success only. On a zero-tool turn `phantom_eligible` is
+                // already true, so scanning would add cost without adding
+                // coverage; the exemption is what needs policing. The haystack
+                // is built only once the cheap extraction finds a candidate,
+                // which keeps it off the iterations that assert nothing.
+                let unbacked_facts = if tool_calls_completed_this_turn > 0 {
+                    let asserted = super::phantom::asserted_facts(&iteration_text);
+                    if asserted.is_empty() {
+                        Vec::new()
+                    } else {
+                        let evidence = Self::conversation_evidence(&context, &turn_tool_output);
+                        super::phantom::unbacked_facts(&asserted, &evidence)
+                    }
+                } else {
+                    Vec::new()
+                };
                 let phantom_eligible = !is_cli_provider
                     && (tool_calls_completed_this_turn == 0
                         // Every call this turn did nothing (#825). `true` and a
@@ -4711,7 +4832,13 @@ impl AgentService {
                         // sentence claiming `gh issue list` ran when no tool
                         // input contains it is false as a matter of fact
                         // (#789).
-                        || !uncalled_commands.is_empty());
+                        || !uncalled_commands.is_empty()
+                        // A stated sha or tally that is in no tool result and
+                        // no message (#1423). Same footing as the command
+                        // check: the conversation is the record of what
+                        // happened, so a fact absent from it was invented
+                        // however the sentence around it is phrased.
+                        || !unbacked_facts.is_empty());
                 // Analytics (#897): if a phantom was detected earlier this turn
                 // and the current iteration produced real tool calls, the
                 // self-heal recovered. Mark the phantom resolved.
@@ -4928,7 +5055,14 @@ impl AgentService {
                         || super::phantom::claims_unbacked_evidence(
                             &iteration_text,
                             &turn_tool_output,
-                        ))
+                        )
+                        // The check the exemption was missing (#1423): a sha or
+                        // tally absent from every tool result and message in
+                        // the conversation. Deliberately NOT gated on a
+                        // zero-tool turn, because the case it exists for is a
+                        // turn that DID run tools and then invented the report
+                        // about them.
+                        || !unbacked_facts.is_empty())
                 {
                     phantom_detections_total += 1;
                     phantom_retries_used += 1;
@@ -4994,10 +5128,12 @@ impl AgentService {
                     // model cannot rationalise it (#797). Falls back to the
                     // generic correction for the other phantom triggers, which
                     // identify no specific command.
-                    let nudge = if uncalled_commands.is_empty() {
-                        super::nudge::no_tool_calls_nudge(is_local_provider)
-                    } else {
+                    let nudge = if !uncalled_commands.is_empty() {
                         super::nudge::uncalled_commands_nudge(&uncalled_commands)
+                    } else if !unbacked_facts.is_empty() {
+                        super::nudge::unbacked_facts_nudge(&unbacked_facts)
+                    } else {
+                        super::nudge::no_tool_calls_nudge(is_local_provider)
                     };
                     context.add_message(Message::user(nudge));
                     continue;
@@ -6400,6 +6536,7 @@ impl AgentService {
                                     plan_session_override: tool_context.plan_session_override,
                                     subagent_manager: tool_context.subagent_manager.clone(),
                                     parent_tool_registry: tool_context.parent_tool_registry.clone(),
+                                    headless: tool_context.headless,
                                 };
 
                                 // Execute the tool with approved context, racing against cancel
@@ -7180,21 +7317,17 @@ impl AgentService {
                 )
                 .await
             } {
-                // Persist compaction marker to DB so restarts load from this point
-                if let Err(e) = message_service
-                    .create_message(session_id, "user".to_string(), outcome.marker(""))
-                    .await
-                {
-                    tracing::error!("Failed to persist post-tool compaction marker to DB: {}", e);
-                }
-
-                let cont_text = super::compaction_prompts::build_continuation(
-                    super::compaction_prompts::CompactionKind::PostTool,
-                    self.silent_compaction,
-                    self.auto_approve_tools,
-                    super::compaction_prompts::PlanRecovery::for_session(session_id).await,
-                );
-                context.add_message(Message::user(cont_text));
+                self.apply_compaction_continuation(
+                    session_id,
+                    &message_service,
+                    &mut context,
+                    outcome,
+                    CompactionKind::PostTool,
+                    "",
+                    false,
+                )
+                .await
+                .unwrap_or_else(|e| tracing::error!("post-tool persist failed: {e}"));
             }
 
             // Check for queued user messages to inject between tool iterations.

@@ -24,7 +24,7 @@ use teloxide::payloads::SendPhotoSetters;
 use teloxide::payloads::SendPollSetters;
 use teloxide::prelude::Requester;
 use teloxide::requests::JsonRequest;
-use teloxide::types::{ChatAction, ChatId, InputFile, MessageId, ThreadId};
+use teloxide::types::{ChatAction, ChatId, InlineKeyboardMarkup, InputFile, MessageId, ThreadId};
 
 /// Look up the thread_id of the most recent Telegram message stored for
 /// `chat_id` in `channel_messages`. Returns `None` when no row exists,
@@ -308,6 +308,7 @@ pub async fn best_effort_note<C>(
                 let detail2 = origin_detail.to_string();
                 let why2 = why.to_string();
                 super::edit_retry::spawn_deferred(
+                    chat,
                     wait,
                     move || async move {
                         let request = message_in_thread(&bot2, chat2, thread2, &text2);
@@ -355,14 +356,12 @@ pub async fn best_effort_note<C>(
 pub(crate) async fn send_markdown_outbox(
     bot: &Bot,
     chat_id: ChatId,
-    thread_id: Option<ThreadId>,
+    mut thread_id: Option<ThreadId>,
     markdown: &str,
     origin: &str,
     origin_detail: &str,
     reply_to: Option<i32>,
 ) -> std::result::Result<Vec<(i32, String)>, String> {
-    let thread = thread_id.map(|t| t.0.0);
-
     // 1. Native rich, as a whole message. `post_rich` owns the telemetry
     // line for this send (with origin + detail threaded through), so the
     // outbox does not double-log the rich success (review F3/F8).
@@ -381,14 +380,58 @@ pub(crate) async fn send_markdown_outbox(
         {
             Ok(id) => return Ok(vec![(id, markdown.to_string())]),
             Err(e) => {
-                tracing::warn!(
-                    "{origin}/{origin_detail}: native rich send failed ({e}) — falling back to HTML"
-                );
+                // Stale-topic auto-route (#116): a remembered topic that was
+                // deleted on Telegram's side makes EVERY thread-carrying send
+                // fail with 400 `message thread not found` — rich AND (before
+                // this fix) the plain fallback below, which re-used the same
+                // poisoned thread. Evict the dead address chat-scoped and
+                // retry this send ONCE unthreaded (General/DM = absence of a
+                // thread, #1319). Any other rich failure falls through to the
+                // HTML ladder with the thread intact.
+                if e.to_string().contains("message thread not found") && thread_id.is_some() {
+                    if let Some(tid) = thread_id {
+                        let evicted = evict_dead_topic(chat_id.0, tid.0.0).await;
+                        tracing::warn!(
+                            "{origin}/{origin_detail}: remembered topic {} is gone \
+                             (message thread not found) — evicted {evicted} rows, retrying unthreaded",
+                            tid.0.0
+                        );
+                    }
+                    thread_id = None;
+                    match super::rich::send_rich_with_mermaid_target_id(
+                        bot.api_url().as_str(),
+                        bot.token(),
+                        chat_id.0,
+                        None,
+                        reply_to,
+                        markdown,
+                        origin,
+                        origin_detail,
+                    )
+                    .await
+                    {
+                        Ok(id) => return Ok(vec![(id, markdown.to_string())]),
+                        Err(e2) => {
+                            tracing::warn!(
+                                "{origin}/{origin_detail}: native rich send failed after \
+                                 stale-topic fallback ({e2}) — falling back to HTML"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        "{origin}/{origin_detail}: native rich send failed ({e}) — falling back to HTML"
+                    );
+                }
             }
         }
     }
 
-    // 2. Universal HTML ladder, chunked to Telegram's limit.
+    // 2. Universal HTML ladder, chunked to Telegram's limit. When the
+    // stale-topic eviction above fired, `thread_id` is now None — the
+    // ladder (and its plain-text fallback, the #116 poisoning leg) is
+    // re-addressed to General/DM instead of the dead topic.
+    let thread = thread_id.map(|t| t.0.0);
     let html = super::handler::markdown_to_telegram_html(markdown);
     let chunks = super::handler::split_message(&html, 4096);
     let total = chunks.len();
@@ -415,6 +458,59 @@ pub(crate) async fn send_markdown_outbox(
                 sent.push((mid.0, chunk.to_string()));
             }
             Err(e) => {
+                // Plain-path leg of the #116 poisoning chain: a message that
+                // is NOT rich-shaped never entered the rich arm, so its first
+                // sight of the dead topic is here — the HTML ladder 400s and
+                // (pre-fix) the plain fallback re-used the same thread and
+                // 400'd too. Same medicine: evict chat-scoped, retry the
+                // chunk once unthreaded. Any other error is returned as
+                // before.
+                let es = e.to_string();
+                if es.contains("message thread not found") && thread_id.is_some() {
+                    if let Some(tid) = thread_id {
+                        let evicted = evict_dead_topic(chat_id.0, tid.0.0).await;
+                        tracing::warn!(
+                            "{origin}/{origin_detail}: HTML ladder hit dead topic {} \
+                             — evicted {evicted} rows, retrying chunk unthreaded",
+                            tid.0.0
+                        );
+                    }
+                    thread_id = None;
+                    match super::intermediates::send_html_or_plain(
+                        bot, chat_id, None, chunk, origin, reply_to,
+                    )
+                    .await
+                    {
+                        Ok(mid) => {
+                            super::telemetry::log_send_success(
+                                origin,
+                                origin_detail,
+                                "-",
+                                "outbox",
+                                "html_chunk_unthreaded",
+                                chat_id.0,
+                                None,
+                                mid.0,
+                                chunk.len(),
+                                &super::telemetry::content_hash8(chunk),
+                            );
+                            sent.push((mid.0, chunk.to_string()));
+                            continue;
+                        }
+                        Err(e2) => {
+                            let partial = if sent.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" ({} of {total} chunks already delivered)", sent.len())
+                            };
+                            return Err(format!(
+                                "{origin}/{origin_detail} chunk {}/{total} failed after \
+                                 stale-topic fallback{partial}: {e2}",
+                                i + 1
+                            ));
+                        }
+                    }
+                }
                 let partial = if sent.is_empty() {
                     String::new()
                 } else {
@@ -428,6 +524,31 @@ pub(crate) async fn send_markdown_outbox(
         }
     }
     Ok(sent)
+}
+
+/// Evict a dead forum-topic address chat-scoped (#116): clear the
+/// `thread_id` on `channel_messages` rows of THIS chat that carry it, so
+/// `latest_thread_id_for_chat` never serves the deleted topic again. The
+/// in-memory session-topic map self-heals on the chat's next inbound
+/// `is_topic_message` (re-registered on every event), so only the stored
+/// rows need clearing here.
+pub(crate) async fn evict_dead_topic(chat_id: i64, thread_id: i32) -> u64 {
+    let Some(pool) = crate::db::global_pool().cloned() else {
+        return 0;
+    };
+    let repo = crate::db::ChannelMessageRepository::new(pool);
+    match repo
+        .clear_thread_for_chat("telegram", &chat_id.to_string(), &thread_id.to_string())
+        .await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(
+                "stale-topic eviction for chat {chat_id} thread {thread_id} failed: {e}"
+            );
+            0
+        }
+    }
 }
 
 /// Persist delivered outbox messages for reply recovery (#234, #1085 P1b
@@ -470,5 +591,99 @@ pub(crate) async fn record_outgoing(
                 "telegram outbox: failed to persist message {mid} for reply-recovery: {e}"
             );
         }
+    }
+}
+
+/// Raw Bot API `sendMessage` with an inline keyboard — the #118 fix.
+///
+/// The teloxide request chain (`message_in_thread(...).parse_mode(..)
+/// .reply_markup(..)`) on this build silently drops both setters: stored
+/// probes carry no entities and no `reply_markup` while the arm logs ok.
+/// This helper posts the exact same payload as raw JSON to the Bot API —
+/// the same wire the rich plane (`rich::api::post_rich`) and the ephemeral
+/// sends (`ephemeral::post`) already use in production, where keyboards
+/// store correctly. Returns the sent message on Telegram's `ok:true`.
+///
+/// 429s wait out `retry_after` (capped) and retry once, mirroring
+/// `ephemeral::post`'s ladder; other failures return the API error text.
+pub(crate) async fn send_buttons_raw(
+    token: &str,
+    chat_id: i64,
+    thread_id: Option<ThreadId>,
+    html: &str,
+    keyboard: &InlineKeyboardMarkup,
+) -> Result<serde_json::Value, String> {
+    let mut payload = serde_json::json!({
+        "chat_id": chat_id,
+        "text": html,
+        "parse_mode": "HTML",
+        "reply_markup": keyboard,
+    });
+    if let Some(t) = thread_id {
+        payload["message_thread_id"] = serde_json::json!(t.0.0);
+    }
+    // #118 wire evidence: log the EXACT payload leaving the process — body bytes
+    // (len+hash8) and the serialized keyboard row count. This is the logging gap
+    // that cost a full morning: text telemetry alone cannot distinguish a dropped
+    // keyboard from a malformed one.
+    let kb_rows = keyboard.inline_keyboard.len();
+    let wire_body = serde_json::to_string(&payload).unwrap_or_default();
+    tracing::info!(
+        "send_buttons wire: body_len={} body_hash8={} kb_rows={} kb_len={} chat={} thread={:?}",
+        wire_body.len(),
+        crate::channels::telegram::telemetry::content_hash8(&wire_body),
+        kb_rows,
+        serde_json::to_string(&keyboard)
+            .map(|s| s.len())
+            .unwrap_or(0),
+        chat_id,
+        thread_id.map(|t| t.0.0),
+    );
+    if kb_rows == 0 {
+        return Err(
+            "no buttons parsed from 'buttons' input — refusing to send a keyboard-less message"
+                .to_string(),
+        );
+    }
+    let url = format!("https://api.telegram.org/bot{token}/sendMessage");
+    let client = reqwest::Client::new();
+    let mut attempt = 0u32;
+    loop {
+        let resp = client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("transport: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        if status.as_u16() == 429 {
+            if attempt >= 1 {
+                return Err("rate-limited after retry".to_string());
+            }
+            attempt += 1;
+            let wait = parsed
+                .get("parameters")
+                .and_then(|p| p.get("retry_after"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(5)
+                .min(15);
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            continue;
+        }
+        if status.is_success()
+            && parsed.get("ok").and_then(serde_json::Value::as_bool) == Some(true)
+        {
+            return Ok(parsed
+                .get("result")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null));
+        }
+        let desc = parsed
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown error");
+        return Err(format!("({status}): {desc}"));
     }
 }

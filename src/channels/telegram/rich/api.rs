@@ -204,10 +204,11 @@ pub(crate) async fn send_rich_markdown_target_id(
     origin: &str,
     origin_detail: &str,
 ) -> anyhow::Result<i32> {
-    // #95: Telegram's rich parser refuses a table that abuts a text line —
-    // insert the missing blank line before any detected table block. The pass
-    // is idempotent, fence-safe, and reuses the AST table parser for detection.
-    let markdown = super::ensure_blank_line_before_tables(markdown);
+    // #95/#132: Telegram's rich parser refuses a table that abuts a text line
+    // and can't see a table collapsed onto one line at all. normalize_tables
+    // is the single canonical entry — reflow + blank line — so every rich
+    // send inherits both fixes. The pass is idempotent and fence-safe.
+    let markdown = super::normalize_tables(markdown);
     let url = format!("{}/bot{token}/sendRichMessage", api_base(api_url));
     let result = post_rich(
         &url,
@@ -280,6 +281,21 @@ async fn post_rich(
     let client = reqwest::Client::new();
     let mut attempt = 0u32;
 
+    // An edit that would leave the message exactly as it is costs a round trip
+    // to be told `message is not modified`, and used to be logged as a send
+    // failure (#1443). Nothing to send, so this returns before the pacing gate
+    // as well as before the request.
+    let edit = super::edit_dedup::fingerprint(body).filter(|_| url.contains("editMessage"));
+    if let Some((chat_id, message_id, fp)) = edit
+        && super::edit_dedup::is_redundant(chat_id, message_id, fp)
+    {
+        tracing::debug!(
+            "Rich edit skipped: message {message_id} in chat {chat_id} already \
+             carries this content and markup"
+        );
+        return Ok(serde_json::Value::Null);
+    }
+
     loop {
         // G4 (#1211): this endpoint has its own Telegram budget, so none of
         // the typing/edit/send governors sees its traffic. Paced here, at the
@@ -328,6 +344,9 @@ async fn post_rich(
                 len,
                 &hash8,
             );
+            if let Some((chat_id, message_id, fp)) = edit {
+                super::edit_dedup::remember(chat_id, message_id, fp);
+            }
             return Ok(result);
         }
 
@@ -353,6 +372,20 @@ async fn post_rich(
             .get("description")
             .and_then(serde_json::Value::as_str)
             .unwrap_or(&text);
+        // Telegram reporting the content is already identical means the
+        // message is in the state we asked for. Nothing failed, so this must
+        // not be logged as a failure or bubble as an error (#1443); the other
+        // edit paths in this crate have always treated it as silent success.
+        // Recording the fingerprint is what stops the next refresh asking.
+        if super::edit_dedup::is_not_modified(desc) {
+            if let Some((chat_id, message_id, fp)) = edit {
+                super::edit_dedup::remember(chat_id, message_id, fp);
+            }
+            tracing::debug!(
+                "Rich edit was a no-op: Telegram reports the content and markup are unchanged"
+            );
+            return Ok(serde_json::Value::Null);
+        }
         if status.as_u16() == 429 {
             tracing::warn!(
                 "Rich API still rate limited after {RICH_MAX_RETRIES} retries — falling back"
@@ -472,10 +505,10 @@ pub(crate) async fn send_rich_markdown_media_target_id(
     origin: &str,
     origin_detail: &str,
 ) -> anyhow::Result<i32> {
-    // #95: same normalization as the plain markdown dialect — the media path
-    // renders pipe tables natively too, so an abutting table needs the blank
-    // line here as well.
-    let markdown = super::ensure_blank_line_before_tables(markdown);
+    // #95/#132: same normalization as the plain markdown dialect — the media
+    // path renders pipe tables natively too, so it gets the single canonical
+    // entry (reflow collapsed tables + blank line) as well.
+    let markdown = super::normalize_tables(markdown);
     let url = format!("{}/bot{token}/sendRichMessage", api_base(api_url));
     let body = build_body_markdown_media_target(chat_id, thread_id, reply_to, &markdown, media);
 

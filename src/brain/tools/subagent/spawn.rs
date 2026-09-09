@@ -465,6 +465,9 @@ impl Tool for SpawnAgentTool {
                     .with_tool_registry(child_registry)
                     .with_auto_approve_tools(true) // children auto-approve (parent already approved spawn)
                     .with_working_directory(child_dir)
+                    // #129: a sub-agent is a headless session (owner ruling C)
+                    // — backstop flag so interactive-only tools hard-error.
+                    .with_headless(true)
                     .with_plan_session_override(plan_session_override);
 
             Arc::new(agent)
@@ -474,14 +477,22 @@ impl Tool for SpawnAgentTool {
         // gets one factual capability line derived from its actual grant —
         // no role-play text that could drift from what the registry truly
         // allows. Full-access children receive just the task.
+        // #129 (owner ruling A): a sub-agent is a headless session — its
+        // final message is relayed verbatim as the spawn result, so the
+        // self-containedness preamble rides on EVERY child prompt (below the
+        // capability note, above the task).
         let full_prompt = if read_only {
             format!(
                 "[Capability note: you are a READ-ONLY sub-agent. Your tool set \
                  contains file reading/search and web research only — no writes, \
-                 no bash, no spawning. Report findings; do not attempt changes.]\n\n{prompt}"
+                 no bash, no spawning. Report findings; do not attempt changes.]\n{}\n\n{prompt}",
+                crate::cli::tool_setup::HEADLESS_PREAMBLE.trim_start_matches('\n')
             )
         } else {
-            prompt.clone()
+            format!(
+                "{}\n\n{prompt}",
+                crate::cli::tool_setup::HEADLESS_PREAMBLE.trim_start_matches('\n')
+            )
         };
 
         // Create the status file in Pending state before spawning. new()
@@ -489,14 +500,16 @@ impl Tool for SpawnAgentTool {
         // propagate any write error. The parent is captured FIRST so the
         // status file carries it: if a restart kills this agent mid-turn
         // and boot-resume revives its session, the revived result must
-        // reach this session (#110).
+        // reach this session (#110). Kept as a `Uuid` too — the follow-up
+        // loop and the completion path below capture it by value (#110).
         let parent_session_id = context.session_id;
+        let parent_session_for_status = context.session_id.to_string();
         let _ = WorkStatus::new_agent(
             &agent_id,
             &label,
             &child_session_id.to_string(),
             &full_prompt,
-            Some(&parent_session_id.to_string()),
+            Some(&parent_session_for_status),
         )
         .map_err(|e| ToolError::Execution(format!("Failed to create status file: {e}")))?;
 
@@ -520,7 +533,7 @@ impl Tool for SpawnAgentTool {
                     &label_clone,
                     &child_session_id.to_string(),
                     &prompt_clone,
-                    Some(&parent_session_id.to_string()),
+                    Some(&parent_session_for_status),
                 )
                 .expect("status file")
             });

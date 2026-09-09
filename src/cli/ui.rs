@@ -168,7 +168,10 @@ async fn spawn_cron_scheduler_for_profile(profile_name: String) {
             let service_context = ServiceContext::new(db.pool().clone());
             let provider = crate::brain::provider::create_provider(&config).await?;
             let home = crate::config::opencrabs_home();
-            let system_brain = BrainLoader::new(home.clone()).build_core_brain(None);
+            let mut system_brain = BrainLoader::new(home.clone()).build_core_brain(None);
+            // Headless-only preamble (#129): a cron job's deliver_to carries
+            // only the final message — inject the self-containedness law.
+            system_brain.push_str(crate::cli::tool_setup::HEADLESS_PREAMBLE);
             // ChannelFactory wants a watch::Receiver<Config>, but every reader
             // on the cron path only calls config_rx.borrow() (never .changed()),
             // so we keep just the receiver and let the sender drop right here.
@@ -184,13 +187,20 @@ async fn spawn_cron_scheduler_for_profile(profile_name: String) {
                 shared_session.clone(),
                 config_rx,
             ));
+            // #129: this factory builds agents ONLY for cron execution —
+            // headless backstop flag on every agent it creates.
+            factory.set_headless(true);
             // Wire the tool registry into the daemon's factory — WITHOUT this the
             // cron agents got an empty registry and every job ran toolless
             // ("Tool not found: bash"). The interactive path sets this via
             // `set_tool_registry`; the daemon builds its own factory, so it must
             // populate and wire the registry here too.
             let tool_registry = Arc::new(crate::brain::tools::registry::ToolRegistry::new());
-            let subagent_manager = crate::cli::tool_setup::register_core_agent_tools(&tool_registry, &db, &config);
+            // `true` = headless (#129): cron sessions are one-shot processes
+            // whose only user-visible output is the deliver_to delivery — the
+            // final message. session_notify/suggest_options stay unregistered
+            // and the headless preamble rides on the factory's shared brain.
+            let subagent_manager = crate::cli::tool_setup::register_core_agent_tools(&tool_registry, &db, &config, true);
             // Headless-safe runtime tools (dynamic tools.toml tools, tool_manage,
             // browser) so secondary-profile cron jobs match the primary profile's
             // functional tool set. Channel-send tools are intentionally NOT here
@@ -404,8 +414,10 @@ async fn cmd_chat_inner(
     // session/channel/cron/a2a/config/slash, follow-up, discovery, sub-agents,
     // RSI) live in one place so the headless cron daemon shares the exact same
     // set. Browser/channel-send/media/rebuild/evolve are added below.
+    // `false` = interactive (#129): TUI + channel users see mid-task output,
+    // so session_notify/suggest_options stay registered.
     let subagent_manager =
-        crate::cli::tool_setup::register_core_agent_tools(&tool_registry, &db, config);
+        crate::cli::tool_setup::register_core_agent_tools(&tool_registry, &db, config, false);
 
     // Auto-detect VPS/cloud and disable vector embeddings if needed.
     crate::config::MemoryConfig::auto_apply_vps_defaults();
@@ -463,6 +475,20 @@ async fn cmd_chat_inner(
     // Create service context
     let service_context = ServiceContext::new(db.pool().clone());
 
+    // Link sessions that predate the project they belong to, or that were
+    // created before anything linked them at all (#1445). One sweep of the
+    // unassigned rows, idempotent, so a later run only picks up what this one
+    // could not. Backgrounded because it touches every unassigned session and
+    // nothing on the startup path is waiting on the answer.
+    {
+        let project_svc = crate::services::ProjectService::new(service_context.clone());
+        tokio::spawn(async move {
+            if let Err(e) = project_svc.backfill_unassigned_sessions().await {
+                tracing::warn!(error = %e, "session/project backfill failed");
+            }
+        });
+    }
+
     // Spawn RSI background engine (digest + periodic analysis). #1063: the
     // engine task always spawns and gates itself per cycle from the live
     // config mirror (headless daemons default OFF, TUI default ON).
@@ -503,7 +529,7 @@ async fn cmd_chat_inner(
     // capability is missing. Without this nudge the model can give up on a task
     // whose tool simply wasn't injected.
     if config.agent.lazy_tools {
-        system_brain.push_str(&crate::brain::tools::catalog::tool_access_prompt());
+        system_brain.push_str(&crate::brain::tools::catalog::tool_access_prompt(headless));
     }
 
     // Propagate persisted auto-always approval policy to the agent service so
