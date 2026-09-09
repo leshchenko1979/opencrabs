@@ -179,7 +179,7 @@ fn test_go_tier_buttons_carry_their_option_number() {
     );
     // n=1: the single Go! button.
     assert_eq!(go_button_label(1, true), "Go!");
-    let single_html = suggestion_rows_rich_html(&opts(&[&"x".repeat(30)]), token);
+    let single_html = suggestion_rows_rich_html(&opts(&[&"x".repeat(31)]), token);
     assert!(
         single_html.contains(">Go!</tg-button>"),
         "single fold keeps the Go! button: {single_html}"
