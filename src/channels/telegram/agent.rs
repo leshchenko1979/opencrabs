@@ -542,18 +542,18 @@ impl TelegramAgent {
                                                     false,
                                                 )
                                                 .await;
+                                                let rewrite =
+                                                    super::suggest_options::pick_rewrite(
+                                                        host_info.as_ref().map(|(full, rich, md)| {
+                                                            (full.as_str(), *rich, md.as_deref())
+                                                        }),
+                                                        &picked,
+                                                        &picked_md,
+                                                        picked_idx,
+                                                    );
                                                 let outcome: Result<(), String> = if !gated {
                                                     Ok(())
                                                 } else {
-                                                    let rewrite =
-                                                        super::suggest_options::pick_rewrite(
-                                                            host_info.as_ref().map(|(full, rich, md)| {
-                                                                (full.as_str(), *rich, md.as_deref())
-                                                            }),
-                                                            &picked,
-                                                            &picked_md,
-                                                            picked_idx,
-                                                        );
                                                     match rewrite.clone() {
                                                         super::suggest_options::PickRewrite::RichMarkdownHost(
                                                             body,
