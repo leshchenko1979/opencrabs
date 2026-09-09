@@ -1103,6 +1103,20 @@ impl Config {
         // bare key into an empty document used to lock it out for good.
         crate::config::seed::ensure_config_seeded();
 
+        // Converge legacy spellings before the write: a file still carrying
+        // [providers.zhipu] plus this write's [providers.zai] is one field
+        // written twice as far as serde is concerned (the alias is another
+        // spelling, not a second field), so the guard below would deny the
+        // write with `duplicate field` until the file was hand-edited.
+        // Renaming first converges the file with comments kept, same as the
+        // load path already does.
+        if let Err(e) = crate::config::alias_merge::migrate_file(&path) {
+            tracing::warn!(
+                "alias_merge: pre-write migration failed for {}: {e}",
+                path.display()
+            );
+        }
+
         // Format-preserving parse — only the targeted key is modified
         let mut doc: DocumentMut = if path.exists() {
             fs::read_to_string(&path)?.parse()?
@@ -1206,6 +1220,16 @@ impl Config {
         // slot per provider, and a file created around one written key has
         // none of them (#1437).
         crate::config::seed::ensure_keys_seeded();
+
+        // Same pre-write convergence as write_item: an old keys.toml still
+        // carrying [providers.zhipu] plus this write's [providers.zai] fails
+        // the guard below as a duplicate field. Rename first, comments kept.
+        if let Err(e) = crate::config::alias_merge::migrate_file(&path) {
+            tracing::warn!(
+                "alias_merge: pre-write keys migration failed for {}: {e}",
+                path.display()
+            );
+        }
 
         let mut doc: DocumentMut = if path.exists() {
             fs::read_to_string(&path)?.parse()?
@@ -1488,7 +1512,18 @@ impl Config {
         // removed the config section but the old keys.toml section
         // survived, and the next /models open re-materialised the
         // ghost via merge_provider_keys.
-        let config_names: std::collections::HashSet<String> = raw_config_custom_provider_names();
+        // If config.toml cannot be read or parsed, provider presence is
+        // UNKNOWN. Removing keys based on unknown state is exactly how
+        // #1458 happened: a duplicate-key parse error made every keys.toml
+        // entry look like a ghost and the cleanup wiped all 21 custom
+        // providers at startup. Fail open — keep everything.
+        let Some(config_names) = raw_config_custom_provider_names() else {
+            tracing::warn!(
+                "config.toml unreadable or unparseable — skipping ghost-key cleanup; \
+                 keys.toml left untouched"
+            );
+            return;
+        };
 
         let remove: Vec<String> = custom_table
             .iter()

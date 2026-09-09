@@ -842,6 +842,7 @@ async fn execute_job(
             None, // no progress callback
             "cron",
             None,
+            None,
         ),
     )
     .await;
