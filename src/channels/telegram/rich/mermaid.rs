@@ -623,7 +623,7 @@ pub(crate) fn replacement_for(
             // same source, vector endpoint, opens crisp in the browser.
             // Narrow renders stay link-free (zero noise). Form is the
             // owner-ratified 07:37Z prototype: bare [svg](url) line.
-            let svg_line = match (svg_url, wants_svg_link(natural_width)) {
+            let svg_line = match (svg_url, wants_svg_link(*natural_width)) {
                 (Some(url), true) => format!("\n[svg]({url})"),
                 _ => String::new(),
             };
