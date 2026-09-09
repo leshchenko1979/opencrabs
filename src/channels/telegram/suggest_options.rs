@@ -353,52 +353,61 @@ pub(crate) fn pick_layout(options: &[String]) -> SuggestLayout {
 pub(crate) fn go_tier_lines_rich(options: &[String]) -> String {
     options
         .iter()
-        .map(|opt| {
-            super::markdown::format_inline(&super::markdown::escape_html(&go_tier_line(opt)))
+        .enumerate()
+        .map(|(i, opt)| {
+            super::markdown::format_inline(&super::markdown::escape_html(&go_tier_line(opt, i + 1)))
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// The label of every NumberedProse-tier button after the #119 owner
-/// redesign: the option text moves into the body, the button just says Go!.
-pub(crate) const GO_BUTTON_LABEL: &str = "Go!";
+/// The 1-based numbered label of one fold-tier button — pairs the button
+/// with its `N. Go: <label>?` body line. (The pre-regression fold tier
+/// was numbered `1.`…`N.`; the 2026-09-08 redesign flattened it to a
+/// uniform `Go!` and the owner defect report of 2026-09-09 restored the
+/// numbers on BOTH planes — buttons and body lines.)
+pub(crate) fn go_button_label(number: usize) -> String {
+    format!("{number}.")
+}
 
-/// The verb the #119 fold tier names options with — the first word of the
-/// `Go: <label>?` body line and the GO_BUTTON_LABEL button minus its bang.
+/// The verb the #119 fold tier names options with — the word the numbered
+/// `N. Go: <label>?` body line prefixes the label with.
 const GO_TIER_VERB: &str = "Go";
 
 /// One #119 fold-tier body line for one option (owner design 06:42Z +
-/// verb-repeat amendment 06:46Z): the label verbatim + `?` when it already
-/// starts with the verb (`Go — implement #98…?`), `<Verb>: <label>?`
-/// otherwise (`Go: Smoke OK — ack both units?`). The label is NOT re-wrapped
-/// in markup here: the rich plane escapes+formats via `go_tier_lines_rich`;
-/// the markdown plane takes the raw line.
-pub(crate) fn go_tier_line(label: &str) -> String {
+/// verb-repeat amendment 06:46Z, numbering restored 2026-09-09 per the
+/// owner defect report): `<N>. <Verb>: <label>?` — label verbatim + `?`
+/// unless it already ends one (`Go — implement #98…?`), `1. Go: <label>?`
+/// otherwise (`1. Go: Smoke OK — ack both units?`). The label is NOT
+/// re-wrapped in markup here: the rich plane escapes+formats via
+/// `go_tier_lines_rich`; the markdown plane takes the raw line. The
+/// number is 1-based and matches the fold-tier button labels, so taps
+/// and lines stay visually paired.
+pub(crate) fn go_tier_line(label: &str, number: usize) -> String {
     // Verb match is whole-first-word, not a character prefix: "go fast"
     // qualifies, "Gossip about it" does not (CI r2, E-test 139).
-    let first_word = label
-        .split_whitespace()
-        .next()
-        .unwrap_or_default();
+    let first_word = label.split_whitespace().next().unwrap_or_default();
     let starts_with_verb = first_word.eq_ignore_ascii_case(GO_TIER_VERB);
     // Owner render correction 2026-09-09: a label that already ends with a
     // question mark must not get a second one; the whole line renders bold
     // (`**` survives escape_html, format_inline/native md both turn it <b>).
     let terminator = if label.ends_with('?') { "" } else { "?" };
     if starts_with_verb {
-        format!("**{label}{terminator}**")
+        format!("**{number}. {label}{terminator}**")
     } else {
-        format!("**{GO_TIER_VERB}: {label}{terminator}**")
+        format!("**{number}. {GO_TIER_VERB}: {label}{terminator}**")
     }
 }
 
-/// The #119 fold-tier body block: one go_tier_line per option, one line
-/// each, in order.
+/// The #119 fold-tier body block: one numbered go_tier_line per option,
+/// one line each, in order — numbering restored 2026-09-09 (owner defect
+/// report: numbered lists stay when there are 2+ options). The number on
+/// each line matches the fold-tier button's label.
 pub(crate) fn go_tier_lines(options: &[String]) -> String {
     options
         .iter()
-        .map(|o| go_tier_line(o))
+        .enumerate()
+        .map(|(i, o)| go_tier_line(o, i + 1))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -605,7 +614,7 @@ pub(crate) fn suggestion_rows_rich_html(options: &[String], token: &str) -> Stri
             .collect::<Vec<_>>()
             .join("\n"),
         SuggestLayout::NumberedProse => (0..options.len())
-            .map(|i| btn(i, GO_BUTTON_LABEL))
+            .map(|i| btn(i, &go_button_label(i + 1)))
             .collect::<Vec<_>>()
             .chunks(MAX_NUMBERS_PER_ROW)
             .map(|c| format!("<tg-button-row>{}</tg-button-row>", c.concat()))
@@ -688,7 +697,7 @@ pub(crate) async fn render_suggestions(
             let all: Vec<InlineKeyboardButton> = (0..options.len())
                 .map(|i| {
                     InlineKeyboardButton::callback(
-                        GO_BUTTON_LABEL.to_string(),
+                        go_button_label(i + 1),
                         format!("{FOLLOWUP_PREFIX}{token}:{i}"),
                     )
                 })
