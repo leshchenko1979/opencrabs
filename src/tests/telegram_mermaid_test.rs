@@ -277,7 +277,7 @@ fn replacement_for_image_uses_fence_index_in_id() {
 fn replacement_for_image_bytes_carries_png_and_no_url() {
     let outcome = MermaidResult::ImageBytes {
         bytes: vec![0x89, b'P', b'N', b'G', 0, 0, 0, 0],
-        natural_width: Some(2000),
+        natural_width: Some(800),
         svg_url: Some("https://mermaid.ink/svg/test".into()),
     };
     let (md, entry) = replacement_for(&outcome, 1, "graph TD;");
