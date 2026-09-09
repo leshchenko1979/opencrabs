@@ -431,6 +431,12 @@ fn md_plane_appends_plain_markdown_pick_record() {
 
 #[test]
 fn go_tier_lines_markdown_renders_119_lines() {
+    // Set-size split (owner order 2026-09-09): n>=2 = the original plain
+    // numbered list — Cyrillic and `|` stay verbatim (document-level
+    // interpretation deliberately skipped).
     let list = go_tier_lines(&["первый".to_string(), "второй|с таблицей".to_string()]);
-    assert_eq!(list, "**1. Go: первый?**\n**2. Go: второй|с таблицей?**");
+    assert_eq!(list, "1. первый\n2. второй|с таблицей");
+    // n=1 = the bold Go! tier line.
+    let single = go_tier_lines(&["первый".to_string()]);
+    assert_eq!(single, "**Go: первый?**");
 }

@@ -104,84 +104,85 @@ fn test_shared_row_respects_the_total_budget() {
 
 #[test]
 fn test_go_tier_body_lines_carry_the_119_shape() {
-    // #119 owner design 06:42Z + render corrections 2026-09-09; numbering
-    // RESTORED 2026-09-09 per the owner defect report — the fold tier
-    // renders a BOLD numbered `<N>. Go: <label>?` line per option (2+
-    // options), with a blank line before the block.
+    // #119 set-size split (owner order 2026-09-09, "back to the way the
+    // numbered lists were before the Go button introduction"):
+    // n>=2 = the ORIGINAL plain numbered list — `1. <label>`, no Go
+    // prefix, no `?` mutation, no bold; n=1 keeps the confirmed Go! tier.
     let body = go_tier_lines_rich(&opts(&["Ship it", "Review & merge"]));
     assert!(
         !body.contains("Suggested next"),
         "#1204: the lines ride under the answer, no header of their own"
     );
     assert!(
-        body.contains("<b>1. Go: Ship it?</b>")
-            && body.contains("<b>2. Go: Review &amp; merge?</b>"),
-        "one bold numbered Go line per option, escaping via the shared renderer: {body}"
+        body.contains("1. Ship it") && body.contains("2. Review &amp; merge"),
+        "plain numbered list for n>=2, escaping via the shared renderer: {body}"
     );
     assert!(
-        body.contains("<b>1.") && body.contains("<b>2."),
-        "numbering restored (owner defect report 2026-09-09): {body}"
+        !body.contains("Go:") && !body.contains("<b>"),
+        "no Go-tier artifacts on the n>=2 fold: {body}"
     );
     assert!(
         !body.contains("<ol>"),
         "no html <ol> — plain numbered prose: {body}"
     );
+    // n=1 keeps the confirmed Go! tier (bold, deduped ?).
+    let single = go_tier_lines_rich(&opts(&["Ship it"]));
+    assert_eq!(single, "<b>Go: Ship it?</b>");
 }
 
 #[test]
 fn test_go_tier_dedupes_trailing_question_mark() {
     // Owner correction 2026-09-09: a label ending in '?' must not gain a
-    // second question mark.
-    assert_eq!(
-        go_tier_line("Confirm render?", 1),
-        "**1. Go: Confirm render?**"
-    );
-    assert_eq!(
-        go_tier_line("Confirm render??", 3),
-        "**3. Go: Confirm render??**"
-    );
+    // second question mark (n=1 Go! tier only).
+    assert_eq!(go_tier_line("Confirm render?"), "**Go: Confirm render?**");
+    assert_eq!(go_tier_line("Confirm render??"), "**Go: Confirm render??**");
 }
 
 #[test]
 fn test_go_tier_verb_repeat_rule() {
-    // #119 owner amendment 06:46Z: a label that already starts with the
-    // verb renders verbatim + `?` (deduped) after the number; otherwise
+    // #119 owner amendment 06:46Z (n=1 Go! tier): a label that already
+    // starts with the verb renders verbatim + `?` (deduped); otherwise
     // the `Go:` prefix is added. Whole line is bold per the 2026-09-09
     // correction.
     assert_eq!(
-        go_tier_line("Go — implement #98 after the #96 gate lands", 2),
-        "**2. Go — implement #98 after the #96 gate lands?**"
+        go_tier_line("Go — implement #98 after the #96 gate lands"),
+        "**Go — implement #98 after the #96 gate lands?**"
     );
-    assert_eq!(
-        go_tier_line("Smoke OK — ack both units", 1),
-        "**1. Go: Smoke OK — ack both units?**"
-    );
+    assert_eq!(go_tier_line("Smoke OK — ack both units"), "**Go: Smoke OK — ack both units?**");
     // Case-insensitive verb match (Go!/go both start the label).
-    assert_eq!(go_tier_line("go fast", 4), "**4. go fast?**");
+    assert_eq!(go_tier_line("go fast"), "**go fast?**");
     // Prefix-verb must not false-positive mid-word.
-    assert_eq!(
-        go_tier_line("Gossip about it", 2),
-        "**2. Go: Gossip about it?**"
-    );
+    assert_eq!(go_tier_line("Gossip about it"), "**Go: Gossip about it?**");
 }
 
 #[test]
 fn test_go_tier_buttons_carry_their_option_number() {
-    // #119 numbering restored 2026-09-09 (owner defect report): each
-    // fold-tier button carries its 1-based option number (`1.` `2.` …),
-    // visually paired with its `<N>. Go: <label>?` body line. Callback
-    // data still carries the absolute index.
+    // #119 numbering restored 2026-09-09 (owner defect report), PLAIN
+    // digits per the owner order 2026-09-09: each n>=2 fold-tier button
+    // carries its bare 1-based option number (`1` `2` …), visually paired
+    // with its `1. <label>` body line. Callback data still carries the
+    // absolute index. n=1 folds to the single `Go!` button.
     let token = "ab12cd34";
     let html = suggestion_rows_rich_html(&opts(&["Ship it", &"x".repeat(30)]), token);
     assert!(
-        html.contains(&format!(">{}</tg-button>", go_button_label(1)))
-            && html.contains(&format!(">{}</tg-button>", go_button_label(2))),
+        html.contains(&format!(">{}</tg-button>", go_button_label(1, false)))
+            && html.contains(&format!(">{}</tg-button>", go_button_label(2, false))),
         "one numbered button per option: {html}"
     );
-    assert!(!html.contains(">Go!<"), "no uniform Go! buttons: {html}");
+    assert!(
+        !html.contains(">Go!<"),
+        "no Go! buttons on the n>=2 fold: {html}"
+    );
     assert!(
         html.contains(&format!("{FOLLOWUP_PREFIX}{token}:0")),
         "callback data still routes by index: {html}"
+    );
+    // n=1: the single Go! button.
+    assert_eq!(go_button_label(1, true), "Go!");
+    let single_html = suggestion_rows_rich_html(&opts(&&"x".repeat(30).to_string()), token);
+    assert!(
+        single_html.contains(">Go!</tg-button>"),
+        "single fold keeps the Go! button: {single_html}"
     );
 }
 
@@ -347,9 +348,11 @@ fn test_rows_and_trailer_start_a_fresh_markdown_block() {
         assert!(md.ends_with("Sign-off."));
         assert!(md.contains(&rows));
         if prose {
-            // 2026-09-09: bold NUMBERED Go line, blank-line-separated from
-            // the body (numbering restored per the owner defect report).
-            assert!(md.contains("**1. Go: One?**"), "go-tier body line: {md}");
+            // 2026-09-09, owner order: n>=2 fold = the original PLAIN
+            // numbered list — no Go prefix, no bold. Blank-line-separated
+            // from the body.
+            assert!(md.contains("1. One"), "numbered fold body line: {md}");
+            assert!(!md.contains("Go:") && !md.contains("**"), "no Go-tier artifacts: {md}");
         }
     }
     // Body already ending in a newline must not grow a triple gap.
