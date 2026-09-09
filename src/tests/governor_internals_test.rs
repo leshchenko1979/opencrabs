@@ -95,7 +95,7 @@ fn ladder_order_drops_clock_first_and_final_never_drops() {
     };
     let line = format_summary(-100123, &c, 2).expect("active peer must summarize");
     assert!(line.contains("chat=-100123"));
-    assert!(line.contains("admitted{typing=12,edits=34,sends=5,ri,interactive=13}"));
+    assert!(line.contains("admitted{typing=12,edits=34,sends=5,rich=11,interactive=13}"));
     assert!(line.contains("interactive_overflow=14"));
     assert!(line.contains("dropped{clock=1,brain_preview=2,intermediary=3,status=4,typing=6}"));
     assert!(line.contains("finals{queued=7,superseded=8,delivered=9,failed=10,pending=2}"));
@@ -159,11 +159,12 @@ fn reserve_blocks_bulk_take_but_not_interactive() {
 
 #[test]
 fn reserve_clamped_to_capacity() {
-    // #117: a tiny bucket can never have a floor at or above its capacity,
-    // or it would be permanently dry for the bulk plane.
+    // #117: a tiny bucket can never have a floor at or above capacity - 1,
+    // or bulk take (which needs 1 + floor tokens) would be permanently
+    // impossible -- floor == capacity needs capacity + 1 tokens (#117 r2).
     let mut b = Bucket::new(1, 1.0);
     b.set_reserve(2);
-    assert_eq!(b.reserve_peek(), 1.0, "reserve clamped to capacity");
+    assert_eq!(b.reserve_peek(), 0.0, "reserve clamped to capacity - 1 = 0");
 }
 
 #[test]

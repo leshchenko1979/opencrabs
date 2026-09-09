@@ -225,10 +225,13 @@ impl Bucket {
         }
     }
 
-    /// Set the reserved floor, clamped to capacity (#117: hardcoded 2, but
-    /// clamped so a tiny capacity bucket can never go permanently dry).
+    /// Set the reserved floor, clamped so bulk admission stays possible:
+    /// a bulk take needs 1 + floor tokens, so floor == capacity would need
+    /// capacity + 1 tokens -- permanently impossible, starving the drainer
+    /// and post-burn self-heal (#117 r2: exactly that failed CI). Cap at
+    /// capacity - 1: at a full bucket a bulk take can always admit.
     pub(crate) fn set_reserve(&mut self, reserve: u32) {
-        self.reserve = f64::from(reserve).min(self.capacity);
+        self.reserve = f64::from(reserve).min((self.capacity - 1.0).max(0.0));
     }
 
     /// Test/telemetry peek at the current reserve floor.
