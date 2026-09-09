@@ -1662,6 +1662,11 @@ pub(crate) async fn cmd_session(
             title,
             sender,
             interrupt,
+            mode,
+            quiet_for_secs,
+            max_delay_secs,
+            confirm,
+            status,
             format,
         } => {
             let sessions = session_svc
@@ -1675,10 +1680,15 @@ pub(crate) async fn cmd_session(
             crate::cli::session_notify::run(
                 config,
                 &uuid.to_string(),
-                &text,
+                text.as_deref(),
                 title.as_deref(),
                 sender.as_deref(),
                 interrupt,
+                mode.as_deref(),
+                quiet_for_secs,
+                max_delay_secs,
+                confirm,
+                status,
                 format,
             )
             .await?;
