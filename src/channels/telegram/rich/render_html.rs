@@ -79,14 +79,11 @@ fn render_block(block: &Block, wrap_p: bool) -> String {
         // super::mermaid so the escaping stays in one place.
         Block::Mermaid { source, result } => match result {
             MermaidResult::Image(url) => super::mermaid::image_html(url),
-            // Locally-rendered PNG bytes are delivered via the multipart
-            // markdown path, never through vector HTML `<img>` (Telegram
-            // rejects it). This arm is a defensive fallback — degrade
-            // legibly rather than leak raw binary.
-            MermaidResult::ImageBytes(_) => super::mermaid::failure_html(
-                "diagram rendered locally but could not be embedded in HTML",
-                source,
-            ),
+            // #134: PNG bytes can't ride the HTML dialect, but a
+            // dimension-rejected wide diagram must not degrade to a bare
+            // failure block — emit the svg escape hatch instead (trigger
+            // leg 2: the photo path rejected the send).
+            MermaidResult::ImageBytes { .. } => super::mermaid::dimension_rejected_html(source),
             MermaidResult::Failed(err) | MermaidResult::ParseError(err) => {
                 super::mermaid::failure_html(err, source)
             }

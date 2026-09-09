@@ -14,10 +14,10 @@ use crate::channels::telegram::rich::api::{
 use crate::channels::telegram::rich::ast::{Block, Inline, MermaidResult};
 use crate::channels::telegram::rich::markdown_to_html_mermaid;
 use crate::channels::telegram::rich::mermaid::{
-    MediaEntry, base64url, cache_get, cache_put, classify_render_failure, error_note, failure_html,
-    find_mermaid_fences, has_mermaid_fence, image_html, ink_url, is_image_response,
+    base64url, cache_get, cache_put, classify_render_failure, dimension_rejected_html, error_note,
+    failure_html, find_mermaid_fences, has_mermaid_fence, image_html, ink_url, is_image_response,
     looks_like_mermaid_source, markdown_failure_block, replacement_for, resolve_blocks,
-    resolve_markdown_media,
+    resolve_markdown_media, svg_url, wants_svg_link, MediaEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -275,7 +275,11 @@ fn replacement_for_image_uses_fence_index_in_id() {
 
 #[test]
 fn replacement_for_image_bytes_carries_png_and_no_url() {
-    let outcome = MermaidResult::ImageBytes(vec![0x89, b'P', b'N', b'G', 0, 0, 0, 0]);
+    let outcome = MermaidResult::ImageBytes {
+        bytes: vec![0x89, b'P', b'N', b'G', 0, 0, 0, 0],
+        natural_width: Some(2000),
+        svg_url: Some("https://mermaid.ink/svg/test".into()),
+    };
     let (md, entry) = replacement_for(&outcome, 1, "graph TD;");
     assert_eq!(md, "![diagram](tg://photo?id=diag1)");
     let e = entry.expect("bytes outcome must carry a media entry");
@@ -285,6 +289,78 @@ fn replacement_for_image_bytes_carries_png_and_no_url() {
         e.bytes.as_deref(),
         Some(&[0x89, b'P', b'N', b'G', 0, 0, 0, 0][..])
     );
+}
+
+// --- #134: svg escape-hatch link ---
+
+#[test]
+fn wants_svg_link_threshold_boundaries() {
+    // Owner-calibrated: 1547 specimen no link, 1840 specimen link.
+    assert!(!wants_svg_link(Some(1_547)));
+    assert!(!wants_svg_link(Some(1_600)), "boundary is exclusive");
+    assert!(wants_svg_link(Some(1_601)));
+    assert!(wants_svg_link(Some(5_000)));
+    assert!(!wants_svg_link(None), "unknown width stays link-free");
+}
+
+#[test]
+fn svg_url_targets_vector_endpoint() {
+    let u = svg_url("flowchart TD\n    A --> B");
+    assert!(u.starts_with("https://mermaid.ink/svg/"), "{u}");
+    // Same payload family as the img URL: decodable base64url suffix.
+    let payload = u.trim_start_matches("https://mermaid.ink/svg/");
+    assert!(!payload.is_empty());
+    assert!(
+        !payload.contains('?'),
+        "no query params on the svg endpoint"
+    );
+}
+
+#[test]
+fn replacement_for_wide_image_appends_svg_link() {
+    let outcome = MermaidResult::ImageBytes {
+        bytes: vec![0x89, b'P', b'N', b'G', 0, 0, 0, 0],
+        natural_width: Some(1_840),
+        svg_url: Some("https://mermaid.ink/svg/abc".into()),
+    };
+    let (md, entry) = replacement_for(&outcome, 0, "src");
+    assert_eq!(
+        md,
+        "![diagram](tg://photo?id=diag0)\n[svg](https://mermaid.ink/svg/abc)"
+    );
+    assert!(entry.is_some());
+}
+
+#[test]
+fn replacement_for_narrow_image_stays_link_free() {
+    let outcome = MermaidResult::ImageBytes {
+        bytes: vec![0x89, b'P', b'N', b'G', 0, 0, 0, 0],
+        natural_width: Some(1_547),
+        svg_url: Some("https://mermaid.ink/svg/abc".into()),
+    };
+    let (md, entry) = replacement_for(&outcome, 0, "src");
+    assert_eq!(md, "![diagram](tg://photo?id=diag0)");
+    assert!(entry.is_some());
+}
+
+#[test]
+fn replacement_for_unknown_width_stays_link_free() {
+    let outcome = MermaidResult::ImageBytes {
+        bytes: vec![0x89, b'P', b'N', b'G', 0, 0, 0, 0],
+        natural_width: None,
+        svg_url: Some("https://mermaid.ink/svg/abc".into()),
+    };
+    let (md, _) = replacement_for(&outcome, 0, "src");
+    assert_eq!(md, "![diagram](tg://photo?id=diag0)");
+}
+
+#[test]
+fn dimension_rejected_html_carries_svg_link() {
+    let html = dimension_rejected_html("flowchart LR\n    S1 --> S2");
+    assert!(html.contains("too wide"), "{html}");
+    assert!(html.contains(r#"<a href="https://mermaid.ink/svg/"#));
+    assert!(html.contains(">svg</a>"));
+    assert!(!html.contains("could not be rendered"));
 }
 
 #[test]
