@@ -30,6 +30,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::seen_skills;
+#[cfg(test)]
 use crate::brain::skills::Skill;
 
 /// Tools the gate never touches — recovery paths a blocked agent must
