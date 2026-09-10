@@ -237,6 +237,9 @@ pub(crate) async fn render_plan_card_html(
 
 /// Rich `sendRichMessage` card: `<details><summary>` collapsibles, 32K-char
 /// limit, no truncation — prose renders in full.
+/// Production callers migrated to the markdown+media dialect (dd70fdd6);
+/// kept for test coverage of the card-assembly invariants.
+#[cfg(test)]
 pub(crate) async fn render_plan_card_rich_html(
     title: Option<&str>,
     checklist: Option<&[String]>,
