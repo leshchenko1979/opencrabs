@@ -177,6 +177,14 @@ impl Skill {
             if indent > 0 && trimmed.starts_with('-') {
                 continue;
             }
+            // Indented non-list line (e.g. `globs: x/**` nested under
+            // `metadata:`) — belongs to a nested block, never to the
+            // top-level key set. Skip it and close any open block key:
+            // a nested region means the previous block list is over.
+            if indent > 0 {
+                open_key = None;
+                continue;
+            }
 
             // Top-level key — closes any open block key.
             open_key = None;

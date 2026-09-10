@@ -131,12 +131,19 @@ pub fn note_compaction(session_id: Uuid) {
 /// (no rows) report false — the gate fires on the first matching call
 /// (owner decision 2026-09-10: fresh sessions gated too).
 pub fn seen_since_compaction(session_id: Uuid, slug: &str) -> bool {
-    let stored = registry()
+    // A session that never consumed this skill is NEVER "seen" — even at
+    // epoch 0 with no compaction yet (fresh sessions are gated too,
+    // owner decision 2026-09-10). Missing entry and stored-epoch-0 are
+    // distinct: hydrated pre-feature rows carry 0 and DO pass (back-compat),
+    // an absent row does not.
+    let Some(stored) = registry()
         .lock()
         .expect("seen_skills registry poisoned")
         .get(&(session_id, slug.to_string()))
         .copied()
-        .unwrap_or(0);
+    else {
+        return false;
+    };
     stored >= current_epoch(session_id)
 }
 
