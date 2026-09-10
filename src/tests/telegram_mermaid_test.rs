@@ -15,7 +15,7 @@ use crate::channels::telegram::rich::ast::{Block, Inline, MermaidResult};
 use crate::channels::telegram::rich::markdown_to_html_mermaid;
 use crate::channels::telegram::rich::mermaid::{
     MediaEntry, base64url, cache_get, cache_put, classify_render_failure, error_note, failure_html,
-    find_mermaid_fences, has_mermaid_fence, image_html, ink_url, is_image_response,
+    find_mermaid_fences, has_mermaid_fence, image_html, ink_url, ink_url_svg, is_image_response,
     looks_like_mermaid_source, markdown_failure_block, replacement_for, resolve_blocks,
     resolve_markdown_media,
 };
@@ -679,6 +679,41 @@ fn ink_url_payload_is_base64url_without_padding() {
         .expect("payload before query string");
     assert!(!payload.contains('='), "padding leaked: {payload}");
     assert!(!payload.contains('+') && !payload.contains('/'));
+}
+
+// ---------------------------------------------------------------------------
+// ink_url_svg (#134 family, owner directive 2026-09-10 03:56Z): the plain-
+// HTML fallback hands the reader a vector link instead of discarding a
+// successful render. Build-only URL — the browser does the fetch.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[test]
+fn ink_url_svg_points_at_the_dedicated_vector_endpoint() {
+    let url = ink_url_svg("graph TD\n    A --> B");
+    assert!(
+        url.starts_with("https://mermaid.ink/svg/"),
+        "expected the /svg/ endpoint: {url}"
+    );
+    assert!(
+        !url.contains("?type=svg"),
+        "svg endpoint needs no param: {url}"
+    );
+}
+
+#[test]
+fn ink_url_svg_payload_matches_ink_url_payload() {
+    // Same diagram → same base64url payload on both endpoints; only the
+    // base differs.
+    let src = "pie\n    \"a\": 1";
+    let png_payload = ink_url(src)
+        .trim_start_matches("https://mermaid.ink/img/")
+        .split('?')
+        .next()
+        .unwrap()
+        .to_string();
+    let svg_payload = ink_url_svg(src).trim_start_matches("https://mermaid.ink/svg/");
+    assert_eq!(png_payload, svg_payload);
 }
 
 #[test]

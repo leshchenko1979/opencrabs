@@ -25,6 +25,8 @@ use std::time::{Duration, Instant};
 /// Base URL of the mermaid.ink image renderer. The diagram source is
 /// base64url-appended. NOTE: this sends the diagram text to a third party.
 const MERMAID_INK_BASE: &str = "https://mermaid.ink/img/";
+/// Vector endpoint base for [`ink_url_svg`] (owner directive 2026-09-10).
+const MERMAID_INK_SVG_BASE: &str = "https://mermaid.ink/svg/";
 
 /// Query parameters appended to every mermaid.ink render request.
 ///
@@ -221,6 +223,17 @@ pub(crate) fn should_render_mermaid(text: &str) -> bool {
 /// payload plus the natural-size PNG parameters ([`MERMAID_INK_PARAMS`]).
 pub(crate) fn ink_url(source: &str) -> String {
     ink_url_params(source, MERMAID_INK_PARAMS)
+}
+
+/// The dedicated vector endpoint for a diagram source (owner directive
+/// 2026-09-10 03:56Z: "for the plain html - instead of an error message, we
+/// should give a mermaid svg link"). Same base64url payload as [`ink_url`],
+/// over `https://mermaid.ink/svg/` — the endpoint serves a real
+/// `image/svg+xml` (live-verified 2026-09-10); `?type=svg` on `/img/` does
+/// NOT. Build-only URL: the browser does the fetch, the server never touches
+/// mermaid.ink for this.
+pub(crate) fn ink_url_svg(source: &str) -> String {
+    format!("{}{}", MERMAID_INK_SVG_BASE, base64url(source))
 }
 
 /// Same URL at an explicit parameter set — the ladder's clamp rung.
