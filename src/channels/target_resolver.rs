@@ -155,8 +155,8 @@ pub fn is_target_url(s: &str) -> bool {
 /// What the resolver needs from the world. Implemented by the wiring context
 /// (ChannelManager + session lookup) so tests can drive resolution without
 /// a live daemon.
-#[allow(async_fn_in_trait)]
-pub trait TargetResolution {
+#[async_trait::async_trait]
+pub trait TargetResolution: Send + Sync {
     /// The session bound to `(channel, chat_id, thread)` — reverse
     /// ownership map. `None` when no session currently owns it.
     async fn session_for_channel(
@@ -387,6 +387,7 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl TargetResolution for FakeWorld {
         async fn session_for_channel(
             &self,

@@ -1838,20 +1838,21 @@ impl TelegramState {
     /// Clear the profile-create flow state.
     pub async fn clear_prof_create(&self, chat_id: i64) {
         self.prof_create_states.lock().await.remove(&chat_id);
+        }
     }
-}
 
-/// All topic-scoped session keys for a chat (#148): the topic ids the
-/// reverse map currently holds for `chat_id`, used by the target resolver's
-/// multi-topic ambiguity rule (a bare `oc://telegram/<chat>` on a forum with
-/// several topic sessions must refuse and list the topic URLs, never guess).
-/// Empty when the chat is unbound or a DM / non-forum group.
-pub async fn topic_sessions_for_chat(&self, chat_id: i64) -> Vec<i32> {
-    let map = self.chat_sessions.lock().await;
-    let mut topics: Vec<i32> = map
-        .keys()
-        .filter_map(|(c, t)| if *c == chat_id { t } else { None })
-        .collect();
-    topics.sort();
-    topics
+    /// All topic-scoped session keys for a chat (#148): the topic ids the
+    /// reverse map currently holds for `chat_id`, used by the target resolver's
+    /// multi-topic ambiguity rule (a bare `oc://telegram/<chat>` on a forum with
+    /// several topic sessions must refuse and list the topic URLs, never guess).
+    /// Empty when the chat is unbound or a DM / non-forum group.
+    pub async fn topic_sessions_for_chat(&self, chat_id: i64) -> Vec<i32> {
+        let map = self.chat_sessions.lock().await;
+        let mut topics: Vec<i32> = map
+            .keys()
+            .filter_map(|(c, t)| if *c == chat_id { *t } else { None })
+            .collect();
+        topics.sort();
+        topics
+    }
 }

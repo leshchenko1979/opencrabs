@@ -48,7 +48,6 @@ fn get_id(input: &Value, key: &str) -> std::result::Result<u64, ToolResult> {
 
 /// Unwrap channel id or return error ToolResult.
 #[allow(clippy::result_large_err)]
-#[allow(clippy::result_large_err)]
 fn channel_or_err(id: Option<u64>) -> std::result::Result<u64, ToolResult> {
     let raw = id.ok_or_else(|| {
         ToolResult::error(

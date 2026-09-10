@@ -588,6 +588,7 @@ impl ChannelManager {
 /// Live `TargetResolution` for the `oc://` target resolver (#148): the
 /// manager holds every channel-state Arc, so it is the single place that
 /// can answer reverse-ownership questions across authorities.
+#[async_trait::async_trait]
 impl crate::channels::target_resolver::TargetResolution for ChannelManager {
     async fn session_for_channel(
         &self,

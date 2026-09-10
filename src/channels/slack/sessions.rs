@@ -25,15 +25,15 @@ impl SlackState {
     pub async fn session_channel(&self, session_id: Uuid) -> Option<String> {
         self.session_channels.lock().await.get(&session_id).cloned()
     }
-}
 
-/// Reverse lookup (#148): the session currently bound to a Slack channel id,
-/// for `oc://slack/<id>` resolution. Reads the reverse map kept in lockstep
-/// with the forward map at `register_session_channel`.
-pub async fn session_owner_by_channel(&self, channel_id: &str) -> Option<Uuid> {
-    self.channel_sessions
-        .lock()
-        .await
-        .get(channel_id)
-        .copied()
+    /// Reverse lookup (#148): the session currently bound to a Slack channel id,
+    /// for `oc://slack/<id>` resolution. Reads the reverse map kept in lockstep
+    /// with the forward map at `register_session_channel`.
+    pub async fn session_owner_by_channel(&self, channel_id: &str) -> Option<Uuid> {
+        self.channel_sessions
+            .lock()
+            .await
+            .get(channel_id)
+            .copied()
+    }
 }

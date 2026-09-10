@@ -39,7 +39,7 @@ async fn bake_without_world_refuses_url_and_here() {
 /// bakes to the concrete threadless form (General topic never bakes `:1`).
 struct OneChatWorld(Option<Uuid>);
 
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait]
 impl crate::channels::target_resolver::TargetResolution for OneChatWorld {
     async fn session_for_channel(
         &self,

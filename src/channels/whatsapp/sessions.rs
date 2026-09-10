@@ -21,11 +21,11 @@ impl WhatsAppState {
     pub async fn session_jid(&self, session_id: Uuid) -> Option<String> {
         self.session_jids.lock().await.get(&session_id).cloned()
     }
-}
 
-/// Reverse lookup (#148): the session currently bound to a WhatsApp JID,
-/// for `oc://whatsapp/<jid>` resolution. Reads the reverse map kept in
-/// lockstep with the forward map at `register_session_jid`.
-pub async fn session_owner_by_jid(&self, jid: &str) -> Option<Uuid> {
-    self.jid_sessions.lock().await.get(jid).copied()
+    /// Reverse lookup (#148): the session currently bound to a WhatsApp JID,
+    /// for `oc://whatsapp/<jid>` resolution. Reads the reverse map kept in
+    /// lockstep with the forward map at `register_session_jid`.
+    pub async fn session_owner_by_jid(&self, jid: &str) -> Option<Uuid> {
+        self.jid_sessions.lock().await.get(jid).copied()
+    }
 }

@@ -80,7 +80,7 @@ pub fn permission() -> SendPermission {
 /// May the current task send to `(channel, target_id)`?
 ///
 /// Outside a cron turn this is always true: the rule exists to stop a job
-//! reaching destinations it was never given, not to police ordinary replies.
+/// reaching destinations it was never given, not to police ordinary replies.
 pub fn may_send(channel: &str, target_id: &str) -> bool {
     match permission() {
         SendPermission::Unscoped => true,
