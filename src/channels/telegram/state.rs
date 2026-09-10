@@ -760,6 +760,23 @@ impl TelegramState {
             .flatten()
     }
 
+    /// The full binding of a session — `(chat_id, topic_id)` — in ONE read
+    /// (#148). Topic follows the `session_topic` rules above: `Some(1)` is
+    /// a known forum's General topic, `None` a DM / non-forum group.
+    /// Consumed by the tool loop's `origin_target` derivation; nothing else
+    /// should need both halves separately.
+    pub async fn session_binding(&self, session_id: Uuid) -> Option<(i64, Option<i32>)> {
+        let chat = self.session_chats.lock().await.get(&session_id).copied()?;
+        let topic = self
+            .session_topic
+            .lock()
+            .await
+            .get(&session_id)
+            .copied()
+            .flatten();
+        Some((chat, topic))
+    }
+
     /// Does `session_id` still own the channel it was bound to (fork #17)?
     /// Reads the sync ownership mirror (see field doc): `Owned` when the bound
     /// chat/topic still resolves back to this session, `Occupied` naming the

@@ -45,6 +45,12 @@ pub struct ChannelFactory {
     /// interactive-only tools hard-error (belt-and-braces backstop behind the
     /// registry-level exclusion). Default `false` (interactive channel factory).
     headless: std::sync::atomic::AtomicBool,
+    /// Channel-manager handle (#148): wired into every agent service so the
+    /// tool loop can derive the ambient `origin_target` from the session
+    /// ownership maps. Set once at startup via [`set_channel_manager`];
+    /// absent on cron/daemon paths, where "here" resolution must refuse.
+    channel_manager:
+        OnceLock<Arc<crate::channels::ChannelManager>>,
 }
 
 impl ChannelFactory {
@@ -111,6 +117,13 @@ impl ChannelFactory {
         let _ = self.subagent_manager.set(manager);
     }
 
+    /// Set the channel-manager handle for ambient origin derivation (#148).
+    /// The manager already holds the channel-state Arcs, so this is the
+    /// single wiring point; TUI boot sets it after constructing the manager.
+    pub fn set_channel_manager(&self, manager: Arc<crate::channels::ChannelManager>) {
+        let _ = self.channel_manager.set(manager);
+    }
+
     /// Create a new AgentService configured for channel use.
     ///
     /// Channels that implement their own approval flow (WhatsApp, Telegram, Discord, Slack)
@@ -173,6 +186,10 @@ impl ChannelFactory {
 
         if let Some(mgr) = self.subagent_manager.get() {
             builder = builder.with_subagent_manager(mgr.clone());
+        }
+
+        if let Some(mgr) = self.channel_manager.get() {
+            builder = builder.with_channel_manager(mgr.clone());
         }
 
         if message_queue_callback.is_some() {

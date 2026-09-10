@@ -1468,6 +1468,12 @@ impl AgentService {
         // Vision resolves the CURRENT provider first (#1318); a tool cannot
         // ask AgentService for it, and this loop has both.
         tool_context.session_provider = Some(self.provider_name_for_session(session_id));
+        // Ambient conversation origin (#148): derived HERE — the single
+        // stamping site, mirroring `session_provider` directly above — from
+        // the session ownership maps via the channel manager. `None` on
+        // surfaces without a manager or binding (cron, CLI, sub-agents),
+        // where `here` resolution must be refused, never guessed.
+        tool_context.origin_target = self.origin_target_for_session(session_id).await;
         tool_context.parent_tool_registry = Some(self.tool_registry.clone());
         // #129 belt-and-braces: interactive-only tools check this flag and
         // hard-error instead of parking a verdict nobody sees.

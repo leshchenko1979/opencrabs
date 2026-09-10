@@ -96,6 +96,29 @@ impl ChannelManager {
         }
     }
 
+    /// Channel-state accessors for the #148 target resolver and the tool
+    /// loop's `origin_target` derivation. Read-only handles — targeting
+    /// never spawns or stops channels.
+    #[cfg(feature = "telegram")]
+    pub fn telegram(&self) -> &Arc<crate::channels::telegram::TelegramState> {
+        &self.telegram_state
+    }
+
+    #[cfg(feature = "whatsapp")]
+    pub fn whatsapp(&self) -> &Arc<crate::channels::whatsapp::WhatsAppState> {
+        &self.whatsapp_state
+    }
+
+    #[cfg(feature = "discord")]
+    pub fn discord(&self) -> &Arc<crate::channels::discord::DiscordState> {
+        &self.discord_state
+    }
+
+    #[cfg(feature = "slack")]
+    pub fn slack(&self) -> &Arc<crate::channels::slack::SlackState> {
+        &self.slack_state
+    }
+
     /// Compare running channels against config and spawn/stop as needed.
     pub async fn reconcile(&self, config: &Config) {
         let mut handles = self.handles.lock().await;
