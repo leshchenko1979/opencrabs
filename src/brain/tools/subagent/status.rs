@@ -39,6 +39,12 @@ pub(crate) mod test_override {
     pub fn get() -> Option<PathBuf> {
         DIR.with(|d| d.borrow().clone())
     }
+    /// Reset the override so the production path is visible again — tests
+    /// must not leak a thread-local dir across the runner's reused threads
+    /// (same reason the work_status override carries one).
+    pub fn clear() {
+        DIR.with(|d| *d.borrow_mut() = None);
+    }
 }
 
 /// Ensure the status directory exists.
@@ -114,8 +120,13 @@ pub struct AgentStatus {
     pub completed_at: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
-    #[serde(default)]
-    pub output_summary: Option<String>,
+    /// The COMPLETE final output of the agent, persisted at completion
+    /// (#147). Replaces the 200-char `output_summary` stub, which no
+    /// production code path ever read and which lost every full report to
+    /// restarts/compaction. `None` for agents not yet terminal and for
+    /// legacy files written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_full: Option<String>,
 }
 
 impl AgentStatus {
@@ -138,7 +149,7 @@ impl AgentStatus {
             progress: None,
             completed_at: None,
             error: None,
-            output_summary: None,
+            output_full: None,
         };
         status.write()?;
         Ok(status)
@@ -178,11 +189,11 @@ impl AgentStatus {
         self.write()
     }
 
-    /// Mark the agent as completed with a short output summary.
-    pub fn mark_completed(&mut self, output_summary: String) -> std::io::Result<()> {
+    /// Mark the agent as completed with the COMPLETE final output (#147).
+    pub fn mark_completed(&mut self, output_full: String) -> std::io::Result<()> {
         self.state = AgentState::Completed;
         self.completed_at = Some(now_rfc3339());
-        self.output_summary = Some(output_summary);
+        self.output_full = Some(output_full);
         self.write()
     }
 

@@ -87,7 +87,7 @@ fn status_completed_sets_timestamp() {
     s.mark_completed("done".into()).unwrap();
     assert_eq!(s.state, AgentState::Completed);
     assert!(s.completed_at.is_some());
-    assert_eq!(s.output_summary, Some("done".to_string()));
+    assert_eq!(s.output_full, Some("done".to_string()));
 }
 
 #[test]
@@ -133,4 +133,63 @@ fn cleanup_removes_old_files() {
     let cleanup_result = cleanup_stale(Duration::from_secs(7 * 86400)).unwrap();
     assert!(cleanup_result.1 >= 1, "should have removed at least 1 file");
     assert!(AgentStatus::read("old-1").is_none());
+}
+
+// ── #147: output_full persistence, serde-skip, legacy compat ─────────
+
+/// Roundtrip: a 5 KB report survives byte-exact in `output_full`, and the
+/// persisted JSON carries no `output_summary` field at all.
+#[test]
+fn output_full_roundtrip_is_byte_exact_and_summary_is_gone() {
+    isolate("output_full");
+    let report: String = "# REVIEW\n\n"
+        .to_string()
+        + &"detail line with plenty of words to bulk it up.\n".repeat(128);
+    assert!(report.chars().count() > 5000, "fixture must be ~5 KB");
+    let mut s = AgentStatus::new("of-1", "review", "sess-of", "review the skill").unwrap();
+    s.mark_completed(report.clone()).unwrap();
+    assert_eq!(s.output_full.as_deref(), Some(report.as_str()));
+
+    let raw = fs::read_to_string(status_path("of-1")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        parsed["output_full"].as_str(),
+        Some(report.as_str()),
+        "persisted file holds the complete report byte-exact"
+    );
+    assert!(
+        parsed.get("output_summary").is_none(),
+        "removed field must not appear in persisted JSON"
+    );
+}
+
+/// Serde-skip: a fresh Pending file contains neither `output_full` nor any
+/// `null` placeholders for it — old tools reading the file see no change.
+#[test]
+fn output_full_absent_field_stays_absent() {
+    isolate("output_full_skip");
+    let _s = AgentStatus::new("of-2", "idle", "sess-of2", "nothing").unwrap();
+    let raw = fs::read_to_string(status_path("of-2")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(parsed.get("output_full").is_none());
+    assert!(parsed.get("output_summary").is_none());
+}
+
+/// Legacy compat: a pre-#147 file carrying `output_summary` deserializes
+/// cleanly (unknown field ignored) and no backfill happens.
+#[test]
+fn legacy_output_summary_file_deserializes_cleanly() {
+    isolate("output_full_legacy");
+    let legacy = serde_json::json!({
+        "id": "of-3", "label": "old", "parent_session_id": "sess-of3",
+        "state": "Completed", "prompt": "old task",
+        "started_at": "2026-08-28T09:00:00+00:00",
+        "completed_at": "2026-08-28T09:30:00+00:00",
+        "output_summary": "all done"
+    });
+    fs::create_dir_all(status_path("of-3").parent().unwrap()).expect("status dir");
+    fs::write(status_path("of-3"), serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+    let s = AgentStatus::read("of-3").expect("legacy file parses");
+    assert_eq!(s.state, AgentState::Completed);
+    assert_eq!(s.output_full, None, "no backfill of the old stub");
 }
