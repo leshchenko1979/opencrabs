@@ -102,6 +102,9 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // fork's 20260908000000 (no version collision); prod DBs already past
     // this index are covered by the heal pass below.
     include_str!("../migrations/20260908000001_pending_requests_thread_id.sql"),
+    // FORK (#150): skill glob gate — per-row compaction epoch on
+    // session_seen_skills. NULL (pre-feature rows) == epoch 0.
+    include_str!("../migrations/20260910000000_add_session_seen_skills_epoch.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

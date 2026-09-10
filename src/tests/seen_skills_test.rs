@@ -2,10 +2,10 @@
 // and any skill-body consumption (read or slug-load) marks the skill SEEN so
 // the post-compaction inventory stamp (#125) lists it.
 
-use crate::brain::tools::Tool;
-use crate::brain::tools::ToolExecutionContext;
 use crate::brain::tools::load_brain_file::*;
 use crate::brain::tools::seen_skills;
+use crate::brain::tools::Tool;
+use crate::brain::tools::ToolExecutionContext;
 use uuid::Uuid;
 
 fn ctx() -> ToolExecutionContext {
@@ -223,8 +223,8 @@ async fn filename_form_traversal_still_refused() {
 
 mod persistence {
     use crate::brain::tools::seen_skills;
-    use crate::db::Database;
     use crate::db::repository::SessionSkillsRepository;
+    use crate::db::Database;
     use uuid::Uuid;
 
     async fn repo() -> (Database, SessionSkillsRepository) {
@@ -238,15 +238,21 @@ mod persistence {
     async fn record_upserts_and_all_reads_back() {
         let (_db, r) = repo().await;
         let sid = Uuid::new_v4();
-        r.record(sid, "opencrabs-dev").await.expect("record");
-        r.record(sid, "opencrabs-dev")
+        r.record(sid, "opencrabs-dev", 0).await.expect("record");
+        r.record(sid, "opencrabs-dev", 0)
             .await
             .expect("re-record (upsert)");
-        r.record(sid, "grafana").await.expect("record 2");
+        r.record(sid, "grafana", 1).await.expect("record 2");
         let rows = r.all().await.expect("all");
         assert_eq!(rows.len(), 2, "upsert must not duplicate rows");
-        assert!(rows.contains(&(sid, "opencrabs-dev".to_string())));
-        assert!(rows.contains(&(sid, "grafana".to_string())));
+        assert!(
+            rows.contains(&(sid, "opencrabs-dev".to_string(), Some(0))),
+            "epoch roundtrip"
+        );
+        assert!(
+            rows.contains(&(sid, "grafana".to_string(), Some(1))),
+            "epoch roundtrip"
+        );
     }
 
     #[tokio::test]
@@ -254,8 +260,8 @@ mod persistence {
         let (_db, r) = repo().await;
         let live = Uuid::new_v4();
         let dead = Uuid::new_v4();
-        r.record(live, "grafana").await.expect("live row");
-        r.record(dead, "grafana").await.expect("dead row");
+        r.record(live, "grafana", 0).await.expect("live row");
+        r.record(dead, "grafana", 0).await.expect("dead row");
         // The live session must exist in `sessions` for the prune-keep leg.
         let pool = _db.pool().clone();
         pool.get()
@@ -274,20 +280,20 @@ mod persistence {
         let pruned = r.prune_missing_sessions().await.expect("prune");
         assert_eq!(pruned, 1, "exactly the dead session's row goes");
         let rows = r.all().await.expect("all after prune");
-        assert_eq!(rows, vec![(live, "grafana".to_string())]);
+        assert_eq!(rows, vec![(live, "grafana".to_string(), Some(0))]);
     }
 
     #[tokio::test]
     async fn hydrate_loads_rows_into_registry() {
         let (_db, r) = repo().await;
         let sid = Uuid::new_v4();
-        r.record(sid, "repo-audit").await.expect("record");
+        r.record(sid, "repo-audit", 0).await.expect("record");
         assert!(!seen_skills::was_seen(sid, "repo-audit"));
         // hydrate_from_db reads the GLOBAL pool (process-wide OnceLock, not
         // settable in tests) — so we test the hydrate DATA path via the repo
         // + registry contract it feeds, not the global-pool plumbing.
         let rows = r.all().await.expect("all");
-        for (s, slug) in rows {
+        for (s, slug, _epoch) in rows {
             seen_skills::mark_seen(s, &slug);
         }
         assert!(

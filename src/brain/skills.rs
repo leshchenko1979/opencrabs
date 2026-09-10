@@ -43,6 +43,7 @@
 //! preserved for forward-compat but ignored.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 /// Compile-time table of built-in skills shipped with the binary.
 ///
@@ -402,4 +403,28 @@ pub fn load_all_skills() -> Vec<Skill> {
 /// `load_all_skills` (user overlay wins).
 pub fn resolve_skill(name: &str) -> Option<Skill> {
     load_all_skills().into_iter().find(|s| s.name == name)
+}
+
+/// The skills that declare `globs` — the skill-gate's working set (#150).
+/// Cached for 60s: the gate runs on EVERY tool call, and re-scanning the
+/// skills tree per call would dominate it. A freshly added globs skill
+/// becomes visible within a minute or on restart; failure to read the
+/// cache source is fail-open (empty vec → gate passes everything).
+pub fn skills_with_globs() -> Vec<Skill> {
+    static CACHE: OnceLock<std::sync::Mutex<Option<(std::time::Instant, Vec<Skill>)>>> =
+        OnceLock::new();
+    static TTL: std::time::Duration = std::time::Duration::from_secs(60);
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cache.lock().expect("skills_with_globs cache poisoned");
+    if let Some((at, skills)) = guard.as_ref() {
+        if at.elapsed() < TTL {
+            return skills.clone();
+        }
+    }
+    let fresh: Vec<Skill> = load_all_skills()
+        .into_iter()
+        .filter(|s| !s.globs.is_empty())
+        .collect();
+    *guard = Some((std::time::Instant::now(), fresh.clone()));
+    fresh
 }

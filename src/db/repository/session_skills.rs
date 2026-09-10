@@ -10,8 +10,8 @@
 //! DB error as a WARN + continue — the in-memory registry keeps functioning,
 //! a stamp just loses restart durability. No panic paths.
 
-use crate::db::Pool;
 use crate::db::database::interact_err;
+use crate::db::Pool;
 use anyhow::{Context, Result};
 use rusqlite::params;
 use uuid::Uuid;
@@ -26,22 +26,25 @@ impl SessionSkillsRepository {
         Self { pool }
     }
 
-    /// Record that `session_id` consumed skill `slug`. Upsert — the
-    /// (session_id, slug) pair is the primary key, so repeats only refresh
-    /// `seen_at`. Idempotent with the in-memory registry's semantics.
-    pub async fn record(&self, session_id: Uuid, slug: &str) -> Result<()> {
+    /// Record that `session_id` consumed skill `slug` at the given
+    /// compaction `epoch`. Upsert — the (session_id, slug) pair is the
+    /// primary key, so repeats refresh `seen_at` AND `epoch` (issue #150:
+    /// the gate compares stored epoch against the session's current epoch,
+    /// so a stale row must always be updatable to the new epoch).
+    pub async fn record(&self, session_id: Uuid, slug: &str, epoch: u64) -> Result<()> {
         let sid = session_id.to_string();
         let slug = slug.to_string();
+        let epoch = epoch as i64;
         self.pool
             .get()
             .await
             .context("Failed to get connection")?
             .interact(move |conn| {
                 conn.execute(
-                    "INSERT INTO session_seen_skills (session_id, slug) VALUES (?1, ?2) \
+                    "INSERT INTO session_seen_skills (session_id, slug, epoch) VALUES (?1, ?2, ?3) \
                      ON CONFLICT(session_id, slug) DO UPDATE \
-                     SET seen_at = strftime('%s', 'now')",
-                    params![sid, slug],
+                     SET seen_at = strftime('%s', 'now'), epoch = excluded.epoch",
+                    params![sid, slug, epoch],
                 )
             })
             .await
@@ -50,27 +53,34 @@ impl SessionSkillsRepository {
         Ok(())
     }
 
-    /// All (session_id, slug) rows — the boot-hydrate feed. Bounded by the
-    /// stamp's own cleanup: rows for sessions deleted by normal session
-    /// pruning are removed by [`Self::prune_missing_sessions`].
-    pub async fn all(&self) -> Result<Vec<(Uuid, String)>> {
+    /// All (session_id, slug, epoch) rows — the boot-hydrate feed. Epoch
+    /// is `None` for pre-feature rows (treated as 0 by the hydrate).
+    /// Bounded by the stamp's own cleanup: rows for sessions deleted by
+    /// normal session pruning are removed by [`Self::prune_missing_sessions`].
+    pub async fn all(&self) -> Result<Vec<(Uuid, String, Option<i64>)>> {
         let rows = self
             .pool
             .get()
             .await
             .context("Failed to get connection")?
             .interact(move |conn| {
-                let mut stmt = conn.prepare("SELECT session_id, slug FROM session_seen_skills")?;
-                let mapped =
-                    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-                mapped.collect::<std::result::Result<Vec<(String, String)>, _>>()
+                let mut stmt =
+                    conn.prepare("SELECT session_id, slug, epoch FROM session_seen_skills")?;
+                let mapped = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                    ))
+                })?;
+                mapped.collect::<std::result::Result<Vec<(String, String, Option<i64>)>, _>>()
             })
             .await
             .map_err(interact_err)?
             .context("Failed to read seen skills")?;
         Ok(rows
             .into_iter()
-            .filter_map(|(sid, slug)| Uuid::parse_str(&sid).ok().map(|id| (id, slug)))
+            .filter_map(|(sid, slug, epoch)| Uuid::parse_str(&sid).ok().map(|id| (id, slug, epoch)))
             .collect())
     }
 
