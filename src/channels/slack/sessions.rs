@@ -11,7 +11,14 @@ impl SlackState {
         self.session_channels
             .lock()
             .await
-            .insert(session_id, channel_id);
+            .insert(session_id, channel_id.clone());
+        // Reverse ownership map (#148): written beside the forward map so the
+        // two cannot drift. Last writer wins — a channel re-registers to its
+        // newest owning session.
+        self.channel_sessions
+            .lock()
+            .await
+            .insert(channel_id, session_id);
     }
 
     /// Look up the channel_id for a session.
@@ -21,13 +28,12 @@ impl SlackState {
 }
 
 /// Reverse lookup (#148): the session currently bound to a Slack channel id,
-/// for `oc://slack/<id>` resolution. Last writer wins — same semantics as
-/// the forward map.
+/// for `oc://slack/<id>` resolution. Reads the reverse map kept in lockstep
+/// with the forward map at `register_session_channel`.
 pub async fn session_owner_by_channel(&self, channel_id: &str) -> Option<Uuid> {
-    self.session_channels
+    self.channel_sessions
         .lock()
         .await
-        .iter()
-        .find(|(_, ch)| ch.as_str() == channel_id)
-        .map(|(s, _)| *s)
+        .get(channel_id)
+        .copied()
 }

@@ -755,6 +755,7 @@ pub mod token_tracking_test;
 pub mod tool_arg_unescape_test;
 pub mod tool_execution_repo_test;
 pub mod tool_context_origin_target_test;
+pub mod oc_reverse_maps_test;
 pub mod tool_loop_helpers_test;
 pub mod tool_name_heal_test;
 pub mod tui_drop_path_test;
