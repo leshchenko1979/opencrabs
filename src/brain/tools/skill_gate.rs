@@ -157,6 +157,14 @@ fn harvest_candidates(
                 out.push(s.clone());
             }
         }
+    } else {
+        // grep/glob: the `pattern` key is regex/glob text — never a path —
+        // but their `path` argument IS a real search root and must still be
+        // harvested, otherwise a gated skill under a grep'd directory never
+        // fires. Only `pattern` is excluded (finding 24's actual scope).
+        if let Some(Value::String(p)) = obj.get("path") {
+            out.push(p.clone());
+        }
     }
 
     // Bash: extract path-like tokens — words containing `/` or tilde
