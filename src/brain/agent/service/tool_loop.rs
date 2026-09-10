@@ -1388,7 +1388,7 @@ impl AgentService {
                 outcome,
                 CompactionKind::Regular,
                 "",
-                false,
+                true,
             )
             .await
             .unwrap_or_else(|e| tracing::error!("compaction marker persist failed: {e}"));
@@ -1865,7 +1865,7 @@ impl AgentService {
                     outcome,
                     CompactionKind::MidLoop,
                     "",
-                    false,
+                    true,
                 )
                 .await
                 .unwrap_or_else(|e| tracing::error!("mid-loop persist failed: {e}"));
@@ -2132,7 +2132,7 @@ impl AgentService {
                                 &CompactionOutcome::Summarised(summary),
                                 CompactionKind::Emergency,
                                 "",
-                                false,
+                                true,
                             )
                             .await
                             .unwrap_or_else(|e| tracing::error!("emergency persist failed: {e}"));
@@ -3963,7 +3963,7 @@ impl AgentService {
                     outcome,
                     CompactionKind::MidLoop,
                     " after token calibration revealed high context usage",
-                    false,
+                    true,
                 )
                 .await
                 .unwrap_or_else(|e| tracing::error!("post-calibration persist failed: {e}"));
@@ -7324,7 +7324,7 @@ impl AgentService {
                     outcome,
                     CompactionKind::PostTool,
                     "",
-                    false,
+                    true,
                 )
                 .await
                 .unwrap_or_else(|e| tracing::error!("post-tool persist failed: {e}"));
