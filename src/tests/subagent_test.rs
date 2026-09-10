@@ -384,7 +384,6 @@ mod send_input_tool {
     use crate::brain::tools::subagent::{SubAgent, SubAgentManager};
     use crate::brain::tools::{Tool, ToolExecutionContext};
     use serde_json::json;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -533,7 +532,6 @@ mod close_agent_tool {
     use crate::brain::tools::subagent::{SubAgent, SubAgentManager, SubAgentState};
     use crate::brain::tools::{Tool, ToolExecutionContext};
     use serde_json::json;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -649,7 +647,6 @@ mod wait_agent_tool {
     use crate::brain::tools::subagent::{SubAgent, SubAgentManager};
     use crate::brain::tools::{Tool, ToolExecutionContext};
     use serde_json::json;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -1241,7 +1238,6 @@ mod team_delete_tool {
     use crate::brain::tools::subagent::{SubAgent, SubAgentManager, TeamDeleteTool, TeamManager};
     use crate::brain::tools::{Tool, ToolExecutionContext};
     use serde_json::json;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -1357,7 +1353,6 @@ mod team_broadcast_tool {
     };
     use crate::brain::tools::{Tool, ToolExecutionContext};
     use serde_json::json;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use uuid::Uuid;

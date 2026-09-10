@@ -192,7 +192,7 @@ pub trait TargetResolution: Send + Sync {
 pub async fn resolve_target(
     url: &str,
     origin: Option<&OriginTarget>,
-    world: &impl TargetResolution,
+    world: &(impl TargetResolution + ?Sized),
     sessions: &[crate::db::models::Session],
 ) -> Result<ResolvedTarget> {
     // `here` — ambient origin only. No origin (cron, CLI, sub-agent) is a
@@ -256,7 +256,7 @@ pub async fn resolve_target(
             let chat_id = segments
                 .first()
                 .ok_or_else(|| anyhow!("oc://telegram needs a chat id: '{url}'"))?;
-            let chat: i64 = chat_id
+            let _chat: i64 = chat_id
                 .parse()
                 .map_err(|_| anyhow!("telegram chat id must be numeric: '{chat_id}'"))?;
             let thread: Option<i32> = match segments.get(1) {

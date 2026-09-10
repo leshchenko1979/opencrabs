@@ -2309,7 +2309,6 @@ pub(crate) async fn cmd_evolve(config: &crate::config::Config, check_only: bool)
     use crate::brain::tools::evolve::EvolveTool;
     use crate::brain::tools::{Tool, ToolExecutionContext};
     use serde_json::json;
-    use std::collections::HashMap;
 
     let tool = EvolveTool::new(None);
     let input = json!({
