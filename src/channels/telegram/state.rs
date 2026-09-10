@@ -1838,7 +1838,6 @@ impl TelegramState {
     /// Clear the profile-create flow state.
     pub async fn clear_prof_create(&self, chat_id: i64) {
         self.prof_create_states.lock().await.remove(&chat_id);
-        }
     }
 
     /// All topic-scoped session keys for a chat (#148): the topic ids the
