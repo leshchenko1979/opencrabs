@@ -132,7 +132,9 @@ fn warn_malformed_glob(slug: &str, glob_str: &str, err: &str) {
     // Warn at most 8 times per process per signature to bound log noise
     // without adding a second map.
     if COUNT.fetch_add(1, Ordering::Relaxed) < 8 {
-        tracing::warn!("skill_gate: skill '{slug}' has malformed glob '{glob_str}' ({err}) — skipping (fail-open)");
+        tracing::warn!(
+            "skill_gate: skill '{slug}' has malformed glob '{glob_str}' ({err}) — skipping (fail-open)"
+        );
     }
 }
 
