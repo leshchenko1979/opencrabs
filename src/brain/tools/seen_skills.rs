@@ -35,7 +35,8 @@ use uuid::Uuid;
 
 /// In-memory registry: (session, slug) → the compaction epoch at which the
 /// skill body was last loaded into that session's context (issue #150).
-/// Epoch 0 == "loaded before any compaction".
+/// Epoch 0 == "loaded before any compaction" (also the back-compat value
+/// for pre-feature rows hydrated from the DB with NULL epoch).
 fn registry() -> &'static std::sync::Mutex<HashMap<(Uuid, String), u64>> {
     static REGISTRY: OnceLock<std::sync::Mutex<HashMap<(Uuid, String), u64>>> = OnceLock::new();
     REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
@@ -69,49 +70,78 @@ pub fn skill_slug_from_path(path: &Path) -> Option<String> {
 /// Record that `session_id` consumed skill `slug` (via read or slug-form
 /// load) at the session's CURRENT compaction epoch.
 ///
-/// Always upserts (issue #150: updating the epoch ensures that re-reading
-/// a skill after compaction unblocks the skill glob gate).
-///
-/// Also best-effort persists the row (#138) on first sight in this process:
-/// a DB write failure logs WARN and is swallowed — the in-memory registry
-/// stays authoritative for the current process, persistence only buys
-/// restart durability. Spawned on a detached task so the hot read/load
-/// path never awaits the DB.
+/// Always upserts (issue #150: the old `newly`-gated insert left the
+/// persisted row frozen at first-seen epoch — after a compaction the gate
+/// would re-block a re-issued identical call forever). The DB write is
+/// still best-effort + detached: a DB failure logs WARN and is swallowed —
+/// the in-memory registry stays authoritative for the current process.
 pub fn mark_seen(session_id: Uuid, slug: &str) {
     let epoch = current_epoch(session_id);
-    let newly = registry()
+    registry()
         .lock()
         .expect("seen_skills registry poisoned")
-        .insert((session_id, slug.to_string()), epoch)
-        .is_none();
-    if newly {
-        let slug = slug.to_string();
-        // Persist only inside a live tokio runtime — plain #[test] fns and
-        // other non-async contexts have no reactor; the in-memory registry
-        // already did its job there, and DB durability is best-effort.
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                match persist_seen(session_id, &slug).await {
-                    Ok(()) => {}
-                    Err(e) => tracing::warn!(
-                        "seen_skills: DB persist of ({session_id}, {slug}) failed (in-memory \
-                         registry unaffected): {e:#}"
-                    ),
-                }
-            });
-        }
+        .insert((session_id, slug.to_string()), epoch);
+    let slug = slug.to_string();
+    // Persist only inside a live tokio runtime — plain #[test] fns and
+    // other non-async contexts have no reactor; the in-memory registry
+    // already did its job there, and DB durability is best-effort.
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            match persist_seen(session_id, &slug, epoch).await {
+                Ok(()) => {}
+                Err(e) => tracing::warn!(
+                    "seen_skills: DB persist of ({session_id}, {slug}) failed (in-memory \
+                     registry unaffected): {e:#}"
+                ),
+            }
+        });
     }
 }
 
-/// Best-effort DB persist of one seen-skill row (#138). Soft-fails when no
-/// global pool exists yet (unit tests, pre-connect startup).
-async fn persist_seen(session_id: Uuid, slug: &str) -> anyhow::Result<()> {
+/// Best-effort DB persist of one seen-skill row (#138, epoch #150).
+/// Soft-fails when no global pool exists yet (unit tests, pre-connect
+/// startup).
+async fn persist_seen(session_id: Uuid, slug: &str, epoch: u64) -> anyhow::Result<()> {
     let pool = crate::db::global_pool()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("no global DB pool (not connected yet)"))?;
     crate::db::repository::SessionSkillsRepository::new(pool)
-        .record(session_id, slug)
+        .record(session_id, slug, epoch)
         .await
+}
+
+/// The session's current compaction epoch (0 before any compaction).
+fn current_epoch(session_id: Uuid) -> u64 {
+    *epochs()
+        .lock()
+        .expect("seen_skills epochs poisoned")
+        .get(&session_id)
+        .unwrap_or(&0)
+}
+
+/// Bump the session's compaction epoch (issue #150): called from the
+/// single compaction-continuation path, AFTER a compaction the registry
+/// entries keep their old epoch, so `seen_since_compaction` flips false
+/// for every skill until the body is re-read. Clears NOTHING — the #125
+/// stamp's seen-inventory (`seen_for_session`) must stay intact.
+pub fn note_compaction(session_id: Uuid) {
+    let mut epochs = epochs().lock().expect("seen_skills epochs poisoned");
+    let next = epochs.get(&session_id).copied().unwrap_or(0) + 1;
+    epochs.insert(session_id, next);
+}
+
+/// Whether `session_id`'s context currently holds skill `slug`'s body:
+/// the stored epoch is >= the session's current epoch. Fresh sessions
+/// (no rows) report false — the gate fires on the first matching call
+/// (owner decision 2026-09-10: fresh sessions gated too).
+pub fn seen_since_compaction(session_id: Uuid, slug: &str) -> bool {
+    let stored = registry()
+        .lock()
+        .expect("seen_skills registry poisoned")
+        .get(&(session_id, slug.to_string()))
+        .copied()
+        .unwrap_or(0);
+    stored >= current_epoch(session_id)
 }
 
 /// Hydrate the in-memory registry from the DB at daemon boot (#138).
@@ -141,12 +171,35 @@ pub fn hydrate_from_db() {
                     // Guard strictly scoped: a MutexGuard is not Send, so it
                     // must not be alive across the prune await below.
                     let mut reg = registry().lock().expect("seen_skills registry poisoned");
-                    for (sid, slug) in rows {
-                        // Hydrated rows carry epoch 0 — "loaded before any
-                        // compaction" (issue #150): they count for the #125
-                        // stamp inventory without claiming the body is still
-                        // in context for the skill glob gate.
-                        reg.insert((sid, slug), 0);
+                    let mut max_epoch: HashMap<Uuid, u64> = HashMap::new();
+                    for (sid, slug, epoch) in rows {
+                        // Pre-feature rows carry NULL epoch → 0 (always
+                        // current — back-compat sessions pass the gate).
+                        let e = epoch.unwrap_or(0).max(0) as u64;
+                        reg.insert((sid, slug), e);
+                        // Seed each session's epoch from MAX(row epochs)
+                        // (finding 9): a restart that reset the in-memory
+                        // epoch to 0 would compare stored epochs > 0
+                        // against 0 and never re-gate, but the reverse —
+                        // rows hydrated at a HIGHER epoch than a session
+                        // counter reset to 0 — would falsely re-gate on
+                        // `>=` only if stored < session. Seeding MAX keeps
+                        // the compare truthful across restarts.
+                        let m = max_epoch.entry(sid).or_insert(0);
+                        if e > *m {
+                            *m = e;
+                        }
+                    }
+                    drop(reg);
+                    let mut ep = epochs().lock().expect("seen_skills epochs poisoned");
+                    for (sid, m) in max_epoch {
+                        ep.entry(sid)
+                            .and_modify(|cur| {
+                                if m > *cur {
+                                    *cur = m;
+                                }
+                            })
+                            .or_insert(m);
                     }
                     reg.len()
                 };
@@ -163,42 +216,6 @@ pub fn hydrate_from_db() {
             ),
         }
     });
-}
-
-/// The session's current compaction epoch (0 before any compaction).
-fn current_epoch(session_id: Uuid) -> u64 {
-    *epochs()
-        .lock()
-        .expect("seen_skills epochs poisoned")
-        .get(&session_id)
-        .unwrap_or(&0)
-}
-
-/// Bump the session's compaction epoch (issue #150): called from the
-/// compaction path. AFTER a compaction, the registry entries keep their
-/// old epoch, so `seen_since_compaction` flips false for every skill
-/// until the body is re-read. Clears NOTHING — the #125 stamp's
-/// seen-inventory (`seen_for_session`) remains intact.
-pub fn note_compaction(session_id: Uuid) {
-    let mut epochs = epochs().lock().expect("seen_skills epochs poisoned");
-    let next = epochs.get(&session_id).copied().unwrap_or(0) + 1;
-    epochs.insert(session_id, next);
-}
-
-/// Whether `session_id`'s context currently holds skill `slug`'s body:
-/// the stored epoch is >= the session's current epoch. Fresh sessions
-/// (no rows) report false — the gate fires on the first matching call.
-pub fn seen_since_compaction(session_id: Uuid, slug: &str) -> bool {
-    let stored = registry()
-        .lock()
-        .expect("seen_skills registry poisoned")
-        .get(&(session_id, slug.to_string()))
-        .copied();
-    if let Some(epoch) = stored {
-        epoch >= current_epoch(session_id)
-    } else {
-        false
-    }
 }
 
 /// Whether `session_id` has consumed skill `slug` this run (any epoch —
@@ -294,7 +311,8 @@ mod tests {
         // A compaction bumps the epoch; the stored row keeps the old one.
         note_compaction(a);
         assert!(!seen_since_compaction(a, "my-skill"));
-        // Re-reading re-arms at the new epoch.
+        // Re-reading re-arms at the new epoch (the B1 repro: the old
+        // `newly` short-circuit left the row frozen and this would fail).
         mark_seen(a, "my-skill");
         assert!(seen_since_compaction(a, "my-skill"));
     }
@@ -305,7 +323,7 @@ mod tests {
         mark_seen(a, "one");
         mark_seen(a, "two");
         note_compaction(a);
-        // The #125 stamp's seen-inventory survives.
+        // The #125 stamp's seen-inventory survives (decision 5).
         assert_eq!(
             seen_for_session(a),
             vec!["one".to_string(), "two".to_string()]
@@ -325,5 +343,26 @@ mod tests {
         mark_seen(b, "sk");
         assert!(seen_since_compaction(b, "sk"));
         assert!(!seen_since_compaction(a, "sk"));
+    }
+
+    #[test]
+    fn hydrate_seeds_epoch_from_max_row_epoch() {
+        // Simulate the boot hydration of a session whose rows carry
+        // epoch 2 (two compactions before the restart): the seeded
+        // session epoch must be 2, so a row at epoch 2 passes and a
+        // hypothetical older row would not — a restart must not falsely
+        // re-gate (finding 9) nor falsely pass.
+        let a = Uuid::new_v4();
+        {
+            let mut reg = registry().lock().unwrap();
+            reg.insert((a, "sk".to_string()), 2);
+            let mut ep = epochs().lock().unwrap();
+            ep.insert(a, 2);
+        }
+        assert!(seen_since_compaction(a, "sk"));
+        note_compaction(a);
+        assert!(!seen_since_compaction(a, "sk"));
+        mark_seen(a, "sk");
+        assert!(seen_since_compaction(a, "sk"));
     }
 }
