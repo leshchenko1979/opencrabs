@@ -390,24 +390,11 @@ mod send_input_tool {
     use uuid::Uuid;
 
     fn test_context() -> ToolExecutionContext {
-        ToolExecutionContext {
-            session_provider: None,
-            session_id: Uuid::new_v4(),
-            working_directory: std::path::PathBuf::from("/tmp"),
-            env_vars: HashMap::new(),
-            auto_approve: true,
-            timeout_secs: 30,
-            sudo_callback: None,
-            ssh_callback: None,
-            shared_working_directory: None,
-            service_context: None,
-            progress_callback: None,
-            background_manager: None,
-            plan_session_override: None,
-            subagent_manager: None,
-            parent_tool_registry: None,
-            headless: false,
-        }
+        let mut ctx = ToolExecutionContext::new(Uuid::new_v4())
+            .with_working_directory(std::path::PathBuf::from("/tmp"))
+            .with_auto_approve(true);
+        ctx.timeout_secs = 30;
+        ctx
     }
 
     fn make_running_agent(id: &str) -> (SubAgent, mpsc::UnboundedReceiver<String>) {
@@ -552,24 +539,11 @@ mod close_agent_tool {
     use uuid::Uuid;
 
     fn test_context() -> ToolExecutionContext {
-        ToolExecutionContext {
-            session_provider: None,
-            session_id: Uuid::new_v4(),
-            working_directory: std::path::PathBuf::from("/tmp"),
-            env_vars: HashMap::new(),
-            auto_approve: true,
-            timeout_secs: 30,
-            sudo_callback: None,
-            ssh_callback: None,
-            shared_working_directory: None,
-            service_context: None,
-            progress_callback: None,
-            background_manager: None,
-            plan_session_override: None,
-            subagent_manager: None,
-            parent_tool_registry: None,
-            headless: false,
-        }
+        let mut ctx = ToolExecutionContext::new(Uuid::new_v4())
+            .with_working_directory(std::path::PathBuf::from("/tmp"))
+            .with_auto_approve(true);
+        ctx.timeout_secs = 30;
+        ctx
     }
 
     fn make_running_agent(id: &str) -> SubAgent {
@@ -681,24 +655,11 @@ mod wait_agent_tool {
     use uuid::Uuid;
 
     fn test_context() -> ToolExecutionContext {
-        ToolExecutionContext {
-            session_provider: None,
-            session_id: Uuid::new_v4(),
-            working_directory: std::path::PathBuf::from("/tmp"),
-            env_vars: HashMap::new(),
-            auto_approve: true,
-            timeout_secs: 30,
-            sudo_callback: None,
-            ssh_callback: None,
-            shared_working_directory: None,
-            service_context: None,
-            progress_callback: None,
-            background_manager: None,
-            plan_session_override: None,
-            subagent_manager: None,
-            parent_tool_registry: None,
-            headless: false,
-        }
+        let mut ctx = ToolExecutionContext::new(Uuid::new_v4())
+            .with_working_directory(std::path::PathBuf::from("/tmp"))
+            .with_auto_approve(true);
+        ctx.timeout_secs = 30;
+        ctx
     }
 
     fn make_running_agent(id: &str) -> SubAgent {
@@ -1286,24 +1247,11 @@ mod team_delete_tool {
     use uuid::Uuid;
 
     fn test_context() -> ToolExecutionContext {
-        ToolExecutionContext {
-            session_provider: None,
-            session_id: Uuid::new_v4(),
-            working_directory: std::path::PathBuf::from("/tmp"),
-            env_vars: HashMap::new(),
-            auto_approve: true,
-            timeout_secs: 30,
-            sudo_callback: None,
-            ssh_callback: None,
-            shared_working_directory: None,
-            service_context: None,
-            progress_callback: None,
-            background_manager: None,
-            plan_session_override: None,
-            subagent_manager: None,
-            parent_tool_registry: None,
-            headless: false,
-        }
+        let mut ctx = ToolExecutionContext::new(Uuid::new_v4())
+            .with_working_directory(std::path::PathBuf::from("/tmp"))
+            .with_auto_approve(true);
+        ctx.timeout_secs = 30;
+        ctx
     }
 
     fn make_running_agent(id: &str) -> SubAgent {
@@ -1415,24 +1363,11 @@ mod team_broadcast_tool {
     use uuid::Uuid;
 
     fn test_context() -> ToolExecutionContext {
-        ToolExecutionContext {
-            session_provider: None,
-            session_id: Uuid::new_v4(),
-            working_directory: std::path::PathBuf::from("/tmp"),
-            env_vars: HashMap::new(),
-            auto_approve: true,
-            timeout_secs: 30,
-            sudo_callback: None,
-            ssh_callback: None,
-            shared_working_directory: None,
-            service_context: None,
-            progress_callback: None,
-            background_manager: None,
-            plan_session_override: None,
-            subagent_manager: None,
-            parent_tool_registry: None,
-            headless: false,
-        }
+        let mut ctx = ToolExecutionContext::new(Uuid::new_v4())
+            .with_working_directory(std::path::PathBuf::from("/tmp"))
+            .with_auto_approve(true);
+        ctx.timeout_secs = 30;
+        ctx
     }
 
     fn make_agent_with_channel(id: &str) -> (SubAgent, mpsc::UnboundedReceiver<String>) {

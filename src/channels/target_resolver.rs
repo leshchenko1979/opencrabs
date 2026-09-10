@@ -278,17 +278,19 @@ pub async fn resolve_target(
                 .await;
             // Bare-chat URL on a forum chat: ambiguous by design (D9/D10).
             if thread.is_none() && session.is_none() {
-                if let Some(topics) = world.telegram_chat_topics(chat_id).await? {
-                    if topics.len() > 1 {
-                        bail!(
-                            "chat {chat_id} is a forum with multiple topic sessions — \
-                             pick a topic: {}",
-                            topics
-                                .iter()
-                                .map(|t| format!("oc://telegram/{chat_id}/{t}"))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        );
+                if let Ok(cid) = chat_id.parse::<i64>() {
+                    if let Some(topics) = world.telegram_chat_topics(cid).await? {
+                        if topics.len() > 1 {
+                            bail!(
+                                "chat {chat_id} is a forum with multiple topic sessions — \
+                                 pick a topic: {}",
+                                topics
+                                    .iter()
+                                    .map(|t| format!("oc://telegram/{chat_id}/{t}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            );
+                        }
                     }
                 }
             }

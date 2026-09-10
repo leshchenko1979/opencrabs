@@ -77,6 +77,7 @@ impl ChannelFactory {
             runtime_info: OnceLock::new(),
             subagent_manager: OnceLock::new(),
             headless: std::sync::atomic::AtomicBool::new(false),
+            channel_manager: OnceLock::new(),
         }
     }
 

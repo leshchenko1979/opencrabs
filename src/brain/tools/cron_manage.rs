@@ -874,7 +874,7 @@ pub(crate) async fn bake_delivery_target(
         .as_deref()
         .map(std::borrow::ToOwned::to_owned);
 
-    let resolved = resolve_target(raw, origin.as_ref(), &world, &sessions)
+    let resolved = resolve_target(raw, origin.as_ref(), world.as_ref(), &sessions)
         .await
         .map_err(|e| format!("cannot resolve delivery target '{raw}': {e}"))?;
 

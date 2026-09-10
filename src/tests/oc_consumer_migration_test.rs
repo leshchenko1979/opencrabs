@@ -121,7 +121,7 @@ async fn cron_create_with_here_bakes_row_target() {
 
     // And the stored row carries the baked target, never a URL.
     let jobs = crate::db::CronJobRepository::new(db.pool().clone())
-        .list()
+        .list_all()
         .await
         .unwrap();
     assert_eq!(jobs.len(), 1);
@@ -154,7 +154,7 @@ async fn cron_create_here_without_origin_is_refused() {
     assert!(text.contains("no current channel"), "{text}");
     // Nothing was created.
     let jobs = crate::db::CronJobRepository::new(db.pool().clone())
-        .list()
+        .list_all()
         .await
         .unwrap();
     assert!(jobs.is_empty());
