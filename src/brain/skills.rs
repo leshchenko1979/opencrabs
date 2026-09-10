@@ -109,6 +109,11 @@ pub struct Skill {
     pub description: String,
     /// Prompt body (everything after the closing `---`, trimmed).
     pub body: String,
+    /// Cursor-style glob paths. When non-empty, the skill gate rejects
+    /// tool calls touching a matching path until the skill body has been
+    /// loaded (seen) in the current session context. Opt-in: no `globs`
+    /// key → empty vec → invisible to the gate.
+    pub globs: Vec<String>,
     /// `review_gate: true` in frontmatter: slash invocation of this skill
     /// is the user reaching for the brake on purpose. The agent must
     /// present the skill's output and wait for explicit user approval
@@ -123,7 +128,8 @@ pub struct Skill {
 /// `review_gate: true`. The gate is a property of the skill as invoked
 /// via its slash: output first, side effects only after the user's
 /// explicit approval — even under tool auto-approve (yolo).
-pub const REVIEW_GATE_REMINDER: &str = "[SKILL REVIEW GATE] This skill declares `review_gate: true`. \
+pub const REVIEW_GATE_REMINDER: &str =
+    "[SKILL REVIEW GATE] This skill declares `review_gate: true`. \
      Present its output (draft, plan, summary) to the user and WAIT for their explicit \
      approval before any side effects — sending, publishing, pushing, deploying, or writing \
      outside the workspace — even if tool auto-approve is on. The user typed the slash \
@@ -144,17 +150,45 @@ impl Skill {
         let mut fm_name: Option<String> = None;
         let mut fm_description: Option<String> = None;
         let mut fm_review_gate = false;
+        let mut fm_globs: Vec<String> = Vec::new();
+
+        // Open-key state: a top-level `key:` with no inline value opens a
+        // block list; subsequent indented `- item` lines belong to it.
+        // Modeled on directives.rs::field but re-implemented here — those
+        // helpers are private and return the wrong shape.
+        let mut open_key: Option<String> = None;
 
         for line in frontmatter.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
+
+            // Indented list item under an open block key.
+            let indent = line.len() - line.trim_start().len();
+            if indent > 0 && trimmed.starts_with('-') {
+                if let Some(key) = open_key.as_deref() {
+                    if key == "globs" {
+                        let item = trimmed[1..].trim().trim_matches('"').trim_matches('\'');
+                        if !item.is_empty() {
+                            fm_globs.push(item.to_string());
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Top-level key — closes any open block key.
+            open_key = None;
+
             let Some((key, value)) = trimmed.split_once(':') else {
                 continue;
             };
             let key = key.trim();
-            let value = value.trim().trim_matches('"').trim_matches('\'');
+            let value = value.trim();
+            // Inline value: strip quoting, then optional `[a, b]` flow form.
+            let value = value.trim_matches('"').trim_matches('\'');
+
             match key {
                 "name" => fm_name = Some(value.to_string()),
                 "description" => fm_description = Some(value.to_string()),
@@ -164,7 +198,32 @@ impl Skill {
                         "true" | "yes" | "1" | "on"
                     );
                 }
-                _ => {}
+                "globs" => {
+                    if value.is_empty() {
+                        // Block list form: `globs:` with items on the
+                        // following indented lines.
+                        open_key = Some(key.to_string());
+                    } else if let Some(inner) =
+                        value.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+                    {
+                        // Inline flow form: `globs: [a, b]`.
+                        for part in inner.split(',') {
+                            let item = part.trim().trim_matches('"').trim_matches('\'');
+                            if !item.is_empty() {
+                                fm_globs.push(item.to_string());
+                            }
+                        }
+                    } else {
+                        // Cursor comma-separated string form: `globs: a, b`.
+                        for part in value.split(',') {
+                            let item = part.trim().trim_matches('"').trim_matches('\'');
+                            if !item.is_empty() {
+                                fm_globs.push(item.to_string());
+                            }
+                        }
+                    }
+                }
+                _ => {} // unknown keys (incl. nested metadata blocks) ignored
             }
         }
 
@@ -178,6 +237,7 @@ impl Skill {
             slash_name,
             description,
             body: body.trim().to_string(),
+            globs: fm_globs,
             review_gate: fm_review_gate,
             source,
         })
