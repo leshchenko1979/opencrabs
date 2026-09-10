@@ -129,7 +129,8 @@ pub struct Skill {
 /// `review_gate: true`. The gate is a property of the skill as invoked
 /// via its slash: output first, side effects only after the user's
 /// explicit approval — even under tool auto-approve (yolo).
-pub const REVIEW_GATE_REMINDER: &str = "[SKILL REVIEW GATE] This skill declares `review_gate: true`. \
+pub const REVIEW_GATE_REMINDER: &str =
+    "[SKILL REVIEW GATE] This skill declares `review_gate: true`. \
      Present its output (draft, plan, summary) to the user and WAIT for their explicit \
      approval before any side effects — sending, publishing, pushing, deploying, or writing \
      outside the workspace — even if tool auto-approve is on. The user typed the slash \
