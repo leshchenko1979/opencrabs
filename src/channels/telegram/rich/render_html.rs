@@ -86,7 +86,7 @@ fn render_block(block: &Block, wrap_p: bool) -> String {
             // directive 2026-09-10 03:56Z): degrade to the note plus the
             // svg escape hatch (generic ink_url_svg link — ruling (a):
             // one semantic, generic hatch + caller-side trigger).
-            MermaidResult::ImageBytes(_) => {
+            MermaidResult::ImageBytes { .. } => {
                 super::mermaid::failure_html(
                     "diagram rendered as image — open the svg link for the full-size vector",
                     source,
@@ -448,7 +448,11 @@ mod tests {
     fn image_bytes_arm_yields_note_and_svg_link_not_failure() {
         let blocks = vec![Block::Mermaid {
             source: "graph TD\n    A --> B".into(),
-            result: MermaidResult::ImageBytes(vec![0x89, b'P']),
+            result: MermaidResult::ImageBytes {
+                bytes: vec![0x89, b'P'],
+                natural_width: None,
+                svg_url: None,
+            },
         }];
         let html = render_html(&blocks);
         assert!(
