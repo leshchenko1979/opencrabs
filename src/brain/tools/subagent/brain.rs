@@ -1,8 +1,7 @@
 use std::path::Path;
-use crate::brain::service::BrainLoader;
-use crate::brain::types::RuntimeInfo;
-use crate::config::paths::collapse_home;
-use crate::services::agent::service::HEADLESS_PREAMBLE;
+use crate::brain::prompt_builder::{BrainLoader, RuntimeInfo};
+use crate::brain::tools::error::collapse_home;
+use crate::cli::tool_setup::HEADLESS_PREAMBLE;
 
 pub const READ_ONLY_CAPABILITY_NOTE: &str = "[Capability note: This sub-agent runs with a read-restricted tool registry (#1173) — file reads, search, and web research only. Tools for shell execution, file writes, and further sub-agents are absent.]\n\n";
 
@@ -24,7 +23,9 @@ pub fn child_system_brain(
         working_directory: Some(collapse_home(child_dir)),
         ..Default::default()
     };
-    BrainLoader::build_core_brain(Some(&runtime_info))
+    let brain_path = BrainLoader::resolve_path();
+    let loader = BrainLoader::new(brain_path);
+    Some(loader.build_core_brain(Some(&runtime_info)))
 }
 
 /// Constructs the full prompt delivered to a child agent, stacking capability and context notes.

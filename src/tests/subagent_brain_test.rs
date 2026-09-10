@@ -9,7 +9,7 @@ use crate::brain::tools::subagent::brain::{
 };
 use crate::brain::tools::subagent::{SpawnAgentTool, SubAgentManager, TeamCreateTool, TeamManager};
 use crate::brain::tools::Tool;
-use crate::config::paths::with_home_override;
+use crate::config::profile::with_home_override;
 use std::fs;
 use std::sync::Arc;
 
@@ -93,7 +93,7 @@ fn child_system_brain_loads_core_files_when_true() {
     let home_tmp = tempfile::tempdir().unwrap();
     let work_tmp = tempfile::tempdir().unwrap();
 
-    with_home_override(home_tmp.path(), || {
+    with_home_override(home_tmp.path().to_path_buf(), || {
         // Seed home brain files
         fs::write(home_tmp.path().join("SOUL.md"), "# SOUL\nBeep boop").unwrap();
         fs::write(home_tmp.path().join("USER.md"), "# USER\nAlexey").unwrap();
