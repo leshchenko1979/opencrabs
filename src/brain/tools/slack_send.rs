@@ -213,11 +213,7 @@ impl Tool for SlackSendTool {
         // Resolve target channel once: explicit param > ambient origin fallback > owner's last channel
         let channel_id_opt: Option<String> =
             if let Some(ch) = input.get("channel_id").and_then(|v| v.as_str()) {
-                let stripped = ch
-                    .strip_prefix("oc://slack/")
-                    .unwrap_or(ch)
-                    .trim_matches('/');
-                Some(stripped.to_string())
+                Some(ch.to_string())
             } else if let Some(origin) = context.origin_target.as_deref() {
                 if origin.channel == "slack" {
                     Some(origin.chat_id.clone())

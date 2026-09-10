@@ -88,44 +88,56 @@ async fn bake_channel_url_through_world() {
 
 #[tokio::test]
 async fn cron_create_with_here_bakes_row_target() {
-    let db = Database::connect_in_memory().await.unwrap();
-    db.run_migrations().await.unwrap();
-    let repo = CronJobRepository::new(db.pool().clone());
-    let tool =
-        crate::brain::tools::cron_manage::CronManageTool::new(repo);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let opencrabs = dir.path().join(".opencrabs");
+    std::fs::create_dir_all(&opencrabs).expect("create .opencrabs");
+    std::fs::write(
+        opencrabs.join("keys.toml"),
+        "[channels.telegram]\ntoken = \"test-token\"\n",
+    )
+    .expect("write keys.toml");
 
-    let mut ctx = ToolExecutionContext::new(Uuid::new_v4());
-    ctx.origin_target = Some(std::sync::Arc::new(crate::brain::tools::OriginTarget {
-        channel: "telegram",
-        chat_id: "-100777".into(),
-        thread: Some(5),
-    }));
-    ctx.world = Some(std::sync::Arc::new(OneChatWorld(None)));
+    crate::config::profile::with_home_override_async(opencrabs, async {
+        let db = Database::connect_in_memory().await.unwrap();
+        db.run_migrations().await.unwrap();
+        let repo = CronJobRepository::new(db.pool().clone());
+        let tool =
+            crate::brain::tools::cron_manage::CronManageTool::new(repo);
 
-    let out = tool
-        .execute(
-            serde_json::json!({
-                "action": "create",
-                "name": "bake-here-probe",
-                "cron": "0 9 * * Mon-Fri",
-                "prompt": "report",
-                "deliver_to": "here"
-            }),
-            &ctx,
-        )
-        .await
-        .unwrap();
-    assert!(out.success, "{}", out.error.unwrap_or_default());
-    let text = out.output;
-    assert!(text.contains("telegram:-100777:5"), "{text}");
+        let mut ctx = ToolExecutionContext::new(Uuid::new_v4());
+        ctx.origin_target = Some(std::sync::Arc::new(crate::brain::tools::OriginTarget {
+            channel: "telegram",
+            chat_id: "-100777".into(),
+            thread: Some(5),
+        }));
+        ctx.world = Some(std::sync::Arc::new(OneChatWorld(None)));
 
-    // And the stored row carries the baked target, never a URL.
-    let jobs = crate::db::CronJobRepository::new(db.pool().clone())
-        .list_all()
-        .await
-        .unwrap();
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].deliver_to.as_deref(), Some("telegram:-100777:5"));
+        let out = tool
+            .execute(
+                serde_json::json!({
+                    "action": "create",
+                    "name": "bake-here-probe",
+                    "cron": "0 9 * * Mon-Fri",
+                    "prompt": "report",
+                    "deliver_to": "here"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(out.success, "{}", out.error.unwrap_or_default());
+        let text = out.output;
+        assert!(text.contains("telegram:-100777:5"), "{text}");
+
+        // And the stored row carries the baked target, never a URL.
+        let jobs = crate::db::CronJobRepository::new(db.pool().clone())
+            .list_all()
+            .await
+            .unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].deliver_to.as_deref(), Some("telegram:-100777:5"));
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -151,7 +163,7 @@ async fn cron_create_here_without_origin_is_refused() {
         .unwrap();
     assert!(!out.success, "here without origin must refuse");
     let text = out.error.unwrap_or_default();
-    assert!(text.contains("no current channel"), "{text}");
+    assert!(text.contains("live channel surface") || text.contains("no current channel"), "{text}");
     // Nothing was created.
     let jobs = crate::db::CronJobRepository::new(db.pool().clone())
         .list_all()

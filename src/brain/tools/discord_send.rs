@@ -228,16 +228,11 @@ impl Tool for DiscordSendTool {
         // Resolve target channel: explicit param > ambient origin fallback > owner's last channel
         let channel_id_opt = if let Some(id_str) = input.get("channel_id").and_then(|v| v.as_str())
         {
-            // Support `oc://discord/<channel>` URLs as well as bare numeric ids
-            let id_str = id_str
-                .strip_prefix("oc://discord/")
-                .unwrap_or(id_str)
-                .trim_matches('/');
             match id_str.parse::<u64>() {
                 Ok(id) => Some(id),
                 Err(_) => {
                     return Ok(ToolResult::error(format!(
-                        "Invalid channel_id '{id_str}': must be a numeric string or 'oc://discord/<channel_id>'"
+                        "Invalid channel_id '{id_str}': must be a numeric string"
                     )));
                 }
             }
