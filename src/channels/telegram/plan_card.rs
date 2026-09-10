@@ -36,6 +36,9 @@ pub(crate) enum CollapsibleStyle {
     /// prose truncated to `CARD_PROSE_BUDGET`.
     BlockquoteExpandable,
     /// Rich `sendRichMessage` (32K chars): `<details><summary>`, no truncation.
+    /// Production callers migrated to the markdown+media dialect; the test-only
+    /// `render_plan_card_rich_html` is the remaining constructor.
+    #[cfg_attr(not(test), expect(dead_code))]
     DetailsSummary,
 }
 

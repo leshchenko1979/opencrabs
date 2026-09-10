@@ -688,7 +688,6 @@ fn ink_url_payload_is_base64url_without_padding() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[test]
 fn ink_url_svg_points_at_the_dedicated_vector_endpoint() {
     let url = ink_url_svg("graph TD\n    A --> B");
     assert!(
