@@ -854,7 +854,10 @@ pub fn template_nudge(session_id: Uuid, warnings: &[String]) -> Option<String> {
         return None;
     }
     Some(format!(
-        "PLAN TEMPLATE INCOMPLETE - rewrite the .md now, before asking for approval: {}. \
+        "PLAN TEMPLATE INCOMPLETE - rewrite the .md now, before asking for approval: {}.\n\n\
+         Plan template contract: each `**Label:**` must be a single line: label + space + text.\n\
+         - ✅ `**Problem:** text on the same line`\n\
+         - ❌ `**Problem:**` alone with text on the next line\n\n\
          The answers are already in this conversation: those labels are a transcription \
          of what was discussed, not new questions to research. If one genuinely never \
          came up, write that plainly instead of filler - text that only passes the \
