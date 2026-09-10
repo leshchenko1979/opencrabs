@@ -416,10 +416,10 @@ static GLOBS_CACHE: OnceLock<GlobsCache> = OnceLock::new();
 
 /// Clear the globs cache (for tests or explicit reload).
 pub fn invalidate_globs_cache() {
-    if let Some(cache) = GLOBS_CACHE.get() {
-        if let Ok(mut guard) = cache.lock() {
-            *guard = None;
-        }
+    if let Some(cache) = GLOBS_CACHE.get()
+        && let Ok(mut guard) = cache.lock()
+    {
+        *guard = None;
     }
 }
 
