@@ -411,7 +411,7 @@ fn build_body_markdown_media_target_matches_prototype_shape() {
         url: Some("https://mermaid.ink/img/abc".into()),
         bytes: None,
     }];
-    let body = build_body_markdown_media_target(-100, None, None, "text", &media);
+    let body = build_body_markdown_media_target(-100, None, None, "text", &media, None);
     assert_eq!(body["chat_id"], -100);
     assert_eq!(body["rich_message"]["markdown"], "text");
     let arr = body["rich_message"]["media"]
@@ -427,8 +427,14 @@ fn build_body_markdown_media_target_matches_prototype_shape() {
 #[test]
 fn build_body_markdown_media_target_includes_thread_id_when_present() {
     use teloxide::types::{MessageId, ThreadId};
-    let body =
-        build_body_markdown_media_target(-100, Some(ThreadId(MessageId(249))), None, "m", &[]);
+    let body = build_body_markdown_media_target(
+        -100,
+        Some(ThreadId(MessageId(249))),
+        None,
+        "m",
+        &[],
+        None,
+    );
     assert_eq!(body["message_thread_id"], 249);
 }
 
@@ -439,7 +445,7 @@ fn build_body_markdown_media_target_bytes_entry_uses_attach_reference() {
         url: None,
         bytes: Some(vec![0x89, b'P']),
     }];
-    let body = build_body_markdown_media_target(-100, None, None, "text", &media);
+    let body = build_body_markdown_media_target(-100, None, None, "text", &media, None);
     let arr = body["rich_message"]["media"]
         .as_array()
         .expect("media array");
@@ -510,6 +516,16 @@ fn multipart_scalar_fields_carries_message_id_for_edits_only() {
     });
     let send_parts = multipart_scalar_fields(&send_body);
     assert!(!send_parts.iter().any(|(name, _)| name == "message_id"));
+
+    // #134 family: a keyboard riding the body becomes a form part — a
+    // multipart edit that omits reply_markup would clear the card's
+    // Approve/Discard buttons.
+    let kb =
+        serde_json::json!({ "inline_keyboard": [[{"text": "Approve", "callback_data": "y"}]] });
+    let mut kb_body = edit_body.clone();
+    kb_body["reply_markup"] = kb.clone();
+    let kb_parts = multipart_scalar_fields(&kb_body);
+    assert!(kb_parts.contains(&("reply_markup".to_string(), kb.to_string())));
 }
 
 // ---------------------------------------------------------------------------

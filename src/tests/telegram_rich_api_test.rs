@@ -160,6 +160,7 @@ async fn send_rich_markdown_media_target_id_uses_custom_api_url() {
             url: Some("https://example.com/img.png".to_string()),
             bytes: None,
         }],
+        None,
         "test",
         "-",
     )

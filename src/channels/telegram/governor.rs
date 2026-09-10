@@ -297,9 +297,14 @@ pub(crate) fn ensure_bucket(
 #[derive(Clone)]
 struct PendingFinal {
     bot: Bot,
+    /// HTML for rich/classic finals; MARKDOWN when `media` is non-empty (the
+    /// markdown+media edit dialect shares this field — see `run_final_edit`).
     html: String,
     /// Rich-API edit when true, classic HTML `editMessageText` otherwise.
     rich: bool,
+    /// Media entries (rendered mermaid diagrams) for the markdown+media edit
+    /// dialect (#134 family). Empty for every other final shape.
+    media: Vec<super::rich::mermaid::MediaEntry>,
     attempts: u32,
 }
 
@@ -702,6 +707,23 @@ pub(crate) async fn edit_admission(
     html: String,
     rich: bool,
 ) -> bool {
+    edit_admission_media(bot, chat_id, msg_id, class, html, rich, Vec::new()).await
+}
+
+/// Media-bearing variant of [`edit_admission`]: identical G2 gate, queue,
+/// and drainer contract, with rendered-mermaid [`MediaEntry`]s riding the
+/// queued final (markdown+media edit dialect). Empty `media` is exactly
+/// [`edit_admission`]; the split exists so the 6-arg call sites (flow,
+/// agent, stream_loop, tests) stay untouched.
+pub(crate) async fn edit_admission_media(
+    bot: &Bot,
+    chat_id: ChatId,
+    msg_id: MessageId,
+    class: EditClass,
+    html: String,
+    rich: bool,
+    media: Vec<super::rich::mermaid::MediaEntry>,
+) -> bool {
     // DMs untouched (positive ids), matching the G1 scope guard.
     if chat_id.0 >= 0 {
         return true;
@@ -751,6 +773,7 @@ pub(crate) async fn edit_admission(
                         bot: bot.clone(),
                         html,
                         rich,
+                        media,
                         attempts: 0,
                     },
                 )
@@ -883,7 +906,15 @@ enum Verdict {
 /// queue forever (finals are never dropped at ADMISSION — wire failures are
 /// a different failure mode with their own telemetry).
 async fn deliver_final(chat_id: i64, msg_id: i32, mut pending: PendingFinal) {
-    let result = run_final_edit(&pending.bot, chat_id, msg_id, &pending.html, pending.rich).await;
+    let result = run_final_edit(
+        &pending.bot,
+        chat_id,
+        msg_id,
+        &pending.html,
+        pending.rich,
+        &pending.media,
+    )
+    .await;
     let retry_after = match &result {
         Err(e) => super::rate_limit::parse_retry_after(e),
         Ok(()) => None,
@@ -951,16 +982,33 @@ async fn deliver_final(chat_id: i64, msg_id: i32, mut pending: PendingFinal) {
     test_support::notify_settled();
 }
 
-/// The two wire shapes a queued final can take, mirroring the call sites that
-/// produced the payload (rich API vs classic HTML edit).
+/// The wire shapes a queued final can take, mirroring the call sites that
+/// produced the payload: rich HTML, classic HTML edit, or — when media
+/// entries ride along — the markdown+media rich edit (plan card, #134
+/// family), where `html` carries the raw markdown body.
 async fn run_final_edit(
     bot: &Bot,
     chat_id: i64,
     msg_id: i32,
     html: &str,
     rich: bool,
+    media: &[super::rich::mermaid::MediaEntry],
 ) -> Result<(), String> {
-    if rich {
+    if !media.is_empty() {
+        super::rich::api::edit_rich_markdown_media(
+            bot.api_url().as_str(),
+            bot.token(),
+            chat_id,
+            msg_id,
+            html,
+            media,
+            None,
+            "turn",
+            "-",
+        )
+        .await
+        .map_err(|e| e.to_string())
+    } else if rich {
         super::rich::api::edit_rich_html(
             bot.api_url().as_str(),
             bot.token(),
