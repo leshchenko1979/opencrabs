@@ -117,7 +117,7 @@ fn child_system_brain_loads_core_files_when_true() {
         assert!(brain_str.contains("Alexey"), "must contain USER.md");
         assert!(brain_str.contains("Runbook rules"), "must contain AGENTS.md");
         assert!(
-            brain_str.contains("Project rules"),
+            brain_str.contains("CLAUDE.md"),
             "must discover project directive (CLAUDE.md) in child working directory"
         );
     });
