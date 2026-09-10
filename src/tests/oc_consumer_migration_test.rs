@@ -27,7 +27,10 @@ async fn bake_without_world_refuses_url_and_here() {
     );
     // `here` refuses — no origin on a headless surface.
     let e = bake_delivery_target("here", &ctx).await.unwrap_err();
-    assert!(e.contains("no current channel"), "{e}");
+    assert!(
+        e.contains("live channel surface") || e.contains("no current channel"),
+        "{e}"
+    );
     // Channel URL refuses — no live world to prove ownership.
     let e = bake_delivery_target("oc://telegram/-100123", &ctx)
         .await
