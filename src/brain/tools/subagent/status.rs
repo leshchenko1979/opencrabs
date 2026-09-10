@@ -39,6 +39,12 @@ pub(crate) mod test_override {
     pub fn get() -> Option<PathBuf> {
         DIR.with(|d| d.borrow().clone())
     }
+    /// Reset the override so the production path is visible again — tests
+    /// must not leak a thread-local dir across the runner's reused threads
+    /// (same reason the work_status override carries one).
+    pub fn clear() {
+        DIR.with(|d| *d.borrow_mut() = None);
+    }
 }
 
 /// Ensure the status directory exists.

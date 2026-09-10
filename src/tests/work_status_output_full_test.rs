@@ -84,11 +84,11 @@ fn legacy_summary_file_deserializes_cleanly() {
     assert_eq!(s.state, AgentState::Completed);
     assert_eq!(s.output_full, None, "no backfill of the old stub");
     // And the migrated-era cleanup still ages it out by completed_at.
-    assert_eq!(cleanup_ages_it(dir), 1);
+    assert_eq!(cleanup_ages_it(&dir), 1);
     drop_dir(dir);
 }
 
-fn cleanup_ages_it(dir: std::path::PathBuf) -> usize {
+fn cleanup_ages_it(dir: &std::path::Path) -> usize {
     let old_ts = chrono::Utc::now()
         .checked_sub_signed(chrono::Duration::days(8))
         .unwrap()
