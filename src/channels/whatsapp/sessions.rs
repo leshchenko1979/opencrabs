@@ -18,3 +18,15 @@ impl WhatsAppState {
         self.session_jids.lock().await.get(&session_id).cloned()
     }
 }
+
+/// Reverse lookup (#148): the session currently bound to a WhatsApp JID,
+/// for `oc://whatsapp/<jid>` resolution. Last writer wins — same semantics
+/// as the forward map.
+pub async fn session_owner_by_jid(&self, jid: &str) -> Option<Uuid> {
+    self.session_jids
+        .lock()
+        .await
+        .iter()
+        .find(|(_, j)| j.as_str() == jid)
+        .map(|(s, _)| *s)
+}

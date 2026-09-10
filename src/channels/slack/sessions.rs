@@ -19,3 +19,15 @@ impl SlackState {
         self.session_channels.lock().await.get(&session_id).cloned()
     }
 }
+
+/// Reverse lookup (#148): the session currently bound to a Slack channel id,
+/// for `oc://slack/<id>` resolution. Last writer wins — same semantics as
+/// the forward map.
+pub async fn session_owner_by_channel(&self, channel_id: &str) -> Option<Uuid> {
+    self.session_channels
+        .lock()
+        .await
+        .iter()
+        .find(|(_, ch)| ch.as_str() == channel_id)
+        .map(|(s, _)| *s)
+}

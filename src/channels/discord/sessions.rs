@@ -19,3 +19,15 @@ impl DiscordState {
         self.session_channels.lock().await.get(&session_id).copied()
     }
 }
+
+/// Reverse lookup (#148): the session currently bound to a Discord channel
+/// id, for `oc://discord/<id>` resolution. Last writer wins — same semantics
+/// as the forward map.
+pub async fn session_owner_by_channel(&self, channel_id: u64) -> Option<Uuid> {
+    self.session_channels
+        .lock()
+        .await
+        .iter()
+        .find(|(_, ch)| **ch == channel_id)
+        .map(|(s, _)| *s)
+}
