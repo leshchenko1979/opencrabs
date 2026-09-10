@@ -357,7 +357,10 @@ fn replacement_for_unknown_width_stays_link_free() {
 #[test]
 fn svg_link_html_carries_generic_hatch() {
     let html = svg_link_html("flowchart LR\n    S1 --> S2");
-    assert!(html.contains(r#"<a href="https://mermaid.ink/svg/"#), "{html}");
+    assert!(
+        html.contains(r#"<a href="https://mermaid.ink/svg/"#),
+        "{html}"
+    );
     assert!(html.contains(">[svg]</a>"), "{html}");
     // No trigger copy baked in — callers supply the specific wording
     // (ruling (a): generic hatch, caller-side trigger).
