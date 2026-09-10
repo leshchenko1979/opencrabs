@@ -1689,7 +1689,7 @@ impl TelegramAgent {
                                 return ResponseResult::Ok(());
                             }
 
-                            // Plan Approve/Discard buttons (`plan:` prefix,
+                            // Plan Review/Approve/Discard buttons (`plan:` prefix,
                             // deliberately distinct from tool-approval
                             // `approve:{id}`). Owner-only, same spirit as
                             // sensitive tool approval: the keyboard sits in
@@ -1697,7 +1697,16 @@ impl TelegramAgent {
                             // it, so the tapper is re-checked here. Approve is
                             // FORBIDDEN while a turn runs (refuse, never
                             // queue); Discard cancels the turn first.
-                            if data == "plan:ok" || data == "plan:no" {
+                            if data == "plan:noop" {
+                                let _ = bot
+                                    .answer_callback_query(query.id.clone())
+                                    .text("⏳ Plan review is currently running…")
+                                    .show_alert(false)
+                                    .await;
+                                return ResponseResult::Ok(());
+                            }
+
+                            if data == "plan:ok" || data == "plan:no" || data == "plan:review" {
                                 let caller_is_owner = config_rx
                                     .borrow()
                                     .channels
@@ -1774,6 +1783,59 @@ impl TelegramAgent {
                                         "plan callback reply",
                                     )
                                     .await;
+                                    return ResponseResult::Ok(());
+                                }
+
+                                if data == "plan:review" {
+                                    if state.is_turn_active(session_id) {
+                                        let _ = bot
+                                            .answer_callback_query(query.id.clone())
+                                            .text("⛔ A turn is running. Review is refused while busy.")
+                                            .show_alert(true)
+                                            .await;
+                                        return ResponseResult::Ok(());
+                                    }
+                                    if state.is_plan_reviewing(session_id) {
+                                        let _ = bot
+                                            .answer_callback_query(query.id.clone())
+                                            .text("⏳ Plan review is already in progress.")
+                                            .show_alert(false)
+                                            .await;
+                                        return ResponseResult::Ok(());
+                                    }
+                                    state.set_plan_reviewing(session_id, true);
+                                    let _ = bot
+                                        .answer_callback_query(query.id.clone())
+                                        .text("🔍 Starting plan review subagent…")
+                                        .await;
+
+                                    // Refresh card to display grayed button & reviewing footer
+                                    crate::channels::telegram::plan_card::refresh_plan_card(
+                                        &bot,
+                                        chat_id,
+                                        thread_id,
+                                        &state,
+                                        &agent,
+                                        session_id,
+                                        crate::channels::telegram::flow_chrome::PlanKb::ReviewingApproveDiscard,
+                                    )
+                                    .await;
+
+                                    // Spawn background review task
+                                    let bot_clone = bot.clone();
+                                    let state_clone = state.clone();
+                                    let agent_clone = agent.clone();
+                                    tokio::spawn(async move {
+                                        execute_plan_review_subagent(
+                                            bot_clone,
+                                            chat_id,
+                                            thread_id,
+                                            state_clone,
+                                            agent_clone,
+                                            session_id,
+                                        )
+                                        .await;
+                                    });
                                     return ResponseResult::Ok(());
                                 }
 
@@ -2236,6 +2298,82 @@ async fn refire_pick_edit(
             .map(|_| ())
             .map_err(|e| e.to_string()),
     }
+}
+
+async fn execute_plan_review_subagent(
+    bot: Bot,
+    chat_id: ChatId,
+    thread_id: Option<ThreadId>,
+    state: Arc<TelegramState>,
+    agent: Arc<AgentService>,
+    session_id: Uuid,
+) {
+    let md_path = crate::utils::plan_files::session_plan_md_path(session_id);
+    let brief = format!(
+        "You are an automated plan structure reviewer and repair subagent.\n\
+         Your task is to review and fix the formatting of the session plan document.\n\
+         File to review: {}\n\n\
+         RULES:\n\
+         1. Read the plan document.\n\
+         2. Ensure every section matches the required plan template structure.\n\
+         3. HARD CONTRACT: Each `**Label:**` must be a single line: label + space + text.\n\
+            - ✅ `**Problem:** text on the same line`\n\
+            - ❌ `**Problem:**` alone with text on the next line\n\
+         4. Write the corrected content back to the plan file.\n\
+         5. When done, output a ONE-LINE summary of the changes made (e.g. 'Rewrote 2 section headers to inline format' or 'No changes needed; formatting matches contract').",
+        md_path.display()
+    );
+
+    let outcome_msg =
+        if let (Some(manager), tool_registry) = (agent.subagent_manager(), agent.tool_registry()) {
+            let spawn_tool =
+                crate::brain::tools::subagent::SpawnAgentTool::new(manager, tool_registry.clone());
+            let mut ctx = crate::brain::tools::ToolExecutionContext::new(session_id);
+            ctx.service_context = Some(agent.context().clone());
+            ctx.parent_tool_registry = Some(tool_registry.clone());
+            ctx.subagent_manager = agent.subagent_manager();
+
+            let input = serde_json::json!({
+                "prompt": brief,
+                "label": "plan-review",
+                "plan_session": session_id.to_string(),
+                "read_only": false,
+            });
+
+            match spawn_tool.execute(input, &ctx).await {
+                Ok(res) if res.success => {
+                    let note = res
+                        .output
+                        .lines()
+                        .last()
+                        .unwrap_or("Plan review complete")
+                        .trim()
+                        .to_string();
+                    format!("✨ Review: {note}")
+                }
+                Ok(res) => {
+                    let err = res.error.unwrap_or(res.output);
+                    format!("⚠️ Review subagent finished: {err}")
+                }
+                Err(e) => format!("⚠️ Review subagent failed: {e}"),
+            }
+        } else {
+            "⚠️ No subagent manager wired for plan review".to_string()
+        };
+
+    state.set_plan_reviewing(session_id, false);
+    state.set_plan_review_delta(session_id, outcome_msg);
+
+    crate::channels::telegram::plan_card::refresh_plan_card(
+        &bot,
+        chat_id,
+        thread_id,
+        &state,
+        &agent,
+        session_id,
+        crate::channels::telegram::flow_chrome::PlanKb::ApproveDiscard,
+    )
+    .await;
 }
 
 #[derive(Clone)]

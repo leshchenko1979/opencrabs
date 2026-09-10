@@ -341,6 +341,10 @@ pub struct TelegramState {
     /// chat.  Entries are ephemeral, in-memory, and evictable (LIFO
     /// overwrite is fine; one active set per session is the norm).
     callback_origins: std::sync::Mutex<HashMap<String, Uuid>>,
+    /// Tracks whether a plan review subagent is currently running for a session
+    plan_reviewing: std::sync::Mutex<HashMap<Uuid, bool>>,
+    /// Stores the latest delta note from plan review subagents
+    plan_review_deltas: std::sync::Mutex<HashMap<Uuid, String>>,
 }
 
 impl Default for TelegramState {
@@ -446,6 +450,8 @@ impl TelegramState {
             last_sticky_action: std::sync::Mutex::new(HashMap::new()),
             media_dedup: super::outbound_dedup::MediaSendDedup::default(),
             callback_origins: std::sync::Mutex::new(HashMap::new()),
+            plan_reviewing: std::sync::Mutex::new(HashMap::new()),
+            plan_review_deltas: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -1211,6 +1217,43 @@ impl TelegramState {
     }
 
     /// Give the plan-card map durable backing. Called once at startup.
+    pub(crate) fn is_plan_reviewing(&self, session_id: Uuid) -> bool {
+        self.plan_reviewing
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&session_id).copied())
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn set_plan_reviewing(&self, session_id: Uuid, reviewing: bool) {
+        if let Ok(mut m) = self.plan_reviewing.lock() {
+            if reviewing {
+                m.insert(session_id, true);
+            } else {
+                m.remove(&session_id);
+            }
+        }
+    }
+
+    pub(crate) fn plan_review_delta(&self, session_id: Uuid) -> Option<String> {
+        self.plan_review_deltas
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&session_id).cloned())
+    }
+
+    pub(crate) fn set_plan_review_delta(&self, session_id: Uuid, delta: String) {
+        if let Ok(mut m) = self.plan_review_deltas.lock() {
+            m.insert(session_id, delta);
+        }
+    }
+
+    pub(crate) fn clear_plan_review_delta(&self, session_id: Uuid) {
+        if let Ok(mut m) = self.plan_review_deltas.lock() {
+            m.remove(&session_id);
+        }
+    }
+
     pub(crate) async fn set_plan_card_store(
         &self,
         repo: crate::db::repository::PlanCardRepository,

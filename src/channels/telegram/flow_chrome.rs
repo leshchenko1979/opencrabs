@@ -29,14 +29,16 @@ use uuid::Uuid;
 const SECTION_TEXT_CAP: usize = 150;
 
 /// Which plan keyboard the latest flow message owns. Keyboards attach only
-/// after `plan init` succeeds: Approve + Discard while the design plan is
+/// after `plan init` succeeds: Review + Approve + Discard while the design plan is
 /// Editing, Discard only while a checklist is Active, none otherwise.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlanKb {
     #[default]
     None,
-    /// Editing design plan: ✅ Approve + 🗑 Discard.
+    /// Editing design plan: 🔍 Review + ✅ Approve + 🗑 Discard.
     ApproveDiscard,
+    /// Editing design plan with active review running: ⏳ Reviewing… + ✅ Approve + 🗑 Discard.
+    ReviewingApproveDiscard,
     /// Active checklist: 🗑 Discard only.
     DiscardOnly,
 }
@@ -50,6 +52,12 @@ impl PlanKb {
         match self {
             PlanKb::None => None,
             PlanKb::ApproveDiscard => Some(InlineKeyboardMarkup::new(vec![vec![
+                InlineKeyboardButton::callback("🔍 Review", "plan:review"),
+                InlineKeyboardButton::callback("✅ Approve plan", "plan:ok"),
+                InlineKeyboardButton::callback("🗑 Discard", "plan:no"),
+            ]])),
+            PlanKb::ReviewingApproveDiscard => Some(InlineKeyboardMarkup::new(vec![vec![
+                InlineKeyboardButton::callback("⏳ Reviewing…", "plan:noop"),
                 InlineKeyboardButton::callback("✅ Approve plan", "plan:ok"),
                 InlineKeyboardButton::callback("🗑 Discard", "plan:no"),
             ]])),

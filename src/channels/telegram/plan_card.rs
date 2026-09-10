@@ -124,6 +124,7 @@ async fn render_plan_card(
     checklist: Option<&[String]>,
     prose: Option<&[ProseSection]>,
     goal: Option<&GoalSection>,
+    footer_note: Option<&str>,
 ) -> Option<String> {
     let mut blocks: Vec<CardBlock> = Vec::new();
 
@@ -213,6 +214,11 @@ async fn render_plan_card(
         }
     }
 
+    // Footer note (e.g. review in progress or review delta summary)
+    if let Some(note) = footer_note.map(str::trim).filter(|n| !n.is_empty()) {
+        blocks.push(CardBlock::Line(format!("<i>{}</i>", escape_html(note))));
+    }
+
     let out = serialize_card(style, &blocks);
     (!out.is_empty()).then_some(out)
 }
@@ -231,6 +237,7 @@ pub(crate) async fn render_plan_card_html(
         checklist,
         prose,
         goal,
+        None,
     )
     .await
 }
@@ -249,6 +256,43 @@ pub(crate) async fn render_plan_card_rich_html(
         checklist,
         prose,
         goal,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn render_plan_card_html_with_footer(
+    title: Option<&str>,
+    checklist: Option<&[String]>,
+    prose: Option<&[ProseSection]>,
+    goal: Option<&GoalSection>,
+    footer: Option<&str>,
+) -> Option<String> {
+    render_plan_card(
+        CollapsibleStyle::BlockquoteExpandable,
+        title,
+        checklist,
+        prose,
+        goal,
+        footer,
+    )
+    .await
+}
+
+pub(crate) async fn render_plan_card_rich_html_with_footer(
+    title: Option<&str>,
+    checklist: Option<&[String]>,
+    prose: Option<&[ProseSection]>,
+    goal: Option<&GoalSection>,
+    footer: Option<&str>,
+) -> Option<String> {
+    render_plan_card(
+        CollapsibleStyle::DetailsSummary,
+        title,
+        checklist,
+        prose,
+        goal,
+        footer,
     )
     .await
 }
@@ -368,23 +412,36 @@ pub(crate) async fn refresh_plan_card(
     } else {
         None
     };
+    let footer_note = if state.is_plan_reviewing(session_id) {
+        Some("🔍 Review subagent rewriting plan…".to_string())
+    } else {
+        state.plan_review_delta(session_id)
+    };
     let use_rich = Config::current().channels.telegram.rich_messages;
+
+    let effective_plan_kb =
+        if state.is_plan_reviewing(session_id) && plan_kb == PlanKb::ApproveDiscard {
+            PlanKb::ReviewingApproveDiscard
+        } else {
+            plan_kb
+        };
 
     // Try rich path first when enabled: sendRichMessage (32K, native
     // <details><summary> collapsibles) with reply_markup for the keyboard.
     if use_rich
-        && let Some(rich_html) = render_plan_card_rich_html(
+        && let Some(rich_html) = render_plan_card_rich_html_with_footer(
             title.as_deref(),
             checklist.as_deref(),
             prose.as_deref(),
             goal.as_ref(),
+            footer_note.as_deref(),
         )
         .await
     {
-        let kb_val = plan_kb
+        let kb_val = effective_plan_kb
             .keyboard()
             .and_then(|m| serde_json::to_value(m).ok());
-        let rich_sig = format!("rich:{rich_html}\u{1}{plan_kb:?}");
+        let rich_sig = format!("rich:{rich_html}\u{1}{effective_plan_kb:?}");
         if let Some((mid, last_sig)) = state.plan_card(session_id).await {
             if last_sig == rich_sig {
                 return;
@@ -474,11 +531,12 @@ pub(crate) async fn refresh_plan_card(
     }
 
     // Classic HTML path (sendMessage, 4096 chars, <blockquote expandable>).
-    let Some(html) = render_plan_card_html(
+    let Some(html) = render_plan_card_html_with_footer(
         title.as_deref(),
         checklist.as_deref(),
         prose.as_deref(),
         goal.as_ref(),
+        footer_note.as_deref(),
     )
     .await
     else {
@@ -497,8 +555,8 @@ pub(crate) async fn refresh_plan_card(
         }
         return;
     };
-    let kb = plan_kb.keyboard();
-    let signature = format!("{html}\u{1}{plan_kb:?}");
+    let kb = effective_plan_kb.keyboard();
+    let signature = format!("{html}\u{1}{effective_plan_kb:?}");
 
     if let Some((mid, last_sig)) = state.plan_card(session_id).await {
         if last_sig == signature {

@@ -450,19 +450,19 @@ impl Tool for SpawnAgentTool {
             }
 
             // #649: a child spawned while the PARENT session is in Plan-mode
-            // Editing must be read-only. The child runs under a fresh session
-            // that resolves to NoPlan, so the per-call plan gate never fires
-            // for it; strip the mutating tools from its registry instead so it
-            // can read and review the design but cannot write the project, run
-            // bash, or spawn further agents (which would escape the parent's
-            // write-freeze). Currently reachable only after spawn_agent leaves
-            // EDITING_DENIED_NAMES; landing this filter first keeps that
-            // removal safe.
-            if matches!(
-                crate::utils::plan_files::plan_mode_state(context.session_id).await,
-                crate::utils::plan_files::PlanModeState::PreInitEditing
-                    | crate::utils::plan_files::PlanModeState::PostInitEditing
-            ) {
+            // Editing must be read-only unless specifically labeled as a plan review/repair worker.
+            // The child runs under a fresh session that resolves to NoPlan, so the per-call plan gate
+            // never fires for it; strip the mutating tools from its registry instead so it can read
+            // and review the design but cannot write the project, run bash, or spawn further agents.
+            // A plan-review worker retains write tools to update the session plan document itself.
+            let is_plan_review_worker = label.as_deref() == Some("plan-review");
+            if !is_plan_review_worker
+                && matches!(
+                    crate::utils::plan_files::plan_mode_state(context.session_id).await,
+                    crate::utils::plan_files::PlanModeState::PreInitEditing
+                        | crate::utils::plan_files::PlanModeState::PostInitEditing
+                )
+            {
                 crate::brain::tools::plan_gate::restrict_registry_to_read_only(&child_registry);
                 tracing::info!(
                     "Sub-agent spawned under a Plan-mode Editing parent: \
