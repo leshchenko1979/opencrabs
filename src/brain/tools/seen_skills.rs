@@ -227,7 +227,7 @@ pub fn seen_for_session(session_id: Uuid) -> Vec<String> {
         .lock()
         .expect("seen_skills registry poisoned")
         .iter()
-        .filter(|((sid, _), _)| **sid == session_id)
+        .filter(|((sid, _), _)| *sid == session_id)
         .map(|((_, slug), _)| slug.clone())
         .collect();
     all.into_iter().collect()
