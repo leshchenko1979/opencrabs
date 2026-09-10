@@ -21,7 +21,6 @@ pub fn child_system_brain(
         model: model.map(|s| s.to_string()),
         provider: provider.map(|s| s.to_string()),
         working_directory: Some(collapse_home(child_dir)),
-        ..Default::default()
     };
     let brain_path = BrainLoader::resolve_path();
     let loader = BrainLoader::new(brain_path);
