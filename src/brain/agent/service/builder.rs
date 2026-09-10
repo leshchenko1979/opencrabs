@@ -477,7 +477,7 @@ impl AgentService {
             session_outgoing_text_ring: std::sync::RwLock::new(HashMap::new()),
             context,
             tool_registry: {
-                let registry = ToolRegistry::new();
+                let mut registry = ToolRegistry::new();
                 // Skill glob gate master switch (#150) — resolved from
                 // config once at construction.
                 registry.set_skill_gate_enabled(config.agent.skill_glob_gate);

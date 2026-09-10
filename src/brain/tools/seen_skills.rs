@@ -174,18 +174,15 @@ pub fn hydrate_from_db() {
                         let e = epoch.unwrap_or(0).max(0) as u64;
                         reg.insert((sid, slug), e);
                         // Seed each session's epoch from MAX(row epochs)
-                        // (finding 9): a restart that reset the in-memory
-                        // epoch to 0 would compare stored epochs > 0
-                        // against 0 and never re-gate, but the reverse —
-                        // rows hydrated at a HIGHER epoch than a session
-                        // counter reset to 0 — would falsely re-gate on
-                        // `>=` only if stored < session. Seeding MAX keeps
-                        // the compare truthful across restarts.
+                        // (finding 9): a restart must not falsely re-gate
+                        // skills the session had already loaded at a
+                        // post-0 epoch, nor falsely pass older rows.
                         let m = max_epoch.entry(sid).or_insert(0);
                         if e > *m {
                             *m = e;
                         }
                     }
+                    let n = reg.len();
                     drop(reg);
                     let mut ep = epochs().lock().expect("seen_skills epochs poisoned");
                     for (sid, m) in max_epoch {
@@ -197,7 +194,7 @@ pub fn hydrate_from_db() {
                             })
                             .or_insert(m);
                     }
-                    reg.len()
+                    n
                 };
                 tracing::info!("seen_skills: hydrated registry from DB ({n} total rows)");
                 match repo.prune_missing_sessions().await {
@@ -230,8 +227,8 @@ pub fn seen_for_session(session_id: Uuid) -> Vec<String> {
         .lock()
         .expect("seen_skills registry poisoned")
         .iter()
-        .filter(|(s, _)| *s == session_id)
-        .map(|(_, slug)| slug.clone())
+        .filter(|((sid, _), _)| **sid == session_id)
+        .map(|((_, slug), _)| slug.clone())
         .collect();
     all.into_iter().collect()
 }

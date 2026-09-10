@@ -104,7 +104,7 @@ impl ToolRegistry {
 
     /// Set the skill glob gate master switch (#150). Called by the
     /// AgentService wiring with the `[agent] skill_glob_gate` config value.
-    pub fn set_skill_gate_enabled(&self, enabled: bool) {
+    pub fn set_skill_gate_enabled(&mut self, enabled: bool) {
         self.skill_gate_enabled = enabled;
     }
 
