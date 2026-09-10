@@ -59,7 +59,10 @@ fn absent_field_stays_absent_no_nulls() {
     let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert!(parsed.get("output_full").is_none());
     assert!(parsed.get("output_summary").is_none());
-    assert!(!raw.contains("null"), "no null placeholders in fresh file");
+    // Precise guarantee: output_full carries skip_serializing_if, so it must
+    // not appear at all (an output_full: null placeholder would violate it).
+    // Other Option fields may legitimately serialize as null.
+    assert!(!raw.contains("output_full"), "no output_full placeholder in fresh file");
     drop_dir(dir);
 }
 

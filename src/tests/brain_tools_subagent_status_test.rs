@@ -187,6 +187,7 @@ fn legacy_output_summary_file_deserializes_cleanly() {
         "completed_at": "2026-08-28T09:30:00+00:00",
         "output_summary": "all done"
     });
+    fs::create_dir_all(status_path("of-3").parent().unwrap()).expect("status dir");
     fs::write(status_path("of-3"), serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
     let s = AgentStatus::read("of-3").expect("legacy file parses");
     assert_eq!(s.state, AgentState::Completed);
