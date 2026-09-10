@@ -28,7 +28,7 @@ async fn a_job_may_send_to_the_chat_it_was_given() {
         assert_eq!(
             permission(),
             SendPermission::Permitted(vec![PermittedTarget {
-                channel: "telegram".to_string(),
+                channel: "telegram",
                 target_id: CONFIGURED.to_string(),
             }])
         );

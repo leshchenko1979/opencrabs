@@ -846,13 +846,13 @@ async fn execute_job(
                             channel: "slack",
                             target_id: rest.to_string(),
                         })
-                    } else if let Some(rest) = t.strip_prefix("whatsapp:") {
-                        Some(crate::cron::send_scope::PermittedTarget {
-                            channel: "whatsapp",
-                            target_id: rest.to_string(),
-                        })
                     } else {
-                        None
+                        t.strip_prefix("whatsapp:").map(|rest| {
+                            crate::cron::send_scope::PermittedTarget {
+                                channel: "whatsapp",
+                                target_id: rest.to_string(),
+                            }
+                        })
                     }
                 })
                 .collect()
