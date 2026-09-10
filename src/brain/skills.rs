@@ -167,15 +167,14 @@ impl Skill {
 
             // Indented list item under an open block key.
             let indent = line.len() - line.trim_start().len();
-            if indent > 0 && trimmed.starts_with('-') {
-                if let Some(key) = open_key.as_deref() {
-                    if key == "globs" {
-                        let item = trimmed[1..].trim().trim_matches('"').trim_matches('\'');
-                        if !item.is_empty() {
-                            fm_globs.push(item.to_string());
-                        }
-                    }
+            if indent > 0 && trimmed.starts_with('-') && open_key.as_deref() == Some("globs") {
+                let item = trimmed[1..].trim().trim_matches('"').trim_matches('\'');
+                if !item.is_empty() {
+                    fm_globs.push(item.to_string());
                 }
+                continue;
+            }
+            if indent > 0 && trimmed.starts_with('-') {
                 continue;
             }
 
@@ -405,21 +404,22 @@ pub fn resolve_skill(name: &str) -> Option<Skill> {
     load_all_skills().into_iter().find(|s| s.name == name)
 }
 
+type GlobsCache = std::sync::Mutex<Option<(std::time::Instant, Vec<Skill>)>>;
+
 /// The skills that declare `globs` — the skill-gate's working set (#150).
 /// Cached for 60s: the gate runs on EVERY tool call, and re-scanning the
 /// skills tree per call would dominate it. A freshly added globs skill
 /// becomes visible within a minute or on restart; failure to read the
 /// cache source is fail-open (empty vec → gate passes everything).
 pub fn skills_with_globs() -> Vec<Skill> {
-    static CACHE: OnceLock<std::sync::Mutex<Option<(std::time::Instant, Vec<Skill>)>>> =
-        OnceLock::new();
+    static CACHE: OnceLock<GlobsCache> = OnceLock::new();
     static TTL: std::time::Duration = std::time::Duration::from_secs(60);
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
     let mut guard = cache.lock().expect("skills_with_globs cache poisoned");
-    if let Some((at, skills)) = guard.as_ref() {
-        if at.elapsed() < TTL {
-            return skills.clone();
-        }
+    if let Some((at, skills)) = guard.as_ref()
+        && at.elapsed() < TTL
+    {
+        return skills.clone();
     }
     let fresh: Vec<Skill> = load_all_skills()
         .into_iter()

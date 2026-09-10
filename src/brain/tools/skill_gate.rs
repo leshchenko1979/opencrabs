@@ -162,13 +162,13 @@ fn harvest_candidates(
     // Bash: extract path-like tokens — words containing `/` or tilde
     // prefixes. Leaky by design (fail-open): we prefer deterministic-cheap
     // over exhaustive.
-    if tool_name == "bash" {
-        if let Some(Value::String(cmd)) = obj.get("command") {
-            for token in cmd.split_whitespace() {
-                let tok = token.trim_matches(|c| c == '"' || c == '\'' || c == ';' || c == ',');
-                if tok.contains('/') || tok.starts_with('~') {
-                    out.push(tok.to_string());
-                }
+    if tool_name == "bash"
+        && let Some(Value::String(cmd)) = obj.get("command")
+    {
+        for token in cmd.split_whitespace() {
+            let tok = token.trim_matches(|c| c == '"' || c == '\'' || c == ';' || c == ',');
+            if tok.contains('/') || tok.starts_with('~') {
+                out.push(tok.to_string());
             }
         }
     }
