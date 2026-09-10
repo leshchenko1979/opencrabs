@@ -533,7 +533,8 @@ pub(crate) async fn deliver_revived_agent_outcome(
     }
     match outcome {
         Ok(output) => {
-            if let Err(e) = status.mark_completed(truncate_tail(output, 512)) {
+            // #147: full revived report persisted, not a 512-char tail.
+            if let Err(e) = status.mark_completed(output.to_string()) {
                 tracing::warn!(target: "background_task", "Could not finalize revived sub-agent status '{}': {e}", agent_id);
             }
         }
@@ -544,17 +545,6 @@ pub(crate) async fn deliver_revived_agent_outcome(
         }
     }
     delivered
-}
-
-/// Keep the tail of , the conclusion matters more than the opening.
-fn truncate_tail(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
-        return s.to_string();
-    }
-    let skip = count - max;
-    let tail: String = s.chars().skip(skip).collect();
-    format!("…(truncated)\n{tail}")
 }
 
 /// Re-offer every persisted tombstone from a previous process (#73).
@@ -672,7 +662,8 @@ fn finalize_revived_status(
 ) {
     match outcome {
         Ok(output) => {
-            if let Err(e) = status.mark_completed(truncate_tail(output, 512)) {
+            // #147: full revived report persisted, not a 512-char tail.
+            if let Err(e) = status.mark_completed(output.to_string()) {
                 tracing::warn!(
                     target: "background_task",
                     "Could not finalize revived sub-agent status '{}': {e}",

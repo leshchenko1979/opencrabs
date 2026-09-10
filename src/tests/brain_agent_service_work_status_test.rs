@@ -99,7 +99,7 @@ fn agent_completed_sets_finish() {
     assert_eq!(s.state, WorkState::Completed);
     let finish = s.finish.as_ref().expect("completed stamps a finish");
     assert!(!finish.completed_at.is_empty());
-    assert_eq!(finish.output_summary.as_deref(), Some("done"));
+    assert_eq!(finish.output_full.as_deref(), Some("done"));
 }
 
 #[test]
@@ -320,7 +320,10 @@ fn legacy_agent_files_migrate_into_the_unified_dir() {
         .as_ref()
         .expect("terminal legacy keeps its finish");
     assert_eq!(finish.completed_at, "2026-08-28T09:30:00+00:00");
-    assert_eq!(finish.output_summary.as_deref(), Some("all done"));
+    // #147: the legacy 200-char `output_summary` stub is deliberately NOT
+    // copied into the unified schema — it deserialized for compat, the
+    // truncated stub is dropped, nothing ever read it.
+    assert_eq!(finish.output_full, None);
 }
 
 /// A missing legacy dir is the common case, not an error.
