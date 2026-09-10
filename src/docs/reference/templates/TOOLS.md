@@ -58,6 +58,47 @@ never assume the capability is missing before searching.
 | Command | A slash shortcut defined in commands.toml | `/check`, `/rebuild`, `/status` |
 | Skill | A workflow template loaded on demand | `/browser-cdp`, `/channels` |
 
+## Skill `globs:` frontmatter (path-scoped skill gate, #150)
+
+A `SKILL.md` may declare a `globs:` frontmatter field to make its own topic
+enforced rather than advisory. When the agent attempts a tool call that
+references a path matching one of the globs, and the skill body is not loaded
+in the current session context (fresh session OR after compaction), the call
+is rejected - the rejection carries the FULL skill body so it lands in
+context, and the identical retry then succeeds.
+
+```markdown
+---
+name: opencrabs-dev
+description: Editor process law for the opencrabs-dev repo
+globs:
+  - "**/skills/opencrabs-dev/**"
+---
+```
+
+- **Accepted forms:** Cursor comma-string (`globs: a/**, b.md`), inline flow
+  (`globs: [a/**, b.md]`), block list (as above). Quotes stripped.
+- **Opt-in per skill:** no `globs` key = the skill is invisible to the gate.
+  Built-ins ship glob-less.
+- **Match semantics (Cursor table):** globs match against the normalized
+  ABSOLUTE path; write `**/` prefixes. `*` matches one path segment (never
+  `/`), `**` matches recursively, matching is case-insensitive.
+- **Harvested keys:** `path`, `file_path`, `filePath`, plus path-like tokens
+  in bash `command`s. `grep`/`glob` tool `pattern`s are never harvested.
+- **Exempt (recovery) tools:** `load_brain_file`, `read_file`,
+  `slash_command`, `session_search`, `tool_search`, `write_opencrabs_file`,
+  `execute_code` are never gated - a blocked agent must be able to read the
+  skill body and re-arm itself.
+- **Sub-agents:** the gate applies to every sub-agent (shared registry
+  execution path). Expected behavior: one extra blocked round-trip per
+  matching skill per fresh sub-agent session; the body rides the rejection,
+  so the sub-agent self-serves.
+- **Fail-open law:** any gate-internal error (malformed glob, missing file,
+  registry error) passes the tool call through - the gate never dead-ends
+  an agent. Malformed globs WARN once and are skipped.
+- **Master switch:** `[agent] skill_glob_gate = true` (default) in
+  config.toml; set `false` to disable the gate entirely.
+
 ## Build & Runtime Commands
 
 - `/cd <path>` — change the working directory for all tool execution (or `config_tool` `set_working_directory`); persists to config.toml
