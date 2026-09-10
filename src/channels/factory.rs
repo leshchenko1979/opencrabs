@@ -124,6 +124,13 @@ impl ChannelFactory {
         let _ = self.channel_manager.set(manager);
     }
 
+    /// The live channel-manager handle, when one was set at boot (#148).
+    /// Cron/daemon paths construct factories without one — `None` there,
+    /// and "here"/channel-URL resolution refuses rather than guesses.
+    pub fn channel_manager(&self) -> Option<Arc<crate::channels::ChannelManager>> {
+        self.channel_manager.get().cloned()
+    }
+
     /// Create a new AgentService configured for channel use.
     ///
     /// Channels that implement their own approval flow (WhatsApp, Telegram, Discord, Slack)

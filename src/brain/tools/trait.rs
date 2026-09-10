@@ -122,6 +122,14 @@ pub struct ToolExecutionContext {
     /// guess.
     pub origin_target: Option<Arc<OriginTarget>>,
 
+    /// Live resolution world for `oc://` target URLs (#148): the surface's
+    /// ChannelManager, wired per-execution beside `origin_target` (same
+    /// stamping site). Gives targeting tools the reverse ownership maps so
+    /// `oc://telegram/<chat>` / `here` resolve against live bindings. `None`
+    /// on surfaces without a channel manager (cron execute, CLI one-shot,
+    /// tests) — those must refuse URL/`here` targets rather than guess.
+    pub world: Option<Arc<dyn crate::channels::target_resolver::TargetResolution + Send + Sync>>,
+
     pub parent_tool_registry: Option<Arc<crate::brain::tools::ToolRegistry>>,
 
     /// Headless session (#129): the enclosing agent runs on a surface with no
@@ -163,6 +171,7 @@ impl ToolExecutionContext {
             subagent_manager: None,
             session_provider: None,
             origin_target: None,
+            world: None,
             parent_tool_registry: None,
             headless: false,
         }

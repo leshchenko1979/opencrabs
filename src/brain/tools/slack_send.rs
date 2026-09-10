@@ -172,7 +172,7 @@ impl Tool for SlackSendTool {
         }
     }
 
-    async fn execute(&self, input: Value, _context: &ToolExecutionContext) -> Result<ToolResult> {
+    async fn execute(&self, input: Value, context: &ToolExecutionContext) -> Result<ToolResult> {
         let action = match input.get("action").and_then(|v| v.as_str()) {
             Some(a) if !a.is_empty() => a.to_string(),
             _ => {
@@ -204,10 +204,20 @@ impl Tool for SlackSendTool {
         let token = SlackApiToken::new(SlackApiTokenValue::from(bot_token));
         let session = client.open_session(&token);
 
-        // Resolve target channel once: explicit param > owner's last channel
+        // Resolve target channel once: explicit param > ambient origin fallback > owner's last channel
         let channel_id_opt: Option<String> =
             if let Some(ch) = input.get("channel_id").and_then(|v| v.as_str()) {
-                Some(ch.to_string())
+                let stripped = ch
+                    .strip_prefix("oc://slack/")
+                    .unwrap_or(ch)
+                    .trim_matches('/');
+                Some(stripped.to_string())
+            } else if let Some(origin) = context.origin_target.as_deref() {
+                if origin.channel == "slack" {
+                    Some(origin.chat_id.clone())
+                } else {
+                    self.slack_state.owner_channel_id().await
+                }
             } else {
                 self.slack_state.owner_channel_id().await
             };
