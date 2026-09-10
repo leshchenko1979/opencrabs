@@ -330,6 +330,7 @@ async fn skill_gate_config_toggle_end_to_end() {
     .expect("write skill");
 
     with_home_override_async(tmp.path().to_path_buf(), async {
+        crate::brain::skills::invalidate_globs_cache();
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(MockTool {
             name: "write_file".to_string(),

@@ -129,8 +129,7 @@ pub struct Skill {
 /// `review_gate: true`. The gate is a property of the skill as invoked
 /// via its slash: output first, side effects only after the user's
 /// explicit approval — even under tool auto-approve (yolo).
-pub const REVIEW_GATE_REMINDER: &str =
-    "[SKILL REVIEW GATE] This skill declares `review_gate: true`. \
+pub const REVIEW_GATE_REMINDER: &str = "[SKILL REVIEW GATE] This skill declares `review_gate: true`. \
      Present its output (draft, plan, summary) to the user and WAIT for their explicit \
      approval before any side effects — sending, publishing, pushing, deploying, or writing \
      outside the workspace — even if tool auto-approve is on. The user typed the slash \
@@ -412,7 +411,17 @@ pub fn resolve_skill(name: &str) -> Option<Skill> {
     load_all_skills().into_iter().find(|s| s.name == name)
 }
 
-type GlobsCache = std::sync::Mutex<Option<(std::time::Instant, Vec<Skill>)>>;
+type GlobsCache = std::sync::Mutex<Option<(std::time::Instant, PathBuf, Vec<Skill>)>>;
+static GLOBS_CACHE: OnceLock<GlobsCache> = OnceLock::new();
+
+/// Clear the globs cache (for tests or explicit reload).
+pub fn invalidate_globs_cache() {
+    if let Some(cache) = GLOBS_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = None;
+        }
+    }
+}
 
 /// The skills that declare `globs` — the skill-gate's working set (#150).
 /// Cached for 60s: the gate runs on EVERY tool call, and re-scanning the
@@ -420,12 +429,13 @@ type GlobsCache = std::sync::Mutex<Option<(std::time::Instant, Vec<Skill>)>>;
 /// becomes visible within a minute or on restart; failure to read the
 /// cache source is fail-open (empty vec → gate passes everything).
 pub fn skills_with_globs() -> Vec<Skill> {
-    static CACHE: OnceLock<GlobsCache> = OnceLock::new();
     static TTL: std::time::Duration = std::time::Duration::from_secs(60);
-    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let cache = GLOBS_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let current_home = crate::config::opencrabs_home();
     let mut guard = cache.lock().expect("skills_with_globs cache poisoned");
-    if let Some((at, skills)) = guard.as_ref()
+    if let Some((at, home, skills)) = guard.as_ref()
         && at.elapsed() < TTL
+        && home == &current_home
     {
         return skills.clone();
     }
@@ -433,6 +443,6 @@ pub fn skills_with_globs() -> Vec<Skill> {
         .into_iter()
         .filter(|s| !s.globs.is_empty())
         .collect();
-    *guard = Some((std::time::Instant::now(), fresh.clone()));
+    *guard = Some((std::time::Instant::now(), current_home, fresh.clone()));
     fresh
 }
