@@ -712,7 +712,8 @@ fn ink_url_svg_payload_matches_ink_url_payload() {
         .next()
         .unwrap()
         .to_string();
-    let svg_payload = ink_url_svg(src).trim_start_matches("https://mermaid.ink/svg/");
+    let svg_url = ink_url_svg(src);
+    let svg_payload = svg_url.trim_start_matches("https://mermaid.ink/svg/");
     assert_eq!(png_payload, svg_payload);
 }
 
