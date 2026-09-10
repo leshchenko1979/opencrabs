@@ -63,13 +63,19 @@ fn get_str<'a>(input: &'a Value, key: &str) -> std::result::Result<&'a str, Tool
 /// Unwrap channel id or return error ToolResult.
 #[allow(clippy::result_large_err)]
 fn channel_or_err(id: Option<String>) -> std::result::Result<String, ToolResult> {
-    id.ok_or_else(|| {
+    let raw = id.ok_or_else(|| {
         ToolResult::error(
             "No channel_id provided and no owner channel available. \
              The owner must send a message first, or pass channel_id explicitly."
                 .to_string(),
         )
-    })
+    })?;
+    if !crate::cron::send_scope::may_send("slack", &raw) {
+        let reason = crate::cron::send_scope::refusal_for("slack", &raw);
+        tracing::warn!("slack_send: {reason}");
+        return Err(ToolResult::error(reason));
+    }
+    Ok(raw)
 }
 
 // Macro to early-return Ok(err_result) when a param helper returns Err.

@@ -48,14 +48,21 @@ fn get_id(input: &Value, key: &str) -> std::result::Result<u64, ToolResult> {
 
 /// Unwrap channel id or return error ToolResult.
 #[allow(clippy::result_large_err)]
+#[allow(clippy::result_large_err)]
 fn channel_or_err(id: Option<u64>) -> std::result::Result<u64, ToolResult> {
-    id.ok_or_else(|| {
+    let raw = id.ok_or_else(|| {
         ToolResult::error(
             "No channel_id provided and no owner channel available. \
              The owner must send a message first, or pass channel_id explicitly."
                 .to_string(),
         )
-    })
+    })?;
+    if !crate::cron::send_scope::may_send("discord", &raw.to_string()) {
+        let reason = crate::cron::send_scope::refusal_for("discord", &raw.to_string());
+        tracing::warn!("discord_send: {reason}");
+        return Err(ToolResult::error(reason));
+    }
+    Ok(raw)
 }
 
 /// Unwrap guild id or return error ToolResult.
