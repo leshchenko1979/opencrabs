@@ -672,6 +672,26 @@ pub(crate) fn image_html(url: &str) -> String {
 /// HTML for a diagram that could not be rendered: a bold warning line, the
 /// renderer's error note in a blockquote, and the original source in a code
 /// block so the reader can see (and fix) what failed.
+/// #134: rendered-image NOTE builder — NOT a failure: the diagram DID
+/// render (owner directive 2026-09-10 03:56Z: a successful render is
+/// never shown as an error). Legible explanation + raw source, with the
+/// caller appending [`svg_link_html`] for the full-size vector link.
+pub(crate) fn rendered_image_note(message: &str, source: &str) -> String {
+    format!(
+        "<b>🖼️ Diagram rendered as image</b>\n<blockquote>{}</blockquote>\n<pre><code>{}</code></pre>",
+        escape(message),
+        escape(source)
+    )
+}
+
+/// #134: generic svg escape-hatch link fragment for HTML-fallback
+/// contexts — a small `[svg]` anchor to the vector render (generic
+/// hatch; the caller owns the trigger copy, ruling (a) 2026-09-10:
+/// ONE semantic — generic hatch here, caller-side trigger).
+pub(crate) fn svg_link_html(source: &str) -> String {
+    format!("\n<a href=\"{}\">[svg]</a>", escape(&ink_url_svg(source)))
+}
+
 pub(crate) fn failure_html(err: &str, source: &str) -> String {
     format!(
         "<b>⚠️ Mermaid diagram could not be rendered</b>\n<blockquote>{}</blockquote>\n<pre><code>{}</code></pre>",

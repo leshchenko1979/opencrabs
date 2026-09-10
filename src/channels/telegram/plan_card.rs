@@ -327,7 +327,10 @@ pub(crate) async fn render_plan_card_markdown(
                 out.push_str(s);
             }
             CardBlock::Block(s) => {
-                if !out.is_empty() {
+                // Skip the separator when the output already ends with a
+                // blank line (an explicit ClassicGap) — otherwise the gap
+                // doubles into two empty lines before the block.
+                if !out.is_empty() && !out.ends_with("\n\n") {
                     out.push('\n');
                 }
                 out.push_str(s);

@@ -87,11 +87,10 @@ fn render_block(block: &Block, wrap_p: bool) -> String {
             // note plus a small [svg] link the reader can open in a
             // browser. Broken fences keep the legible failure block.
             MermaidResult::ImageBytes(_) => {
-                let svg = super::mermaid::ink_url_svg(source);
-                super::mermaid::failure_html(
-                    "diagram rendered as image — open the svg link for the full-size vector",
+                super::mermaid::rendered_image_note(
+                    "open the svg link for the full-size vector",
                     source,
-                ) + &format!("\n<a href=\"{}\">[svg]</a>", escape(&svg))
+                ) + &super::mermaid::svg_link_html(source)
             }
             MermaidResult::Failed(err) | MermaidResult::ParseError(err) => {
                 super::mermaid::failure_html(err, source)
@@ -453,8 +452,8 @@ mod tests {
         }];
         let html = render_html(&blocks);
         assert!(
-            html.contains("diagram rendered as image"),
-            "ImageBytes must degrade to the rendered-image note. Got:\n{html}"
+            html.contains("Diagram rendered as image"),
+            "ImageBytes must yield the rendered-image note banner. Got:\n{html}"
         );
         assert!(
             html.contains("<a href=\"https://mermaid.ink/svg/"),
