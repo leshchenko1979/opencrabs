@@ -168,6 +168,35 @@ pub fn append_skill_stamp(mut text: String, active_skills: &[String]) -> String 
     text
 }
 
+/// Advisory lazy-tool-inventory stamp: names the EXTENDED (lazy) tools
+/// that were active in this session before the compaction. Lazy tools
+/// are activated by `tool_search` discovery or JIT-on-execute and live
+/// in `ToolRegistry.session_active` — an in-memory map that dies on
+/// restart, leaving the waking agent no trace of which tool schemas it
+/// had loaded. This stamp is the durable record. Names only — no
+/// schemas, no descriptions (the waking agent re-surfaces any tool it
+/// needs via `tool_search`, which is cheap).
+///
+/// Same omit-when-empty rule as [`append_skill_stamp`]: an empty set
+/// produces NO stamp at all — zero marginal tokens for sessions that
+/// never activated a lazy tool. The list is "loaded at compaction time"
+/// semantics, not full session history: the registry's LRU cap (#603)
+/// may have evicted older entries, hence the recency caveat.
+pub fn append_tool_stamp(mut text: String, active_tools: &[String]) -> String {
+    if active_tools.is_empty() {
+        return text;
+    }
+    let mut names: Vec<&str> = active_tools.iter().map(|s| s.as_str()).collect();
+    names.sort();
+    text.push_str(&format!(
+        "\n\nLAZY TOOLS LOADED PRE-COMPACTION: {}. Snapshot of what was \
+         loaded at compaction time (older entries may have been evicted) \
+         — re-surface any tool via tool_search when needed.",
+        names.join(", ")
+    ));
+    text
+}
+
 /// Shared head of the fun Regular/MidLoop continuation order (#134 DRY —
 /// was copy-pasted in both arms; PostTool reuses its first sentence).
 const FUN_IMMEDIATE_TASK: &str = "IMMEDIATELY continue the task described in the \"IMMEDIATE TASK\" section of the compaction summary. This is NOT optional — \

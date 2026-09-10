@@ -478,22 +478,38 @@ impl AgentService {
                 .into_iter()
                 .collect();
         let skills: Vec<String> = active.union(&seen).cloned().collect();
+        // Lazy-tool inventory for the tool stamp: the EXTENDED tools this
+        // session activated (tool_search discovery + JIT-on-execute both
+        // call registry.activate). In-memory — this is exactly the state
+        // that dies on restart, so it must ride the persisted continuation.
+        let lazy_tools: Vec<String> = {
+            let mut v: Vec<String> = self
+                .tool_registry
+                .active_tools(session_id)
+                .into_iter()
+                .collect();
+            v.sort();
+            v
+        };
         tracing::debug!(
             "continuation_prompt({kind:?}): skill inventory stamp = {skills:?} \
-             (active {}/{} + seen {}/{})",
+             (active {}/{} + seen {}/{}); lazy-tool stamp = {lazy_tools:?}",
             skills.len(),
             active.len(),
             seen.len(),
             skills.len()
         );
-        super::compaction_prompts::append_skill_stamp(
-            super::compaction_prompts::build_continuation(
-                kind,
-                self.silent_compaction,
-                self.auto_approve_tools,
-                super::compaction_prompts::PlanRecovery::for_session(session_id).await,
+        super::compaction_prompts::append_tool_stamp(
+            super::compaction_prompts::append_skill_stamp(
+                super::compaction_prompts::build_continuation(
+                    kind,
+                    self.silent_compaction,
+                    self.auto_approve_tools,
+                    super::compaction_prompts::PlanRecovery::for_session(session_id).await,
+                ),
+                &skills,
             ),
-            &skills,
+            &lazy_tools,
         )
     }
 
