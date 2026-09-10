@@ -728,6 +728,7 @@ pub mod subagent_provider_pair_test;
 pub mod subagent_push_result_test;
 pub mod subagent_session_ttl_test;
 pub mod subagent_test;
+pub mod subagent_brain_test;
 pub mod subagent_tool_description_test;
 pub mod subagent_worktree_test;
 pub mod suggest_options_test;
