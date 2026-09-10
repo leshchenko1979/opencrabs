@@ -110,3 +110,38 @@ fn lookup_skips_commands_and_terminal_agents() {
 
     drop_status_dir(dir);
 }
+
+// ── #147: natural-completion writer persists the COMPLETE output ─────
+
+/// The natural completion path must persist the full final text byte-exact
+/// in `finish.output_full` — the 200-char head stub is gone.
+#[test]
+fn natural_completion_persists_full_output_byte_exact() {
+    let dir = temp_status_dir("of-natural");
+    let report: String = "# LENS REPORT\n\n".to_string()
+        + &"finding: detail with enough bulk to exceed any stub cap.\n".repeat(80);
+    assert!(report.chars().count() > 200, "fixture must exceed 200 chars");
+
+    let mut agent = WorkStatus::new_agent(
+        "of-natural-1",
+        "lens",
+        "sess-of-natural",
+        "review task",
+        None,
+    )
+    .expect("write agent status");
+    agent.mark_completed(report.clone()).expect("finalize");
+
+    let reread = WorkStatus::read("of-natural-1").expect("status file readable");
+    let finish = reread.finish.expect("terminal finish present");
+    assert_eq!(
+        finish.output_full.as_deref(),
+        Some(report.as_str()),
+        "persisted output_full must equal the full final output byte-exact"
+    );
+
+    let raw = std::fs::read_to_string(dir.join("of-natural-1.json")).expect("raw json");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(parsed.get("output_summary").is_none());
+    drop_status_dir(dir);
+}
