@@ -18,21 +18,24 @@ use crate::brain::agent::service::work_status::{
 /// plain `#[test]`, never `#[tokio::test]` (a worker thread would see the real
 /// dir and the assertions would run against the live filesystem).
 struct TempStatusDir {
-    dir: tempfile::TempDir,
+    dir: Option<tempfile::TempDir>,
 }
 
 impl TempStatusDir {
     fn new() -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         test_override::set(dir.path().to_path_buf());
-        Self { dir }
+        Self { dir: Some(dir) }
     }
 }
 
 impl Drop for TempStatusDir {
     fn drop(&mut self) {
         test_override::clear();
-        drop(self.dir);
+        // A `Drop` impl cannot move a field out of `&mut self` (E0507), so
+        // `take()` it instead. The dir still drops here — after the override
+        // stops pointing at it, which is the ordering this guard exists for.
+        let _ = self.dir.take();
     }
 }
 
