@@ -355,3 +355,45 @@ async fn markdown_card_empty_inputs_render_nothing() {
         "a whitespace-only title is not content"
     );
 }
+
+#[tokio::test]
+async fn markdown_card_neutralises_prose_media_tags() {
+    // #134: a lone `<img>` in model-authored prose 400'd EVERY rich plan card
+    // (RICH_MESSAGE_PHOTO_INVALID, len=19765 in the daemon log) and slid the
+    // card into the classic-HTML fallback. Prose is text — the tag must ship
+    // inert while staying readable.
+    let prose = vec![ProseSection {
+        heading: Some("What could break".to_string()),
+        body: "Classic path untouched (no `<img>` in classic sendMessage HTML).".to_string(),
+    }];
+    let md = render_plan_card_markdown(Some(TITLE), None, Some(&prose), None)
+        .await
+        .expect("card with prose must render");
+
+    assert!(
+        !md.contains("<img"),
+        "a live <img> tag must never reach the rich body. Got:\n{md}"
+    );
+    assert!(
+        md.contains("&lt;img>"),
+        "the tag must stay readable as text. Got:\n{md}"
+    );
+}
+
+#[tokio::test]
+async fn markdown_card_keeps_ordinary_prose_html() {
+    // The guard is scoped to media tags: prose markup that Telegram renders
+    // (bold, iframes, comparison operators) must pass through untouched.
+    let prose = vec![ProseSection {
+        heading: Some("Context".to_string()),
+        body: "<b>bold</b> and a < b".to_string(),
+    }];
+    let md = render_plan_card_markdown(Some(TITLE), None, Some(&prose), None)
+        .await
+        .expect("card with prose must render");
+
+    assert!(
+        md.contains("<b>bold</b> and a < b"),
+        "non-media prose HTML must survive. Got:\n{md}"
+    );
+}
