@@ -189,3 +189,48 @@ async fn corrupt_bg_meta_row_is_skipped_not_fatal() {
     assert_eq!(rows[0].origin, PushOrigin::SessionNotify);
     assert!(rows[0].bg_meta.is_none());
 }
+
+#[tokio::test]
+async fn clear_dead_sessions_reaps_only_rows_for_missing_sessions() {
+    let (repo, db) = setup().await;
+    let live = Uuid::new_v4();
+    let dead = Uuid::new_v4();
+
+    // A session row that still exists (sessions.id is TEXT). `raw` runs the
+    // statement against the shared pool; the repo API offers no session write.
+    raw(&db, move |conn| {
+        conn.execute(
+            "INSERT INTO sessions (id, created_at, updated_at) VALUES (?1, 0, 0)",
+            rusqlite::params![live.to_string()],
+        )
+    })
+    .await;
+
+    repo.record(
+        Uuid::new_v4(),
+        live,
+        "live ctx",
+        "live disp",
+        PushOrigin::SessionNotify,
+        None,
+    )
+    .await
+    .expect("record live");
+    repo.record(
+        Uuid::new_v4(),
+        dead,
+        "dead ctx",
+        "dead disp",
+        PushOrigin::SessionNotify,
+        None,
+    )
+    .await
+    .expect("record dead");
+
+    let reaped = repo.clear_dead_sessions().await.expect("reap");
+    assert_eq!(reaped, 1, "only the row whose session is gone is dropped");
+
+    let rows = repo.all().await.expect("all");
+    assert_eq!(rows.len(), 1, "the live-session row survives");
+    assert_eq!(rows[0].session_id, live);
+}
