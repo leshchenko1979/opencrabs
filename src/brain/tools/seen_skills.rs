@@ -218,6 +218,34 @@ pub fn hydrate_from_db() {
     });
 }
 
+/// Remove a consumed skill from `session_id`'s registry (pruning on compaction discard).
+pub fn unmark_seen(session_id: Uuid, slug: &str) {
+    registry()
+        .lock()
+        .expect("seen_skills registry poisoned")
+        .remove(&(session_id, slug.to_string()));
+    let slug = slug.to_string();
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            match delete_seen(session_id, &slug).await {
+                Ok(()) => {}
+                Err(e) => tracing::warn!(
+                    "seen_skills: DB delete of ({session_id}, {slug}) failed (in-memory \
+                     registry unaffected): {e:#}"
+                ),
+            }
+        });
+    }
+}
+
+async fn delete_seen(session_id: Uuid, slug: &str) -> anyhow::Result<()> {
+    let pool = crate::db::global_pool()
+        .ok_or_else(|| anyhow::anyhow!("no global DB pool"))?;
+    crate::db::repository::session_skills::SessionSkillsRepository::new(pool)
+        .delete_skill(session_id, slug)
+        .await
+}
+
 /// Whether `session_id` has consumed skill `slug` this run (any epoch —
 /// legacy stamp inventory semantics; the gate uses
 /// [`seen_since_compaction`]).

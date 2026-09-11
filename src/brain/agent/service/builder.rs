@@ -1996,6 +1996,18 @@ impl AgentService {
             .insert(skill_name.to_string());
     }
 
+    /// Unregister an active skill for a session (discarded during compaction).
+    pub fn unregister_active_skill(&self, session_id: Uuid, skill_name: &str) {
+        crate::brain::tools::seen_skills::unmark_seen(session_id, skill_name);
+        let mut map = self
+            .active_skills
+            .write()
+            .expect("active_skills lock poisoned");
+        if let Some(set) = map.get_mut(&session_id) {
+            set.remove(skill_name);
+        }
+    }
+
     /// Get the set of active skill names for a session. Returns empty set
     /// if no skills have been activated.
     pub fn active_skills_for_session(&self, session_id: Uuid) -> HashSet<String> {

@@ -2,10 +2,10 @@
 // and any skill-body consumption (read or slug-load) marks the skill SEEN so
 // the post-compaction inventory stamp (#125) lists it.
 
-use crate::brain::tools::load_brain_file::*;
-use crate::brain::tools::seen_skills;
 use crate::brain::tools::Tool;
 use crate::brain::tools::ToolExecutionContext;
+use crate::brain::tools::load_brain_file::*;
+use crate::brain::tools::seen_skills;
 use uuid::Uuid;
 
 fn ctx() -> ToolExecutionContext {
@@ -144,8 +144,7 @@ fn stamp_union_dedupes_active_and_seen() {
 
 // ── acceptance 5: stamp-build observability is a DEBUG line ────────────────
 // Verified by code inspection of continuation_prompt (tracing::debug! with
-// the full inventory list); zero-skill silence is covered by the existing
-// skill_stamp_is_silent_when_no_skills_active test on append_skill_stamp.
+// the full inventory list).
 
 // ── issue #138 gap 2: filename form registers the skill ────────────────────
 
@@ -223,8 +222,8 @@ async fn filename_form_traversal_still_refused() {
 
 mod persistence {
     use crate::brain::tools::seen_skills;
-    use crate::db::repository::SessionSkillsRepository;
     use crate::db::Database;
+    use crate::db::repository::SessionSkillsRepository;
     use uuid::Uuid;
 
     async fn repo() -> (Database, SessionSkillsRepository) {

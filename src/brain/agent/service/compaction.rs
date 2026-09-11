@@ -636,6 +636,14 @@ impl AgentService {
         let auto_approve = self.auto_approve_tools;
         let subagents = self.subagent_manager.clone();
         let attempt_deadline = self.compaction_attempt_deadline(session_id);
+        let active_skills = self.active_skills_for_session(session_id);
+        let active_tools = self.tool_registry.active_tools(session_id);
+        let context_inventory = Self::format_context_inventory(
+            max_tokens,
+            &active_skills,
+            &active_tools,
+            Some(&self.tool_registry),
+        );
         // Its own token: this task answers to session teardown, never to a
         // context that grew impatient.
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -655,6 +663,7 @@ impl AgentService {
                 auto_approve,
                 cancel,
                 attempt_deadline,
+                context_inventory,
             )
             .await?;
             Ok(Self::decorate_compaction_summary(summary, session_id, subagents).await)
