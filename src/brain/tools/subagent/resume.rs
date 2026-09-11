@@ -235,7 +235,7 @@ impl Tool for ResumeAgentTool {
                     .await
                     .with_tool_registry(child_registry)
                     .with_auto_approve_tools(true)
-                    .with_working_directory(child_dir)
+                    .with_working_directory(context.working_dir())
                     // #129: a resumed child is still headless (owner ruling C).
                     .with_headless(true);
 

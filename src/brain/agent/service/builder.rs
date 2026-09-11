@@ -461,17 +461,7 @@ impl AgentService {
             plan_mode_swap: std::sync::RwLock::new(HashMap::new()),
             session_context_limits: std::sync::RwLock::new(HashMap::new()),
             session_primary_failure_streak: std::sync::RwLock::new(HashMap::new()),
-            // #138: hydrate the seen-skills registry from the DB before the
-            // first surface can stamp — detached, so construction never
-            // blocks (and a no-pool test env just skips, see hydrate fn).
-            // Fired here because AgentService::new is the chokepoint every
-            // surface (TUI, daemon, cron) constructs its service through;
-            // hydrating once per process is sufficient (registry is
-            // process-wide and hydrate is once-only by flag).
-            active_skills: {
-                crate::brain::tools::seen_skills::hydrate_from_db();
-                std::sync::RwLock::new(HashMap::new())
-            },
+            active_skills: std::sync::RwLock::new(HashMap::new()),
             session_pressure_warned: std::sync::RwLock::new(HashMap::new()),
             last_compaction_elapsed: std::sync::RwLock::new(HashMap::new()),
             session_outgoing_text_ring: std::sync::RwLock::new(HashMap::new()),
@@ -877,6 +867,26 @@ impl AgentService {
         self
     }
 
+    /// Carry an ALREADY-BUILT background manager and its enqueue route into a
+    /// rebuilt service (#1504).
+    ///
+    /// Unlike [`Self::with_message_enqueue_callback`], this does NOT create a
+    /// fresh manager: it reuses the existing `Arc`. A provider switch rebuilds
+    /// the whole service (`rebuild_agent_service`), and that path used to drop
+    /// the enqueue callback, so the rebuilt service had no background manager
+    /// and long commands stopped detaching for every session after the switch.
+    /// Reusing the same manager keeps detachment working AND keeps any in-flight
+    /// detached task tracked by the one manager rather than orphaning it.
+    pub fn with_existing_background_manager(
+        mut self,
+        manager: Option<std::sync::Arc<super::background_tasks::BackgroundTaskManager>>,
+        enqueue: Option<super::types::MessageEnqueueCallback>,
+    ) -> Self {
+        self.background_manager = manager;
+        self.message_enqueue_callback = enqueue;
+        self
+    }
+
     /// The background-task manager, if an enqueue producer was wired (#722).
     pub fn background_manager(
         &self,
@@ -942,18 +952,13 @@ impl AgentService {
     /// `origin_target` (#148) from the session ownership maps. `None` — the
     /// default on cron/CLI/sub-agent paths — leaves `origin_target` unset
     /// and "here" resolution refused.
-    pub fn with_channel_manager(
-        mut self,
-        manager: Arc<crate::channels::ChannelManager>,
-    ) -> Self {
+    pub fn with_channel_manager(mut self, manager: Arc<crate::channels::ChannelManager>) -> Self {
         self.channel_manager = Some(manager);
         self
     }
 
     /// Clone the channel-manager handle, if wired (#148).
-    pub fn channel_manager(
-        &self,
-    ) -> Option<Arc<crate::channels::ChannelManager>> {
+    pub fn channel_manager(&self) -> Option<Arc<crate::channels::ChannelManager>> {
         self.channel_manager.clone()
     }
 
@@ -1954,11 +1959,6 @@ impl AgentService {
     /// body is re-injected into the system brain on every turn so it
     /// survives context compaction (#219).
     pub fn register_active_skill(&self, session_id: Uuid, skill_name: &str) {
-        // #138: slash invocation is skill consumption too — marking seen
-        // (which persists to the DB) makes the compaction stamp's union
-        // survive restarts for slash-invoked skills, not just read-loaded
-        // ones. In-memory active_skills stays the re-injection driver.
-        crate::brain::tools::seen_skills::mark_seen(session_id, skill_name);
         let mut map = self
             .active_skills
             .write()

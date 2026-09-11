@@ -1,7 +1,6 @@
-use std::path::Path;
 use crate::brain::prompt_builder::{BrainLoader, RuntimeInfo};
 use crate::brain::tools::error::collapse_home;
-use crate::cli::tool_setup::HEADLESS_PREAMBLE;
+use std::path::Path;
 
 pub const READ_ONLY_CAPABILITY_NOTE: &str = "[Capability note: This sub-agent runs with a read-restricted tool registry (#1173) — file reads, search, and web research only. Tools for shell execution, file writes, and further sub-agents are absent.]\n\n";
 
@@ -36,7 +35,7 @@ pub fn child_prompt(read_only: bool, include_brain: bool, prompt: &str) -> Strin
     if !include_brain {
         prefix.push_str(LEAN_BRAIN_CONTEXT_NOTE);
     }
-    format!("{}{}{}", prefix, HEADLESS_PREAMBLE, prompt)
+    format!("{}{}", prefix, prompt)
 }
 
 /// Human-readable label for spawn response reporting.

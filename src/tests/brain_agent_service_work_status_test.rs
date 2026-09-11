@@ -320,10 +320,7 @@ fn legacy_agent_files_migrate_into_the_unified_dir() {
         .as_ref()
         .expect("terminal legacy keeps its finish");
     assert_eq!(finish.completed_at, "2026-08-28T09:30:00+00:00");
-    // #147: the legacy 200-char `output_summary` stub is deliberately NOT
-    // copied into the unified schema — it deserialized for compat, the
-    // truncated stub is dropped, nothing ever read it.
-    assert_eq!(finish.output_full, None);
+    assert!(finish.output_full.is_none());
 }
 
 /// A missing legacy dir is the common case, not an error.

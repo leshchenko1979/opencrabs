@@ -49,8 +49,7 @@ pub struct ChannelFactory {
     /// tool loop can derive the ambient `origin_target` from the session
     /// ownership maps. Set once at startup via [`set_channel_manager`];
     /// absent on cron/daemon paths, where "here" resolution must refuse.
-    channel_manager:
-        OnceLock<Arc<crate::channels::ChannelManager>>,
+    channel_manager: OnceLock<Arc<crate::channels::ChannelManager>>,
 }
 
 impl ChannelFactory {

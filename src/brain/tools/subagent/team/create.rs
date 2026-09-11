@@ -179,17 +179,6 @@ impl Tool for TeamCreateTool {
                 })?),
                 None => None,
             };
-
-            // Brain pre-injection flag (#145): absent = false; non-boolean = hard error.
-            let member_include_brain = match agent_def.get("include_brain") {
-                None => false,
-                Some(serde_json::Value::Bool(b)) => *b,
-                Some(_) => {
-                    return Ok(ToolResult::error(format!(
-                        "Team member '{label}': 'include_brain' must be a boolean"
-                    )));
-                }
-            };
             let deprecated_raw = agent_def
                 .get("agent_type")
                 .and_then(|v| v.as_str())
@@ -201,6 +190,17 @@ impl Tool for TeamCreateTool {
                 Some(_) => {
                     return Ok(ToolResult::error(format!(
                         "Team member '{label}': 'allow_nested' must be a boolean"
+                    )));
+                }
+            };
+
+            // Brain pre-injection flag (#145): absent = false; non-boolean = hard error.
+            let member_include_brain = match agent_def.get("include_brain") {
+                None => false,
+                Some(serde_json::Value::Bool(b)) => *b,
+                Some(_) => {
+                    return Ok(ToolResult::error(format!(
+                        "Team member '{label}': 'include_brain' must be a boolean"
                     )));
                 }
             };
@@ -312,8 +312,7 @@ impl Tool for TeamCreateTool {
                     .await
                     .with_tool_registry(child_registry)
                     .with_auto_approve_tools(true)
-                    .with_working_directory(child_dir)
-                    .with_headless(true);
+                    .with_working_directory(child_dir);
 
             if let Some(brain) = system_brain {
                 child_service_builder = child_service_builder.with_system_brain(brain);
@@ -324,12 +323,9 @@ impl Tool for TeamCreateTool {
             // Typed preambles are gone (#1173, Proposal B): restricted
             // members get one factual capability line, full members just the
             // task.
-            // #145: stacked capability + lean context note + headless preamble.
-            let full_prompt = super::super::brain::child_prompt(
-                read_only,
-                member_include_brain,
-                &prompt,
-            );
+            // #145: stacked capability + lean context note.
+            let full_prompt =
+                super::super::brain::child_prompt(read_only, member_include_brain, &prompt);
 
             let cancel_clone = cancel_token.clone();
             let manager = self.subagent_manager.clone();

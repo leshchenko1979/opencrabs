@@ -29,7 +29,7 @@ pub(crate) fn completion_message(
     let (context_text, display_text) = match outcome {
         Ok(output) => {
             let full_report_hint = if output.chars().count() > PUSHED_OUTPUT_LIMIT {
-                let path = crate::brain::tools::subagent::status::status_path(agent_id);
+                let path = crate::brain::agent::service::work_status::status_path(agent_id);
                 format!(
                     "Preview truncated - the FULL untruncated report is persisted in {} \
                      (field output_full).\n",
@@ -509,21 +509,27 @@ impl Tool for SpawnAgentTool {
         // gets one factual capability line derived from its actual grant —
         // no role-play text that could drift from what the registry truly
         // allows. Full-access children receive just the task.
-        // #129 (owner ruling A): a sub-agent is a headless session — its
-        // final message is relayed verbatim as the spawn result, so the
-        // self-containedness preamble rides on EVERY child prompt (below the
-        // capability note, above the task).
-        // #145: stacked capability + lean context note + headless preamble.
-        let full_prompt = super::brain::child_prompt(read_only, include_brain, &prompt);
+        // #145: stacked capability + lean context note via child_prompt.
+        // #129 (owner ruling A): a sub-agent is a headless session — the
+        // self-containedness preamble rides on EVERY spawned child prompt,
+        // below the capability note and the context note, above the task
+        // (child_prompt emits notes-then-task, so the preamble slots
+        // between them; byte-exact task preserved).
+        let stacked = super::brain::child_prompt(read_only, include_brain, &prompt);
+        let notes_len = stacked.len() - prompt.len();
+        let full_prompt = format!(
+            "{}{}{}",
+            &stacked[..notes_len],
+            crate::cli::tool_setup::HEADLESS_PREAMBLE.trim_start_matches('\n'),
+            &stacked[notes_len..]
+        );
 
         // Create the status file in Pending state before spawning. new()
         // writes the file; we don't need the returned handle, but we do
-        // propagate any write error. The parent is captured FIRST so the
-        // status file carries it: if a restart kills this agent mid-turn
-        // and boot-resume revives its session, the revived result must
-        // reach this session (#110). Kept as a `Uuid` too — the follow-up
-        // loop and the completion path below capture it by value (#110).
-        let parent_session_id = context.session_id;
+        // propagate any write error. The parent session is captured before
+        // the first write so the file is born with the binding (#110): if
+        // the daemon restarts mid-run, boot-resume can route the revived
+        // result back to the session that is waiting on it.
         let parent_session_for_status = context.session_id.to_string();
         let _ = WorkStatus::new_agent(
             &agent_id,
@@ -542,7 +548,10 @@ impl Tool for SpawnAgentTool {
         let prompt_clone = full_prompt;
         let label_clone = label.clone();
         let mut input_rx = input_rx;
-        // `parent_session_id` was captured above the status-file write (#110).
+        // The session that asked for this agent, so a result nobody is waiting
+        // on still reaches the caller instead of sitting in the manager map
+        // (#1036). Not the child's session, which nothing is listening to.
+        let parent_session_id = context.session_id;
 
         let handle = tokio::spawn(async move {
             tracing::info!("Sub-agent {} starting: {}", agent_id_clone, prompt_clone);
@@ -554,7 +563,7 @@ impl Tool for SpawnAgentTool {
                     &label_clone,
                     &child_session_id.to_string(),
                     &prompt_clone,
-                    Some(&parent_session_for_status),
+                    None,
                 )
                 .expect("status file")
             });

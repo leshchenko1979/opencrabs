@@ -3,12 +3,12 @@
 //! Sub-agents run lean by default (no pre-injected brain files), but can
 //! opt in to full workspace brain via `include_brain: true`.
 
+use crate::brain::tools::Tool;
 use crate::brain::tools::subagent::brain::{
-    brain_status_label, child_prompt, child_system_brain, LEAN_BRAIN_CONTEXT_NOTE,
-    READ_ONLY_CAPABILITY_NOTE,
+    LEAN_BRAIN_CONTEXT_NOTE, READ_ONLY_CAPABILITY_NOTE, brain_status_label, child_prompt,
+    child_system_brain,
 };
 use crate::brain::tools::subagent::{SpawnAgentTool, SubAgentManager, TeamCreateTool, TeamManager};
-use crate::brain::tools::Tool;
 use crate::config::profile::with_home_override;
 use std::fs;
 use std::sync::Arc;
@@ -72,10 +72,7 @@ fn brain_status_label_reporting() {
         brain_status_label(false),
         "lean (none pre-injected; use load_brain_file)"
     );
-    assert_eq!(
-        brain_status_label(true),
-        "core attached (SOUL/USER/AGENTS)"
-    );
+    assert_eq!(brain_status_label(true), "core attached (SOUL/USER/AGENTS)");
 }
 
 #[test]
@@ -115,7 +112,10 @@ fn child_system_brain_loads_core_files_when_true() {
         let brain_str = brain.unwrap();
         assert!(brain_str.contains("Beep boop"), "must contain SOUL.md");
         assert!(brain_str.contains("Alexey"), "must contain USER.md");
-        assert!(brain_str.contains("Runbook rules"), "must contain AGENTS.md");
+        assert!(
+            brain_str.contains("Runbook rules"),
+            "must contain AGENTS.md"
+        );
         assert!(
             brain_str.contains("CLAUDE.md"),
             "must discover project directive (CLAUDE.md) in child working directory"

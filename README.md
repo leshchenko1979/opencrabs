@@ -49,6 +49,7 @@
 - [🧙 Onboarding Wizard](#-onboarding-wizard)
 - [🔑 API Keys (keys.toml)](#-api-keys-keystoml)
 - [🔐 Secret Sanitization & Redaction](#-secret-sanitization--redaction)
+- [🛡️ Security Controls](#️-security-controls)
 - [🏠 Using Local LLMs](#-using-local-llms)
 - [📝 Configuration](#-configuration)
 - [🛠️ Configuration (config.toml)](#-configuration-configtoml)
@@ -449,7 +450,7 @@ Every channel has a `bot_owner` field (`[channels.telegram]`, `[channels.discord
 
 The owner gets access that other allowlisted users do not. All channel commands except `/new` are owner-only: `/compact`, `/doctor`, `/evolve`, `/help`, `/models`, `/rtk`, `/sessions`, `/stop`, `/usage`, `/profiles`, `/goal`, `/mission-control`, `/rename`, `/cd`, `/respond_to`, `/redact`, `/restart`, `/exit`. `/new` stays open for session recovery (bugged/hallucinated sessions). Non-owners who try get a short "owner only" notice.
 
-**Deny-by-default access model:** if neither `allowed_users` nor `bot_owner` is configured, the bot refuses all interactions — unconfigured installs are locked down by default. Set at least one to unlock access. This prevents open-mode footguns on fresh deployments.
+**Deny-by-default access model (all channels):** if neither `allowed_users` (nor `allowed_phones`/`allowed_roles`) nor `bot_owner` is configured, the bot refuses all interactions — unconfigured installs are locked down by default on Telegram, Discord, Slack, and WhatsApp alike. Set at least one to unlock access. This prevents open-mode footguns on fresh deployments.
 
 ```toml
 [channels.telegram]
@@ -546,7 +547,7 @@ This solves the core UX problem in mention-only groups: previously, tagging the 
 | **Inline Plan Approval** | Interactive plan review selector (Approve / Reject / Request Changes / View Plan) |
 | **Session Management** | Create, rename, delete sessions with persistent SQLite storage; each session remembers its provider + model — switching sessions auto-restores the provider (no manual `/models` needed); token counts and context % per session. New sessions auto-generate a meaningful title from the first user message (no more "New Chat") |
 | **Direct Model Switch** | `/models <provider/model>` switches the current session instantly — no picker — on the TUI and every channel. You can also name it the way you say it: `/models xiaomi mimo v2.5 pro` resolves the same as `/models xiaomi/mimo-v2.5-pro`, with spacing, hyphens, dots and case interchangeable. Matching is programmatic against the provider's own catalogue, so it costs no model call and never invents a model that provider doesn't serve; an ambiguous reference is refused with the candidates listed rather than guessed. Add `all` (`/models minimax/MiniMax-M3 all`) to apply to every non-archived session (Telegram also offers an inline "Apply to all sessions" button). `opencrabs session set-model` does the same from the terminal, and `[providers.<name>] force_default = true` pushes the section's default pair to all sessions on config reload |
-| **Theme Switching** | `/theme` opens an interactive picker — arrow through the roster with **live preview** (the whole UI recolors under the cursor), Enter applies + persists, Esc reverts. 8 built-ins (`crab-dark` default, dracula, alucard, monokai, solarized-light, solarized-dark, catppuccin-mocha, catppuccin-latte) plus your own presets: drop a TOML in `~/.opencrabs/themes/*.toml` and it hot-loads into the picker. `/theme list`, `/theme set <name>`, `/theme reset` keep the text surface; the active theme persists via the `[tui.theme]` config key and survives restarts. Non-truecolor terminals automatically get an ANSI-mapped fallback tier instead of broken colors |
+| **Theme Switching** | `/theme` opens an interactive picker — arrow through the roster with **live preview** (the whole UI recolors under the cursor), Enter applies + persists, Esc reverts. 8 hand-built presets (`crab-dark` default, dracula, alucard, monokai, solarized-light, solarized-dark, catppuccin-mocha, catppuccin-latte) plus a 31-theme curated pack converted from the opencode and alacritty-theme catalogs (tokyonight + storm, nord, gruvbox + light, kanagawa, everforest, rosepine + dawn, catppuccin-macchiato/frappe, github, material, palenight, zenburn, aura, ayu, and more — `/theme list` shows the full roster), plus your own presets: drop a TOML in `~/.opencrabs/themes/*.toml` and it hot-loads into the picker, and `cargo run --example theme_pack_gen -- <sources-dir>` (the generator that built the curated pack) converts any alacritty-theme TOML or opencode theme JSON into a ready-to-drop file with a provenance header, including `#RGB`/`#RRGGBBAA` colors, defs refs and dark/light variants; fetch loop and curation notes live in `src/tui/theme_catalog/pack/README.md`. `/theme list`, `/theme set <name>`, `/theme reset` keep the text surface; the active theme persists via the `[tui.theme]` config key and survives restarts. Non-truecolor terminals automatically get an ANSI-mapped fallback tier instead of broken colors |
 | **Split Panes** | Horizontal (`\|` in sessions) and vertical (`_` in sessions) pane splitting — tmux-style. Each pane runs its own session with independent provider, model, and context. Run 10 sessions side by side, all processing in parallel. `Tab` to cycle focus, `Ctrl+X` to close pane |
 | **Parallel Sessions** | Multiple sessions can have in-flight requests to different providers simultaneously. Send a message in one session, switch to another, send another — both process in parallel. Background sessions auto-approve tool calls; you'll see results when you switch back |
 | **Scroll While Streaming** | Scroll up during streaming without being yanked back to bottom; auto-scroll re-enables when you scroll back down or send a message |
@@ -2143,7 +2144,7 @@ fallback_chain = ["openai_compatible", "openai", "local"]
 
 ## 🔐 Secret Sanitization & Redaction
 
-OpenCrabs automatically redacts API keys and tokens from all outputs — conversation history, TUI display, tool approval dialogs, and external channel delivery (Telegram, Discord, Slack, WhatsApp). Secrets never persist to the database or appear in logs.
+OpenCrabs automatically redacts API keys and tokens from all outputs — conversation history, TUI display, tool approval dialogs, and external channel delivery (Telegram, Discord, Slack, WhatsApp). The log writer scrubs every provider and channel secret shape (`sk-`, `xoxb-`, `ghp_`, `Authorization: Bearer`, PEM blocks, Telegram bot tokens), not just one, so secrets do not land in `~/.opencrabs/logs/` or the database.
 
 ### Scoped Redaction (global / group / dm)
 
@@ -2201,6 +2202,26 @@ API keys stored via `SecretString` are:
 - **Zeroized on drop** — memory is overwritten when the value goes out of scope (not left for GC)
 - **Never serialized** — `Debug`, `Display`, and `Serialize` all output `[REDACTED]`
 - **Never logged** — `expose_secret()` is the only way to access the raw value
+
+---
+
+## 🛡️ Security Controls
+
+OpenCrabs runs `bash`, `execute_code`, and `http_request` as its whole point, so the security model is about the **gates around** that power, not forbidding it. These are enforced by the binary, not by instructions to the model. Most were hardened in response to a source-code audit by [Abraxas Labs](https://abraxaslabs.tech).
+
+| Control | What it does |
+|---------|--------------|
+| **Deny-by-default channel access** | An unconfigured channel (no `allowed_users`/`allowed_phones`/`allowed_roles` and no `bot_owner`) refuses everyone, on Telegram, Discord, Slack, and WhatsApp. An empty allowlist never grants access or ownership. |
+| **Owner-gated approvals** | Tool-approval and YOLO buttons re-check that the tapper is the owner on every channel, so a group member cannot approve a pending tool or flip the instance to unattended mode. |
+| **Command blocklist floor** | The `bash` hard blocklist (`rm -rf ~`, fork bombs, `/etc/shadow`, …) applies to `execute_code` and dynamic shell tools too; core tool names (`bash`, `read_file`, `evolve`, …) are reserved so a dynamic tool cannot shadow them. |
+| **Confidential-file deny** | `read_file` refuses `keys.toml`, anything under `.ssh/`, SSH private keys, `.env`, `.pem`/`.key`, `/etc/shadow`, and credential files at the harness — not by prompt. |
+| **SSRF guard** | `http_request` and `web_scrape` refuse cloud metadata (`169.254.169.254`, `metadata.google.internal`), RFC1918, link-local, CGNAT, and unspecified targets, resolve DNS before deciding, and re-validate every redirect. Loopback stays reachable for local development. |
+| **Verified auto-update** | Before swapping the running binary, the updater verifies the release `SHA256SUMS` and pins the download host to GitHub. A missing or mismatched checksum aborts the update. `[agent] evolve_allow_root` (default true) lets you refuse root swaps. |
+| **Owner-only secret files** | `keys.toml` and `config.toml` are written `0600` automatically; the daemon writes logs to `~/.opencrabs/logs/` (`0700`), never world-readable `/tmp`. |
+| **Authenticated A2A gateway** | The A2A gateway refuses to start on a non-loopback bind without an `api_key`, and compares the bearer token in constant time. Off by default, loopback-only when on. |
+| **Broad secret redaction** | See [Secret Sanitization & Redaction](#-secret-sanitization--redaction) above — every provider/channel secret shape is scrubbed from channel output and logs. |
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -4555,10 +4576,10 @@ cargo build --release
 # Small release build
 cargo build --profile release-small
 
-# Run tests (8,095 tests across 875 modules: 8,036 of them under src/tests/,
-# where tests belong, plus 19 inline in src/tui/render/presets_test.rs and
+# Run tests (8,227 tests across 833 modules: 8,207 of them under src/tests/,
+# where tests belong, plus 20 inline in src/tui/render/presets_test.rs and
 # src/channels/telegram/rich/inline.rs;
-# 30 slower ones are #[ignore]d to keep the default
+# 34 slower ones are #[ignore]d to keep the default
 # run fast: profile tests that touch ~/.opencrabs, browser end-to-end
 # tests, and opencode provider tests. Opt in with
 # `cargo test --all-features -- --ignored` when needed. Counts are from a

@@ -39,6 +39,13 @@ enum PlanOperation {
         /// Inline task definitions (checklist mode): plan + tasks in one call.
         #[serde(default)]
         tasks: Vec<InlineTask>,
+        /// Optional absolute path to the repo the plan's work executes in
+        /// (#1452). When set, receipt binding (#1011) verifies claimed
+        /// commit shas against THIS repo instead of the session cwd, so a
+        /// plan executed in a non-cwd repo can carry mechanical receipts.
+        /// Validated at init: must be absolute and an existing directory.
+        #[serde(default)]
+        working_directory: Option<String>,
     },
     /// Append one or more tasks in a single call (primary append op).
     /// Active only: checklist operations are blocked while Editing.
@@ -467,6 +474,41 @@ fn render_task_details(plan: &PlanDocument, task: &PlanTask) -> String {
 
 /// Validate plan file path for security
 /// Prevents symlink attacks and path traversal
+/// Validate the optional `working_directory` init param (#1452): the repo a
+/// plan's work executes in, for receipt binding. Must be absolute and an
+/// existing directory; a bad binding must fail init loudly, never silently
+/// weaken the receipt gate (a nonexistent dir would make the `git`
+/// probe fail and skip verification entirely).
+pub(crate) fn validate_plan_working_directory(dir: &str) -> Result<()> {
+    let path = std::path::Path::new(dir);
+    if !path.is_absolute() {
+        return Err(ToolError::InvalidInput(format!(
+            "working_directory must be an absolute path (got '{dir}')"
+        )));
+    }
+    if !path.is_dir() {
+        return Err(ToolError::InvalidInput(format!(
+            "working_directory does not exist or is not a directory: {dir}"
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve the repo receipt binding (#1011) verifies claimed shas against:
+/// the plan's bound `working_directory` when set (#1452), else the session
+/// working directory (previous behavior, unchanged for plans without a
+/// binding). Pure so the resolution itself is unit-testable.
+pub(crate) fn receipt_binding_dir(
+    plan_working_directory: Option<&str>,
+    session_working_dir: &Path,
+) -> PathBuf {
+    plan_working_directory
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| session_working_dir.to_path_buf())
+}
+
 pub(crate) fn validate_plan_file_path(path: &Path, base_dir: &Path) -> Result<()> {
     // Check if path is absolute and within the base directory
     if !path.starts_with(base_dir) {
@@ -1086,6 +1128,13 @@ const SHA_CLAIM_KEYWORDS: [&str; 5] = ["committed", "commit", "pushed", "push", 
 /// count as its claim context.
 const SHA_CLAIM_WINDOW: usize = 32;
 
+/// Hex-looking tokens that are names of other algorithms, not commits
+/// (#1501). Selection criterion: a receipted false positive only — each
+/// entry is a pure-hex identifier that follows a commit-ish keyword in
+/// ordinary completion text ("signed ... with ED25519 key ..."). Do not
+/// speculatively add tokens; every entry needs its own occurrence.
+const NON_COMMIT_HEX_TOKENS: [&str; 1] = ["ed25519"];
+
 /// Extract git-sha claims from free text (#1011).
 ///
 /// A claim is a maximal alphanumeric run consisting only of hex digits,
@@ -1111,7 +1160,8 @@ pub(crate) fn extract_sha_claims(text: &str) -> Vec<String> {
         }
         let run = &text[start..i];
         let is_hex = run.bytes().all(|b| b.is_ascii_hexdigit());
-        if is_hex && (7..=40).contains(&run.len()) {
+        let is_non_commit = NON_COMMIT_HEX_TOKENS.contains(&run.to_ascii_lowercase().as_str());
+        if is_hex && !is_non_commit && (7..=40).contains(&run.len()) {
             // Back up at most SHA_CLAIM_WINDOW bytes for the keyword
             // context, then realign to a char boundary: start-32 can land
             // inside a multi-byte character, and slicing there panics. A
@@ -1293,6 +1343,10 @@ impl Tool for PlanTool {
                     "type": "string",
                     "description": "Import mode: absolute path to a plan JSON file on disk (init). Takes precedence over title."
                 },
+                "working_directory": {
+                    "type": "string",
+                    "description": "Optional absolute path to the repo the plan's work executes in (init). Receipt binding verifies claimed commit shas against this repo instead of the session cwd (#1452). Must exist."
+                },
                 "tasks": {
                     "type": "array",
                     "items": { "type": "object" },
@@ -1420,6 +1474,7 @@ impl Tool for PlanTool {
                 file_path,
                 mode,
                 tasks,
+                working_directory,
             } => {
                 use crate::utils::plan_files::PlanModeState;
                 // A live plan blocks re-init. Pre-init is NOT live for this
@@ -1450,6 +1505,19 @@ impl Tool for PlanTool {
                 // the operator opted out via `[agent] plan_require_approval =
                 // false`. Read once for both arms below.
                 let require_approval = plan_require_approval_enabled();
+
+                // #1452: optional repo binding for receipt validation. The
+                // explicit param is validated upfront; an imported JSON's
+                // own binding is validated in the import arm (same rule: a
+                // bad binding must fail init loudly, never silently weaken
+                // the receipt gate).
+                let validated_working_directory = match working_directory.as_deref() {
+                    Some(dir) => {
+                        validate_plan_working_directory(dir)?;
+                        Some(dir.to_string())
+                    }
+                    None => None,
+                };
 
                 if let Some(path) = file_path {
                     // ===== import mode (mode param ignored) =====
@@ -1546,6 +1614,21 @@ impl Tool for PlanTool {
                     imported.updated_at = Utc::now();
                     imported.approved_at = None;
                     imported.approval_source = None;
+
+                    // #1452: the explicit init param overrides a JSON-carried
+                    // binding; with no param, a JSON-carried binding is kept
+                    // but validated (an imported bad path must not silently
+                    // skip receipt verification at complete time).
+                    imported.working_directory = match validated_working_directory {
+                        Some(dir) => Some(dir),
+                        None => match imported.working_directory.take() {
+                            Some(dir) => {
+                                validate_plan_working_directory(&dir)?;
+                                Some(dir)
+                            }
+                            None => None,
+                        },
+                    };
 
                     imported.resolve_index_deps();
 
@@ -1717,6 +1800,8 @@ impl Tool for PlanTool {
 
                     let mut new_plan = PlanDocument::new(plan_sid, title.clone());
                     new_plan.status = PlanStatus::Editing;
+                    // #1452: repo binding for receipt validation, when given.
+                    new_plan.working_directory = validated_working_directory;
 
                     // Get criteria_policy for validation (#1133)
                     let policy = ralph_loop_config(&context.working_dir())
@@ -2273,12 +2358,18 @@ impl Tool for PlanTool {
                     // must exist in the repo, whatever the task type. The
                     // type-keyed commands above cannot see claims inside the
                     // output. Part of the verification gate, so it only runs
-                    // when the gate is active.
+                    // when the gate is active. The verification repo resolves
+                    // from the plan's bound working_directory when set
+                    // (#1452): shas are checked where the work actually
+                    // lives, not where the session happens to run.
                     let gate_active = ralph_loop_config(&context.working_dir())
                         .is_some_and(|c| c.verification.enabled);
+                    let receipt_dir = receipt_binding_dir(
+                        current_plan.working_directory.as_deref(),
+                        &context.working_dir(),
+                    );
                     if gate_active
-                        && let Err(receipt_msg) =
-                            verify_sha_receipts(&output, &context.working_dir())
+                        && let Err(receipt_msg) = verify_sha_receipts(&output, &receipt_dir)
                     {
                         return Ok(ToolResult::error(format!(
                             "🔒 Ralph Loop receipt binding REJECTED task #{task_order}.\n\n{receipt_msg}"

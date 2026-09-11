@@ -380,6 +380,27 @@ pub async fn on_interaction(
                         tracing::warn!("Slack: unknown action_id: {}", action_id);
                         continue;
                     };
+                // OC-01: the approval buttons sit in a channel where any member
+                // can click them, so re-check the clicker is the owner before
+                // acting, same as the session branch above. A non-owner click
+                // otherwise runs the pending tool, and a YOLO click persists
+                // auto-always instance-wide.
+                {
+                    let cfg = state.config_rx.borrow().clone();
+                    let caller_id = block_actions
+                        .user
+                        .as_ref()
+                        .map(|u| u.id.0.as_str())
+                        .unwrap_or("");
+                    if !cfg.channels.slack.is_owner(caller_id) {
+                        tracing::warn!(
+                            "Slack: non-owner {} clicked '{}' — refused (OC-01)",
+                            caller_id,
+                            action_id
+                        );
+                        continue;
+                    }
+                }
                 if yolo {
                     crate::utils::persist_auto_always_policy();
                 }
@@ -892,9 +913,18 @@ async fn handle_message(
     let idle_timeout_hours = sl_cfg.session_idle_hours;
     let voice_config = cfg.voice_config();
 
-    // Allowlist check — if allowed list is empty, accept all
-    if !allowed.is_empty() && !allowed.contains(&user_id) {
-        tracing::debug!("Slack: ignoring message from non-allowed user {}", user_id);
+    // Deny-by-default allowlist (OC-02). An empty allowlist used to accept
+    // everyone, unlike Telegram. Now an unconfigured workspace (no allowed_users
+    // and no bot_owner) denies, and a configured one admits only allowlisted
+    // users or the owner.
+    let is_owner =
+        crate::config::owner::is_owner(&sl_cfg.allowed_users, &sl_cfg.bot_owner, &user_id);
+    let unconfigured = allowed.is_empty() && sl_cfg.bot_owner.is_empty();
+    if unconfigured || !(is_owner || allowed.contains(&user_id)) {
+        tracing::debug!(
+            "Slack: ignoring message from non-allowed user {} (deny-by-default, OC-02)",
+            user_id
+        );
         return;
     }
 

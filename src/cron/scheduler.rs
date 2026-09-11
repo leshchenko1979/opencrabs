@@ -352,15 +352,8 @@ async fn deliver_rebuild_status(job: &CronJob, msg: &str) -> Vec<tokio::task::Jo
             .filter(|s| !s.is_empty())
         {
             // Rebuild status messages aren't worth reply recovery — no pool.
-            if let Some(h) = deliver_result(
-                target,
-                &job.name,
-                msg,
-                job.deliver_api_key.as_deref(),
-                None,
-                None,
-            )
-            .await
+            if let Some(h) =
+                deliver_result(target, &job.name, msg, job.deliver_api_key.as_deref(), None).await
             {
                 handles.push(h);
             }
@@ -821,21 +814,20 @@ async fn execute_job(
     // lives in its session and the scheduler is the only thing that speaks.
     // Scoped across the whole turn so it holds inside every tool call, and
     // task-local so it never reaches a sibling job on the scheduler.
-    let permitted_targets: Option<Vec<crate::cron::send_scope::PermittedTarget>> = job
-        .deliver_to
-        .as_deref()
-        .map(|targets| {
+    let permitted_targets: Option<Vec<crate::cron::send_scope::PermittedTarget>> =
+        job.deliver_to.as_deref().map(|targets| {
             targets
                 .split(',')
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
                 .filter_map(|t| {
                     if let Some(rest) = t.strip_prefix("telegram:") {
-                        parse_telegram_target(rest)
-                            .map(|(chat_id, _)| crate::cron::send_scope::PermittedTarget {
+                        parse_telegram_target(rest).map(|(chat_id, _)| {
+                            crate::cron::send_scope::PermittedTarget {
                                 channel: "telegram",
                                 target_id: chat_id.to_string(),
-                            })
+                            }
+                        })
                     } else if let Some(rest) = t.strip_prefix("discord:") {
                         Some(crate::cron::send_scope::PermittedTarget {
                             channel: "discord",
@@ -903,8 +895,7 @@ async fn execute_job(
                 tracing::error!("Failed to save cron run result to DB: {e}");
             }
 
-            // Optionally deliver to configured channels too. Delivery
-            // failures stamp status='delivery_failed' on this run (#107).
+            // Optionally deliver to configured channels too
             if let Some(ref deliver_to) = job.deliver_to {
                 for target in deliver_to
                     .split(',')
@@ -917,7 +908,6 @@ async fn execute_job(
                         &clean,
                         job.deliver_api_key.as_deref(),
                         Some(ctx.pool()),
-                        Some(run_id.clone()),
                     )
                     .await;
                 }
@@ -946,7 +936,6 @@ async fn execute_job(
                         &msg,
                         job.deliver_api_key.as_deref(),
                         Some(ctx.pool()),
-                        Some(run_id.clone()),
                     )
                     .await;
                 }
@@ -1042,7 +1031,6 @@ async fn deliver_result(
     content: &str,
     api_key: Option<&str>,
     pool: Option<crate::db::Pool>,
-    run_id: Option<String>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     // Only the Telegram delivery arm uses the pool (to record the message for
     // reply recovery); other targets ignore it.
@@ -1056,23 +1044,21 @@ async fn deliver_result(
 
     // Leaked `oc://` target URL at fire time (#148 loud failure pin):
     // cron targets must be baked at create/update time. A leaked URL here
-    // means the bake step was bypassed — refuse loudly and record the failure.
+    // means the bake step was bypassed — refuse loudly.
     if crate::channels::target_resolver::is_target_url(deliver_to) {
-        let reason = format!(
-            "Unbaked target URL '{deliver_to}' reached delivery — oc:// targets must be baked at \
-             create/update time (#148); refusing fire-time resolution"
+        tracing::error!(
+            "Unbaked target URL '{deliver_to}' reached delivery for job '{job_name}' — oc:// targets must be baked at create/update time (#148); refusing fire-time resolution"
         );
-        tracing::error!("{} for job '{}'", reason, job_name);
-        record_delivery_failure(pool, run_id, &reason).await;
         return None;
     }
 
     let parts: Vec<&str> = deliver_to.splitn(2, ':').collect();
     if parts.len() != 2 {
-        let reason =
-            format!("Invalid deliver_to format '{deliver_to}' — expected 'channel:id' or HTTP URL");
-        tracing::warn!("{} for job '{}' — delivery NOT performed (#107)", reason, job_name);
-        record_delivery_failure(pool, run_id, &reason).await;
+        tracing::warn!(
+            "Invalid deliver_to format '{}' for job '{}' — expected 'channel:id' or HTTP URL",
+            deliver_to,
+            job_name
+        );
         return None;
     }
 
@@ -1091,9 +1077,6 @@ async fn deliver_result(
 
     let delivery_msg = format!("⏰ **Cron: {job_name}**\n\n{msg}");
 
-    // Any arm that cannot prove a send happened records the failure on the
-    // run row (#107): status flips to 'delivery_failed' with the reason, so
-    // execution success and delivery success are never conflated again.
     match channel {
         "session" => {
             // Fork #144: deliver into a session's notify queue. Cron results
@@ -1137,26 +1120,21 @@ async fn deliver_result(
                             job_name,
                             &delivery_msg,
                             pool.clone(),
-                            run_id,
                         )
                         .await;
                     }
                     None => {
-                        let reason = format!(
+                        tracing::error!(
                             "Invalid Telegram deliver_to target '{target_id}' for job \
                              '{job_name}' — expected 'telegram:<chat_id>' or \
-                             'telegram:<chat_id>:<thread_id>'; not delivering (#107)"
+                             'telegram:<chat_id>:<thread_id>'; not delivering"
                         );
-                        tracing::error!("{reason}");
-                        record_delivery_failure(pool, run_id, &reason).await;
                     }
                 }
             }
             #[cfg(not(feature = "telegram"))]
             {
-                let reason = "Telegram feature not enabled — delivery NOT performed (#107)";
-                tracing::warn!("{reason} for job '{job_name}'");
-                record_delivery_failure(pool, run_id, reason).await;
+                tracing::warn!("Telegram feature not enabled — cannot deliver cron result");
             }
         }
         "discord" => {
@@ -1167,9 +1145,7 @@ async fn deliver_result(
             }
             #[cfg(not(feature = "discord"))]
             {
-                let reason = "Discord feature not enabled — delivery NOT performed (#107)";
-                tracing::warn!("{reason} for job '{job_name}'");
-                record_delivery_failure(pool, run_id, reason).await;
+                tracing::warn!("Discord feature not enabled — cannot deliver cron result");
             }
         }
         "slack" => {
@@ -1180,43 +1156,14 @@ async fn deliver_result(
             }
             #[cfg(not(feature = "slack"))]
             {
-                let reason = "Slack feature not enabled — delivery NOT performed (#107)";
-                tracing::warn!("{reason} for job '{job_name}'");
-                record_delivery_failure(pool, run_id, reason).await;
+                tracing::warn!("Slack feature not enabled — cannot deliver cron result");
             }
         }
         other => {
-            let reason = format!(
-                "Unknown delivery channel '{other}' — delivery NOT performed (#107)"
-            );
-            tracing::warn!("{} for job '{job_name}'", reason);
-            record_delivery_failure(pool, run_id, &reason).await;
+            tracing::warn!("Unknown delivery channel '{other}' for job '{job_name}'");
         }
     }
     None
-}
-
-/// Stamp `status='delivery_failed'` (+ reason) onto a run row (#107). The run
-/// id is `None` for callers without one (rebuild-status delivery) — those keep
-/// log-only surfacing. Fire-and-forget: a stamp failure must not mask the
-/// delivery failure itself.
-async fn record_delivery_failure(
-    pool: Option<crate::db::Pool>,
-    run_id: Option<String>,
-    reason: &str,
-) {
-    let (Some(pool), Some(run_id)) = (pool, run_id) else {
-        return;
-    };
-    let repo = crate::db::CronJobRunRepository::new(pool);
-    if let Err(e) = repo
-        .complete_delivery_failed(&run_id, reason)
-        .await
-    {
-        tracing::error!(
-            "Failed to record delivery failure on run {run_id}: {e} (delivery was already lost: {reason})"
-        );
-    }
 }
 
 /// Deliver cron result via HTTP POST to a generic webhook URL.
@@ -1254,10 +1201,9 @@ async fn deliver_http(url: &str, job_name: &str, content: &str, api_key: Option<
 
 /// Read `channels.<channel>.<field>` (e.g. a bot token) from the active
 /// workspace's `keys.toml`. Cron delivery runs outside any channel's live
-/// connection, so it reads the credential straight off disk. Also used by
-/// cron_manage's fail-fast delivery validation (#107).
+/// connection, so it reads the credential straight off disk.
 #[cfg(any(feature = "telegram", feature = "discord", feature = "slack"))]
-pub(crate) fn read_channel_secret(channel: &str, field: &str) -> Option<String> {
+fn read_channel_secret(channel: &str, field: &str) -> Option<String> {
     let keys_path = crate::brain::BrainLoader::resolve_path().join("keys.toml");
     let content = std::fs::read_to_string(&keys_path).ok()?;
     content.parse::<toml::Table>().ok().and_then(|t| {
@@ -1314,12 +1260,9 @@ async fn deliver_telegram(
     job_name: &str,
     message: &str,
     pool: Option<crate::db::Pool>,
-    run_id: Option<String>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let Some(token) = read_channel_secret("telegram", "token") else {
-        let reason = "No Telegram bot token in keys.toml — delivery NOT performed (#107)";
-        tracing::warn!("{reason} (job '{job_name}')");
-        record_delivery_failure(pool, run_id, reason).await;
+        tracing::warn!("No Telegram bot token found in keys.toml — cannot deliver cron result");
         return None;
     };
     let bot = teloxide::Bot::new(token);
@@ -1403,15 +1346,6 @@ async fn deliver_telegram(
                 } else {
                     tracing::error!("Cron delivery for '{job_name}' to chat {chat_id} failed: {e}");
                 }
-                // Detached delivery: the outcome lands after the run row was
-                // already stamped success (#107). Flip it so a silent drop
-                // never masquerades as a clean run.
-                record_delivery_failure(
-                    pool,
-                    run_id,
-                    &format!("Telegram send to chat {chat_id} failed: {e}"),
-                )
-                .await;
             }
         }
     }))

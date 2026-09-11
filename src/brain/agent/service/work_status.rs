@@ -1,9 +1,5 @@
 //! Unified status files for detached work (#26 P1).
 //!
-#![allow(dead_code)]
-// upstream rework (#1313-#1319) removed callers of the
-// legacy/stale-status subset; kept intact for the forkwin port cycle to
-// disposition (round-4/5 precedent: tag, don't delete).
 //! One JSON status file per unit of detached work — both detached bash
 //! commands (#1160) and spawned sub-agents (#1038) — at
 //! `<opencrabs_home>/tmp/detached/<id>.json`. Before #26 this was two
@@ -467,12 +463,6 @@ struct LegacySubagentStatus {
     completed_at: Option<String>,
     #[serde(default)]
     error: Option<String>,
-    /// Pre-#26 files carried the 200-char `output_summary` stub (#147);
-    /// deserialized for compat, deliberately NOT copied into the unified
-    /// schema — the truncated stub is dropped, the full report never
-    /// existed for these files. Nothing in production reads it.
-    #[serde(default)]
-    output_summary: Option<String>,
 }
 
 /// Move pre-#26 sub-agent status files from `legacy` into [`status_dir`],

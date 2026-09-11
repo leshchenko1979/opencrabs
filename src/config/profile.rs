@@ -110,7 +110,7 @@ pub fn with_home_override<T>(home: PathBuf, f: impl FnOnce() -> T) -> T {
     PROFILE_HOME_OVERRIDE.sync_scope(home, f)
 }
 
-/// Run an async future with `opencrabs_home()` pointed at an explicit directory.
+/// Run a future with `opencrabs_home()` pointed at an explicit directory.
 ///
 /// Async counterpart of `with_home_override`: the override is a task-local,
 /// so it survives every `.await` inside `fut` and never leaks to sibling

@@ -12,7 +12,6 @@ use crate::db::models::ChannelMessage as DbChannelMessage;
 use crate::services::SessionService;
 use crate::utils::sanitize::redact_secrets;
 use crate::utils::truncate_str;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::Mutex as TokioMutex;
@@ -415,7 +414,6 @@ pub(crate) async fn handle_message(
     // Read latest config from watch channel — single source of truth
     let cfg = config_rx.borrow().clone();
     let wa_cfg = &cfg.channels.whatsapp;
-    let allowed: HashSet<String> = wa_cfg.allowed_phones.iter().cloned().collect();
     let idle_timeout_hours = wa_cfg.session_idle_hours;
     let voice_config = cfg.voice_config();
 
@@ -489,16 +487,31 @@ pub(crate) async fn handle_message(
             None
         };
 
-        if let Some(c) = choice
-            && wa_state.resolve_pending_approval(&phone, c).await.is_some()
-        {
-            tracing::info!("WhatsApp: approval from {}: {:?}", phone, c);
-            if c == WaApproval::Always {
-                crate::utils::persist_auto_session_policy();
-            } else if c == WaApproval::Yolo {
-                crate::utils::persist_auto_always_policy();
+        // OC-01: an approval prompt is keyed by sender phone, so an allowlisted
+        // non-owner who caused the tool could approve or YOLO their own call. Gate
+        // the resolution on true ownership (canonical resolver, so an empty
+        // allowlist is unconfigured/deny, not "everyone is owner"). A non-owner
+        // reply is dropped, not resolved.
+        if let Some(c) = choice {
+            let is_owner =
+                crate::config::owner::is_owner(&wa_cfg.allowed_phones, &wa_cfg.bot_owner, &phone);
+            if !is_owner {
+                tracing::warn!(
+                    "WhatsApp: non-owner {} replied approval {:?} — refused (OC-01)",
+                    phone,
+                    c
+                );
+                return;
             }
-            return;
+            if wa_state.resolve_pending_approval(&phone, c).await.is_some() {
+                tracing::info!("WhatsApp: approval from {}: {:?}", phone, c);
+                if c == WaApproval::Always {
+                    crate::utils::persist_auto_session_policy();
+                } else if c == WaApproval::Yolo {
+                    crate::utils::persist_auto_always_policy();
+                }
+                return;
+            }
         }
     }
 
@@ -683,8 +696,17 @@ pub(crate) async fn handle_message(
 
     // is_owner gates /new archiving and owner-only flows. The self-chat is
     // always the owner even though its LID sender won't match the configured PN.
-    let is_owner =
-        is_owner_self_chat || allowed.is_empty() || owner_number.as_deref() == Some(phone.as_str());
+    //
+    // `allowed.is_empty()` used to be an owner condition (OC-02): an empty
+    // allowed_phones under response_policy=auto answered everyone AND elevated
+    // every contact to owner, handing them /evolve, /exit, /rebuild, /cd. Open
+    // DM access (answering an unlisted contact) is a separate policy decision
+    // and is not the same as ownership, so it is gone from here. Ownership is
+    // now the self-chat, the configured owner number, or the canonical owner
+    // resolver over allowed_phones + bot_owner.
+    let is_owner = is_owner_self_chat
+        || owner_number.as_deref() == Some(phone.as_str())
+        || crate::config::owner::is_owner(&wa_cfg.allowed_phones, &wa_cfg.bot_owner, &phone);
 
     // Sessions are keyed by a stable `[chat:wa-<phone>]` suffix so auto-rename
     // of the visible label still resolves to the same row (issue #121).
@@ -1208,7 +1230,7 @@ pub(crate) async fn handle_message(
     // Otherwise send a 3-button message (Yes / Always / No) and wait up to 5 min.
     let approval_cb: ApprovalCallback = {
         use crate::channels::whatsapp::WaApproval;
-        use crate::utils::{check_approval_policy, persist_auto_session_policy};
+        use crate::utils::check_approval_policy;
 
         let client = client.clone();
         let chat_jid = reply_target.clone();
@@ -1272,12 +1294,15 @@ pub(crate) async fn handle_message(
                             "WhatsApp approval: user chose Always (phone={})",
                             phone_key
                         );
-                        persist_auto_session_policy();
+                        // Policy persistence happens once, at the owner-gated
+                        // reply handler that resolves this oneshot (OC-01). This
+                        // arm only fires because that handler already accepted
+                        // the choice from the owner, so persisting again here
+                        // would be a second, ungated write of the same value.
                         Ok((true, true))
                     }
                     Ok(Ok(WaApproval::Yolo)) => {
                         tracing::info!("WhatsApp approval: user chose YOLO (phone={})", phone_key);
-                        crate::utils::persist_auto_always_policy();
                         Ok((true, true))
                     }
                     Ok(Ok(WaApproval::No)) => {
