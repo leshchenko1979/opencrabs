@@ -43,5 +43,7 @@ pub use session_skills::SessionSkillsRepository;
 pub use tool_execution::ToolExecutionRepository;
 pub use traits::Repository;
 pub use usage_ledger::UsageLedgerRepository;
+pub mod pending_tombstone;
+pub use pending_tombstone::{PendingTombstoneRepository, PendingTombstoneRow};
 pub mod notify_queue;
 pub use notify_queue::{NotifyQueueRepository, NotifyQueueRow};

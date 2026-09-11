@@ -526,10 +526,12 @@ impl Tool for SpawnAgentTool {
 
         // Create the status file in Pending state before spawning. new()
         // writes the file; we don't need the returned handle, but we do
-        // propagate any write error. The parent session is captured before
-        // the first write so the file is born with the binding (#110): if
-        // the daemon restarts mid-run, boot-resume can route the revived
-        // result back to the session that is waiting on it.
+        // propagate any write error. The parent is captured FIRST so the
+        // status file carries it: if a restart kills this agent mid-turn
+        // and boot-resume revives its session, the revived result must
+        // reach this session (#110). Kept as a `Uuid` too — the follow-up
+        // loop and the completion path below capture it by value (#110).
+        let parent_session_id = context.session_id;
         let parent_session_for_status = context.session_id.to_string();
         let _ = WorkStatus::new_agent(
             &agent_id,
@@ -548,10 +550,7 @@ impl Tool for SpawnAgentTool {
         let prompt_clone = full_prompt;
         let label_clone = label.clone();
         let mut input_rx = input_rx;
-        // The session that asked for this agent, so a result nobody is waiting
-        // on still reaches the caller instead of sitting in the manager map
-        // (#1036). Not the child's session, which nothing is listening to.
-        let parent_session_id = context.session_id;
+        // `parent_session_id` was captured above the status-file write (#110).
 
         let handle = tokio::spawn(async move {
             tracing::info!("Sub-agent {} starting: {}", agent_id_clone, prompt_clone);
@@ -563,7 +562,7 @@ impl Tool for SpawnAgentTool {
                     &label_clone,
                     &child_session_id.to_string(),
                     &prompt_clone,
-                    None,
+                    Some(&parent_session_for_status),
                 )
                 .expect("status file")
             });

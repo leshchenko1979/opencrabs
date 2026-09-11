@@ -189,7 +189,6 @@ async fn corrupt_bg_meta_row_is_skipped_not_fatal() {
     assert_eq!(rows[0].origin, PushOrigin::SessionNotify);
     assert!(rows[0].bg_meta.is_none());
 }
-
 #[tokio::test]
 async fn clear_dead_sessions_reaps_only_rows_for_missing_sessions() {
     let (repo, db) = setup().await;

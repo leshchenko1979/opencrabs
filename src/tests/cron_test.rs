@@ -909,17 +909,34 @@ mod tool {
 
     #[tokio::test]
     async fn test_create_with_deliver_to() {
-        let (_db, tool) = setup().await;
-        let input = serde_json::json!({
-            "action": "create",
-            "name": "Delivered Job",
-            "cron": "0 9 * * *",
-            "prompt": "Check things",
-            "deliver_to": "telegram:123456"
-        });
-        let result = tool.execute(input, &ctx()).await.unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("telegram:123456"));
+        // The create path fail-fast-validates deliver_to against the channel
+        // credential (#107), so the test home must carry a telegram token in
+        // keys.toml — exactly what a working deployment has. Async override:
+        // the validation awaits nothing, but the test body is async and
+        // task-locals survive `.await` only via the async scope.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let opencrabs = dir.path().join(".opencrabs");
+        std::fs::create_dir_all(&opencrabs).expect("create .opencrabs");
+        std::fs::write(
+            opencrabs.join("keys.toml"),
+            "[channels.telegram]\ntoken = \"test-token\"\n",
+        )
+        .expect("write keys.toml");
+
+        crate::config::profile::with_home_override_async(opencrabs, async {
+            let (_db, tool) = setup().await;
+            let input = serde_json::json!({
+                "action": "create",
+                "name": "Delivered Job",
+                "cron": "0 9 * * *",
+                "prompt": "Check things",
+                "deliver_to": "telegram:123456"
+            });
+            let result = tool.execute(input, &ctx()).await.unwrap();
+            assert!(result.success, "create rejected: {}", result.output);
+            assert!(result.output.contains("telegram:123456"));
+        })
+        .await;
     }
 
     // --- update action (#966) ---
