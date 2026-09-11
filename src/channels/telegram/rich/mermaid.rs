@@ -599,6 +599,77 @@ pub(crate) fn resolve_markdown_media(text: &str) -> BoxFuture<'static, (String, 
     .boxed()
 }
 
+/// Media tag names Telegram's rich-markdown parser resolves as media entities.
+/// A LIVE tag from model-authored prose is a whole-message rejection when its
+/// source cannot be resolved against the media array (live Bot API probes,
+/// 2026-09-11): bare `<img>` → `RICH_MESSAGE_PHOTO_INVALID`,
+/// `<img src="tg://photo?id=x">` → same, `<video src="tg://video?id=v">` →
+/// `RICH_MESSAGE_VIDEO_INVALID`, `<audio src="tg://audio?id=a">` →
+/// `RICH_MESSAGE_AUDIO_INVALID`. `<iframe>` and `<img src="https://…">` pass.
+/// Code-span quoting is NOT a safe hiding place: one unbalanced backtick in
+/// prose shifts span pairing for the rest of the section and exposes the tag
+/// (#134 root cause — a lone `<img>` in a 18.5K card body 400'd every send).
+const PROSE_MEDIA_TAGS: [&str; 3] = ["img", "video", "audio"];
+
+/// Escape the tag opener of every media tag in model-authored prose so the
+/// text still READS `<img>` but can never go live (see [`PROSE_MEDIA_TAGS`]).
+/// Markdown syntax is untouched — only the `<` of a media tag is rewritten.
+pub(crate) fn neutralize_prose_media_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find('<') {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos + 1..];
+        let bytes = tail.as_bytes();
+        let mut n = usize::from(bytes.first() == Some(&b'/'));
+        let name_start = n;
+        while n < bytes.len() && bytes[n].is_ascii_alphabetic() {
+            n += 1;
+        }
+        let is_media = n > name_start
+            && PROSE_MEDIA_TAGS
+                .iter()
+                .any(|t| tail[name_start..n].eq_ignore_ascii_case(t));
+        out.push_str(if is_media { "&lt;" } else { "<" });
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Rewrite `tg://photo?id=<X>` references in an already-resolved rich body
+/// whose `<X>` has no matching [`MediaEntry`] into the non-triggering
+/// `tg:photo?id=<X>` form (probe-verified 200, 2026-09-11). Telegram rejects
+/// the WHOLE message with `RICH_MESSAGE_PHOTO_INVALID` when a photo reference
+/// cannot be resolved, and prose can carry such a reference as an example of
+/// the construct. Sibling of [`neutralize_prose_media_html`], which closes the
+/// HTML-tag hole.
+pub(crate) fn neutralize_orphan_photo_refs(text: &str, media: &[MediaEntry]) -> String {
+    const PREFIX: &str = "tg://photo?id=";
+    if !text.contains(PREFIX) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find(PREFIX) {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + PREFIX.len()..];
+        let id_len = after
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+            .count();
+        let id = &after[..id_len];
+        if !id.is_empty() && media.iter().any(|m| m.id == id) {
+            out.push_str(PREFIX);
+        } else {
+            out.push_str("tg:photo?id=");
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Recursively replace every `Code{lang:"mermaid"}` block with a
 /// `Mermaid{source, result}` block by pre-validating each fence. Handles
 /// top-level fences and fences nested inside quotes, list items, and details.
