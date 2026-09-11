@@ -406,6 +406,123 @@ async fn handle_create_failure(error: &str, state: &TelegramState, session_id: U
     }
 }
 
+/// Spawn label for the plan-review worker (#155). The subagent spawn path
+/// keys its single write-grant exception on this exact label, so the two
+/// sides must never drift — both read this one constant.
+pub(crate) const PLAN_REVIEW_LABEL: &str = crate::brain::tools::subagent::PLAN_REVIEW_LABEL;
+
+/// Card footer while a review subagent is rewriting the plan (#155).
+pub(crate) const PLAN_REVIEW_RUNNING_NOTE: &str = "🔍 Review subagent rewriting plan…";
+
+/// Cap on the one-line review delta rendered into the card footer. The delta
+/// is a card line, not a report: the review worker is collected through
+/// `wait_agent`, so its full report is deliberately NOT echoed into the
+/// session — the delta is the only thing the owner is shown.
+const PLAN_REVIEW_DELTA_CAP: usize = 200;
+
+/// Marker the review brief asks the worker to end its report with, so the
+/// card delta is the worker's own summary rather than a scraped prose line.
+const PLAN_REVIEW_DELTA_MARKER: &str = "DELTA:";
+
+/// The keyboard a plan card should show, given whether a review is running
+/// (#155). Only the Editing keyboard grays out — a running review must not
+/// invent a keyboard for the checklist or absent states.
+pub(crate) fn plan_review_effective_kb(plan_kb: PlanKb, reviewing: bool) -> PlanKb {
+    if reviewing && plan_kb == PlanKb::ApproveDiscard {
+        PlanKb::ReviewingApproveDiscard
+    } else {
+        plan_kb
+    }
+}
+
+/// Footer note for the card, if any (#155). The running note wins over a
+/// stale delta, so the owner never reads a previous review's summary while a
+/// new one is mid-flight.
+pub(crate) fn plan_review_footer_note(
+    plan_kb: PlanKb,
+    reviewing: bool,
+    delta: Option<String>,
+) -> Option<String> {
+    // The footer belongs to the EDITING card only. The same renderer draws the
+    // Active checklist card (Discard-only) and the None card, and a review
+    // delta or a "reviewing…" note left over on either of those would describe
+    // a plan state that no longer exists.
+    if !matches!(
+        plan_kb,
+        PlanKb::ApproveDiscard | PlanKb::ReviewingApproveDiscard
+    ) {
+        return None;
+    }
+    if reviewing {
+        return Some(PLAN_REVIEW_RUNNING_NOTE.to_string());
+    }
+    delta.filter(|d| !d.trim().is_empty())
+}
+
+/// Append the footer to a rendered card body (#155). Deliberately outside the
+/// renderers: both production arms of `refresh_plan_card` call one renderer
+/// each, so appending here covers rich and classic alike — without threading a
+/// fifth parameter through every renderer and its many test call sites.
+pub(crate) fn plan_card_with_footer(body: String, footer: Option<&str>) -> String {
+    let Some(note) = footer.map(str::trim).filter(|n| !n.is_empty()) else {
+        return body;
+    };
+    format!("{body}\n\n{note}")
+}
+
+/// Spawn input for the plan-review worker (#155). Pure so the test asserts the
+/// exact contract the production path sends instead of a copy of it.
+pub(crate) fn plan_review_spawn_input(session_id: Uuid, brief: String) -> serde_json::Value {
+    serde_json::json!({
+        "prompt": brief,
+        "label": PLAN_REVIEW_LABEL,
+        "plan_session": session_id.to_string(),
+        "read_only": false,
+    })
+}
+
+/// Child agent id from a `spawn_agent` tool result (#155). The spawn returns
+/// `Spawned sub-agent '<label>' with id: <id>`; parse the id rather than
+/// treating that acknowledgement as the worker's report — the defect the first
+/// attempt shipped.
+pub(crate) fn plan_review_agent_id(spawn_output: &str) -> Option<String> {
+    let rest = spawn_output.split_once("with id: ")?.1;
+    let id = rest.split_whitespace().next().unwrap_or_default();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+/// One-line card delta from a finished review's report (#155). Reads the
+/// worker's own `DELTA:` line; falls back to a status line so the card always
+/// says something true about what happened.
+pub(crate) fn plan_review_delta(report: Option<&str>) -> String {
+    let Some(report) = report else {
+        return "✨ Review finished but returned no report.".to_string();
+    };
+    let summary = report
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(PLAN_REVIEW_DELTA_MARKER))
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match summary {
+        Some(s) => format!("✨ Review: {}", clamp_review_delta(s)),
+        None => "✨ Review finished (no summary line returned).".to_string(),
+    }
+}
+
+/// Clamp a review summary to the footer budget, marking the cut with an
+/// ellipsis — a silently shortened sentence reads as a complete one, and the
+/// owner would never know the worker had more to say.
+fn clamp_review_delta(s: &str) -> String {
+    let cut = truncate_chars(s, PLAN_REVIEW_DELTA_CAP);
+    if cut.len() == s.len() {
+        s.to_string()
+    } else {
+        format!("{cut}…")
+    }
+}
+
 /// Create or update the session's plan card to reflect the live plan state,
 /// carrying `plan_kb`. Removes the card when the plan is gone.
 ///
@@ -462,6 +579,16 @@ pub(crate) async fn refresh_plan_card(
     };
     let use_rich = Config::current().channels.telegram.rich_messages;
 
+    // #155: a plan review in flight grays the Review button and explains
+    // itself in the footer; a finished review leaves its one-line delta there.
+    let reviewing = state.is_plan_reviewing(session_id).await;
+    let plan_kb = plan_review_effective_kb(plan_kb, reviewing);
+    let footer_note = plan_review_footer_note(
+        plan_kb,
+        reviewing,
+        state.plan_review_delta(session_id).await,
+    );
+
     // Try rich path first when enabled: sendRichMessage (32K) as the
     // markdown+media dialect (#134 family) — raw markdown prose with inline
     // details/summary collapsibles (probe-proven, 2026-09-10) and rendered
@@ -480,6 +607,9 @@ pub(crate) async fn refresh_plan_card(
     {
         let (rich_md, media) = super::rich::mermaid::resolve_markdown_media(&md).await;
         let rich_md = super::rich::normalize_tables(&rich_md);
+        // #155 footer rides the body, so it lands inside the signature below —
+        // a footer-only change (review started, or a new delta) must re-render.
+        let rich_md = plan_card_with_footer(rich_md, footer_note.as_deref());
         let kb_val = plan_kb
             .keyboard()
             .and_then(|m| serde_json::to_value(m).ok());
@@ -614,6 +744,9 @@ pub(crate) async fn refresh_plan_card(
         }
         return;
     };
+    // #155: footer rides the body, so it lands inside `signature` below — a
+    // footer-only change (review started, or a new delta) must re-render.
+    let html = plan_card_with_footer(html, footer_note.as_deref());
     let kb = plan_kb.keyboard();
     let signature = format!("{html}\u{1}{plan_kb:?}");
 
@@ -989,6 +1122,10 @@ pub(crate) async fn remove_plan_card(
     // instead: the lock is not reentrant, so re-acquiring it deadlocks.
     let card_lock = state.plan_card_lock(session_id).await;
     let _guard = card_lock.lock().await;
+    // #155: the card is going away, so the review footer goes with it — a
+    // stale "✨ Review: …" must never resurface on a later plan in the same
+    // session (the same stale-chrome family the goal-scoping filter fixed).
+    state.clear_plan_review_delta(session_id).await;
     remove_plan_card_locked(bot, chat, state, session_id).await;
 }
 
