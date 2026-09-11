@@ -492,58 +492,12 @@ impl AgentService {
         session_id: Uuid,
         kind: super::compaction_prompts::CompactionKind,
     ) -> String {
-        // Union (issue #131): slash-invoked skills (#219 registry) plus
-        // skills the session CONSUMED by reading (seen_skills registry) —
-        // the inventory must reflect every way the agent loaded a skill.
-        // Deduped by BTreeSet; slash-invocation wins nothing extra because
-        // both registries store the same slug strings.
-        let active: std::collections::BTreeSet<String> = self
-            .active_skills_for_session(session_id)
-            .into_iter()
-            .collect();
-        // Epoch bump (#150) BEFORE the seen-inventory read below is NOT
-        // required and after it is not harmful: `note_compaction` bumps a
-        // per-session epoch counter and clears nothing, so
-        // `seen_for_session` is unaffected either way (decision 5 — a
-        // clearing implementation would empty the stamp's inventory).
         crate::brain::tools::seen_skills::note_compaction(session_id);
-        let seen: std::collections::BTreeSet<String> =
-            crate::brain::tools::seen_skills::seen_for_session(session_id)
-                .into_iter()
-                .collect();
-        let skills: Vec<String> = active.union(&seen).cloned().collect();
-        // Lazy-tool inventory for the tool stamp: the EXTENDED tools this
-        // session activated (tool_search discovery + JIT-on-execute both
-        // call registry.activate). In-memory — this is exactly the state
-        // that dies on restart, so it must ride the persisted continuation.
-        let lazy_tools: Vec<String> = {
-            let mut v: Vec<String> = self
-                .tool_registry
-                .active_tools(session_id)
-                .into_iter()
-                .collect();
-            v.sort();
-            v
-        };
-        tracing::debug!(
-            "continuation_prompt({kind:?}): skill inventory stamp = {skills:?} \
-             (active {}/{} + seen {}/{}); lazy-tool stamp = {lazy_tools:?}",
-            skills.len(),
-            active.len(),
-            seen.len(),
-            skills.len()
-        );
-        super::compaction_prompts::append_tool_stamp(
-            super::compaction_prompts::append_skill_stamp(
-                super::compaction_prompts::build_continuation(
-                    kind,
-                    self.silent_compaction,
-                    self.auto_approve_tools,
-                    super::compaction_prompts::PlanRecovery::for_session(session_id).await,
-                ),
-                &skills,
-            ),
-            &lazy_tools,
+        super::compaction_prompts::build_continuation(
+            kind,
+            self.silent_compaction,
+            self.auto_approve_tools,
+            super::compaction_prompts::PlanRecovery::for_session(session_id).await,
         )
     }
 
@@ -563,14 +517,30 @@ impl AgentService {
         marker_suffix: &str,
         persist: bool,
     ) -> Result<()> {
+        let marker_content = outcome.marker(marker_suffix);
         message_service
             .create_message(
                 session_id,
                 "user".to_string(),
-                outcome.marker(marker_suffix),
+                marker_content.clone(),
             )
             .await
             .map_err(AgentError::db)?;
+
+        // Curate active skills and lazy tools according to the machine-readable manifest.
+        if let CompactionOutcome::Summarised(summary) = outcome {
+            if let Some(manifest) = crate::brain::agent::service::context::parse_context_manifest(summary) {
+                for discard_slug in manifest.discard_skills {
+                    self.unregister_active_skill(session_id, &discard_slug);
+                }
+                for active_slug in manifest.active_skills {
+                    self.register_active_skill(session_id, &active_slug);
+                }
+                if !manifest.required_tools.is_empty() {
+                    self.tool_registry.activate_tools(session_id, manifest.required_tools);
+                }
+            }
+        }
 
         let cont_text = self.continuation_prompt(session_id, kind).await;
         if persist {

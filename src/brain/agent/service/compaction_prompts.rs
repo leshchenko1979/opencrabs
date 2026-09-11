@@ -141,62 +141,6 @@ pub fn build_continuation(
     text
 }
 
-/// Advisory skill-inventory stamp (#125): names the skills that were
-/// active (slash-invoked) in this session before the compaction, framed
-/// as CONSIDER-not-RELOAD — the session's focus may have shifted while
-/// the context was compacting, so the waking agent weighs each skill's
-/// relevance against the IMMEDIATE TASK instead of blindly re-reading
-/// bodies it may no longer need. An empty slice produces NO stamp at
-/// all: zero marginal tokens for sessions that never touched a skill.
-///
-/// The list rides the continuation prompt (mechanically composed from
-/// in-memory session state at build time), so it is immune to the
-/// summarizer's token-budget drops — the durable-state property the
-/// research phase identified as the gap.
-pub fn append_skill_stamp(mut text: String, active_skills: &[String]) -> String {
-    if active_skills.is_empty() {
-        return text;
-    }
-    let mut names: Vec<&str> = active_skills.iter().map(|s| s.as_str()).collect();
-    names.sort();
-    text.push_str(&format!(
-        "\n\nSKILLS LOADED PRE-COMPACTION: {}. Session focus may have \
-         shifted — consider whether each is still relevant to the \
-         IMMEDIATE TASK; reload only those that are.",
-        names.join(", ")
-    ));
-    text
-}
-
-/// Advisory lazy-tool-inventory stamp: names the EXTENDED (lazy) tools
-/// that were active in this session before the compaction. Lazy tools
-/// are activated by `tool_search` discovery or JIT-on-execute and live
-/// in `ToolRegistry.session_active` — an in-memory map that dies on
-/// restart, leaving the waking agent no trace of which tool schemas it
-/// had loaded. This stamp is the durable record. Names only — no
-/// schemas, no descriptions (the waking agent re-surfaces any tool it
-/// needs via `tool_search`, which is cheap).
-///
-/// Same omit-when-empty rule as [`append_skill_stamp`]: an empty set
-/// produces NO stamp at all — zero marginal tokens for sessions that
-/// never activated a lazy tool. The list is "loaded at compaction time"
-/// semantics, not full session history: the registry's LRU cap (#603)
-/// may have evicted older entries, hence the recency caveat.
-pub fn append_tool_stamp(mut text: String, active_tools: &[String]) -> String {
-    if active_tools.is_empty() {
-        return text;
-    }
-    let mut names: Vec<&str> = active_tools.iter().map(|s| s.as_str()).collect();
-    names.sort();
-    text.push_str(&format!(
-        "\n\nLAZY TOOLS LOADED PRE-COMPACTION: {}. Snapshot of what was \
-         loaded at compaction time (older entries may have been evicted) \
-         — re-surface any tool via tool_search when needed.",
-        names.join(", ")
-    ));
-    text
-}
-
 fn fun_body(kind: CompactionKind) -> &'static str {
     match kind {
         CompactionKind::Regular => {

@@ -3,18 +3,13 @@
 //! Two failure classes are pinned here:
 //!
 //! 1. **The silent non-persist.** `apply_compaction_continuation` takes a
+//! 1. **The silent non-persist.** `apply_compaction_continuation` takes a
 //!    `persist` flag; only Manual /compact passed `true`. All five automatic
-//!    kinds passed `false`, so the continuation (skill stamp, CRITICAL
-//!    continue-instructions, plan recovery) reached in-memory context only
-//!    and was never written to the DB. A restarted auto-compacted session
-//!    replayed marker + bare summary and got no continuation at all. The
-//!    unit tests around the stamps drive `append_tool_stamp` /
-//!    `append_skill_stamp` directly and would keep passing — this guard
-//!    reads the call sites themselves, like the single-continuation-path
-//!    guard does.
-//!
-//! 2. **Restart parity.** The loader (`messages_from_last_compaction`)
-//!    replays everything from the compaction marker forward, so a persisted
+//!    kinds passed `false`, so the continuation (continue-instructions, plan recovery)
+//!    reached in-memory context only and was never written to the DB. A restarted
+//!    auto-compacted session replayed marker + bare summary and got no
+//!    continuation at all. This guard reads the call sites themselves,
+//!    like the single-continuation-path guard does.
 //!    continuation rides the restart for free. The parity test pins that:
 //!    a DB-shaped history that carries the marker + stamped continuation
 //!    survives the replay with both stamps intact.
