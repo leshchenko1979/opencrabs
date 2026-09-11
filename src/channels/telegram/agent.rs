@@ -2502,7 +2502,7 @@ async fn execute_plan_review_subagent(
                     _ = stop.notified() => break,
                     _ = interval.tick() => {
                         if let Some(status) =
-                            crate::brain::tools::subagent::status::AgentStatus::read(&child_id_c)
+                            crate::brain::agent::service::work_status::WorkStatus::read(&child_id_c)
                         {
                             let note = crate::channels::telegram::plan_card::format_plan_review_running_progress(
                                 status.progress.as_ref(),
@@ -2517,7 +2517,7 @@ async fn execute_plan_review_subagent(
                                     &state_c,
                                     &agent_c,
                                     session_id,
-                                    crate::channels::telegram::flow_chrome::PlanKb::ReviewingApproveDiscard,
+                                    crate::channels::telegram::flow_chrome::PlanKb::ApproveDiscard,
                                 )
                                 .await;
                             }
