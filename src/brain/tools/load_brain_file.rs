@@ -109,7 +109,6 @@ impl Tool for LoadBrainFileTool {
             }));
         }
 
-
         // Filename form of a skill (issue #138): "<slug>.md" resolves through
         // the skill registry exactly like the bare slug form — same marking,
         // same body framing, query filtering included. Before #138 this form

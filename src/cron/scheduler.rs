@@ -1201,9 +1201,10 @@ async fn deliver_http(url: &str, job_name: &str, content: &str, api_key: Option<
 
 /// Read `channels.<channel>.<field>` (e.g. a bot token) from the active
 /// workspace's `keys.toml`. Cron delivery runs outside any channel's live
-/// connection, so it reads the credential straight off disk.
+/// connection, so it reads the credential straight off disk. Also used by
+/// cron_manage's fail-fast delivery validation (#107).
 #[cfg(any(feature = "telegram", feature = "discord", feature = "slack"))]
-fn read_channel_secret(channel: &str, field: &str) -> Option<String> {
+pub(crate) fn read_channel_secret(channel: &str, field: &str) -> Option<String> {
     let keys_path = crate::brain::BrainLoader::resolve_path().join("keys.toml");
     let content = std::fs::read_to_string(&keys_path).ok()?;
     content.parse::<toml::Table>().ok().and_then(|t| {

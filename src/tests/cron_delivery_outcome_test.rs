@@ -78,10 +78,20 @@ async fn delivery_failure_stamps_delivery_failed_not_success() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(status, "delivery_failed", "silent success is the #107 defect");
-    assert_eq!(content.as_deref(), Some("report body"), "execution content must survive the delivery-failure stamp");
+    assert_eq!(
+        status, "delivery_failed",
+        "silent success is the #107 defect"
+    );
+    assert_eq!(
+        content.as_deref(),
+        Some("report body"),
+        "execution content must survive the delivery-failure stamp"
+    );
     assert!(
-        error.as_deref().unwrap_or_default().contains("No Telegram bot token"),
+        error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("No Telegram bot token"),
         "reason must be recorded on the row"
     );
 }
@@ -93,8 +103,12 @@ async fn delivery_failure_never_overwrites_execution_error() {
     let run_id = format!("{}-107b", Uuid::new_v4());
     seed_run(&pool, &run_id, chrono::Utc::now()).await;
 
-    repo.complete_error(&run_id, "agent exploded").await.unwrap();
-    repo.complete_delivery_failed(&run_id, "late delivery failure").await.unwrap();
+    repo.complete_error(&run_id, "agent exploded")
+        .await
+        .unwrap();
+    repo.complete_delivery_failed(&run_id, "late delivery failure")
+        .await
+        .unwrap();
 
     let (status, error): (String, Option<String>) = pool
         .get()
@@ -112,7 +126,11 @@ async fn delivery_failure_never_overwrites_execution_error() {
         .unwrap();
 
     assert_eq!(status, "error", "execution error must keep its status");
-    assert_eq!(error.as_deref(), Some("agent exploded"), "execution error reason must survive");
+    assert_eq!(
+        error.as_deref(),
+        Some("agent exploded"),
+        "execution error reason must survive"
+    );
 }
 
 #[test]
@@ -142,7 +160,9 @@ fn delivery_target_validation_checks_channel_credential() {
         match (secret.is_some(), result.is_ok()) {
             (true, true) | (false, false) => {} // agreement
             (true, false) => panic!("validator refused a resolvable credential"),
-            (false, true) => panic!("validator accepted an unresolvable credential — silent drop (#107)"),
+            (false, true) => {
+                panic!("validator accepted an unresolvable credential — silent drop (#107)")
+            }
         }
     }
 }

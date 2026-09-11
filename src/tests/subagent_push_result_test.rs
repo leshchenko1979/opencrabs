@@ -160,10 +160,10 @@ fn a_long_output_hint_names_the_persisted_file_not_the_ram_tool() {
         "hint must no longer claim the RAM-resident tool holds the report"
     );
     assert!(msg.context_text.contains("output_full"));
-    let expected_path =
-        crate::brain::tools::subagent::status::status_path("hint-id-1");
+    let expected_path = crate::brain::tools::subagent::status::status_path("hint-id-1");
     assert!(
-        msg.context_text.contains(&expected_path.display().to_string()),
+        msg.context_text
+            .contains(&expected_path.display().to_string()),
         "hint carries the real status-file path: {expected_path:?}"
     );
 }

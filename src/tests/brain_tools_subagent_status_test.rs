@@ -142,8 +142,7 @@ fn cleanup_removes_old_files() {
 #[test]
 fn output_full_roundtrip_is_byte_exact_and_summary_is_gone() {
     isolate("output_full");
-    let report: String = "# REVIEW\n\n"
-        .to_string()
+    let report: String = "# REVIEW\n\n".to_string()
         + &"detail line with plenty of words to bulk it up.\n".repeat(128);
     assert!(report.chars().count() > 5000, "fixture must be ~5 KB");
     let mut s = AgentStatus::new("of-1", "review", "sess-of", "review the skill").unwrap();
@@ -188,7 +187,11 @@ fn legacy_output_summary_file_deserializes_cleanly() {
         "output_summary": "all done"
     });
     fs::create_dir_all(status_path("of-3").parent().unwrap()).expect("status dir");
-    fs::write(status_path("of-3"), serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+    fs::write(
+        status_path("of-3"),
+        serde_json::to_string_pretty(&legacy).unwrap(),
+    )
+    .unwrap();
     let s = AgentStatus::read("of-3").expect("legacy file parses");
     assert_eq!(s.state, AgentState::Completed);
     assert_eq!(s.output_full, None, "no backfill of the old stub");

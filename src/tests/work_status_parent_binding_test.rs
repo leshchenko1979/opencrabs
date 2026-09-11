@@ -120,7 +120,10 @@ fn natural_completion_persists_full_output_byte_exact() {
     let dir = temp_status_dir("of-natural");
     let report: String = "# LENS REPORT\n\n".to_string()
         + &"finding: detail with enough bulk to exceed any stub cap.\n".repeat(80);
-    assert!(report.chars().count() > 200, "fixture must exceed 200 chars");
+    assert!(
+        report.chars().count() > 200,
+        "fixture must exceed 200 chars"
+    );
 
     let mut agent = WorkStatus::new_agent(
         "of-natural-1",
