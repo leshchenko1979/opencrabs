@@ -1808,6 +1808,28 @@ impl Tool for PlanTool {
                         .map(|c| c.verification.criteria_policy)
                         .unwrap_or_default();
 
+                    #[cfg(feature = "telegram")]
+                    for it in &tasks {
+                        if let Some(desc) = &it.description
+                            && crate::channels::telegram::rich::mermaid::should_render_mermaid(desc)
+                        {
+                            let parse_errors =
+                                crate::channels::telegram::rich::mermaid::preflight_parse_errors(
+                                    desc,
+                                )
+                                .await;
+                            if !parse_errors.is_empty() {
+                                return Ok(ToolResult::error(format!(
+                                    "PLAN TASK REFUSED: Mermaid diagram syntax error in task description ('{}').\n\n\
+                                     Renderer diagnostic:\n{}\n\n\
+                                     Please fix the Mermaid diagram syntax in the task description and try again.",
+                                    it.title,
+                                    parse_errors.join("\n")
+                                )));
+                            }
+                        }
+                    }
+
                     for it in &tasks {
                         let parsed_type = parse_task_type(&it.task_type);
                         let order = new_plan.tasks.len() + 1;
@@ -1915,6 +1937,28 @@ impl Tool for PlanTool {
                     .map(|c| c.verification.criteria_policy)
                     .unwrap_or_default();
 
+                #[cfg(feature = "telegram")]
+                for it in &tasks {
+                    if let Some(desc) = &it.description
+                        && crate::channels::telegram::rich::mermaid::should_render_mermaid(desc)
+                    {
+                        let parse_errors =
+                            crate::channels::telegram::rich::mermaid::preflight_parse_errors(
+                                desc,
+                            )
+                            .await;
+                        if !parse_errors.is_empty() {
+                            return Ok(ToolResult::error(format!(
+                                "PLAN TASK REFUSED: Mermaid diagram syntax error in task description ('{}').\n\n\
+                                 Renderer diagnostic:\n{}\n\n\
+                                 Please fix the Mermaid diagram syntax in the task description and try again.",
+                                it.title,
+                                parse_errors.join("\n")
+                            )));
+                        }
+                    }
+                }
+
                 let mut added: Vec<String> = Vec::new();
                 for it in tasks {
                     let task_title = it.title.clone();
@@ -1970,6 +2014,24 @@ impl Tool for PlanTool {
                 let policy = ralph_loop_config(&context.working_dir())
                     .map(|c| c.verification.criteria_policy)
                     .unwrap_or_default();
+
+                #[cfg(feature = "telegram")]
+                if let Some(desc) = &description
+                    && crate::channels::telegram::rich::mermaid::should_render_mermaid(desc)
+                {
+                    let parse_errors =
+                        crate::channels::telegram::rich::mermaid::preflight_parse_errors(desc)
+                            .await;
+                    if !parse_errors.is_empty() {
+                        return Ok(ToolResult::error(format!(
+                            "PLAN TASK REFUSED: Mermaid diagram syntax error in task description ('{title}').\n\n\
+                             Renderer diagnostic:\n{}\n\n\
+                             Please fix the Mermaid diagram syntax in the task description and try again.",
+                            parse_errors.join("\n")
+                        )));
+                    }
+                }
+
                 let parsed_type = parse_task_type(&task_type);
                 let order = current_plan.tasks.len() + 1;
 
