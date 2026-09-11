@@ -412,6 +412,18 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
 
     // Then detached commands, which keep their own table.
     reported += report_interrupted().await;
+    // Their STATUS FILES are a separate surface: `report_interrupted` accounts
+    // for the DB row but never rewrites the file, so a restart-killed command
+    // left a forever-`Running` file that every reader saw as live work (#111
+    // follow-up, Part D). No notice here — the row path already notified; this
+    // only makes the file agree with reality.
+    let finalized = super::work_status::reconcile_stale_commands();
+    if finalized > 0 {
+        tracing::info!(
+            target: "background_task",
+            "Boot status reconcile: finalized={finalized} stale command status file(s)"
+        );
+    }
 
     // Finally the durable notify queue (#111): pushes parked in memory by a
     // process that died before their session claimed them. Re-offered AFTER

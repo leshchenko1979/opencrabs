@@ -448,6 +448,49 @@ impl WorkStatus {
                 && !matches!(s.state, WorkState::Completed | WorkState::Failed)
         })
     }
+
+    /// Finalize detached-COMMAND status files left `Running` by a restart
+    /// (#111 follow-up, Part D).
+    ///
+    /// [`crate::brain::agent::service::restart_recovery::report_interrupted`]
+    /// accounts for a killed command through its DB row and notifies the
+    /// owning session, but it never rewrites the status FILE — so every
+    /// restart-killed command left a file reading `Running` forever, and
+    /// every file reader (`tasks_list`, the waiter sweeps) saw work that no
+    /// longer existed. At boot no command can be live, so a `Running`
+    /// command file is stale by construction.
+    ///
+    /// Deliberately emits NO notice: the DB-row path already reported the
+    /// interruption, and a second notice would be a duplicate wake.
+    /// Returns how many files were finalized.
+    pub fn reconcile_stale_commands() -> usize {
+        let ids = match Self::list_all() {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(
+                    target: "background_task",
+                    "Could not list detached status files for boot reconcile: {e}"
+                );
+                return 0;
+            }
+        };
+        let mut finalized = 0usize;
+        for id in ids {
+            let Some(mut status) = Self::read(&id) else {
+                continue;
+            };
+            if status.kind == WorkKind::Command && status.state == WorkState::Running {
+                match status.mark_interrupted() {
+                    Ok(()) => finalized += 1,
+                    Err(e) => tracing::warn!(
+                        target: "background_task",
+                        "Could not finalize stale command status '{id}': {e}"
+                    ),
+                }
+            }
+        }
+        finalized
+    }
 }
 
 // ── Legacy migration ─────────────────────────────────────────────────

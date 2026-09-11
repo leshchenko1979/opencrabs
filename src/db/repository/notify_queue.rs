@@ -230,4 +230,32 @@ impl NotifyQueueRepository {
             .context("Failed to clear matching notify queue rows")?;
         Ok(())
     }
+
+    /// Reap rows whose owning session no longer exists (#111 follow-up, Part B).
+    ///
+    /// A row for a session that is gone can never be claimed: no channel will
+    /// ever register a route for it, so no consume site will ever clear it.
+    /// Left alone it survives every boot forever, and boot redelivery keeps
+    /// re-offering it to a target that cannot exist. Returns how many rows
+    /// were dropped.
+    ///
+    /// Failure direction matches every other clear here: the push was already
+    /// undeliverable (its session is gone), so dropping it loses nothing a
+    /// route could have carried.
+    pub async fn clear_dead_sessions(&self) -> Result<usize> {
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "DELETE FROM notify_queue \
+                     WHERE session_id NOT IN (SELECT id FROM sessions)",
+                    [],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to reap notify-queue rows for dead sessions")
+    }
 }
