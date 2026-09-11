@@ -16,8 +16,8 @@ use crate::channels::telegram::rich::markdown_to_html_mermaid;
 use crate::channels::telegram::rich::mermaid::{
     MediaEntry, base64url, cache_get, cache_put, classify_render_failure, error_note, failure_html,
     find_mermaid_fences, has_mermaid_fence, image_html, ink_url, ink_url_svg, is_image_response,
-    looks_like_mermaid_source, markdown_failure_block, replacement_for, resolve_blocks,
-    resolve_markdown_media,
+    looks_like_mermaid_source, markdown_failure_block, neutralize_orphan_photo_refs,
+    neutralize_prose_media_html, replacement_for, resolve_blocks, resolve_markdown_media,
 };
 
 // ---------------------------------------------------------------------------
@@ -789,4 +789,68 @@ fn png_dims_rejects_non_png_and_short_buffers() {
     hdr.extend_from_slice(b"IDAT"); // wrong chunk type
     hdr.extend_from_slice(&[0u8; 16]);
     assert_eq!(png_dims(&hdr), None);
+}
+
+// ---------------------------------------------------------------------------
+// #134 - prose media neutralisation
+//
+// Live Bot API probes, 2026-09-11: a LIVE `<img>` in a rich markdown body is a
+// whole-message 400 (RICH_MESSAGE_PHOTO_INVALID); `<video>`/`<audio>` fail the
+// same way with their own codes, and an escaped opener is inert. One unbalanced
+// backtick in prose is enough to expose a tag that was "hidden" inside a code
+// span, so quoting is not a fix.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn prose_media_tags_are_escaped_and_other_html_survives() {
+    assert_eq!(
+        neutralize_prose_media_html("no `<img>` here"),
+        "no `&lt;img>` here"
+    );
+    assert_eq!(
+        neutralize_prose_media_html(r#"<IMG SRC="x">"#),
+        r#"&lt;IMG SRC="x">"#
+    );
+    assert_eq!(neutralize_prose_media_html("</img>"), "&lt;/img>");
+    assert_eq!(
+        neutralize_prose_media_html(r#"<video src="v">"#),
+        r#"&lt;video src="v">"#
+    );
+    assert_eq!(neutralize_prose_media_html("<audio>"), "&lt;audio>");
+    // Not media - prose keeps its own markup and plain text.
+    assert_eq!(neutralize_prose_media_html("<b>bold</b>"), "<b>bold</b>");
+    assert_eq!(
+        neutralize_prose_media_html("<iframe src=x>"),
+        "<iframe src=x>"
+    );
+    assert_eq!(neutralize_prose_media_html("a < b"), "a < b");
+    assert_eq!(neutralize_prose_media_html("images"), "images");
+    assert_eq!(neutralize_prose_media_html(""), "");
+}
+
+#[test]
+fn orphan_photo_refs_are_neutralised_but_resolved_ones_survive() {
+    let media = vec![MediaEntry {
+        id: "diag0".to_string(),
+        url: Some("https://example.invalid/d0.png".to_string()),
+        bytes: None,
+    }];
+    assert_eq!(
+        neutralize_orphan_photo_refs("![d](tg://photo?id=diag0)", &media),
+        "![d](tg://photo?id=diag0)",
+        "a ref with a matching media entry must keep resolving"
+    );
+    assert_eq!(
+        neutralize_orphan_photo_refs("![x](tg://photo?id=N)", &media),
+        "![x](tg:photo?id=N)",
+        "an orphan ref must lose its scheme so it cannot be resolved"
+    );
+    assert_eq!(
+        neutralize_orphan_photo_refs("![x](tg://photo?id=N)", &[]),
+        "![x](tg:photo?id=N)"
+    );
+    assert_eq!(
+        neutralize_orphan_photo_refs("nothing here", &media),
+        "nothing here"
+    );
 }
