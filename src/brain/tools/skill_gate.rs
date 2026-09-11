@@ -23,6 +23,11 @@
 //!   `**` matches recursively — `require_literal_separator: true`.
 //!   Globs match against the normalized ABSOLUTE path; skill authors
 //!   use `**/` prefixes (e.g. `**/skills/opencrabs-dev/**`).
+//! - **Pattern resolution** ([`compile_pattern`]): `~` expands to home;
+//!   a wildcard-led pattern (`**/x`) is unanchored and matched verbatim;
+//!   any other relative pattern anchors at the session cwd. A glob is
+//!   never blanket-prefixed with `cwd` — that silently disarms every
+//!   documented `**/…` form.
 //! - **Cheap + deterministic:** fast-exit when disabled / no loaded
 //!   skill declares globs / tool is exempt.
 
@@ -194,25 +199,41 @@ fn harvest_candidates(
         .collect()
 }
 
-/// Compile a frontmatter glob into a matcher, resolving the PATTERN the same
-/// way candidate paths are resolved: `~` expands to the home directory, a
-/// relative pattern resolves against `cwd`, and the result is normalized.
+/// Compile a frontmatter glob into a matcher.
 ///
-/// Without this, the natural Cursor-style form `~/repo/**` compiles with a
-/// literal `~` prefix and can never match an absolute candidate path — the
-/// gate would be silently inert for exactly the skills that opt in.
+/// A glob is not a path, so the resolution is deliberately narrow — and the
+/// narrowness is load-bearing:
+///
+/// 1. a leading `~` expands to the home directory (`~/repo/**`). Without
+///    this the natural Cursor-style form compiles with a literal `~` and can
+///    never match an absolute candidate path: the gate would be silently
+///    inert for exactly the skills that opt in.
+/// 2. a pattern that is absolute, or whose first component starts with a
+///    wildcard (`**/x`, `*/x`, `[ab]/x`), is used VERBATIM. `**/…` is an
+///    *unanchored* "match anywhere" pattern (`**/test` matches
+///    `/one/two/test`); prefixing it with `cwd` pins it to a prefix it can
+///    never satisfy and disarms the gate for every such skill.
+/// 3. any other relative pattern (`src/**`) anchors at the tool's `cwd`,
+///    mirroring how relative candidate paths are resolved — so a
+///    root-relative author intent still matches, instead of failing open.
+/// 4. the result is normalized (`.` / `..` / duplicate separators).
 fn compile_pattern(
     glob_str: &str,
     cwd: &std::path::Path,
 ) -> Result<glob::Pattern, glob::PatternError> {
     let expanded = super::error::expand_tilde(glob_str);
-    let as_path = std::path::Path::new(&expanded);
-    let joined = if as_path.is_absolute() {
-        as_path.to_path_buf()
+    let anchored = if expanded.is_absolute() || is_wildcard_led(glob_str) {
+        expanded
     } else {
-        cwd.join(as_path)
+        cwd.join(expanded)
     };
-    glob::Pattern::new(&normalize(&joined).to_string_lossy())
+    glob::Pattern::new(&normalize(&anchored).to_string_lossy())
+}
+
+/// Whether a glob's first path component starts with a wildcard — i.e. the
+/// pattern is anchored nowhere and must match at any depth.
+fn is_wildcard_led(glob_str: &str) -> bool {
+    matches!(glob_str.as_bytes().first(), Some(b'*' | b'?' | b'['))
 }
 /// Normalize a path for matching: resolve `.` / `..` lexically, strip
 /// redundant separators. No filesystem access — purely string-level so
