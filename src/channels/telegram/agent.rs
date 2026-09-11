@@ -2410,23 +2410,47 @@ async fn execute_plan_review_subagent(
 
     let md_path = crate::utils::plan_files::plan_md_path(session_id).await;
     let brief = format!(
-        "You are an automated plan structure reviewer. Rewrite ONE file, in place, \
-         and nothing else.\n\
+        "You are an adversarial software architecture and plan review agent.\n\
+         Your mission is to upgrade the implementation plan in-place to ensure it is concrete, \
+         feasible, edge-case hardened, and leaves zero ambiguity for the implementer.\n\
          \n\
          File: {md_path}\n\
          \n\
-         Read it first. Then fix any structural defect you find:\n\
-         - Every checklist item must carry its label INLINE on the same line as \
-         the item (a label on its own line above the item is malformed).\n\
-         - The document must keep the section layout the plan template defines.\n\
-         - Do not reword the plan's intent, do not add or remove tasks, and do \
-         not touch any other file.\n\
+         ### STEP 1: GROUNDING & CODEBASE VERIFICATION\n\
+         1. Read the plan file completely.\n\
+         2. Inspect the codebase (using grep, read_file, glob) to verify every referenced file, \
+         function, struct, route, and tool exists and matches what the plan assumes.\n\
+         3. If the plan assumes a non-existent API or wrong pattern, correct the plan to reflect real codebase ground truth.\n\
          \n\
-         If the file is already well-formed, change nothing and say so.\n\
+         ### STEP 2: ELIMINATE AMBIGUITY & UNRESOLVED FORKS\n\
+         - Hunt down all instances of \"or\", \"if needed\", \"optional\", \"TBD\", \"might\", \"consider\", or \"investigate later\".\n\
+         - Make the concrete technical decision upfront: pick the exact file, exact function, exact type, and exact sequence.\n\
+         - Do NOT leave design or scoping choices to the implementer unless strictly dependent on an external third party.\n\
          \n\
-         Finish your report with exactly one line beginning with `DELTA:` — one \
-         short sentence, under 200 characters, saying what you changed (or that \
-         nothing needed changing).",
+         ### STEP 3: ADVERSARIAL EDGE-CASE & FEASIBILITY AUDIT\n\
+         - Concurrency & State: Are shared state, locks, and active-turn collisions guarded?\n\
+         - Failure Modes: What happens on timeout, network drop, malformed payload, or missing data?\n\
+         - Integration Completeness: Are all new modules, callbacks, and routes wired into their dispatch points?\n\
+         - Acceptance Criteria: Ensure every step has verifiable, runnable commands and concrete outcomes (not vague prose).\n\
+         \n\
+         ### STEP 4: REWRITE THE PLAN IN PLACE\n\
+         Rewrite the plan directly in {md_path} ensuring:\n\
+         - All edge-cases, concrete decisions, and verified paths are incorporated into the Implementation Steps.\n\
+         - Section layout and Layer-2 contract are strictly preserved:\n\
+           * `## Context` with single-line `**Problem:** ...`, `**Target state:** ...`, `**Intent:** ...`\n\
+           * `## Implementation steps` with numbered items (`1. ...`, `2. ...`).\n\
+         - Do not alter the user's high-level goal or remove required deliverables.\n\
+         \n\
+         ### STEP 5: STRUCTURED REPORT\n\
+         End your output with three explicit sections:\n\
+         \n\
+         SUMMARY:\n\
+         <Bullet list of major edge cases, ambiguity fixes, and codebase corrections applied>\n\
+         \n\
+         OPEN_QUESTIONS:\n\
+         <If any major trade-offs, external blockers, or strategic questions require the operator's decision, list them here. If none, write: None>\n\
+         \n\
+         DELTA: <One concise summary sentence of what was changed>",
         md_path = md_path.display()
     );
 
@@ -2477,30 +2501,106 @@ async fn execute_plan_review_subagent(
         )
         .await;
 
-    let delta = match waited {
-        Err(e) => format!("⚠️ Review could not be awaited: {e}"),
+    let review_report = match waited {
+        Err(e) => {
+            let err_msg = format!("⚠️ Review could not be awaited: {e}");
+            crate::channels::telegram::plan_card::PlanReviewReport {
+                card_delta: err_msg,
+                full_summary: None,
+                open_questions: Vec::new(),
+            }
+        }
         Ok(_) => match manager.get_state(&child_id) {
             Some(crate::brain::tools::subagent::SubAgentState::Completed) => {
-                crate::channels::telegram::plan_card::plan_review_delta(
+                crate::channels::telegram::plan_card::parse_plan_review_report(
                     manager.get_output(&child_id).as_deref(),
                 )
             }
             Some(crate::brain::tools::subagent::SubAgentState::Failed(e)) => {
-                format!("⚠️ Review failed: {e}")
+                crate::channels::telegram::plan_card::PlanReviewReport {
+                    card_delta: format!("⚠️ Review failed: {e}"),
+                    full_summary: None,
+                    open_questions: Vec::new(),
+                }
             }
             Some(crate::brain::tools::subagent::SubAgentState::Cancelled) => {
-                "⚠️ Review was cancelled.".to_string()
+                crate::channels::telegram::plan_card::PlanReviewReport {
+                    card_delta: "⚠️ Review was cancelled.".to_string(),
+                    full_summary: None,
+                    open_questions: Vec::new(),
+                }
             }
             Some(crate::brain::tools::subagent::SubAgentState::AwaitingInput) => {
-                "⚠️ Review paused for input; the plan was left as it was.".to_string()
+                crate::channels::telegram::plan_card::PlanReviewReport {
+                    card_delta: "⚠️ Review paused for input; the plan was left as it was."
+                        .to_string(),
+                    full_summary: None,
+                    open_questions: Vec::new(),
+                }
             }
             Some(crate::brain::tools::subagent::SubAgentState::Running) => {
-                "⚠️ Review timed out; it may still finish in the background.".to_string()
+                crate::channels::telegram::plan_card::PlanReviewReport {
+                    card_delta: "⚠️ Review timed out; it may still finish in the background."
+                        .to_string(),
+                    full_summary: None,
+                    open_questions: Vec::new(),
+                }
             }
-            None => "⚠️ Review stopped: its worker disappeared.".to_string(),
+            None => crate::channels::telegram::plan_card::PlanReviewReport {
+                card_delta: "⚠️ Review stopped: its worker disappeared.".to_string(),
+                full_summary: None,
+                open_questions: Vec::new(),
+            },
         },
     };
-    finish(delta).await;
+
+    // Deliver findings as a native rich turn message to the thread
+    let mut findings_md = String::from("### 🔍 Plan Review Findings\n\n");
+    findings_md.push_str(&format!("**Result:** {}\n\n", review_report.card_delta));
+    if let Some(summary) = &review_report.full_summary {
+        findings_md.push_str("#### Summary of Changes\n");
+        findings_md.push_str(summary);
+        findings_md.push_str("\n\n");
+    }
+    if !review_report.open_questions.is_empty() {
+        findings_md.push_str("#### ❓ Open Questions for Discussion\n");
+        for (i, q) in review_report.open_questions.iter().enumerate() {
+            findings_md.push_str(&format!("{}. {}\n", i + 1, q));
+        }
+        findings_md.push('\n');
+    }
+
+    let cfg = crate::config::Config::current();
+    let token = cfg.channels.telegram.token.clone();
+    let api_url = cfg.channels.telegram.api_url.clone();
+    let chat_id_i64 = chat_id.0;
+
+    let send_res = crate::channels::telegram::rich::api::send_rich_markdown_id(
+        &api_url,
+        &token,
+        chat_id_i64,
+        thread_id,
+        &findings_md,
+        None,
+        "plan_review",
+        "review_findings",
+    )
+    .await;
+
+    if let Err(e) = send_res {
+        tracing::warn!(
+            "Failed to deliver rich plan review findings, falling back to basic send: {e}"
+        );
+        let _ = crate::channels::telegram::send::message_in_thread(
+            &bot,
+            chat_id,
+            thread_id,
+            &findings_md,
+        )
+        .await;
+    }
+
+    finish(review_report.card_delta).await;
 }
 
 #[derive(Clone)]
