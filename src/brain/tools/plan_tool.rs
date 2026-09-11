@@ -1810,12 +1810,14 @@ impl Tool for PlanTool {
 
                     #[cfg(feature = "telegram")]
                     for it in &tasks {
-                        if let Some(desc) = &it.description
-                            && crate::channels::telegram::rich::mermaid::should_render_mermaid(desc)
+                        if !it.description.is_empty()
+                            && crate::channels::telegram::rich::mermaid::should_render_mermaid(
+                                &it.description,
+                            )
                         {
                             let parse_errors =
                                 crate::channels::telegram::rich::mermaid::preflight_parse_errors(
-                                    desc,
+                                    &it.description,
                                 )
                                 .await;
                             if !parse_errors.is_empty() {
@@ -1939,12 +1941,14 @@ impl Tool for PlanTool {
 
                 #[cfg(feature = "telegram")]
                 for it in &tasks {
-                    if let Some(desc) = &it.description
-                        && crate::channels::telegram::rich::mermaid::should_render_mermaid(desc)
+                    if !it.description.is_empty()
+                        && crate::channels::telegram::rich::mermaid::should_render_mermaid(
+                            &it.description,
+                        )
                     {
                         let parse_errors =
                             crate::channels::telegram::rich::mermaid::preflight_parse_errors(
-                                desc,
+                                &it.description,
                             )
                             .await;
                         if !parse_errors.is_empty() {
@@ -2016,12 +2020,16 @@ impl Tool for PlanTool {
                     .unwrap_or_default();
 
                 #[cfg(feature = "telegram")]
-                if let Some(desc) = &description
-                    && crate::channels::telegram::rich::mermaid::should_render_mermaid(desc)
+                if !description.is_empty()
+                    && crate::channels::telegram::rich::mermaid::should_render_mermaid(
+                        &description,
+                    )
                 {
                     let parse_errors =
-                        crate::channels::telegram::rich::mermaid::preflight_parse_errors(desc)
-                            .await;
+                        crate::channels::telegram::rich::mermaid::preflight_parse_errors(
+                            &description,
+                        )
+                        .await;
                     if !parse_errors.is_empty() {
                         return Ok(ToolResult::error(format!(
                             "PLAN TASK REFUSED: Mermaid diagram syntax error in task description ('{title}').\n\n\
