@@ -17,8 +17,9 @@
 
 use crate::channels::telegram::flow_chrome::PlanKb;
 use crate::channels::telegram::plan_card::{
-    PLAN_REVIEW_LABEL, PLAN_REVIEW_RUNNING_NOTE, plan_card_with_footer, plan_review_agent_id,
-    plan_review_delta, plan_review_effective_kb, plan_review_footer_note, plan_review_spawn_input,
+    PLAN_REVIEW_LABEL, PLAN_REVIEW_RUNNING_NOTE, format_plan_review_running_progress,
+    plan_card_with_footer, plan_review_agent_id, plan_review_delta, plan_review_effective_kb,
+    plan_review_footer_note, plan_review_spawn_input,
 };
 use uuid::Uuid;
 
@@ -50,49 +51,47 @@ fn rows(kb: PlanKb) -> Vec<Vec<(String, String)>> {
 #[test]
 fn editing_card_offers_review_approve_discard() {
     let rows = rows(PlanKb::ApproveDiscard);
-    assert_eq!(
-        rows.len(),
-        1,
-        "the Editing card carries a single button row"
-    );
+    assert_eq!(rows.len(), 2, "the Editing card carries two button rows");
     assert_eq!(
         rows[0],
+        vec![("✅ Approve plan".to_string(), "plan:ok".to_string())],
+        "Row 1 carries Approve plan"
+    );
+    assert_eq!(
+        rows[1],
         vec![
             ("🔍 Review".to_string(), "plan:review".to_string()),
-            ("✅ Approve plan".to_string(), "plan:ok".to_string()),
             ("🗑 Discard".to_string(), "plan:no".to_string()),
         ],
-        "Review sits first, and Approve/Discard keep their exact labels and \
-         callback data — the callback handler keys on those strings"
+        "Row 2 carries Review and Discard"
     );
 }
 
 #[test]
-fn reviewing_card_replaces_review_with_a_grayed_ack_only_button() {
+fn reviewing_card_disables_approve_and_review_with_noop() {
     let rows = rows(PlanKb::ReviewingApproveDiscard);
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
     assert_eq!(
         rows[0],
+        vec![("⏳ Approve plan".to_string(), "plan:noop".to_string())],
+        "Approve plan is disabled with plan:noop while review runs"
+    );
+    assert_eq!(
+        rows[1],
         vec![
             ("⏳ Reviewing…".to_string(), "plan:noop".to_string()),
-            ("✅ Approve plan".to_string(), "plan:ok".to_string()),
             ("🗑 Discard".to_string(), "plan:no".to_string()),
         ],
-        "while a review runs the Review slot becomes a no-op ack, so a second \
-         tap can never fork a concurrent rewrite; Approve and Discard stay \
-         live because the subagent may not approve or discard for the owner"
+        "while a review runs the Review slot becomes a no-op ack, and Discard stays live"
     );
 }
 
 #[test]
-fn running_review_never_disables_approve_or_discard() {
+fn running_review_disables_approve_and_review_leaves_discard_live() {
     let reviewing = rows(PlanKb::ReviewingApproveDiscard);
-    let editing = rows(PlanKb::ApproveDiscard);
-    assert_eq!(
-        &reviewing[0][1..],
-        &editing[0][1..],
-        "the owner's own buttons are untouched by a review in flight"
-    );
+    assert_eq!(reviewing[0][0].1, "plan:noop", "Approve is disabled");
+    assert_eq!(reviewing[1][0].1, "plan:noop", "Review is disabled");
+    assert_eq!(reviewing[1][1].1, "plan:no", "Discard stays live");
 }
 
 #[test]
@@ -116,7 +115,7 @@ fn effective_keyboard_grays_only_the_editing_card() {
 
 #[test]
 fn footer_explains_a_running_review() {
-    let note = plan_review_footer_note(PlanKb::ReviewingApproveDiscard, true, None)
+    let note = plan_review_footer_note(PlanKb::ReviewingApproveDiscard, true, None, None)
         .expect("running review has a footer");
     assert_eq!(note, PLAN_REVIEW_RUNNING_NOTE);
     assert!(
@@ -129,7 +128,7 @@ fn footer_explains_a_running_review() {
 fn footer_shows_the_last_delta_once_the_review_finishes() {
     let delta = "✨ Review: fixed 2 inline labels".to_string();
     assert_eq!(
-        plan_review_footer_note(PlanKb::ApproveDiscard, false, Some(delta.clone())),
+        plan_review_footer_note(PlanKb::ApproveDiscard, false, None, Some(delta.clone())),
         Some(delta),
         "a finished review's delta stays on the card until the next one"
     );
@@ -138,17 +137,17 @@ fn footer_shows_the_last_delta_once_the_review_finishes() {
 #[test]
 fn no_footer_without_a_review_or_a_delta() {
     assert_eq!(
-        plan_review_footer_note(PlanKb::ApproveDiscard, false, None),
+        plan_review_footer_note(PlanKb::ApproveDiscard, false, None, None),
         None
     );
     // A blank delta is not a delta: rendering an empty footer would add a
     // stray blank line to every card.
     assert_eq!(
-        plan_review_footer_note(PlanKb::ApproveDiscard, false, Some("   ".to_string())),
+        plan_review_footer_note(PlanKb::ApproveDiscard, false, None, Some("   ".to_string())),
         None
     );
     assert_eq!(
-        plan_review_footer_note(PlanKb::ApproveDiscard, false, Some(String::new())),
+        plan_review_footer_note(PlanKb::ApproveDiscard, false, None, Some(String::new())),
         None
     );
 }
@@ -158,13 +157,64 @@ fn running_review_footer_wins_over_a_stale_delta() {
     let note = plan_review_footer_note(
         PlanKb::ReviewingApproveDiscard,
         true,
+        None,
         Some("✨ Review: old result".to_string()),
     )
     .expect("a running review always has a footer");
+    assert_eq!(note, PLAN_REVIEW_RUNNING_NOTE);
+}
+
+#[test]
+fn running_review_footer_shows_live_progress_note() {
+    let progress_note = "🔍 Review subagent running (turn 3 · read_file)…".to_string();
+    let note = plan_review_footer_note(
+        PlanKb::ReviewingApproveDiscard,
+        true,
+        Some(progress_note.clone()),
+        Some("✨ Review: old result".to_string()),
+    )
+    .expect("a running review with progress note renders that note");
+    assert_eq!(note, progress_note);
+}
+
+#[test]
+fn format_progress_snapshot_handles_various_states() {
     assert_eq!(
-        note, PLAN_REVIEW_RUNNING_NOTE,
-        "a second review must not display the previous review's result as if \
-         it were the current one"
+        format_plan_review_running_progress(None),
+        PLAN_REVIEW_RUNNING_NOTE
+    );
+
+    let p_zero = crate::brain::tools::subagent::ProgressSnapshot {
+        iteration: 0,
+        last_tool: Some("read_file".to_string()),
+        last_event: None,
+        updated_at: None,
+    };
+    assert_eq!(
+        format_plan_review_running_progress(Some(&p_zero)),
+        PLAN_REVIEW_RUNNING_NOTE
+    );
+
+    let p_tool = crate::brain::tools::subagent::ProgressSnapshot {
+        iteration: 4,
+        last_tool: Some("read_file".to_string()),
+        last_event: None,
+        updated_at: None,
+    };
+    assert_eq!(
+        format_plan_review_running_progress(Some(&p_tool)),
+        "🔍 Review subagent running (turn 4 · read_file)…"
+    );
+
+    let p_notool = crate::brain::tools::subagent::ProgressSnapshot {
+        iteration: 2,
+        last_tool: None,
+        last_event: None,
+        updated_at: None,
+    };
+    assert_eq!(
+        format_plan_review_running_progress(Some(&p_notool)),
+        "🔍 Review subagent running (turn 2)…"
     );
 }
 
@@ -267,6 +317,44 @@ fn delta_comes_from_the_workers_marked_summary_line() {
     assert_eq!(
         plan_review_delta(Some(report)),
         "✨ Review: moved 2 labels inline; no task text changed"
+    );
+}
+
+#[test]
+fn structured_report_parses_summary_open_questions_and_delta() {
+    let report = "### Analysis\n\
+                  Verified codebase ground truth.\n\
+                  \n\
+                  SUMMARY:\n\
+                  - Verified src/channels/telegram/flow_chrome.rs carries PlanKb.\n\
+                  - Resolved concurrency lock in TelegramState.\n\
+                  \n\
+                  OPEN_QUESTIONS:\n\
+                  1. Should we support custom timeouts for long review runs?\n\
+                  2. Do we need a dedicated log topic for review audits?\n\
+                  \n\
+                  DELTA: Hardened concurrency locks and added 2-row layout";
+
+    let parsed = crate::channels::telegram::plan_card::parse_plan_review_report(Some(report));
+    assert_eq!(
+        parsed.card_delta,
+        "✨ Review: Hardened concurrency locks and added 2-row layout"
+    );
+    assert_eq!(parsed.open_questions.len(), 2);
+    assert_eq!(
+        parsed.open_questions[0],
+        "Should we support custom timeouts for long review runs?"
+    );
+    assert_eq!(
+        parsed.open_questions[1],
+        "Do we need a dedicated log topic for review audits?"
+    );
+    assert!(parsed.full_summary.is_some());
+    assert!(
+        parsed
+            .full_summary
+            .unwrap()
+            .contains("Verified src/channels/telegram/flow_chrome.rs")
     );
 }
 
