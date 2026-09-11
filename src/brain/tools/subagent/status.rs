@@ -42,6 +42,13 @@ pub(crate) mod test_override {
     /// Reset the override so the production path is visible again — tests
     /// must not leak a thread-local dir across the runner's reused threads
     /// (same reason the work_status override carries one).
+    ///
+    /// Orphaned by the 2026-09-11 upstream merge: its only caller was the
+    /// fork's `#147` index test, which the arbitration replaced with
+    /// upstream's `work_status` version. Kept, not deleted (round-4/5
+    /// precedent: tag, don't delete) — the sub-agent-status guarantees it
+    /// served are pinned in brain_tools_subagent_status_test.rs.
+    #[allow(dead_code)]
     pub fn clear() {
         DIR.with(|d| *d.borrow_mut() = None);
     }
