@@ -216,3 +216,13 @@ fn permanent_edit_error_vocabulary_is_exact() {
     assert!(!is_permanent_edit_error("Too Many Requests: retry after 3"));
     assert!(!is_permanent_edit_error("timeout"));
 }
+
+/// D1 (#171): Rate limiter defaults are sized safely below Telegram's ~20/min
+/// group rate limit across edits, rich messages, and sends.
+#[test]
+fn rate_limiter_defaults_sized_below_group_limit() {
+    let cfg = crate::config::RateLimiterConfig::default();
+    assert_eq!(cfg.edits_per_minute, 18);
+    assert_eq!(cfg.rich_per_minute, 18);
+    assert_eq!(cfg.sends_ceiling_per_minute, 18);
+}
