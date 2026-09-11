@@ -30,6 +30,7 @@ pub use notify::SessionNotifyTool;
 pub use resume::ResumeAgentTool;
 pub use send_input::SendInputTool;
 pub use spawn::SpawnAgentTool;
+pub use status::ProgressSnapshot;
 pub use team::{TeamBroadcastTool, TeamCreateTool, TeamDeleteTool, TeamManager};
 pub use wait::WaitAgentTool;
 
