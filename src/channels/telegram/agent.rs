@@ -2387,6 +2387,7 @@ async fn execute_plan_review_subagent(
         let bot = bot.clone();
         let agent = agent.clone();
         async move {
+            state.clear_plan_review_running_note(session_id).await;
             state.set_plan_reviewing(session_id, false).await;
             state.set_plan_review_delta(session_id, delta).await;
             crate::channels::telegram::plan_card::refresh_plan_card(
@@ -2484,6 +2485,49 @@ async fn execute_plan_review_subagent(
         return;
     };
 
+    // Live progress tracker task (#155): updates the plan card with turn & tool
+    // so the review doesn't appear frozen to the operator.
+    let progress_stop = std::sync::Arc::new(tokio::sync::Notify::new());
+    let progress_task = {
+        let stop = progress_stop.clone();
+        let child_id_c = child_id.clone();
+        let state_c = state.clone();
+        let bot_c = bot.clone();
+        let agent_c = agent.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+            let mut last_rendered = String::new();
+            loop {
+                tokio::select! {
+                    _ = stop.notified() => break,
+                    _ = interval.tick() => {
+                        if let Some(status) =
+                            crate::brain::tools::subagent::status::AgentStatus::read(&child_id_c)
+                        {
+                            let note = crate::channels::telegram::plan_card::format_plan_review_running_progress(
+                                status.progress.as_ref(),
+                            );
+                            if note != last_rendered {
+                                last_rendered = note.clone();
+                                state_c.set_plan_review_running_note(session_id, note).await;
+                                crate::channels::telegram::plan_card::refresh_plan_card(
+                                    &bot_c,
+                                    chat_id,
+                                    thread_id,
+                                    &state_c,
+                                    &agent_c,
+                                    session_id,
+                                    crate::channels::telegram::flow_chrome::PlanKb::ReviewingApproveDiscard,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    };
+
     // Collect through `wait_agent` (which registers a waiter, suppressing the
     // child's own push into this session — see the fn doc). The manager stays
     // the authority on the OUTCOME: `wait_agent` returns early on a round
@@ -2501,15 +2545,14 @@ async fn execute_plan_review_subagent(
         )
         .await;
 
+    // Stop progress monitor now that wait returned
+    progress_stop.notify_one();
+    let _ = progress_task.await;
+
     let review_report = match waited {
-        Err(e) => {
-            let err_msg = format!("⚠️ Review could not be awaited: {e}");
-            crate::channels::telegram::plan_card::PlanReviewReport {
-                card_delta: err_msg,
-                full_summary: None,
-                open_questions: Vec::new(),
-            }
-        }
+        Err(e) => crate::channels::telegram::plan_card::PlanReviewReport::simple(format!(
+            "⚠️ Review could not be awaited: {e}"
+        )),
         Ok(_) => match manager.get_state(&child_id) {
             Some(crate::brain::tools::subagent::SubAgentState::Completed) => {
                 crate::channels::telegram::plan_card::parse_plan_review_report(
@@ -2517,59 +2560,33 @@ async fn execute_plan_review_subagent(
                 )
             }
             Some(crate::brain::tools::subagent::SubAgentState::Failed(e)) => {
-                crate::channels::telegram::plan_card::PlanReviewReport {
-                    card_delta: format!("⚠️ Review failed: {e}"),
-                    full_summary: None,
-                    open_questions: Vec::new(),
-                }
+                crate::channels::telegram::plan_card::PlanReviewReport::simple(format!(
+                    "⚠️ Review failed: {e}"
+                ))
             }
             Some(crate::brain::tools::subagent::SubAgentState::Cancelled) => {
-                crate::channels::telegram::plan_card::PlanReviewReport {
-                    card_delta: "⚠️ Review was cancelled.".to_string(),
-                    full_summary: None,
-                    open_questions: Vec::new(),
-                }
+                crate::channels::telegram::plan_card::PlanReviewReport::simple(
+                    "⚠️ Review was cancelled.",
+                )
             }
             Some(crate::brain::tools::subagent::SubAgentState::AwaitingInput) => {
-                crate::channels::telegram::plan_card::PlanReviewReport {
-                    card_delta: "⚠️ Review paused for input; the plan was left as it was."
-                        .to_string(),
-                    full_summary: None,
-                    open_questions: Vec::new(),
-                }
+                crate::channels::telegram::plan_card::PlanReviewReport::simple(
+                    "⚠️ Review paused for input; the plan was left as it was.",
+                )
             }
             Some(crate::brain::tools::subagent::SubAgentState::Running) => {
-                crate::channels::telegram::plan_card::PlanReviewReport {
-                    card_delta: "⚠️ Review timed out; it may still finish in the background."
-                        .to_string(),
-                    full_summary: None,
-                    open_questions: Vec::new(),
-                }
+                crate::channels::telegram::plan_card::PlanReviewReport::simple(
+                    "⚠️ Review timed out; it may still finish in the background.",
+                )
             }
-            None => crate::channels::telegram::plan_card::PlanReviewReport {
-                card_delta: "⚠️ Review stopped: its worker disappeared.".to_string(),
-                full_summary: None,
-                open_questions: Vec::new(),
-            },
+            None => crate::channels::telegram::plan_card::PlanReviewReport::simple(
+                "⚠️ Review stopped: its worker disappeared.",
+            ),
         },
     };
 
     // Deliver findings as a native rich turn message to the thread
-    let mut findings_md = String::from("### 🔍 Plan Review Findings\n\n");
-    findings_md.push_str(&format!("**Result:** {}\n\n", review_report.card_delta));
-    if let Some(summary) = &review_report.full_summary {
-        findings_md.push_str("#### Summary of Changes\n");
-        findings_md.push_str(summary);
-        findings_md.push_str("\n\n");
-    }
-    if !review_report.open_questions.is_empty() {
-        findings_md.push_str("#### ❓ Open Questions for Discussion\n");
-        for (i, q) in review_report.open_questions.iter().enumerate() {
-            findings_md.push_str(&format!("{}. {}\n", i + 1, q));
-        }
-        findings_md.push('\n');
-    }
-
+    let findings_md = review_report.to_findings_markdown();
     let chat_id_i64 = chat_id.0;
     let send_res = crate::channels::telegram::rich::api::send_rich_markdown_id(
         bot.api_url().as_str(),
