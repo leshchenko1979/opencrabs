@@ -943,5 +943,6 @@ pub mod whatsapp_store_test;
 pub mod whatsapp_stream_test;
 pub mod whatsapp_voice_note_test;
 pub mod word_delete_keybinding_test;
+pub mod work_status_reconcile_test;
 pub mod write_partial_view_guard_test;
 pub mod zhipu_endpoint_test;

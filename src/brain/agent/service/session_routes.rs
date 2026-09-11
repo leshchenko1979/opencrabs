@@ -323,6 +323,11 @@ pub fn deliver_to_session(session_id: Uuid, msg: QueuedUserMessage, interrupt: b
         };
     }
     if let Some(route) = session_route(target) {
+        // Retire the durable twin at the delivery chokepoint itself (#111
+        // follow-up, Part A): every successful route clears its own row,
+        // instead of relying on each consume site to remember. Clear BEFORE
+        // the move — `route` takes `msg` by value.
+        super::notify_queue::clear_on_delivery(target, &msg);
         route(target, msg);
         return if hops > 0 {
             Delivery::Redirected { to: target }
@@ -349,6 +354,9 @@ pub fn deliver_to_session(session_id: Uuid, msg: QueuedUserMessage, interrupt: b
     };
     match local {
         Some(route) => {
+            // Same chokepoint rule as the `session_route` arm above (#111
+            // follow-up, Part A): a local delivery retires its durable twin.
+            super::notify_queue::clear_on_delivery(target, &msg);
             route(target, msg);
             if hops > 0 {
                 Delivery::Redirected { to: target }
