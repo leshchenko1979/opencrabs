@@ -35,8 +35,11 @@ const SECTION_TEXT_CAP: usize = 150;
 pub(crate) enum PlanKb {
     #[default]
     None,
-    /// Editing design plan: ✅ Approve + 🗑 Discard.
+    /// Editing design plan: 🔍 Review + ✅ Approve + 🗑 Discard.
     ApproveDiscard,
+    /// Editing design plan with a review subagent running: the Review button
+    /// is replaced by a grayed ⏳ Reviewing… that only acks (#155).
+    ReviewingApproveDiscard,
     /// Active checklist: 🗑 Discard only.
     DiscardOnly,
 }
@@ -50,6 +53,12 @@ impl PlanKb {
         match self {
             PlanKb::None => None,
             PlanKb::ApproveDiscard => Some(InlineKeyboardMarkup::new(vec![vec![
+                InlineKeyboardButton::callback("🔍 Review", "plan:review"),
+                InlineKeyboardButton::callback("✅ Approve plan", "plan:ok"),
+                InlineKeyboardButton::callback("🗑 Discard", "plan:no"),
+            ]])),
+            PlanKb::ReviewingApproveDiscard => Some(InlineKeyboardMarkup::new(vec![vec![
+                InlineKeyboardButton::callback("⏳ Reviewing…", "plan:noop"),
                 InlineKeyboardButton::callback("✅ Approve plan", "plan:ok"),
                 InlineKeyboardButton::callback("🗑 Discard", "plan:no"),
             ]])),

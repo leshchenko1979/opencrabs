@@ -862,6 +862,7 @@ mod telegram_photo_thread_scope_test;
 pub mod telegram_plan_card_interrupt_restick_test;
 pub mod telegram_plan_finalize_test;
 pub mod telegram_plan_render_test;
+pub mod telegram_plan_review_test;
 pub mod telegram_pre_tool_rolling_test;
 pub mod telegram_quote_reply_test;
 pub mod telegram_react_delivery_test;

@@ -458,11 +458,22 @@ impl Tool for SpawnAgentTool {
             // write-freeze). Currently reachable only after spawn_agent leaves
             // EDITING_DENIED_NAMES; landing this filter first keeps that
             // removal safe.
-            if matches!(
-                crate::utils::plan_files::plan_mode_state(context.session_id).await,
-                crate::utils::plan_files::PlanModeState::PreInitEditing
-                    | crate::utils::plan_files::PlanModeState::PostInitEditing
-            ) {
+            // #155: the plan Review worker is the ONE child that must write
+            // while its parent is Editing — rewriting the plan `.md` IS its
+            // job. Label-exact, so no other spawn can widen the grant; the
+            // child still goes through the Layer-2 template guard on write
+            // (`sync_md_to_json`), which is the point of routing the rewrite
+            // through the normal write path.
+            // `label` is a String that already defaulted to "sub-agent" when
+            // the caller omitted it, so this is a plain equality.
+            let is_plan_review_worker = label == super::PLAN_REVIEW_LABEL;
+            if !is_plan_review_worker
+                && matches!(
+                    crate::utils::plan_files::plan_mode_state(context.session_id).await,
+                    crate::utils::plan_files::PlanModeState::PreInitEditing
+                        | crate::utils::plan_files::PlanModeState::PostInitEditing
+                )
+            {
                 crate::brain::tools::plan_gate::restrict_registry_to_read_only(&child_registry);
                 tracing::info!(
                     "Sub-agent spawned under a Plan-mode Editing parent: \

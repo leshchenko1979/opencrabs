@@ -32,3 +32,9 @@ pub use send_input::SendInputTool;
 pub use spawn::SpawnAgentTool;
 pub use team::{TeamBroadcastTool, TeamCreateTool, TeamDeleteTool, TeamManager};
 pub use wait::WaitAgentTool;
+
+/// Spawn label for the plan-review worker (#155). One constant shared by the
+/// spawn path (which grants this label the single write exception to the
+/// Editing-parent read-only rule) and the Telegram plan card (which sends it),
+/// so the grant and its caller can never drift apart.
+pub(crate) const PLAN_REVIEW_LABEL: &str = "plan-review";
