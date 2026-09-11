@@ -2570,14 +2570,10 @@ async fn execute_plan_review_subagent(
         findings_md.push('\n');
     }
 
-    let cfg = crate::config::Config::current();
-    let token = cfg.channels.telegram.token.clone();
-    let api_url = cfg.channels.telegram.api_url.clone();
     let chat_id_i64 = chat_id.0;
-
     let send_res = crate::channels::telegram::rich::api::send_rich_markdown_id(
-        &api_url,
-        &token,
+        bot.api_url().as_str(),
+        bot.token(),
         chat_id_i64,
         thread_id,
         &findings_md,

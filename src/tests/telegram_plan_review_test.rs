@@ -184,7 +184,7 @@ fn format_progress_snapshot_handles_various_states() {
         PLAN_REVIEW_RUNNING_NOTE
     );
 
-    let p_zero = crate::brain::tools::subagent::ProgressSnapshot {
+    let p_zero = crate::brain::tools::subagent::status::ProgressSnapshot {
         iteration: 0,
         last_tool: Some("read_file".to_string()),
         last_event: None,
@@ -195,7 +195,7 @@ fn format_progress_snapshot_handles_various_states() {
         PLAN_REVIEW_RUNNING_NOTE
     );
 
-    let p_tool = crate::brain::tools::subagent::ProgressSnapshot {
+    let p_tool = crate::brain::tools::subagent::status::ProgressSnapshot {
         iteration: 4,
         last_tool: Some("read_file".to_string()),
         last_event: None,
@@ -206,7 +206,7 @@ fn format_progress_snapshot_handles_various_states() {
         "🔍 Review subagent running (turn 4 · read_file)…"
     );
 
-    let p_notool = crate::brain::tools::subagent::ProgressSnapshot {
+    let p_notool = crate::brain::tools::subagent::status::ProgressSnapshot {
         iteration: 2,
         last_tool: None,
         last_event: None,
@@ -226,12 +226,12 @@ fn footer_never_bleeds_onto_a_non_editing_card() {
     // goal-scoping filter fixed.
     for kb in [PlanKb::None, PlanKb::DiscardOnly] {
         assert_eq!(
-            plan_review_footer_note(kb, false, Some("✨ Review: stale".to_string())),
+            plan_review_footer_note(kb, false, None, Some("✨ Review: stale".to_string())),
             None,
             "a finished review's delta must not outlive the Editing card"
         );
         assert_eq!(
-            plan_review_footer_note(kb, true, None),
+            plan_review_footer_note(kb, true, None, None),
             None,
             "a running review cannot be showing on a card that offers no \
              Review button"
