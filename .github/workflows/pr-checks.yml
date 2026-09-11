@@ -71,6 +71,11 @@ on:
         required: false
         default: false
         type: boolean
+      fast:
+        description: "true = fast gate (fmt + clippy only, skip tests); for quick syntax and lint checks"
+        required: false
+        default: false
+        type: boolean
 
 # Owner-approved 2026-08-30 (fix batch, a87b66dc; group KEY corrected same
 # day, owner "Fix it" 02:32Z on the cancel-storm finding): every
@@ -97,7 +102,7 @@ env:
 
 jobs:
   gates:
-    name: PR-lane gates (${{ inputs.ref }}${{ inputs.fix && ' — FIX MODE' || inputs.lockregen && ' — LOCK REGEN' || inputs.swap && ' — SWAP MODE' || '' }})
+    name: PR-lane gates (${{ inputs.ref }}${{ inputs.fix && ' — FIX MODE' || inputs.lockregen && ' — LOCK REGEN' || inputs.swap && ' — SWAP MODE' || inputs.fast && ' — FAST' || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -145,11 +150,11 @@ jobs:
         run: cargo clippy --locked --lib --bins --tests --all-features -- -D warnings
 
       - name: Install mold + clang (test link speed)
-        if: ${{ !inputs.fix && !inputs.lockregen }}
+        if: ${{ !inputs.fix && !inputs.lockregen && !inputs.fast }}
         run: sudo apt-get install -y mold clang
 
       - name: Run tests
-        if: ${{ !inputs.fix && !inputs.lockregen }}
+        if: ${{ !inputs.fix && !inputs.lockregen && !inputs.fast }}
         # v0.4.23 law: the all-features test gate. Flags mirror upstream's
         # `test` job exactly (profile ci + mold linker).
         env:
