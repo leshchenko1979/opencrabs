@@ -594,13 +594,11 @@ impl Tool for SpawnAgentTool {
                 let agent_id_for_progress = agent_id_clone.clone();
                 let progress_cb = std::sync::Arc::new(
                     move |_sid: uuid::Uuid, event: crate::brain::agent::ProgressEvent| {
-                        if let crate::brain::agent::ProgressEvent::ToolStarted {
-                            tool_name, ..
-                        } = event
+                        if let crate::brain::agent::ProgressEvent::ToolStarted { tool_name, .. } =
+                            event
+                            && let Some(mut st) = WorkStatus::read(&agent_id_for_progress)
                         {
-                            if let Some(mut st) = WorkStatus::read(&agent_id_for_progress) {
-                                let _ = st.update_progress(iteration, Some(tool_name), None);
-                            }
+                            let _ = st.update_progress(iteration, Some(tool_name), None);
                         }
                     },
                 );
