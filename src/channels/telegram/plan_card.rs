@@ -442,7 +442,7 @@ pub(crate) fn plan_review_effective_kb(plan_kb: PlanKb, reviewing: bool) -> Plan
 
 /// Format the running note for an in-flight review with live progress (#155).
 pub(crate) fn format_plan_review_running_progress(
-    progress: Option<&crate::brain::tools::subagent::status::ProgressSnapshot>,
+    progress: Option<&crate::brain::agent::service::work_status::ProgressSnapshot>,
 ) -> String {
     let Some(p) = progress else {
         return PLAN_REVIEW_RUNNING_NOTE.to_string();

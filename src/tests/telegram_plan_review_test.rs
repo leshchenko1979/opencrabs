@@ -184,7 +184,7 @@ fn format_progress_snapshot_handles_various_states() {
         PLAN_REVIEW_RUNNING_NOTE
     );
 
-    let p_zero = crate::brain::tools::subagent::status::ProgressSnapshot {
+    let p_zero = crate::brain::agent::service::work_status::ProgressSnapshot {
         iteration: 0,
         last_tool: Some("read_file".to_string()),
         last_event: None,
@@ -195,7 +195,7 @@ fn format_progress_snapshot_handles_various_states() {
         PLAN_REVIEW_RUNNING_NOTE
     );
 
-    let p_tool = crate::brain::tools::subagent::status::ProgressSnapshot {
+    let p_tool = crate::brain::agent::service::work_status::ProgressSnapshot {
         iteration: 4,
         last_tool: Some("read_file".to_string()),
         last_event: None,
@@ -206,7 +206,7 @@ fn format_progress_snapshot_handles_various_states() {
         "🔍 Review subagent running (turn 4 · read_file)…"
     );
 
-    let p_notool = crate::brain::tools::subagent::status::ProgressSnapshot {
+    let p_notool = crate::brain::agent::service::work_status::ProgressSnapshot {
         iteration: 2,
         last_tool: None,
         last_event: None,

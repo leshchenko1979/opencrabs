@@ -591,12 +591,31 @@ impl Tool for SpawnAgentTool {
             // Run prompt → wait for input → run again loop
             let final_output = loop {
                 iteration += 1;
+                let agent_id_for_progress = agent_id_clone.clone();
+                let progress_cb = std::sync::Arc::new(
+                    move |_sid: uuid::Uuid, event: crate::brain::agent::ProgressEvent| {
+                        if let crate::brain::agent::ProgressEvent::ToolStarted {
+                            tool_name, ..
+                        } = event
+                        {
+                            if let Some(mut st) = WorkStatus::read(&agent_id_for_progress) {
+                                let _ = st.update_progress(iteration, Some(tool_name), None);
+                            }
+                        }
+                    },
+                );
+
                 let result = child_service
-                    .send_message_with_tools_and_mode(
+                    .send_message_with_tools_and_callback(
                         child_session_id,
                         current_prompt,
                         model_override.clone(),
                         Some(cancel_clone.clone()),
+                        None,
+                        Some(progress_cb),
+                        "subagent",
+                        None,
+                        None,
                     )
                     .await;
 
