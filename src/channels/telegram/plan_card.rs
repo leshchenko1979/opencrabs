@@ -281,14 +281,19 @@ pub(crate) async fn render_plan_card_markdown(
     if let Some(sections) = prose.filter(|s| !s.is_empty()) {
         for sec in sections {
             // Markdown mode: details/summary inline, prose body raw (the
-            // markdown dialect renders md formatting + native tables).
+            // markdown dialect renders md formatting + native tables) — with
+            // media tags neutralised first: a LIVE `<img>`/`<video>`/`<audio>`
+            // tag in model-authored prose is a whole-message rejection when
+            // Telegram cannot resolve it against the media array (#134 root
+            // cause, live-probe verified).
+            let body = super::rich::mermaid::neutralize_prose_media_html(&sec.body);
             blocks.push(CardBlock::Block(match &sec.heading {
                 Some(h) => format!(
                     "<details><summary><b>{}</b></summary>\n{}\n</details>",
                     escape_html(h),
-                    sec.body
+                    body
                 ),
-                None => sec.body.clone(),
+                None => body,
             }));
         }
     }
@@ -606,6 +611,11 @@ pub(crate) async fn refresh_plan_card(
         .await
     {
         let (rich_md, media) = super::rich::mermaid::resolve_markdown_media(&md).await;
+        // A `tg://photo?id=X` reference with no matching media entry is a
+        // whole-message 400 (`RICH_MESSAGE_PHOTO_INVALID`); prose can carry
+        // one as an example. Neutralise orphans AFTER resolution so the refs
+        // the resolver just created keep resolving.
+        let rich_md = super::rich::mermaid::neutralize_orphan_photo_refs(&rich_md, &media);
         let rich_md = super::rich::normalize_tables(&rich_md);
         // #155 footer rides the body, so it lands inside the signature below —
         // a footer-only change (review started, or a new delta) must re-render.
