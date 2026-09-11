@@ -529,14 +529,38 @@ pub(crate) struct PlanReviewReport {
     pub(crate) open_questions: Vec<String>,
 }
 
+impl PlanReviewReport {
+    pub(crate) fn simple(card_delta: impl Into<String>) -> Self {
+        Self {
+            card_delta: card_delta.into(),
+            full_summary: None,
+            open_questions: Vec::new(),
+        }
+    }
+
+    pub(crate) fn to_findings_markdown(&self) -> String {
+        let mut out = String::from("### 🔍 Plan Review Findings\n\n");
+        out.push_str(&format!("**Result:** {}\n\n", self.card_delta));
+        if let Some(summary) = &self.full_summary {
+            out.push_str("#### Summary of Changes\n");
+            out.push_str(summary);
+            out.push_str("\n\n");
+        }
+        if !self.open_questions.is_empty() {
+            out.push_str("#### ❓ Open Questions for Discussion\n");
+            for (i, q) in self.open_questions.iter().enumerate() {
+                out.push_str(&format!("{}. {}\n", i + 1, q));
+            }
+            out.push('\n');
+        }
+        out
+    }
+}
+
 /// Parse a review worker's full output into card delta, full summary, and open questions.
 pub(crate) fn parse_plan_review_report(report: Option<&str>) -> PlanReviewReport {
     let Some(report) = report else {
-        return PlanReviewReport {
-            card_delta: "✨ Review finished but returned no report.".to_string(),
-            full_summary: None,
-            open_questions: Vec::new(),
-        };
+        return PlanReviewReport::simple("✨ Review finished but returned no report.");
     };
 
     let mut open_questions = Vec::new();
@@ -580,9 +604,7 @@ pub(crate) fn parse_plan_review_report(report: Option<&str>) -> PlanReviewReport
                 if !q.is_empty() {
                     open_questions.push(q.to_string());
                 }
-            } else if !trimmed.is_empty()
-                && (trimmed.chars().next().map_or(false, |c| c.is_ascii_digit()))
-            {
+            } else if !trimmed.is_empty() && trimmed.starts_with(|c: char| c.is_ascii_digit()) {
                 let q = trimmed
                     .trim_start_matches(|c: char| {
                         c.is_ascii_digit() || c == '.' || c == ')' || c == ' '
@@ -631,6 +653,7 @@ pub(crate) fn parse_plan_review_report(report: Option<&str>) -> PlanReviewReport
 /// One-line card delta from a finished review's report (#155). Reads the
 /// worker's own `DELTA:` line; falls back to a status line so the card always
 /// says something true about what happened.
+#[cfg(test)]
 pub(crate) fn plan_review_delta(report: Option<&str>) -> String {
     parse_plan_review_report(report).card_delta
 }
