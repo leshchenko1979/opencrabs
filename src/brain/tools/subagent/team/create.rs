@@ -179,6 +179,7 @@ impl Tool for TeamCreateTool {
                 })?),
                 None => None,
             };
+
             let deprecated_raw = agent_def
                 .get("agent_type")
                 .and_then(|v| v.as_str())
@@ -312,7 +313,8 @@ impl Tool for TeamCreateTool {
                     .await
                     .with_tool_registry(child_registry)
                     .with_auto_approve_tools(true)
-                    .with_working_directory(child_dir);
+                    .with_working_directory(child_dir)
+                    .with_headless(true);
 
             if let Some(brain) = system_brain {
                 child_service_builder = child_service_builder.with_system_brain(brain);

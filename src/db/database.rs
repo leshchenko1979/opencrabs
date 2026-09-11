@@ -84,11 +84,23 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     include_str!("../migrations/20260828000001_pending_requests_origin.sql"),
     include_str!("../migrations/20260902000001_add_pending_followups.sql"),
     include_str!("../migrations/20260904000000_add_pending_followups_host_markdown.sql"),
-    // #111: durable notify queue — parked session_notify / background-task
-    // pushes survive restarts and re-offer at boot. Kept in filename order per
-    // the list invariant; databases already stamped past this index are
-    // repaired by `heal_notify_queue` after `to_latest` (#1401).
+    include_str!("../migrations/20260904120000_add_channel_messages_ship_plane.sql"),
+    // FORK (#73): durable parked-tombstone store — death reports survive
+    // restart storms instead of dying in the in-memory PARKED queue.
+    include_str!("../migrations/20260905000000_add_pending_tombstones.sql"),
+    // FORK (#111): durable notify queue — parked session_notify /
+    // background-task pushes survive restarts and re-offer at boot.
+    // Kept in filename order per the list invariant; databases already
+    // stamped past this index are repaired by `heal_notify_queue` after
+    // `to_latest` (#1401).
     include_str!("../migrations/20260906000001_add_notify_queue.sql"),
+    // FORK (#138): durable seen-skills store — the post-compaction skill
+    // inventory stamp (#125/#131) survives daemon restarts: every
+    // mark_seen writes a row, boot hydrates the in-memory registry back.
+    include_str!("../migrations/20260908000000_add_session_seen_skills.sql"),
+    // Upstream (#1462-class): pending-requests thread id — slots AFTER the
+    // fork's 20260908000000 (no version collision); prod DBs already past
+    // this index are covered by the heal pass below.
     include_str!("../migrations/20260908000001_pending_requests_thread_id.sql"),
 ];
 

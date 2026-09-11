@@ -82,8 +82,8 @@ impl Tool for LoadBrainFileTool {
         // filename form cannot (skills live in subdirectories). A success
         // here marks the skill as SEEN for this session, feeding the
         // post-compaction inventory stamp (#125/#131 union).
-        // A bare name that resolves to no known skill falls through to the
-        // brain-file handling below, which produces the "not found" error.
+        // Extracted BEFORE the skill-slug branch: the slug form supports
+        // section-filtered reloads too.
         if !name.ends_with(".md")
             && !name.contains('/')
             && !name.contains('\\')
@@ -102,6 +102,43 @@ impl Tool for LoadBrainFileTool {
                 let matches = crate::brain::brain_sections::find_sections(&body, query);
                 tracing::info!(
                     "load_brain_file(skill {}): query={query:?}: {} section(s) returned",
+                    skill.name,
+                    matches.sections.len()
+                );
+                matches.render(&format!("skill: {}", skill.name), query)
+            }));
+        }
+
+        // Filename form of a skill (issue #138): "<slug>.md" resolves through
+        // the skill registry exactly like the bare slug form — same marking,
+        // same body framing, query filtering included. Before #138 this form
+        // could only miss (skills live in skills/<slug>/SKILL.md, never in the
+        // home dir flat namespace), and a query-filtered miss registered
+        // nothing — the exact undercount the #138 probe caught live. A brain
+        // file that shares a skill's name would be shadowed, matching the
+        // user-override precedence skills already have elsewhere.
+        if let Some(skill) = name
+            .strip_suffix(".md")
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains('\\'))
+            .and_then(crate::brain::skills::resolve_skill)
+        {
+            super::seen_skills::mark_seen(ctx.session_id, &skill.name);
+            tracing::info!(
+                "load_brain_file: resolved filename form '{}.md' to skill '{}', marked seen \
+                 for session {}",
+                skill.name,
+                skill.name,
+                ctx.session_id
+            );
+            let body = skill.prompt_body();
+            return Ok(ToolResult::success(if query.is_empty() {
+                format!("--- skill: {} ---\n{}", skill.name, body)
+            } else {
+                let matches = crate::brain::brain_sections::find_sections(&body, query);
+                tracing::info!(
+                    "load_brain_file(skill {}, filename form): query={query:?}: {} section(s) \
+                     returned",
                     skill.name,
                     matches.sections.len()
                 );
