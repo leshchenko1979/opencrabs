@@ -105,4 +105,24 @@ impl SessionSkillsRepository {
             .context("Failed to prune seen skills")?;
         Ok(n as u64)
     }
+
+    /// Delete a single seen-skill record for a session.
+    pub async fn delete_skill(&self, session_id: Uuid, slug: &str) -> Result<()> {
+        let sid = session_id.to_string();
+        let slug = slug.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "DELETE FROM session_seen_skills WHERE session_id = ?1 AND slug = ?2",
+                    rusqlite::params![sid, slug],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to delete seen skill")?;
+        Ok(())
+    }
 }
