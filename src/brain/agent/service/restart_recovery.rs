@@ -162,6 +162,10 @@ pub fn claim_session(session_id: Uuid, route: &MessageEnqueueCallback) -> usize 
             target: "background_task",
             "Delivered {count} parked restart report(s) to session {session_id}"
         );
+        // Delivery happened: any durable copies of these reports are now
+        // redundant. Fire-and-forget — a failed clear costs a duplicate
+        // after the next restart, never a lost report (#73).
+        clear_persisted_tombstones(session_id);
         // notify_queue twin (#111): clear ONLY the rows matching what was
         // just delivered — a blanket clear-for-session here could eat a
         // never-delivered mid-turn row for the same session.
@@ -191,6 +195,8 @@ pub fn flush_parked(local: &MessageEnqueueCallback) -> usize {
     let count = remaining.len();
     for (session_id, msg) in remaining {
         local(session_id, msg.clone());
+        // Delivered locally: the durable copies are redundant now (#73).
+        clear_persisted_tombstones(session_id);
         // notify_queue twin (#111) — content-exact clear of what just went
         // out; a stale row on clear failure is a duplicate, not a loss.
         super::notify_queue::clear_on_delivery(session_id, &msg);
@@ -372,11 +378,20 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
     // Sub-agents first: they die with the process but their status files do
     // not, so every file still mid-flight is an agent that no longer exists.
     let orphans = crate::brain::tools::subagent::reconcile::reconcile_orphaned_agents();
-    let mut reported = 0usize;
+    let mut reported = redeliver_persisted_tombstones().await;
     for mut orphan in orphans {
         match interrupted_report_target(&orphan) {
             Some(session_id) => {
-                deliver_or_park(session_id, subagent_interrupted_message(&orphan));
+                let msg = subagent_interrupted_message(&orphan);
+                // Clone: the parked branch still needs the message content
+                // for the durable copy below.
+                if deliver_or_park(session_id, msg.clone()) {
+                    // Delivered to a live route; nothing durable to keep.
+                } else {
+                    // Parked in memory only — persist it so the restart that
+                    // killed the agent cannot also kill its report (#73).
+                    persist_tombstone(session_id, &msg).await;
+                }
                 reported += 1;
             }
             None => {
@@ -384,11 +399,10 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
                 // the agent's parent is waiting on a result either way.
                 tracing::error!(
                     target: "background_task",
-                    "Sub-agent '{}' has an unparseable parent session '{}' or '{}', its \
+                    "Sub-agent '{}' has an unparseable parent session '{}', its \
                      interruption cannot be reported",
                     orphan.label,
-                    orphan.parent_session_id.as_deref().unwrap_or("<none>"),
-                    orphan.session_id
+                    orphan.parent_session_id.as_str(),
                 );
                 // Still finalize the file so it cannot zombie.
                 orphan.mark_interrupted().ok();
@@ -429,20 +443,197 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
     reported
 }
 
+/// The tombstone repository, when a pool exists.
+///
+/// Resolved per call through the global pool, same as the background-task
+/// repo: recovery runs before sessions exist, so nothing threads a pool
+/// here. `None` before the DB is initialized (early startup, tests), which
+/// simply means durable parking is skipped and the report rides the
+/// in-memory queue alone.
+fn tombstone_repo() -> Option<crate::db::PendingTombstoneRepository> {
+    crate::db::global_pool().map(|p| crate::db::PendingTombstoneRepository::new(p.clone()))
+}
+
+/// Persist an undelivered tombstone report so no restart can lose it (#73).
+///
+/// Best-effort by design: a failure here is logged loudly but never blocks
+/// startup, because a report that only lives in memory still beats a report
+/// that panics the boot. The row is cleared the moment the report actually
+/// reaches a surface (see [`clear_persisted_tombstones`]).
+pub(crate) async fn persist_tombstone(session_id: Uuid, msg: &QueuedUserMessage) {
+    let Some(repo) = tombstone_repo() else {
+        return;
+    };
+    if let Err(e) = repo
+        .record(
+            Uuid::new_v4(),
+            session_id,
+            &msg.context_text,
+            &msg.display_text,
+        )
+        .await
+    {
+        tracing::error!(
+            target: "background_task",
+            "Could not persist sub-agent tombstone for session {session_id}: it rides the \
+             in-memory queue alone and the next restart will lose it: {e:#}"
+        );
+    }
+}
+
+/// Deliver a boot-resumed sub-agent's outcome to the session that spawned it,
+/// and finalize the status file either way (#110).
+///
+/// Boot-resume revives an interrupted child session, but the child has no
+/// channel binding: the default surface route would drop the result where
+/// nobody reads it. The status file carries the spawning session, so the
+/// outcome goes there instead — the same delivery the live completion path
+/// uses. If no live route exists the report is durably parked, so the
+/// failure direction is a duplicate report, never a lost one.
+///
+/// Returns whether a status file was found and finalized (informational).
+pub(crate) async fn deliver_revived_agent_outcome(
+    status: &mut crate::brain::agent::service::work_status::WorkStatus,
+    outcome: std::result::Result<&str, &str>,
+) -> bool {
+    use crate::brain::agent::service::session_routes::{Delivery, deliver_to_session};
+
+    let Some(parent) = status
+        .parent_session_id
+        .as_deref()
+        .and_then(|p| Uuid::parse_str(p).ok())
+    else {
+        // Legacy file without a parent: nothing to route to, but still
+        // finalize so the file cannot zombie (upstream's fix — the pre-merge
+        // version returned without stamping the terminal outcome).
+        tracing::warn!(
+            target: "background_task",
+            "Revived sub-agent '{}' has no parent session recorded; finalizing status only",
+            status.id
+        );
+        finalize_revived_status(status, outcome);
+        return false;
+    };
+
+    let agent_id = status.id.clone();
+    let label = status.label.clone();
+    let msg = crate::brain::tools::subagent::spawn::completion_message(&label, &agent_id, outcome);
+    let delivered = matches!(
+        deliver_to_session(parent, msg.clone(), true),
+        Delivery::Delivered
+    );
+    if !delivered {
+        // Parked or unroutable: hand it to the park machinery now (upstream's
+        // immediate-park semantics), then persist a tombstone so a later
+        // restart cannot eat the report the same restart class produced
+        // (#73 semantics). Worst case the report is delivered twice, never
+        // zero times.
+        deliver_or_park(parent, msg.clone());
+        persist_tombstone(parent, &msg).await;
+    }
+    match outcome {
+        Ok(output) => {
+            // #147: full revived report persisted, not a 512-char tail.
+            if let Err(e) = status.mark_completed(output.to_string()) {
+                tracing::warn!(target: "background_task", "Could not finalize revived sub-agent status '{}': {e}", agent_id);
+            }
+        }
+        Err(error) => {
+            if let Err(e) = status.mark_failed(error.to_string()) {
+                tracing::warn!(target: "background_task", "Could not finalize revived sub-agent status '{}': {e}", agent_id);
+            }
+        }
+    }
+    delivered
+}
+
+/// Re-offer every persisted tombstone from a previous process (#73).
+///
+/// Runs before the freshly reconciled reports are delivered, so older
+/// deaths are announced first. A row whose report lands on a live route is
+/// cleared; one that parks again keeps its row — memory is still not
+/// durable, the DB row is, so the report keeps surviving restarts until it
+/// is genuinely delivered.
+async fn redeliver_persisted_tombstones() -> usize {
+    let Some(repo) = tombstone_repo() else {
+        return 0;
+    };
+    let rows = match repo.all().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(
+                target: "background_task",
+                "Could not read persisted sub-agent tombstones: {e:#}"
+            );
+            return 0;
+        }
+    };
+    let mut count = 0usize;
+    for row in rows {
+        let msg = QueuedUserMessage {
+            context_text: row.context_text.clone(),
+            display_text: row.display_text.clone(),
+            origin: PushOrigin::Recovery,
+            bg_meta: None,
+        };
+        if deliver_or_park(row.session_id, msg)
+            && let Err(e) = repo.clear(row.id).await
+        {
+            // Worst case the report is delivered twice, never zero times.
+            tracing::error!(
+                target: "background_task",
+                "Delivered persisted tombstone {} but could not clear its row; it may be \
+                 re-delivered after the next restart: {e:#}",
+                row.id
+            );
+        }
+        count += 1;
+    }
+    if count > 0 {
+        tracing::info!(
+            target: "background_task",
+            "Re-offered {count} persisted sub-agent tombstone(s) from a previous run"
+        );
+    }
+    count
+}
+
+/// Drop every persisted tombstone for a session whose reports just reached a
+/// surface — the durable copies are redundant the moment delivery happens.
+///
+/// Best-effort and fire-and-forget: a failed clear costs a duplicate report
+/// after the next restart, never a lost one. No-op outside a tokio runtime.
+fn clear_persisted_tombstones(session_id: Uuid) {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    if let Some(repo) = tombstone_repo() {
+        tokio::spawn(async move {
+            if let Err(e) = repo.clear_for_session(session_id).await {
+                tracing::warn!(
+                    target: "background_task",
+                    "Could not clear persisted tombstones for session {session_id} after \
+                     delivery: they may be re-delivered after the next restart: {e:#}"
+                );
+            }
+        });
+    }
+}
+
 /// What the parent agent is told about a sub-agent a restart killed.
 ///
 /// Mirrors the framing used for detached commands: state plainly that it did
 /// not finish and hand the decision back, rather than letting the agent read
 /// an absent result as either success or failure.
 fn subagent_interrupted_message(
-    status: &crate::brain::agent::service::work_status::WorkStatus,
+    status: &crate::brain::tools::subagent::status::AgentStatus,
 ) -> QueuedUserMessage {
     let context_text = format!(
         "[SUB-AGENT INTERRUPTED] The sub-agent `{}` (id {}) was still running when OpenCrabs \
          restarted, so it was killed and produced no result. Its task was:\n\n```\n{}\n```\n\nIt \
          did NOT complete. Decide whether to spawn it again based on what you were doing; do not \
          assume it succeeded or failed.",
-        status.label, status.id, status.task
+        status.label, status.id, status.prompt
     );
     QueuedUserMessage {
         context_text,
@@ -459,84 +650,9 @@ fn subagent_interrupted_message(
 /// the pre-#26 routing value this field replaced. Returns the session to
 /// report to, if either field parses as a UUID.
 fn interrupted_report_target(
-    status: &crate::brain::agent::service::work_status::WorkStatus,
+    status: &crate::brain::tools::subagent::status::AgentStatus,
 ) -> Option<Uuid> {
-    status
-        .parent_session_id
-        .as_deref()
-        .or(Some(status.session_id.as_str()))
-        .and_then(|p| Uuid::parse_str(p).ok())
-}
-
-/// Deliver a boot-resumed sub-agent's outcome to the session that spawned it,
-/// and finalize the status file either way (#110).
-///
-/// Boot-resume revives an interrupted child session, but the child has no
-/// channel binding: the default surface route would drop the result where
-/// nobody reads it. The status file carries the spawning session, so the
-/// outcome goes there instead — the same delivery the live completion path
-/// uses (`deliver_to_session`, interrupt=true). On Parked or NoRoute the
-/// message rides the durable park machinery (`deliver_or_park` handles the
-/// park; NoRoute falls back to it), so the failure direction is a duplicate
-/// report, never a lost one — no tombstone infrastructure required.
-///
-/// Returns whether the outcome was routed to a parent session (informational).
-pub(crate) fn deliver_revived_agent_outcome(
-    status: &mut crate::brain::agent::service::work_status::WorkStatus,
-    outcome: std::result::Result<&str, &str>,
-) -> bool {
-    let Some(parent) = status
-        .parent_session_id
-        .as_deref()
-        .and_then(|p| Uuid::parse_str(p).ok())
-    else {
-        // Legacy file without a parent: nothing to route to, but still
-        // finalize so the file cannot zombie.
-        tracing::warn!(
-            target: "background_task",
-            "Revived sub-agent '{}' has no parent session recorded; finalizing status only",
-            status.id
-        );
-        finalize_revived_status(status, outcome);
-        return false;
-    };
-
-    let agent_id = status.id.clone();
-    let label = status.label.clone();
-    let msg = crate::brain::tools::subagent::spawn::completion_message(&label, &agent_id, outcome);
-    match crate::brain::agent::service::session_routes::deliver_to_session(
-        parent,
-        msg.clone(),
-        true,
-    ) {
-        crate::brain::agent::service::session_routes::Delivery::Delivered => {
-            tracing::info!(
-                target: "background_task",
-                "Revived sub-agent {agent_id}'s result delivered to parent session {parent}"
-            );
-        }
-        crate::brain::agent::service::session_routes::Delivery::NoRoute => {
-            // No live route right now: hand it to the park machinery so the
-            // report leaves when the owning channel claims the session, or
-            // at worst flushes after the grace period — same durability the
-            // live completion path has.
-            tracing::warn!(
-                target: "background_task",
-                "Revived sub-agent {agent_id}'s result had no route for parent {parent}; parked"
-            );
-            deliver_or_park(parent, msg);
-        }
-        _ => {
-            // Parked / redirected: the delivery machinery owns it from here.
-            tracing::info!(
-                target: "background_task",
-                "Revived sub-agent {agent_id}'s result for parent {parent} handled by the \
-                 delivery machinery (parked or redirected)"
-            );
-        }
-    }
-    finalize_revived_status(status, outcome);
-    true
+    Uuid::parse_str(&status.parent_session_id).ok()
 }
 
 /// Stamp the terminal outcome onto a revived agent's status file.
@@ -546,6 +662,7 @@ fn finalize_revived_status(
 ) {
     match outcome {
         Ok(output) => {
+            // #147: full revived report persisted, not a 512-char tail.
             if let Err(e) = status.mark_completed(output.to_string()) {
                 tracing::warn!(
                     target: "background_task",
