@@ -240,6 +240,7 @@ pub fn unmark_seen(session_id: Uuid, slug: &str) {
 
 async fn delete_seen(session_id: Uuid, slug: &str) -> anyhow::Result<()> {
     let pool = crate::db::global_pool()
+        .cloned()
         .ok_or_else(|| anyhow::anyhow!("no global DB pool"))?;
     crate::db::repository::session_skills::SessionSkillsRepository::new(pool)
         .delete_skill(session_id, slug)
