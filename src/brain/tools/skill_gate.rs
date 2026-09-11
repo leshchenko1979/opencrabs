@@ -94,7 +94,7 @@ pub fn check(
 
     for skill in &skills {
         for glob_str in &skill.globs {
-            let pattern = match glob::Pattern::new(glob_str) {
+            let pattern = match compile_pattern(glob_str, cwd) {
                 Ok(p) => p,
                 Err(e) => {
                     // Malformed glob: warn once per (slug, glob) per
@@ -194,6 +194,26 @@ fn harvest_candidates(
         .collect()
 }
 
+/// Compile a frontmatter glob into a matcher, resolving the PATTERN the same
+/// way candidate paths are resolved: `~` expands to the home directory, a
+/// relative pattern resolves against `cwd`, and the result is normalized.
+///
+/// Without this, the natural Cursor-style form `~/repo/**` compiles with a
+/// literal `~` prefix and can never match an absolute candidate path — the
+/// gate would be silently inert for exactly the skills that opt in.
+fn compile_pattern(
+    glob_str: &str,
+    cwd: &std::path::Path,
+) -> Result<glob::Pattern, glob::PatternError> {
+    let expanded = super::error::expand_tilde(glob_str);
+    let as_path = std::path::Path::new(&expanded);
+    let joined = if as_path.is_absolute() {
+        as_path.to_path_buf()
+    } else {
+        cwd.join(as_path)
+    };
+    glob::Pattern::new(&normalize(&joined).to_string_lossy())
+}
 /// Normalize a path for matching: resolve `.` / `..` lexically, strip
 /// redundant separators. No filesystem access — purely string-level so
 /// the gate cannot fail on missing paths.
@@ -240,7 +260,7 @@ mod tests {
             let candidates = harvest_candidates(tool, &input, std::path::Path::new("/work"));
             for s in &skills {
                 for g in &s.globs {
-                    let Ok(pattern) = glob::Pattern::new(g) else {
+                    let Ok(pattern) = compile_pattern(g, std::path::Path::new("/work")) else {
                         continue;
                     };
                     let options = glob::MatchOptions {
@@ -409,5 +429,42 @@ mod tests {
             std::path::Path::new("/work"),
         );
         assert_eq!(candidates, vec![std::path::PathBuf::from("/tmp/x")]);
+    }
+
+    #[test]
+    fn tilde_pattern_matches_home_path() {
+        // Regression: the frontmatter form a skill author actually writes
+        // (`~/repo/**`) must match — it must not compile to a literal `~`.
+        let s = skill(&["~/guard/**"]);
+        let v = verdict_with_skills(
+            Uuid::new_v4(),
+            "write_file",
+            json!({"path": "~/guard/file.md", "content": "c"}),
+            vec![s],
+            true,
+        );
+        let GateVerdict::Block { matched_path, .. } = v else {
+            panic!("expected Block for a `~/...` glob, got {v:?}");
+        };
+        let home = super::super::error::expand_tilde("~");
+        assert_eq!(
+            matched_path,
+            home.join("guard").join("file.md").display().to_string()
+        );
+    }
+
+    #[test]
+    fn relative_pattern_resolves_against_cwd() {
+        // A bare relative pattern (`guard/**`) resolves against the tool cwd,
+        // mirroring how candidate paths are resolved.
+        let s = skill(&["guard/**"]);
+        let v = verdict_with_skills(
+            Uuid::new_v4(),
+            "write_file",
+            json!({"path": "guard/file.md", "content": "c"}),
+            vec![s],
+            true,
+        );
+        assert!(matches!(v, GateVerdict::Block { .. }));
     }
 }
