@@ -8,6 +8,8 @@
 
 const TOOL_LOOP: &str = "src/brain/agent/service/tool_loop.rs";
 
+use std::path::Path;
+
 /// Occurrences in real code, ignoring line comments so this guard's own
 /// explanatory prose (and the loop's) does not count as a call.
 fn code_occurrences(text: &str, needle: &str) -> Vec<usize> {

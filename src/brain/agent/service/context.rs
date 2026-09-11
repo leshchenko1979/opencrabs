@@ -1,7 +1,6 @@
 use super::builder::AgentService;
 use crate::brain::agent::context::AgentContext;
 use crate::brain::agent::error::{AgentError, Result};
-use crate::brain::agent::service::AgentService;
 use crate::brain::provider::{ContentBlock, LLMRequest, Message, Provider};
 use crate::services::{MessageService, SessionService};
 use std::path::PathBuf;
@@ -763,7 +762,7 @@ impl AgentService {
         for tool_name in sorted_tools {
             let tokens = if let Some(reg) = tool_registry {
                 if let Some(t) = reg.get(tool_name) {
-                    AgentContext::estimate_tokens(&t.schema().to_string())
+                    AgentContext::estimate_tokens(&t.input_schema().to_string())
                 } else {
                     150
                 }
