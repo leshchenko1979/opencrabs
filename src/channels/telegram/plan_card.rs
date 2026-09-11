@@ -36,6 +36,9 @@ pub(crate) enum CollapsibleStyle {
     /// prose truncated to `CARD_PROSE_BUDGET`.
     BlockquoteExpandable,
     /// Rich `sendRichMessage` (32K chars): `<details><summary>`, no truncation.
+    /// Production callers migrated to the markdown+media dialect; the test-only
+    /// `render_plan_card_rich_html` is the remaining constructor.
+    #[cfg_attr(not(test), expect(dead_code))]
     DetailsSummary,
 }
 
@@ -237,6 +240,9 @@ pub(crate) async fn render_plan_card_html(
 
 /// Rich `sendRichMessage` card: `<details><summary>` collapsibles, 32K-char
 /// limit, no truncation — prose renders in full.
+/// Production callers migrated to the markdown+media dialect (dd70fdd6);
+/// kept for test coverage of the card-assembly invariants.
+#[cfg(test)]
 pub(crate) async fn render_plan_card_rich_html(
     title: Option<&str>,
     checklist: Option<&[String]>,
@@ -251,6 +257,92 @@ pub(crate) async fn render_plan_card_rich_html(
         goal,
     )
     .await
+}
+
+/// Markdown-mode rich card (#134 family): the same blocks as the rich HTML
+/// variant, but committed to raw markdown — details/summary collapsibles
+/// inline (the markdown input dialect parses them natively, live-Bot-API
+/// probe J/K 2026-09-10) and checklist rows as plain lines. Mermaid fences
+/// in prose are NOT resolved here: the caller resolves the ASSEMBLED body
+/// once through `resolve_markdown_media`, so every card re-render reuses
+/// one diagN numbering per body instead of per-section (reviewer major #1).
+pub(crate) async fn render_plan_card_markdown(
+    title: Option<&str>,
+    checklist: Option<&[String]>,
+    prose: Option<&[ProseSection]>,
+    goal: Option<&GoalSection>,
+) -> Option<String> {
+    let mut blocks: Vec<CardBlock> = Vec::new();
+
+    if let Some(t) = title.map(str::trim).filter(|t| !t.is_empty()) {
+        blocks.push(CardBlock::Line(format!("📋 <b>{}</b>", escape_html(t))));
+    }
+
+    if let Some(sections) = prose.filter(|s| !s.is_empty()) {
+        for sec in sections {
+            // Markdown mode: details/summary inline, prose body raw (the
+            // markdown dialect renders md formatting + native tables).
+            blocks.push(CardBlock::Block(match &sec.heading {
+                Some(h) => format!(
+                    "<details><summary><b>{}</b></summary>\n{}\n</details>",
+                    escape_html(h),
+                    sec.body
+                ),
+                None => sec.body.clone(),
+            }));
+        }
+    }
+
+    if let Some(rows) = checklist {
+        for row in rows {
+            blocks.push(CardBlock::Line(escape_html(row)));
+        }
+    }
+
+    if let Some(g) = goal {
+        let text = g.text.trim();
+        if !text.is_empty() {
+            let has_prose = prose.is_some_and(|p| !p.is_empty());
+            if checklist.is_some() || has_prose {
+                blocks.push(CardBlock::ClassicGap);
+            }
+            blocks.push(CardBlock::Block(format!(
+                "<details><summary>{}</summary>\n{}\n</details>",
+                g.prefix(true),
+                escape_html(text)
+            )));
+        }
+    }
+
+    // Markdown serializer: same single-variant shape as the DetailsSummary
+    // serializer but with markdown line semantics — Lines need a real
+    // newline between them, Blocks carry their own collapsibles.
+    let mut out = String::new();
+    for b in &blocks {
+        match b {
+            CardBlock::Line(s) => {
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                out.push_str(s);
+            }
+            CardBlock::Block(s) => {
+                // Skip the separator when the output already ends with a
+                // blank line (an explicit ClassicGap) — otherwise the gap
+                // doubles into two empty lines before the block.
+                if !out.is_empty() && !out.ends_with("\n\n") {
+                    out.push('\n');
+                }
+                out.push_str(s);
+            }
+            CardBlock::ClassicGap => {
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 /// Result of a plan card edit attempt.
@@ -370,10 +462,15 @@ pub(crate) async fn refresh_plan_card(
     };
     let use_rich = Config::current().channels.telegram.rich_messages;
 
-    // Try rich path first when enabled: sendRichMessage (32K, native
-    // <details><summary> collapsibles) with reply_markup for the keyboard.
+    // Try rich path first when enabled: sendRichMessage (32K) as the
+    // markdown+media dialect (#134 family) — raw markdown prose with inline
+    // details/summary collapsibles (probe-proven, 2026-09-10) and rendered
+    // mermaid diagrams riding the media array instead of a bare HTML string
+    // that drops every diagram (the defect HQ's card exposed). The assembled
+    // body resolves through `resolve_markdown_media` exactly ONCE, so diagN
+    // numbering is stable per body.
     if use_rich
-        && let Some(rich_html) = render_plan_card_rich_html(
+        && let Some(md) = render_plan_card_markdown(
             title.as_deref(),
             checklist.as_deref(),
             prose.as_deref(),
@@ -381,10 +478,24 @@ pub(crate) async fn refresh_plan_card(
         )
         .await
     {
+        let (rich_md, media) = super::rich::mermaid::resolve_markdown_media(&md).await;
+        let rich_md = super::rich::normalize_tables(&rich_md);
         let kb_val = plan_kb
             .keyboard()
             .and_then(|m| serde_json::to_value(m).ok());
-        let rich_sig = format!("rich:{rich_html}\u{1}{plan_kb:?}");
+        // Sig covers the media array too: identical prose with a changed
+        // diagram (re-render bytes/url) must not sig-skip.
+        let rich_sig = format!(
+            "richmd:{rich_md}\u{1}{:?}\u{1}{plan_kb:?}",
+            media
+                .iter()
+                .map(|m| (
+                    m.id.clone(),
+                    m.url.clone(),
+                    m.bytes.as_ref().map(|b| b.len())
+                ))
+                .collect::<Vec<_>>()
+        );
         if let Some((mid, last_sig)) = state.plan_card(session_id).await {
             if last_sig == rich_sig {
                 return;
@@ -394,14 +505,17 @@ pub(crate) async fn refresh_plan_card(
             // latest-wins and the governor's drainer lands it on refill; the
             // tracked signature is saved now so identical later refreshes skip
             // (a permanently failed queue drain self-heals on the next
-            // differing-content plan change).
-            let admitted = super::governor::edit_admission(
+            // differing-content plan change). Media rides the queued final via
+            // the media-bearing admission variant (owner law: extend, never
+            // bypass the governor).
+            let admitted = super::governor::edit_admission_media(
                 bot,
                 chat,
                 mid,
                 super::governor::EditClass::Final,
-                rich_html.clone(),
+                rich_md.clone(),
                 true,
+                media.clone(),
             )
             .await;
             if !admitted {
@@ -410,12 +524,13 @@ pub(crate) async fn refresh_plan_card(
                     .await;
                 return;
             }
-            match super::rich::api::edit_rich_html(
+            match super::rich::api::edit_rich_markdown_media(
                 bot.api_url().as_str(),
                 bot.token(),
                 chat.0,
                 mid.0,
-                &rich_html,
+                &rich_md,
+                &media,
                 kb_val.as_ref(),
                 "turn",
                 "-",
@@ -449,12 +564,14 @@ pub(crate) async fn refresh_plan_card(
         // No live card or edit failed: create fresh via rich API.
         // G3 send pacing (#1211): a fresh card is a full message post.
         super::governor::pace_send(chat).await;
-        match super::rich::api::send_rich_html_id(
+        match super::rich::api::send_rich_markdown_media_target_id(
             bot.api_url().as_str(),
             bot.token(),
             chat.0,
             thread_id,
-            &rich_html,
+            None,
+            &rich_md,
+            &media,
             kb_val.as_ref(),
             "turn",
             "-",
@@ -697,13 +814,15 @@ async fn finalize_plan_card_locked(
 
     let use_rich = Config::current().channels.telegram.rich_messages;
 
-    // Completed forms, mirrored dual-path as in refresh_plan_card.
+    // Completed forms, mirrored dual-path as in refresh_plan_card. The rich
+    // form rides the markdown dialect now (#134 family) — checklist-only
+    // body, no media; the ✅/notice chrome is markdown-bold + plain italic.
     let rich = if use_rich {
-        render_plan_card_rich_html(title.as_deref(), checklist.as_deref(), None, None)
+        render_plan_card_markdown(title.as_deref(), checklist.as_deref(), None, None)
             .await
             .map(|mut r| {
                 r = r.replacen("📋", "✅", 1);
-                r.push_str("\n<i>Plan completed and archived.</i>");
+                r.push_str("\n*Plan completed and archived.*");
                 r
             })
     } else {
@@ -722,13 +841,15 @@ async fn finalize_plan_card_locked(
     if use_rich && let Some(rich) = &rich {
         // G3 send pacing (#1211): a fresh card is a full message post.
         super::governor::pace_send(chat).await;
-        match super::rich::api::send_rich_html_id(
+        match super::rich::api::send_rich_markdown_media_target_id(
             bot.api_url().as_str(),
             bot.token(),
             chat.0,
             thread_id,
+            None,
             rich,
-            Some(&empty_kb),
+            &[],
+            None,
             "turn",
             "-",
         )
@@ -796,12 +917,13 @@ async fn finalize_plan_card_locked(
             };
             let mut edited = false;
             if use_rich && let Some(rich) = &rich {
-                match super::rich::api::edit_rich_html(
+                match super::rich::api::edit_rich_markdown_media(
                     bot.api_url().as_str(),
                     bot.token(),
                     chat.0,
                     mid.0,
                     rich,
+                    &[],
                     Some(&empty_kb),
                     "turn",
                     "-",

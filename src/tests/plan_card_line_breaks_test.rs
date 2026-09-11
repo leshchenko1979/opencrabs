@@ -272,3 +272,86 @@ async fn rich_card_prose_routes_code_fences_through_the_gated_converter() {
         "no mermaid fence means no figure resolution must happen. Got:\n{html}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #134 family: the rich card rides the MARKDOWN+media dialect. The body is
+// raw markdown (details/summary inline — markdown mode parses them natively,
+// live Bot API probes J/K + P1/P2, 2026-09-10), mermaid fences resolve
+// through `resolve_markdown_media` into a media array instead of HTML
+// conversion. Fence-free inputs only here — network-fencing shapes stay
+// pinned in telegram_mermaid_test.rs.
+// ---------------------------------------------------------------------------
+
+use crate::channels::telegram::plan_card::render_plan_card_markdown;
+
+#[tokio::test]
+async fn markdown_card_checklist_rows_stay_on_their_own_lines() {
+    let md = render_plan_card_markdown(Some(TITLE), Some(&rows()), None, None)
+        .await
+        .expect("a card with a title and checklist must render");
+
+    assert!(
+        md.contains("☑ First task\n\n☑ Second task\n\n☐ Third task"),
+        "markdown rows must be blank-line-separated or they collapse into one \
+         paragraph. Got:\n{md}"
+    );
+    assert!(
+        md.starts_with("📋 <b>"),
+        "the title must lead the card, bold-marked. Got:\n{md}"
+    );
+}
+
+#[tokio::test]
+async fn markdown_card_prose_uses_inline_details_and_keeps_body_raw() {
+    let prose = vec![ProseSection {
+        heading: Some("Context".to_string()),
+        body: "Plain **markdown** body.".to_string(),
+    }];
+    let md = render_plan_card_markdown(Some(TITLE), None, Some(&prose), None)
+        .await
+        .expect("card with prose must render");
+
+    assert!(
+        md.contains(
+            "<details><summary><b>Context</b></summary>\nPlain **markdown** body.\n</details>"
+        ),
+        "prose must sit inside inline details, body untouched (markdown mode \
+         renders md formatting natively). Got:\n{md}"
+    );
+    assert!(
+        !md.contains("<p>"),
+        "markdown mode has no HTML paragraph wrapper. Got:\n{md}"
+    );
+}
+
+#[tokio::test]
+async fn markdown_card_goal_sits_inside_details_after_a_gap() {
+    let goal = GoalSection {
+        text: "Ship it".to_string(),
+        completed: false,
+    };
+    let md = render_plan_card_markdown(Some(TITLE), Some(&rows()), None, Some(&goal))
+        .await
+        .expect("card with a goal must render");
+
+    assert!(
+        md.contains("☐ Third task\n\n<details><summary><b>🎯</b></summary>"),
+        "the goal must follow a blank-line gap and render inside details. \
+         Got:\n{md}"
+    );
+}
+
+#[tokio::test]
+async fn markdown_card_empty_inputs_render_nothing() {
+    assert!(
+        render_plan_card_markdown(None, None, None, None)
+            .await
+            .is_none()
+    );
+    assert!(
+        render_plan_card_markdown(Some("   "), None, None, None)
+            .await
+            .is_none(),
+        "a whitespace-only title is not content"
+    );
+}
