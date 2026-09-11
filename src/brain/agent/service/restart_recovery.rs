@@ -403,7 +403,7 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
     // left a forever-`Running` file that every reader saw as live work (#111
     // follow-up, Part D). No notice here — the row path already notified; this
     // only makes the file agree with reality.
-    let finalized = super::work_status::reconcile_stale_commands();
+    let finalized = super::work_status::WorkStatus::reconcile_stale_commands();
     if finalized > 0 {
         tracing::info!(
             target: "background_task",
