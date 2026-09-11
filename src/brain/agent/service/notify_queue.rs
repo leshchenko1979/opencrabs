@@ -44,6 +44,14 @@ fn repo() -> Option<NotifyQueueRepository> {
     crate::db::global_pool().map(|p| NotifyQueueRepository::new(p.clone()))
 }
 
+/// Seconds since the Unix epoch, saturating to 0 on a clock that predates it.
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Runtime-agnostic fire-and-forget: run the future on the tokio runtime
 /// when one is live, log-and-drop when none is (sync tests, pre-boot).
 fn spawn_if_runtime<F>(future: F, what: &'static str)
@@ -100,8 +108,10 @@ pub(crate) fn persist(session_id: Uuid, msg: &QueuedUserMessage) {
 /// Re-offer every persisted push from a previous process (#111).
 ///
 /// Runs from [`super::restart_recovery::recover`] alongside the tombstone
-/// redelivery. A row whose push lands on a live route is cleared; one that
-/// parks again keeps its row and keeps surviving restarts until the park is
+/// redelivery. Rows whose session no longer exists are reaped first (Part B —
+/// nothing can ever claim them), then each surviving row's push is offered to
+/// its session: one that lands on a live route is cleared, one that parks
+/// again keeps its row and keeps surviving restarts until the park is
 /// genuinely delivered (the consume sites clear it). Returns how many rows
 /// were re-offered.
 pub(crate) async fn redeliver_persisted() -> usize {
@@ -143,16 +153,32 @@ pub(crate) async fn redeliver_persisted() -> usize {
             origin: row.origin,
             bg_meta: row.bg_meta.clone(),
         };
-        if super::restart_recovery::deliver_or_park(row.session_id, msg)
-            && let Err(e) = repo.clear(row.id).await
-        {
-            // Worst case the push is delivered twice, never zero times.
-            tracing::error!(
-                target: "background_task",
-                "Delivered persisted push {} but could not clear its row; it may be \
-                 re-delivered after the next restart: {e:#}",
-                row.id
-            );
+        if super::restart_recovery::deliver_or_park(row.session_id, msg) {
+            if let Err(e) = repo.clear(row.id).await {
+                // Worst case the push is delivered twice, never zero times.
+                tracing::error!(
+                    target: "background_task",
+                    "Delivered persisted push {} but could not clear its row; it may be \
+                     re-delivered after the next restart: {e:#}",
+                    row.id
+                );
+            }
+        } else {
+            // Parked again (#111 follow-up, Part C): a row that keeps
+            // surviving boots has no clear path. Log it as a defect rather
+            // than re-offering it silently forever.
+            let age_secs = now_unix().saturating_sub(row.created_at);
+            if age_secs > STALE_ROW_SECS {
+                tracing::warn!(
+                    target: "background_task",
+                    "Persisted push {} for session {} has survived {}h with no clear path \
+                     (parked again at boot); it keeps being re-offered until its session \
+                     claims a route or it is reaped",
+                    row.id,
+                    row.session_id,
+                    age_secs / 3600
+                );
+            }
         }
         count += 1;
     }
