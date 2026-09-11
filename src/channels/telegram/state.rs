@@ -243,6 +243,16 @@ pub struct TelegramState {
     ///
     /// Per session, so unrelated chats never wait on each other.
     plan_card_locks: Mutex<HashMap<Uuid, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    /// Sessions with a plan-review subagent in flight (#155). While set, the
+    /// plan card's Review button renders grayed and a second tap is refused,
+    /// so one Editing plan can never accumulate concurrent rewrites of the
+    /// same `.md`.
+    plan_reviewing: Mutex<HashMap<Uuid, bool>>,
+    /// Last completed plan review's one-line delta, per session (#155). Shown
+    /// as the card footer until the next review replaces it or the card goes
+    /// away — this is what makes the review's result visible without the
+    /// owner having to read the subagent's full report.
+    plan_review_deltas: Mutex<HashMap<Uuid, String>>,
     /// Photo batching buffer: (chat_id, user_id, media_group_id) → Vec<(img_marker, Option<caption>)>
     /// When user sends multiple photos in an album, we buffer them and only fire the agent
     /// after a quiet period (no new photos for 3s). Keyed by media_group_id to avoid merging
@@ -428,6 +438,8 @@ impl TelegramState {
             followup_store: Mutex::new(None),
             plan_card_backoff: Mutex::new(HashMap::new()),
             plan_card_locks: Mutex::new(HashMap::new()),
+            plan_reviewing: Mutex::new(HashMap::new()),
+            plan_review_deltas: Mutex::new(HashMap::new()),
             photo_buffer: Mutex::new(HashMap::new()),
             photo_debounce: Mutex::new(HashMap::new()),
             text_buffer: Mutex::new(HashMap::new()),
@@ -1349,6 +1361,53 @@ impl TelegramState {
             tracing::warn!("Failed to clear plan card for session {session_id}: {e}");
         }
         existing
+    }
+
+    /// True while a plan-review subagent is rewriting this session's plan
+    /// (#155). Read by the card renderer (grays the Review button) and by the
+    /// callback (refuses a second tap), so one Editing plan can never
+    /// accumulate concurrent rewrites of the same `.md`.
+    pub(crate) async fn is_plan_reviewing(&self, session_id: Uuid) -> bool {
+        self.plan_reviewing
+            .lock()
+            .await
+            .get(&session_id)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Set or clear the plan-review-in-flight flag for `session_id` (#155).
+    pub(crate) async fn set_plan_reviewing(&self, session_id: Uuid, reviewing: bool) {
+        let mut guard = self.plan_reviewing.lock().await;
+        if reviewing {
+            guard.insert(session_id, true);
+        } else {
+            guard.remove(&session_id);
+        }
+    }
+
+    /// The last completed plan review's one-line delta for `session_id` (#155),
+    /// rendered as the card footer until the next review replaces it.
+    pub(crate) async fn plan_review_delta(&self, session_id: Uuid) -> Option<String> {
+        self.plan_review_deltas
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+    }
+
+    /// Record the one-line delta of a finished plan review (#155).
+    pub(crate) async fn set_plan_review_delta(&self, session_id: Uuid, delta: String) {
+        self.plan_review_deltas
+            .lock()
+            .await
+            .insert(session_id, delta);
+    }
+
+    /// Forget the plan-review delta for `session_id` (#155) — called when the
+    /// plan leaves Editing, so a stale delta never shows on a later plan.
+    pub(crate) async fn clear_plan_review_delta(&self, session_id: Uuid) {
+        self.plan_review_deltas.lock().await.remove(&session_id);
     }
 
     /// Mark `session_id` as having a turn in flight, returning an RAII guard
