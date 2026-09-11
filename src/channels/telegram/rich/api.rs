@@ -14,8 +14,11 @@ use teloxide::types::ThreadId;
 /// Send `html` as a native rich message and return the new message id
 /// (#420 path A). The HTML input mode is parsed server-side into rich
 /// blocks, so `<details><summary>` becomes a native RichBlockDetails
-/// collapsible, which the markdown input mode cannot express.
-/// `reply_markup` is optional — pass `None` for no keyboard.
+/// collapsible. (Earlier text here claimed the markdown input mode cannot
+/// express details — wrong: live Bot API probes J/K, 2026-09-10, proved
+/// markdown mode parses `<details><summary>` natively; the markdown+media
+/// card path relies on that.) `reply_markup` is optional — pass `None`
+/// for no keyboard.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_rich_html_id(
     api_url: &str,
@@ -502,6 +505,7 @@ pub(crate) async fn send_rich_markdown_media_target_id(
     reply_to: Option<i32>,
     markdown: &str,
     media: &[super::mermaid::MediaEntry],
+    reply_markup: Option<&serde_json::Value>,
     origin: &str,
     origin_detail: &str,
 ) -> anyhow::Result<i32> {
@@ -510,7 +514,14 @@ pub(crate) async fn send_rich_markdown_media_target_id(
     // entry (reflow collapsed tables + blank line) as well.
     let markdown = super::normalize_tables(markdown);
     let url = format!("{}/bot{token}/sendRichMessage", api_base(api_url));
-    let body = build_body_markdown_media_target(chat_id, thread_id, reply_to, &markdown, media);
+    let body = build_body_markdown_media_target(
+        chat_id,
+        thread_id,
+        reply_to,
+        &markdown,
+        media,
+        reply_markup,
+    );
 
     let result = if media.iter().any(|m| m.bytes.is_some()) {
         // Local render → multipart upload of the PNG bytes (attach://).
@@ -549,6 +560,12 @@ pub(crate) fn multipart_scalar_fields(body: &serde_json::Value) -> Vec<(String, 
     }
     if let Some(v) = body.get("rich_message") {
         fields.push(("rich_message".to_string(), v.to_string()));
+    }
+    // The keyboard must ride multipart edits too: Telegram CLEARS
+    // reply_markup on an edit that omits it, so a media-bearing edit of the
+    // plan card would silently strip Approve/Discard without this part.
+    if let Some(v) = body.get("reply_markup") {
+        fields.push(("reply_markup".to_string(), v.to_string()));
     }
     fields
 }
@@ -692,6 +709,7 @@ pub(crate) fn build_body_markdown_media_target(
     reply_to: Option<i32>,
     markdown: &str,
     media: &[super::mermaid::MediaEntry],
+    reply_markup: Option<&serde_json::Value>,
 ) -> serde_json::Value {
     let media_arr: Vec<serde_json::Value> = media
         .iter()
@@ -718,6 +736,11 @@ pub(crate) fn build_body_markdown_media_target(
     }
     if let Some(mid) = reply_to {
         body["reply_parameters"] = serde_json::json!({ "message_id": mid });
+    }
+    // Inline keyboard (plan card Approve/Discard) rides every markdown+media
+    // send, exactly like the html twin — omitting it clears a previous one.
+    if let Some(kb) = reply_markup {
+        body["reply_markup"] = kb.clone();
     }
     body
 }
@@ -853,6 +876,7 @@ pub(crate) async fn send_rich_with_mermaid_target_id(
         reply_to,
         &resolved,
         &media,
+        None,
         origin,
         origin_detail,
     )
