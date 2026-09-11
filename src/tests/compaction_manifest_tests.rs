@@ -1,5 +1,5 @@
 use crate::brain::agent::service::AgentService;
-use crate::brain::agent::service::context::{ContextManifest, parse_context_manifest};
+use crate::brain::agent::service::context::parse_context_manifest;
 use std::collections::HashSet;
 
 #[test]
