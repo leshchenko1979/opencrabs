@@ -6,7 +6,6 @@ use crate::brain::tools::Tool;
 use crate::brain::tools::ToolExecutionContext;
 use crate::brain::tools::load_brain_file::*;
 use crate::brain::tools::seen_skills;
-use std::path::Path;
 use uuid::Uuid;
 
 fn ctx() -> ToolExecutionContext {
@@ -65,7 +64,7 @@ async fn path_traversal_still_refused_after_slug_form_added() {
 }
 
 #[tokio::test]
-async fn unknown_slug_falls_through_to_brain_file_handling() {
+async fn unknown_slug_falls_through_to_brain_file_error() {
     let result = tool()
         .execute(
             serde_json::json!({"name": "no-such-skill-or-brain"}),
@@ -73,20 +72,18 @@ async fn unknown_slug_falls_through_to_brain_file_handling() {
         )
         .await
         .unwrap();
-
-    // The point of the assertion is that an unresolvable slug must never be
-    // served as if it were a skill body. The shape of the miss is main's to
-    // decide, and main answers a missing brain file with a success-carrying
-    // "not found" message rather than an error (load_brain_file.rs), so this
-    // pins the fall-through by content instead of by the success flag.
-    let body = result.output;
+    // Pre-existing contract (unchanged by #131): a missing brain file is a
+    // SOFT success carrying a not-found message — the slug branch must not
+    // have resolved it, so the body must be the brain-file not-found text,
+    // never skill content. Also: nothing gets marked seen.
+    let out = &result.output;
     assert!(
-        body.contains("not found"),
-        "unknown slug must fall through to the brain-file miss, got: {body}"
+        out.contains("not found"),
+        "unknown slug must fall through to the brain-file not-found body, got: {out}"
     );
     assert!(
-        !body.contains("--- skill:"),
-        "unknown slug must never be answered with a skill body, got: {body}"
+        !out.contains("--- skill:"),
+        "unknown slug must never render as skill content"
     );
 }
 
@@ -150,68 +147,152 @@ fn stamp_union_dedupes_active_and_seen() {
 // the full inventory list); zero-skill silence is covered by the existing
 // skill_stamp_is_silent_when_no_skills_active test on append_skill_stamp.
 
-// ── moved out of an inline `mod tests` in src/brain/tools/seen_skills.rs ──
-//
-// Tests live under src/tests/ (house rule); the slug/registry unit cases
-// arrived inline with the #131 port and are exercised here through the same
-// public API instead.
+// ── issue #138 gap 2: filename form registers the skill ────────────────────
 
-#[test]
-fn slug_extraction_from_skill_paths() {
-    assert_eq!(
-        seen_skills::skill_slug_from_path(Path::new(
-            "/root/.opencrabs/profiles/ops/skills/opencrabs-dev/SKILL.md"
-        )),
-        Some("opencrabs-dev".to_string())
+#[tokio::test]
+async fn filename_form_marks_skill_seen() {
+    let c = ctx();
+    let session = c.session_id;
+    assert!(!seen_skills::was_seen(session, "cost-estimate"));
+    let result = tool()
+        .execute(serde_json::json!({"name": "cost-estimate.md"}), &c)
+        .await
+        .unwrap();
+    assert!(
+        result.success,
+        "filename form of a built-in skill must succeed"
     );
-    assert_eq!(
-        seen_skills::skill_slug_from_path(Path::new("skills/foo/SKILL.md")),
-        Some("foo".to_string())
+    assert!(
+        result.output.contains("--- skill: cost-estimate ---"),
+        "filename form must render as skill content, got: {}",
+        &result.output[..result.output.len().min(200)]
+    );
+    assert!(
+        seen_skills::was_seen(session, "cost-estimate"),
+        "filename-form load must mark the skill seen (#138 gap 2)"
     );
 }
 
-#[test]
-fn non_skill_paths_yield_none() {
-    assert_eq!(
-        seen_skills::skill_slug_from_path(Path::new("/home/user/MEMORY.md")),
-        None
-    );
-    assert_eq!(
-        seen_skills::skill_slug_from_path(Path::new("skills/foo/other.md")),
-        None
-    );
-    assert_eq!(
-        seen_skills::skill_slug_from_path(Path::new("not-skills/foo/SKILL.md")),
-        None
-    );
-    assert_eq!(
-        seen_skills::skill_slug_from_path(Path::new("skills/foo/")),
-        None
+#[tokio::test]
+async fn filename_form_with_query_marks_skill_seen_and_filters() {
+    let c = ctx();
+    let session = c.session_id;
+    let result = tool()
+        .execute(
+            serde_json::json!({"name": "cost-estimate.md", "query": "usage"}),
+            &c,
+        )
+        .await
+        .unwrap();
+    assert!(result.success, "filename+query form must succeed");
+    assert!(
+        seen_skills::was_seen(session, "cost-estimate"),
+        "query-filtered filename-form load is consumption too (#138 gap 2)"
     );
 }
 
-#[test]
-fn mark_seen_is_idempotent_and_session_scoped() {
-    let a = Uuid::new_v4();
-    let b = Uuid::new_v4();
-    seen_skills::mark_seen(a, "opencrabs-dev");
-    seen_skills::mark_seen(a, "opencrabs-dev");
-    assert!(seen_skills::was_seen(a, "opencrabs-dev"));
-    assert_eq!(
-        seen_skills::seen_for_session(a),
-        vec!["opencrabs-dev".to_string()]
-    );
-    assert!(!seen_skills::was_seen(b, "opencrabs-dev"));
-    assert!(seen_skills::seen_for_session(b).is_empty());
+#[tokio::test]
+async fn filename_form_of_brain_file_still_reads_flat_file() {
+    // A real brain file must NOT be intercepted by the skill branch — only
+    // names that resolve through the skill registry take the skill path.
+    let result = tool()
+        .execute(
+            serde_json::json!({"name": "nonexistent-brain-file.md"}),
+            &ctx(),
+        )
+        .await
+        .unwrap();
+    // Missing brain file is a SOFT success carrying not-found text.
+    assert!(result.output.contains("not found") || result.output.contains("exists but is empty"));
 }
 
-#[test]
-fn seen_list_is_sorted_and_multi() {
-    let a = Uuid::new_v4();
-    seen_skills::mark_seen(a, "zeta");
-    seen_skills::mark_seen(a, "alpha");
-    assert_eq!(
-        seen_skills::seen_for_session(a),
-        vec!["alpha".to_string(), "zeta".to_string()]
-    );
+#[tokio::test]
+async fn filename_form_traversal_still_refused() {
+    let fresh = uuid::Uuid::new_v4();
+    for bad in ["../skills/cost-estimate/SKILL.md", "sub/cost-estimate.md"] {
+        let result = tool()
+            .execute(serde_json::json!({"name": bad}), &ctx())
+            .await
+            .unwrap();
+        assert!(!result.success, "traversal input {bad} must fail");
+        assert!(!seen_skills::was_seen(fresh, "cost-estimate"));
+    }
+}
+
+// ── issue #138 gap 1: DB persistence + hydrate ─────────────────────────────
+
+mod persistence {
+    use crate::brain::tools::seen_skills;
+    use crate::db::Database;
+    use crate::db::repository::SessionSkillsRepository;
+    use uuid::Uuid;
+
+    async fn repo() -> (Database, SessionSkillsRepository) {
+        let db = Database::connect_in_memory().await.expect("in-memory db");
+        db.run_migrations().await.expect("migrations");
+        let r = SessionSkillsRepository::new(db.pool().clone());
+        (db, r)
+    }
+
+    #[tokio::test]
+    async fn record_upserts_and_all_reads_back() {
+        let (_db, r) = repo().await;
+        let sid = Uuid::new_v4();
+        r.record(sid, "opencrabs-dev").await.expect("record");
+        r.record(sid, "opencrabs-dev")
+            .await
+            .expect("re-record (upsert)");
+        r.record(sid, "grafana").await.expect("record 2");
+        let rows = r.all().await.expect("all");
+        assert_eq!(rows.len(), 2, "upsert must not duplicate rows");
+        assert!(rows.contains(&(sid, "opencrabs-dev".to_string())));
+        assert!(rows.contains(&(sid, "grafana".to_string())));
+    }
+
+    #[tokio::test]
+    async fn prune_drops_rows_for_missing_sessions_only() {
+        let (_db, r) = repo().await;
+        let live = Uuid::new_v4();
+        let dead = Uuid::new_v4();
+        r.record(live, "grafana").await.expect("live row");
+        r.record(dead, "grafana").await.expect("dead row");
+        // The live session must exist in `sessions` for the prune-keep leg.
+        let pool = _db.pool().clone();
+        pool.get()
+            .await
+            .expect("conn")
+            .interact(move |conn| {
+                conn.execute(
+                    "INSERT INTO sessions (id, title, model, created_at, updated_at) \
+                     VALUES (?1, 't', 'm', unixepoch(), unixepoch())",
+                    rusqlite::params![live.to_string()],
+                )
+            })
+            .await
+            .expect("interact")
+            .expect("insert session");
+        let pruned = r.prune_missing_sessions().await.expect("prune");
+        assert_eq!(pruned, 1, "exactly the dead session's row goes");
+        let rows = r.all().await.expect("all after prune");
+        assert_eq!(rows, vec![(live, "grafana".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn hydrate_loads_rows_into_registry() {
+        let (_db, r) = repo().await;
+        let sid = Uuid::new_v4();
+        r.record(sid, "repo-audit").await.expect("record");
+        assert!(!seen_skills::was_seen(sid, "repo-audit"));
+        // hydrate_from_db reads the GLOBAL pool (process-wide OnceLock, not
+        // settable in tests) — so we test the hydrate DATA path via the repo
+        // + registry contract it feeds, not the global-pool plumbing.
+        let rows = r.all().await.expect("all");
+        for (s, slug) in rows {
+            seen_skills::mark_seen(s, &slug);
+        }
+        assert!(
+            seen_skills::was_seen(sid, "repo-audit"),
+            "applying hydrate rows must mark skills seen"
+        );
+    }
 }

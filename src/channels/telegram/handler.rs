@@ -2542,8 +2542,13 @@ pub(crate) async fn handle_message(
     );
 
     // Progress callback: accumulates streaming chunks + tool status into shared state
-    let progress_cb: ProgressCallback =
-        progress::build_progress_cb(&streaming, &bot, msg.chat.id, thread_id);
+    let progress_cb: ProgressCallback = progress::build_progress_cb(
+        &streaming,
+        &bot,
+        msg.chat.id,
+        thread_id,
+        agent.context_limit_for_session(session_id),
+    );
 
     // Build Telegram-native approval + follow-up-question callbacks
     // for this session
@@ -3008,6 +3013,7 @@ pub(crate) async fn handle_message(
             options,
             merge_host,
             trailer,
+            Some(channel_msg_repo.clone()),
         )
         .await;
     }

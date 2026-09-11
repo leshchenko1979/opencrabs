@@ -25,6 +25,8 @@ use std::time::{Duration, Instant};
 /// Base URL of the mermaid.ink image renderer. The diagram source is
 /// base64url-appended. NOTE: this sends the diagram text to a third party.
 const MERMAID_INK_BASE: &str = "https://mermaid.ink/img/";
+/// Vector endpoint base for [`ink_url_svg`] (owner directive 2026-09-10).
+const MERMAID_INK_SVG_BASE: &str = "https://mermaid.ink/svg/";
 
 /// Query parameters appended to every mermaid.ink render request.
 ///
@@ -221,6 +223,17 @@ pub(crate) fn should_render_mermaid(text: &str) -> bool {
 /// payload plus the natural-size PNG parameters ([`MERMAID_INK_PARAMS`]).
 pub(crate) fn ink_url(source: &str) -> String {
     ink_url_params(source, MERMAID_INK_PARAMS)
+}
+
+/// The dedicated vector endpoint for a diagram source (owner directive
+/// 2026-09-10 03:56Z: "for the plain html - instead of an error message, we
+/// should give a mermaid svg link"). Same base64url payload as [`ink_url`],
+/// over `https://mermaid.ink/svg/` — the endpoint serves a real
+/// `image/svg+xml` (live-verified 2026-09-10); `?type=svg` on `/img/` does
+/// NOT. Build-only URL: the browser does the fetch, the server never touches
+/// mermaid.ink for this.
+pub(crate) fn ink_url_svg(source: &str) -> String {
+    format!("{}{}", MERMAID_INK_SVG_BASE, base64url(source))
 }
 
 /// Same URL at an explicit parameter set — the ladder's clamp rung.
@@ -659,6 +672,26 @@ pub(crate) fn image_html(url: &str) -> String {
 /// HTML for a diagram that could not be rendered: a bold warning line, the
 /// renderer's error note in a blockquote, and the original source in a code
 /// block so the reader can see (and fix) what failed.
+/// #134: rendered-image NOTE builder — NOT a failure: the diagram DID
+/// render (owner directive 2026-09-10 03:56Z: a successful render is
+/// never shown as an error). Legible explanation + raw source, with the
+/// caller appending [`svg_link_html`] for the full-size vector link.
+pub(crate) fn rendered_image_note(message: &str, source: &str) -> String {
+    format!(
+        "<b>🖼️ Diagram rendered as image</b>\n<blockquote>{}</blockquote>\n<pre><code>{}</code></pre>",
+        escape(message),
+        escape(source)
+    )
+}
+
+/// #134: generic svg escape-hatch link fragment for HTML-fallback
+/// contexts — a small `[svg]` anchor to the vector render (generic
+/// hatch; the caller owns the trigger copy, ruling (a) 2026-09-10:
+/// ONE semantic — generic hatch here, caller-side trigger).
+pub(crate) fn svg_link_html(source: &str) -> String {
+    format!("\n<a href=\"{}\">[svg]</a>", escape(&ink_url_svg(source)))
+}
+
 pub(crate) fn failure_html(err: &str, source: &str) -> String {
     format!(
         "<b>⚠️ Mermaid diagram could not be rendered</b>\n<blockquote>{}</blockquote>\n<pre><code>{}</code></pre>",

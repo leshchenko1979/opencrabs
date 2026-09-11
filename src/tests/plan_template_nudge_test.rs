@@ -124,3 +124,24 @@ fn nudge_points_at_the_discussion_not_at_a_template() {
          non-empty check: {nudge}"
     );
 }
+#[test]
+fn nudge_contains_explicit_structure_contract_and_examples() {
+    let sid = Uuid::new_v4();
+    let warnings = template_section_warnings(EMPTY_SCAFFOLD);
+    let nudge = template_nudge(sid, &warnings).expect("empty scaffold must nudge");
+
+    assert!(
+        nudge.contains(
+            "Plan template contract: each `**Label:**` must be a single line: label + space + text."
+        ),
+        "nudge must contain explicit structure contract: {nudge}"
+    );
+    assert!(
+        nudge.contains("✅ `**Problem:** text on the same line`"),
+        "nudge must contain ✅ pass example: {nudge}"
+    );
+    assert!(
+        nudge.contains("❌ `**Problem:**` alone with text on the next line"),
+        "nudge must contain ❌ fail example: {nudge}"
+    );
+}

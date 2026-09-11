@@ -82,6 +82,8 @@ pub enum ProgressEvent {
         before_pct: f64,
         after_pct: f64,
         elapsed: std::time::Duration,
+        before_tokens: usize,
+        after_tokens: usize,
     },
     /// A single build-output line (e.g. "Compiling foo v1.0"). The TUI keeps a
     /// rolling window of the last few lines and clears them on RestartReady.
