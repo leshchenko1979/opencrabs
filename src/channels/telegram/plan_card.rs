@@ -440,12 +440,33 @@ pub(crate) fn plan_review_effective_kb(plan_kb: PlanKb, reviewing: bool) -> Plan
     }
 }
 
+/// Format the running note for an in-flight review with live progress (#155).
+pub(crate) fn format_plan_review_running_progress(
+    progress: Option<&crate::brain::tools::subagent::ProgressSnapshot>,
+) -> String {
+    let Some(p) = progress else {
+        return PLAN_REVIEW_RUNNING_NOTE.to_string();
+    };
+    if p.iteration == 0 {
+        return PLAN_REVIEW_RUNNING_NOTE.to_string();
+    }
+    if let Some(tool) = &p.last_tool {
+        format!(
+            "🔍 Review subagent running (turn {} · {})…",
+            p.iteration, tool
+        )
+    } else {
+        format!("🔍 Review subagent running (turn {})…", p.iteration)
+    }
+}
+
 /// Footer note for the card, if any (#155). The running note wins over a
 /// stale delta, so the owner never reads a previous review's summary while a
 /// new one is mid-flight.
 pub(crate) fn plan_review_footer_note(
     plan_kb: PlanKb,
     reviewing: bool,
+    running_note: Option<String>,
     delta: Option<String>,
 ) -> Option<String> {
     // The footer belongs to the EDITING card only. The same renderer draws the
@@ -459,7 +480,11 @@ pub(crate) fn plan_review_footer_note(
         return None;
     }
     if reviewing {
-        return Some(PLAN_REVIEW_RUNNING_NOTE.to_string());
+        return Some(
+            running_note
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| PLAN_REVIEW_RUNNING_NOTE.to_string()),
+        );
     }
     delta.filter(|d| !d.trim().is_empty())
 }
@@ -496,24 +521,118 @@ pub(crate) fn plan_review_agent_id(spawn_output: &str) -> Option<String> {
     (!id.is_empty()).then(|| id.to_string())
 }
 
+/// Structured outcome of a finished plan review report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlanReviewReport {
+    pub(crate) card_delta: String,
+    pub(crate) full_summary: Option<String>,
+    pub(crate) open_questions: Vec<String>,
+}
+
+/// Parse a review worker's full output into card delta, full summary, and open questions.
+pub(crate) fn parse_plan_review_report(report: Option<&str>) -> PlanReviewReport {
+    let Some(report) = report else {
+        return PlanReviewReport {
+            card_delta: "✨ Review finished but returned no report.".to_string(),
+            full_summary: None,
+            open_questions: Vec::new(),
+        };
+    };
+
+    let mut open_questions = Vec::new();
+    let mut in_open_questions = false;
+    let mut summary_lines = Vec::new();
+    let mut in_summary = false;
+    let mut delta_line = None;
+
+    for line in report.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with(PLAN_REVIEW_DELTA_MARKER) {
+            let d = trimmed
+                .strip_prefix(PLAN_REVIEW_DELTA_MARKER)
+                .unwrap()
+                .trim();
+            if !d.is_empty() {
+                delta_line = Some(d.to_string());
+            }
+        } else if trimmed.starts_with("OPEN_QUESTIONS:") {
+            in_open_questions = true;
+            in_summary = false;
+            let rest = trimmed.strip_prefix("OPEN_QUESTIONS:").unwrap().trim();
+            if !rest.is_empty() {
+                open_questions.push(rest.to_string());
+            }
+        } else if trimmed.starts_with("SUMMARY:") {
+            in_summary = true;
+            in_open_questions = false;
+            let rest = trimmed.strip_prefix("SUMMARY:").unwrap().trim();
+            if !rest.is_empty() {
+                summary_lines.push(rest.to_string());
+            }
+        } else if in_open_questions {
+            if trimmed.starts_with('#') || trimmed.starts_with("DELTA:") {
+                in_open_questions = false;
+            } else if trimmed.starts_with('-')
+                || trimmed.starts_with('*')
+                || trimmed.starts_with("•")
+            {
+                let q = trimmed.trim_start_matches(['-', '*', '•', ' ']).trim();
+                if !q.is_empty() {
+                    open_questions.push(q.to_string());
+                }
+            } else if !trimmed.is_empty()
+                && (trimmed.chars().next().map_or(false, |c| c.is_ascii_digit()))
+            {
+                let q = trimmed
+                    .trim_start_matches(|c: char| {
+                        c.is_ascii_digit() || c == '.' || c == ')' || c == ' '
+                    })
+                    .trim();
+                if !q.is_empty() {
+                    open_questions.push(q.to_string());
+                }
+            }
+        } else if in_summary {
+            if trimmed.starts_with('#')
+                || trimmed.starts_with("DELTA:")
+                || trimmed.starts_with("OPEN_QUESTIONS:")
+            {
+                in_summary = false;
+            } else if !trimmed.is_empty() {
+                summary_lines.push(trimmed.to_string());
+            }
+        }
+    }
+
+    let card_delta = match delta_line {
+        Some(s) => format!("✨ Review: {}", clamp_review_delta(&s)),
+        None => {
+            if !summary_lines.is_empty() {
+                format!("✨ Review: {}", clamp_review_delta(&summary_lines[0]))
+            } else {
+                "✨ Review finished (no summary line returned).".to_string()
+            }
+        }
+    };
+
+    let full_summary = if !summary_lines.is_empty() {
+        Some(summary_lines.join("\n"))
+    } else {
+        None
+    };
+
+    PlanReviewReport {
+        card_delta,
+        full_summary,
+        open_questions,
+    }
+}
+
 /// One-line card delta from a finished review's report (#155). Reads the
 /// worker's own `DELTA:` line; falls back to a status line so the card always
 /// says something true about what happened.
 pub(crate) fn plan_review_delta(report: Option<&str>) -> String {
-    let Some(report) = report else {
-        return "✨ Review finished but returned no report.".to_string();
-    };
-    let summary = report
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix(PLAN_REVIEW_DELTA_MARKER))
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    match summary {
-        Some(s) => format!("✨ Review: {}", clamp_review_delta(s)),
-        None => "✨ Review finished (no summary line returned).".to_string(),
-    }
+    parse_plan_review_report(report).card_delta
 }
 
 /// Clamp a review summary to the footer budget, marking the cut with an
@@ -587,12 +706,10 @@ pub(crate) async fn refresh_plan_card(
     // #155: a plan review in flight grays the Review button and explains
     // itself in the footer; a finished review leaves its one-line delta there.
     let reviewing = state.is_plan_reviewing(session_id).await;
+    let running_note = state.plan_review_running_note(session_id).await;
+    let delta = state.plan_review_delta(session_id).await;
     let plan_kb = plan_review_effective_kb(plan_kb, reviewing);
-    let footer_note = plan_review_footer_note(
-        plan_kb,
-        reviewing,
-        state.plan_review_delta(session_id).await,
-    );
+    let footer_note = plan_review_footer_note(plan_kb, reviewing, running_note, delta);
 
     // Try rich path first when enabled: sendRichMessage (32K) as the
     // markdown+media dialect (#134 family) — raw markdown prose with inline
@@ -1136,6 +1253,7 @@ pub(crate) async fn remove_plan_card(
     // stale "✨ Review: …" must never resurface on a later plan in the same
     // session (the same stale-chrome family the goal-scoping filter fixed).
     state.clear_plan_review_delta(session_id).await;
+    state.clear_plan_review_running_note(session_id).await;
     remove_plan_card_locked(bot, chat, state, session_id).await;
 }
 

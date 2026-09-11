@@ -52,16 +52,23 @@ impl PlanKb {
         use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
         match self {
             PlanKb::None => None,
-            PlanKb::ApproveDiscard => Some(InlineKeyboardMarkup::new(vec![vec![
-                InlineKeyboardButton::callback("🔍 Review", "plan:review"),
-                InlineKeyboardButton::callback("✅ Approve plan", "plan:ok"),
-                InlineKeyboardButton::callback("🗑 Discard", "plan:no"),
-            ]])),
-            PlanKb::ReviewingApproveDiscard => Some(InlineKeyboardMarkup::new(vec![vec![
-                InlineKeyboardButton::callback("⏳ Reviewing…", "plan:noop"),
-                InlineKeyboardButton::callback("✅ Approve plan", "plan:ok"),
-                InlineKeyboardButton::callback("🗑 Discard", "plan:no"),
-            ]])),
+            PlanKb::ApproveDiscard => Some(InlineKeyboardMarkup::new(vec![
+                vec![InlineKeyboardButton::callback("✅ Approve plan", "plan:ok")],
+                vec![
+                    InlineKeyboardButton::callback("🔍 Review", "plan:review"),
+                    InlineKeyboardButton::callback("🗑 Discard", "plan:no"),
+                ],
+            ])),
+            PlanKb::ReviewingApproveDiscard => Some(InlineKeyboardMarkup::new(vec![
+                vec![InlineKeyboardButton::callback(
+                    "⏳ Approve plan",
+                    "plan:noop",
+                )],
+                vec![
+                    InlineKeyboardButton::callback("⏳ Reviewing…", "plan:noop"),
+                    InlineKeyboardButton::callback("🗑 Discard", "plan:no"),
+                ],
+            ])),
             PlanKb::DiscardOnly => Some(InlineKeyboardMarkup::new(vec![vec![
                 InlineKeyboardButton::callback("🗑 Discard plan", "plan:no"),
             ]])),
