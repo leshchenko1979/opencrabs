@@ -7,6 +7,16 @@
 //! Two hooks feed this registry:
 //! - `load_brain_file` with a bare skill slug (the #131 canonical form)
 //! - `read_file` on a `skills/<slug>/SKILL.md` path (whole-file reads)
+//! - `load_brain_file` with the filename form `<slug>.md` (issue #138)
+//! - slash invocation (`register_active_skill`) also marks seen (#138) so
+//!   the stamp's union survives restarts
+//!
+//! Persistence (#138): every `mark_seen` best-effort writes a row to the
+//! `session_seen_skills` table (`SessionSkillsRepository`); daemon boot
+//! hydrates the registry from that table, so a restart/rebuild no longer
+//! makes a skill-consuming session look "skill-less" to the stamp. DB is
+//! the durability layer only — the in-memory set stays the hot path, and
+//! any DB failure degrades to a WARN (no panic, stamp never fails).
 //!
 //! In-memory registry stores `(session_id, slug) -> epoch` (issue #150).
 //! When context compaction occurs, `note_compaction` bumps the session's epoch.
@@ -61,12 +71,98 @@ pub fn skill_slug_from_path(path: &Path) -> Option<String> {
 ///
 /// Always upserts (issue #150: updating the epoch ensures that re-reading
 /// a skill after compaction unblocks the skill glob gate).
+///
+/// Also best-effort persists the row (#138) on first sight in this process:
+/// a DB write failure logs WARN and is swallowed — the in-memory registry
+/// stays authoritative for the current process, persistence only buys
+/// restart durability. Spawned on a detached task so the hot read/load
+/// path never awaits the DB.
 pub fn mark_seen(session_id: Uuid, slug: &str) {
     let epoch = current_epoch(session_id);
-    registry()
+    let newly = registry()
         .lock()
         .expect("seen_skills registry poisoned")
-        .insert((session_id, slug.to_string()), epoch);
+        .insert((session_id, slug.to_string()), epoch)
+        .is_none();
+    if newly {
+        let slug = slug.to_string();
+        // Persist only inside a live tokio runtime — plain #[test] fns and
+        // other non-async contexts have no reactor; the in-memory registry
+        // already did its job there, and DB durability is best-effort.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                match persist_seen(session_id, &slug).await {
+                    Ok(()) => {}
+                    Err(e) => tracing::warn!(
+                        "seen_skills: DB persist of ({session_id}, {slug}) failed (in-memory \
+                         registry unaffected): {e:#}"
+                    ),
+                }
+            });
+        }
+    }
+}
+
+/// Best-effort DB persist of one seen-skill row (#138). Soft-fails when no
+/// global pool exists yet (unit tests, pre-connect startup).
+async fn persist_seen(session_id: Uuid, slug: &str) -> anyhow::Result<()> {
+    let pool = crate::db::global_pool()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no global DB pool (not connected yet)"))?;
+    crate::db::repository::SessionSkillsRepository::new(pool)
+        .record(session_id, slug)
+        .await
+}
+
+/// Hydrate the in-memory registry from the DB at daemon boot (#138).
+///
+/// Loads every persisted (session, slug) row into the registry so a
+/// restart does not erase skills a session consumed before it. Also prunes
+/// rows whose session no longer exists (hygiene, soft-fail). Called from
+/// `AgentService::new` — the chokepoint every surface constructs through —
+/// via a detached task so service construction never blocks on the DB.
+/// Only fires once per process (the registry static is process-wide; a
+/// second hydrate is a no-op by construction but still skipped for clarity).
+pub fn hydrate_from_db() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static HYDRATED: AtomicBool = AtomicBool::new(false);
+    if HYDRATED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let Some(pool) = crate::db::global_pool().cloned() else {
+        tracing::debug!("seen_skills: no global DB pool at hydrate time (tests?) — skipping");
+        return;
+    };
+    tokio::spawn(async move {
+        let repo = crate::db::repository::SessionSkillsRepository::new(pool);
+        match repo.all().await {
+            Ok(rows) => {
+                let n = {
+                    // Guard strictly scoped: a MutexGuard is not Send, so it
+                    // must not be alive across the prune await below.
+                    let mut reg = registry().lock().expect("seen_skills registry poisoned");
+                    for (sid, slug) in rows {
+                        // Hydrated rows carry epoch 0 — "loaded before any
+                        // compaction" (issue #150): they count for the #125
+                        // stamp inventory without claiming the body is still
+                        // in context for the skill glob gate.
+                        reg.insert((sid, slug), 0);
+                    }
+                    reg.len()
+                };
+                tracing::info!("seen_skills: hydrated registry from DB ({n} total rows)");
+                match repo.prune_missing_sessions().await {
+                    Ok(0) => {}
+                    Ok(k) => tracing::debug!("seen_skills: pruned {k} row(s) for dead sessions"),
+                    Err(e) => tracing::warn!("seen_skills: prune failed (soft): {e:#}"),
+                }
+            }
+            Err(e) => tracing::warn!(
+                "seen_skills: DB hydrate failed (in-memory registry starts empty, \
+                 stamps may undercount until next mark_seen): {e:#}"
+            ),
+        }
+    });
 }
 
 /// The session's current compaction epoch (0 before any compaction).

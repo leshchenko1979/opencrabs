@@ -81,12 +81,17 @@ fn render_block(block: &Block, wrap_p: bool) -> String {
             MermaidResult::Image(url) => super::mermaid::image_html(url),
             // Locally-rendered PNG bytes are delivered via the multipart
             // markdown path, never through vector HTML `<img>` (Telegram
-            // rejects it). This arm is a defensive fallback — degrade
-            // legibly rather than leak raw binary.
-            MermaidResult::ImageBytes(_) => super::mermaid::failure_html(
-                "diagram rendered locally but could not be embedded in HTML",
-                source,
-            ),
+            // rejects it). This arm is a defensive fallback — but a
+            // SUCCESSFUL render is never discarded as a failure (owner
+            // directive 2026-09-10 03:56Z): degrade to the clamped-image
+            // note plus a small [svg] link the reader can open in a
+            // browser. Broken fences keep the legible failure block.
+            MermaidResult::ImageBytes(_) => {
+                super::mermaid::rendered_image_note(
+                    "open the svg link for the full-size vector",
+                    source,
+                ) + &super::mermaid::svg_link_html(source)
+            }
             MermaidResult::Failed(err) | MermaidResult::ParseError(err) => {
                 super::mermaid::failure_html(err, source)
             }
@@ -428,4 +433,52 @@ pub(crate) async fn markdown_to_html_mermaid_p(text: &str) -> String {
         blocks
     };
     render_html_p(&resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // #134 family, owner directive 03:56Z: the whole-message HTML fallback
+    // stops discarding a successful render — ImageBytes yields the
+    // rendered-image note + [svg] link. Broken fences keep the failure
+    // block. Direct render_html() (module-internal), no resolver involved.
+
+    #[test]
+    fn image_bytes_arm_yields_note_and_svg_link_not_failure() {
+        let blocks = vec![Block::Mermaid {
+            source: "graph TD\n    A --> B".into(),
+            result: MermaidResult::ImageBytes(vec![0x89, b'P']),
+        }];
+        let html = render_html(&blocks);
+        assert!(
+            html.contains("Diagram rendered as image"),
+            "ImageBytes must yield the rendered-image note banner. Got:\n{html}"
+        );
+        assert!(
+            html.contains("<a href=\"https://mermaid.ink/svg/"),
+            "the note must carry the svg link. Got:\n{html}"
+        );
+        assert!(
+            !html.contains("could not be rendered"),
+            "a SUCCESSFUL render must not read as a failure. Got:\n{html}"
+        );
+    }
+
+    #[test]
+    fn parse_error_arm_still_yields_the_failure_block() {
+        let blocks = vec![Block::Mermaid {
+            source: "graph TD\n    A -->".into(),
+            result: MermaidResult::ParseError("Parse error on line 2".into()),
+        }];
+        let html = render_html(&blocks);
+        assert!(
+            html.contains("Mermaid diagram could not be rendered"),
+            "broken fences keep the legible failure block. Got:\n{html}"
+        );
+        assert!(
+            !html.contains("[svg]"),
+            "no svg link for a render that never happened. Got:\n{html}"
+        );
+    }
 }

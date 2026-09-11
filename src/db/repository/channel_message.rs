@@ -6,6 +6,7 @@ use crate::db::Pool;
 use crate::db::database::interact_err;
 use crate::db::models::ChannelMessage;
 use anyhow::{Context, Result};
+use chrono::Utc;
 use rusqlite::{OptionalExtension, params};
 
 /// Summary of a known chat
@@ -40,8 +41,9 @@ impl ChannelMessageRepository {
                     "INSERT OR IGNORE INTO channel_messages
                         (id, channel, channel_chat_id, channel_chat_name,
                          sender_id, sender_name, content, message_type,
-                         platform_message_id, created_at, thread_id, topic_name)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                         platform_message_id, created_at, thread_id, topic_name,
+                         ship_plane)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                     params![
                         m.id.to_string(),
                         m.channel,
@@ -55,6 +57,7 @@ impl ChannelMessageRepository {
                         m.created_at.timestamp(),
                         m.thread_id,
                         m.topic_name,
+                        m.ship_plane,
                     ],
                 )
             })
@@ -339,6 +342,61 @@ impl ChannelMessageRepository {
             .context("Failed to look up bot message by platform id")
     }
 
+    /// The conversation's most recent bot rich-markdown bubble (#91) — the
+    /// cross-turn glue target. Returns `(platform_message_id, content)`.
+    /// A row only qualifies when the bot authored it, its platform id was
+    /// captured, the ship-plane marker marks it rich-markdown (the only
+    /// plane whose stored content IS the shipped body a re-edit can re-send),
+    /// it sits in the requested thread (or outside any, for non-forum chats),
+    /// and it is younger than `max_age_secs` — older answers fall back to
+    /// the standalone bubble instead of wearing fresh controls (#1226
+    /// stale-shell class).
+    pub async fn last_bot_rich_md(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        thread_id: Option<&str>,
+        max_age_secs: i64,
+    ) -> Result<Option<(String, String)>> {
+        let ch = channel.to_string();
+        let cid = chat_id.to_string();
+        let tid = thread_id.map(|s| s.to_string());
+        let cutoff = Utc::now().timestamp() - max_age_secs;
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| match &tid {
+                Some(tid) => conn
+                    .query_row(
+                        "SELECT platform_message_id, content FROM channel_messages \
+                         WHERE channel = ?1 AND channel_chat_id = ?2 AND thread_id = ?3 \
+                         AND sender_id = 'bot:opencrabs' \
+                         AND platform_message_id IS NOT NULL AND ship_plane = 'rich-md' \
+                         AND created_at > ?4 \
+                         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                        params![ch, cid, tid, cutoff],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional(),
+                None => conn
+                    .query_row(
+                        "SELECT platform_message_id, content FROM channel_messages \
+                         WHERE channel = ?1 AND channel_chat_id = ?2 AND thread_id IS NULL \
+                         AND sender_id = 'bot:opencrabs' \
+                         AND platform_message_id IS NOT NULL AND ship_plane = 'rich-md' \
+                         AND created_at > ?3 \
+                         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                        params![ch, cid, cutoff],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional(),
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to look up cross-turn glue target")
+    }
+
     /// Most recent non-null forum topic name for a thread, used to label the
     /// session after the topic ("Devops") instead of its numeric thread id
     /// ("topic:2"). Telegram only carries the name on regular topic messages
@@ -380,6 +438,52 @@ impl ChannelMessageRepository {
             .await
             .map_err(interact_err)?
             .context("Failed to fetch latest topic name")
+    }
+
+    /// Sender id of the NEWEST message in one topic (#33 boot classifier).
+    /// `thread_id = None` addresses the General/DM arm (rows stored with a
+    /// NULL thread). The classifier reads this to tell an interrupted turn
+    /// (last word = a user) from a completed one (last word = the bot's own
+    /// outgoing row, `bot:opencrabs` via `send::record_outgoing`).
+    /// `rowid` breaks created_at ties — same-second rows must resolve
+    /// deterministically to the last-inserted one.
+    pub async fn last_topic_sender(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        thread_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        let ch = channel.to_string();
+        let cid = chat_id.to_string();
+        let tid = thread_id.map(|s| s.to_string());
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                if let Some(t) = &tid {
+                    conn.query_row(
+                        "SELECT sender_id FROM channel_messages \
+                         WHERE channel = ?1 AND channel_chat_id = ?2 AND thread_id = ?3 \
+                         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                        params![ch, cid, t],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                } else {
+                    conn.query_row(
+                        "SELECT sender_id FROM channel_messages \
+                         WHERE channel = ?1 AND channel_chat_id = ?2 AND thread_id IS NULL \
+                         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                        params![ch, cid],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                }
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to fetch last topic sender")
     }
 
     /// Recent user-sent request texts across ALL chats, newest first (#504).

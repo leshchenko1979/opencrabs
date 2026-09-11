@@ -536,6 +536,26 @@ impl TelegramAgent {
                                                         &picked_md,
                                                         picked_idx,
                                                     );
+                                                // #117 step 1: the tap consequence enters the
+                                                // G2 gate as Interactive — it shares the
+                                                // bucket's view of the throttle window and
+                                                // gets the reserved floor, but NEVER queues
+                                                // and NEVER drops (the gate's Interactive arm
+                                                // always returns true; payload below is only
+                                                // read by the finals drainer, which Interactive
+                                                // never feeds). The deferred retry inside the
+                                                // arms stays gate-free: it IS the reactive
+                                                // floor (#68/#76).
+                                                let _interactive_gate = super::governor::
+                                                    edit_admission(
+                                                    &bot_clone,
+                                                    chat_id,
+                                                    mid,
+                                                    super::governor::EditClass::Interactive,
+                                                    String::new(),
+                                                    false,
+                                                )
+                                                .await;
                                                 let outcome: Result<(), String> = match rewrite.clone() {
                                                     super::suggest_options::PickRewrite::RichMarkdownHost(
                                                         body,
@@ -602,6 +622,7 @@ impl TelegramAgent {
                                                             let echo_text = text.clone();
                                                             let echo_chooser = chooser.clone();
                                                             super::edit_retry::spawn_deferred(
+                                                                chat_id,
                                                                 wait,
                                                                 move || async move {
                                                                     refire_pick_edit(&bot_r, retry)
@@ -993,6 +1014,7 @@ impl TelegramAgent {
                                                 // window that killed the old immediate
                                                 // fallback.
                                                 super::edit_retry::spawn_deferred(
+                                                    chat,
                                                     wait,
                                                     {
                                                         let bot = bot.clone();
@@ -1807,6 +1829,7 @@ impl TelegramAgent {
                                                 Err(e) => match super::edit_retry::classify(&e) {
                                                     super::edit_retry::EditErr::RetryAfter(wait) => {
                                                         super::edit_retry::spawn_deferred(
+                                                            chat_id,
                                                             wait,
                                                             move || {
                                                                 let bot = bot2.clone();
