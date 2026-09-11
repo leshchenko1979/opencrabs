@@ -21,7 +21,7 @@
 //!   [`Limits::typing_max_hold`] is dropped — the indicator is cosmetic and
 //!   the next tick re-fires it.
 //! - **G2 edits** ([`edit_admission`] + [`EditClass`]): token bucket
-//!   ~30/min per forum peer. On an empty bucket the priority drop ladder
+//!   ~18/min per forum peer. On an empty bucket the priority drop ladder
 //!   applies — clock → brain preview → intermediary flow updates → status
 //!   line — because each dropped class self-heals: every flow refresh
 //!   re-renders FULL current state, so the next admitted edit carries the
