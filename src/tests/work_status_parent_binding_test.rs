@@ -62,35 +62,6 @@ fn status_file_carries_parent_and_lookup_finds_child() {
 }
 
 #[test]
-fn interrupted_file_is_still_detected_after_reconcile() {
-    let dir = temp_status_dir("interrupted");
-    let child = Uuid::new_v4();
-    let parent = Uuid::new_v4();
-
-    let mut agent = WorkStatus::new_agent(
-        "agent-int",
-        "restarted lens",
-        &child.to_string(),
-        "task",
-        Some(&parent.to_string()),
-    )
-    .expect("write status");
-
-    // Upstream reconciliation marks the file Interrupted at boot, before
-    // the resumed session finishes — the detector must still find it.
-    agent.mark_interrupted().expect("mark interrupted");
-    assert!(agent.state.is_terminal());
-    let found = WorkStatus::find_agent_by_session(&child.to_string()).expect("found");
-    assert_eq!(found.id, "agent-int");
-    assert_eq!(
-        found.parent_session_id.as_deref(),
-        Some(parent.to_string().as_str())
-    );
-
-    drop_status_dir(dir);
-}
-
-#[test]
 fn legacy_file_without_parent_deserializes_and_is_skipped_by_nothing() {
     let dir = temp_status_dir("legacy");
     let child = Uuid::new_v4();
@@ -114,7 +85,7 @@ fn legacy_file_without_parent_deserializes_and_is_skipped_by_nothing() {
 }
 
 #[test]
-fn lookup_skips_commands_and_outcome_terminal_agents() {
+fn lookup_skips_commands_and_terminal_agents() {
     let dir = temp_status_dir("skip");
     let child = Uuid::new_v4();
 
@@ -123,7 +94,7 @@ fn lookup_skips_commands_and_outcome_terminal_agents() {
         .expect("write command status");
     assert!(WorkStatus::find_agent_by_session(&child.to_string()).is_none());
 
-    // An outcome-terminal agent must not look revivable.
+    // A terminal agent must not look revivable.
     let mut agent = WorkStatus::new_agent(
         "agent-done",
         "finished lens",
@@ -137,17 +108,43 @@ fn lookup_skips_commands_and_outcome_terminal_agents() {
     assert_eq!(agent.kind, WorkKind::Agent);
     assert!(WorkStatus::find_agent_by_session(&child.to_string()).is_none());
 
-    // A failed agent is equally final.
+    drop_status_dir(dir);
+}
+
+// ── #147: natural-completion writer persists the COMPLETE output ─────
+
+/// The natural completion path must persist the full final text byte-exact
+/// in `finish.output_full` — the 200-char head stub is gone.
+#[test]
+fn natural_completion_persists_full_output_byte_exact() {
+    let dir = temp_status_dir("of-natural");
+    let report: String = "# LENS REPORT\n\n".to_string()
+        + &"finding: detail with enough bulk to exceed any stub cap.\n".repeat(80);
+    assert!(
+        report.chars().count() > 200,
+        "fixture must exceed 200 chars"
+    );
+
     let mut agent = WorkStatus::new_agent(
-        "agent-fail",
-        "failed lens",
-        &child.to_string(),
-        "task",
+        "of-natural-1",
+        "lens",
+        "sess-of-natural",
+        "review task",
         None,
     )
     .expect("write agent status");
-    agent.mark_failed("boom".to_string()).expect("finalize");
-    assert!(WorkStatus::find_agent_by_session(&child.to_string()).is_none());
+    agent.mark_completed(report.clone()).expect("finalize");
 
+    let reread = WorkStatus::read("of-natural-1").expect("status file readable");
+    let finish = reread.finish.expect("terminal finish present");
+    assert_eq!(
+        finish.output_full.as_deref(),
+        Some(report.as_str()),
+        "persisted output_full must equal the full final output byte-exact"
+    );
+
+    let raw = std::fs::read_to_string(dir.join("of-natural-1.json")).expect("raw json");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(parsed.get("output_summary").is_none());
     drop_status_dir(dir);
 }

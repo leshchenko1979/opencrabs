@@ -144,3 +144,26 @@ fn a_long_output_keeps_its_tail() {
     assert!(msg.context_text.contains("truncated"));
     assert!(msg.context_text.len() < long.len());
 }
+
+#[test]
+fn a_long_output_hint_names_the_persisted_file_not_the_ram_tool() {
+    // #147: the hint must point at the durable status file (field
+    // output_full), not at wait_agent — which reads daemon RAM and dies at
+    // every restart/swap. The path must be real (status_path), not a bare id.
+    let long: String = std::iter::repeat_n('x', 5000)
+        .chain("THE-CONCLUSION".chars())
+        .collect();
+    let msg = completion_message("big", "hint-id-1", Ok(&long));
+
+    assert!(
+        !msg.context_text.contains("wait_agent"),
+        "hint must no longer claim the RAM-resident tool holds the report"
+    );
+    assert!(msg.context_text.contains("output_full"));
+    let expected_path = crate::brain::agent::service::work_status::status_path("hint-id-1");
+    assert!(
+        msg.context_text
+            .contains(&expected_path.display().to_string()),
+        "hint carries the real status-file path: {expected_path:?}"
+    );
+}

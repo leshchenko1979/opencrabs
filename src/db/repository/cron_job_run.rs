@@ -76,6 +76,30 @@ impl CronJobRunRepository {
         Ok(())
     }
 
+    /// Mark a run as delivery-failed (#107): the job executed and produced
+    /// content (kept in `content`), but the configured `deliver_to` channel
+    /// never received it. Distinct from `error` (execution failure) so a
+    /// silent delivery drop can never masquerade as a clean success. A no-op
+    /// guard keeps an execution `error` row from being overwritten.
+    pub async fn complete_delivery_failed(&self, run_id: &str, reason: &str) -> Result<()> {
+        let id = run_id.to_string();
+        let reason = reason.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "UPDATE cron_job_runs SET status = 'delivery_failed', error = ?1, completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?2 AND status != 'error'",
+                    params![reason, id],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to update cron job run delivery status")?;
+        Ok(())
+    }
+
     /// Mark a run as failed with error.
     pub async fn complete_error(&self, run_id: &str, error: &str) -> Result<()> {
         let id = run_id.to_string();
