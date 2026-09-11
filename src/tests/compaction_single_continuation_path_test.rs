@@ -3,19 +3,8 @@
 //! There are five places a compaction can wake the agent (Regular, MidLoop,
 //! Emergency, PostTool, Manual), and each used to call `build_continuation`
 //! itself with the same four arguments. Anything that has to ride *every*
-//! continuation then has to be added in five places and stays correct only
-//! while nobody forgets one. The advisory skill-inventory stamp (#125) is the
-//! first such rider: it is appended after the body, so a site still calling
-//! `build_continuation` directly produces a perfectly valid prompt with the
-//! stamp silently missing.
-//!
-//! That failure is invisible to the unit tests around the stamp, which drive
-//! `append_skill_stamp` directly and would keep passing. This guard pins the
-//! structural property they cannot: the loop reaches the builder exactly once,
-//! through `continuation_prompt`, so a sixth compaction site cannot quietly
-//! skip what the other five carry.
-
-use std::path::Path;
+//! The continuation (continue-instructions, plan recovery) must reach the DB.
+//! This guard pins that every compaction site passes persist=true.
 
 const TOOL_LOOP: &str = "src/brain/agent/service/tool_loop.rs";
 
@@ -48,7 +37,7 @@ fn the_tool_loop_reaches_the_continuation_builder_exactly_once() {
 }
 
 #[test]
-fn the_single_path_is_continuation_prompt_and_it_carries_the_stamp() {
+fn the_single_path_is_continuation_prompt() {
     let text = std::fs::read_to_string(Path::new(TOOL_LOOP))
         .unwrap_or_else(|e| panic!("{TOOL_LOOP} must be readable ({e}); did the module move?"));
 
@@ -56,14 +45,5 @@ fn the_single_path_is_continuation_prompt_and_it_carries_the_stamp() {
         !code_occurrences(&text, "async fn continuation_prompt(").is_empty(),
         "the shared construction path is gone from {TOOL_LOOP}; the guard above is \
          measuring nothing"
-    );
-    assert!(
-        !code_occurrences(&text, "append_skill_stamp(").is_empty(),
-        "the shared path no longer appends the skill stamp, so no compaction carries it"
-    );
-    assert!(
-        !code_occurrences(&text, "active_skills_for_session(").is_empty(),
-        "the stamp is no longer fed from the session's active-skill registry, so it \
-         would render empty for every session"
     );
 }

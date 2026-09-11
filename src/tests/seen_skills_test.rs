@@ -150,8 +150,7 @@ fn stamp_union_dedupes_active_and_seen() {
 
 // ── acceptance 5: stamp-build observability is a DEBUG line ────────────────
 // Verified by code inspection of continuation_prompt (tracing::debug! with
-// the full inventory list); zero-skill silence is covered by the existing
-// skill_stamp_is_silent_when_no_skills_active test on append_skill_stamp.
+// the full inventory list).
 
 // ── moved out of an inline `mod tests` in src/brain/tools/seen_skills.rs ──
 //
