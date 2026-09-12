@@ -912,6 +912,10 @@ pub async fn sync_md_to_json(session_id: Uuid) -> Result<(), String> {
             return Err(format!(
                 "PLAN WRITE REFUSED: Mermaid diagram syntax error in plan markdown.\n\n\
                  Renderer diagnostic:\n{}\n\n\
+                 Correction rules:\n\
+                 1. Sequence Diagrams: 'Note over A,B:' supports at most two participants spanning the range. Do not list three or more comma-separated actors.\n\
+                 2. Mobile Layout & Aspect Ratio: Always use top-down vertical layouts ('flowchart TD' or 'direction TB'). Never use 'LR' or wide unconstrained subgraphs that become illegible on mobile screens.\n\
+                 3. Labels: Do not use backticks or HTML tags in labels. Use '<br/>' for line breaks.\n\n\
                  Please fix the Mermaid diagram syntax in the plan design and try again.",
                 parse_errors.join("\n")
             ));
