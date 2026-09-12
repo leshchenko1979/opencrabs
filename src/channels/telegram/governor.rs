@@ -712,26 +712,11 @@ pub(crate) async fn edit_admission(
     edit_admission_media_kb(bot, chat_id, msg_id, class, html, rich, Vec::new(), None).await
 }
 
-/// Media-bearing variant of [`edit_admission`]: identical G2 gate, queue,
-/// and drainer contract, with rendered-mermaid [`MediaEntry`]s riding the
-/// queued final (markdown+media edit dialect). Empty `media` is exactly
-/// [`edit_admission`]; the split exists so the 6-arg call sites (flow,
-/// agent, stream_loop, tests) stay untouched.
-pub(crate) async fn edit_admission_media(
-    bot: &Bot,
-    chat_id: ChatId,
-    msg_id: MessageId,
-    class: EditClass,
-    html: String,
-    rich: bool,
-    media: Vec<super::rich::mermaid::MediaEntry>,
-) -> bool {
-    edit_admission_media_kb(bot, chat_id, msg_id, class, html, rich, media, None).await
-}
-
-/// Media-and-keyboard-bearing variant of [`edit_admission`] (#155): preserves
-/// optional `reply_markup` across queued final drains so rate-governed plan card
-/// and UI refreshes do not strip their inline keyboards.
+/// Media-and-keyboard-bearing variant of [`edit_admission`] (#134, #155):
+/// preserves rendered-mermaid [`MediaEntry`]s and optional `reply_markup` across
+/// queued final drains so rate-governed plan card and rich edits do not strip
+/// media or inline keyboards.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn edit_admission_media_kb(
     bot: &Bot,
     chat_id: ChatId,
