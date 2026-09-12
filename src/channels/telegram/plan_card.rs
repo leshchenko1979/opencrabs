@@ -746,6 +746,15 @@ fn clamp_review_delta(s: &str) -> String {
 /// (32K char limit, native `<details><summary>` collapsibles). On any rich
 /// API failure, falls back to the classic HTML `sendMessage` path (4096 chars,
 /// `<blockquote expandable>`).
+///
+/// Returns whether this refresh actually dealt with the card. `false` means the
+/// suppression gate (#814 flood control) skipped the whole call before any read
+/// or API work — the card still shows its previous state. A caller that records
+/// "the card now shows X" must not do so on a `false`: it would mark content
+/// rendered that was never sent, and the next refresh carrying that same
+/// content would then skip (#187 D3). Every other exit reports `true`, because
+/// each one either landed the content or handed it to the governor, which is
+/// the authority on landing it.
 pub(crate) async fn refresh_plan_card(
     bot: &Bot,
     chat: ChatId,
@@ -754,13 +763,13 @@ pub(crate) async fn refresh_plan_card(
     agent: &AgentService,
     session_id: Uuid,
     plan_kb: PlanKb,
-) {
+) -> bool {
     // Telegram asked us to wait. The card is chrome, so skipping an update
     // beats renewing the flood-control window on every refresh (#814).
     // Checked BEFORE taking the lock, so a throttled session releases waiters
     // immediately instead of queueing them behind a write that will not happen.
     if state.plan_card_suppressed(session_id).await {
-        return;
+        return false;
     }
 
     // Serialise everything below (#822). The sequence is check-whether-a-card-
@@ -856,7 +865,7 @@ pub(crate) async fn refresh_plan_card(
         );
         if let Some((mid, last_sig)) = state.plan_card(session_id).await {
             if last_sig == rich_sig {
-                return;
+                return true;
             }
             // G2 flood governor (#1211): plan-card refreshes are FINAL class —
             // never dropped. When the edit bucket is empty the payload queues
@@ -882,7 +891,7 @@ pub(crate) async fn refresh_plan_card(
                 state
                     .set_plan_card(session_id, chat, thread_id, mid, rich_sig)
                     .await;
-                return;
+                return true;
             }
             match super::rich::api::edit_rich_markdown_media(
                 bot.api_url().as_str(),
@@ -901,7 +910,7 @@ pub(crate) async fn refresh_plan_card(
                     state
                         .set_plan_card(session_id, chat, thread_id, mid, rich_sig)
                         .await;
-                    return;
+                    return true;
                 }
                 Err(e) => {
                     let outcome = handle_edit_failure(
@@ -915,7 +924,7 @@ pub(crate) async fn refresh_plan_card(
                     )
                     .await;
                     match outcome {
-                        EditOutcome::Saved | EditOutcome::Suppressed => return,
+                        EditOutcome::Saved | EditOutcome::Suppressed => return true,
                         EditOutcome::Gone => { /* fall through to create */ }
                     }
                 }
@@ -942,7 +951,7 @@ pub(crate) async fn refresh_plan_card(
                 state
                     .set_plan_card(session_id, chat, thread_id, MessageId(mid), rich_sig)
                     .await;
-                return;
+                return true;
             }
             Err(e) => {
                 tracing::warn!("Rich plan card create failed: {e} — falling back to HTML");
@@ -972,7 +981,7 @@ pub(crate) async fn refresh_plan_card(
         } else {
             remove_plan_card_locked(bot, chat, state, session_id).await;
         }
-        return;
+        return true;
     };
     // #155: footer rides the body, so it lands inside `signature` below — a
     // footer-only change (review started, or a new delta) must re-render.
@@ -982,7 +991,7 @@ pub(crate) async fn refresh_plan_card(
 
     if let Some((mid, last_sig)) = state.plan_card(session_id).await {
         if last_sig == signature {
-            return;
+            return true;
         }
         // G2 flood governor (#1211): same FINAL contract as the rich path —
         // queue latest-wins when the edit bucket is empty, never drop.
@@ -999,7 +1008,7 @@ pub(crate) async fn refresh_plan_card(
             state
                 .set_plan_card(session_id, chat, thread_id, mid, signature)
                 .await;
-            return;
+            return true;
         }
         let mut req = bot
             .edit_message_text(chat, mid, html.clone())
@@ -1012,7 +1021,7 @@ pub(crate) async fn refresh_plan_card(
                 state
                     .set_plan_card(session_id, chat, thread_id, mid, signature)
                     .await;
-                return;
+                return true;
             }
             Err(e) => {
                 let outcome = handle_edit_failure(
@@ -1026,7 +1035,7 @@ pub(crate) async fn refresh_plan_card(
                 )
                 .await;
                 match outcome {
-                    EditOutcome::Saved | EditOutcome::Suppressed => return,
+                    EditOutcome::Saved | EditOutcome::Suppressed => return true,
                     EditOutcome::Gone => { /* fall through to create */ }
                 }
             }
@@ -1050,6 +1059,7 @@ pub(crate) async fn refresh_plan_card(
             handle_create_failure(&e.to_string(), state, session_id).await;
         }
     }
+    true
 }
 
 /// Delete the session's plan card and stop tracking it. Used both as terminal
