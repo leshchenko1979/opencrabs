@@ -329,3 +329,89 @@ fn legacy_migration_with_no_legacy_dir_is_a_noop() {
     isolate("legacy_none");
     assert_eq!(migrate_legacy_dir(&legacy_dir()), 0);
 }
+
+/// #187 D2 — a round-end write must not reset the tool count.
+///
+/// The sub-agent keeps ONE status handle for the child's whole life, taken at
+/// spawn. The progress callback writes `tool_count` through its own fresh read;
+/// the round-end `update_progress` then re-serialises the spawn-time copy, and
+/// because it derives `prev_tool_count` from that copy it wrote 0 over the
+/// callback's count — every round. That alone explains the at-rest census (0 of
+/// 273 status files with a truthy `tool_count`), which is why the census could
+/// never settle whether the callback fires at all.
+///
+/// Both halves are pinned: the hazard (writing from the stale copy clobbers)
+/// and the fix (reload first, and the count survives).
+#[test]
+fn round_end_write_keeps_a_mid_round_tool_count() {
+    isolate("round_end_count");
+    let id = "d2-round-end";
+    let mut spawn_handle =
+        WorkStatus::new_agent(id, "review", "sess-1", "review the plan", None).unwrap();
+    assert!(
+        spawn_handle.progress.is_none(),
+        "a freshly spawned agent carries no progress snapshot — this is the copy spawn.rs holds"
+    );
+
+    // The progress callback: fresh read, explicit count.
+    let mut from_callback = WorkStatus::read(id).expect("status file");
+    from_callback
+        .update_progress_tool_count(1, 5, Some("bash".to_string()), None)
+        .unwrap();
+    assert_eq!(
+        WorkStatus::read(id).unwrap().progress.unwrap().tool_count,
+        5
+    );
+
+    // THE HAZARD, pinned deliberately: writing from the spawn-time handle
+    // clobbers the callback's count back to 0. This is the pre-fix behaviour.
+    let mut stale = spawn_handle.clone();
+    stale
+        .update_progress(1, None, Some("tool call(s) completed".to_string()))
+        .unwrap();
+    assert_eq!(
+        WorkStatus::read(id).unwrap().progress.unwrap().tool_count,
+        0,
+        "writing from the spawn-time copy IS the clobber this fix removes"
+    );
+
+    // The callback writes again (a later tool in the same round).
+    let mut from_callback = WorkStatus::read(id).expect("status file");
+    from_callback
+        .update_progress_tool_count(1, 6, Some("read_file".to_string()), None)
+        .unwrap();
+
+    // THE FIX: reload first, then the round-end write.
+    assert!(spawn_handle.reload(), "the status file is there to re-read");
+    spawn_handle
+        .update_progress(1, None, Some("tool call(s) completed".to_string()))
+        .unwrap();
+
+    let after = WorkStatus::read(id).unwrap().progress.unwrap();
+    assert_eq!(
+        after.tool_count, 6,
+        "the round-end write must carry the callback's count, not the spawn-time 0"
+    );
+    assert_eq!(after.iteration, 1);
+    assert_eq!(
+        after.last_tool, None,
+        "the round-end write still clears last_tool — only the count is preserved"
+    );
+    assert_eq!(after.last_event.as_deref(), Some("tool call(s) completed"));
+}
+
+/// `reload` reports a vanished file rather than blanking the handle.
+///
+/// A caller is mid-write on a status the sweep may have aged out; turning a
+/// missing file into an empty handle would write a WRONG status instead of
+/// leaving the caller's copy alone.
+#[test]
+fn reload_reports_a_missing_file_and_leaves_the_handle_alone() {
+    isolate("reload_gone");
+    let mut orphan = WorkStatus::new_agent("d2-gone", "review", "sess-1", "x", None).unwrap();
+    fs::remove_file(status_path("d2-gone")).unwrap();
+
+    assert!(!orphan.reload(), "a missing file reports false");
+    assert_eq!(orphan.id, "d2-gone", "and the handle is left untouched");
+    assert_eq!(orphan.task, "x");
+}

@@ -421,6 +421,30 @@ impl WorkStatus {
         serde_json::from_str(&data).ok()
     }
 
+    /// Re-read this handle from disk, returning whether the file was there
+    /// (#187 D2).
+    ///
+    /// A `WorkStatus` is a SNAPSHOT, not a live view: `read` is called once and
+    /// every later write re-serialises whatever that copy held. That becomes a
+    /// clobber as soon as a second writer updates the same file — the sub-agent
+    /// progress callback writes `tool_count` through its own fresh read, and
+    /// the round-end `update_progress`, whose `prev_tool_count` comes from the
+    /// spawn-time copy, reset it to 0 at every round boundary. Reload before
+    /// such a write so the other writer's fields survive it.
+    ///
+    /// A vanished file leaves the handle untouched: the caller is mid-write on
+    /// a status the sweep may have aged out, and blanking the handle would turn
+    /// a missing file into a wrong one.
+    pub fn reload(&mut self) -> bool {
+        match Self::read(&self.id) {
+            Some(fresh) => {
+                *self = fresh;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Seconds since this work item spawned (#155). Drives the plan-review
     /// progress clock — the same wall-clock shape the flow chrome footer
     /// already uses, so the review note reads like a turn's own footer rather
