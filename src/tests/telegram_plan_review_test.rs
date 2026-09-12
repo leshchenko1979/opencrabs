@@ -186,6 +186,7 @@ fn format_progress_snapshot_handles_various_states() {
 
     let p_zero = crate::brain::agent::service::work_status::ProgressSnapshot {
         iteration: 0,
+        tool_count: 0,
         last_tool: Some("read_file".to_string()),
         last_event: None,
         updated_at: None,
@@ -196,25 +197,27 @@ fn format_progress_snapshot_handles_various_states() {
     );
 
     let p_tool = crate::brain::agent::service::work_status::ProgressSnapshot {
-        iteration: 4,
+        iteration: 1,
+        tool_count: 4,
         last_tool: Some("read_file".to_string()),
         last_event: None,
         updated_at: None,
     };
     assert_eq!(
         format_plan_review_running_progress(Some(&p_tool)),
-        "🔍 Review subagent running (turn 4 · read_file)…"
+        "🔍 Review subagent running (🛠 4 · read_file)…"
     );
 
     let p_notool = crate::brain::agent::service::work_status::ProgressSnapshot {
-        iteration: 2,
+        iteration: 1,
+        tool_count: 2,
         last_tool: None,
         last_event: None,
         updated_at: None,
     };
     assert_eq!(
         format_plan_review_running_progress(Some(&p_notool)),
-        "🔍 Review subagent running (turn 2)…"
+        "🔍 Review subagent running (🛠 2)…"
     );
 }
 

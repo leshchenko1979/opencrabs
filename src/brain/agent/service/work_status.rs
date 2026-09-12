@@ -140,6 +140,8 @@ impl WorkState {
 pub struct ProgressSnapshot {
     #[serde(default = "usize::default")]
     pub iteration: usize,
+    #[serde(default = "usize::default")]
+    pub tool_count: usize,
     #[serde(default)]
     pub last_tool: Option<String>,
     #[serde(default)]
@@ -334,15 +336,35 @@ impl WorkStatus {
         self.write()
     }
 
-    /// Update the progress snapshot after each tool-loop iteration.
+    /// Update the progress snapshot after each tool-loop iteration or tool execution (#155).
     pub fn update_progress(
         &mut self,
         iteration: usize,
         last_tool: Option<String>,
         last_event: Option<String>,
     ) -> std::io::Result<()> {
+        let prev_tool_count = self.progress.as_ref().map(|p| p.tool_count).unwrap_or(0);
         self.progress = Some(ProgressSnapshot {
             iteration,
+            tool_count: prev_tool_count,
+            last_tool,
+            last_event,
+            updated_at: Some(now_rfc3339()),
+        });
+        self.write()
+    }
+
+    /// Update the progress snapshot with explicit tool execution count (#155).
+    pub fn update_progress_tool_count(
+        &mut self,
+        iteration: usize,
+        tool_count: usize,
+        last_tool: Option<String>,
+        last_event: Option<String>,
+    ) -> std::io::Result<()> {
+        self.progress = Some(ProgressSnapshot {
+            iteration,
+            tool_count,
             last_tool,
             last_event,
             updated_at: Some(now_rfc3339()),
