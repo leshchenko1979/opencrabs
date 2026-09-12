@@ -1755,6 +1755,26 @@ impl TelegramAgent {
                                 let kb_msg_id = query.message.as_ref().map(|m| m.id());
 
                                 if data == "plan:no" {
+                                    // #155 D1: a review in flight is a DETACHED
+                                    // sub-agent. `cancel_session` below only
+                                    // fires the TURN token, which the review
+                                    // never registered — so without this the
+                                    // reviewer kept rewriting the plan (and
+                                    // re-posting the card) minutes after the
+                                    // discard. Stop it by its own id first.
+                                    let review_child = state.plan_review_child(session_id).await;
+                                    let review_stopped = match (
+                                        review_child.as_deref(),
+                                        agent.subagent_manager(),
+                                    ) {
+                                        (Some(id), Some(manager)) => manager.cancel(id),
+                                        _ => false,
+                                    };
+                                    if review_stopped {
+                                        state.set_plan_reviewing(session_id, false).await;
+                                        state.clear_plan_review_running_note(session_id).await;
+                                        state.clear_plan_review_child(session_id).await;
+                                    }
                                     let cancelled = state.cancel_session(session_id).await;
                                     let mut reply =
                                         crate::utils::plan_mode::discard(session_id, agent.context())
@@ -1762,6 +1782,9 @@ impl TelegramAgent {
                                     if cancelled {
                                         reply =
                                             format!("⏹️ Cancelled the running turn. {reply}");
+                                    }
+                                    if review_stopped {
+                                        reply = format!("{reply} 🔍 Review stopped.");
                                     }
                                     if let Err(e) = bot
                                         .answer_callback_query(query.id.clone())
@@ -2388,8 +2411,29 @@ async fn execute_plan_review_subagent(
         let agent = agent.clone();
         async move {
             state.clear_plan_review_running_note(session_id).await;
+            state.clear_plan_review_child(session_id).await;
             state.set_plan_reviewing(session_id, false).await;
             state.set_plan_review_delta(session_id, delta).await;
+            // #155 D2: a review that finishes AFTER the owner discarded the plan
+            // must not resurrect the card. Discard deletes the plan, so with no
+            // plan content left there is nothing to render — remove the card
+            // instead of re-posting a headerless one.
+            let (title, checklist) =
+                crate::channels::telegram::flow_chrome::load_plan_sections(session_id).await;
+            let has_md_title =
+                crate::channels::telegram::flow_chrome::load_plan_md_title(session_id)
+                    .await
+                    .is_some();
+            let has_prose = crate::channels::telegram::flow_chrome::load_plan_prose(session_id)
+                .await
+                .is_some();
+            if title.is_none() && checklist.is_none() && !has_md_title && !has_prose {
+                crate::channels::telegram::plan_card::remove_plan_card(
+                    &bot, chat_id, &state, session_id,
+                )
+                .await;
+                return;
+            }
             crate::channels::telegram::plan_card::refresh_plan_card(
                 &bot,
                 chat_id,
@@ -2484,6 +2528,12 @@ async fn execute_plan_review_subagent(
         finish("⚠️ Review started but its id could not be read.".to_string()).await;
         return;
     };
+    // #155 D1: publish the child id so the `plan:no` discard path can cancel
+    // this review. Without it the reviewer ran to natural completion minutes
+    // after the owner discarded, rewriting the plan and re-posting the card.
+    state
+        .set_plan_review_child(session_id, child_id.clone())
+        .await;
 
     // Live progress tracker task (#155): updates the plan card with turn & tool
     // so the review doesn't appear frozen to the operator.

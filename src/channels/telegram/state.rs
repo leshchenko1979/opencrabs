@@ -255,6 +255,11 @@ pub struct TelegramState {
     plan_review_deltas: Mutex<HashMap<Uuid, String>>,
     /// Running note or live progress for an in-flight plan review, per session.
     plan_review_running_notes: Mutex<HashMap<Uuid, String>>,
+    /// Sub-agent id of the plan review currently in flight, per session (#155).
+    /// Its PRESENCE is the cancellation handle: `plan:no` reads it to stop a
+    /// running review, which would otherwise keep rewriting the plan (and
+    /// re-posting the card) minutes after the owner discarded it.
+    plan_review_children: Mutex<HashMap<Uuid, String>>,
     /// Photo batching buffer: (chat_id, user_id, media_group_id) → Vec<(img_marker, Option<caption>)>
     /// When user sends multiple photos in an album, we buffer them and only fire the agent
     /// after a quiet period (no new photos for 3s). Keyed by media_group_id to avoid merging
@@ -443,6 +448,7 @@ impl TelegramState {
             plan_reviewing: Mutex::new(HashMap::new()),
             plan_review_deltas: Mutex::new(HashMap::new()),
             plan_review_running_notes: Mutex::new(HashMap::new()),
+            plan_review_children: Mutex::new(HashMap::new()),
             photo_buffer: Mutex::new(HashMap::new()),
             photo_debounce: Mutex::new(HashMap::new()),
             text_buffer: Mutex::new(HashMap::new()),
@@ -1430,6 +1436,30 @@ impl TelegramState {
             .lock()
             .await
             .remove(&session_id);
+    }
+
+    /// Sub-agent id of the plan review in flight for `session_id` (#155).
+    /// `Some` means a review is running and can be cancelled by that id.
+    pub(crate) async fn plan_review_child(&self, session_id: Uuid) -> Option<String> {
+        self.plan_review_children
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+    }
+
+    /// Publish the sub-agent id of a plan review that has just started (#155),
+    /// so the discard path has something to cancel.
+    pub(crate) async fn set_plan_review_child(&self, session_id: Uuid, child_id: String) {
+        self.plan_review_children
+            .lock()
+            .await
+            .insert(session_id, child_id);
+    }
+
+    /// Forget the in-flight review's id once it is terminal or cancelled (#155).
+    pub(crate) async fn clear_plan_review_child(&self, session_id: Uuid) {
+        self.plan_review_children.lock().await.remove(&session_id);
     }
 
     /// Forget the plan-review delta for `session_id` (#155) — called when the
