@@ -2909,7 +2909,7 @@ pub(crate) async fn handle_message(
                 combined,
                 agent_for_resume,
                 state_for_resume,
-                true, // end-of-turn detached flush is a push-initiated wake (#12)
+                Some(crate::brain::agent::PendingOrigin::System), // end-of-turn detached flush is a push-initiated wake (#12)
             )
             .await
             {
@@ -2963,7 +2963,7 @@ pub(crate) async fn handle_message(
                     combined,
                     agent.clone(),
                     telegram_state.clone(),
-                    true, // stranded-reaction flush is a push-initiated wake (#12)
+                    Some(crate::brain::agent::PendingOrigin::System), // stranded-reaction flush is a push-initiated wake (#12)
                 )
                 .await;
                 // Retire the durable twin on resume ATTEMPT (#111): this run's
