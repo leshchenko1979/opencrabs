@@ -772,7 +772,7 @@ impl TelegramAgent {
                                                 text,
                                                 agent_clone,
                                                 state_clone,
-                                                false, // user button tap, not a push wake (#12)
+                                                Some(crate::brain::agent::PendingOrigin::User), // user button tap (#174)
                                             )
                                             .await
                                         {
@@ -1979,7 +1979,7 @@ impl TelegramAgent {
                                                     prompt,
                                                     agent2,
                                                     state2,
-                                                    false, // user button tap, not a push wake (#12)
+                                                    Some(crate::brain::agent::PendingOrigin::User), // user plan approval button tap (#174)
                                                 )
                                                 .await
                                             {
@@ -2097,7 +2097,7 @@ impl TelegramAgent {
                                                     format!("[callback:{data_owned}]"),
                                                     agent_cb,
                                                     state_cb,
-                                                    false, // user-initiated callback tap (#12)
+                                                    Some(crate::brain::agent::PendingOrigin::User), // user-initiated callback tap (#174)
                                                 )
                                                 .await
                                             {
