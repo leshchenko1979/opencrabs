@@ -1,0 +1,13 @@
+-- Boot classifier origin signal (#180): record whether a binding was last
+-- refreshed by an inbound TEXT message or by an inline BUTTON TAP.
+--
+-- Gate 1 of the boot classifier (#33) only considers sessions whose binding
+-- moved inside WAKE_RECENT_SECS. Until now the sole writer was the text path
+-- in `handler.rs`, so a tap-initiated turn was never a candidate — and when
+-- it did surface, Gate 2 read the topic's last message as a bot card and
+-- called the turn COMPLETED. A kill in the dispatch→PROCESSING-insert window
+-- then lost the turn entirely.
+--
+-- NULL means "written before this column existed" and is read as text
+-- semantics, so every pre-existing row keeps its current classification.
+ALTER TABLE session_bindings ADD COLUMN last_origin TEXT;

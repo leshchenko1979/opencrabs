@@ -7,9 +7,9 @@ use super::TelegramState;
 use super::session_resolve;
 use crate::brain::agent::{AgentService, ProgressCallback};
 use crate::config::{Config, RespondTo};
-use crate::db::ChannelMessageRepository;
 use crate::db::SessionBindingRepository;
 use crate::db::models::ChannelMessage as DbChannelMessage;
+use crate::db::{BindingOrigin, ChannelMessageRepository};
 use crate::services::SessionService;
 use crate::utils::sanitize::redact_secrets;
 use crate::utils::truncate_str;
@@ -1893,6 +1893,7 @@ pub(crate) async fn handle_message(
             "telegram",
             &msg.chat.id.0.to_string(),
             topic_id,
+            BindingOrigin::Text,
         )
         .await
     {
