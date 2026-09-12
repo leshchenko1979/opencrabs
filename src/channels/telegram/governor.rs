@@ -305,6 +305,8 @@ struct PendingFinal {
     /// Media entries (rendered mermaid diagrams) for the markdown+media edit
     /// dialect (#134 family). Empty for every other final shape.
     media: Vec<super::rich::mermaid::MediaEntry>,
+    /// Optional inline keyboard markup preserved across queued final drains (#155).
+    reply_markup: Option<serde_json::Value>,
     attempts: u32,
 }
 
@@ -707,7 +709,7 @@ pub(crate) async fn edit_admission(
     html: String,
     rich: bool,
 ) -> bool {
-    edit_admission_media(bot, chat_id, msg_id, class, html, rich, Vec::new()).await
+    edit_admission_media_kb(bot, chat_id, msg_id, class, html, rich, Vec::new(), None).await
 }
 
 /// Media-bearing variant of [`edit_admission`]: identical G2 gate, queue,
@@ -723,6 +725,22 @@ pub(crate) async fn edit_admission_media(
     html: String,
     rich: bool,
     media: Vec<super::rich::mermaid::MediaEntry>,
+) -> bool {
+    edit_admission_media_kb(bot, chat_id, msg_id, class, html, rich, media, None).await
+}
+
+/// Media-and-keyboard-bearing variant of [`edit_admission`] (#155): preserves
+/// optional `reply_markup` across queued final drains so rate-governed plan card
+/// and UI refreshes do not strip their inline keyboards.
+pub(crate) async fn edit_admission_media_kb(
+    bot: &Bot,
+    chat_id: ChatId,
+    msg_id: MessageId,
+    class: EditClass,
+    html: String,
+    rich: bool,
+    media: Vec<super::rich::mermaid::MediaEntry>,
+    reply_markup: Option<serde_json::Value>,
 ) -> bool {
     // DMs untouched (positive ids), matching the G1 scope guard.
     if chat_id.0 >= 0 {
@@ -774,6 +792,7 @@ pub(crate) async fn edit_admission_media(
                         html,
                         rich,
                         media,
+                        reply_markup,
                         attempts: 0,
                     },
                 )
@@ -913,6 +932,7 @@ async fn deliver_final(chat_id: i64, msg_id: i32, mut pending: PendingFinal) {
         &pending.html,
         pending.rich,
         &pending.media,
+        pending.reply_markup.as_ref(),
     )
     .await;
     let retry_after = match &result {
@@ -993,6 +1013,7 @@ async fn run_final_edit(
     html: &str,
     rich: bool,
     media: &[super::rich::mermaid::MediaEntry],
+    reply_markup: Option<&serde_json::Value>,
 ) -> Result<(), String> {
     if !media.is_empty() {
         super::rich::api::edit_rich_markdown_media(
@@ -1002,7 +1023,7 @@ async fn run_final_edit(
             msg_id,
             html,
             media,
-            None,
+            reply_markup,
             "turn",
             "-",
         )
@@ -1015,7 +1036,7 @@ async fn run_final_edit(
             chat_id,
             msg_id,
             html,
-            None,
+            reply_markup,
             "turn",
             "-",
         )
@@ -1023,11 +1044,16 @@ async fn run_final_edit(
         .map_err(|e| e.to_string())
     } else {
         use teloxide::payloads::EditMessageTextSetters;
-        bot.edit_message_text(ChatId(chat_id), MessageId(msg_id), html)
-            .parse_mode(ParseMode::Html)
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        let mut req = bot
+            .edit_message_text(ChatId(chat_id), MessageId(msg_id), html)
+            .parse_mode(ParseMode::Html);
+        if let Some(kb) = reply_markup
+            && let Ok(inline_kb) =
+                serde_json::from_value::<teloxide::types::InlineKeyboardMarkup>(kb.clone())
+        {
+            req = req.reply_markup(inline_kb);
+        }
+        req.await.map(|_| ()).map_err(|e| e.to_string())
     }
 }
 
