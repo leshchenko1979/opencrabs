@@ -92,9 +92,14 @@ fn render_block(block: &Block, wrap_p: bool) -> String {
                     source,
                 ) + &super::mermaid::svg_link_html(source)
             }
-            MermaidResult::Failed(err) | MermaidResult::ParseError(err) => {
-                super::mermaid::failure_html(err, source)
+            // #189: same split as the markdown path — a transient failure
+            // offers the svg hatch (the response had already passed the
+            // image check, so the render may exist server-side), while a
+            // deterministic parse rejection does not.
+            MermaidResult::Failed(err) => {
+                super::mermaid::failure_html(err, source) + &super::mermaid::svg_link_html(source)
             }
+            MermaidResult::ParseError(err) => super::mermaid::failure_html(err, source),
         },
         Block::Quote(inner) => format!(
             "<blockquote>{}</blockquote>",
@@ -479,6 +484,31 @@ mod tests {
         assert!(
             !html.contains("[svg]"),
             "no svg link for a render that never happened. Got:\n{html}"
+        );
+    }
+
+    #[test]
+    fn failed_arm_yields_the_svg_hatch() {
+        // #189 Leg 4: a TRANSIENT failure (transport/infra) offers the escape
+        // hatch — the response had already passed the `2xx + image/*` check
+        // before the body was lost, so the render very likely exists
+        // server-side. This is the arm the owner's dropped #180 diagram hit.
+        let blocks = vec![Block::Mermaid {
+            source: "flowchart TD\n    A --> B".into(),
+            result: MermaidResult::Failed("diagram renderer dropped the image".into()),
+        }];
+        let html = render_html(&blocks);
+        assert!(
+            html.contains("Mermaid diagram could not be rendered"),
+            "the transient failure keeps the legible block. Got:\n{html}"
+        );
+        assert!(
+            html.contains("<a href=\"https://mermaid.ink/svg/"),
+            "a transient failure must offer the svg hatch. Got:\n{html}"
+        );
+        assert!(
+            html.contains("diagram renderer dropped the image"),
+            "the renderer note must survive. Got:\n{html}"
         );
     }
 }
