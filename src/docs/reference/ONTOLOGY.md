@@ -16,6 +16,8 @@
 | **Not:** X, Y | known synonyms/wrong names — do not use them |
 | → | deeper definition lives in the linked slice; that slice is canonical for that domain |
 
+**A `**Not:**` entry bans a CONCEPT NAME, not a character string.** Code identifiers, module and file names, and CLI strings legitimately carry these words and are NOT vocabulary violations — `plan_files.rs` and the `🦀 Memory Files` listing are the names the code ships, and this file describes the code AS IS. A `**Not:**` entry tells you what to call the *concept* when you write prose, docs, issues, or prompts; it never says an identifier must be renamed.
+
 ## Core concepts
 
 ### Runtime & identity
@@ -36,7 +38,7 @@
 
 **Directive** — any information that shapes agent behavior: rules, tool definitions, skills, commands, config, project knowledge. → brain slice (`BRAIN_CONSTITUTION.md`).
 
-**Brain file** — a markdown file in the profile home that shapes agent behavior; each declares what it owns in an `Owns:` header. Core files are always in the system prompt; contextual files load on demand via `load_brain_file`. → `BRAIN_CONSTITUTION.md` §1 (canonical for all brain-file subtypes). **Not:** "memory file" (memory is one brain file among several).
+**Brain file** — a markdown file in the profile home that shapes agent behavior; each declares what it owns in an `Owns:` header. Core files are always in the system prompt; contextual files load on demand via `load_brain_file`. → `BRAIN_CONSTITUTION.md` §1 (canonical for all brain-file subtypes). **Not:** "memory file" as a name for a brain file — memory is one brain file among several, and the `memory/` daily logs are a separate thing.
 
 **Skill** — a reusable multi-step workflow defined in `SKILL.md` with YAML frontmatter; user skills live in `<profile home>/skills/<name>/`, built-in skills are embedded in the binary. **Not:** "command" (a command is a slash mapping, below).
 
@@ -58,13 +60,13 @@
 
 **Memory search** — retrieval over past daily logs (`memory` scope), brain files (`brain` scope), and indexed external paths (`external` scope). See `src/brain/tools/memory_search.rs`. **Not:** "recall" as a synonym for the tool (recall is the ranking subsystem inside it).
 
-**Daily log** — the per-day memory file (`memory/YYYY-MM-DD.md`) that records what happened in past sessions. Distinct from brain files (rules/policy).
+**Daily log** — the per-day log at `memory/YYYY-MM-DD.md` that records what happened in past sessions. Distinct from brain files (rules/policy).
 
 ### Plan mode
 
 **Plan** — a session's structured plan: design prose plus an executable checklist, stored as JSON sidecar (`.opencrabs_plan_<session-id>.json`) mirrored to a session `.md`. Managed by the `plan` tool. **Not:** "task list" alone (a plan holds the design and its execution track), "roadmap".
 
-**Session plan / checklist** — the two representations of a plan: the design `.md` (Editing status, user-reviewable) and the executable `tasks[]` (Active status). **Not:** "plan file", "todo list".
+**Session plan / checklist** — the two representations of a plan: the design `.md` (Editing status, user-reviewable) and the executable `tasks[]` (Active status). **Not:** "todo list". ("Plan file" is the on-disk artifact's own name — the module is `src/utils/plan_files.rs` — not a name for the concept.)
 
 **Design track / checklist track** — how a plan starts: design goes to Editing and waits for user Approve; a checklist with inline tasks goes Active immediately. → plan-mode slice (`plans/plan-mode/README.md`).
 
