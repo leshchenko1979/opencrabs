@@ -211,8 +211,10 @@ pub fn hydrate_from_rows(rows: Vec<(Uuid, String, Option<i64>, bool)>) -> Hydrat
 /// registry size for the boot log (#138 part 2).
 ///
 /// Fully synchronous — no guard is held across an await (a MutexGuard is not
-/// `Send`), which is why seeding is split out of the hydrate task.
-fn apply_seeds(seeds: HydrationSeeds) -> usize {
+/// `Send`), which is why seeding is split out of the hydrate task. Split out
+/// for a second reason too: it is the only way a test can drive the boot
+/// path, since `global_pool()` is a process-wide OnceLock no test can set.
+pub(crate) fn apply_seeds(seeds: HydrationSeeds) -> usize {
     let seen_count = {
         let mut reg = registry().lock().expect("seen_skills registry poisoned");
         for (key, e) in seeds.seen {

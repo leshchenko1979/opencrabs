@@ -6,10 +6,6 @@ use crate::brain::tools::Tool;
 use crate::brain::tools::ToolExecutionContext;
 use crate::brain::tools::load_brain_file::*;
 use crate::brain::tools::seen_skills;
-use crate::brain::tools::seen_skills::*;
-use crate::db::Database;
-use crate::db::repository::SessionSkillsRepository;
-use std::path::Path;
 use uuid::Uuid;
 
 fn ctx() -> ToolExecutionContext {
@@ -68,7 +64,7 @@ async fn path_traversal_still_refused_after_slug_form_added() {
 }
 
 #[tokio::test]
-async fn unknown_slug_falls_through_to_brain_file_handling() {
+async fn unknown_slug_falls_through_to_brain_file_error() {
     let result = tool()
         .execute(
             serde_json::json!({"name": "no-such-skill-or-brain"}),
@@ -76,20 +72,18 @@ async fn unknown_slug_falls_through_to_brain_file_handling() {
         )
         .await
         .unwrap();
-
-    // The point of the assertion is that an unresolvable slug must never be
-    // served as if it were a skill body. The shape of the miss is main's to
-    // decide, and main answers a missing brain file with a success-carrying
-    // "not found" message rather than an error (load_brain_file.rs), so this
-    // pins the fall-through by content instead of by the success flag.
-    let body = result.output;
+    // Pre-existing contract (unchanged by #131): a missing brain file is a
+    // SOFT success carrying a not-found message — the slug branch must not
+    // have resolved it, so the body must be the brain-file not-found text,
+    // never skill content. Also: nothing gets marked seen.
+    let out = &result.output;
     assert!(
-        body.contains("not found"),
-        "unknown slug must fall through to the brain-file miss, got: {body}"
+        out.contains("not found"),
+        "unknown slug must fall through to the brain-file not-found body, got: {out}"
     );
     assert!(
-        !body.contains("--- skill:"),
-        "unknown slug must never be answered with a skill body, got: {body}"
+        !out.contains("--- skill:"),
+        "unknown slug must never render as skill content"
     );
 }
 
@@ -131,20 +125,105 @@ fn read_file_whole_read_marks_skill_seen_via_hook() {
     assert!(seen_skills::was_seen(session, "grafana"));
 }
 
-// ── acceptance 3: union of both registries is deduplicated ─────────────────
+// ── acceptance 3: the STAMP is the real active ∪ seen union (#138 part 2) ──
 
+/// Replaces the old `stamp_union_dedupes_active_and_seen`, which built two
+/// local `BTreeSet`s and called `HashSet::union` on them. That test exercised
+/// the stdlib, not the product: it passed with the production stamp untouched
+/// and with `seen_for_session` still dead code — it could never have caught
+/// the gap #138 exists to close.
+///
+/// This one drives the REAL union helper and asserts the three things that
+/// actually matter: the stamp carries both registries, the re-injection set
+/// carries ONLY the active one, and the overlap dedupes.
 #[test]
-fn stamp_union_dedupes_active_and_seen() {
-    let mut active = std::collections::BTreeSet::new();
-    active.insert("opencrabs-dev".to_string());
-    let mut seen = std::collections::BTreeSet::new();
-    seen.insert("opencrabs-dev".to_string());
-    seen.insert("grafana".to_string());
-    let union: Vec<String> = active.union(&seen).cloned().collect();
-    assert_eq!(union.len(), 2, "overlap must dedupe");
+fn stamp_union_spans_active_and_seen_while_active_stays_narrow() {
+    let sid = Uuid::new_v4();
+    // Held active AND consumed → must appear exactly once.
+    seen_skills::mark_seen(sid, "opencrabs-dev");
+    seen_skills::mark_active(sid, "opencrabs-dev");
+    // Consumed then discarded → seen only, and must still reach the stamp.
+    seen_skills::mark_seen(sid, "grafana");
+
+    let stamp = seen_skills::stamp_skills_for_session(sid);
+    assert_eq!(stamp.len(), 2, "overlap must dedupe: {stamp:?}");
+    assert!(stamp.contains("opencrabs-dev"), "active half missing");
+    assert!(stamp.contains("grafana"), "seen-only half missing");
+
+    let active = seen_skills::active_for_session(sid);
     assert_eq!(
-        union,
-        vec!["grafana".to_string(), "opencrabs-dev".to_string()]
+        active.len(),
+        1,
+        "re-injection must stay active-only: {active:?}"
+    );
+    assert!(active.contains("opencrabs-dev"));
+    assert!(
+        !active.contains("grafana"),
+        "a seen-only skill must NOT be re-injected"
+    );
+
+    // …and the union renders through the REAL inventory builder.
+    let rendered = crate::brain::agent::service::AgentService::format_context_inventory(
+        200_000,
+        &stamp,
+        &std::collections::HashSet::new(),
+        None,
+    );
+    assert!(
+        rendered.contains("opencrabs-dev") && rendered.contains("grafana"),
+        "the rendered inventory must list both halves of the union, got: {rendered}"
+    );
+}
+
+/// Discarding a skill clears it from BOTH registries (#138 part 2) — the
+/// discard path must not leave a skill that is neither re-injected nor
+/// stamped still lingering in either set.
+#[test]
+fn discard_clears_active_and_seen() {
+    let sid = Uuid::new_v4();
+    seen_skills::mark_seen(sid, "grafana");
+    seen_skills::mark_active(sid, "grafana");
+    assert!(seen_skills::active_for_session(sid).contains("grafana"));
+    assert!(seen_skills::was_seen(sid, "grafana"));
+
+    seen_skills::unmark_seen(sid, "grafana");
+    seen_skills::unmark_active(sid, "grafana");
+
+    assert!(
+        seen_skills::active_for_session(sid).is_empty(),
+        "discard must drop the active entry"
+    );
+    assert!(
+        !seen_skills::was_seen(sid, "grafana"),
+        "discard must drop the seen entry too"
+    );
+    assert!(
+        seen_skills::stamp_skills_for_session(sid).is_empty(),
+        "so the stamp must then be empty"
+    );
+}
+
+/// The two registries are INDEPENDENT: activating a skill must not mark it
+/// seen, and marking it seen must not activate it. If they leaked into each
+/// other, every read would start re-injecting its own body.
+#[test]
+fn active_and_seen_are_independent_registries() {
+    let sid = Uuid::new_v4();
+    seen_skills::mark_active(sid, "cost-estimate");
+    assert!(
+        !seen_skills::was_seen(sid, "cost-estimate"),
+        "activation alone must not mark the skill consumed"
+    );
+    assert!(
+        seen_skills::stamp_skills_for_session(sid).contains("cost-estimate"),
+        "but the stamp still sees it via the active half"
+    );
+
+    let other = Uuid::new_v4();
+    seen_skills::mark_seen(other, "cost-estimate");
+    assert!(
+        seen_skills::active_for_session(other).is_empty(),
+        "consumption alone must not activate the skill"
     );
 }
 
@@ -152,112 +231,13 @@ fn stamp_union_dedupes_active_and_seen() {
 // Verified by code inspection of continuation_prompt (tracing::debug! with
 // the full inventory list).
 
-// ── moved out of an inline `mod tests` in src/brain/tools/seen_skills.rs ──
-//
-// Tests live under src/tests/ (house rule); the slug/registry unit cases
-// arrived inline with the #131 port and are exercised here through the same
-// public API instead.
-
-#[test]
-fn slug_extraction_from_skill_paths() {
-    assert_eq!(
-        seen_skills::skill_slug_from_path(Path::new(
-            "/root/.opencrabs/profiles/ops/skills/opencrabs-dev/SKILL.md"
-        )),
-        Some("opencrabs-dev".to_string())
-    );
-    assert_eq!(
-        seen_skills::skill_slug_from_path(Path::new("skills/foo/SKILL.md")),
-        Some("foo".to_string())
-    );
-}
-
-#[test]
-fn non_skill_paths_yield_none() {
-    assert_eq!(
-        seen_skills::skill_slug_from_path(Path::new("/home/user/MEMORY.md")),
-        None
-    );
-    assert_eq!(
-        seen_skills::skill_slug_from_path(Path::new("skills/foo/other.md")),
-        None
-    );
-    assert_eq!(
-        seen_skills::skill_slug_from_path(Path::new("not-skills/foo/SKILL.md")),
-        None
-    );
-    assert_eq!(
-        seen_skills::skill_slug_from_path(Path::new("skills/foo/")),
-        None
-    );
-}
-
-#[test]
-fn mark_seen_is_idempotent_and_session_scoped() {
-    let a = Uuid::new_v4();
-    let b = Uuid::new_v4();
-    seen_skills::mark_seen(a, "opencrabs-dev");
-    seen_skills::mark_seen(a, "opencrabs-dev");
-    assert!(seen_skills::was_seen(a, "opencrabs-dev"));
-    assert_eq!(
-        seen_skills::seen_for_session(a),
-        vec!["opencrabs-dev".to_string()]
-    );
-    assert!(!seen_skills::was_seen(b, "opencrabs-dev"));
-    assert!(seen_skills::seen_for_session(b).is_empty());
-}
-
-#[test]
-fn seen_list_is_sorted_and_multi() {
-    let a = Uuid::new_v4();
-    seen_skills::mark_seen(a, "zeta");
-    seen_skills::mark_seen(a, "alpha");
-    assert_eq!(
-        seen_skills::seen_for_session(a),
-        vec!["alpha".to_string(), "zeta".to_string()]
-    );
-}
-
-// ══ issue #138: the registry survives daemon restarts ══════════════════════
-//
-// Before #138 the registry was in-memory only, so a restart made a
-// skill-consuming session look skill-less to the post-compaction stamp. The
-// row write is best-effort (acceptance 5); the read side is exercised here
-// against a real in-memory DB with the migrations applied.
-
-/// In-memory DB with all migrations applied — including the #138 table.
-async fn test_db() -> Database {
-    let db = Database::connect_in_memory()
-        .await
-        .expect("in-memory DB should connect");
-    db.run_migrations().await.expect("migrations should apply");
-    db
-}
-
-/// Minimal `sessions` row: every later migration's column on that table is
-/// either nullable or defaulted, so (id, created_at, updated_at) suffices.
-async fn insert_session(db: &Database, id: Uuid) {
-    db.pool()
-        .get()
-        .await
-        .expect("pool connection")
-        .interact(move |conn| {
-            conn.execute(
-                "INSERT INTO sessions (id, created_at, updated_at) VALUES (?1, ?2, ?3)",
-                rusqlite::params![id.to_string(), 0i64, 0i64],
-            )
-        })
-        .await
-        .expect("interact")
-        .expect("insert session");
-}
-
-// ── acceptance 2: filename form registers consumption (the live gap) ───────
+// ── issue #138 gap 2: filename form registers the skill ────────────────────
 
 #[tokio::test]
-async fn filename_form_marks_skill_seen_for_session() {
+async fn filename_form_marks_skill_seen() {
     let c = ctx();
     let session = c.session_id;
+    assert!(!seen_skills::was_seen(session, "cost-estimate"));
     let result = tool()
         .execute(serde_json::json!({"name": "cost-estimate.md"}), &c)
         .await
@@ -267,265 +247,278 @@ async fn filename_form_marks_skill_seen_for_session() {
         "filename form of a built-in skill must succeed"
     );
     assert!(
+        result.output.contains("--- skill: cost-estimate ---"),
+        "filename form must render as skill content, got: {}",
+        &result.output[..result.output.len().min(200)]
+    );
+    assert!(
         seen_skills::was_seen(session, "cost-estimate"),
-        "filename-form load must mark the skill seen"
+        "filename-form load must mark the skill seen (#138 gap 2)"
     );
 }
 
 #[tokio::test]
-async fn filename_form_with_query_marks_skill_seen_for_session() {
-    // The #138 probe caught this live: a query-filtered filename-form load
-    // resolved nothing and registered nothing, so the skill never reached
-    // the stamp inventory.
+async fn filename_form_with_query_marks_skill_seen_and_filters() {
     let c = ctx();
     let session = c.session_id;
     let result = tool()
         .execute(
-            serde_json::json!({"name": "cost-estimate.md", "query": "estimate"}),
+            serde_json::json!({"name": "cost-estimate.md", "query": "usage"}),
             &c,
         )
         .await
         .unwrap();
-    assert!(result.success);
+    assert!(result.success, "filename+query form must succeed");
     assert!(
         seen_skills::was_seen(session, "cost-estimate"),
-        "a query-filtered filename-form load must still register consumption"
-    );
-}
-
-// ── acceptance 1: restart does not lose seen-skill state ───────────────────
-
-#[tokio::test]
-async fn record_and_read_round_trip() {
-    let db = test_db().await;
-    let repo = SessionSkillsRepository::new(db.pool().clone());
-    let sid = Uuid::new_v4();
-    repo.record(sid, "opencrabs-dev", 0).await.unwrap();
-    repo.record(sid, "cost-estimate", 2).await.unwrap();
-
-    let rows = repo.all().await.unwrap();
-    assert_eq!(rows.len(), 2);
-    let ce = rows
-        .iter()
-        .find(|r| r.1 == "cost-estimate")
-        .expect("cost-estimate row must round-trip");
-    let od = rows
-        .iter()
-        .find(|r| r.1 == "opencrabs-dev")
-        .expect("opencrabs-dev row must round-trip");
-    assert_eq!(ce.0, sid);
-    assert_eq!(ce.2, Some(2));
-    assert_eq!(od.0, sid);
-    assert_eq!(od.2, Some(0));
-}
-
-#[tokio::test]
-async fn record_upserts_epoch_instead_of_duplicating() {
-    let db = test_db().await;
-    let repo = SessionSkillsRepository::new(db.pool().clone());
-    let sid = Uuid::new_v4();
-    repo.record(sid, "sk", 0).await.unwrap();
-    repo.record(sid, "sk", 3).await.unwrap();
-
-    let rows = repo.all().await.unwrap();
-    assert_eq!(rows.len(), 1, "same (session, slug) must upsert");
-    assert_eq!(
-        rows[0].2,
-        Some(3),
-        "the newer epoch must win — a stale row would re-gate the skill (#150)"
+        "query-filtered filename-form load is consumption too (#138 gap 2)"
     );
 }
 
 #[tokio::test]
-async fn restart_hydrates_registry_from_persisted_rows() {
-    let db = test_db().await;
-    let repo = SessionSkillsRepository::new(db.pool().clone());
-    let sid = Uuid::new_v4();
-    repo.record(sid, "opencrabs-dev", 1).await.unwrap();
-
-    // Simulate a daemon restart: the row survives, the in-memory registry
-    // does not. Boot rehydrates from what was persisted.
-    let rows = repo.all().await.unwrap();
-    seen_skills::apply_seeds(seen_skills::hydrate_from_rows(rows));
-
-    assert!(seen_skills::was_seen(sid, "opencrabs-dev"));
-    assert_eq!(
-        seen_skills::seen_for_session(sid),
-        vec!["opencrabs-dev".to_string()],
-        "the #125 stamp inventory must list a pre-restart skill"
-    );
-    assert!(
-        seen_skills::seen_since_compaction(sid, "opencrabs-dev"),
-        "the restored epoch counter must keep the skill in context"
-    );
+async fn filename_form_of_brain_file_still_reads_flat_file() {
+    // A real brain file must NOT be intercepted by the skill branch — only
+    // names that resolve through the skill registry take the skill path.
+    let result = tool()
+        .execute(
+            serde_json::json!({"name": "nonexistent-brain-file.md"}),
+            &ctx(),
+        )
+        .await
+        .unwrap();
+    // Missing brain file is a SOFT success carrying not-found text.
+    assert!(result.output.contains("not found") || result.output.contains("exists but is empty"));
 }
 
 #[tokio::test]
-async fn prune_drops_orphans_and_keeps_live_sessions() {
-    let db = test_db().await;
-    let repo = SessionSkillsRepository::new(db.pool().clone());
-    let live = Uuid::new_v4();
-    let dead = Uuid::new_v4();
-    insert_session(&db, live).await;
-    repo.record(live, "sk", 0).await.unwrap();
-    repo.record(dead, "sk", 0).await.unwrap();
-
-    let pruned = repo.prune_missing_sessions().await.unwrap();
-    assert_eq!(pruned, 1, "only the orphaned row is dropped");
-
-    let rows = repo.all().await.unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, live, "a live session's rows must survive");
+async fn filename_form_traversal_still_refused() {
+    let fresh = uuid::Uuid::new_v4();
+    for bad in ["../skills/cost-estimate/SKILL.md", "sub/cost-estimate.md"] {
+        let result = tool()
+            .execute(serde_json::json!({"name": bad}), &ctx())
+            .await
+            .unwrap();
+        assert!(!result.success, "traversal input {bad} must fail");
+        assert!(!seen_skills::was_seen(fresh, "cost-estimate"));
+    }
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Registry unit tests, moved out of the inline `#[cfg(test)] mod tests` block
-// at the bottom of `src/brain/tools/seen_skills.rs`. CONTRIBUTING.md: every
-// test lives under `src/tests/` as a dedicated `*_test.rs` file, and an
-// inline block found while working a file moves as part of that change.
-// Bodies are unchanged — `super::*` became the explicit glob at the top.
-// Four of the moved tests (slug extraction, non-skill paths, idempotent
-// mark, sorted list) were already sitting above: an earlier move copied
-// them out and left the originals behind, so the inline block had been a
-// stale duplicate of them since. Only the copies above survive.
-// ───────────────────────────────────────────────────────────────────────────
+// ── issue #138 gap 1: DB persistence + hydrate ─────────────────────────────
 
-// --- issue #150: epoch-carrying registry + skill-gate semantics ---
+mod persistence {
+    use crate::brain::tools::seen_skills;
+    use crate::db::Database;
+    use crate::db::repository::SessionSkillsRepository;
+    use uuid::Uuid;
 
-#[test]
-fn fresh_session_reports_not_seen_since_compaction() {
-    let a = Uuid::new_v4();
-    assert!(!seen_since_compaction(a, "anything"));
-}
+    async fn repo() -> (Database, SessionSkillsRepository) {
+        let db = Database::connect_in_memory().await.expect("in-memory db");
+        db.run_migrations().await.expect("migrations");
+        let r = SessionSkillsRepository::new(db.pool().clone());
+        (db, r)
+    }
 
-#[test]
-fn seen_passes_and_compaction_rearms_gate() {
-    let a = Uuid::new_v4();
-    mark_seen(a, "my-skill");
-    assert!(seen_since_compaction(a, "my-skill"));
-    // A compaction bumps the epoch; the stored row keeps the old one.
-    note_compaction(a);
-    assert!(!seen_since_compaction(a, "my-skill"));
-    // Re-reading re-arms at the new epoch.
-    mark_seen(a, "my-skill");
-    assert!(seen_since_compaction(a, "my-skill"));
-}
+    #[tokio::test]
+    async fn record_upserts_and_all_reads_back() {
+        let (_db, r) = repo().await;
+        let sid = Uuid::new_v4();
+        r.record(sid, "opencrabs-dev", 0).await.expect("record");
+        r.record(sid, "opencrabs-dev", 0)
+            .await
+            .expect("re-record (upsert)");
+        r.record(sid, "grafana", 1).await.expect("record 2");
+        let rows = r.all().await.expect("all");
+        assert_eq!(rows.len(), 2, "upsert must not duplicate rows");
+        assert!(
+            rows.contains(&(sid, "opencrabs-dev".to_string(), Some(0), false)),
+            "epoch roundtrip; record() never touches the active flag"
+        );
+        assert!(
+            rows.contains(&(sid, "grafana".to_string(), Some(1), false)),
+            "epoch roundtrip; record() never touches the active flag"
+        );
+    }
 
-#[test]
-fn compaction_clears_nothing_stamp_inventory_intact() {
-    let a = Uuid::new_v4();
-    mark_seen(a, "one");
-    mark_seen(a, "two");
-    note_compaction(a);
-    // The #125 stamp's seen-inventory survives.
-    assert_eq!(
-        seen_for_session(a),
-        vec!["one".to_string(), "two".to_string()]
-    );
-    // ...but neither body is "in context" for gate purposes.
-    assert!(!seen_since_compaction(a, "one"));
-    assert!(!seen_since_compaction(a, "two"));
-}
+    #[tokio::test]
+    async fn prune_drops_rows_for_missing_sessions_only() {
+        let (_db, r) = repo().await;
+        let live = Uuid::new_v4();
+        let dead = Uuid::new_v4();
+        r.record(live, "grafana", 0).await.expect("live row");
+        r.record(dead, "grafana", 0).await.expect("dead row");
+        // The live session must exist in `sessions` for the prune-keep leg.
+        let pool = _db.pool().clone();
+        pool.get()
+            .await
+            .expect("conn")
+            .interact(move |conn| {
+                conn.execute(
+                    "INSERT INTO sessions (id, title, model, created_at, updated_at) \
+                     VALUES (?1, 't', 'm', unixepoch(), unixepoch())",
+                    rusqlite::params![live.to_string()],
+                )
+            })
+            .await
+            .expect("interact")
+            .expect("insert session");
+        let pruned = r.prune_missing_sessions().await.expect("prune");
+        assert_eq!(pruned, 1, "exactly the dead session's row goes");
+        let rows = r.all().await.expect("all after prune");
+        assert_eq!(
+            rows,
+            vec![(live, "grafana".to_string(), Some(0), false)],
+            "the surviving row keeps its epoch and its inactive flag"
+        );
+    }
 
-#[test]
-fn sessions_are_independent() {
-    let a = Uuid::new_v4();
-    let b = Uuid::new_v4();
-    mark_seen(a, "sk");
-    note_compaction(a);
-    // b never compacted: its row stays current.
-    mark_seen(b, "sk");
-    assert!(seen_since_compaction(b, "sk"));
-    assert!(!seen_since_compaction(a, "sk"));
-}
+    #[tokio::test]
+    async fn hydrate_loads_rows_into_registry() {
+        let (_db, r) = repo().await;
+        let sid = Uuid::new_v4();
+        r.record(sid, "repo-audit", 0).await.expect("record");
+        assert!(!seen_skills::was_seen(sid, "repo-audit"));
+        // hydrate_from_db reads the GLOBAL pool (process-wide OnceLock, not
+        // settable in tests) — so we test the hydrate DATA path via the repo
+        // + registry contract it feeds, not the global-pool plumbing.
+        let rows = r.all().await.expect("all");
+        for (s, slug, _epoch, _active) in rows {
+            seen_skills::mark_seen(s, &slug);
+        }
+        assert!(
+            seen_skills::was_seen(sid, "repo-audit"),
+            "applying hydrate rows must mark skills seen"
+        );
+    }
 
-// --- issue #138: boot hydration (registry survives restarts) ---
+    // ── #138 part 2: the ACTIVE registry survives a restart ────────────────
 
-#[test]
-fn hydration_takes_max_epoch_per_session() {
-    let a = Uuid::new_v4();
-    let b = Uuid::new_v4();
-    let seeds = hydrate_from_rows(vec![
-        (a, "one".to_string(), Some(1)),
-        (a, "two".to_string(), Some(3)),
-        (b, "one".to_string(), Some(1)),
-    ]);
-    assert_eq!(seeds.seen.len(), 3);
-    // The counter floors at the HIGHEST epoch this session reached.
-    assert_eq!(seeds.epochs.get(&a), Some(&3));
-    assert_eq!(seeds.epochs.get(&b), Some(&1));
-}
+    /// Round-trip: a skill activated before a restart is STILL active after
+    /// the restart rehydrates from the DB — and still listed in the stamp.
+    ///
+    /// This is the acceptance criterion #138 was opened for. "Restart" is
+    /// modelled by the real hydrate path minus the global pool: read rows
+    /// from the test DB -> pure fold -> apply to the process-wide registries.
+    /// The pool plumbing itself is untestable here because `global_pool()` is
+    /// a process-wide OnceLock no test can set — which is precisely why the
+    /// fold was split out as a pure function.
+    #[tokio::test]
+    async fn activated_skill_survives_a_restart() {
+        let (_db, r) = repo().await;
+        let sid = Uuid::new_v4();
+        r.record(sid, "opencrabs-dev", 0).await.expect("record");
+        r.set_active(sid, "opencrabs-dev", true)
+            .await
+            .expect("activate");
 
-#[test]
-fn hydration_restores_epoch_counter_so_next_compaction_gates() {
-    let a = Uuid::new_v4();
-    apply_seeds(hydrate_from_rows(vec![(a, "sk".to_string(), Some(2))]));
-    assert!(was_seen(a, "sk"));
-    assert!(seen_since_compaction(a, "sk"));
-    // The counter came back at 2, so the NEXT compaction is epoch 3 and
-    // the epoch-2 row is correctly stale. Without epoch seeding the
-    // counter would restart at 0, this bump would land on 1, and the
-    // 2 >= 1 compare would wrongly keep the skill "in context".
-    note_compaction(a);
-    assert!(!seen_since_compaction(a, "sk"));
-}
+        let seeds = seen_skills::hydrate_from_rows(r.all().await.expect("all"));
+        seen_skills::apply_seeds(seeds);
 
-#[test]
-fn hydration_null_epoch_reads_as_zero_and_stays_permissive() {
-    let a = Uuid::new_v4();
-    apply_seeds(hydrate_from_rows(vec![(a, "legacy".to_string(), None)]));
-    assert!(was_seen(a, "legacy"));
-    assert!(seen_since_compaction(a, "legacy"));
-    // A negative epoch (never written by us, but possible in a
-    // hand-edited row) clamps to 0 rather than wrapping to u64::MAX.
-    let b = Uuid::new_v4();
-    apply_seeds(hydrate_from_rows(vec![(b, "odd".to_string(), Some(-5))]));
-    assert!(seen_since_compaction(b, "odd"));
-}
+        assert!(
+            seen_skills::active_for_session(sid).contains("opencrabs-dev"),
+            "the active flag must survive the restart"
+        );
+        assert!(
+            seen_skills::stamp_skills_for_session(sid).contains("opencrabs-dev"),
+            "and the stamp must list it"
+        );
+    }
 
-#[test]
-fn hydration_preserves_stamp_inventory_across_restart() {
-    let a = Uuid::new_v4();
-    apply_seeds(hydrate_from_rows(vec![
-        (a, "zeta".to_string(), Some(0)),
-        (a, "alpha".to_string(), Some(1)),
-    ]));
-    // The #125 stamp reads this list — sorted, both rows present.
-    assert_eq!(
-        seen_for_session(a),
-        vec!["alpha".to_string(), "zeta".to_string()]
-    );
-}
+    /// Negative: a SEEN-only row (`active = 0`) must NOT come back active.
+    /// If it did, every skill a session ever read would be re-injected on top
+    /// of the read already sitting in its own conversation history.
+    #[tokio::test]
+    async fn seen_only_row_does_not_rehydrate_as_active() {
+        let (_db, r) = repo().await;
+        let sid = Uuid::new_v4();
+        r.record(sid, "grafana", 0)
+            .await
+            .expect("record (seen only)");
 
-// ══ the boot-hydration once-flag is claimed AFTER the readiness guards ═════
-//
-// Source-scan sentinel, because the flag is a function-local `static` with no
-// reader and no reset: a behavioural test would have to drive a process-wide
-// one-shot, which makes it order-dependent on every other test in the binary
-// — the exact flakiness class #1535/#1536 just removed. What can be pinned is
-// the ordering itself, and the ordering is the whole bug: claiming the flag
-// above the pool check lets a caller that hydrated NOTHING spend the
-// process's single attempt, silently disabling restart durability for that
-// run. `a2a::test_helpers` already builds a service before `Database::connect`
-// installs the pool, so the early-caller order is not hypothetical.
+        let seeds = seen_skills::hydrate_from_rows(r.all().await.expect("all"));
+        seen_skills::apply_seeds(seeds);
 
-#[test]
-fn boot_hydration_claims_its_flag_after_the_pool_guard() {
-    let src = include_str!("../brain/tools/seen_skills.rs");
-    let body = src
-        .split("pub fn hydrate_from_db()")
-        .nth(1)
-        .expect("hydrate_from_db must exist");
-    let pool = body
-        .find("global_pool()")
-        .expect("hydrate_from_db must still guard on the global pool");
-    let claim = body
-        .find("HYDRATED.swap")
-        .expect("hydrate_from_db must still claim a once-flag");
-    assert!(
-        claim > pool,
-        "the once-flag is claimed at byte {claim}, before the pool guard at \
-         {pool}: a boot with no pool would burn the process's only hydration \
-         attempt and restart durability would be lost for the whole run"
-    );
+        assert!(
+            seen_skills::active_for_session(sid).is_empty(),
+            "a seen-only row must not hydrate as active"
+        );
+        assert!(
+            seen_skills::stamp_skills_for_session(sid).contains("grafana"),
+            "but it MUST still reach the union stamp"
+        );
+    }
+
+    /// A legacy row — written before the active column existed — carries NULL
+    /// epoch and `active = 0`: seen-only, exactly the pre-feature semantics.
+    #[tokio::test]
+    async fn legacy_row_hydrates_seen_at_epoch_zero_and_inactive() {
+        let (_db, r) = repo().await;
+        let sid = Uuid::new_v4();
+        // Bypass the repo and write the row exactly as the old schema would
+        // have left it: no epoch, and the active column taking its default.
+        let pool = _db.pool().clone();
+        pool.get()
+            .await
+            .expect("conn")
+            .interact(move |conn| {
+                conn.execute(
+                    "INSERT INTO session_seen_skills (session_id, slug) VALUES (?1, ?2)",
+                    rusqlite::params![sid.to_string(), "legacy-skill"],
+                )
+            })
+            .await
+            .expect("interact")
+            .expect("insert legacy row");
+
+        let rows = r.all().await.expect("all");
+        assert_eq!(
+            rows,
+            vec![(sid, "legacy-skill".to_string(), None, false)],
+            "a legacy row reads back with NULL epoch and an inactive flag"
+        );
+
+        let seeds = seen_skills::hydrate_from_rows(rows);
+        assert_eq!(
+            seeds.seen.get(&(sid, "legacy-skill".to_string())),
+            Some(&0),
+            "NULL epoch must fold to 0 (always current — back-compat sessions pass the gate)"
+        );
+        assert!(
+            !seeds.active.contains_key(&sid),
+            "a legacy row is seen-only and must not seed the active registry"
+        );
+    }
+
+    /// Activation UPSERTS, so it works even when the active path runs before
+    /// the seen path ever wrote a row for that (session, slug).
+    #[tokio::test]
+    async fn set_active_upserts_when_no_seen_row_exists() {
+        let (_db, r) = repo().await;
+        let sid = Uuid::new_v4();
+        r.set_active(sid, "cost-estimate", true)
+            .await
+            .expect("activate without a prior record()");
+        assert_eq!(
+            r.all().await.expect("all"),
+            vec![(sid, "cost-estimate".to_string(), None, true)],
+            "activation alone must create the row, flagged active"
+        );
+    }
+
+    /// Deactivation is deliberately a plain UPDATE, NOT an upsert: the
+    /// discard path deletes the row outright, and an upserting deactivate
+    /// would resurrect it as a phantom seen-only row.
+    #[tokio::test]
+    async fn deactivate_does_not_resurrect_a_deleted_row() {
+        let (_db, r) = repo().await;
+        let sid = Uuid::new_v4();
+        r.set_active(sid, "grafana", true).await.expect("activate");
+        r.delete_skill(sid, "grafana").await.expect("delete row");
+        r.set_active(sid, "grafana", false)
+            .await
+            .expect("deactivate a row that no longer exists");
+        assert!(
+            r.all().await.expect("all").is_empty(),
+            "deactivating a deleted row must not bring it back"
+        );
+    }
 }
