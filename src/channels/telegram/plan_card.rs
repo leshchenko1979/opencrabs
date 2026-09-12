@@ -484,19 +484,25 @@ pub(crate) fn format_plan_review_running_progress(
     progress: Option<&crate::brain::agent::service::work_status::ProgressSnapshot>,
     elapsed_secs: Option<u64>,
 ) -> String {
-    let Some(p) = progress else {
-        return PLAN_REVIEW_RUNNING_NOTE.to_string();
-    };
-    if p.tool_count == 0 && p.iteration == 0 {
-        return PLAN_REVIEW_RUNNING_NOTE.to_string();
-    }
     let mut segs: Vec<String> = Vec::new();
-    if p.tool_count > 0 {
-        segs.push(format!("🛠 {}", p.tool_count));
+    // A snapshot that carries no tool news contributes no segment: `iteration
+    // == 0 && tool_count == 0` is the shape a freshly-created status file has,
+    // and its `last_tool` is not something the progress callback produces. That
+    // guard stays — it is about the TOOL segments.
+    if let Some(p) = progress.filter(|p| p.tool_count > 0 || p.iteration > 0) {
+        if p.tool_count > 0 {
+            segs.push(format!("🛠 {}", p.tool_count));
+        }
+        if let Some(tool) = p.last_tool.as_deref().filter(|t| !t.is_empty()) {
+            segs.push(tool.to_string());
+        }
     }
-    if let Some(tool) = p.last_tool.as_deref().filter(|t| !t.is_empty()) {
-        segs.push(tool.to_string());
-    }
+    // #186 D1: the clock is NOT gated behind `progress`. `WorkStatus.progress`
+    // is written at ROUND END, so for a review's entire first round it is
+    // `None` — exactly the stretch where the owner has nothing else to watch.
+    // This function used to early-return the bare note in that case, silently
+    // discarding `elapsed_secs` and dropping the live clock in the one case it
+    // exists for.
     if let Some(secs) = elapsed_secs {
         segs.push(super::flow::humanize_duration(secs));
     }
