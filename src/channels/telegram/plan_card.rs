@@ -715,8 +715,17 @@ pub(crate) async fn refresh_plan_card(
     // create is exactly what leaves the window open.
     let card_lock = state.plan_card_lock(session_id).await;
     let _guard = card_lock.lock().await;
-    let (title, checklist) = load_plan_sections(session_id).await;
+    let (json_title, checklist) = load_plan_sections(session_id).await;
     let prose = load_plan_prose(session_id).await;
+    // #155 D2: the title normally comes from the plan JSON, and the `.md` H1 is
+    // stripped out of the prose by design, so nothing else supplies one. When
+    // the JSON is gone but the `.md` survives — a reviewer rewrite after a
+    // discard, or a hand-authored plan — the card lost its `📋` header
+    // entirely. Fall back to that H1.
+    let title = match json_title {
+        Some(t) => Some(t),
+        None => super::flow_chrome::load_plan_md_title(session_id).await,
+    };
     // Goal scoping (owner rule 2026-09-03, #84): a completed goal belongs to
     // the plan it was set under and renders only in the finalize chrome's ✅
     // card. The live card drops `completed` rows — the row survives in
