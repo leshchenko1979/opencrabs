@@ -753,7 +753,12 @@ impl AgentService {
         let mut sorted_skills: Vec<_> = active_skills.iter().collect();
         sorted_skills.sort();
         for skill_name in sorted_skills {
-            let normalized = skill_name.strip_prefix('/').unwrap_or(skill_name);
+            // #179: one canonicalisation rule for the whole crate. The table
+            // must name the same string the manifest rule tells the model to
+            // write — it used to render "/canarya" beside a rule saying
+            // "<skill-slug>", so the prompt argued with itself and the spelling
+            // the model was told to follow was the one that did not work.
+            let normalized = crate::brain::skills::normalize_skill_slug(skill_name);
             let skill = all_skills
                 .iter()
                 .find(|s| s.name == normalized || s.slash_name == *skill_name);
@@ -768,7 +773,7 @@ impl AgentService {
             } else {
                 0.0
             };
-            rows.push((format!("/{}", normalized), "Skill", tokens, pct));
+            rows.push((normalized, "Skill", tokens, pct));
         }
 
         let mut sorted_tools: Vec<_> = active_tools.iter().collect();
