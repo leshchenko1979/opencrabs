@@ -465,6 +465,24 @@ pub(crate) async fn load_plan_sections(session_id: Uuid) -> (Option<String>, Opt
     plan_document_sections(&plan)
 }
 
+/// The plan `.md`'s first level-1 heading, when the file exists (#155).
+///
+/// The card's title normally comes from the plan JSON; the `.md` H1 is the
+/// only other source of it, and it is stripped out of the prose sections by
+/// design. So a JSON-less `.md` — a reviewer rewrite after a discard, or a
+/// hand-authored plan — would otherwise render a card with no `📋` header at
+/// all. Only a true `# ` heading matches; `## ` does not.
+pub(crate) async fn load_plan_md_title(session_id: Uuid) -> Option<String> {
+    let path = crate::utils::plan_files::plan_md_path(session_id).await;
+    let body = tokio::fs::read_to_string(&path).await.ok()?;
+    body.lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("# "))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| crate::utils::truncate_str(t, SECTION_TEXT_CAP).to_string())
+}
+
 /// Title + checklist rows for a plan card, from any document — live or
 /// archived (#1158). Same row shape either way: full ballot checklist
 /// (ADR 0005 Decision 3, one `status_mark()` row per task), quality glyphs,
