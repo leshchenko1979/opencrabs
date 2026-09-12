@@ -260,6 +260,13 @@ pub struct TelegramState {
     /// running review, which would otherwise keep rewriting the plan (and
     /// re-posting the card) minutes after the owner discarded it.
     plan_review_children: Mutex<HashMap<Uuid, String>>,
+    /// Sessions whose in-flight plan review has been asked to STOP (#155 D1).
+    /// A discard can land between `set_plan_reviewing(true)` and the review
+    /// publishing its child id — a window seconds wide, spanning a card refresh
+    /// and the whole `spawn_agent` setup. In that window there is no id to
+    /// cancel, so the intent is recorded here and honoured at publish time;
+    /// without it the reviewer ran on and rewrote the plan after a discard.
+    plan_review_cancels: Mutex<HashMap<Uuid, bool>>,
     /// Photo batching buffer: (chat_id, user_id, media_group_id) → Vec<(img_marker, Option<caption>)>
     /// When user sends multiple photos in an album, we buffer them and only fire the agent
     /// after a quiet period (no new photos for 3s). Keyed by media_group_id to avoid merging
@@ -449,6 +456,7 @@ impl TelegramState {
             plan_review_deltas: Mutex::new(HashMap::new()),
             plan_review_running_notes: Mutex::new(HashMap::new()),
             plan_review_children: Mutex::new(HashMap::new()),
+            plan_review_cancels: Mutex::new(HashMap::new()),
             photo_buffer: Mutex::new(HashMap::new()),
             photo_debounce: Mutex::new(HashMap::new()),
             text_buffer: Mutex::new(HashMap::new()),
@@ -1460,6 +1468,30 @@ impl TelegramState {
     /// Forget the in-flight review's id once it is terminal or cancelled (#155).
     pub(crate) async fn clear_plan_review_child(&self, session_id: Uuid) {
         self.plan_review_children.lock().await.remove(&session_id);
+    }
+
+    /// Ask the in-flight plan review for `session_id` to stop (#155 D1).
+    ///
+    /// Safe to call when the review has NOT yet published its child id: the
+    /// review checks this the moment it publishes, so a discard that lands in
+    /// that window still stops it instead of letting it rewrite the plan.
+    pub(crate) async fn request_plan_review_cancel(&self, session_id: Uuid) {
+        self.plan_review_cancels
+            .lock()
+            .await
+            .insert(session_id, true);
+    }
+
+    /// Consume a pending plan-review cancel request (#155 D1).
+    ///
+    /// `remove`, not `get`: a request belongs to exactly ONE review, so a stale
+    /// flag can never stop the next review the owner starts.
+    pub(crate) async fn take_plan_review_cancel(&self, session_id: Uuid) -> bool {
+        self.plan_review_cancels
+            .lock()
+            .await
+            .remove(&session_id)
+            .unwrap_or(false)
     }
 
     /// Forget the plan-review delta for `session_id` (#155) — called when the
