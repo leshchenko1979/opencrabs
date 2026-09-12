@@ -138,7 +138,7 @@ cargo test --all-features --verbose
 
 `cargo clippy` is the lint pass we trust — `cargo check` only type-checks and misses the lint rules CI enforces. Iterate with clippy locally so you don't burn a CI run discovering a `-D warnings` failure.
 
-**Vocabulary lives in `src/docs/reference/ONTOLOGY.md`.** If your change introduces, renames, or retires a concept, update that file in the same PR — it is the single source of truth for the project's shared terms. There is no CI gate on it: it is a contributor responsibility, and a `**Not:**` entry there is a naming rule for prose, never a ban on a code identifier. `scripts/ontology-lint.sh <repo>` checks the file's structure and prints advisory synonym hits if you want a second look.
+**Vocabulary lives in `src/docs/reference/ONTOLOGY.md`.** If your change introduces, renames, or retires a concept, update that file in the same PR — it is the single source of truth for the project's shared terms. There is no CI gate on it: it is a contributor responsibility, and a `**Not:**` entry there is a naming rule for prose, never a ban on a code identifier.
 
 ### Running the App While You Iterate
 
