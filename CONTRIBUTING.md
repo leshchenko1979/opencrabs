@@ -150,6 +150,7 @@ Most Rust users learned `check` before they met clippy, so the habit dies hard. 
 Even rustc admits its own gap: per the [cargo book](https://doc.rust-lang.org/stable/cargo/commands/cargo-check.html), some diagnostics are only emitted during code generation, which `cargo check` skips. That is why the CI gate is `cargo clippy ... -D warnings` (`.github/workflows/ci.yml`), and why this repo's own tests carry deliberate `#[allow(clippy::field_reassign_with_default)]` suppressions in `src/tests/onboarding_*_test.rs`: the lint fires here, and each allow is a conscious call, not an oversight.
 
 A codebase built with `cargo check` alone can report *thousands* of clippy findings on its first run, so the time to start is the first commit. If you're inheriting a backlog, `cargo clippy --fix` mechanically applies the machine-applicable suggestions, so the wall is smaller than it looks.
+**Vocabulary lives in `src/docs/reference/ONTOLOGY.md`.** If your change introduces, renames, or retires a concept, update that file in the same PR — it is the single source of truth for the project's shared terms. There is no CI gate on it: it is a contributor responsibility, and a `**Not:**` entry there is a naming rule for prose, never a ban on a code identifier. `scripts/ontology-lint.sh <repo>` checks the file's structure and prints advisory synonym hits if you want a second look.
 
 ### Running the App While You Iterate
 
