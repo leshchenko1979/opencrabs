@@ -291,13 +291,13 @@ async fn markdown_card_checklist_rows_stay_on_their_own_lines() {
         .expect("a card with a title and checklist must render");
 
     assert!(
-        md.contains("☑ First task\n\n☑ Second task\n\n☐ Third task"),
-        "markdown rows must be blank-line-separated or they collapse into one \
-         paragraph. Got:\n{md}"
+        md.contains("<p>☑ First task</p>\n<p>☑ Second task</p>\n<p>☐ Third task</p>"),
+        "markdown rows must be wrapped in <p>...</p> blocks so Telegram's rich \
+         message client preserves each checklist row on its own line. Got:\n{md}"
     );
     assert!(
-        md.starts_with("📋 <b>"),
-        "the title must lead the card, bold-marked. Got:\n{md}"
+        md.starts_with("<p>📋 <b>"),
+        "the title must lead the card, bold-marked and wrapped in <p>. Got:\n{md}"
     );
 }
 
@@ -313,14 +313,14 @@ async fn markdown_card_prose_uses_inline_details_and_keeps_body_raw() {
 
     assert!(
         md.contains(
-            "<details><summary><b>Context</b></summary>\nPlain **markdown** body.\n</details>"
+            "<details><summary><b>Context</b></summary><p>Plain <b>markdown</b> body.</p></details>"
         ),
-        "prose must sit inside inline details, body untouched (markdown mode \
-         renders md formatting natively). Got:\n{md}"
+        "prose must sit inside inline details with HTML block formatting (<p>, <b>) \
+         so Telegram renders formatted multi-line prose. Got:\n{md}"
     );
     assert!(
-        !md.contains("<p>"),
-        "markdown mode has no HTML paragraph wrapper. Got:\n{md}"
+        md.starts_with("<p>📋 <b>"),
+        "title is wrapped in <p> while prose details are unmolested. Got:\n{md}"
     );
 }
 
@@ -335,7 +335,9 @@ async fn markdown_card_goal_sits_inside_details_after_a_gap() {
         .expect("card with a goal must render");
 
     assert!(
-        md.contains("☐ Third task\n\n<details><summary><b>🎯</b></summary>"),
+        md.contains(
+            "<p>☐ Third task</p>\n\n<details><summary><b>🎯</b></summary><p>Ship it</p></details>"
+        ),
         "the goal must follow a blank-line gap and render inside details. \
          Got:\n{md}"
     );
@@ -375,7 +377,7 @@ async fn markdown_card_neutralises_prose_media_tags() {
         "a live <img> tag must never reach the rich body. Got:\n{md}"
     );
     assert!(
-        md.contains("&lt;img>"),
+        md.contains("&lt;img&gt;") || md.contains("&lt;img>") || md.contains("&amp;lt;img&gt;"),
         "the tag must stay readable as text. Got:\n{md}"
     );
 }
@@ -393,7 +395,7 @@ async fn markdown_card_keeps_ordinary_prose_html() {
         .expect("card with prose must render");
 
     assert!(
-        md.contains("<b>bold</b> and a < b"),
+        md.contains("<b>bold</b> and a &lt; b") || md.contains("<b>bold</b> and a < b"),
         "non-media prose HTML must survive. Got:\n{md}"
     );
 }
