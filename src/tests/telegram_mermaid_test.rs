@@ -454,15 +454,15 @@ fn prevalidate_budgets_split_connect_from_total() {
     // dropped-body branch indistinguishable from an unreachable host. The
     // connect budget must now be strictly smaller than the total, or the
     // split has no effect.
-    assert!(
-        PREVALIDATE_CONNECT_TIMEOUT_SECS < PREVALIDATE_TIMEOUT_SECS,
-        "connect budget ({PREVALIDATE_CONNECT_TIMEOUT_SECS}s) must be smaller than \
-         the total ({PREVALIDATE_TIMEOUT_SECS}s)"
-    );
-    assert!(
-        PREVALIDATE_TIMEOUT_SECS >= 30,
-        "the total must cover a slow body download, not just a handshake"
-    );
+    //
+    // Evaluated at compile time: these are consts, so a runtime assert both
+    // trips `assertions_on_constants` and defers to run-time a contradiction
+    // the compiler can already see (same idiom as question_common_test.rs).
+    const {
+        assert!(PREVALIDATE_CONNECT_TIMEOUT_SECS < PREVALIDATE_TIMEOUT_SECS);
+        // The total must cover a slow body download, not just a handshake.
+        assert!(PREVALIDATE_TIMEOUT_SECS >= 30);
+    }
 }
 
 // ---------------------------------------------------------------------------
