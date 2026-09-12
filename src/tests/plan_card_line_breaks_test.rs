@@ -313,14 +313,68 @@ async fn markdown_card_prose_uses_inline_details_and_keeps_body_raw() {
 
     assert!(
         md.contains(
-            "<details><summary><b>Context</b></summary><p>Plain <b>markdown</b> body.</p></details>"
+            "<details><summary><b>Context</b></summary>\n\nPlain **markdown** body.\n\n</details>"
         ),
-        "prose must sit inside inline details with HTML block formatting (<p>, <b>) \
-         so Telegram renders formatted multi-line prose. Got:\n{md}"
+        "prose must sit inside inline details as RAW markdown, separated from the \
+         summary by a blank line so the markdown block resumes instead of being \
+         swallowed as HTML text (the #941 oneliner regression). Got:\n{md}"
     );
     assert!(
         md.starts_with("<p>📋 <b>"),
         "title is wrapped in <p> while prose details are unmolested. Got:\n{md}"
+    );
+}
+
+#[tokio::test]
+async fn markdown_card_prose_keeps_the_mermaid_fence_for_the_media_pass() {
+    // Regression guard (acb8e205): `markdown_to_html_mermaid_p` CONSUMED the
+    // fence, so the caller's `resolve_markdown_media` found nothing to turn
+    // into an image and the card shipped an EMPTY media array — the owner's
+    // "the mermaid didn't render". The fence must survive this function.
+    let prose = vec![ProseSection {
+        heading: Some("Diagram".to_string()),
+        body: "```mermaid\nflowchart TD\n    A --> B\n```".to_string(),
+    }];
+    let md = render_plan_card_markdown(Some(TITLE), None, Some(&prose), None)
+        .await
+        .expect("card with a mermaid fence must render");
+
+    assert!(
+        md.contains("```mermaid"),
+        "the mermaid fence must ride through to the media pass untouched. Got:\n{md}"
+    );
+    assert!(
+        !md.contains("mermaid.ink") && !md.contains("<figure"),
+        "no HTML image note or figure may be emitted here — the media array \
+         carries the picture. Got:\n{md}"
+    );
+}
+
+#[tokio::test]
+async fn markdown_card_prose_lists_stay_markdown() {
+    // acb8e205 pre-converted the body to HTML, and `render_list` emits a
+    // literal `•`/`1.` glyph inside a `<p>` — a paragraph starting with a dot,
+    // not a list (the owner's "the lists don't render as lists"). Raw
+    // markdown keeps the list markers the dialect parses.
+    let prose = vec![ProseSection {
+        heading: Some("Context".to_string()),
+        body: "- **Problem:** one\n- **Target state:** two\n\n1. first step".to_string(),
+    }];
+    let md = render_plan_card_markdown(Some(TITLE), None, Some(&prose), None)
+        .await
+        .expect("card with prose must render");
+
+    assert!(
+        md.contains("- **Problem:** one"),
+        "bullets must stay markdown list items. Got:\n{md}"
+    );
+    assert!(
+        md.contains("1. first step"),
+        "ordered items must stay markdown list items. Got:\n{md}"
+    );
+    assert!(
+        !md.contains("•") && !md.contains("<p>1."),
+        "no literal bullet glyph may be emitted into the markdown dialect. Got:\n{md}"
     );
 }
 

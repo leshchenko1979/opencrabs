@@ -260,9 +260,12 @@ pub(crate) async fn render_plan_card_rich_html(
 }
 
 /// Markdown-mode rich card (#134 family): the same blocks as the rich HTML
-/// variant, but committed to raw markdown — details/summary collapsibles
-/// inline (the markdown input dialect parses them natively, live-Bot-API
-/// probe J/K 2026-09-10) and checklist rows as plain lines. Mermaid fences
+/// variant, but committed to the markdown input dialect — details/summary
+/// collapsibles inline (the dialect parses them natively, live-Bot-API
+/// probe J/K 2026-09-10) and checklist rows wrapped in `<p>` so each row
+/// breaks. Prose bodies ship RAW markdown, separated from the `</summary>`
+/// line by a blank line; converting them to HTML first broke lists, tables
+/// and the mermaid fence (see the block comment inside). Mermaid fences
 /// in prose are NOT resolved here: the caller resolves the ASSEMBLED body
 /// once through `resolve_markdown_media`, so every card re-render reuses
 /// one diagN numbering per body instead of per-section (reviewer major #1).
@@ -280,21 +283,30 @@ pub(crate) async fn render_plan_card_markdown(
 
     if let Some(sections) = prose.filter(|s| !s.is_empty()) {
         for sec in sections {
-            // Markdown mode: details/summary inline. Telegram's rich parser
-            // treats the interior of <details> as HTML, so markdown prose
-            // bodies are converted via markdown_to_html_mermaid_p so paragraphs,
-            // lists, bolding, pipe tables, and mermaid fences render with
-            // proper block tags (<p>, <b>, <pre>) instead of collapsing
-            // into run-on oneliners with raw asterisks (#941 regression fix).
+            // Markdown mode ships the body RAW. Pre-converting it to HTML
+            // (acb8e205) was wrong three ways, all visible in one card:
+            //   * `render_list` emits a literal `•`/`1.` GLYPH inside a `<p>`
+            //     — a paragraph starting with a dot, not a list;
+            //   * `render_key_value` joins table rows with bare newlines and
+            //     no block wrapper, so the rows fuse;
+            //   * `markdown_to_html_mermaid_p` CONSUMES the mermaid fence, so
+            //     the caller's `resolve_markdown_media` found nothing to turn
+            //     into an image and the card shipped an empty media array.
+            // Raw markdown keeps lists, pipe tables and fences intact for the
+            // markdown input dialect.
+            //
+            // The BLANK LINE after </summary> is load-bearing: `<details>`
+            // opens a CommonMark HTML block, and without a terminating blank
+            // line the body is swallowed as HTML text and renders as literal
+            // markdown — the #941 oneliner regression.
             let body = super::rich::mermaid::neutralize_prose_media_html(&sec.body);
-            let body_html = super::rich::markdown_to_html_mermaid_p(&body).await;
+            let body = body.trim();
             blocks.push(CardBlock::Block(match &sec.heading {
                 Some(h) => format!(
-                    "<details><summary><b>{}</b></summary>{}</details>",
-                    escape_html(h),
-                    body_html
+                    "<details><summary><b>{}</b></summary>\n\n{body}\n\n</details>",
+                    escape_html(h)
                 ),
-                None => body_html,
+                None => body.to_string(),
             }));
         }
     }
