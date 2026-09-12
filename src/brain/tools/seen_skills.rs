@@ -72,12 +72,15 @@ pub fn skill_slug_from_path(path: &Path) -> Option<String> {
 /// still best-effort + detached: a DB failure logs WARN and is swallowed —
 /// the in-memory registry stays authoritative for the current process.
 pub fn mark_seen(session_id: Uuid, slug: &str) {
+    // #179: the registry and the DB are keyed by the bare slug. Normalising
+    // here as well as in builder.rs covers the callers that bypass it —
+    // load_brain_file, read.rs and the registry tool mark seen directly.
+    let slug = crate::brain::skills::normalize_skill_slug(slug);
     let epoch = current_epoch(session_id);
     registry()
         .lock()
         .expect("seen_skills registry poisoned")
-        .insert((session_id, slug.to_string()), epoch);
-    let slug = slug.to_string();
+        .insert((session_id, slug.clone()), epoch);
     // Persist only inside a live tokio runtime — plain #[test] fns and
     // other non-async contexts have no reactor; the in-memory registry
     // already did its job there, and DB durability is best-effort.
@@ -220,11 +223,13 @@ pub fn hydrate_from_db() {
 
 /// Remove a consumed skill from `session_id`'s registry (pruning on compaction discard).
 pub fn unmark_seen(session_id: Uuid, slug: &str) {
+    // #179: mirror of mark_seen — the discard must remove the same bare-keyed
+    // entry the registration wrote, whatever spelling it arrived in.
+    let slug = crate::brain::skills::normalize_skill_slug(slug);
     registry()
         .lock()
         .expect("seen_skills registry poisoned")
-        .remove(&(session_id, slug.to_string()));
-    let slug = slug.to_string();
+        .remove(&(session_id, slug.clone()));
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
             match delete_seen(session_id, &slug).await {

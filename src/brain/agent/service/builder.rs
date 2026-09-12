@@ -1982,29 +1982,39 @@ impl AgentService {
     /// body is re-injected into the system brain on every turn so it
     /// survives context compaction (#219).
     pub fn register_active_skill(&self, session_id: Uuid, skill_name: &str) {
+        // #179: canonicalise to the bare slug here — this pair is the choke
+        // point for BOTH entry paths into active_skills. The slash-command
+        // path passes Skill::slash_name ("/foo") while the manifest path
+        // passes the bare slug ("foo"); without normalisation the same skill
+        // is keyed two ways and the re-injection matcher — which compares the
+        // bare Skill::name — silently misses one of them.
+        let slug = crate::brain::skills::normalize_skill_slug(skill_name);
         // #138: slash invocation is skill consumption too — marking seen
         // (which persists to the DB) makes the compaction stamp's union
         // survive restarts for slash-invoked skills, not just read-loaded
         // ones. In-memory active_skills stays the re-injection driver.
-        crate::brain::tools::seen_skills::mark_seen(session_id, skill_name);
+        crate::brain::tools::seen_skills::mark_seen(session_id, &slug);
         let mut map = self
             .active_skills
             .write()
             .expect("active_skills lock poisoned");
-        map.entry(session_id)
-            .or_default()
-            .insert(skill_name.to_string());
+        map.entry(session_id).or_default().insert(slug);
     }
 
     /// Unregister an active skill for a session (discarded during compaction).
+    ///
+    /// Normalised the same way as [`Self::register_active_skill`], so a discard
+    /// written in either spelling removes the single bare-keyed entry (#179).
+    /// A legacy slashed DB row is cleared by `delete_skill` itself.
     pub fn unregister_active_skill(&self, session_id: Uuid, skill_name: &str) {
-        crate::brain::tools::seen_skills::unmark_seen(session_id, skill_name);
+        let slug = crate::brain::skills::normalize_skill_slug(skill_name);
+        crate::brain::tools::seen_skills::unmark_seen(session_id, &slug);
         let mut map = self
             .active_skills
             .write()
             .expect("active_skills lock poisoned");
         if let Some(set) = map.get_mut(&session_id) {
-            set.remove(skill_name);
+            set.remove(&slug);
         }
     }
 
