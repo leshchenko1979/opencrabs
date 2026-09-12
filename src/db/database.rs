@@ -109,6 +109,11 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // last per the list invariant; the column is NULL by design on existing
     // rows so no heal pass is needed.
     include_str!("../migrations/20260912000001_add_project_repo_remote.sql"),
+    // FORK (#180): boot classifier origin signal — records whether a session
+    // binding was last refreshed by a text message or a button tap, so a
+    // tap-initiated turn killed before its PROCESSING row is still a
+    // candidate for recovery. NULL (pre-feature rows) == text semantics.
+    include_str!("../migrations/20260912160000_session_bindings_last_origin.sql"),
     // #138: durable seen-skills store — the post-compaction skill inventory
     // stamp (#125/#131) survives daemon restarts: every mark_seen writes a row,
     // boot hydrates the in-memory registry back. Appended last per the list
