@@ -519,26 +519,24 @@ impl AgentService {
     ) -> Result<()> {
         let marker_content = outcome.marker(marker_suffix);
         message_service
-            .create_message(
-                session_id,
-                "user".to_string(),
-                marker_content.clone(),
-            )
+            .create_message(session_id, "user".to_string(), marker_content.clone())
             .await
             .map_err(AgentError::db)?;
 
         // Curate active skills and lazy tools according to the machine-readable manifest.
-        if let CompactionOutcome::Summarised(summary) = outcome {
-            if let Some(manifest) = crate::brain::agent::service::context::parse_context_manifest(summary) {
-                for discard_slug in manifest.discard_skills {
-                    self.unregister_active_skill(session_id, &discard_slug);
-                }
-                for active_slug in manifest.active_skills {
-                    self.register_active_skill(session_id, &active_slug);
-                }
-                if !manifest.required_tools.is_empty() {
-                    self.tool_registry.activate_tools(session_id, manifest.required_tools);
-                }
+        if let CompactionOutcome::Summarised(summary) = outcome
+            && let Some(manifest) =
+                crate::brain::agent::service::context::parse_context_manifest(summary)
+        {
+            for discard_slug in manifest.discard_skills {
+                self.unregister_active_skill(session_id, &discard_slug);
+            }
+            for active_slug in manifest.active_skills {
+                self.register_active_skill(session_id, &active_slug);
+            }
+            if !manifest.required_tools.is_empty() {
+                self.tool_registry
+                    .activate_tools(session_id, manifest.required_tools);
             }
         }
 
