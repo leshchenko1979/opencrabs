@@ -411,6 +411,35 @@ pub fn resolve_skill(name: &str) -> Option<Skill> {
     load_all_skills().into_iter().find(|s| s.name == name)
 }
 
+/// Canonicalise a skill reference to its bare slug (#179).
+///
+/// The leading `/` is the **invocation sigil** — a presentation prefix on the
+/// slash-command surface only, never part of a skill's identity. A skill is
+/// identified by [`Skill::name`] (the Agent Skills standard's `name` field,
+/// which forbids a slash); `slash_name` is *derived* from it for display.
+///
+/// Every ingestion boundary normalises through here, so the in-memory
+/// `active_skills` set and the `session_seen_skills` table stay single-keyed.
+/// Before this existed the slash-command path wrote `/foo` while the manifest
+/// and brain-file paths wrote `foo` — the same skill under two keys, so a
+/// discard of one form left the other behind.
+///
+/// Deliberately minimal: trim, then strip **at most one** leading slash. No
+/// lowercasing — slugs are already lowercase by the standard, and folding case
+/// would silently merge two distinct skills.
+///
+/// ```
+/// # use opencrabs::brain::skills::normalize_skill_slug;
+/// assert_eq!(normalize_skill_slug("opencrabs-dev"), "opencrabs-dev");
+/// assert_eq!(normalize_skill_slug("/opencrabs-dev"), "opencrabs-dev");
+/// assert_eq!(normalize_skill_slug("  /opencrabs-dev  "), "opencrabs-dev");
+/// assert_eq!(normalize_skill_slug("//x"), "/x");
+/// ```
+pub fn normalize_skill_slug(raw: &str) -> String {
+    let trimmed = raw.trim();
+    trimmed.strip_prefix('/').unwrap_or(trimmed).to_string()
+}
+
 type GlobsCache = std::sync::Mutex<Option<(std::time::Instant, PathBuf, Vec<Skill>)>>;
 static GLOBS_CACHE: OnceLock<GlobsCache> = OnceLock::new();
 
@@ -445,4 +474,51 @@ pub fn skills_with_globs() -> Vec<Skill> {
         .collect();
     *guard = Some((std::time::Instant::now(), current_home, fresh.clone()));
     fresh
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_skill_slug_strips_at_most_one_sigil() {
+        // The bare slug is already canonical — the documented manifest spelling.
+        assert_eq!(normalize_skill_slug("opencrabs-dev"), "opencrabs-dev");
+        // The slash-command spelling normalises onto the same key.
+        assert_eq!(normalize_skill_slug("/opencrabs-dev"), "opencrabs-dev");
+        // Surrounding whitespace from a YAML list item is trimmed.
+        assert_eq!(normalize_skill_slug("  /opencrabs-dev  "), "opencrabs-dev");
+        assert_eq!(normalize_skill_slug("  opencrabs-dev  "), "opencrabs-dev");
+        // Exactly ONE slash is stripped: `//x` is not a sigil plus a slug.
+        // (This is also why normalisation is not idempotent for `//x` —
+        // the second pass strips the slash that survived the first.)
+        assert_eq!(normalize_skill_slug("//x"), "/x");
+        assert_eq!(normalize_skill_slug(&normalize_skill_slug("//x")), "x");
+        // Empty and sigil-only input stay empty — no panic, no invented slug.
+        assert_eq!(normalize_skill_slug(""), "");
+        assert_eq!(normalize_skill_slug("   "), "");
+        assert_eq!(normalize_skill_slug("/"), "");
+    }
+
+    #[test]
+    fn normalize_skill_slug_does_not_fold_case() {
+        // Folding case would silently merge two distinct skills.
+        assert_eq!(normalize_skill_slug("/OpenCrabs-Dev"), "OpenCrabs-Dev");
+    }
+
+    #[test]
+    fn normalize_skill_slug_is_idempotent_for_real_slugs() {
+        // A well-formed reference normalises to a fixed point: applying it
+        // twice equals applying it once. `//x` is excluded on purpose — it is
+        // not a well-formed reference, and the single-strip rule is pinned in
+        // the test above instead.
+        for raw in ["opencrabs-dev", "/opencrabs-dev", "  /x  ", "x", ""] {
+            let once = normalize_skill_slug(raw);
+            assert_eq!(
+                normalize_skill_slug(&once),
+                once,
+                "not idempotent for {raw:?}"
+            );
+        }
+    }
 }
