@@ -55,10 +55,12 @@ fn normalize_skill_slug_trims_surrounding_whitespace() {
 /// to `x` would let a typo resolve to a real skill.
 #[test]
 fn normalize_skill_slug_strips_at_most_one_sigil() {
-    assert_eq!(normalize_skill_slug("//canarya"), "/canarya");
+    let once = normalize_skill_slug("//canarya");
+    assert_eq!(once, "/canarya");
+
+    let twice = normalize_skill_slug(&once);
     assert_ne!(
-        normalize_skill_slug(&normalize_skill_slug("//canarya")),
-        normalize_skill_slug("//canarya"),
+        twice, once,
         "double-sigil normalisation must not be idempotent by accident"
     );
 }
