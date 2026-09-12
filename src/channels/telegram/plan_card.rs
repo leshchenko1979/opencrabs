@@ -280,20 +280,21 @@ pub(crate) async fn render_plan_card_markdown(
 
     if let Some(sections) = prose.filter(|s| !s.is_empty()) {
         for sec in sections {
-            // Markdown mode: details/summary inline, prose body raw (the
-            // markdown dialect renders md formatting + native tables) — with
-            // media tags neutralised first: a LIVE `<img>`/`<video>`/`<audio>`
-            // tag in model-authored prose is a whole-message rejection when
-            // Telegram cannot resolve it against the media array (#134 root
-            // cause, live-probe verified).
+            // Markdown mode: details/summary inline. Telegram's rich parser
+            // treats the interior of <details> as HTML, so markdown prose
+            // bodies are converted via markdown_to_html_mermaid_p so paragraphs,
+            // lists, bolding, pipe tables, and mermaid fences render with
+            // proper block tags (<p>, <b>, <pre>) instead of collapsing
+            // into run-on oneliners with raw asterisks (#941 regression fix).
             let body = super::rich::mermaid::neutralize_prose_media_html(&sec.body);
+            let body_html = super::rich::markdown_to_html_mermaid_p(&body).await;
             blocks.push(CardBlock::Block(match &sec.heading {
                 Some(h) => format!(
-                    "<details><summary><b>{}</b></summary>\n{}\n</details>",
+                    "<details><summary><b>{}</b></summary>{}</details>",
                     escape_html(h),
-                    body
+                    body_html
                 ),
-                None => body,
+                None => body_html,
             }));
         }
     }
@@ -311,25 +312,29 @@ pub(crate) async fn render_plan_card_markdown(
             if checklist.is_some() || has_prose {
                 blocks.push(CardBlock::ClassicGap);
             }
+            let text_html = super::rich::markdown_to_html_p(text);
             blocks.push(CardBlock::Block(format!(
-                "<details><summary>{}</summary>\n{}\n</details>",
+                "<details><summary>{}</summary>{}</details>",
                 g.prefix(true),
-                escape_html(text)
+                text_html
             )));
         }
     }
 
     // Markdown serializer: same single-variant shape as the DetailsSummary
-    // serializer but with markdown line semantics — Lines need a real
-    // newline between them, Blocks carry their own collapsibles.
+    // serializer but with markdown line semantics — Lines are wrapped in <p>
+    // to preserve individual paragraph lines in Telegram's rich message
+    // client, Blocks carry their own collapsibles (<details>).
     let mut out = String::new();
     for b in &blocks {
         match b {
             CardBlock::Line(s) => {
                 if !out.is_empty() {
-                    out.push_str("\n\n");
+                    out.push('\n');
                 }
+                out.push_str("<p>");
                 out.push_str(s);
+                out.push_str("</p>");
             }
             CardBlock::Block(s) => {
                 // Skip the separator when the output already ends with a
