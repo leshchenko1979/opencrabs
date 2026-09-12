@@ -17,8 +17,8 @@
 
 use super::ast::Block;
 pub use super::ast::MermaidResult;
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -412,7 +412,7 @@ async fn read_body_with_retry(
                 source,
                 "diagram renderer unreachable",
                 Some(&e),
-            ))
+            ));
         }
     };
     let status = retry.status().as_u16();
