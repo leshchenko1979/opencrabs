@@ -270,6 +270,48 @@ fn progress_note_carries_the_flow_footer_clock() {
     );
 }
 
+/// #186 D1 — the clock must render even when there is no progress snapshot.
+///
+/// `WorkStatus.progress` is written at ROUND END, so a review's entire first
+/// round reads `progress: None` — precisely the stretch where the owner has
+/// nothing else to watch. The formatter used to early-return the bare note in
+/// that case, silently discarding `elapsed_secs`: the live clock was dropped
+/// exactly when it was needed, and the card sat on the plain "running" line
+/// until the round ended.
+#[test]
+fn review_clock_renders_without_a_progress_snapshot() {
+    assert_eq!(
+        format_plan_review_running_progress(None, Some(45)),
+        "🔍 Review subagent running (45s)…",
+        "a review whose progress has not been written yet still shows its clock"
+    );
+    assert_eq!(
+        format_plan_review_running_progress(None, Some(90)),
+        "🔍 Review subagent running (1 min 30s)…",
+        "the ungated clock keeps the flow footer's minute form"
+    );
+    // With neither a snapshot nor a clock there is genuinely nothing to say —
+    // the bare note is still the floor.
+    assert_eq!(
+        format_plan_review_running_progress(None, None),
+        PLAN_REVIEW_RUNNING_NOTE
+    );
+    // A zero-progress snapshot is the same "no tool news" case: its TOOL
+    // segment stays suppressed (that is what the `iteration == 0 &&
+    // tool_count == 0` guard is for), but the clock is independent of it.
+    let p_zero = crate::brain::agent::service::work_status::ProgressSnapshot {
+        iteration: 0,
+        tool_count: 0,
+        last_tool: Some("read_file".to_string()),
+        last_event: None,
+        updated_at: None,
+    };
+    assert_eq!(
+        format_plan_review_running_progress(Some(&p_zero), Some(12)),
+        "🔍 Review subagent running (12s)…"
+    );
+}
+
 #[test]
 fn review_clock_anchors_on_the_spawn_stamp() {
     // The clock reads the child's OWN spawn stamp, so a review that started
