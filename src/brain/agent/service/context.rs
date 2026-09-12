@@ -519,11 +519,13 @@ impl AgentService {
         let provider = self.provider_for_session(session_id);
         let cancel = cancel_token.cloned().unwrap_or_default();
 
-        let active_skills = self.active_skills_for_session(session_id);
+        // #138 part 2: the inventory stamp lists the UNION (active ∪ seen).
+        // Re-injection (tool_loop) stays active-only on purpose.
+        let stamp_skills = crate::brain::tools::seen_skills::stamp_skills_for_session(session_id);
         let active_tools = self.tool_registry.active_tools(session_id);
         let context_inventory = Self::format_context_inventory(
             context.max_tokens,
-            &active_skills,
+            &stamp_skills,
             &active_tools,
             Some(&self.tool_registry),
         );

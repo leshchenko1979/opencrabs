@@ -416,6 +416,26 @@ pub fn active_for_session(session_id: Uuid) -> HashSet<String> {
         .unwrap_or_default()
 }
 
+/// The skill set for the compaction inventory stamp (#138 part 2): the
+/// UNION of the ACTIVE set and the SEEN set.
+///
+/// The two registries stay SEPARATE everywhere else on purpose —
+/// re-injection reads ACTIVE only, because a read-counted skill must not be
+/// re-injected on top of the read already present in conversation history.
+/// The stamp is the one consumer that wants both: the summariser must be
+/// told about every skill the session has had in play, whether it is still
+/// held active or was already consumed and discarded.
+///
+/// Before this, the stamp read the active set alone, so a skill that was
+/// read (and then discarded) vanished from the inventory — the summariser
+/// was told no skill was in play while the skill's body sat in the very
+/// history it was summarising.
+pub fn stamp_skills_for_session(session_id: Uuid) -> HashSet<String> {
+    let mut set = active_for_session(session_id);
+    set.extend(seen_for_session(session_id));
+    set
+}
+
 /// Drop `session_id`'s entire ACTIVE set — session teardown (#138 part 2).
 ///
 /// Clears memory AND persists the deactivation for every slug it held, so a

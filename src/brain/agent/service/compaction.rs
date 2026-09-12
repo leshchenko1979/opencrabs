@@ -636,11 +636,13 @@ impl AgentService {
         let auto_approve = self.auto_approve_tools;
         let subagents = self.subagent_manager.clone();
         let attempt_deadline = self.compaction_attempt_deadline(session_id);
-        let active_skills = self.active_skills_for_session(session_id);
+        // #138 part 2: the inventory stamp lists the UNION (active ∪ seen).
+        // Re-injection below stays active-only on purpose.
+        let stamp_skills = crate::brain::tools::seen_skills::stamp_skills_for_session(session_id);
         let active_tools = self.tool_registry.active_tools(session_id);
         let context_inventory = Self::format_context_inventory(
             max_tokens,
-            &active_skills,
+            &stamp_skills,
             &active_tools,
             Some(&self.tool_registry),
         );
