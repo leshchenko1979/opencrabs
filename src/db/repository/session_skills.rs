@@ -107,6 +107,12 @@ impl SessionSkillsRepository {
     }
 
     /// Delete a single seen-skill record for a session.
+    ///
+    /// Matches the bare slug **and** a legacy sigil-prefixed row (#179): before
+    /// slugs were canonicalised the slash-command path persisted `/foo` while
+    /// every other path persisted `foo`, so a stale row can outlive the fix.
+    /// Clearing both forms on the first discard retires those without a
+    /// migration — `'/' || ?2` is a no-op match when the row is already bare.
     pub async fn delete_skill(&self, session_id: Uuid, slug: &str) -> Result<()> {
         let sid = session_id.to_string();
         let slug = slug.to_string();
@@ -116,7 +122,8 @@ impl SessionSkillsRepository {
             .context("Failed to get connection")?
             .interact(move |conn| {
                 conn.execute(
-                    "DELETE FROM session_seen_skills WHERE session_id = ?1 AND slug = ?2",
+                    "DELETE FROM session_seen_skills \
+                     WHERE session_id = ?1 AND (slug = ?2 OR slug = '/' || ?2)",
                     rusqlite::params![sid, slug],
                 )
             })
