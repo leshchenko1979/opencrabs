@@ -440,6 +440,36 @@ pub fn normalize_skill_slug(raw: &str) -> String {
     trimmed.strip_prefix('/').unwrap_or(trimmed).to_string()
 }
 
+/// Build the system-brain fragment that re-injects the bodies of a session's
+/// active skills, so a skill survives compaction (#219).
+///
+/// #179: the match is on the IDENTITY field [`Skill::name`] — the canonical
+/// bare slug — never on [`Skill::slash_name`], which carries the invocation
+/// sigil. The compaction manifest and every non-slash-command ingestion path
+/// key the active set by bare slug, so matching on `slash_name` silently
+/// injected NOTHING for a skill registered in the documented `- <skill-slug>`
+/// form: the manifest said "active", the matcher disagreed, and the failure
+/// was invisible. Extracted from the tool loop so that exact failure mode is
+/// directly testable.
+pub fn active_skill_bodies(
+    active_skills: &std::collections::HashSet<String>,
+    skills: &[Skill],
+) -> String {
+    let mut section = String::new();
+    for skill in skills {
+        if active_skills.contains(&skill.name) {
+            // `prompt_body()` carries the review-gate reminder for flagged
+            // skills so the gate survives compaction too.
+            section.push_str(&format!(
+                "\n\n--- Active Skill: {} ---\n{}",
+                skill.slash_name,
+                skill.prompt_body()
+            ));
+        }
+    }
+    section
+}
+
 type GlobsCache = std::sync::Mutex<Option<(std::time::Instant, PathBuf, Vec<Skill>)>>;
 static GLOBS_CACHE: OnceLock<GlobsCache> = OnceLock::new();
 

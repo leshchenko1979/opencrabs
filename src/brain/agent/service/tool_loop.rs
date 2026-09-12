@@ -1202,23 +1202,11 @@ impl AgentService {
         let active_skills = self.active_skills_for_session(session_id);
         if !active_skills.is_empty() {
             let skills = crate::brain::skills::load_all_skills();
-            let mut skill_section = String::new();
-            for skill in &skills {
-                // #179: compare the IDENTITY field, not the display name.
-                // `slash_name` carries the invocation sigil, so a set keyed by
-                // the bare slug — which is what the manifest and every
-                // non-slash-command path produce — never matched here, and the
-                // skill body was silently NOT injected.
-                if active_skills.contains(&skill.name) {
-                    // `prompt_body()` carries the review-gate reminder for
-                    // flagged skills so the gate survives compaction too.
-                    skill_section.push_str(&format!(
-                        "\n\n--- Active Skill: {} ---\n{}",
-                        skill.slash_name,
-                        skill.prompt_body()
-                    ));
-                }
-            }
+            // #179: selection lives in `active_skill_bodies` (matching the
+            // IDENTITY field, the bare slug) so the contract "a skill
+            // registered in the documented `- <skill-slug>` form IS injected"
+            // is directly testable rather than buried in this loop.
+            let skill_section = crate::brain::skills::active_skill_bodies(&active_skills, &skills);
             if !skill_section.is_empty()
                 && let Some(ref mut brain) = context.system_brain
             {
