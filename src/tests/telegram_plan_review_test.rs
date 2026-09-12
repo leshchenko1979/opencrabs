@@ -15,6 +15,7 @@
 //! 3. The result is a one-line delta rendered as the card footer, derived from
 //!    the worker's `DELTA:` line, never from the spawn acknowledgement.
 
+use crate::channels::telegram::TelegramState;
 use crate::channels::telegram::flow_chrome::PlanKb;
 use crate::channels::telegram::plan_card::{
     PLAN_REVIEW_LABEL, PLAN_REVIEW_RUNNING_NOTE, format_plan_review_running_progress,
@@ -558,5 +559,54 @@ fn a_long_delta_is_truncated_to_fit_the_card() {
     assert!(
         delta.ends_with('…') || delta.ends_with("..."),
         "a truncated delta must show that it was truncated"
+    );
+}
+
+#[tokio::test]
+async fn review_cancel_request_is_one_shot_and_survives_a_missing_id() {
+    // #155 D1: a discard can land while the review is still inside
+    // `spawn_agent` setup, before it can publish its child id. There is no id
+    // to cancel in that window, so the discard records its intent instead and
+    // the review consumes it at publish time. Two properties make that safe,
+    // and both are pinned here.
+    let state = TelegramState::new();
+    let session = Uuid::new_v4();
+
+    // Nothing requested → nothing to honour. A stray `take` must not read as a
+    // cancel, or every review would stop the instant it started.
+    assert!(!state.take_plan_review_cancel(session).await);
+
+    // The window itself: the request is visible with NO child id published —
+    // the exact state a mid-startup discard leaves behind.
+    assert!(state.plan_review_child(session).await.is_none());
+    state.request_plan_review_cancel(session).await;
+    assert!(
+        state.take_plan_review_cancel(session).await,
+        "a discard during startup must be visible at publish time"
+    );
+
+    // One-shot: `take` REMOVES, so a request belongs to exactly one review. If
+    // it merely read, this stale flag would stop the owner's NEXT review.
+    assert!(
+        !state.take_plan_review_cancel(session).await,
+        "the request must be consumed, never left to stop a later review"
+    );
+
+    // Sessions are independent: one session's cancel never touches another's.
+    let other = Uuid::new_v4();
+    state.request_plan_review_cancel(session).await;
+    assert!(!state.take_plan_review_cancel(other).await);
+    assert!(state.take_plan_review_cancel(session).await);
+
+    // Why the discard handler gates the request on `is_plan_reviewing`: a
+    // request that no review ever consumes LIES IN WAIT. If a discard recorded
+    // one with no review in flight, the next review the owner starts would read
+    // it at publish time and stop itself immediately — a dead button. This
+    // assertion is the hazard, not the desired behaviour.
+    let later = Uuid::new_v4();
+    state.request_plan_review_cancel(later).await;
+    assert!(
+        state.take_plan_review_cancel(later).await,
+        "an ungated request survives its discard — hence the is_plan_reviewing gate"
     );
 }
