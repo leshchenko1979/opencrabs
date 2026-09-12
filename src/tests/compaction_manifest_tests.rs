@@ -96,7 +96,11 @@ fn test_format_context_inventory() {
 
     let table =
         AgentService::format_context_inventory(200_000, &active_skills, &active_tools, None);
-    assert!(table.contains("| `/cost-estimate` | Skill |"));
+    // The table must render the canonical bare slug. A slashed cell here would
+    // contradict the `<skill-slug>` rule documented in the very same prompt —
+    // that contradiction is #179 F2, so pin both directions.
+    assert!(table.contains("| `cost-estimate` | Skill |"));
+    assert!(!table.contains("| `/cost-estimate` | Skill |"));
     assert!(table.contains("| `telegram_send` | Lazy Tool |"));
     assert!(table.contains("Guidance: aim to keep active skills and lazy tools <= 5% target"));
 }
