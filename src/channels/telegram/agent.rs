@@ -256,12 +256,17 @@ impl TelegramAgent {
                 let session_svc = session_svc.clone();
                 let shared_session = shared_session.clone();
                 let config_rx = config_rx.clone();
+                // #180 Leg A: a button tap must be able to record the session
+                // binding. `deps` owns the message path's handle; this is the
+                // callback path's own copy.
+                let cb_session_binding_repo = deps.session_binding_repo.clone();
                 move |bot: Bot, query: CallbackQuery| {
                     let state = telegram_state.clone();
                     let agent = agent.clone();
                     let session_svc = session_svc.clone();
                     let shared_session = shared_session.clone();
                     let config_rx = config_rx.clone();
+                    let cb_session_binding_repo = cb_session_binding_repo.clone();
                     async move {
                         if let Some(data) = query.data.as_deref() {
                             tracing::info!("Telegram callback query received: data={}", data);
@@ -467,6 +472,18 @@ impl TelegramAgent {
                                     let state_clone = state.clone();
                                     let rearm_token = tapped_token.clone();
                                     let query_id = query.id.clone();
+                                    // #180 Leg A: record the tap BEFORE the turn is
+                                    // dispatched. The kill this guards against lands
+                                    // between dispatch and the PROCESSING insert, so
+                                    // the row must be on disk before
+                                    // `resume_session_inner` is reached.
+                                    record_tap_binding(
+                                        &cb_session_binding_repo,
+                                        sid,
+                                        chat_id,
+                                        thread_id,
+                                    )
+                                    .await;
                                     tokio::spawn(async move {
                                         // Record the pick ON the suggestion block
                                         // rather than posting a new message.
@@ -1983,6 +2000,16 @@ impl TelegramAgent {
                                             "plan approve notice",
                                         )
                                         .await;
+                                        // #180 Leg A: approving the plan with a tap
+                                        // starts a turn — record the binding before
+                                        // dispatch, same as the follow-up path.
+                                        record_tap_binding(
+                                            &cb_session_binding_repo,
+                                            session_id,
+                                            chat_id,
+                                            thread_id,
+                                        )
+                                        .await;
                                         // Visible seed turn, spawned so the
                                         // callback answers fast. The turn guard
                                         // keeps concurrent messages from forking a
@@ -2106,6 +2133,16 @@ impl TelegramAgent {
                                             .await
                                     };
                                     if let Some(sid) = sid {
+                                        // #180 Leg A: a generic callback tap that
+                                        // dispatches a turn is the same boot-recovery
+                                        // candidate as the follow-up and plan paths.
+                                        record_tap_binding(
+                                            &cb_session_binding_repo,
+                                            sid,
+                                            cb_chat,
+                                            cb_thread,
+                                        )
+                                        .await;
                                         let agent_cb = agent.clone();
                                         let bot_cb = bot.clone();
                                         let state_cb = state.clone();
@@ -2844,6 +2881,43 @@ fn spawn_settle_watcher(
             spawn_handle_message(bot, final_msg, deps);
         }
     });
+}
+
+/// #180 Leg A — record that a BUTTON TAP started a turn.
+///
+/// Gate 1 of the boot classifier (#33) only looks at sessions whose binding
+/// moved inside `WAKE_RECENT_SECS`, and the only writer used to be the text
+/// path in `handler.rs`. A tap therefore never made its session a candidate —
+/// and when the session did surface, Gate 2 read the topic's trailing bot
+/// message as the turn's own reply and called it completed. Writing the
+/// binding here, with the `callback` origin, makes the tap a candidate AND
+/// tells Gate 2 that the trailing bot message carries no completion signal.
+///
+/// Called at the three callback sites that actually dispatch a turn: a
+/// follow-up suggestion, a plan approval, and generic callback routing.
+/// Config pickers such as `/models` deliberately do not call it — they start
+/// no turn, so a resume would be noise.
+async fn record_tap_binding(
+    repo: &SessionBindingRepository,
+    session_id: Uuid,
+    chat_id: teloxide::types::ChatId,
+    thread_id: Option<teloxide::types::ThreadId>,
+) {
+    if let Err(e) = repo
+        .upsert(
+            session_id.to_string(),
+            "telegram",
+            &chat_id.0.to_string(),
+            thread_id.map(|t| t.0.0),
+            crate::db::BindingOrigin::Callback,
+        )
+        .await
+    {
+        tracing::warn!(
+            "Telegram: could not record tap binding for session {session_id}: {e} \
+             (boot recovery will not see this turn — #180)"
+        );
+    }
 }
 
 /// Resolve the correct session ID for a callback query.

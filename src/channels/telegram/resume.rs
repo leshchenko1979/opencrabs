@@ -1606,6 +1606,29 @@ pub async fn classify_recently_active(
             recovery.unclassified.push(short_session_id(sid));
             continue;
         };
+        // #180: this binding was last refreshed by a BUTTON TAP that started a
+        // turn. A bot message after a tap is only the card the button rode in
+        // on, so it carries no completion signal — and if the kill landed in
+        // the dispatch→PROCESSING window, NET 1 has no row for this turn
+        // either. This is the one case where NET 2 is the only net left.
+        //
+        // The origin is written only at the three tap sites that actually
+        // dispatch a turn (follow-up, plan approve, generic routing), never by
+        // a config picker, so a callback origin always means work was started.
+        if crate::db::BindingOrigin::from_stored(b.last_origin.as_deref())
+            == crate::db::BindingOrigin::Callback
+        {
+            tracing::info!(
+                target: "telegram",
+                "Boot classifier (#180): session {} was last refreshed by a button tap \
+                 that started a turn — resuming",
+                short_session_id(sid)
+            );
+            recovery
+                .interrupted
+                .push((sid, chat_id, b.thread_id.map(i64::from)));
+            continue;
+        }
         let last_sender = msg_repo
             .last_topic_sender(
                 "telegram",
