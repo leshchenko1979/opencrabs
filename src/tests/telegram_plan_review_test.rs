@@ -180,7 +180,7 @@ fn running_review_footer_shows_live_progress_note() {
 #[test]
 fn format_progress_snapshot_handles_various_states() {
     assert_eq!(
-        format_plan_review_running_progress(None),
+        format_plan_review_running_progress(None, None),
         PLAN_REVIEW_RUNNING_NOTE
     );
 
@@ -192,7 +192,7 @@ fn format_progress_snapshot_handles_various_states() {
         updated_at: None,
     };
     assert_eq!(
-        format_plan_review_running_progress(Some(&p_zero)),
+        format_plan_review_running_progress(Some(&p_zero), None),
         PLAN_REVIEW_RUNNING_NOTE
     );
 
@@ -204,7 +204,7 @@ fn format_progress_snapshot_handles_various_states() {
         updated_at: None,
     };
     assert_eq!(
-        format_plan_review_running_progress(Some(&p_tool)),
+        format_plan_review_running_progress(Some(&p_tool), None),
         "🔍 Review subagent running (🛠 4 · read_file)…"
     );
 
@@ -216,8 +216,117 @@ fn format_progress_snapshot_handles_various_states() {
         updated_at: None,
     };
     assert_eq!(
-        format_plan_review_running_progress(Some(&p_notool)),
+        format_plan_review_running_progress(Some(&p_notool), None),
         "🔍 Review subagent running (🛠 2)…"
+    );
+}
+
+#[test]
+fn progress_note_carries_the_flow_footer_clock() {
+    // Owner order 2026-09-12 (#155): the review note gets a wall clock in the
+    // SAME shape the flow chrome footer uses — `45s` under a minute, then
+    // `1 min 30s` — so the two never drift into different time formats. The
+    // boundary matters: the whole point is that a 90-second review reads
+    // `1 min 30s`, not `90s` and not `1m`.
+    use crate::brain::agent::service::work_status::ProgressSnapshot;
+    let p = ProgressSnapshot {
+        iteration: 1,
+        tool_count: 4,
+        last_tool: Some("read_file".to_string()),
+        last_event: None,
+        updated_at: None,
+    };
+    assert_eq!(
+        format_plan_review_running_progress(Some(&p), Some(45)),
+        "🔍 Review subagent running (🛠 4 · read_file · 45s)…"
+    );
+    assert_eq!(
+        format_plan_review_running_progress(Some(&p), Some(60)),
+        "🔍 Review subagent running (🛠 4 · read_file · 1 min 0s)…",
+        "60s is the first minute-form reading — same boundary as the flow footer"
+    );
+    assert_eq!(
+        format_plan_review_running_progress(Some(&p), Some(90)),
+        "🔍 Review subagent running (🛠 4 · read_file · 1 min 30s)…"
+    );
+    // No elapsed (an unparseable spawn stamp) DROPS the segment; it must never
+    // print a placeholder clock that reads like a real one.
+    assert_eq!(
+        format_plan_review_running_progress(Some(&p), None),
+        "🔍 Review subagent running (🛠 4 · read_file)…"
+    );
+    // A tool-less tick still clocks — the count is optional, the time is not.
+    let p_notool = ProgressSnapshot {
+        iteration: 1,
+        tool_count: 2,
+        last_tool: None,
+        last_event: None,
+        updated_at: None,
+    };
+    assert_eq!(
+        format_plan_review_running_progress(Some(&p_notool), Some(7)),
+        "🔍 Review subagent running (🛠 2 · 7s)…"
+    );
+}
+
+#[test]
+fn review_clock_anchors_on_the_spawn_stamp() {
+    // The clock reads the child's OWN spawn stamp, so a review that started
+    // three minutes ago reads three minutes even if the reader only just
+    // looked — an anchor taken when the reader arrives would reset the clock on
+    // every card refresh. Both failure paths must yield NO clock: an
+    // unparseable stamp, and a stamp in the future (clock skew). The future
+    // case matters most — a negative elapsed must never reach the renderer,
+    // where it would print an absurd multi-million-minute reading.
+    //
+    // Built as struct literals on purpose: `WorkStatus::new_agent` WRITES a
+    // status file, and a test must never touch the live status dir.
+    use crate::brain::agent::service::work_status::{WorkKind, WorkState, WorkStatus};
+    let base = WorkStatus {
+        id: "clock-test".to_string(),
+        kind: WorkKind::Agent,
+        session_id: "session".to_string(),
+        parent_session_id: None,
+        label: "plan review".to_string(),
+        task: "review".to_string(),
+        spawned_at: chrono::Utc::now().to_rfc3339(),
+        state: WorkState::Running,
+        progress: None,
+        finish: None,
+    };
+    assert_eq!(
+        base.elapsed_secs(),
+        Some(0),
+        "a just-spawned item reads 0s, never a negative wrap"
+    );
+
+    let unparseable = WorkStatus {
+        spawned_at: "not-a-timestamp".to_string(),
+        ..base.clone()
+    };
+    assert_eq!(
+        unparseable.elapsed_secs(),
+        None,
+        "an unparseable stamp drops the clock instead of faking one"
+    );
+
+    let future = WorkStatus {
+        spawned_at: "2099-01-01T00:00:00+00:00".to_string(),
+        ..base.clone()
+    };
+    assert_eq!(
+        future.elapsed_secs(),
+        None,
+        "a future stamp (clock skew) drops the clock, never wraps negative"
+    );
+
+    let past = WorkStatus {
+        spawned_at: "2020-01-01T00:00:00+00:00".to_string(),
+        ..base
+    };
+    assert!(
+        past.elapsed_secs().is_some_and(|s| s > 0),
+        "a past stamp yields a real, positive elapsed time"
     );
 }
 
@@ -245,7 +354,7 @@ fn footer_never_bleeds_onto_a_non_editing_card() {
 #[test]
 fn footer_is_appended_to_the_body_it_decorates() {
     let body = "✍️ **Editing plan**".to_string();
-    let with = plan_card_with_footer(body.clone(), Some("✨ Review: done"));
+    let with = plan_card_with_footer(body.clone(), Some("✨ Review: done"), false);
     assert!(
         with.starts_with(&body),
         "the card body is preserved verbatim"
@@ -257,9 +366,39 @@ fn footer_is_appended_to_the_body_it_decorates() {
     );
     // No footer, or a blank one, leaves the body byte-identical — which is
     // what keeps the card's change-signature stable when nothing changed.
-    assert_eq!(plan_card_with_footer(body.clone(), None), body);
-    assert_eq!(plan_card_with_footer(body.clone(), Some("  ")), body);
-    assert_eq!(plan_card_with_footer(body.clone(), Some("")), body);
+    assert_eq!(plan_card_with_footer(body.clone(), None, false), body);
+    assert_eq!(plan_card_with_footer(body.clone(), Some("  "), false), body);
+    assert_eq!(plan_card_with_footer(body.clone(), Some(""), false), body);
+}
+
+#[test]
+fn rich_footer_rides_as_sub_but_classic_stays_plain() {
+    // Owner order 2026-09-12 (#155): the review footer renders as `<sub>`
+    // small text in the rich dialect, the same shape the flow chrome footer
+    // already uses. The classic HTML arm must NOT wrap: classic Telegram HTML
+    // has no `<sub>` and rejects the tag outright, which would 400 the whole
+    // card edit rather than merely its footnote.
+    let body = "✍️ **Editing plan**".to_string();
+    let note = "🔍 Review subagent running (🛠 4 · read_file)…";
+
+    let rich = plan_card_with_footer(body.clone(), Some(note), true);
+    assert_eq!(rich, format!("{body}\n\n<sub>{note}</sub>"));
+    assert!(
+        rich.ends_with("</sub>"),
+        "the rich footnote closes its <sub>"
+    );
+
+    let classic = plan_card_with_footer(body.clone(), Some(note), false);
+    assert_eq!(classic, format!("{body}\n\n{note}"));
+    assert!(
+        !classic.contains("<sub>"),
+        "classic HTML has no <sub>; emitting it 400s the card edit"
+    );
+
+    // The blank/no-footer contract is dialect-independent: nothing to decorate
+    // means the body comes back byte-identical either way.
+    assert_eq!(plan_card_with_footer(body.clone(), None, true), body);
+    assert_eq!(plan_card_with_footer(body.clone(), Some("   "), true), body);
 }
 
 #[test]

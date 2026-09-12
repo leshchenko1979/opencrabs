@@ -446,8 +446,15 @@ pub(crate) fn plan_review_effective_kb(plan_kb: PlanKb, reviewing: bool) -> Plan
 }
 
 /// Format the running note for an in-flight review with live progress (#155).
+///
+/// `elapsed_secs` is the review's own wall clock, rendered through
+/// [`super::flow::humanize_duration`] — the SAME formatter the flow chrome
+/// footer uses (`45s`, then `1 min 30s`), so the review note and a turn's own
+/// footer read alike instead of drifting into two time formats (owner order
+/// 2026-09-12). `None` drops the segment rather than printing a placeholder.
 pub(crate) fn format_plan_review_running_progress(
     progress: Option<&crate::brain::agent::service::work_status::ProgressSnapshot>,
+    elapsed_secs: Option<u64>,
 ) -> String {
     let Some(p) = progress else {
         return PLAN_REVIEW_RUNNING_NOTE.to_string();
@@ -455,20 +462,20 @@ pub(crate) fn format_plan_review_running_progress(
     if p.tool_count == 0 && p.iteration == 0 {
         return PLAN_REVIEW_RUNNING_NOTE.to_string();
     }
-    if let Some(tool) = &p.last_tool {
-        if p.tool_count > 0 {
-            format!(
-                "🔍 Review subagent running (🛠 {} · {})…",
-                p.tool_count, tool
-            )
-        } else {
-            format!("🔍 Review subagent running ({})…", tool)
-        }
-    } else if p.tool_count > 0 {
-        format!("🔍 Review subagent running (🛠 {})…", p.tool_count)
-    } else {
-        PLAN_REVIEW_RUNNING_NOTE.to_string()
+    let mut segs: Vec<String> = Vec::new();
+    if p.tool_count > 0 {
+        segs.push(format!("🛠 {}", p.tool_count));
     }
+    if let Some(tool) = p.last_tool.as_deref().filter(|t| !t.is_empty()) {
+        segs.push(tool.to_string());
+    }
+    if let Some(secs) = elapsed_secs {
+        segs.push(super::flow::humanize_duration(secs));
+    }
+    if segs.is_empty() {
+        return PLAN_REVIEW_RUNNING_NOTE.to_string();
+    }
+    format!("🔍 Review subagent running ({})…", segs.join(" · "))
 }
 
 /// Footer note for the card, if any (#155). The running note wins over a
@@ -504,11 +511,22 @@ pub(crate) fn plan_review_footer_note(
 /// renderers: both production arms of `refresh_plan_card` call one renderer
 /// each, so appending here covers rich and classic alike — without threading a
 /// fifth parameter through every renderer and its many test call sites.
-pub(crate) fn plan_card_with_footer(body: String, footer: Option<&str>) -> String {
+///
+/// `small` picks the dialect's footnote shape (owner order 2026-09-12, #155):
+/// the rich arm passes `true`, so the review footer — live progress while a
+/// review runs, or the last review's delta — rides as `<sub>` small text, the
+/// same shape the flow chrome footer already uses. The classic HTML arm passes
+/// `false`: classic Telegram HTML has no `<sub>` and 400s on the tag, so the
+/// note stays plain there.
+pub(crate) fn plan_card_with_footer(body: String, footer: Option<&str>, small: bool) -> String {
     let Some(note) = footer.map(str::trim).filter(|n| !n.is_empty()) else {
         return body;
     };
-    format!("{body}\n\n{note}")
+    if small {
+        format!("{body}\n\n<sub>{note}</sub>")
+    } else {
+        format!("{body}\n\n{note}")
+    }
 }
 
 /// Spawn input for the plan-review worker (#155). Pure so the test asserts the
@@ -779,7 +797,7 @@ pub(crate) async fn refresh_plan_card(
         let rich_md = super::rich::normalize_tables(&rich_md);
         // #155 footer rides the body, so it lands inside the signature below —
         // a footer-only change (review started, or a new delta) must re-render.
-        let rich_md = plan_card_with_footer(rich_md, footer_note.as_deref());
+        let rich_md = plan_card_with_footer(rich_md, footer_note.as_deref(), true);
         let kb_val = plan_kb
             .keyboard()
             .and_then(|m| serde_json::to_value(m).ok());
@@ -917,7 +935,7 @@ pub(crate) async fn refresh_plan_card(
     };
     // #155: footer rides the body, so it lands inside `signature` below — a
     // footer-only change (review started, or a new delta) must re-render.
-    let html = plan_card_with_footer(html, footer_note.as_deref());
+    let html = plan_card_with_footer(html, footer_note.as_deref(), false);
     let kb = plan_kb.keyboard();
     let signature = format!("{html}\u{1}{plan_kb:?}");
 

@@ -2554,8 +2554,14 @@ async fn execute_plan_review_subagent(
                         if let Some(status) =
                             crate::brain::agent::service::work_status::WorkStatus::read(&child_id_c)
                         {
+                            // The clock rides the note (#155): the review's own
+                            // spawn-anchored elapsed time, in the flow footer's
+                            // format. It differs every tick, so the card edit
+                            // below is re-issued each tick — that IS the live
+                            // clock the owner asked for.
                             let note = crate::channels::telegram::plan_card::format_plan_review_running_progress(
                                 status.progress.as_ref(),
+                                status.elapsed_secs(),
                             );
                             if note != last_rendered {
                                 last_rendered = note.clone();
