@@ -8,8 +8,7 @@ use super::session_resolve;
 use crate::brain::agent::{AgentService, ProgressCallback};
 use crate::channels::group_history;
 use crate::config::{Config, RespondTo};
-use crate::db::ChannelMessageRepository;
-use crate::db::SessionBindingRepository;
+use crate::db::{BindingOrigin, ChannelMessageRepository, MessageRepository, SessionBindingRepository};
 use crate::db::models::ChannelMessage as DbChannelMessage;
 use crate::services::SessionService;
 use crate::utils::sanitize::redact_secrets;
@@ -1853,7 +1852,7 @@ pub(crate) async fn handle_message(
     // Consolidated in TelegramState::bind_session_topic so proactive bindings
     // and inbound message handling share the exact same registration path.
     if let Err(e) = telegram_state
-        .bind_session_topic(session_id, msg.chat.id.0, topic_id)
+        .bind_session_topic(session_id, msg.chat.id.0, topic_id, BindingOrigin::Text)
         .await
     {
         tracing::warn!(
