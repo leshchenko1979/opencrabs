@@ -436,6 +436,22 @@ pub(crate) const PLAN_REVIEW_LABEL: &str = crate::brain::tools::subagent::PLAN_R
 /// Card footer while a review subagent is rewriting the plan (#155).
 pub(crate) const PLAN_REVIEW_RUNNING_NOTE: &str = "🔍 Review subagent rewriting plan…";
 
+/// Whether a finished plan-review child was cancelled by the owner (#186).
+///
+/// `SubAgentState::Cancelled` is reachable for a review child only from the
+/// discard paths (the cancel-intent honour and the discard handler in
+/// `agent.rs`), so a cancelled review means exactly "the owner killed the plan
+/// mid-review". Such a run has no findings — the caller must NOT deliver a
+/// report card for it.
+pub(crate) fn plan_review_was_cancelled(
+    state: Option<&crate::brain::tools::subagent::SubAgentState>,
+) -> bool {
+    matches!(
+        state,
+        Some(crate::brain::tools::subagent::SubAgentState::Cancelled)
+    )
+}
+
 /// Cap on the one-line review delta rendered into the card footer. The delta
 /// is a card line, not a report: the review worker is collected through
 /// `wait_agent`, so its full report is deliberately NOT echoed into the

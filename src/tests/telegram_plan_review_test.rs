@@ -20,7 +20,7 @@ use crate::channels::telegram::flow_chrome::PlanKb;
 use crate::channels::telegram::plan_card::{
     PLAN_REVIEW_LABEL, PLAN_REVIEW_RUNNING_NOTE, format_plan_review_running_progress,
     plan_card_with_footer, plan_review_agent_id, plan_review_delta, plan_review_effective_kb,
-    plan_review_footer_note, plan_review_spawn_input,
+    plan_review_footer_note, plan_review_spawn_input, plan_review_was_cancelled,
 };
 use uuid::Uuid;
 
@@ -608,5 +608,43 @@ async fn review_cancel_request_is_one_shot_and_survives_a_missing_id() {
     assert!(
         state.take_plan_review_cancel(later).await,
         "an ungated request survives its discard — hence the is_plan_reviewing gate"
+    );
+}
+
+/// #186 — a cancelled review must not deliver a findings card.
+///
+/// The owner's Discard does stop the review, but the terminal-state match still
+/// produced a report and the delivery block below it sent that report
+/// unconditionally — so the topic received a 92-byte `🔍 Plan Review Findings`
+/// card reading "⚠️ Review was cancelled." after every discard. This predicate
+/// is the gate the delivery now sits behind.
+#[test]
+fn cancelled_review_is_not_delivered_as_findings() {
+    use crate::brain::tools::subagent::SubAgentState;
+
+    // The one state that means "the owner cancelled": suppressed.
+    assert!(
+        plan_review_was_cancelled(Some(&SubAgentState::Cancelled)),
+        "a cancelled review has no findings to report"
+    );
+
+    // Every other state still reports. A failure or a pause is news the owner
+    // needs; silence there would hide a broken review instead of a dead one.
+    for state in [
+        SubAgentState::Completed,
+        SubAgentState::Failed("boom".to_string()),
+        SubAgentState::AwaitingInput,
+        SubAgentState::Running,
+    ] {
+        assert!(
+            !plan_review_was_cancelled(Some(&state)),
+            "{state:?} must still deliver its findings"
+        );
+    }
+
+    // A worker that vanished is not a cancellation — it reports the disappearance.
+    assert!(
+        !plan_review_was_cancelled(None),
+        "a missing worker reports 'its worker disappeared', not silence"
     );
 }

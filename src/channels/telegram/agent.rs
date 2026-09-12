@@ -2631,11 +2631,18 @@ async fn execute_plan_review_subagent(
     progress_stop.notify_one();
     let _ = progress_task.await;
 
+    // A cancelled review has no findings to report: the owner discarded the plan
+    // and the review was stopped mid-flight (#186). Read the terminal state once,
+    // before the match consumes it, so the delivery below can be skipped.
+    let child_state = manager.get_state(&child_id);
+    let review_cancelled =
+        crate::channels::telegram::plan_card::plan_review_was_cancelled(child_state.as_ref());
+
     let review_report = match waited {
         Err(e) => crate::channels::telegram::plan_card::PlanReviewReport::simple(format!(
             "⚠️ Review could not be awaited: {e}"
         )),
-        Ok(_) => match manager.get_state(&child_id) {
+        Ok(_) => match child_state {
             Some(crate::brain::tools::subagent::SubAgentState::Completed) => {
                 crate::channels::telegram::plan_card::parse_plan_review_report(
                     manager.get_output(&child_id).as_deref(),
@@ -2667,32 +2674,40 @@ async fn execute_plan_review_subagent(
         },
     };
 
-    // Deliver findings as a native rich turn message to the thread
-    let findings_md = review_report.to_findings_markdown();
-    let chat_id_i64 = chat_id.0;
-    let send_res = crate::channels::telegram::rich::api::send_rich_markdown_id(
-        bot.api_url().as_str(),
-        bot.token(),
-        chat_id_i64,
-        thread_id,
-        &findings_md,
-        None,
-        "plan_review",
-        "review_findings",
-    )
-    .await;
-
-    if let Err(e) = send_res {
-        tracing::warn!(
-            "Failed to deliver rich plan review findings, falling back to basic send: {e}"
+    if review_cancelled {
+        // The owner cancelled the review — there is nothing to report. Stay silent
+        // and fall through to the cleanup below.
+        tracing::debug!(
+            "Plan review was cancelled by the owner — suppressing the findings delivery"
         );
-        let _ = crate::channels::telegram::send::message_in_thread(
-            &bot,
-            chat_id,
+    } else {
+        // Deliver findings as a native rich turn message to the thread
+        let findings_md = review_report.to_findings_markdown();
+        let chat_id_i64 = chat_id.0;
+        let send_res = crate::channels::telegram::rich::api::send_rich_markdown_id(
+            bot.api_url().as_str(),
+            bot.token(),
+            chat_id_i64,
             thread_id,
             &findings_md,
+            None,
+            "plan_review",
+            "review_findings",
         )
         .await;
+
+        if let Err(e) = send_res {
+            tracing::warn!(
+                "Failed to deliver rich plan review findings, falling back to basic send: {e}"
+            );
+            let _ = crate::channels::telegram::send::message_in_thread(
+                &bot,
+                chat_id,
+                thread_id,
+                &findings_md,
+            )
+            .await;
+        }
     }
 
     finish(review_report.card_delta).await;
