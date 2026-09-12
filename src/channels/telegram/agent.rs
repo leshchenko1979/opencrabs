@@ -2590,9 +2590,16 @@ async fn execute_plan_review_subagent(
                                 status.elapsed_secs(),
                             );
                             if note != last_rendered {
-                                last_rendered = note.clone();
-                                state_c.set_plan_review_running_note(session_id, note).await;
-                                crate::channels::telegram::plan_card::refresh_plan_card(
+                                state_c
+                                    .set_plan_review_running_note(session_id, note.clone())
+                                    .await;
+                                // #187 D3: mark the note rendered only if the card
+                                // actually took it. The suppression gate (#814 flood
+                                // control) skips the whole refresh before any read or
+                                // API work, and recording the note as rendered here
+                                // would make the next refresh carrying that same note
+                                // skip — leaving the card on the older footer.
+                                if crate::channels::telegram::plan_card::refresh_plan_card(
                                     &bot_c,
                                     chat_id,
                                     thread_id,
@@ -2601,7 +2608,10 @@ async fn execute_plan_review_subagent(
                                     session_id,
                                     crate::channels::telegram::flow_chrome::PlanKb::ApproveDiscard,
                                 )
-                                .await;
+                                .await
+                                {
+                                    last_rendered = note;
+                                }
                             }
                         }
                     }
