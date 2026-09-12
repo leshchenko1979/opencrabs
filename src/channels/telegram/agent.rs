@@ -1762,6 +1762,18 @@ impl TelegramAgent {
                                     // reviewer kept rewriting the plan (and
                                     // re-posting the card) minutes after the
                                     // discard. Stop it by its own id first.
+                                    //
+                                    // The id may not be published yet: a review
+                                    // spends seconds inside `spawn_agent` setup
+                                    // before it can name itself. Record the
+                                    // intent as well, so that review stops the
+                                    // moment it publishes instead of running on.
+                                    // Gated on a review actually being in flight:
+                                    // an ungated request would outlive this
+                                    // discard and stop the owner's NEXT review.
+                                    if state.is_plan_reviewing(session_id).await {
+                                        state.request_plan_review_cancel(session_id).await;
+                                    }
                                     let review_child = state.plan_review_child(session_id).await;
                                     let review_stopped = match (
                                         review_child.as_deref(),
@@ -2534,6 +2546,20 @@ async fn execute_plan_review_subagent(
     state
         .set_plan_review_child(session_id, child_id.clone())
         .await;
+    // A discard that landed while this review was still starting had no id to
+    // cancel — it recorded its intent instead, and this is where that intent is
+    // honoured. Stop the child BEFORE it can read the plan, then clean up by
+    // hand rather than through `finish`: `finish` refreshes the card, which
+    // would re-post one for a plan the owner already discarded.
+    if state.take_plan_review_cancel(session_id).await {
+        manager.cancel(&child_id);
+        state.clear_plan_review_running_note(session_id).await;
+        state.clear_plan_review_child(session_id).await;
+        state.set_plan_reviewing(session_id, false).await;
+        crate::channels::telegram::plan_card::remove_plan_card(&bot, chat_id, &state, session_id)
+            .await;
+        return;
+    }
 
     // Live progress tracker task (#155): updates the plan card with turn & tool
     // so the review doesn't appear frozen to the operator.
