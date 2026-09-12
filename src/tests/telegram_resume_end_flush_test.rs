@@ -103,7 +103,7 @@ async fn resume_turn_flushes_an_item_queued_after_its_last_drain() {
         "resume prompt".to_string(),
         agent,
         state.clone(),
-        true,
+        None,
     )
     .await
     .expect("resume turn completes");
@@ -135,7 +135,7 @@ async fn empty_queue_flush_is_a_noop() {
         "resume prompt".to_string(),
         agent,
         state.clone(),
-        true,
+        None,
     )
     .await
     .expect("resume turn completes");
@@ -169,7 +169,7 @@ async fn a_busy_skip_leaves_queued_items_for_the_running_turn() {
         "resume prompt".to_string(),
         agent,
         state.clone(),
-        true,
+        None,
     )
     .await
     .expect("busy skip returns Ok");
