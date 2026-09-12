@@ -1204,7 +1204,12 @@ impl AgentService {
             let skills = crate::brain::skills::load_all_skills();
             let mut skill_section = String::new();
             for skill in &skills {
-                if active_skills.contains(&skill.slash_name) {
+                // #179: compare the IDENTITY field, not the display name.
+                // `slash_name` carries the invocation sigil, so a set keyed by
+                // the bare slug — which is what the manifest and every
+                // non-slash-command path produce — never matched here, and the
+                // skill body was silently NOT injected.
+                if active_skills.contains(&skill.name) {
                     // `prompt_body()` carries the review-gate reminder for
                     // flagged skills so the gate survives compaction too.
                     skill_section.push_str(&format!(
