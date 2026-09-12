@@ -115,11 +115,11 @@ async fn legacy_slashed_db_row_is_cleared_on_discard() {
 
     let rows = repo.all().await.unwrap();
     assert!(
-        !rows.iter().any(|(s, _, _)| *s == sid),
+        !rows.iter().any(|(s, _, _, _)| *s == sid),
         "the legacy slashed row must be cleared, got: {rows:?}"
     );
     assert!(
-        rows.iter().any(|(s, _, _)| *s == other),
+        rows.iter().any(|(s, _, _, _)| *s == other),
         "another session's row must be untouched, got: {rows:?}"
     );
 
