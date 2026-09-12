@@ -638,6 +638,14 @@ impl Tool for SpawnAgentTool {
                             response.content.chars().take(120).collect::<String>()
                         };
 
+                        // Re-read before writing (#187 D2). `status` is the
+                        // handle taken at spawn; the progress callback has been
+                        // writing `tool_count` through its own fresh read, and
+                        // `update_progress` takes `prev_tool_count` from THIS
+                        // copy — so writing from it reset the count to 0 at
+                        // every round boundary. Reload first so the callback's
+                        // count survives the round-end write.
+                        status.reload();
                         status
                             .update_progress(iteration, None, Some(summary))
                             .unwrap_or_else(|e| tracing::warn!("status write failed: {e}"));
