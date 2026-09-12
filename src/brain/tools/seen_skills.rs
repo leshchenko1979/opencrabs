@@ -1,30 +1,34 @@
-//! Session-scoped seen-skill tracking (issue #131).
+//! Session-scoped skill registries (issues #131, #138, #150).
 //!
-//! Records which skill bodies a session has CONSUMED — by any surface — so
-//! the post-compaction advisory stamp (#125) can list skills the agent
-//! actually read, not only those invoked via slash command.
+//! Two process-wide registries live here, both hydrated from ONE table at
+//! daemon boot:
 //!
-//! Two hooks feed this registry:
-//! - `load_brain_file` with a bare skill slug (the #131 canonical form)
-//! - `read_file` on a `skills/<slug>/SKILL.md` path (whole-file reads)
-//! - `load_brain_file` with the filename form `<slug>.md` (issue #138)
-//! - slash invocation (`register_active_skill`) also marks seen (#138) so
-//!   the stamp's union survives restarts
+//! - **SEEN** — which skill bodies a session has CONSUMED, by any surface —
+//!   so the post-compaction advisory stamp (#125) can list skills the agent
+//!   actually read, not only those invoked via slash command. Hooks:
+//!   `load_brain_file` with a bare skill slug (the #131 canonical form),
+//!   `read_file` on a `skills/<slug>/SKILL.md` path, `load_brain_file` with
+//!   the filename form `<slug>.md` (#138), and slash invocation (#138).
+//! - **ACTIVE** — which skills the session currently holds active, i.e. the
+//!   set that drives per-turn body RE-INJECTION and feeds the same stamp.
+//!   Written by `register_active_skill` / `unregister_active_skill`.
 //!
-//! Persistence (#138): every `mark_seen` best-effort writes a row to the
-//! `session_seen_skills` table (`SessionSkillsRepository`); daemon boot
-//! hydrates the registry from that table, so a restart/rebuild no longer
-//! makes a skill-consuming session look "skill-less" to the stamp. DB is
-//! the durability layer only — the in-memory set stays the hot path, and
-//! any DB failure degrades to a WARN (no panic, stamp never fails).
+//! Persistence (#138): every mutation best-effort writes its
+//! `session_seen_skills` row — `record()` for the seen path, `set_active()`
+//! for the active flag — and daemon boot hydrates BOTH registries from that
+//! table. Before the active flag existed, the active set was process-memory
+//! only, so a restart/rebuild left it born EMPTY: the re-injection driver
+//! injected nothing and the inventory rendered skill-less, even though the
+//! session had those skills active a moment earlier. DB is the durability
+//! layer only — the in-memory sets stay the hot path, and any DB failure
+//! degrades to a WARN (no panic, stamp never fails).
 //!
-//! This is deliberately SEPARATE from `AgentService::active_skills` (the
-//! #219 slash-invocation registry): that set also drives per-turn body
-//! re-injection into the system prompt, and read-counted skills must not be
-//! re-injected on top of the read already present in conversation history.
-//! The compaction stamp is the UNION of both registries.
+//! The two registries stay SEPARATE on purpose: re-injection reads ACTIVE
+//! only, because a read-counted skill must not be re-injected on top of the
+//! read already present in conversation history. The compaction stamp is the
+//! UNION of both.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::OnceLock;
 use uuid::Uuid;
@@ -43,6 +47,19 @@ fn registry() -> &'static std::sync::Mutex<HashMap<(Uuid, String), u64>> {
 fn epochs() -> &'static std::sync::Mutex<HashMap<Uuid, u64>> {
     static EPOCHS: OnceLock<std::sync::Mutex<HashMap<Uuid, u64>>> = OnceLock::new();
     EPOCHS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Process-wide ACTIVE-skill registry (#138 part 2): session → the slugs
+/// whose bodies are currently held active for that session.
+///
+/// This is the persisted counterpart of the old per-service
+/// `AgentService::active_skills` map. It is process-wide rather than
+/// per-service so that every service instance and every consumer — the
+/// per-turn re-injection driver and the compaction inventory stamp — reads
+/// the same set, and so a restart can repopulate it from the DB.
+fn active_registry() -> &'static std::sync::Mutex<HashMap<Uuid, HashSet<String>>> {
+    static ACTIVE: OnceLock<std::sync::Mutex<HashMap<Uuid, HashSet<String>>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
 /// Extract the skill slug from a path that points at a skill definition
@@ -150,15 +167,92 @@ pub fn seen_since_compaction(session_id: Uuid, slug: &str) -> bool {
     stored >= current_epoch(session_id)
 }
 
-/// Hydrate the in-memory registry from the DB at daemon boot (#138).
+/// The three registry seeds derived from the persisted rows (#138 part 2).
 ///
-/// Loads every persisted (session, slug) row into the registry so a
-/// restart does not erase skills a session consumed before it. Also prunes
-/// rows whose session no longer exists (hygiene, soft-fail). Called from
-/// `AgentService::new` — the chokepoint every surface constructs through —
-/// via a detached task so service construction never blocks on the DB.
-/// Only fires once per process (the registry static is process-wide; a
-/// second hydrate is a no-op by construction but still skipped for clarity).
+/// Kept as plain data so [`hydrate_from_rows`] is PURE — the hydrate
+/// arithmetic (epoch carry-over, active-set assembly) is unit-testable
+/// without a live DB or a tokio runtime.
+#[derive(Debug, Default)]
+pub struct HydrationSeeds {
+    /// (session, slug) → epoch for the SEEN registry.
+    pub seen: HashMap<(Uuid, String), u64>,
+    /// session → MAX row epoch, for the compaction-epoch counter.
+    pub epochs: HashMap<Uuid, u64>,
+    /// session → the slugs flagged ACTIVE (the re-injection set).
+    pub active: HashMap<Uuid, HashSet<String>>,
+}
+
+/// Fold persisted rows into the three registry seeds — PURE (#138 part 2).
+///
+/// `active` is the flag carried on the row; a row that predates the active
+/// column carries `false` — seen-only, exactly the legacy semantics.
+pub fn hydrate_from_rows(rows: Vec<(Uuid, String, Option<i64>, bool)>) -> HydrationSeeds {
+    let mut seeds = HydrationSeeds::default();
+    for (sid, slug, epoch, active) in rows {
+        // Pre-feature rows carry NULL epoch → 0 (always current — back-compat
+        // sessions pass the gate).
+        let e = epoch.unwrap_or(0).max(0) as u64;
+        seeds.seen.insert((sid, slug.clone()), e);
+        // Seed each session's epoch from MAX(row epochs) (finding 9): a
+        // restart must not falsely re-gate skills the session had already
+        // loaded at a post-0 epoch, nor falsely pass older rows.
+        let m = seeds.epochs.entry(sid).or_insert(0);
+        if e > *m {
+            *m = e;
+        }
+        if active {
+            seeds.active.entry(sid).or_default().insert(slug);
+        }
+    }
+    seeds
+}
+
+/// Apply seeds to the three process-wide registries; returns the SEEN
+/// registry size for the boot log (#138 part 2).
+///
+/// Fully synchronous — no guard is held across an await (a MutexGuard is not
+/// `Send`), which is why seeding is split out of the hydrate task.
+fn apply_seeds(seeds: HydrationSeeds) -> usize {
+    let seen_count = {
+        let mut reg = registry().lock().expect("seen_skills registry poisoned");
+        for (key, e) in seeds.seen {
+            reg.insert(key, e);
+        }
+        reg.len()
+    };
+    {
+        let mut ep = epochs().lock().expect("seen_skills epochs poisoned");
+        for (sid, m) in seeds.epochs {
+            ep.entry(sid)
+                .and_modify(|cur| {
+                    if m > *cur {
+                        *cur = m;
+                    }
+                })
+                .or_insert(m);
+        }
+    }
+    {
+        let mut act = active_registry()
+            .lock()
+            .expect("seen_skills active registry poisoned");
+        for (sid, slugs) in seeds.active {
+            act.entry(sid).or_default().extend(slugs);
+        }
+    }
+    seen_count
+}
+
+/// Hydrate the in-memory registries from the DB at daemon boot (#138).
+///
+/// Loads every persisted row into BOTH the seen registry and the active
+/// registry, so a restart does not erase skills a session consumed or held
+/// active before it. Also prunes rows whose session no longer exists
+/// (hygiene, soft-fail). Called from `AgentService::new` — the chokepoint
+/// every surface constructs through — via a detached task so service
+/// construction never blocks on the DB. Only fires once per process (the
+/// registry statics are process-wide; a second hydrate is a no-op by
+/// construction but still skipped for clarity).
 pub fn hydrate_from_db() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static HYDRATED: AtomicBool = AtomicBool::new(false);
@@ -173,40 +267,13 @@ pub fn hydrate_from_db() {
         let repo = crate::db::repository::SessionSkillsRepository::new(pool);
         match repo.all().await {
             Ok(rows) => {
-                let n = {
-                    // Guard strictly scoped: a MutexGuard is not Send, so it
-                    // must not be alive across the prune await below.
-                    let mut reg = registry().lock().expect("seen_skills registry poisoned");
-                    let mut max_epoch: HashMap<Uuid, u64> = HashMap::new();
-                    for (sid, slug, epoch) in rows {
-                        // Pre-feature rows carry NULL epoch → 0 (always
-                        // current — back-compat sessions pass the gate).
-                        let e = epoch.unwrap_or(0).max(0) as u64;
-                        reg.insert((sid, slug), e);
-                        // Seed each session's epoch from MAX(row epochs)
-                        // (finding 9): a restart must not falsely re-gate
-                        // skills the session had already loaded at a
-                        // post-0 epoch, nor falsely pass older rows.
-                        let m = max_epoch.entry(sid).or_insert(0);
-                        if e > *m {
-                            *m = e;
-                        }
-                    }
-                    let n = reg.len();
-                    drop(reg);
-                    let mut ep = epochs().lock().expect("seen_skills epochs poisoned");
-                    for (sid, m) in max_epoch {
-                        ep.entry(sid)
-                            .and_modify(|cur| {
-                                if m > *cur {
-                                    *cur = m;
-                                }
-                            })
-                            .or_insert(m);
-                    }
-                    n
-                };
-                tracing::info!("seen_skills: hydrated registry from DB ({n} total rows)");
+                let seeds = hydrate_from_rows(rows);
+                let active_count: usize = seeds.active.values().map(|s| s.len()).sum();
+                let n = apply_seeds(seeds);
+                tracing::info!(
+                    "seen_skills: hydrated registries from DB ({n} seen rows, \
+                     {active_count} active)"
+                );
                 match repo.prune_missing_sessions().await {
                     Ok(0) => {}
                     Ok(k) => tracing::debug!("seen_skills: pruned {k} row(s) for dead sessions"),
@@ -214,7 +281,7 @@ pub fn hydrate_from_db() {
                 }
             }
             Err(e) => tracing::warn!(
-                "seen_skills: DB hydrate failed (in-memory registry starts empty, \
+                "seen_skills: DB hydrate failed (in-memory registries start empty, \
                  stamps may undercount until next mark_seen): {e:#}"
             ),
         }
@@ -272,6 +339,121 @@ pub fn seen_for_session(session_id: Uuid) -> Vec<String> {
         .map(|((_, slug), _)| slug.clone())
         .collect();
     all.into_iter().collect()
+}
+
+/// Mark skill `slug` ACTIVE for `session_id` (#138 part 2): its body is
+/// re-injected each turn and it is listed in the compaction inventory.
+///
+/// The in-memory registry is updated first and unconditionally; the DB write
+/// is best-effort and detached, exactly like `mark_seen` — a DB failure logs
+/// WARN and the in-memory set stays authoritative for this process.
+pub fn mark_active(session_id: Uuid, slug: &str) {
+    // #179: same one-canonicalisation rule as the seen path — the registry
+    // and the DB column are keyed by the bare slug.
+    let slug = crate::brain::skills::normalize_skill_slug(slug);
+    active_registry()
+        .lock()
+        .expect("seen_skills active registry poisoned")
+        .entry(session_id)
+        .or_default()
+        .insert(slug.clone());
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            match persist_active(session_id, &slug, true).await {
+                Ok(()) => {}
+                Err(e) => tracing::warn!(
+                    "seen_skills: DB activation of ({session_id}, {slug}) failed \
+                     (in-memory registry unaffected): {e:#}"
+                ),
+            }
+        });
+    }
+}
+
+/// Clear the ACTIVE flag for `slug` in `session_id` (#138 part 2) — the
+/// discard path. The session's entry is dropped once its set empties, so the
+/// registry never accumulates empty sets.
+pub fn unmark_active(session_id: Uuid, slug: &str) {
+    let slug = crate::brain::skills::normalize_skill_slug(slug);
+    {
+        let mut act = active_registry()
+            .lock()
+            .expect("seen_skills active registry poisoned");
+        // Split the lookup from the removal: `set` borrows `act`, so the
+        // empty-set cleanup has to run after that borrow ends.
+        let now_empty = match act.get_mut(&session_id) {
+            Some(set) => {
+                set.remove(&slug);
+                set.is_empty()
+            }
+            None => false,
+        };
+        if now_empty {
+            act.remove(&session_id);
+        }
+    }
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            match persist_active(session_id, &slug, false).await {
+                Ok(()) => {}
+                Err(e) => tracing::warn!(
+                    "seen_skills: DB deactivation of ({session_id}, {slug}) failed \
+                     (in-memory registry unaffected): {e:#}"
+                ),
+            }
+        });
+    }
+}
+
+/// The slugs currently ACTIVE for `session_id` — the re-injection set, and
+/// one half of the stamp union (#138 part 2). Empty for an unknown session.
+pub fn active_for_session(session_id: Uuid) -> HashSet<String> {
+    active_registry()
+        .lock()
+        .expect("seen_skills active registry poisoned")
+        .get(&session_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Drop `session_id`'s entire ACTIVE set — session teardown (#138 part 2).
+///
+/// Clears memory AND persists the deactivation for every slug it held, so a
+/// later restart does not resurrect an active set the session no longer has.
+/// The SEEN registry is deliberately untouched: a consumed skill stays
+/// consumed as far as the stamp's inventory is concerned.
+pub fn forget_session(session_id: Uuid) {
+    let removed = active_registry()
+        .lock()
+        .expect("seen_skills active registry poisoned")
+        .remove(&session_id)
+        .unwrap_or_default();
+    if removed.is_empty() {
+        return;
+    }
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            for slug in removed {
+                if let Err(e) = persist_active(session_id, &slug, false).await {
+                    tracing::warn!(
+                        "seen_skills: DB deactivation of ({session_id}, {slug}) on session \
+                         teardown failed (in-memory registry unaffected): {e:#}"
+                    );
+                }
+            }
+        });
+    }
+}
+
+/// Best-effort DB persist of one active-flag flip (#138 part 2). Soft-fails
+/// when no global pool exists yet (unit tests, pre-connect startup).
+async fn persist_active(session_id: Uuid, slug: &str, active: bool) -> anyhow::Result<()> {
+    let pool = crate::db::global_pool()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no global DB pool (not connected yet)"))?;
+    crate::db::repository::SessionSkillsRepository::new(pool)
+        .set_active(session_id, slug, active)
+        .await
 }
 
 #[cfg(test)]
