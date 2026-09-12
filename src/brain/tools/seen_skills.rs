@@ -63,17 +63,19 @@ pub fn skill_slug_from_path(path: &Path) -> Option<String> {
 /// Always upserts (issue #150: updating the epoch ensures that re-reading
 /// a skill after compaction unblocks the skill glob gate).
 pub fn mark_seen(session_id: Uuid, slug: &str) {
+    // #179: the registry and the DB are keyed by the bare slug. Normalising
+    // here as well as in builder.rs covers the callers that bypass it —
+    // load_brain_file, read.rs and the registry tool mark seen directly.
+    let slug = crate::brain::skills::normalize_skill_slug(slug);
     let epoch = current_epoch(session_id);
     registry()
         .lock()
         .expect("seen_skills registry poisoned")
-        .insert((session_id, slug.to_string()), epoch);
-    // #138: best-effort durability. One row per (session, slug) so the
-    // registry can be rebuilt at boot. Detached so the hot path never
-    // blocks, and WARN-only on failure — the in-memory registry is the
-    // source of truth for this run, durability is a bonus (acceptance 5).
+        .insert((session_id, slug.clone()), epoch);
+    // Persist only inside a live tokio runtime — plain #[test] fns and
+    // other non-async contexts have no reactor; the in-memory registry
+    // already did its job there, and DB durability is best-effort.
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        let slug = slug.to_string();
         handle.spawn(async move {
             match persist_seen(session_id, &slug, epoch).await {
                 Ok(()) => {}
@@ -136,11 +138,13 @@ pub fn seen_since_compaction(session_id: Uuid, slug: &str) -> bool {
 
 /// Remove a consumed skill from `session_id`'s registry (pruning on compaction discard).
 pub fn unmark_seen(session_id: Uuid, slug: &str) {
+    // #179: mirror of mark_seen — the discard must remove the same bare-keyed
+    // entry the registration wrote, whatever spelling it arrived in.
+    let slug = crate::brain::skills::normalize_skill_slug(slug);
     registry()
         .lock()
         .expect("seen_skills registry poisoned")
-        .remove(&(session_id, slug.to_string()));
-    let slug = slug.to_string();
+        .remove(&(session_id, slug.clone()));
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
             match delete_seen(session_id, &slug).await {
