@@ -42,7 +42,13 @@ async fn bind_session(db: &Database, session: Uuid, chat: &str, thread: Option<i
         .await
         .unwrap();
     SessionBindingRepository::new(db.pool().clone())
-        .upsert(session.to_string(), "telegram", chat, thread)
+        .upsert(
+            session.to_string(),
+            "telegram",
+            chat,
+            thread,
+            crate::db::BindingOrigin::Text,
+        )
         .await
         .unwrap();
 }
@@ -176,4 +182,67 @@ async fn same_second_rows_resolve_to_last_inserted() {
     let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
     assert!(r.interrupted.is_empty(), "rowid tiebreak → bot row wins");
     assert_eq!(r.completed.len(), 1);
+}
+
+/// #180: a BUTTON TAP started the turn, so the bot card sitting last in the
+/// topic is not a completion signal — it is the card the button rode in on.
+/// Before this, a tap-initiated turn killed in the dispatch→PROCESSING window
+/// (where NET 1 has no row) was classified `completed` and lost.
+#[tokio::test]
+async fn callback_origin_with_bot_last_classifies_interrupted() {
+    let db = test_db().await;
+    let sid = Uuid::new_v4();
+    bind_session(&db, sid, "-100666", Some(21)).await;
+    // Leg A re-binds on the tap, recording what refreshed the row.
+    SessionBindingRepository::new(db.pool().clone())
+        .upsert(
+            sid.to_string(),
+            "telegram",
+            "-100666",
+            Some(21),
+            crate::db::BindingOrigin::Callback,
+        )
+        .await
+        .unwrap();
+    store_msg(&db, "-100666", Some("21"), "user:alexey", "ping").await;
+    // The bot's own card — last word in the topic, but not a completion.
+    store_msg(&db, "-100666", Some("21"), BOT_SENDER_ID, "card").await;
+
+    let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
+    assert_eq!(
+        r.interrupted.len(),
+        1,
+        "a tap-initiated turn must be resumable even when the bot card is last"
+    );
+    assert_eq!(r.interrupted[0].0, sid);
+    assert_eq!(r.interrupted[0].1, -100666);
+    assert_eq!(r.interrupted[0].2, Some(21));
+    assert!(
+        r.completed.is_empty(),
+        "the card the button rode in on is not a completion signal"
+    );
+    assert!(r.unclassified.is_empty());
+}
+
+/// #180 back-compat: a row written before `last_origin` existed carries NULL
+/// and must keep the pre-fix text semantics — the sender heuristic stays in
+/// charge. An unrecognised value is read the same conservative way.
+#[test]
+fn null_and_unknown_origin_read_as_text() {
+    use crate::db::BindingOrigin;
+    assert_eq!(BindingOrigin::from_stored(None), BindingOrigin::Text);
+    assert_eq!(
+        BindingOrigin::from_stored(Some("text")),
+        BindingOrigin::Text
+    );
+    assert_eq!(
+        BindingOrigin::from_stored(Some("something-else")),
+        BindingOrigin::Text
+    );
+    assert_eq!(
+        BindingOrigin::from_stored(Some("callback")),
+        BindingOrigin::Callback
+    );
+    assert_eq!(BindingOrigin::Callback.as_str(), "callback");
+    assert_eq!(BindingOrigin::Text.as_str(), "text");
 }
