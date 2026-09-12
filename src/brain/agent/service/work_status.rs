@@ -421,6 +421,18 @@ impl WorkStatus {
         serde_json::from_str(&data).ok()
     }
 
+    /// Seconds since this work item spawned (#155). Drives the plan-review
+    /// progress clock — the same wall-clock shape the flow chrome footer
+    /// already uses, so the review note reads like a turn's own footer rather
+    /// than inventing a second time format. `None` when `spawned_at` is
+    /// unparseable or lies in the future, so a caller renders NO clock instead
+    /// of a wrong one.
+    pub fn elapsed_secs(&self) -> Option<u64> {
+        let spawned = chrono::DateTime::parse_from_rfc3339(&self.spawned_at).ok()?;
+        let secs = (chrono::Utc::now() - spawned.with_timezone(&chrono::Utc)).num_seconds();
+        u64::try_from(secs).ok()
+    }
+
     /// Persist status to disk. Uses atomic rename for crash safety.
     fn write(&self) -> std::io::Result<()> {
         let path = status_path(&self.id);
