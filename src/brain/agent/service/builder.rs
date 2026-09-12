@@ -260,13 +260,10 @@ pub struct AgentService {
     /// next one.
     pub(super) session_primary_failure_streak: std::sync::RwLock<HashMap<Uuid, u32>>,
 
-    /// Per-session set of skill names that have been invoked. When a skill
-    /// is activated (via `/skill-name`), its name is recorded here so
-    /// the tool loop can re-inject the full skill body into the system brain
-    /// after compaction (issue #219). Without this, the 120-char clipped
-    /// description in `push_commands_and_skills` is all that survives.
-    pub(super) active_skills: std::sync::RwLock<HashMap<Uuid, HashSet<String>>>,
-
+    // #138 part 2: the active-skill set no longer lives here. It is now a
+    // process-wide registry in `brain::tools::seen_skills`, persisted on the
+    // `session_seen_skills.active` column — so a restart repopulates it and
+    // every consumer (re-injection, inventory stamp) reads the same set.
     /// Per-session flag: has the pre-compaction context-pressure warning
     /// (#909) already been emitted for the current band entry? Set true when
     /// the warning fires (usage in 55-64% band), cleared when usage drops
@@ -453,6 +450,14 @@ impl AgentService {
         context: ServiceContext,
         config: &crate::config::Config,
     ) -> Self {
+        // #138: hydrate BOTH skill registries (seen + active) from the DB
+        // before the first surface can stamp — detached, so construction
+        // never blocks (a no-pool test env just skips; see the hydrate fn).
+        // Fired here because AgentService::new is the chokepoint every
+        // surface (TUI, daemon, cron) constructs its service through;
+        // hydrating once per process is sufficient (the registries are
+        // process-wide and hydrate is once-only by flag).
+        crate::brain::tools::seen_skills::hydrate_from_db();
         Self {
             provider: std::sync::RwLock::new(provider),
             session_providers: std::sync::RwLock::new(HashMap::new()),
@@ -461,17 +466,6 @@ impl AgentService {
             plan_mode_swap: std::sync::RwLock::new(HashMap::new()),
             session_context_limits: std::sync::RwLock::new(HashMap::new()),
             session_primary_failure_streak: std::sync::RwLock::new(HashMap::new()),
-            // #138: hydrate the seen-skills registry from the DB before the
-            // first surface can stamp — detached, so construction never
-            // blocks (and a no-pool test env just skips, see hydrate fn).
-            // Fired here because AgentService::new is the chokepoint every
-            // surface (TUI, daemon, cron) constructs its service through;
-            // hydrating once per process is sufficient (registry is
-            // process-wide and hydrate is once-only by flag).
-            active_skills: {
-                crate::brain::tools::seen_skills::hydrate_from_db();
-                std::sync::RwLock::new(HashMap::new())
-            },
             session_pressure_warned: std::sync::RwLock::new(HashMap::new()),
             last_compaction_elapsed: std::sync::RwLock::new(HashMap::new()),
             session_outgoing_text_ring: std::sync::RwLock::new(HashMap::new()),
@@ -1601,10 +1595,11 @@ impl AgentService {
             .write()
             .expect("session_primary_failure_streak lock poisoned")
             .remove(&session_id);
-        self.active_skills
-            .write()
-            .expect("active_skills lock poisoned")
-            .remove(&session_id);
+        // #138 part 2: drop the session's ACTIVE skill set — memory and the
+        // persisted flag — so a later restart cannot resurrect skills the
+        // session no longer holds. The SEEN registry stays: a consumed skill
+        // remains consumed for the stamp's inventory.
+        crate::brain::tools::seen_skills::forget_session(session_id);
     }
 
     /// Record one primary-provider failure that was rescued by a
@@ -1983,7 +1978,7 @@ impl AgentService {
     /// survives context compaction (#219).
     pub fn register_active_skill(&self, session_id: Uuid, skill_name: &str) {
         // #179: canonicalise to the bare slug here — this pair is the choke
-        // point for BOTH entry paths into active_skills. The slash-command
+        // point for BOTH entry paths into the active set. The slash-command
         // path passes Skill::slash_name ("/foo") while the manifest path
         // passes the bare slug ("foo"); without normalisation the same skill
         // is keyed two ways and the re-injection matcher — which compares the
@@ -1992,13 +1987,12 @@ impl AgentService {
         // #138: slash invocation is skill consumption too — marking seen
         // (which persists to the DB) makes the compaction stamp's union
         // survive restarts for slash-invoked skills, not just read-loaded
-        // ones. In-memory active_skills stays the re-injection driver.
+        // ones.
         crate::brain::tools::seen_skills::mark_seen(session_id, &slug);
-        let mut map = self
-            .active_skills
-            .write()
-            .expect("active_skills lock poisoned");
-        map.entry(session_id).or_default().insert(slug);
+        // #138 part 2: the ACTIVE half is what drives re-injection, and it
+        // now persists on the same row (the `active` column) instead of
+        // dying with the process. Without this a restart re-injected nothing.
+        crate::brain::tools::seen_skills::mark_active(session_id, &slug);
     }
 
     /// Unregister an active skill for a session (discarded during compaction).
@@ -2009,23 +2003,12 @@ impl AgentService {
     pub fn unregister_active_skill(&self, session_id: Uuid, skill_name: &str) {
         let slug = crate::brain::skills::normalize_skill_slug(skill_name);
         crate::brain::tools::seen_skills::unmark_seen(session_id, &slug);
-        let mut map = self
-            .active_skills
-            .write()
-            .expect("active_skills lock poisoned");
-        if let Some(set) = map.get_mut(&session_id) {
-            set.remove(&slug);
-        }
+        crate::brain::tools::seen_skills::unmark_active(session_id, &slug);
     }
 
     /// Get the set of active skill names for a session. Returns empty set
     /// if no skills have been activated.
     pub fn active_skills_for_session(&self, session_id: Uuid) -> HashSet<String> {
-        self.active_skills
-            .read()
-            .expect("active_skills lock poisoned")
-            .get(&session_id)
-            .cloned()
-            .unwrap_or_default()
+        crate::brain::tools::seen_skills::active_for_session(session_id)
     }
 }
