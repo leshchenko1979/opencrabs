@@ -1,0 +1,20 @@
+-- Skill registry persistence (issue #138, part 2): the active flag.
+--
+-- `session_seen_skills` already persists the SEEN registry (which skills a
+-- session has consumed, for the compaction inventory stamp). This adds the
+-- ACTIVE registry — the set that drives per-turn skill-body RE-INJECTION
+-- and feeds the same inventory stamp.
+--
+-- Before this column the active set lived only in
+-- `AgentService::active_skills`, an in-memory RwLock map, so a daemon
+-- restart — or a rebuild + swap — left it born EMPTY: the re-injection
+-- driver injected nothing and the inventory rendered no skills, even though
+-- the session had them active a moment earlier. The seen registry survived
+-- (it was persisted) but it is deliberately NOT the re-injection driver
+-- (a read-counted skill must not be re-injected on top of the read already
+-- in conversation history).
+--
+-- The flag is upserted by the active path only; `record()` (the seen path)
+-- never touches it, so a read can never downgrade an active row. Legacy rows
+-- default to 0 (inactive) — a row that predates this feature is seen-only.
+ALTER TABLE session_seen_skills ADD COLUMN active INTEGER NOT NULL DEFAULT 0;

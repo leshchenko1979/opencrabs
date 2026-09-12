@@ -110,6 +110,11 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // tap-initiated turn killed before its PROCESSING row is still a
     // candidate for recovery. NULL (pre-feature rows) == text semantics.
     include_str!("../migrations/20260912160000_session_bindings_last_origin.sql"),
+    // FORK (#138 part 2): the active-skill flag. The re-injection driver and
+    // the inventory stamp both read the ACTIVE set, which used to live only
+    // in memory (`AgentService::active_skills`) and was born EMPTY after any
+    // restart. Persisted here so boot hydrates it alongside the seen set.
+    include_str!("../migrations/20260912210000_add_session_seen_skills_active.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
