@@ -447,16 +447,22 @@ pub(crate) fn format_plan_review_running_progress(
     let Some(p) = progress else {
         return PLAN_REVIEW_RUNNING_NOTE.to_string();
     };
-    if p.iteration == 0 {
+    if p.tool_count == 0 && p.iteration == 0 {
         return PLAN_REVIEW_RUNNING_NOTE.to_string();
     }
     if let Some(tool) = &p.last_tool {
-        format!(
-            "🔍 Review subagent running (turn {} · {})…",
-            p.iteration, tool
-        )
+        if p.tool_count > 0 {
+            format!(
+                "🔍 Review subagent running (🛠 {} · {})…",
+                p.tool_count, tool
+            )
+        } else {
+            format!("🔍 Review subagent running ({})…", tool)
+        }
+    } else if p.tool_count > 0 {
+        format!("🔍 Review subagent running (🛠 {})…", p.tool_count)
     } else {
-        format!("🔍 Review subagent running (turn {})…", p.iteration)
+        PLAN_REVIEW_RUNNING_NOTE.to_string()
     }
 }
 
@@ -785,10 +791,10 @@ pub(crate) async fn refresh_plan_card(
             // latest-wins and the governor's drainer lands it on refill; the
             // tracked signature is saved now so identical later refreshes skip
             // (a permanently failed queue drain self-heals on the next
-            // differing-content plan change). Media rides the queued final via
-            // the media-bearing admission variant (owner law: extend, never
-            // bypass the governor).
-            let admitted = super::governor::edit_admission_media(
+            // differing-content plan change). Media and keyboard ride the
+            // queued final via edit_admission_media_kb (owner law: extend,
+            // never bypass the governor, #155).
+            let admitted = super::governor::edit_admission_media_kb(
                 bot,
                 chat,
                 mid,
@@ -796,6 +802,7 @@ pub(crate) async fn refresh_plan_card(
                 rich_md.clone(),
                 true,
                 media.clone(),
+                kb_val.clone(),
             )
             .await;
             if !admitted {
