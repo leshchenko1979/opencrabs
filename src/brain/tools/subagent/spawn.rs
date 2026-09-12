@@ -587,18 +587,28 @@ impl Tool for SpawnAgentTool {
 
             let mut current_prompt = prompt_clone;
             let mut iteration: usize = 0;
+            let total_tool_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
             // Run prompt → wait for input → run again loop
             let final_output = loop {
                 iteration += 1;
                 let agent_id_for_progress = agent_id_clone.clone();
+                let tool_count_counter = total_tool_count.clone();
                 let progress_cb = std::sync::Arc::new(
                     move |_sid: uuid::Uuid, event: crate::brain::agent::ProgressEvent| {
                         if let crate::brain::agent::ProgressEvent::ToolStarted { tool_name, .. } =
                             event
                             && let Some(mut st) = WorkStatus::read(&agent_id_for_progress)
                         {
-                            let _ = st.update_progress(iteration, Some(tool_name), None);
+                            let count = tool_count_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                + 1;
+                            let _ = st.update_progress_tool_count(
+                                iteration,
+                                count,
+                                Some(tool_name),
+                                None,
+                            );
                         }
                     },
                 );
