@@ -1708,7 +1708,12 @@ impl TelegramSendTool {
                 if bind {
                     let bind_res = self
                         .telegram_state
-                        .bind_session_topic(context.session_id, chat_id, Some(thread_id))
+                        .bind_session_topic(
+                            context.session_id,
+                            chat_id,
+                            Some(thread_id),
+                            crate::db::repository::session_binding::BindingOrigin::Callback,
+                        )
                         .await;
                     if let Err(e) = bind_res {
                         tracing::warn!("create_topic: failed to bind session to new topic: {e}");
@@ -1829,7 +1834,12 @@ impl TelegramSendTool {
 
         match self
             .telegram_state
-            .bind_session_topic(context.session_id, chat_id, topic_id)
+            .bind_session_topic(
+                context.session_id,
+                chat_id,
+                topic_id,
+                crate::db::repository::session_binding::BindingOrigin::Callback,
+            )
             .await
         {
             Ok(_) => {

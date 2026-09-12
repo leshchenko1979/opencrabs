@@ -1254,6 +1254,7 @@ impl TelegramState {
         session_id: Uuid,
         chat_id: i64,
         topic_id: Option<i32>,
+        origin: crate::db::repository::session_binding::BindingOrigin,
     ) -> Result<(), String> {
         // 1. In-memory mappings + sync ownership mirror
         self.register_session_chat(session_id, chat_id, topic_id)
@@ -1267,6 +1268,7 @@ impl TelegramState {
                 "telegram",
                 &chat_id.to_string(),
                 topic_id,
+                origin,
             )
             .await
             .map_err(|e| format!("could not persist session binding for {session_id}: {e}"))?;
