@@ -135,6 +135,10 @@ pub(crate) fn skip_applied_active_migration(
     if !has_column(conn, "session_seen_skills", "active")? {
         return Ok(false);
     }
+    // If loaded_mtime is missing, add it before skipping the migration
+    if !has_column(conn, "session_seen_skills", "loaded_mtime")? {
+        conn.execute_batch("ALTER TABLE session_seen_skills ADD COLUMN loaded_mtime INTEGER;")?;
+    }
     conn.pragma_update(None, "user_version", ACTIVE_MIGRATION_INDEX)?;
     tracing::warn!(
         "Stamped past the session_seen_skills_active migration: column 'active' was already \
@@ -176,5 +180,19 @@ pub(crate) fn heal_project_repo_remote(conn: &rusqlite::Connection) -> rusqlite:
     tracing::warn!(
         "Healed projects: repo_remote was missing although the schema was stamped past it (#1401, #209)."
     );
+    Ok(true)
+}
+
+/// Add `session_seen_skills.loaded_mtime` when migration was skipped or partially applied (#210).
+pub(crate) fn heal_session_seen_skills_loaded_mtime(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<bool> {
+    if !has_table(conn, "session_seen_skills")?
+        || has_column(conn, "session_seen_skills", "loaded_mtime")?
+    {
+        return Ok(false);
+    }
+    conn.execute_batch("ALTER TABLE session_seen_skills ADD COLUMN loaded_mtime INTEGER;")?;
+    tracing::warn!("Healed session_seen_skills: added missing loaded_mtime column (#210).");
     Ok(true)
 }

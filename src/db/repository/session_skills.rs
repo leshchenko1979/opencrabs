@@ -53,14 +53,14 @@ impl SessionSkillsRepository {
         Ok(())
     }
 
-    /// All (session_id, slug, epoch, active) rows — the boot-hydrate feed for
+    /// All (session_id, slug, epoch, active, loaded_mtime) rows — the boot-hydrate feed for
     /// BOTH registries (#138 part 2: the seen set and the active set hydrate
-    /// from this one query). Epoch is `None` for pre-feature rows (treated as
+    /// from this one query) plus loaded_mtime (#210). Epoch is `None` for pre-feature rows (treated as
     /// 0 by the hydrate); `active` is false for every row that predates the
     /// active flag. Bounded by the stamp's own cleanup: rows for sessions
     /// deleted by normal session pruning are removed by
     /// [`Self::prune_missing_sessions`].
-    pub async fn all(&self) -> Result<Vec<(Uuid, String, Option<i64>, bool)>> {
+    pub async fn all(&self) -> Result<Vec<(Uuid, String, Option<i64>, bool, Option<i64>)>> {
         let rows = self
             .pool
             .get()
@@ -68,28 +68,52 @@ impl SessionSkillsRepository {
             .context("Failed to get connection")?
             .interact(move |conn| {
                 let mut stmt = conn
-                    .prepare("SELECT session_id, slug, epoch, active FROM session_seen_skills")?;
+                    .prepare("SELECT session_id, slug, epoch, active, loaded_mtime FROM session_seen_skills")?;
                 let mapped = stmt.query_map([], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, Option<i64>>(2)?,
                         r.get::<_, i64>(3)? != 0,
+                        r.get::<_, Option<i64>>(4)?,
                     ))
                 })?;
-                mapped.collect::<std::result::Result<Vec<(String, String, Option<i64>, bool)>, _>>()
+                mapped.collect::<std::result::Result<Vec<(String, String, Option<i64>, bool, Option<i64>)>, _>>()
             })
             .await
             .map_err(interact_err)?
             .context("Failed to read seen skills")?;
         Ok(rows
             .into_iter()
-            .filter_map(|(sid, slug, epoch, active)| {
+            .filter_map(|(sid, slug, epoch, active, loaded_mtime)| {
                 Uuid::parse_str(&sid)
                     .ok()
-                    .map(|id| (id, slug, epoch, active))
+                    .map(|id| (id, slug, epoch, active, loaded_mtime))
             })
             .collect())
+    }
+
+    /// Update `loaded_mtime` for one (session_id, slug) pair (#210).
+    /// Upserts so that active or seen skills can store loaded_mtime even if not previously recorded.
+    pub async fn set_loaded_mtime(&self, session_id: Uuid, slug: &str, mtime: u64) -> Result<()> {
+        let sid = session_id.to_string();
+        let slug = slug.to_string();
+        let mtime = mtime as i64;
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "INSERT INTO session_seen_skills (session_id, slug, loaded_mtime) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT(session_id, slug) DO UPDATE SET loaded_mtime = excluded.loaded_mtime",
+                    params![sid, slug, mtime],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to set loaded_mtime")?;
+        Ok(())
     }
 
     /// Flip the ACTIVE flag for one (session, slug) row (#138 part 2).

@@ -398,6 +398,7 @@ impl Database {
                     crate::db::migration_heal::heal_pending_requests_origin(conn)?;
                     crate::db::migration_heal::heal_notify_queue(conn)?;
                     crate::db::migration_heal::heal_project_repo_remote(conn)?;
+                    crate::db::migration_heal::heal_session_seen_skills_loaded_mtime(conn)?;
                     Ok(())
                 },
             )
