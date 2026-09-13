@@ -2834,7 +2834,7 @@ pub(crate) async fn handle_message(
     // stranded. Empty is the common case (one cheap lock check) — a real
     // inference only fires when something was queued.
     //
-    // The body moved to `resume::flush_queued_after_turn` so the
+    // #201: the body moved to `resume::flush_queued_after_turn` so the
     // resume wrapper runs the exact same flush after its own guard drops —
     // see the helper for the origin split (#1213) and the resume semantics.
     super::resume::flush_queued_after_turn(
