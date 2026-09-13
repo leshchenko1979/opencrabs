@@ -111,6 +111,39 @@ pub(crate) fn skip_applied_thread_id_migration(
     Ok(true)
 }
 
+/// Index of the `session_seen_skills_active` migration in the current list (1-based).
+const ACTIVE_MIGRATION_INDEX: i64 = 48;
+
+/// Stamp past the `session_seen_skills_active` migration when its column is already
+/// there, so `to_latest` does not re-run an ALTER that has already happened (#209, #212).
+///
+/// On prod, databases were already stamped at `user_version = 47` with column `active`
+/// existing. When `20260912000001_add_project_repo_remote.sql` was sorted to index 45
+/// (to maintain alphabetical filename order), `add_session_seen_skills_active` shifted
+/// to index 47 (migration 48). When `to_latest` ran on a database stamped 47, it replayed
+/// migration 48 and crashed on `duplicate column name: active`.
+///
+/// This guard runs BEFORE `to_latest`. If `user_version == 47` and `active` already
+/// exists, it updates `user_version` to 48 so `to_latest` skips it safely.
+pub(crate) fn skip_applied_active_migration(
+    conn: &rusqlite::Connection,
+    user_version: i64,
+) -> rusqlite::Result<bool> {
+    if user_version != ACTIVE_MIGRATION_INDEX - 1 {
+        return Ok(false);
+    }
+    if !has_column(conn, "session_seen_skills", "active")? {
+        return Ok(false);
+    }
+    conn.pragma_update(None, "user_version", ACTIVE_MIGRATION_INDEX)?;
+    tracing::warn!(
+        "Stamped past the session_seen_skills_active migration: column 'active' was already \
+         present at version {user_version}, so replaying it would have failed startup on a \
+         duplicate column (#209, #212)."
+    );
+    Ok(true)
+}
+
 /// Add `pending_requests.origin` when migration 37 was skipped.
 ///
 /// Mirrors `src/migrations/20260828000001_pending_requests_origin.sql`, which

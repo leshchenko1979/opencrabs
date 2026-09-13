@@ -384,6 +384,10 @@ impl Database {
                         conn,
                         user_version,
                     )?;
+                    crate::db::migration_heal::skip_applied_active_migration(
+                        conn,
+                        user_version,
+                    )?;
 
                     migrations.to_latest(conn)?;
 
