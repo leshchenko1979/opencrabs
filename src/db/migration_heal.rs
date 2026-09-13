@@ -128,3 +128,20 @@ pub(crate) fn heal_pending_requests_origin(conn: &rusqlite::Connection) -> rusql
     );
     Ok(true)
 }
+
+/// Add `projects.repo_remote` and its index when migration 48 was skipped on upstream builds.
+///
+/// Mirrors `src/migrations/20260912000001_add_project_repo_remote.sql`.
+pub(crate) fn heal_project_repo_remote(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    if !has_table(conn, "projects")? || has_column(conn, "projects", "repo_remote")? {
+        return Ok(false);
+    }
+    conn.execute_batch(
+        "ALTER TABLE projects ADD COLUMN repo_remote TEXT; \
+         CREATE INDEX IF NOT EXISTS idx_projects_repo_remote ON projects(repo_remote);",
+    )?;
+    tracing::warn!(
+        "Healed projects: repo_remote was missing although the schema was stamped past it (#1401, #209)."
+    );
+    Ok(true)
+}

@@ -405,6 +405,7 @@ impl Database {
                     // the schema itself can say so.
                     crate::db::migration_heal::heal_pending_requests_origin(conn)?;
                     crate::db::migration_heal::heal_notify_queue(conn)?;
+                    crate::db::migration_heal::heal_project_repo_remote(conn)?;
                     Ok(())
                 },
             )
