@@ -21,8 +21,8 @@ use teloxide::prelude::*;
 use teloxide::types::ChatId;
 use uuid::Uuid;
 
-use crate::brain::agent::QueuedUserMessage;
 use crate::brain::agent::service::AgentService;
+use crate::brain::agent::{PendingOrigin, QueuedUserMessage};
 use crate::brain::provider::Provider;
 use crate::channels::telegram::resume::resume_session;
 use crate::db::Database;
@@ -103,7 +103,7 @@ async fn resume_turn_flushes_an_item_queued_after_its_last_drain() {
         "resume prompt".to_string(),
         agent,
         state.clone(),
-        None,
+        Some(PendingOrigin::System),
     )
     .await
     .expect("resume turn completes");
@@ -135,7 +135,7 @@ async fn empty_queue_flush_is_a_noop() {
         "resume prompt".to_string(),
         agent,
         state.clone(),
-        None,
+        Some(PendingOrigin::System),
     )
     .await
     .expect("resume turn completes");
@@ -169,7 +169,7 @@ async fn a_busy_skip_leaves_queued_items_for_the_running_turn() {
         "resume prompt".to_string(),
         agent,
         state.clone(),
-        None,
+        Some(PendingOrigin::System),
     )
     .await
     .expect("busy skip returns Ok");
