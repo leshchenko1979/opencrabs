@@ -92,3 +92,59 @@ async fn migration_sql_order_invariants() {
         "session_seen_skills_active must remain at index 47 per chronological filename order"
     );
 }
+
+#[tokio::test]
+async fn skip_applied_active_migration_prevents_duplicate_column_crash() {
+    let db = Database::connect_in_memory().await.unwrap();
+    // Simulate prod DB shape at user_version 47 with column active present and projects.repo_remote missing
+    db.pool()
+        .get()
+        .await
+        .unwrap()
+        .interact(|conn| -> Result<(), String> {
+            // Apply migrations up to 45 (before repo_remote and last_origin)
+            build_migrations()
+                .to_version(conn, 45)
+                .map_err(|e| e.to_string())?;
+            // Add session_bindings.last_origin and session_seen_skills.active manually
+            conn.execute_batch(
+                "ALTER TABLE session_bindings ADD COLUMN last_origin TEXT; \
+                 ALTER TABLE session_seen_skills ADD COLUMN active INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(|e| e.to_string())?;
+            // Stamp user_version to 47 (exact state of prod DB before 6fb2657e)
+            conn.pragma_update(None, "user_version", 47)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // run_migrations() must succeed without crashing on duplicate column active
+    db.run_migrations()
+        .await
+        .expect("run_migrations must succeed on prod DB at stamp 47");
+
+    // Verify user_version is now 48, active exists, and repo_remote was healed
+    db.pool()
+        .get()
+        .await
+        .unwrap()
+        .interact(|conn| {
+            let version: i64 = conn
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, 48, "user_version must be stamped to 48");
+            assert!(
+                crate::db::migration_heal::has_column(conn, "session_seen_skills", "active")
+                    .unwrap(),
+                "active column must exist"
+            );
+            assert!(
+                crate::db::migration_heal::has_column(conn, "projects", "repo_remote").unwrap(),
+                "repo_remote column must be healed"
+            );
+        })
+        .await
+        .unwrap();
+}
