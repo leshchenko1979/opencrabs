@@ -61,6 +61,10 @@ pub struct SessionBinding {
     /// written before the column existed; read it through
     /// [`BindingOrigin::from_stored`] rather than matching on the raw string.
     pub last_origin: Option<String>,
+    /// Timestamp (unix seconds) when a tap-initiated turn was opened (#200).
+    /// Set when a button tap begins a turn, cleared when the turn completes.
+    /// `None` indicates no turn is actively open from a button tap.
+    pub turn_open_at: Option<i64>,
 }
 
 /// Reads and writes [`SessionBinding`] rows.
@@ -91,27 +95,64 @@ impl SessionBindingRepository {
     ) -> Result<()> {
         let ch = channel.to_string();
         let cid = chat_id.to_string();
-        let origin = origin.as_str();
+        let origin_str = origin.as_str();
+        let is_callback = origin == BindingOrigin::Callback;
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                if is_callback {
+                    conn.execute(
+                        "INSERT INTO session_bindings (session_id, channel, chat_id, thread_id, last_origin, turn_open_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s', 'now')) \
+                         ON CONFLICT(session_id) DO UPDATE SET \
+                           channel = excluded.channel, \
+                           chat_id = excluded.chat_id, \
+                           thread_id = excluded.thread_id, \
+                           last_origin = excluded.last_origin, \
+                           turn_open_at = excluded.turn_open_at, \
+                           updated_at = strftime('%s', 'now')",
+                        params![session_id, ch, cid, thread_id, origin_str],
+                    )
+                } else {
+                    conn.execute(
+                        "INSERT INTO session_bindings (session_id, channel, chat_id, thread_id, last_origin, turn_open_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, NULL) \
+                         ON CONFLICT(session_id) DO UPDATE SET \
+                           channel = excluded.channel, \
+                           chat_id = excluded.chat_id, \
+                           thread_id = excluded.thread_id, \
+                           last_origin = excluded.last_origin, \
+                           turn_open_at = NULL, \
+                           updated_at = strftime('%s', 'now')",
+                        params![session_id, ch, cid, thread_id, origin_str],
+                    )
+                }
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to upsert session binding")?;
+        Ok(())
+    }
+
+    /// Clear `turn_open_at` for a session binding when a turn completes (#200).
+    /// Safe no-op if no binding exists or turn_open_at is already NULL.
+    pub async fn clear_turn_open_at(&self, session_id: &str) -> Result<()> {
+        let sid = session_id.to_string();
         self.pool
             .get()
             .await
             .context("Failed to get connection")?
             .interact(move |conn| {
                 conn.execute(
-                    "INSERT INTO session_bindings (session_id, channel, chat_id, thread_id, last_origin) \
-                     VALUES (?1, ?2, ?3, ?4, ?5) \
-                     ON CONFLICT(session_id) DO UPDATE SET \
-                       channel = excluded.channel, \
-                       chat_id = excluded.chat_id, \
-                       thread_id = excluded.thread_id, \
-                       last_origin = excluded.last_origin, \
-                       updated_at = strftime('%s', 'now')",
-                    params![session_id, ch, cid, thread_id, origin],
+                    "UPDATE session_bindings SET turn_open_at = NULL WHERE session_id = ?1",
+                    params![sid],
                 )
             })
             .await
             .map_err(interact_err)?
-            .context("Failed to upsert session binding")?;
+            .context("Failed to clear turn_open_at")?;
         Ok(())
     }
 
@@ -128,7 +169,7 @@ impl SessionBindingRepository {
             .context("Failed to get connection")?
             .interact(move |conn| {
                 conn.prepare(
-                    "SELECT b.session_id, b.channel, b.chat_id, b.thread_id, b.last_origin \
+                    "SELECT b.session_id, b.channel, b.chat_id, b.thread_id, b.last_origin, b.turn_open_at \
                      FROM session_bindings b \
                      JOIN sessions s ON s.id = b.session_id \
                      WHERE b.channel = ?1 \
@@ -141,6 +182,7 @@ impl SessionBindingRepository {
                         chat_id: row.get("chat_id")?,
                         thread_id: row.get("thread_id")?,
                         last_origin: row.get("last_origin")?,
+                        turn_open_at: row.get("turn_open_at")?,
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()
@@ -160,8 +202,8 @@ impl SessionBindingRepository {
     /// against `sessions` drops bindings whose session was deleted, matching
     /// [`Self::all_for_channel`] (#1224).
     ///
-    /// Since #180 the rows also carry `last_origin`, which the classifier uses
-    /// to tell a completed turn from one whose only evidence is a button card.
+    /// Since #180 the rows also carry `last_origin`, and since #200 `turn_open_at`,
+    /// which the classifier uses to tell an interrupted tap-turn from a completed one.
     pub async fn recent_for_channel(
         &self,
         channel: &str,
@@ -175,7 +217,7 @@ impl SessionBindingRepository {
             .context("Failed to get connection")?
             .interact(move |conn| {
                 conn.prepare(
-                    "SELECT b.session_id, b.channel, b.chat_id, b.thread_id, b.last_origin \
+                    "SELECT b.session_id, b.channel, b.chat_id, b.thread_id, b.last_origin, b.turn_open_at \
                      FROM session_bindings b \
                      JOIN sessions s ON s.id = b.session_id \
                      WHERE b.channel = ?1 AND b.updated_at >= ?2 \
@@ -188,6 +230,7 @@ impl SessionBindingRepository {
                         chat_id: row.get("chat_id")?,
                         thread_id: row.get("thread_id")?,
                         last_origin: row.get("last_origin")?,
+                        turn_open_at: row.get("turn_open_at")?,
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()

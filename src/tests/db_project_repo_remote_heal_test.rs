@@ -1,7 +1,7 @@
 //! Tests for healing `projects.repo_remote` when skipped on upstream/fork boundary (#209).
 
-use crate::db::database::{MIGRATION_SQL, build_migrations};
 use crate::db::Database;
+use crate::db::database::{MIGRATION_SQL, build_migrations};
 
 async fn db_with_repo_remote_skipped() -> Database {
     let db = Database::connect_in_memory().await.unwrap();
@@ -38,7 +38,10 @@ async fn has_repo_remote(db: &Database) -> bool {
 #[tokio::test]
 async fn fixture_reproduces_skipped_repo_remote() {
     let db = db_with_repo_remote_skipped().await;
-    assert!(!has_repo_remote(&db).await, "fixture must lack repo_remote column");
+    assert!(
+        !has_repo_remote(&db).await,
+        "fixture must lack repo_remote column"
+    );
 }
 
 #[tokio::test]
@@ -90,6 +93,10 @@ async fn migration_sql_order_invariants() {
     assert!(
         MIGRATION_SQL[47].contains("active"),
         "session_seen_skills_active must remain at index 47 per chronological filename order"
+    );
+    assert!(
+        MIGRATION_SQL[48].contains("turn_open_at"),
+        "session_bindings_turn_open_at must remain at index 48 per chronological filename order (#200)"
     );
 }
 

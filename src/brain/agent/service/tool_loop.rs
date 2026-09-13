@@ -738,11 +738,24 @@ impl AgentService {
                  resumes it (#1462)"
             );
         }
-        if track_origin.is_some()
-            && !cancelled_by_shutdown
-            && let Err(e) = pending_repo.delete(request_id).await
-        {
-            tracing::warn!("Failed to clean up pending request: {}", e);
+        if track_origin.is_some() && !cancelled_by_shutdown {
+            if let Err(e) = pending_repo.delete(request_id).await {
+                tracing::warn!("Failed to clean up pending request: {}", e);
+            }
+            // #200: if this turn was started by a button tap, clear turn_open_at
+            // so boot recovery knows the turn completed and does not spuriously
+            // re-execute it. Shutdown cancellations preserve the open marker.
+            let binding_repo = crate::db::SessionBindingRepository::new(self.context.pool());
+            if let Err(e) = binding_repo
+                .clear_turn_open_at(&session_id.to_string())
+                .await
+            {
+                tracing::warn!(
+                    "Failed to clear turn_open_at for session {}: {}",
+                    session_id,
+                    e
+                );
+            }
         }
 
         result
