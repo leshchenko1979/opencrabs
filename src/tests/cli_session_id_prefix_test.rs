@@ -91,13 +91,12 @@ fn ambiguous_prefix_lists_candidates() {
 #[tokio::test]
 async fn resolve_session_id_with_service_fast_path_parses_uuid_without_querying_service() {
     use crate::cli::session_resolve::resolve_session_id_with_service;
+    use crate::db::Database;
     use crate::services::SessionService;
     use crate::services::context::ServiceContext;
-    use std::sync::Arc;
 
-    let db = crate::db::Database::new("sqlite::memory:").await.unwrap();
-    db.run_migrations().await.unwrap();
-    let ctx = Arc::new(ServiceContext::new(db.pool().clone()));
+    let db = Database::connect_in_memory().await.expect("in-memory DB");
+    let ctx = ServiceContext::new(db.pool().clone());
     let svc = SessionService::new(ctx);
 
     let random_uuid = uuid::Uuid::new_v4();
@@ -110,13 +109,12 @@ async fn resolve_session_id_with_service_fast_path_parses_uuid_without_querying_
 #[tokio::test]
 async fn resolve_session_id_with_service_fallback_matches_prefix() {
     use crate::cli::session_resolve::resolve_session_id_with_service;
+    use crate::db::Database;
     use crate::services::SessionService;
     use crate::services::context::ServiceContext;
-    use std::sync::Arc;
 
-    let db = crate::db::Database::new("sqlite::memory:").await.unwrap();
-    db.run_migrations().await.unwrap();
-    let ctx = Arc::new(ServiceContext::new(db.pool().clone()));
+    let db = Database::connect_in_memory().await.expect("in-memory DB");
+    let ctx = ServiceContext::new(db.pool().clone());
     let svc = SessionService::new(ctx);
 
     let created = svc
