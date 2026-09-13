@@ -224,6 +224,51 @@ async fn callback_origin_with_bot_last_classifies_interrupted() {
     assert!(r.unclassified.is_empty());
 }
 
+/// #200: once a tap-initiated turn completes, `turn_open_at` is cleared to NULL.
+/// When the daemon restarts, the completed turn must NOT be spuriously classified as
+/// interrupted; it falls through to check `last_topic_sender`, sees BOT_SENDER_ID,
+/// and classifies `completed`.
+#[tokio::test]
+async fn completed_callback_turn_classifies_completed() {
+    let db = test_db().await;
+    let sid = Uuid::new_v4();
+    bind_session(&db, sid, "-100777", Some(42)).await;
+    let binding_repo = SessionBindingRepository::new(db.pool().clone());
+    // Tap starts the turn: origin is callback and turn_open_at is set.
+    binding_repo
+        .upsert(
+            sid.to_string(),
+            "telegram",
+            "-100777",
+            Some(42),
+            crate::db::BindingOrigin::Callback,
+        )
+        .await
+        .unwrap();
+    store_msg(&db, "-100777", Some("42"), "user:alexey", "request").await;
+    // The bot finishes and posts its reply.
+    store_msg(&db, "-100777", Some("42"), BOT_SENDER_ID, "done").await;
+
+    // Turn completes normally: turn_open_at is cleared.
+    binding_repo
+        .clear_turn_open_at(&sid.to_string())
+        .await
+        .unwrap();
+
+    let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
+    assert!(
+        r.interrupted.is_empty(),
+        "a completed tap turn must not be classified as interrupted"
+    );
+    assert_eq!(
+        r.completed.len(),
+        1,
+        "a completed tap turn with bot last must classify as completed"
+    );
+    assert_eq!(r.completed[0], &sid.to_string()[..8]);
+    assert!(r.unclassified.is_empty());
+}
+
 /// #180 back-compat: a row written before `last_origin` existed carries NULL
 /// and must keep the pre-fix text semantics — the sender heuristic stays in
 /// charge. An unrecognised value is read the same conservative way.

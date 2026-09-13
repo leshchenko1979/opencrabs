@@ -4,10 +4,10 @@
 //! Moved VERBATIM out of handler.rs (#471 phase 1, pure decomposition —
 //! the handler glob re-export keeps every existing call site stable).
 
+use super::TelegramState;
 #[allow(unused_imports)]
 use super::handler::*;
 use super::send::{best_effort_delete, fire_chat_action};
-use super::TelegramState;
 use crate::a2a::handler::notify::CLI_SENDER_PREFIX;
 use crate::brain::agent::service::background_tasks;
 use crate::brain::agent::{AgentService, ProgressCallback, ProgressEvent};
@@ -1774,22 +1774,25 @@ pub async fn classify_recently_active(
             recovery.unclassified.push(short_session_id(sid));
             continue;
         };
-        // #180: this binding was last refreshed by a BUTTON TAP that started a
+        // #180 / #200: this binding was last refreshed by a BUTTON TAP that started a
         // turn. A bot message after a tap is only the card the button rode in
         // on, so it carries no completion signal — and if the kill landed in
         // the dispatch→PROCESSING window, NET 1 has no row for this turn
         // either. This is the one case where NET 2 is the only net left.
         //
-        // The origin is written only at the three tap sites that actually
-        // dispatch a turn (follow-up, plan approve, generic routing), never by
-        // a config picker, so a callback origin always means work was started.
+        // However (#200), once the turn finishes, `turn_open_at` is cleared to NULL.
+        // We only short-circuit to `interrupted` if `turn_open_at` is still Some(_),
+        // proving the turn was in-flight when the daemon was killed.
+        // If `turn_open_at` is None, the turn completed normally; fall through
+        // to check `last_topic_sender` (which will see BOT_SENDER_ID and classify `completed`).
         if crate::db::BindingOrigin::from_stored(b.last_origin.as_deref())
             == crate::db::BindingOrigin::Callback
+            && b.turn_open_at.is_some()
         {
             tracing::info!(
                 target: "telegram",
-                "Boot classifier (#180): session {} was last refreshed by a button tap \
-                 that started a turn — resuming",
+                "Boot classifier (#180/#200): session {} was last refreshed by an in-flight button tap \
+                 turn — resuming",
                 short_session_id(sid)
             );
             recovery
