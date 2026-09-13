@@ -106,8 +106,8 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // session_seen_skills. NULL (pre-feature rows) == epoch 0.
     include_str!("../migrations/20260910000000_add_session_seen_skills_epoch.sql"),
     // #1510: projects.repo_remote, the adoption-only second identity. Appended
-    // last per the list invariant; the column is NULL by design on existing
-    // rows so no heal pass is needed.
+    // here in chronological filename order (index 45). Databases already stamped
+    // past index 45 are repaired by `heal_project_repo_remote` after `to_latest` (#1401).
     include_str!("../migrations/20260912000001_add_project_repo_remote.sql"),
     // FORK (#180): boot classifier origin signal — records whether a session
     // binding was last refreshed by a text message or a button tap, so a
