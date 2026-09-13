@@ -1772,7 +1772,7 @@ pub async fn classify_recently_active(
         .unwrap_or(0);
     let since_epoch = now.saturating_sub(WAKE_RECENT_SECS);
     let binding_repo = crate::db::SessionBindingRepository::new(pool.clone());
-    let msg_repo = crate::db::ChannelMessageRepository::new(pool);
+    let msg_repo = crate::db::ChannelMessageRepository::new(pool.clone());
     let Ok(bindings) = binding_repo
         .recent_for_channel("telegram", since_epoch)
         .await
