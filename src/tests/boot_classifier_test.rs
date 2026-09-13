@@ -291,3 +291,123 @@ fn null_and_unknown_origin_read_as_text() {
     assert_eq!(BindingOrigin::Callback.as_str(), "callback");
     assert_eq!(BindingOrigin::Text.as_str(), "text");
 }
+
+/// #218: A session pursuing an autonomous goal whose bot sent the last message
+/// before daemon kill was interrupted in its autonomous loop.
+/// If `goal_state` has `state = 'active'` and `turns_used < max_turns`, it must
+/// classify as `interrupted` so it resumes and keeps working.
+#[tokio::test]
+async fn active_goal_with_bot_last_classifies_interrupted() {
+    let db = test_db().await;
+    let sid = Uuid::new_v4();
+    bind_session(&db, sid, "-100888", Some(55)).await;
+    store_msg(&db, "-100888", Some("55"), "user:alexey", "run goal").await;
+    store_msg(
+        &db,
+        "-100888",
+        Some("55"),
+        BOT_SENDER_ID,
+        "working on step 1",
+    )
+    .await;
+
+    // Seed active goal with turns remaining
+    let pool = db.pool().clone();
+    let conn = pool.get().await.unwrap();
+    let s_id = sid.to_string();
+    conn.interact(move |conn| {
+        conn.execute(
+            "INSERT INTO goal_state (id, session_id, goal_text, state, turns_used, max_turns, created_at, updated_at) \
+             VALUES (?1, ?2, 'make tea', 'active', 2, 10, '2026-09-13T00:00:00Z', '2026-09-13T00:00:00Z')",
+            rusqlite::params!["goal-1", s_id],
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+
+    let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
+    assert_eq!(
+        r.interrupted.len(),
+        1,
+        "active unexhausted goal must classify as interrupted even if bot spoke last"
+    );
+    assert_eq!(r.interrupted[0].0, sid);
+    assert_eq!(r.interrupted[0].1, -100888);
+    assert_eq!(r.interrupted[0].2, Some(55));
+    assert!(r.completed.is_empty());
+}
+
+/// #218: If an active goal has reached `max_turns`, it is exhausted and should
+/// not classify as interrupted when bot spoke last.
+#[tokio::test]
+async fn exhausted_goal_with_bot_last_classifies_completed() {
+    let db = test_db().await;
+    let sid = Uuid::new_v4();
+    bind_session(&db, sid, "-100889", Some(56)).await;
+    store_msg(&db, "-100889", Some("56"), "user:alexey", "run goal").await;
+    store_msg(
+        &db,
+        "-100889",
+        Some("56"),
+        BOT_SENDER_ID,
+        "done with max turns",
+    )
+    .await;
+
+    // Seed active goal but exhausted turns
+    let pool = db.pool().clone();
+    let conn = pool.get().await.unwrap();
+    let s_id = sid.to_string();
+    conn.interact(move |conn| {
+        conn.execute(
+            "INSERT INTO goal_state (id, session_id, goal_text, state, turns_used, max_turns, created_at, updated_at) \
+             VALUES (?1, ?2, 'make tea', 'active', 10, 10, '2026-09-13T00:00:00Z', '2026-09-13T00:00:00Z')",
+            rusqlite::params!["goal-2", s_id],
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+
+    let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
+    assert!(
+        r.interrupted.is_empty(),
+        "exhausted goal must not classify as interrupted"
+    );
+    assert_eq!(r.completed.len(), 1);
+    assert_eq!(r.completed[0], &sid.to_string()[..8]);
+}
+
+/// #218: If a goal is paused, it should not classify as interrupted when bot spoke last.
+#[tokio::test]
+async fn paused_goal_with_bot_last_classifies_completed() {
+    let db = test_db().await;
+    let sid = Uuid::new_v4();
+    bind_session(&db, sid, "-100890", Some(57)).await;
+    store_msg(&db, "-100890", Some("57"), "user:alexey", "pause goal").await;
+    store_msg(&db, "-100890", Some("57"), BOT_SENDER_ID, "paused").await;
+
+    // Seed paused goal
+    let pool = db.pool().clone();
+    let conn = pool.get().await.unwrap();
+    let s_id = sid.to_string();
+    conn.interact(move |conn| {
+        conn.execute(
+            "INSERT INTO goal_state (id, session_id, goal_text, state, turns_used, max_turns, created_at, updated_at) \
+             VALUES (?1, ?2, 'make tea', 'paused', 2, 10, '2026-09-13T00:00:00Z', '2026-09-13T00:00:00Z')",
+            rusqlite::params!["goal-3", s_id],
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+
+    let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
+    assert!(
+        r.interrupted.is_empty(),
+        "paused goal must not classify as interrupted"
+    );
+    assert_eq!(r.completed.len(), 1);
+    assert_eq!(r.completed[0], &sid.to_string()[..8]);
+}
