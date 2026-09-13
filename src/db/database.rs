@@ -105,10 +105,6 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // FORK (#150): skill glob gate — per-row compaction epoch on
     // session_seen_skills. NULL (pre-feature rows) == epoch 0.
     include_str!("../migrations/20260910000000_add_session_seen_skills_epoch.sql"),
-    // #1510: projects.repo_remote, the adoption-only second identity. Appended
-    // last per the list invariant; the column is NULL by design on existing
-    // rows so no heal pass is needed.
-    include_str!("../migrations/20260912000001_add_project_repo_remote.sql"),
     // FORK (#180): boot classifier origin signal — records whether a session
     // binding was last refreshed by a text message or a button tap, so a
     // tap-initiated turn killed before its PROCESSING row is still a
@@ -119,6 +115,9 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // in memory (`AgentService::active_skills`) and was born EMPTY after any
     // restart. Persisted here so boot hydrates it alongside the seen set.
     include_str!("../migrations/20260912210000_add_session_seen_skills_active.sql"),
+    // Upstream (#1510): projects.repo_remote, the adoption-only second identity.
+    // Appended last per the list invariant (restored after #209 migration union).
+    include_str!("../migrations/20260912000001_add_project_repo_remote.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
@@ -393,6 +392,7 @@ impl Database {
                     // the schema itself can say so.
                     crate::db::migration_heal::heal_pending_requests_origin(conn)?;
                     crate::db::migration_heal::heal_notify_queue(conn)?;
+                    crate::db::migration_heal::heal_project_repo_remote(conn)?;
                     Ok(())
                 },
             )
