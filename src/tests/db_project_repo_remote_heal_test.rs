@@ -10,12 +10,12 @@ async fn db_with_repo_remote_skipped() -> Database {
         .await
         .unwrap()
         .interact(|conn| -> Result<(), String> {
-            // Apply migrations up to 47 (all except repo_remote at 48)
+            // Apply migrations up to 45 (before repo_remote at 46 / index 45)
             build_migrations()
-                .to_version(conn, 47)
+                .to_version(conn, 45)
                 .map_err(|e| e.to_string())?;
-            // Stamp to latest (48) without having applied 48
-            conn.pragma_update(None, "user_version", MIGRATION_SQL.len() as i64)
+            // Stamp to 47 (simulating a DB already migrated past index 45 on fork)
+            conn.pragma_update(None, "user_version", 47)
                 .map_err(|e| e.to_string())
         })
         .await
@@ -80,7 +80,15 @@ async fn migration_sql_order_invariants() {
         "origin column must remain at index 36"
     );
     assert!(
-        MIGRATION_SQL[47].contains("projects"),
-        "projects.repo_remote must be appended last per invariant (#1510, #209)"
+        MIGRATION_SQL[45].contains("projects"),
+        "projects.repo_remote must be at index 45 per chronological filename order (#1510, #209)"
+    );
+    assert!(
+        MIGRATION_SQL[46].contains("last_origin"),
+        "session_bindings_last_origin must remain at index 46 per chronological filename order"
+    );
+    assert!(
+        MIGRATION_SQL[47].contains("active"),
+        "session_seen_skills_active must remain at index 47 per chronological filename order"
     );
 }
