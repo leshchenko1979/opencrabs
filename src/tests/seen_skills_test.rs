@@ -383,11 +383,11 @@ mod persistence {
         let rows = r.all().await.expect("all");
         assert_eq!(rows.len(), 2, "upsert must not duplicate rows");
         assert!(
-            rows.contains(&(sid, "opencrabs-dev".to_string(), Some(0), false)),
+            rows.contains(&(sid, "opencrabs-dev".to_string(), Some(0), false, None)),
             "epoch roundtrip; record() never touches the active flag"
         );
         assert!(
-            rows.contains(&(sid, "grafana".to_string(), Some(1), false)),
+            rows.contains(&(sid, "grafana".to_string(), Some(1), false, None)),
             "epoch roundtrip; record() never touches the active flag"
         );
     }
@@ -419,7 +419,7 @@ mod persistence {
         let rows = r.all().await.expect("all after prune");
         assert_eq!(
             rows,
-            vec![(live, "grafana".to_string(), Some(0), false)],
+            vec![(live, "grafana".to_string(), Some(0), false, None)],
             "the surviving row keeps its epoch and its inactive flag"
         );
     }
@@ -434,7 +434,7 @@ mod persistence {
         // settable in tests) — so we test the hydrate DATA path via the repo
         // + registry contract it feeds, not the global-pool plumbing.
         let rows = r.all().await.expect("all");
-        for (s, slug, _epoch, _active) in rows {
+        for (s, slug, _epoch, _active, _mtime) in rows {
             seen_skills::mark_seen(s, &slug);
         }
         assert!(
@@ -525,7 +525,7 @@ mod persistence {
         let rows = r.all().await.expect("all");
         assert_eq!(
             rows,
-            vec![(sid, "legacy-skill".to_string(), None, false)],
+            vec![(sid, "legacy-skill".to_string(), None, false, None)],
             "a legacy row reads back with NULL epoch and an inactive flag"
         );
 
@@ -552,7 +552,7 @@ mod persistence {
             .expect("activate without a prior record()");
         assert_eq!(
             r.all().await.expect("all"),
-            vec![(sid, "cost-estimate".to_string(), None, true)],
+            vec![(sid, "cost-estimate".to_string(), None, true, None)],
             "activation alone must create the row, flagged active"
         );
     }

@@ -244,6 +244,7 @@ pub struct HydrationSeeds {
 ///
 /// `active` is the flag carried on the row; a row that predates the active
 /// column carries `false` — seen-only, exactly the legacy semantics.
+#[allow(clippy::type_complexity)]
 pub fn hydrate_from_rows(
     rows: Vec<(Uuid, String, Option<i64>, bool, Option<i64>)>,
 ) -> HydrationSeeds {
@@ -263,10 +264,8 @@ pub fn hydrate_from_rows(
         if active {
             seeds.active.entry(sid).or_default().insert(slug.clone());
         }
-        if let Some(mtime) = loaded_mtime {
-            if mtime > 0 {
-                seeds.mtimes.insert((sid, slug), mtime as u64);
-            }
+        if let Some(mtime) = loaded_mtime.filter(|&m| m > 0) {
+            seeds.mtimes.insert((sid, slug), mtime as u64);
         }
     }
     seeds
