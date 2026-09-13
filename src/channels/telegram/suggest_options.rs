@@ -1155,7 +1155,9 @@ async fn cross_turn_glue(
         // markdown-merge arm byte-for-byte in construction). Paragraph
         // break before the block — owner correction 2026-09-09: a single
         // \n glued the Go: line to the body's last line.
+        // #207 fold-list counter isolation: HR breaks list fusion
         push_blank_line(&mut new_md);
+        new_md.push_str("---\n\n");
         new_md.push_str(&go_tier_lines(options));
     }
     new_md.push('\n');
