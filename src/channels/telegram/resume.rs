@@ -1736,6 +1736,32 @@ pub struct BootWakeRecovery {
     pub unclassified: Vec<String>,
 }
 
+/// Check if a session has an active, unexhausted goal in `goal_state`.
+///
+/// If `state == 'active'` and `turns_used < max_turns`, the session was driving
+/// an autonomous goal that was interrupted by daemon restart (#218).
+pub async fn has_active_goal(pool: &crate::db::Pool, session_id: Uuid) -> bool {
+    let sid = session_id.to_string();
+    let Ok(conn) = pool.get().await else {
+        return false;
+    };
+    conn.interact(move |conn| {
+        use rusqlite::OptionalExtension;
+        let mut stmt = conn.prepare_cached(
+            "SELECT 1 FROM goal_state \
+             WHERE session_id = ?1 AND state = 'active' AND turns_used < max_turns \
+             LIMIT 1",
+        )?;
+        let exists: Option<i32> = stmt
+            .query_row(rusqlite::params![sid], |row| row.get(0))
+            .optional()?;
+        Ok::<bool, rusqlite::Error>(exists.is_some())
+    })
+    .await
+    .unwrap_or(Ok(false))
+    .unwrap_or(false)
+}
+
 pub async fn classify_recently_active(
     pool: crate::db::Pool,
     already_resumed: &std::collections::HashSet<Uuid>,
@@ -1817,7 +1843,24 @@ pub async fn classify_recently_active(
                     .interrupted
                     .push((sid, chat_id, b.thread_id.map(i64::from)));
             }
-            Some(_) => recovery.completed.push(short_session_id(sid)),
+            Some(_) => {
+                // #218: If the bot sent the last message, check whether an autonomous
+                // goal was actively in-flight. If an active, unexhausted goal exists,
+                // the session was interrupted across restart and must resume so the
+                // tool loop's goal hook continues driving it.
+                if has_active_goal(&pool, sid).await {
+                    tracing::info!(
+                        target: "telegram",
+                        "Boot classifier (#218): session {} has active unexhausted goal — resuming",
+                        short_session_id(sid)
+                    );
+                    recovery
+                        .interrupted
+                        .push((sid, chat_id, b.thread_id.map(i64::from)));
+                } else {
+                    recovery.completed.push(short_session_id(sid));
+                }
+            }
             None => recovery.unclassified.push(short_session_id(sid)),
         }
     }
