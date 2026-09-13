@@ -776,6 +776,50 @@ async fn rich_calls_are_paced_once_the_bucket_empties() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn rich_pacing_waits_for_refill_without_failing_open() {
+    let _guard = ts::registry_guard().await;
+    ts::reset(6_000);
+    rl_config!(
+        enabled: true,
+        rich_per_minute: 1, // 1 token every 60 s
+        rich_burst: 1,
+    );
+
+    const CHAT: ChatId = ChatId(-100_556);
+    const TOPIC: i32 = 4243;
+
+    // Burst token consumed immediately at t=0.
+    governor::pace_rich(CHAT, Some(TOPIC)).await;
+    assert_eq!(ts::snapshot(CHAT).unwrap().admitted_rich, 1);
+
+    // Call pace_rich again: bucket is empty, next token is 60 s away.
+    // Under the old code, at SEND_MAX_HOLD (30 s), this failed open.
+    // With fail-open eliminated (#176), it must wait for the token to refill cleanly.
+    let handle = tokio::spawn(async move {
+        governor::pace_rich(CHAT, Some(TOPIC)).await;
+    });
+
+    // Advance 31 s (past old 30 s fail-open boundary):
+    // Task must still be waiting since token requires 60 s.
+    ts::advance(31_000);
+    tokio::task::yield_now().await;
+    assert!(
+        !handle.is_finished(),
+        "rich pacer must not fail open past 30 s"
+    );
+
+    // Advance remaining 30 s (61 s total) -> token refills -> task finishes.
+    ts::advance(30_000);
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("rich pacer should admit once token refilled")
+        .expect("task panicked");
+
+    let snap = ts::snapshot(CHAT).unwrap();
+    assert_eq!(snap.admitted_rich, 2, "refilled token must admit cleanly");
+}
+
+#[tokio::test(start_paused = true)]
 async fn rich_pacing_leaves_dms_and_non_forums_alone() {
     let _guard = ts::registry_guard().await;
     ts::reset(1_000);
