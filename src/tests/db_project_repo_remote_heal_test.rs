@@ -141,7 +141,11 @@ async fn skip_applied_active_migration_prevents_duplicate_column_crash() {
             let version: i64 = conn
                 .pragma_query_value(None, "user_version", |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 48, "user_version must be stamped to 48");
+            assert_eq!(
+                version,
+                crate::db::Database::MIGRATION_COUNT as i64,
+                "user_version must be stamped to latest migration"
+            );
             assert!(
                 crate::db::migration_heal::has_column(conn, "session_seen_skills", "active")
                     .unwrap(),
