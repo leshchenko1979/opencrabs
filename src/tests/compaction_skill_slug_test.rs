@@ -13,7 +13,7 @@
 //! The inversion test is `documented_manifest_spelling_selects_the_skill_body`
 //! — it fails against the pre-fix matcher, which is the whole point.
 
-use crate::brain::skills::{Skill, SkillSource, active_skill_bodies, normalize_skill_slug};
+use crate::brain::skills::{active_skill_bodies, normalize_skill_slug, Skill, SkillSource};
 use std::collections::HashSet;
 
 /// Minimal valid `SKILL.md` blob for `name`.
@@ -118,7 +118,7 @@ fn documented_manifest_spelling_selects_the_skill_body() {
     // Exactly what `parse_context_manifest` yields for a `- canarya` entry.
     let active = set_of(&["canarya"]);
 
-    let section = active_skill_bodies(&active, &skills);
+    let section = active_skill_bodies(&active, &skills, &std::collections::HashMap::new());
 
     assert!(
         section.contains("BODY-OF-canarya"),
@@ -139,7 +139,7 @@ fn slash_spelling_normalises_to_the_same_identity() {
 
     assert_eq!(active.iter().next().map(String::as_str), Some("canarya"));
 
-    let section = active_skill_bodies(&active, &skills);
+    let section = active_skill_bodies(&active, &skills, &std::collections::HashMap::new());
     assert!(
         section.contains("BODY-OF-canarya"),
         "slash spelling must resolve to the same skill, got: {section:?}"
@@ -163,10 +163,42 @@ fn both_spellings_collapse_to_one_key() {
 fn inactive_skills_contribute_nothing() {
     let skills = vec![skill("canarya"), skill("miidas")];
 
-    let none = active_skill_bodies(&set_of(&[]), &skills);
+    let none = active_skill_bodies(&set_of(&[]), &skills, &std::collections::HashMap::new());
     assert!(none.is_empty(), "empty active set must yield no section");
 
-    let other = active_skill_bodies(&set_of(&["miidas"]), &skills);
+    let other = active_skill_bodies(
+        &set_of(&["miidas"]),
+        &skills,
+        &std::collections::HashMap::new(),
+    );
     assert!(!other.contains("BODY-OF-canarya"));
     assert!(other.contains("BODY-OF-miidas"));
+}
+
+#[test]
+fn reinject_consumed_auxiliary_files() {
+    let mut s = skill("opencrabs-dev");
+    s.auxiliary_files = vec![
+        crate::brain::skills::AuxiliaryFile {
+            name: "editor.md".to_string(),
+            body: "EDITOR-PROCEDURE".to_string(),
+        },
+        crate::brain::skills::AuxiliaryFile {
+            name: "fleet-directives.md".to_string(),
+            body: "FLEET-LAW".to_string(),
+        },
+    ];
+    let skills = vec![s];
+    let active = set_of(&["opencrabs-dev"]);
+
+    let mut seen_aux = std::collections::HashMap::new();
+    seen_aux.insert("opencrabs-dev".to_string(), vec!["editor.md".to_string()]);
+
+    let section = active_skill_bodies(&active, &skills, &seen_aux);
+    assert!(section.contains("--- Active Skill: /opencrabs-dev ---"));
+    assert!(section.contains("--- Active Auxiliary: editor.md ---\nEDITOR-PROCEDURE"));
+    assert!(
+        !section.contains("fleet-directives.md"),
+        "unconsumed aux must NOT be injected"
+    );
 }

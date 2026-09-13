@@ -5,8 +5,8 @@
 //! — no full `App` needed.
 
 use crate::brain::skills::{Skill, SkillSource};
-use crate::tui::app::skills_dialog::input::{KeyOutcome, decide};
-use crate::tui::app::skills_dialog::{SkillsDialogState, matching};
+use crate::tui::app::skills_dialog::input::{decide, KeyOutcome};
+use crate::tui::app::skills_dialog::{matching, SkillsDialogState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 fn skill(name: &str, description: &str, body: &str, source: SkillSource) -> Skill {
@@ -18,6 +18,7 @@ fn skill(name: &str, description: &str, body: &str, source: SkillSource) -> Skil
         globs: Vec::new(),
         review_gate: false,
         source,
+        auxiliary_files: Vec::new(),
     }
 }
 
