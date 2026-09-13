@@ -1,29 +1,28 @@
-//! Startup reconciliation of sub-agent status files (#1038).
+//! Startup reconciliation of sub-agent status files (#1038, #192).
 //!
 //! A sub-agent runs inside a `tokio::spawn`ed task, so it dies with the
 //! process. Its status file does not: it stays on disk in whatever state it
 //! last wrote, which for a killed agent is `Pending` or `Running` forever.
 //! Anything reading those files then sees a live agent that no longer exists.
 //!
-//! Nothing reconciled them, and the sweep the module documented was never
-//! wired: [`super::status::cleanup_stale`] had no caller outside tests, so
-//! orphaned files accumulated indefinitely.
+//! Prior to #192, this pass read legacy `<home>/tmp/subagents`, but sub-agents
+//! write unified status files to `<home>/tmp/detached` since #26.
 //!
 //! This pass runs once at startup, before any new agent is spawned. Every
-//! non-terminal file belongs to a dead process by definition, so each is moved
-//! to [`AgentState::Interrupted`] and returned to the caller, which decides
-//! how to report it into the originating session.
+//! non-terminal sub-agent file belongs to a dead process by definition, so each
+//! is moved to [`WorkState::Interrupted`] and returned to the caller, which
+//! decides how to report it into the originating session.
 
 use std::time::Duration;
 
-use super::status::{AgentStatus, status_dir};
+use crate::brain::agent::service::work_status::{self, WorkKind, WorkStatus};
 
 /// How long a terminal status file is kept before the sweep removes it.
 /// Matches the 7 days the module has always documented.
 pub const STALE_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Move every non-terminal status file to `Interrupted`, then sweep files that
-/// have aged out.
+/// Move every non-terminal sub-agent status file to `Interrupted`, then sweep
+/// files that have aged out.
 ///
 /// Returns the agents that were interrupted, oldest file first, so the caller
 /// can tell their sessions. An agent whose file cannot be re-written is still
@@ -34,29 +33,29 @@ pub const STALE_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// agent gets its `completed_at` stamped first and ages out on the same
 /// schedule as any other terminal state, instead of lingering as an
 /// unexplained file.
-pub fn reconcile_orphaned_agents() -> Vec<AgentStatus> {
+pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
     let interrupted = mark_orphans_interrupted();
 
-    match super::status::cleanup_stale(STALE_AFTER) {
+    match work_status::cleanup_stale(STALE_AFTER) {
         Ok((scanned, removed)) if removed > 0 => {
             tracing::info!(
                 target: "subagent",
-                "Swept {removed} stale sub-agent status file(s) of {scanned} scanned"
+                "Swept {removed} stale status file(s) of {scanned} scanned"
             );
         }
         Ok(_) => {}
         Err(e) => {
             // Costs disk, not correctness, so startup continues.
-            tracing::warn!(target: "subagent", "Sub-agent status sweep failed: {e}");
+            tracing::warn!(target: "subagent", "Status sweep failed: {e}");
         }
     }
 
     interrupted
 }
 
-/// Walk the status directory and interrupt everything still mid-flight.
-fn mark_orphans_interrupted() -> Vec<AgentStatus> {
-    let dir = status_dir();
+/// Walk the unified status directory and interrupt sub-agents still mid-flight.
+fn mark_orphans_interrupted() -> Vec<WorkStatus> {
+    let dir = work_status::status_dir();
     if !dir.exists() {
         return Vec::new();
     }
@@ -66,14 +65,14 @@ fn mark_orphans_interrupted() -> Vec<AgentStatus> {
         Err(e) => {
             tracing::warn!(
                 target: "subagent",
-                "Could not read sub-agent status dir {}: {e}",
+                "Could not read status dir {}: {e}",
                 dir.display()
             );
             return Vec::new();
         }
     };
 
-    let mut orphans: Vec<AgentStatus> = Vec::new();
+    let mut orphans: Vec<WorkStatus> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "json") {
@@ -86,24 +85,24 @@ fn mark_orphans_interrupted() -> Vec<AgentStatus> {
             Err(e) => {
                 tracing::warn!(
                     target: "subagent",
-                    "Could not read sub-agent status file {}: {e}",
+                    "Could not read status file {}: {e}",
                     path.display()
                 );
                 continue;
             }
         };
-        let mut status: AgentStatus = match serde_json::from_str(&data) {
+        let mut status: WorkStatus = match serde_json::from_str(&data) {
             Ok(status) => status,
             Err(e) => {
                 tracing::warn!(
                     target: "subagent",
-                    "Could not parse sub-agent status file {}: {e}",
+                    "Could not parse status file {}: {e}",
                     path.display()
                 );
                 continue;
             }
         };
-        if status.state.is_terminal() {
+        if status.kind != WorkKind::Agent || status.state.is_terminal() {
             continue;
         }
         if let Err(e) = status.mark_interrupted() {
@@ -119,11 +118,11 @@ fn mark_orphans_interrupted() -> Vec<AgentStatus> {
             "Sub-agent '{}' ({}) for session {} was interrupted by a restart",
             status.label,
             status.id,
-            status.parent_session_id
+            status.parent_session_id.as_deref().unwrap_or(&status.session_id)
         );
         orphans.push(status);
     }
 
-    orphans.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+    orphans.sort_by(|a, b| a.spawned_at.cmp(&b.spawned_at));
     orphans
 }
