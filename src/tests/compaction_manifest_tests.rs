@@ -1,5 +1,5 @@
-use crate::brain::agent::service::AgentService;
 use crate::brain::agent::service::context::parse_context_manifest;
+use crate::brain::agent::service::AgentService;
 use std::collections::HashSet;
 
 #[test]
@@ -94,8 +94,13 @@ fn test_format_context_inventory() {
     let mut active_tools = HashSet::new();
     active_tools.insert("telegram_send".to_string());
 
-    let table =
-        AgentService::format_context_inventory(200_000, &active_skills, &active_tools, None);
+    let table = AgentService::format_context_inventory(
+        200_000,
+        &active_skills,
+        &std::collections::HashMap::new(),
+        &active_tools,
+        None,
+    );
     // The table must render the canonical bare slug. A slashed cell here would
     // contradict the `<skill-slug>` rule documented in the very same prompt —
     // that contradiction is #179 F2, so pin both directions.
@@ -103,4 +108,25 @@ fn test_format_context_inventory() {
     assert!(!table.contains("| `/cost-estimate` | Skill |"));
     assert!(table.contains("| `telegram_send` | Lazy Tool |"));
     assert!(table.contains("Guidance: aim to keep active skills and lazy tools <= 5% target"));
+}
+
+#[test]
+fn test_format_context_inventory_with_auxiliary() {
+    let mut active_skills = HashSet::new();
+    active_skills.insert("opencrabs-dev".to_string());
+
+    let mut seen_aux = std::collections::HashMap::new();
+    seen_aux.insert("opencrabs-dev".to_string(), vec!["editor.md".to_string()]);
+
+    let active_tools = HashSet::new();
+
+    let table = AgentService::format_context_inventory(
+        200_000,
+        &active_skills,
+        &seen_aux,
+        &active_tools,
+        None,
+    );
+    assert!(table.contains("| `opencrabs-dev` | Skill |"));
+    assert!(table.contains("| `opencrabs-dev/editor.md` | Skill aux |"));
 }
