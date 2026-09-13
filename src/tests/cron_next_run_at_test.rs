@@ -1,12 +1,17 @@
+use crate::brain::provider::Provider;
 use crate::brain::tools::cron_manage::CronManageTool;
 use crate::brain::tools::{Tool, ToolExecutionContext};
 use crate::channels::ChannelFactory;
+use crate::config::Config;
 use crate::cron::scheduler::CronScheduler;
 use crate::db::models::CronJob;
 use crate::db::repository::cron_job_run::CronJobRunRepository;
 use crate::db::{CronJobRepository, Database};
 use crate::services::ServiceContext;
+use crate::tests::agent_service_mocks::MockProvider;
+use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::{Mutex, watch};
 
 async fn setup() -> (Database, CronJobRepository, CronManageTool) {
     let db = Database::connect_in_memory()
@@ -20,6 +25,19 @@ async fn setup() -> (Database, CronJobRepository, CronManageTool) {
 
 fn ctx() -> ToolExecutionContext {
     ToolExecutionContext::new(uuid::Uuid::new_v4())
+}
+
+fn create_test_factory(service_ctx: ServiceContext) -> Arc<ChannelFactory> {
+    let (_, config_rx) = watch::channel(Config::default());
+    Arc::new(ChannelFactory::new(
+        Arc::new(MockProvider) as Arc<dyn Provider>,
+        service_ctx,
+        "test brain".to_string(),
+        PathBuf::from("/tmp"),
+        PathBuf::from("/tmp/oc_test_brain"),
+        Arc::new(Mutex::new(None)),
+        config_rx,
+    ))
 }
 
 #[tokio::test]
@@ -152,8 +170,8 @@ async fn test_startup_backfill_populates_null_next_run_at() {
     let original_last_run = saved.last_run_at;
 
     let run_repo = CronJobRunRepository::new(db.pool().clone());
-    let factory = Arc::new(ChannelFactory::new());
     let service_ctx = ServiceContext::new(db.pool().clone());
+    let factory = create_test_factory(service_ctx.clone());
     let scheduler = CronScheduler::new(repo.clone(), run_repo, factory, service_ctx);
 
     let backfilled = scheduler.backfill_missing_next_run().await.unwrap();
@@ -194,8 +212,8 @@ async fn test_backfill_handles_invalid_cron_gracefully() {
     repo.insert(&job).await.unwrap();
 
     let run_repo = CronJobRunRepository::new(db.pool().clone());
-    let factory = Arc::new(ChannelFactory::new());
     let service_ctx = ServiceContext::new(db.pool().clone());
+    let factory = create_test_factory(service_ctx.clone());
     let scheduler = CronScheduler::new(repo.clone(), run_repo, factory, service_ctx);
 
     let backfilled = scheduler.backfill_missing_next_run().await.unwrap();
