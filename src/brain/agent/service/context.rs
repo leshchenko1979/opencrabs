@@ -115,7 +115,11 @@ pub fn parse_manifest_text(text: &str) -> Option<ContextManifest> {
         }
     }
 
-    if found_any_key { Some(manifest) } else { None }
+    if found_any_key {
+        Some(manifest)
+    } else {
+        None
+    }
 }
 
 fn parse_inline_items(s: &str, target: &mut Vec<String>) {
@@ -532,10 +536,12 @@ impl AgentService {
         // #138 part 2: the inventory stamp lists the UNION (active ∪ seen).
         // Re-injection (tool_loop) stays active-only on purpose.
         let stamp_skills = crate::brain::tools::seen_skills::stamp_skills_for_session(session_id);
+        let seen_aux = crate::brain::tools::seen_skills::aux_seen_for_session(session_id);
         let active_tools = self.tool_registry.active_tools(session_id);
         let context_inventory = Self::format_context_inventory(
             context.max_tokens,
             &stamp_skills,
+            &seen_aux,
             &active_tools,
             Some(&self.tool_registry),
         );
@@ -831,11 +837,15 @@ impl AgentService {
             )
             .to_string(),
         }
-    /// Format dynamic markdown table of currently active skills and lazy tools,
-    /// their token sizes, and percentage of total context window for the compaction prompt.
+    }
+
+    /// Format dynamic markdown table of currently active skills, consumed auxiliary
+    /// skill documents, and lazy tools, their token sizes, and percentage of total context
+    /// window for the compaction prompt.
     pub fn format_context_inventory(
         snapshot_max_tokens: usize,
         active_skills: &std::collections::HashSet<String>,
+        seen_aux: &std::collections::HashMap<String, Vec<String>>,
         active_tools: &std::collections::HashSet<String>,
         tool_registry: Option<&std::sync::Arc<crate::brain::tools::ToolRegistry>>,
     ) -> String {
@@ -866,7 +876,34 @@ impl AgentService {
             } else {
                 0.0
             };
-            rows.push((normalized, "Skill", tokens, pct));
+            rows.push((normalized.clone(), "Skill", tokens, pct));
+
+            // Issue #216: account consumed auxiliary skill documents.
+            if let Some(files) = seen_aux.get(&normalized) {
+                for file_name in files {
+                    let aux_tokens = if let Some(s) = skill {
+                        if let Some(aux) = s.auxiliary_files.iter().find(|a| &a.name == file_name) {
+                            AgentContext::estimate_tokens(&aux.body)
+                        } else {
+                            100
+                        }
+                    } else {
+                        100
+                    };
+                    total_tokens += aux_tokens;
+                    let aux_pct = if snapshot_max_tokens > 0 {
+                        (aux_tokens as f64 / snapshot_max_tokens as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    rows.push((
+                        format!("{normalized}/{file_name}"),
+                        "Skill aux",
+                        aux_tokens,
+                        aux_pct,
+                    ));
+                }
+            }
         }
 
         let mut sorted_tools: Vec<_> = active_tools.iter().collect();

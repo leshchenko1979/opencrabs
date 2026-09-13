@@ -2,7 +2,7 @@
 //!
 //! Allows reading file contents from the filesystem.
 
-use super::error::{Result, ToolError, validate_file_path};
+use super::error::{validate_file_path, Result, ToolError};
 use super::hashline::hash::{format_hashline, hash_line};
 use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
@@ -226,8 +226,16 @@ impl Tool for ReadTool {
             // A whole-file read of a skill definition counts as consuming
             // that skill (issue #131): the post-compaction stamp lists it
             // even though no slash command was ever issued.
+            // Branch for aux files (issue #216): reading SKILL.md marks the
+            // skill seen (and satisfies the skill gate), while reading an
+            // auxiliary .md file records aux usage without satisfying the gate.
             if let Some(slug) = super::seen_skills::skill_slug_from_path(&path) {
-                super::seen_skills::mark_seen(context.session_id, &slug);
+                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if file_name == "SKILL.md" {
+                    super::seen_skills::mark_seen(context.session_id, &slug);
+                } else {
+                    super::seen_skills::mark_aux_seen(context.session_id, &slug, file_name);
+                }
             }
             if contents.len() > OUTPUT_BUDGET {
                 // Budget path (#986): emit lines until the 128 KB budget is
