@@ -75,6 +75,13 @@ fn aux_registry() -> &'static std::sync::Mutex<AuxMap> {
     AUX.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Process-wide loaded mtime registry (#210): (session, slug) → mtime of the skill file
+/// when it was last loaded/checked for that session.
+fn loaded_mtimes() -> &'static std::sync::Mutex<HashMap<(Uuid, String), u64>> {
+    static MTIMES: OnceLock<std::sync::Mutex<HashMap<(Uuid, String), u64>>> = OnceLock::new();
+    MTIMES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 /// Extract the skill slug from a path that points at a skill definition
 /// or auxiliary file: any `.md` file whose second-to-last component is
 /// `skills` (i.e. `skills/<slug>/<file>.md`) yields `Some(slug)`.
@@ -216,10 +223,10 @@ pub fn seen_since_compaction(session_id: Uuid, slug: &str) -> bool {
     stored >= current_epoch(session_id)
 }
 
-/// The three registry seeds derived from the persisted rows (#138 part 2).
+/// The registry seeds derived from the persisted rows (#138 part 2, #210).
 ///
 /// Kept as plain data so [`hydrate_from_rows`] is PURE — the hydrate
-/// arithmetic (epoch carry-over, active-set assembly) is unit-testable
+/// arithmetic (epoch carry-over, active-set assembly, loaded mtime) is unit-testable
 /// without a live DB or a tokio runtime.
 #[derive(Debug, Default)]
 pub struct HydrationSeeds {
@@ -229,15 +236,19 @@ pub struct HydrationSeeds {
     pub epochs: HashMap<Uuid, u64>,
     /// session → the slugs flagged ACTIVE (the re-injection set).
     pub active: HashMap<Uuid, HashSet<String>>,
+    /// (session, slug) → recorded loaded_mtime (#210).
+    pub mtimes: HashMap<(Uuid, String), u64>,
 }
 
-/// Fold persisted rows into the three registry seeds — PURE (#138 part 2).
+/// Fold persisted rows into the registry seeds — PURE (#138 part 2, #210).
 ///
 /// `active` is the flag carried on the row; a row that predates the active
 /// column carries `false` — seen-only, exactly the legacy semantics.
-pub fn hydrate_from_rows(rows: Vec<(Uuid, String, Option<i64>, bool)>) -> HydrationSeeds {
+pub fn hydrate_from_rows(
+    rows: Vec<(Uuid, String, Option<i64>, bool, Option<i64>)>,
+) -> HydrationSeeds {
     let mut seeds = HydrationSeeds::default();
-    for (sid, slug, epoch, active) in rows {
+    for (sid, slug, epoch, active, loaded_mtime) in rows {
         // Pre-feature rows carry NULL epoch → 0 (always current — back-compat
         // sessions pass the gate).
         let e = epoch.unwrap_or(0).max(0) as u64;
@@ -250,7 +261,12 @@ pub fn hydrate_from_rows(rows: Vec<(Uuid, String, Option<i64>, bool)>) -> Hydrat
             *m = e;
         }
         if active {
-            seeds.active.entry(sid).or_default().insert(slug);
+            seeds.active.entry(sid).or_default().insert(slug.clone());
+        }
+        if let Some(mtime) = loaded_mtime {
+            if mtime > 0 {
+                seeds.mtimes.insert((sid, slug), mtime as u64);
+            }
         }
     }
     seeds
@@ -291,6 +307,14 @@ pub(crate) fn apply_seeds(seeds: HydrationSeeds) -> usize {
             act.entry(sid).or_default().extend(slugs);
         }
     }
+    {
+        let mut mtimes = loaded_mtimes()
+            .lock()
+            .expect("seen_skills loaded_mtimes poisoned");
+        for (key, mtime) in seeds.mtimes {
+            mtimes.insert(key, mtime);
+        }
+    }
     seen_count
 }
 
@@ -320,10 +344,11 @@ pub fn hydrate_from_db() {
             Ok(rows) => {
                 let seeds = hydrate_from_rows(rows);
                 let active_count: usize = seeds.active.values().map(|s| s.len()).sum();
+                let mtime_count = seeds.mtimes.len();
                 let n = apply_seeds(seeds);
                 tracing::info!(
                     "seen_skills: hydrated registries from DB ({n} seen rows, \
-                     {active_count} active)"
+                     {active_count} active, {mtime_count} loaded mtimes)"
                 );
                 match repo.prune_missing_sessions().await {
                     Ok(0) => {}
@@ -430,6 +455,10 @@ pub fn mark_active(session_id: Uuid, slug: &str) {
 /// registry never accumulates empty sets.
 pub fn unmark_active(session_id: Uuid, slug: &str) {
     let slug = crate::brain::skills::normalize_skill_slug(slug);
+    loaded_mtimes()
+        .lock()
+        .expect("seen_skills loaded_mtimes poisoned")
+        .remove(&(session_id, slug.clone()));
     {
         let mut act = active_registry()
             .lock()
@@ -496,7 +525,44 @@ pub fn stamp_skills_for_session(session_id: Uuid) -> HashSet<String> {
     set
 }
 
-/// Drop `session_id`'s entire ACTIVE set — session teardown (#138 part 2).
+/// Record the loaded mtime for an active skill in `session_id` (#210).
+pub fn record_skill_loaded_mtime(session_id: Uuid, slug: &str, mtime: u64) {
+    let slug = crate::brain::skills::normalize_skill_slug(slug);
+    loaded_mtimes()
+        .lock()
+        .expect("seen_skills loaded_mtimes poisoned")
+        .insert((session_id, slug.clone()), mtime);
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            match persist_loaded_mtime(session_id, &slug, mtime).await {
+                Ok(()) => {}
+                Err(e) => tracing::warn!(
+                    "seen_skills: DB persist loaded_mtime of ({session_id}, {slug}) failed \
+                     (in-memory registry unaffected): {e:#}"
+                ),
+            }
+        });
+    }
+}
+
+/// Retrieve the recorded loaded mtime for a skill in `session_id` (#210).
+pub fn get_skill_loaded_mtime(session_id: Uuid, slug: &str) -> Option<u64> {
+    let slug = crate::brain::skills::normalize_skill_slug(slug);
+    loaded_mtimes()
+        .lock()
+        .expect("seen_skills loaded_mtimes poisoned")
+        .get(&(session_id, slug))
+        .copied()
+}
+
+async fn persist_loaded_mtime(session_id: Uuid, slug: &str, mtime: u64) -> anyhow::Result<()> {
+    let pool = crate::db::global_pool()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no global DB pool"))?;
+    crate::db::repository::session_skills::SessionSkillsRepository::new(pool)
+        .set_loaded_mtime(session_id, slug, mtime)
+        .await
+}
 ///
 /// Clears memory AND persists the deactivation for every slug it held, so a
 /// later restart does not resurrect an active set the session no longer has.
@@ -514,6 +580,10 @@ pub fn forget_session(session_id: Uuid) {
         .expect("seen_skills active registry poisoned")
         .remove(&session_id)
         .unwrap_or_default();
+    loaded_mtimes()
+        .lock()
+        .expect("seen_skills loaded_mtimes poisoned")
+        .retain(|(sid, _), _| *sid != session_id);
     if removed.is_empty() {
         return;
     }
@@ -545,6 +615,39 @@ async fn persist_active(session_id: Uuid, slug: &str, active: bool) -> anyhow::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hydrate_from_rows_with_mtime() {
+        let sid = Uuid::new_v4();
+        let rows = vec![
+            (
+                sid,
+                "test-skill".to_string(),
+                Some(1),
+                true,
+                Some(1726000000),
+            ),
+            (sid, "seen-skill".to_string(), Some(2), false, None),
+        ];
+        let seeds = hydrate_from_rows(rows);
+        assert_eq!(seeds.seen.get(&(sid, "test-skill".to_string())), Some(&1));
+        assert!(seeds.active.get(&sid).unwrap().contains("test-skill"));
+        assert_eq!(
+            seeds.mtimes.get(&(sid, "test-skill".to_string())),
+            Some(&1726000000)
+        );
+        assert_eq!(seeds.mtimes.get(&(sid, "seen-skill".to_string())), None);
+    }
+
+    #[test]
+    fn loaded_mtime_record_and_get() {
+        let sid = Uuid::new_v4();
+        record_skill_loaded_mtime(sid, "my-skill", 123456);
+        assert_eq!(get_skill_loaded_mtime(sid, "my-skill"), Some(123456));
+        assert_eq!(get_skill_loaded_mtime(sid, "/my-skill"), Some(123456)); // normalizes
+        unmark_active(sid, "my-skill");
+        assert_eq!(get_skill_loaded_mtime(sid, "my-skill"), None);
+    }
 
     #[test]
     fn slug_extraction_from_skill_paths() {

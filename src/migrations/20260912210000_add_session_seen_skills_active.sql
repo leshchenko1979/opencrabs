@@ -18,3 +18,5 @@
 -- never touches it, so a read can never downgrade an active row. Legacy rows
 -- default to 0 (inactive) — a row that predates this feature is seen-only.
 ALTER TABLE session_seen_skills ADD COLUMN active INTEGER NOT NULL DEFAULT 0;
+-- Active skill update tracking (issue #210): track mtime of skill file when loaded.
+ALTER TABLE session_seen_skills ADD COLUMN loaded_mtime INTEGER;
