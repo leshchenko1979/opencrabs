@@ -132,7 +132,7 @@ async fn skip_applied_active_migration_prevents_duplicate_column_crash() {
         .await
         .expect("run_migrations must succeed on prod DB at stamp 47");
 
-    // Verify user_version is now 48, active exists, and repo_remote was healed
+    // Verify user_version is now stamped to the latest migration, active exists, and repo_remote was healed
     db.pool()
         .get()
         .await
