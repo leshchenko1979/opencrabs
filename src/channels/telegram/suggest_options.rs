@@ -1124,7 +1124,7 @@ async fn cross_turn_glue(
     thread_id: Option<ThreadId>,
     token: &str,
     layout: &SuggestLayout,
-    options: &[String],
+    options: &[crate::brain::tools::suggest_options::SuggestionItem],
     trailer: Option<&String>,
 ) -> Option<MergePayload> {
     let target = repo
@@ -1156,9 +1156,10 @@ async fn cross_turn_glue(
         // break before the block — owner correction 2026-09-09: a single
         // \n glued the Go: line to the body's last line.
         // #207 fold-list counter isolation: HR breaks list fusion
+        let raw_labels: Vec<String> = options.iter().map(|o| o.label.clone()).collect();
         push_blank_line(&mut new_md);
         new_md.push_str("---\n\n");
-        new_md.push_str(&go_tier_lines(options));
+        new_md.push_str(&go_tier_lines(&raw_labels));
     }
     new_md.push('\n');
     new_md.push_str(&suggestion_rows_rich_html(options, token));
