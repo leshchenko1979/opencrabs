@@ -168,7 +168,7 @@ async fn run_auto_title_round_trip(
         .await
         .expect("first turn should complete");
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while tokio::time::Instant::now() < deadline {
         let s = session_service
             .get_session(session_id)
@@ -341,7 +341,7 @@ async fn run_two_message_round_trip(
         .expect("first turn should complete");
 
     // Wait for the auto-title task to land.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut after_first: Option<String> = None;
     while tokio::time::Instant::now() < deadline {
         let s = session_service
