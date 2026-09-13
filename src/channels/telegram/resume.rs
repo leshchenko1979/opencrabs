@@ -4,10 +4,10 @@
 //! Moved VERBATIM out of handler.rs (#471 phase 1, pure decomposition —
 //! the handler glob re-export keeps every existing call site stable).
 
-use super::TelegramState;
 #[allow(unused_imports)]
 use super::handler::*;
 use super::send::{best_effort_delete, fire_chat_action};
+use super::TelegramState;
 use crate::a2a::handler::notify::CLI_SENDER_PREFIX;
 use crate::brain::agent::service::background_tasks;
 use crate::brain::agent::{AgentService, ProgressCallback, ProgressEvent};
