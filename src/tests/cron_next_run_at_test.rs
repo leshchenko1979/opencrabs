@@ -1,8 +1,9 @@
 use crate::brain::tools::cron_manage::CronManageTool;
 use crate::brain::tools::{Tool, ToolExecutionContext};
+use crate::channels::factory::ChannelFactory;
 use crate::cron::scheduler::CronScheduler;
 use crate::db::models::CronJob;
-use crate::db::repository::CronJobPatch;
+use crate::db::repository::cron_job_run::CronJobRunRepository;
 use crate::db::{CronJobRepository, Database};
 use crate::services::ServiceContext;
 use std::sync::Arc;
@@ -150,8 +151,10 @@ async fn test_startup_backfill_populates_null_next_run_at() {
     );
     let original_last_run = saved.last_run_at;
 
+    let run_repo = CronJobRunRepository::new(db.pool().clone());
+    let factory = Arc::new(ChannelFactory::new());
     let service_ctx = Arc::new(ServiceContext::new(db.pool().clone()));
-    let scheduler = CronScheduler::new(repo.clone(), service_ctx);
+    let scheduler = CronScheduler::new(repo.clone(), run_repo, factory, service_ctx);
 
     let backfilled = scheduler.backfill_missing_next_run().await.unwrap();
     assert_eq!(backfilled, 1, "Expected 1 job to be backfilled");
@@ -190,8 +193,10 @@ async fn test_backfill_handles_invalid_cron_gracefully() {
     job.next_run_at = None;
     repo.insert(&job).await.unwrap();
 
+    let run_repo = CronJobRunRepository::new(db.pool().clone());
+    let factory = Arc::new(ChannelFactory::new());
     let service_ctx = Arc::new(ServiceContext::new(db.pool().clone()));
-    let scheduler = CronScheduler::new(repo.clone(), service_ctx);
+    let scheduler = CronScheduler::new(repo.clone(), run_repo, factory, service_ctx);
 
     let backfilled = scheduler.backfill_missing_next_run().await.unwrap();
     assert_eq!(

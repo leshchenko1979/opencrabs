@@ -451,17 +451,17 @@ impl CronScheduler {
         // Ensure all enabled jobs have next_run_at populated even if created externally
         // or through legacy paths (#202).
         for job in &mut jobs {
-            if job.next_run_at.is_none() {
-                if let Some(next) = super::next_run_utc(&job.cron_expr, job_tz(job), now) {
-                    let patch = crate::db::repository::CronJobPatch {
-                        next_run_at: Some(Some(next)),
-                        ..Default::default()
-                    };
-                    if let Err(e) = self.repo.update_fields(&job.id.to_string(), patch).await {
-                        tracing::warn!(error = %e, job_id = %job.id, "Failed to persist next_run_at in tick");
-                    } else {
-                        job.next_run_at = Some(next);
-                    }
+            if job.next_run_at.is_none()
+                && let Some(next) = super::next_run_utc(&job.cron_expr, job_tz(job), now)
+            {
+                let patch = crate::db::repository::CronJobPatch {
+                    next_run_at: Some(Some(next)),
+                    ..Default::default()
+                };
+                if let Err(e) = self.repo.update_fields(&job.id.to_string(), patch).await {
+                    tracing::warn!(error = %e, job_id = %job.id, "Failed to persist next_run_at in tick");
+                } else {
+                    job.next_run_at = Some(next);
                 }
             }
         }

@@ -516,12 +516,11 @@ impl CronManageTool {
             }
         } else if patch.enabled == Some(true)
             && !job.enabled
-            && job.next_run_at.map_or(true, |t| t <= chrono::Utc::now())
+            && job.next_run_at.is_none_or(|t| t <= chrono::Utc::now())
+            && let Some(tz) = crate::cron::parse_timezone(&effective_tz)
         {
-            if let Some(tz) = crate::cron::parse_timezone(&effective_tz) {
-                let next = crate::cron::next_run_utc(&job.cron_expr, tz, chrono::Utc::now());
-                patch.next_run_at = Some(next);
-            }
+            let next = crate::cron::next_run_utc(&job.cron_expr, tz, chrono::Utc::now());
+            patch.next_run_at = Some(next);
         }
 
         let updated = self
