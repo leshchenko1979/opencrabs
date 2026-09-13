@@ -1,6 +1,6 @@
 use crate::brain::tools::cron_manage::CronManageTool;
 use crate::brain::tools::{Tool, ToolExecutionContext};
-use crate::channels::factory::ChannelFactory;
+use crate::channels::ChannelFactory;
 use crate::cron::scheduler::CronScheduler;
 use crate::db::models::CronJob;
 use crate::db::repository::cron_job_run::CronJobRunRepository;
@@ -153,7 +153,7 @@ async fn test_startup_backfill_populates_null_next_run_at() {
 
     let run_repo = CronJobRunRepository::new(db.pool().clone());
     let factory = Arc::new(ChannelFactory::new());
-    let service_ctx = Arc::new(ServiceContext::new(db.pool().clone()));
+    let service_ctx = ServiceContext::new(db.pool().clone());
     let scheduler = CronScheduler::new(repo.clone(), run_repo, factory, service_ctx);
 
     let backfilled = scheduler.backfill_missing_next_run().await.unwrap();
@@ -195,7 +195,7 @@ async fn test_backfill_handles_invalid_cron_gracefully() {
 
     let run_repo = CronJobRunRepository::new(db.pool().clone());
     let factory = Arc::new(ChannelFactory::new());
-    let service_ctx = Arc::new(ServiceContext::new(db.pool().clone()));
+    let service_ctx = ServiceContext::new(db.pool().clone());
     let scheduler = CronScheduler::new(repo.clone(), run_repo, factory, service_ctx);
 
     let backfilled = scheduler.backfill_missing_next_run().await.unwrap();
