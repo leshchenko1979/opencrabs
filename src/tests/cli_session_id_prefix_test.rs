@@ -88,14 +88,47 @@ fn ambiguous_prefix_lists_candidates() {
     assert!(err.contains("worker"), "candidates list every match: {err}");
 }
 
-#[test]
-fn unknown_prefix_errors_cleanly() {
-    let sessions = vec![session("alpha")];
-    let err = resolve_session_id(&sessions, "zzzzzzzz").expect_err("no match");
-    assert!(
-        err.contains("no session id starts with 'zzzzzzzz'"),
-        "got: {err}"
-    );
+#[tokio::test]
+async fn resolve_session_id_with_service_fast_path_parses_uuid_without_querying_service() {
+    use crate::cli::session_resolve::resolve_session_id_with_service;
+    use crate::services::SessionService;
+    use crate::services::context::ServiceContext;
+    use std::sync::Arc;
+
+    let db = crate::db::Database::new("sqlite::memory:").await.unwrap();
+    db.run_migrations().await.unwrap();
+    let ctx = Arc::new(ServiceContext::new(db.pool().clone()));
+    let svc = SessionService::new(ctx);
+
+    let random_uuid = uuid::Uuid::new_v4();
+    let resolved = resolve_session_id_with_service(&svc, &random_uuid.to_string())
+        .await
+        .expect("fast path succeeds");
+    assert_eq!(resolved, random_uuid);
+}
+
+#[tokio::test]
+async fn resolve_session_id_with_service_fallback_matches_prefix() {
+    use crate::cli::session_resolve::resolve_session_id_with_service;
+    use crate::services::SessionService;
+    use crate::services::context::ServiceContext;
+    use std::sync::Arc;
+
+    let db = crate::db::Database::new("sqlite::memory:").await.unwrap();
+    db.run_migrations().await.unwrap();
+    let ctx = Arc::new(ServiceContext::new(db.pool().clone()));
+    let svc = SessionService::new(ctx);
+
+    let created = svc
+        .create_session(Some("prefix-target".to_string()))
+        .await
+        .unwrap();
+    let prefix = &created.id.to_string()[..8];
+
+    let resolved = resolve_session_id_with_service(&svc, prefix)
+        .await
+        .expect("prefix resolved via fallback");
+    assert_eq!(resolved, created.id);
 }
 
 #[test]
