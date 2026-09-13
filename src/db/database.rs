@@ -124,6 +124,9 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // boot hydrates the in-memory registry back. Appended last per the list
     // invariant; the CREATE is idempotent, so no heal pass is needed.
     include_str!("../migrations/20260913000001_add_session_seen_skills.sql"),
+    // FORK (#200): track whether a button-tap turn is actively in-flight
+    // so boot classifier does not spuriously resume completed turns.
+    include_str!("../migrations/20260913000001_session_bindings_turn_open_at.sql"),
     // #1529: per-newsletter poll cursors. Idempotent CREATE, so no heal
     // pass; appended last per the list invariant above.
     include_str!("../migrations/20260914000001_add_whatsapp_newsletter_cursors.sql"),
@@ -392,10 +395,7 @@ impl Database {
                         conn,
                         user_version,
                     )?;
-                    crate::db::migration_heal::skip_applied_active_migration(
-                        conn,
-                        user_version,
-                    )?;
+                    crate::db::migration_heal::skip_applied_active_migration(conn, user_version)?;
 
                     migrations.to_latest(conn)?;
 
