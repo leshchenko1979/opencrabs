@@ -375,6 +375,19 @@ fn interrupted_message(row: &crate::db::BackgroundTaskRow) -> QueuedUserMessage 
 /// for a channel to claim their session instead of being handed to a
 /// destination that would discard them (#1206).
 pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
+    // Migrate pre-#26 sub-agent status files into the unified detached dir
+    // before reconciliation, so sub-agents in flight across upgrades are preserved (#1038, #192).
+    let legacy = super::work_status::legacy_dir();
+    let migrated = super::work_status::migrate_legacy_dir(&legacy);
+    if migrated > 0 {
+        tracing::info!(
+            target: "background_task",
+            count = migrated,
+            from = %legacy.display(),
+            "Migrated legacy subagent status files to unified detached directory"
+        );
+    }
+
     // Sub-agents first: they die with the process but their status files do
     // not, so every file still mid-flight is an agent that no longer exists.
     let orphans = crate::brain::tools::subagent::reconcile::reconcile_orphaned_agents();
@@ -402,7 +415,7 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
                     "Sub-agent '{}' has an unparseable parent session '{}', its \
                      interruption cannot be reported",
                     orphan.label,
-                    orphan.parent_session_id.as_str(),
+                    orphan.parent_session_id.as_deref().unwrap_or(&orphan.session_id),
                 );
                 // Still finalize the file so it cannot zombie.
                 orphan.mark_interrupted().ok();
@@ -638,14 +651,14 @@ fn clear_persisted_tombstones(session_id: Uuid) {
 /// not finish and hand the decision back, rather than letting the agent read
 /// an absent result as either success or failure.
 fn subagent_interrupted_message(
-    status: &crate::brain::tools::subagent::status::AgentStatus,
+    status: &super::work_status::WorkStatus,
 ) -> QueuedUserMessage {
     let context_text = format!(
         "[SUB-AGENT INTERRUPTED] The sub-agent `{}` (id {}) was still running when OpenCrabs \
          restarted, so it was killed and produced no result. Its task was:\n\n```\n{}\n```\n\nIt \
          did NOT complete. Decide whether to spawn it again based on what you were doing; do not \
          assume it succeeded or failed.",
-        status.label, status.id, status.prompt
+        status.label, status.id, status.task
     );
     QueuedUserMessage {
         context_text,
@@ -662,9 +675,13 @@ fn subagent_interrupted_message(
 /// the pre-#26 routing value this field replaced. Returns the session to
 /// report to, if either field parses as a UUID.
 fn interrupted_report_target(
-    status: &crate::brain::tools::subagent::status::AgentStatus,
+    status: &super::work_status::WorkStatus,
 ) -> Option<Uuid> {
-    Uuid::parse_str(&status.parent_session_id).ok()
+    status
+        .parent_session_id
+        .as_deref()
+        .and_then(|p| Uuid::parse_str(p).ok())
+        .or_else(|| Uuid::parse_str(&status.session_id).ok())
 }
 
 /// Stamp the terminal outcome onto a revived agent's status file.
