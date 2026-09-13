@@ -12,7 +12,7 @@
 //! arbitrary sender id.
 
 use crate::channels::telegram::resume::classify_recently_active;
-use crate::db::models::{BOT_SENDER_ID, ChannelMessage, Session};
+use crate::db::models::{ChannelMessage, Session, BOT_SENDER_ID};
 use crate::db::{ChannelMessageRepository, Database, SessionBindingRepository, SessionRepository};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -313,18 +313,20 @@ async fn active_goal_with_bot_last_classifies_interrupted() {
 
     // Seed active goal with turns remaining
     let pool = db.pool().clone();
-    let conn = pool.get().await.unwrap();
     let s_id = sid.to_string();
-    conn.interact(move |conn| {
-        conn.execute(
-            "INSERT INTO goal_state (id, session_id, goal_text, state, turns_used, max_turns, created_at, updated_at) \
-             VALUES (?1, ?2, 'make tea', 'active', 2, 10, '2026-09-13T00:00:00Z', '2026-09-13T00:00:00Z')",
-            rusqlite::params!["goal-1", s_id],
-        )
-    })
-    .await
-    .unwrap()
-    .unwrap();
+    {
+        let conn = pool.get().await.unwrap();
+        conn.interact(move |conn| {
+            conn.execute(
+                "INSERT INTO goal_state (id, session_id, goal_text, state, turns_used, max_turns, created_at, updated_at) \
+                 VALUES (?1, ?2, 'make tea', 'active', 2, 10, '2026-09-13T00:00:00Z', '2026-09-13T00:00:00Z')",
+                rusqlite::params!["goal-1", s_id],
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    }
 
     let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
     assert_eq!(
@@ -357,18 +359,20 @@ async fn exhausted_goal_with_bot_last_classifies_completed() {
 
     // Seed active goal but exhausted turns
     let pool = db.pool().clone();
-    let conn = pool.get().await.unwrap();
     let s_id = sid.to_string();
-    conn.interact(move |conn| {
-        conn.execute(
-            "INSERT INTO goal_state (id, session_id, goal_text, state, turns_used, max_turns, created_at, updated_at) \
-             VALUES (?1, ?2, 'make tea', 'active', 10, 10, '2026-09-13T00:00:00Z', '2026-09-13T00:00:00Z')",
-            rusqlite::params!["goal-2", s_id],
-        )
-    })
-    .await
-    .unwrap()
-    .unwrap();
+    {
+        let conn = pool.get().await.unwrap();
+        conn.interact(move |conn| {
+            conn.execute(
+                "INSERT INTO goal_state (id, session_id, goal_text, state, turns_used, max_turns, created_at, updated_at) \
+                 VALUES (?1, ?2, 'make tea', 'active', 10, 10, '2026-09-13T00:00:00Z', '2026-09-13T00:00:00Z')",
+                rusqlite::params!["goal-2", s_id],
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    }
 
     let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
     assert!(
@@ -390,18 +394,20 @@ async fn paused_goal_with_bot_last_classifies_completed() {
 
     // Seed paused goal
     let pool = db.pool().clone();
-    let conn = pool.get().await.unwrap();
     let s_id = sid.to_string();
-    conn.interact(move |conn| {
-        conn.execute(
-            "INSERT INTO goal_state (id, session_id, goal_text, state, turns_used, max_turns, created_at, updated_at) \
-             VALUES (?1, ?2, 'make tea', 'paused', 2, 10, '2026-09-13T00:00:00Z', '2026-09-13T00:00:00Z')",
-            rusqlite::params!["goal-3", s_id],
-        )
-    })
-    .await
-    .unwrap()
-    .unwrap();
+    {
+        let conn = pool.get().await.unwrap();
+        conn.interact(move |conn| {
+            conn.execute(
+                "INSERT INTO goal_state (id, session_id, goal_text, state, turns_used, max_turns, created_at, updated_at) \
+                 VALUES (?1, ?2, 'make tea', 'paused', 2, 10, '2026-09-13T00:00:00Z', '2026-09-13T00:00:00Z')",
+                rusqlite::params!["goal-3", s_id],
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    }
 
     let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
     assert!(
