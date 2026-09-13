@@ -42,7 +42,7 @@
 //! Only `name` and `description` are recognised today. Other keys are
 //! preserved for forward-compat but ignored.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// Compile-time table of built-in skills shipped with the binary.
@@ -98,6 +98,12 @@ pub enum SkillSource {
     User,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuxiliaryFile {
+    pub name: String,
+    pub body: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Skill {
     /// Slug used to invoke the skill (`/security-audit` → `"security-audit"`).
@@ -123,6 +129,10 @@ pub struct Skill {
     /// usual flow — the gate lives on the slash, not the skill's topic.
     pub review_gate: bool,
     pub source: SkillSource,
+    /// Auxiliary markdown files located directly in the skill directory
+    /// (e.g. `editor.md`, `fleet-directives.md`, `triage.md`), excluding
+    /// `SKILL.md`, `README.md`, `CHANGELOG.md`, dotfiles, and subdirectories.
+    pub auxiliary_files: Vec<AuxiliaryFile>,
 }
 
 /// Hard reminder prepended to a skill's body when it declares
@@ -247,6 +257,7 @@ impl Skill {
             globs: fm_globs,
             review_gate: fm_review_gate,
             source,
+            auxiliary_files: Vec::new(),
         })
     }
 
@@ -289,6 +300,69 @@ pub(crate) fn split_frontmatter(raw: &str) -> Option<(&str, &str)> {
     let body_start = (close_idx + 4).min(after_open.len());
     let body = &after_open[body_start..];
     Some((frontmatter, body))
+}
+
+/// Discover auxiliary `.md` files directly in a skill directory.
+///
+/// Rules:
+/// - Only inspects top-level directory entries (does not recurse into subdirectories).
+/// - Must have `.md` extension.
+/// - Excludes `SKILL.md`, `README.md`, `CHANGELOG.md` (case-sensitive exact match).
+/// - Excludes hidden/dotfiles (starting with `.`).
+/// - Sorted by file name.
+/// - Unreadable files log a warning and are skipped.
+pub fn discover_aux_files(dir: &Path) -> Vec<AuxiliaryFile> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut aux_files = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Top-level files only: skip directories entirely (e.g. reviews/, tools/).
+        if !path.is_file() {
+            continue;
+        }
+
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+
+        // Skip dotfiles.
+        if file_name.starts_with('.') {
+            continue;
+        }
+
+        // Must end with .md
+        if !file_name.ends_with(".md") {
+            continue;
+        }
+
+        // Exclude exact SKILL.md, README.md, CHANGELOG.md
+        if matches!(file_name, "SKILL.md" | "README.md" | "CHANGELOG.md") {
+            continue;
+        }
+
+        match std::fs::read_to_string(&path) {
+            Ok(body) => {
+                aux_files.push(AuxiliaryFile {
+                    name: file_name.to_string(),
+                    body: body.trim().to_string(),
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "skills: failed to read auxiliary file '{}' at {}: {e}",
+                    file_name,
+                    path.display()
+                );
+            }
+        }
+    }
+
+    aux_files.sort_by(|a, b| a.name.cmp(&b.name));
+    aux_files
 }
 
 /// User skills directory: `~/.opencrabs/skills/`.
@@ -352,7 +426,8 @@ pub fn load_all_skills() -> Vec<Skill> {
                         }
                     };
                     match Skill::parse(name, &raw, SkillSource::User) {
-                        Ok(skill) => {
+                        Ok(mut skill) => {
+                            skill.auxiliary_files = discover_aux_files(&path);
                             by_name.insert(skill.name.clone(), skill);
                         }
                         Err(e) => {
@@ -392,7 +467,8 @@ pub fn load_all_skills() -> Vec<Skill> {
                 }
             };
             match Skill::parse(name, &raw, SkillSource::User) {
-                Ok(skill) => {
+                Ok(mut skill) => {
+                    skill.auxiliary_files = discover_aux_files(&path);
                     by_name.insert(skill.name.clone(), skill);
                 }
                 Err(e) => {
@@ -454,6 +530,7 @@ pub fn normalize_skill_slug(raw: &str) -> String {
 pub fn active_skill_bodies(
     active_skills: &std::collections::HashSet<String>,
     skills: &[Skill],
+    seen_aux: &std::collections::HashMap<String, Vec<String>>,
 ) -> String {
     let mut section = String::new();
     for skill in skills {
@@ -465,6 +542,19 @@ pub fn active_skill_bodies(
                 skill.slash_name,
                 skill.prompt_body()
             ));
+
+            // Reinject consumed auxiliary files (issue #216).
+            if let Some(files) = seen_aux.get(&skill.name) {
+                for file_name in files {
+                    if let Some(aux) = skill.auxiliary_files.iter().find(|a| &a.name == file_name)
+                    {
+                        section.push_str(&format!(
+                            "\n\n--- Active Auxiliary: {} ---\n{}",
+                            aux.name, aux.body
+                        ));
+                    }
+                }
+            }
         }
     }
     section
@@ -550,5 +640,39 @@ mod tests {
                 "not idempotent for {raw:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_discover_aux_files_exclusions_and_sorting() {
+        let temp = tempfile::tempdir().expect("tempdir failed");
+        let dir = temp.path();
+
+        // 1. Regular auxiliary files
+        std::fs::write(dir.join("editor.md"), "editor procedure").unwrap();
+        std::fs::write(dir.join("triage.md"), "triage procedure").unwrap();
+        std::fs::write(dir.join("fleet-directives.md"), "fleet directives").unwrap();
+
+        // 2. Excluded files
+        std::fs::write(dir.join("SKILL.md"), "main skill definition").unwrap();
+        std::fs::write(dir.join("README.md"), "readme").unwrap();
+        std::fs::write(dir.join("CHANGELOG.md"), "changelog").unwrap();
+        std::fs::write(dir.join(".hidden.md"), "hidden").unwrap();
+        std::fs::write(dir.join("oc-deploy"), "binary/tool script").unwrap();
+
+        // 3. Subdirectories (should not recurse)
+        let sub = dir.join("reviews");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("reviewer-a.md"), "reviewer a").unwrap();
+
+        let aux = discover_aux_files(dir);
+        let names: Vec<String> = aux.into_iter().map(|a| a.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "editor.md".to_string(),
+                "fleet-directives.md".to_string(),
+                "triage.md".to_string(),
+            ]
+        );
     }
 }

@@ -1196,7 +1196,10 @@ impl AgentService {
             // IDENTITY field, the bare slug) so the contract "a skill
             // registered in the documented `- <skill-slug>` form IS injected"
             // is directly testable rather than buried in this loop.
-            let skill_section = crate::brain::skills::active_skill_bodies(&active_skills, &skills);
+            // #216: pass consumed auxiliary files for the session.
+            let seen_aux = crate::brain::tools::seen_skills::aux_seen_for_session(session_id);
+            let skill_section =
+                crate::brain::skills::active_skill_bodies(&active_skills, &skills, &seen_aux);
             if !skill_section.is_empty()
                 && let Some(ref mut brain) = context.system_brain
             {

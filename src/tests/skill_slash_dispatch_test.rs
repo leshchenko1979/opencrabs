@@ -9,7 +9,7 @@
 
 use crate::brain::commands::UserCommand;
 use crate::brain::skills::{Skill, SkillSource};
-use crate::channels::commands::{ChannelCommand, match_user_command_inner};
+use crate::channels::commands::{match_user_command_inner, ChannelCommand};
 
 fn skill(name: &str, body: &str) -> Skill {
     Skill {
@@ -20,6 +20,7 @@ fn skill(name: &str, body: &str) -> Skill {
         globs: Vec::new(),
         review_gate: false,
         source: SkillSource::Builtin,
+        auxiliary_files: Vec::new(),
     }
 }
 
@@ -106,6 +107,7 @@ fn review_gated_skill_dispatch_prepends_reminder() {
         globs: Vec::new(),
         review_gate: true,
         source: crate::brain::skills::SkillSource::User,
+        auxiliary_files: Vec::new(),
     };
     let skills = vec![gated];
     match match_user_command_inner("/drop-release", &[], &skills) {

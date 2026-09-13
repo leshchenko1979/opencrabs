@@ -2,10 +2,10 @@
 // and any skill-body consumption (read or slug-load) marks the skill SEEN so
 // the post-compaction inventory stamp (#125) lists it.
 
-use crate::brain::tools::Tool;
-use crate::brain::tools::ToolExecutionContext;
 use crate::brain::tools::load_brain_file::*;
 use crate::brain::tools::seen_skills;
+use crate::brain::tools::Tool;
+use crate::brain::tools::ToolExecutionContext;
 use uuid::Uuid;
 
 fn ctx() -> ToolExecutionContext {
@@ -125,6 +125,58 @@ fn read_file_whole_read_marks_skill_seen_via_hook() {
     assert!(seen_skills::was_seen(session, "grafana"));
 }
 
+#[test]
+fn aux_file_path_extraction_and_registry_isolation() {
+    let session = Uuid::new_v4();
+
+    // 1. Top-level aux .md extracts slug
+    let p_top =
+        std::path::Path::new("/root/.opencrabs/profiles/ops/skills/opencrabs-dev/editor.md");
+    assert_eq!(
+        seen_skills::skill_slug_from_path(p_top),
+        Some("opencrabs-dev".to_string())
+    );
+
+    // 2. Nested .md does NOT extract slug
+    let p_nested = std::path::Path::new(
+        "/root/.opencrabs/profiles/ops/skills/opencrabs-dev/reviews/reviewer-a.md",
+    );
+    assert_eq!(seen_skills::skill_slug_from_path(p_nested), None);
+
+    // 3. Non-.md does NOT extract slug
+    let p_non_md =
+        std::path::Path::new("/root/.opencrabs/profiles/ops/skills/opencrabs-dev/tools/oc-deploy");
+    assert_eq!(seen_skills::skill_slug_from_path(p_non_md), None);
+
+    // 4. mark_aux_seen populates aux_seen_for_session
+    seen_skills::mark_aux_seen(session, "opencrabs-dev", "editor.md");
+    seen_skills::mark_aux_seen(session, "opencrabs-dev", "fleet-directives.md");
+    let aux = seen_skills::aux_seen_for_session(session);
+    let dev_files = aux
+        .get("opencrabs-dev")
+        .expect("must contain opencrabs-dev");
+    assert_eq!(
+        dev_files,
+        &vec!["editor.md".to_string(), "fleet-directives.md".to_string()]
+    );
+
+    // 5. Gate isolation: aux read does NOT set was_seen / seen_since_compaction
+    assert!(!seen_skills::was_seen(session, "opencrabs-dev"));
+    assert!(!seen_skills::seen_since_compaction(
+        session,
+        "opencrabs-dev"
+    ));
+
+    // 6. Stamp union includes aux-only skills
+    let stamp = seen_skills::stamp_skills_for_session(session);
+    assert!(stamp.contains("opencrabs-dev"));
+
+    // 7. unmark_seen clears aux registry
+    seen_skills::unmark_seen(session, "opencrabs-dev");
+    let aux_after = seen_skills::aux_seen_for_session(session);
+    assert!(!aux_after.contains_key("opencrabs-dev"));
+}
+
 // ── acceptance 3: the STAMP is the real active ∪ seen union (#138 part 2) ──
 
 /// Replaces the old `stamp_union_dedupes_active_and_seen`, which built two
@@ -166,6 +218,7 @@ fn stamp_union_spans_active_and_seen_while_active_stays_narrow() {
     let rendered = crate::brain::agent::service::AgentService::format_context_inventory(
         200_000,
         &stamp,
+        &std::collections::HashMap::new(),
         &std::collections::HashSet::new(),
         None,
     );
@@ -307,8 +360,8 @@ async fn filename_form_traversal_still_refused() {
 
 mod persistence {
     use crate::brain::tools::seen_skills;
-    use crate::db::Database;
     use crate::db::repository::SessionSkillsRepository;
+    use crate::db::Database;
     use uuid::Uuid;
 
     async fn repo() -> (Database, SessionSkillsRepository) {

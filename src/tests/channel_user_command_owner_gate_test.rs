@@ -20,7 +20,7 @@
 
 use crate::brain::commands::UserCommand;
 use crate::brain::skills::{Skill, SkillSource};
-use crate::channels::commands::{ChannelCommand, gate_user_command, match_user_command_inner};
+use crate::channels::commands::{gate_user_command, match_user_command_inner, ChannelCommand};
 
 fn deploy_command() -> UserCommand {
     UserCommand {
@@ -49,6 +49,7 @@ fn audit_skill() -> Skill {
         globs: Vec::new(),
         review_gate: false,
         source: SkillSource::User,
+        auxiliary_files: Vec::new(),
     }
 }
 

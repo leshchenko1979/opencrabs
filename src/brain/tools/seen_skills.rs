@@ -62,22 +62,71 @@ fn active_registry() -> &'static std::sync::Mutex<HashMap<Uuid, HashSet<String>>
     ACTIVE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// In-memory registry for consumed auxiliary files (issue #216):
+/// `(session, slug) -> BTreeSet<file_name>` (e.g. `editor.md`, `fleet-directives.md`).
+///
+/// In-memory only; does not affect the safety gate (`seen_since_compaction`),
+/// but is included in `stamp_skills_for_session` and consumed for post-compaction
+/// auxiliary reinjection.
+type AuxMap = HashMap<(Uuid, String), BTreeSet<String>>;
+
+fn aux_registry() -> &'static std::sync::Mutex<AuxMap> {
+    static AUX: OnceLock<std::sync::Mutex<AuxMap>> = OnceLock::new();
+    AUX.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 /// Extract the skill slug from a path that points at a skill definition
-/// file: any path whose second-to-last component is `skills` and whose
-/// file name is `SKILL.md` yields `Some(slug)`. Returns `None` for
-/// everything else (brain files, regular files, skill assets).
+/// or auxiliary file: any `.md` file whose second-to-last component is
+/// `skills` (i.e. `skills/<slug>/<file>.md`) yields `Some(slug)`.
+/// Returns `None` for everything else (brain files, regular files,
+/// nested subdirectories such as `skills/<slug>/reviews/<file>.md`, non-`.md` files).
 pub fn skill_slug_from_path(path: &Path) -> Option<String> {
     let file_name = path.file_name()?.to_str()?;
-    if file_name != "SKILL.md" {
+    if !file_name.ends_with(".md") {
         return None;
     }
     let mut comps = path.components().rev();
-    comps.next()?; // SKILL.md
+    comps.next()?; // <file>.md
     let slug = comps.next()?;
     if comps.next()?.as_os_str() != "skills" {
         return None;
     }
     slug.as_os_str().to_str().map(|s| s.to_string())
+}
+
+/// Record that `session_id` consumed an auxiliary file belonging to `slug` (issue #216).
+///
+/// Kept in a dedicated in-memory registry separate from `mark_seen` so that
+/// reading an auxiliary file alone does NOT satisfy the `seen_since_compaction`
+/// safety skill gate (which requires the main `SKILL.md` body / role router).
+pub fn mark_aux_seen(session_id: Uuid, slug: &str, file: &str) {
+    let slug = crate::brain::skills::normalize_skill_slug(slug);
+    aux_registry()
+        .lock()
+        .expect("seen_skills aux registry poisoned")
+        .entry((session_id, slug))
+        .or_default()
+        .insert(file.to_string());
+}
+
+/// Retrieve all consumed auxiliary files for `session_id`, grouped by skill slug
+/// with sorted file names.
+pub fn aux_seen_for_session(session_id: Uuid) -> HashMap<String, Vec<String>> {
+    let reg = aux_registry()
+        .lock()
+        .expect("seen_skills aux registry poisoned");
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    for ((sess, slug), files) in reg.iter() {
+        if *sess == session_id && !files.is_empty() {
+            map.entry(slug.clone())
+                .or_default()
+                .extend(files.iter().cloned());
+        }
+    }
+    for files in map.values_mut() {
+        files.sort();
+    }
+    map
 }
 
 /// Record that `session_id` consumed skill `slug` (via read or slug-form
@@ -299,6 +348,10 @@ pub fn unmark_seen(session_id: Uuid, slug: &str) {
         .lock()
         .expect("seen_skills registry poisoned")
         .remove(&(session_id, slug.clone()));
+    aux_registry()
+        .lock()
+        .expect("seen_skills aux registry poisoned")
+        .remove(&(session_id, slug.clone()));
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
             match delete_seen(session_id, &slug).await {
@@ -394,6 +447,10 @@ pub fn unmark_active(session_id: Uuid, slug: &str) {
             act.remove(&session_id);
         }
     }
+    aux_registry()
+        .lock()
+        .expect("seen_skills aux registry poisoned")
+        .remove(&(session_id, slug.clone()));
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
             match persist_active(session_id, &slug, false).await {
@@ -435,6 +492,7 @@ pub fn active_for_session(session_id: Uuid) -> HashSet<String> {
 pub fn stamp_skills_for_session(session_id: Uuid) -> HashSet<String> {
     let mut set = active_for_session(session_id);
     set.extend(seen_for_session(session_id));
+    set.extend(aux_seen_for_session(session_id).into_keys());
     set
 }
 
@@ -445,6 +503,12 @@ pub fn stamp_skills_for_session(session_id: Uuid) -> HashSet<String> {
 /// The SEEN registry is deliberately untouched: a consumed skill stays
 /// consumed as far as the stamp's inventory is concerned.
 pub fn forget_session(session_id: Uuid) {
+    {
+        let mut aux = aux_registry()
+            .lock()
+            .expect("seen_skills aux registry poisoned");
+        aux.retain(|(sess, _), _| *sess != session_id);
+    }
     let removed = active_registry()
         .lock()
         .expect("seen_skills active registry poisoned")
@@ -494,6 +558,10 @@ mod tests {
             skill_slug_from_path(Path::new("skills/foo/SKILL.md")),
             Some("foo".to_string())
         );
+        assert_eq!(
+            skill_slug_from_path(Path::new("skills/foo/other.md")),
+            Some("foo".to_string())
+        );
     }
 
     #[test]
@@ -502,9 +570,12 @@ mod tests {
             skill_slug_from_path(Path::new("/home/user/MEMORY.md")),
             None
         );
-        assert_eq!(skill_slug_from_path(Path::new("skills/foo/other.md")), None);
         assert_eq!(
             skill_slug_from_path(Path::new("not-skills/foo/SKILL.md")),
+            None
+        );
+        assert_eq!(
+            skill_slug_from_path(Path::new("skills/foo/nested/other.md")),
             None
         );
         assert_eq!(skill_slug_from_path(Path::new("skills/foo/")), None);
