@@ -119,6 +119,9 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // in memory (`AgentService::active_skills`) and was born EMPTY after any
     // restart. Persisted here so boot hydrates it alongside the seen set.
     include_str!("../migrations/20260912210000_add_session_seen_skills_active.sql"),
+    // FORK (#200): track whether a button-tap turn is actively in-flight
+    // so boot classifier does not spuriously resume completed turns.
+    include_str!("../migrations/20260913000001_session_bindings_turn_open_at.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
@@ -384,10 +387,7 @@ impl Database {
                         conn,
                         user_version,
                     )?;
-                    crate::db::migration_heal::skip_applied_active_migration(
-                        conn,
-                        user_version,
-                    )?;
+                    crate::db::migration_heal::skip_applied_active_migration(conn, user_version)?;
 
                     migrations.to_latest(conn)?;
 

@@ -1,0 +1,12 @@
+-- Track whether a button-tap turn is still actively in-flight (#200).
+--
+-- #180 added `last_origin` so button taps can be boot-recovery candidates.
+-- However, `last_origin` is never reset to 'text' when a turn finishes,
+-- causing finished turns to be spuriously re-executed if a restart occurs
+-- within WAKE_RECENT_SECS.
+--
+-- `turn_open_at` records the timestamp when a tap-initiated turn is started.
+-- It is cleared when the turn completes (unless cancelled by shutdown,
+-- which preserves recovery under #1462). The boot classifier only short-circuits
+-- to `interrupted` if `last_origin == 'callback'` AND `turn_open_at IS NOT NULL`.
+ALTER TABLE session_bindings ADD COLUMN turn_open_at INTEGER;
