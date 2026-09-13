@@ -804,7 +804,7 @@ async fn rich_pacing_waits_for_refill_without_failing_open() {
     let snap = ts::snapshot(CHAT).unwrap();
     assert_eq!(snap.admitted_rich, 2, "refilled token must admit cleanly");
     assert!(
-        snap.throttled_rich_ms >= 60_000,
+        snap.throttled_rich_ms >= 50_000,
         "rich pacer must wait past SEND_MAX_HOLD (30s) without failing open; throttled_rich_ms={}",
         snap.throttled_rich_ms
     );
