@@ -76,7 +76,6 @@ pub mod rsi_propose;
 pub mod self_improve;
 pub mod self_improve_guards;
 pub mod session_search;
-pub mod skill_gate;
 pub mod slash_command;
 pub mod slash_onboard;
 pub mod suggest_options;
