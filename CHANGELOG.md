@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 🐛 Bug Fixes
+
+- `fix(daemon)`: await A2A gateway readiness before spawning cron schedulers (#196)
+- `fix(daemon)`: pre-acquire active profile scheduler lock and probe live instances to prevent cross-profile scheduler lock crossing (#194)
+
 ## [0.5.1] - 2026-09-12
 
 213 commits since v0.5.0, 6 contributors. 373 files changed, +27,981 / -2,729 lines.
