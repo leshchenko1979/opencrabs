@@ -118,29 +118,42 @@ pub(crate) async fn cmd_daemon(config: &crate::config::Config) -> Result<()> {
     // The guard is passed into cmd_chat_inner so it is not re-acquired (flock self-denial).
     let active_lock = crate::config::profile::acquire_scheduler_lock(&active);
 
-    match crate::config::profile::list_profiles() {
-        Ok(entries) => {
-            for entry in entries {
-                // The active profile is already covered by cmd_chat_inner's
-                // scheduler. Skipping it here avoids running its jobs twice.
-                if entry.name == active {
-                    continue;
+    // Only adopt secondary profiles if running the default profile and adoption is enabled (#184).
+    // An explicit `-p <name>` daemon is dedicated to that profile and does not adopt foreign profiles.
+    let is_default_profile = crate::config::profile::active_profile().is_none()
+        || crate::config::profile::active_profile() == Some("default");
+    let should_adopt = is_default_profile && config.daemon.adopt_profiles;
+
+    if should_adopt {
+        match crate::config::profile::list_profiles() {
+            Ok(entries) => {
+                for entry in entries {
+                    // The active profile is already covered by cmd_chat_inner's
+                    // scheduler. Skipping it here avoids running its jobs twice.
+                    if entry.name == active {
+                        continue;
+                    }
+                    // #194: Don't adopt a profile's scheduler if that profile already has a
+                    // live daemon or TUI instance running.
+                    if crate::config::profile::instance_running(&entry.name) {
+                        tracing::info!(
+                            "Multi-profile daemon: '{}' has a live instance — not adopting its scheduler",
+                            entry.name
+                        );
+                        continue;
+                    }
+                    tokio::spawn(spawn_cron_scheduler_for_profile(entry.name));
                 }
-                // #194: Don't adopt a profile's scheduler if that profile already has a
-                // live daemon or TUI instance running.
-                if crate::config::profile::instance_running(&entry.name) {
-                    tracing::info!(
-                        "Multi-profile daemon: '{}' has a live instance — not adopting its scheduler",
-                        entry.name
-                    );
-                    continue;
-                }
-                tokio::spawn(spawn_cron_scheduler_for_profile(entry.name));
+            }
+            Err(e) => {
+                tracing::warn!("daemon: list_profiles failed, running active profile only: {e}");
             }
         }
-        Err(e) => {
-            tracing::warn!("daemon: list_profiles failed, running active profile only: {e}");
-        }
+    } else {
+        tracing::debug!(
+            "Multi-profile daemon: adoption skipped (active='{active}', adopt_profiles={})",
+            config.daemon.adopt_profiles
+        );
     }
     cmd_chat_inner(config, None, false, true, active_lock).await
 }
@@ -231,7 +244,7 @@ async fn spawn_cron_scheduler_for_profile(profile_name: String) {
                 service_context,
             );
             tracing::info!("Multi-profile daemon: cron scheduler running for profile '{name}'");
-            scheduler.run().await; // loops forever
+            scheduler.run_adoptive(name).await;
             Ok(())
         })
         .await;
