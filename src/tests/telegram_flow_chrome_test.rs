@@ -109,7 +109,7 @@ async fn test_goal_turn_budget_formatting() {
     // Classic chrome
     let classic_html = multi_para.chrome_classic(false);
     assert!(
-        classic_html.contains("<blockquote expandable><b>🎯</b> Heading paragraph (2/15 turns)")
+        classic_html.contains("<blockquote expandable><b>🎯</b> Heading paragraph\n\nSecond paragraph body (2/15 turns)</blockquote>")
     );
 }
 
@@ -141,7 +141,7 @@ fn chrome_classic_order_title_checklist_rows_goal_and_omit_state_and_ctx() {
     assert_eq!(
         out,
         "📋 <b>Ship plan mode</b>\n☑ scope it\n☐ build it\n\n\
-         <blockquote expandable><b>🎯</b> close B</blockquote>"
+         <blockquote expandable><b>🎯</b> close B (0/20 turns)</blockquote>"
     );
     assert!(
         !out.contains("Editing plan"),
@@ -245,7 +245,7 @@ fn rich_prose_then_checklist_then_goal_use_hr_boundaries() {
     assert_eq!(
         out,
         "<p>📋 <b>P</b></p><details><summary>Ctx</summary><p>body</p></details>\
-         <hr><p>☐ a</p><hr><p><b>🎯</b> g</p>"
+         <hr><p>☐ a</p><hr><p><b>🎯</b> g (0/20 turns)</p>"
     );
 }
 
@@ -319,7 +319,7 @@ fn rich_multi_paragraph_goal_collapses_with_first_paragraph_summary() {
     let out = s.chrome_rich(false);
     assert_eq!(
         out,
-        "<details><summary><b>🎯</b> ship the release</summary>\
+        "<details><summary><b>🎯</b> ship the release (0/20 turns)</summary>\
          <p>then tag it</p><p>then announce</p></details>"
     );
 }
@@ -328,7 +328,7 @@ fn rich_multi_paragraph_goal_collapses_with_first_paragraph_summary() {
 fn rich_one_paragraph_goal_stays_plain_always_visible() {
     let s = sections(None, None, Some("ship the release"));
     let out = s.chrome_rich(false);
-    assert_eq!(out, "<p><b>🎯</b> ship the release</p>");
+    assert_eq!(out, "<p><b>🎯</b> ship the release (0/20 turns)</p>");
     assert!(!out.contains("<details"), "one paragraph never collapses");
 }
 
@@ -337,12 +337,18 @@ fn completed_goal_keeps_target_icon_live_and_swaps_to_check_at_settle() {
     let mut s = sections(None, None, Some("close the audit"));
     s.goal.as_mut().expect("goal set").completed = true;
     // While the turn is still running a completed goal keeps 🎯 (Decision 10).
-    assert_eq!(s.chrome_rich(false), "<p><b>🎯</b> close the audit</p>");
+    assert_eq!(
+        s.chrome_rich(false),
+        "<p><b>🎯</b> close the audit (0/20 turns)</p>"
+    );
     // At settle only the icon swaps; the word never changes.
-    assert_eq!(s.chrome_rich(true), "<p><b>✅</b> close the audit</p>");
+    assert_eq!(
+        s.chrome_rich(true),
+        "<p><b>✅</b> close the audit (0/20 turns)</p>"
+    );
     assert_eq!(
         s.chrome_classic(true),
-        "<blockquote expandable><b>✅</b> close the audit</blockquote>"
+        "<blockquote expandable><b>✅</b> close the audit (0/20 turns)</blockquote>"
     );
 }
 
@@ -350,7 +356,10 @@ fn completed_goal_keeps_target_icon_live_and_swaps_to_check_at_settle() {
 fn active_goal_never_shows_check_even_at_settle() {
     // Settle with the goal still active → 🎯 (Decision 10 rule 5).
     let s = sections(None, None, Some("still going"));
-    assert_eq!(s.chrome_rich(true), "<p><b>🎯</b> still going</p>");
+    assert_eq!(
+        s.chrome_rich(true),
+        "<p><b>🎯</b> still going (0/20 turns)</p>"
+    );
 }
 
 // ── plan-state copy (Decision 7): Editing chrome carries no slash hints ──
@@ -609,9 +618,9 @@ fn details_populated_flow_keeps_chrome_outside_the_details() {
     );
     // Chrome is an always-visible <p> block BEFORE the collapsed log, with a
     // kept spacer, not inside the summary.
-    assert!(
-        out.starts_with("<p><b>🎯</b> finish the audit</p><p>&nbsp;</p><details><summary><sub>")
-    );
+    assert!(out.starts_with(
+        "<p><b>🎯</b> finish the audit (0/20 turns)</p><p>&nbsp;</p><details><summary><sub>"
+    ));
     assert!(out.ends_with("</details>"));
     assert!(out.contains("⏱ 0:08"));
 }
