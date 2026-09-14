@@ -250,7 +250,11 @@ impl CronScheduler {
     /// Spawn the scheduler as a background tokio task.
     /// Polls every 60 seconds for due jobs.
     pub fn spawn(self) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(self.run())
+        let scheduler_profile = crate::config::profile::current_profile_name();
+        tokio::spawn(crate::config::profile::with_profile_home_async(
+            Some(&scheduler_profile),
+            self.run(),
+        ))
     }
 
     /// Run the polling loop in the CURRENT task (no internal spawn). The
@@ -329,28 +333,24 @@ impl CronScheduler {
                 let notifier = self.session_notifier.clone();
                 let job_name = job.name.clone();
                 let job_id = job.id;
+                let scheduler_profile = crate::config::profile::current_profile_name();
+                let target_profile = job
+                    .profile_name
+                    .as_deref()
+                    .unwrap_or(&scheduler_profile)
+                    .to_string();
+
                 tokio::spawn(
                     async move {
-                        // For foreign-profile jobs, wrap the ENTIRE execution in a
-                        // task-local profile home scope. This means every tool call
-                        // the agent makes (memory writes, config reads, file ops,
-                        // brain reads) resolves to the job's profile home, not the
+                        // Wrap the ENTIRE execution in a task-local profile home scope
+                        // (#182, #184). This means every tool call the agent makes
+                        // (memory writes, config reads, file ops, brain reads) and all
+                        // log events resolve to the job's profile home, not the
                         // process profile. The scope lives until the task ends, so
                         // it persists across every .await inside the agent loop.
-                        //
-                        // This spawned task does NOT inherit the scheduler's own
-                        // task-local home (tokio::spawn drops it), so it defaults to
-                        // the process global. We therefore scope whenever the job's
-                        // profile differs from the process global, which is exactly
-                        // the multi-profile daemon case: a per-profile scheduler's
-                        // jobs are stamped with a non-global profile and get scoped
-                        // here.
-                        let profile = job.profile_name.as_deref();
-                        let active = crate::config::profile::active_profile().unwrap_or("default");
-                        let needs_scope = profile.is_some() && profile != Some(active);
-
-                        let result = if needs_scope {
-                            crate::config::profile::with_profile_home_async(profile, async {
+                        let result = crate::config::profile::with_profile_home_async(
+                            Some(&target_profile),
+                            async {
                                 tracing::info!(
                                     "Cron job '{}' — task-local profile home set to {:?}",
                                     job.name,
@@ -423,24 +423,9 @@ impl CronScheduler {
                                     }
                                     Err(e) => Err(e),
                                 }
-                            })
-                            .await
-                        } else {
-                            match resolve_or_create_cron_session(&ctx, &job).await {
-                                Ok(cron_sid) => {
-                                    execute_job(
-                                        &job,
-                                        &factory,
-                                        &ctx,
-                                        cron_sid,
-                                        &run_repo,
-                                        notifier.as_ref(),
-                                    )
-                                    .await
-                                }
-                                Err(e) => Err(e),
-                            }
-                        };
+                            },
+                        )
+                        .await;
 
                         if let Err(e) = result {
                             tracing::error!("Cron job '{}' failed: {e}", job.name);
@@ -1419,54 +1404,57 @@ async fn deliver_telegram(
     // handle — their delivery survives the tick regardless.
     let message = message.to_string();
     let job_name = job_name.to_string();
-    Some(tokio::spawn(async move {
-        match crate::channels::telegram::send::send_markdown_outbox(
-            &bot,
-            teloxide::types::ChatId(chat_id),
-            thread,
-            &message,
-            "cron",
-            &job_name,
-            None,
-        )
-        .await
-        {
-            Ok(outbox) => {
-                tracing::info!(
-                    "Cron result for '{job_name}' delivered to Telegram chat {chat_id}{} ({} part(s))",
-                    outbox
-                        .effective_thread_id
-                        .map(|t| format!(" thread {}", t.0.0))
-                        .unwrap_or_default(),
-                    outbox.sent.len()
-                );
-                // Persist keyed by message id so a reply to the cron post
-                // resolves to this exact content (#234, #169).
-                outbox.record_outgoing(pool, chat_id).await;
-            }
-            Err(e) => {
-                if let Some(t) = thread_id {
-                    tracing::error!(
-                        "Cron delivery for '{job_name}' to chat {chat_id} thread {t} failed: {e} — \
-                         if the error is 'message thread not found', topic {t} does not exist \
-                         in chat {chat_id}; fix the job's deliver_to (there is no fallback to the \
-                         default topic)"
+    let profile = crate::config::profile::current_profile_name();
+    Some(tokio::spawn(
+        crate::config::profile::with_profile_home_async(Some(&profile), async move {
+            match crate::channels::telegram::send::send_markdown_outbox(
+                &bot,
+                teloxide::types::ChatId(chat_id),
+                thread,
+                &message,
+                "cron",
+                &job_name,
+                None,
+            )
+            .await
+            {
+                Ok(outbox) => {
+                    tracing::info!(
+                        "Cron result for '{job_name}' delivered to Telegram chat {chat_id}{} ({} part(s))",
+                        outbox
+                            .effective_thread_id
+                            .map(|t| format!(" thread {}", t.0.0))
+                            .unwrap_or_default(),
+                        outbox.sent.len()
                     );
-                } else {
-                    tracing::error!("Cron delivery for '{job_name}' to chat {chat_id} failed: {e}");
+                    // Persist keyed by message id so a reply to the cron post
+                    // resolves to this exact content (#234, #169).
+                    outbox.record_outgoing(pool, chat_id).await;
                 }
-                // Detached delivery: the outcome lands after the run row was
-                // already stamped success (#107). Flip it so a silent drop
-                // never masquerades as a clean run.
-                record_delivery_failure(
-                    pool,
-                    run_id,
-                    &format!("Telegram send to chat {chat_id} failed: {e}"),
-                )
-                .await;
+                Err(e) => {
+                    if let Some(t) = thread_id {
+                        tracing::error!(
+                            "Cron delivery for '{job_name}' to chat {chat_id} thread {t} failed: {e} — \
+                             if the error is 'message thread not found', topic {t} does not exist \
+                             in chat {chat_id}; fix the job's deliver_to (there is no fallback to the \
+                             default topic)"
+                        );
+                    } else {
+                        tracing::error!("Cron delivery for '{job_name}' to chat {chat_id} failed: {e}");
+                    }
+                    // Detached delivery: the outcome lands after the run row was
+                    // already stamped success (#107). Flip it so a silent drop
+                    // never masquerades as a clean run.
+                    record_delivery_failure(
+                        pool,
+                        run_id,
+                        &format!("Telegram send to chat {chat_id} failed: {e}"),
+                    )
+                    .await;
+                }
             }
-        }
-    }))
+        }),
+    ))
 }
 
 /// Whether a `get_chat` result describes a forum (topics-enabled) group.
