@@ -878,6 +878,7 @@ pub(crate) async fn refresh_plan_card(
                 true,
                 media.clone(),
                 kb_val.clone(),
+                super::governor::FinalDialect::Markdown,
             )
             .await;
             if !admitted {

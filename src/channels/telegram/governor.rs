@@ -292,16 +292,28 @@ pub(crate) fn ensure_bucket(
 // Per-peer state
 // ---------------------------------------------------------------------------
 
+/// Dialect of the queued final payload (#229). Distinguishes HTML (classic/rich)
+/// from Markdown (rich plan cards), ensuring media-empty markdown edits do not
+/// get sent to Telegram as HTML and corrupt whitespace / formatting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum FinalDialect {
+    #[default]
+    Html,
+    Markdown,
+}
+
 /// A final edit Telegram refused transiently, held latest-wins per message id
 /// until the drainer can land it.
 #[derive(Clone)]
 struct PendingFinal {
     bot: Bot,
-    /// HTML for rich/classic finals; MARKDOWN when `media` is non-empty (the
-    /// markdown+media edit dialect shares this field — see `run_final_edit`).
+    /// HTML for rich/classic finals; MARKDOWN when `dialect` is `FinalDialect::Markdown`
+    /// (the markdown+media edit dialect shares this field — see `run_final_edit`).
     html: String,
     /// Rich-API edit when true, classic HTML `editMessageText` otherwise.
     rich: bool,
+    /// Dialect of the final payload (#229).
+    dialect: FinalDialect,
     /// Media entries (rendered mermaid diagrams) for the markdown+media edit
     /// dialect (#134 family). Empty for every other final shape.
     media: Vec<super::rich::mermaid::MediaEntry>,
@@ -709,13 +721,24 @@ pub(crate) async fn edit_admission(
     html: String,
     rich: bool,
 ) -> bool {
-    edit_admission_media_kb(bot, chat_id, msg_id, class, html, rich, Vec::new(), None).await
+    edit_admission_media_kb(
+        bot,
+        chat_id,
+        msg_id,
+        class,
+        html,
+        rich,
+        Vec::new(),
+        None,
+        FinalDialect::Html,
+    )
+    .await
 }
 
-/// Media-and-keyboard-bearing variant of [`edit_admission`] (#134, #155):
-/// preserves rendered-mermaid [`MediaEntry`]s and optional `reply_markup` across
-/// queued final drains so rate-governed plan card and rich edits do not strip
-/// media or inline keyboards.
+/// Media-and-keyboard-bearing variant of [`edit_admission`] (#134, #155, #229):
+/// preserves rendered-mermaid [`MediaEntry`]s, optional `reply_markup`, and the
+/// payload [`FinalDialect`] across queued final drains so rate-governed plan card
+/// and rich edits do not strip media, lose keyboards, or corrupt formatting dialects.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn edit_admission_media_kb(
     bot: &Bot,
@@ -726,6 +749,7 @@ pub(crate) async fn edit_admission_media_kb(
     rich: bool,
     media: Vec<super::rich::mermaid::MediaEntry>,
     reply_markup: Option<serde_json::Value>,
+    dialect: FinalDialect,
 ) -> bool {
     // DMs untouched (positive ids), matching the G1 scope guard.
     if chat_id.0 >= 0 {
@@ -779,6 +803,7 @@ pub(crate) async fn edit_admission_media_kb(
                         bot: bot.clone(),
                         html,
                         rich,
+                        dialect,
                         media,
                         reply_markup,
                         attempts: 0,
@@ -919,6 +944,7 @@ async fn deliver_final(chat_id: i64, msg_id: i32, mut pending: PendingFinal) {
         msg_id,
         &pending.html,
         pending.rich,
+        pending.dialect,
         &pending.media,
         pending.reply_markup.as_ref(),
     )
@@ -991,58 +1017,62 @@ async fn deliver_final(chat_id: i64, msg_id: i32, mut pending: PendingFinal) {
 }
 
 /// The wire shapes a queued final can take, mirroring the call sites that
-/// produced the payload: rich HTML, classic HTML edit, or — when media
-/// entries ride along — the markdown+media rich edit (plan card, #134
-/// family), where `html` carries the raw markdown body.
-#[allow(clippy::too_many_arguments)]
+/// The wire shapes a queued final can take, mirroring the call sites that
+/// produced the payload: rich HTML, classic HTML edit, or the markdown+media
+/// rich edit (plan card, #134, #229), where `html` carries the raw markdown body.
 async fn run_final_edit(
     bot: &Bot,
     chat_id: i64,
     msg_id: i32,
     html: &str,
     rich: bool,
+    dialect: FinalDialect,
     media: &[super::rich::mermaid::MediaEntry],
     reply_markup: Option<&serde_json::Value>,
 ) -> Result<(), String> {
-    if !media.is_empty() {
-        super::rich::api::edit_rich_markdown_media(
-            bot.api_url().as_str(),
-            bot.token(),
-            chat_id,
-            msg_id,
-            html,
-            media,
-            reply_markup,
-            "turn",
-            "-",
-        )
-        .await
-        .map_err(|e| e.to_string())
-    } else if rich {
-        super::rich::api::edit_rich_html(
-            bot.api_url().as_str(),
-            bot.token(),
-            chat_id,
-            msg_id,
-            html,
-            reply_markup,
-            "turn",
-            "-",
-        )
-        .await
-        .map_err(|e| e.to_string())
-    } else {
-        use teloxide::payloads::EditMessageTextSetters;
-        let mut req = bot
-            .edit_message_text(ChatId(chat_id), MessageId(msg_id), html)
-            .parse_mode(ParseMode::Html);
-        if let Some(kb) = reply_markup
-            && let Ok(inline_kb) =
-                serde_json::from_value::<teloxide::types::InlineKeyboardMarkup>(kb.clone())
-        {
-            req = req.reply_markup(inline_kb);
+    match (rich, dialect) {
+        (true, FinalDialect::Markdown) => {
+            super::rich::api::edit_rich_markdown_media(
+                bot.api_url().as_str(),
+                bot.token(),
+                chat_id,
+                msg_id,
+                html,
+                media,
+                reply_markup,
+                "turn",
+                "-",
+            )
+            .await
+            .map_err(|e| e.to_string())
         }
-        req.await.map(|_| ()).map_err(|e| e.to_string())
+        (true, FinalDialect::Html) => {
+            super::rich::api::edit_rich_html(
+                bot.api_url().as_str(),
+                bot.token(),
+                chat_id,
+                msg_id,
+                html,
+                reply_markup,
+                "turn",
+                "-",
+            )
+            .await
+            .map_err(|e| e.to_string())
+        }
+        (false, _) => {
+            use teloxide::payloads::EditMessageTextSetters;
+            let mut req = bot
+                .edit_message_text(ChatId(chat_id), MessageId(msg_id), html)
+                .parse_mode(ParseMode::Html);
+            if let Some(kb) = reply_markup
+                && let Ok(inline_kb) =
+                    serde_json::from_value::<teloxide::types::InlineKeyboardMarkup>(kb.clone())
+            {
+                req = req.reply_markup(inline_kb);
+            }
+            req.await.map(|_| ()).map_err(|e| e.to_string())
+        }
     }
 }
 
