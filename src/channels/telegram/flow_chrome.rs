@@ -30,7 +30,8 @@ const SECTION_TEXT_CAP: usize = 150;
 
 /// Which plan keyboard the latest flow message owns. Keyboards attach only
 /// after `plan init` succeeds: Approve + Discard while the design plan is
-/// Editing, Discard only while a checklist is Active, none otherwise.
+/// Editing, Discard only while a checklist is Active, CompletedReview while
+/// the plan is archived/completed, none otherwise.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlanKb {
     #[default]
@@ -42,6 +43,10 @@ pub(crate) enum PlanKb {
     ReviewingApproveDiscard,
     /// Active checklist: 🗑 Discard only.
     DiscardOnly,
+    /// Completed / archived plan: 🔍 Review implementation (#234).
+    CompletedReview,
+    /// Completed / archived plan with an implementation review running (#234).
+    CompletedReviewing,
 }
 
 impl PlanKb {
@@ -71,6 +76,12 @@ impl PlanKb {
             ])),
             PlanKb::DiscardOnly => Some(InlineKeyboardMarkup::new(vec![vec![
                 InlineKeyboardButton::callback("🗑 Discard plan", "plan:no"),
+            ]])),
+            PlanKb::CompletedReview => Some(InlineKeyboardMarkup::new(vec![vec![
+                InlineKeyboardButton::callback("🔍 Review implementation", "plan:review_impl"),
+            ]])),
+            PlanKb::CompletedReviewing => Some(InlineKeyboardMarkup::new(vec![vec![
+                InlineKeyboardButton::callback("⏳ Reviewing implementation…", "plan:noop_impl"),
             ]])),
         }
     }
