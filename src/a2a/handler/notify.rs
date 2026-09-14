@@ -27,12 +27,12 @@
 
 use crate::a2a::types::*;
 use crate::brain::agent::service::notify_policy::{
-    CONFIRM_CAP, DeliveryMode, confirm_route, resolve_mode, validate_sender_label,
+    confirm_route, resolve_mode, validate_sender_label, DeliveryMode, CONFIRM_CAP,
 };
 use crate::brain::agent::service::notify_receipts;
 use crate::brain::agent::service::quiet_delivery;
-use crate::brain::agent::service::session_routes::Delivery;
 use crate::brain::agent::service::session_routes::deliver_to_session;
+use crate::brain::agent::service::session_routes::Delivery;
 use crate::brain::agent::{PushOrigin, QueuedUserMessage};
 use crate::services::{ServiceContext, SessionService};
 
@@ -145,6 +145,13 @@ pub async fn handle_session_notify(
     match session_svc.get_session(session_id).await {
         Ok(Some(_session)) => {}
         Ok(None) => {
+            crate::brain::agent::service::notify_journal::record(
+                &format!("a2a:{sender}"),
+                &session_id.to_string(),
+                "no_route",
+                1,
+                &format!("session {session_id} does not exist"),
+            );
             return JsonRpcResponse::success(
                 req_id,
                 serde_json::json!({
@@ -189,16 +196,24 @@ pub async fn handle_session_notify(
     {
         let id = quiet_delivery::defer_quiet(session_id, msg, quiet_for, max_delay);
         notify_receipts::record_queued(id, session_id);
+        let detail_str = format!(
+            "deferred for session {session_id}: delivers once the session has been \
+             quiet for {}s (hard cap {}s) — notification id {id}",
+            quiet_for.as_secs(),
+            max_delay.as_secs()
+        );
+        crate::brain::agent::service::notify_journal::record(
+            &format!("a2a:{sender}"),
+            &session_id.to_string(),
+            "deferred",
+            0,
+            &detail_str,
+        );
         return JsonRpcResponse::success(
             req_id,
             serde_json::json!({
                 "outcome": "deferred",
-                "detail": format!(
-                    "deferred for session {session_id}: delivers once the session has been \
-                     quiet for {}s (hard cap {}s) — notification id {id}",
-                    quiet_for.as_secs(),
-                    max_delay.as_secs()
-                ),
+                "detail": detail_str,
                 "notify_id": id.to_string(),
                 "notify_state": "deferred",
             }),
@@ -296,6 +311,18 @@ pub async fn handle_session_notify(
             serde_json::json!({}),
         ),
     };
+
+    let exit_code = match outcome {
+        "delivered" | "parked" | "deferred" => 0,
+        _ => 1,
+    };
+    crate::brain::agent::service::notify_journal::record(
+        &format!("a2a:{sender}"),
+        &session_id.to_string(),
+        outcome,
+        exit_code,
+        &detail,
+    );
 
     JsonRpcResponse::success(req_id, {
         let mut body = serde_json::json!({ "outcome": outcome, "detail": detail });
