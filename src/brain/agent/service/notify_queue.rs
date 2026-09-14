@@ -30,6 +30,12 @@ use uuid::Uuid;
 /// column — and the shipped table is deliberately unchanged.
 const STALE_ROW_SECS: i64 = 24 * 60 * 60;
 
+/// Maximum age a row may survive in notify_queue before being reaped (#182).
+/// Rows older than STALE_ROW_SECS (24h) emit warnings; rows older than
+/// MAX_ROW_AGE_SECS (72h / 3 days) are dropped at boot so dead routes do not
+/// leak rows indefinitely.
+pub const MAX_ROW_AGE_SECS: i64 = 3 * STALE_ROW_SECS; // 72h (259,200s)
+
 fn repo() -> Option<NotifyQueueRepository> {
     crate::db::global_pool().map(|p| NotifyQueueRepository::new(p.clone()))
 }
@@ -120,6 +126,41 @@ pub(crate) async fn redeliver_persisted() -> usize {
         Err(e) => tracing::warn!(
             target: "background_task",
             "Could not reap notify-queue rows for dead sessions: {e:#}"
+        ),
+    }
+
+    // Reap rows older than MAX_ROW_AGE_SECS (72h) for unclaimed sessions (#182):
+    // Sessions that exist in DB but have no active channel route park pushes forever.
+    // At boot, reap them to halt table bloat and memory leaks, logging full audit telemetry.
+    let cutoff = now_unix().saturating_sub(MAX_ROW_AGE_SECS);
+    match repo.reap_stale_unclaimed(cutoff).await {
+        Ok(reaped) if !reaped.is_empty() => {
+            tracing::info!(
+                target: "background_task",
+                "Boot notify queue: reaped {} stale unclaimed push(es) older than {}h",
+                reaped.len(),
+                MAX_ROW_AGE_SECS / 3600
+            );
+            for row in reaped {
+                let age_h = now_unix().saturating_sub(row.created_at) / 3600;
+                let clean_text = row.context_text.replace(['\n', '\r'], " ");
+                let preview: String = clean_text.trim().chars().take(120).collect();
+                tracing::error!(
+                    target: "background_task",
+                    "Notify queue reaper: dropped undeliverable push {} for unclaimed session {} (age {}h > {}h, origin={:?}): {}",
+                    row.id,
+                    row.session_id,
+                    age_h,
+                    MAX_ROW_AGE_SECS / 3600,
+                    row.origin,
+                    preview
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            target: "background_task",
+            "Could not reap stale unclaimed notify-queue rows: {e:#}"
         ),
     }
     let rows = match repo.all().await {
