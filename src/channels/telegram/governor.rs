@@ -994,6 +994,7 @@ async fn deliver_final(chat_id: i64, msg_id: i32, mut pending: PendingFinal) {
 /// produced the payload: rich HTML, classic HTML edit, or — when media
 /// entries ride along — the markdown+media rich edit (plan card, #134
 /// family), where `html` carries the raw markdown body.
+#[allow(clippy::too_many_arguments)]
 async fn run_final_edit(
     bot: &Bot,
     chat_id: i64,
