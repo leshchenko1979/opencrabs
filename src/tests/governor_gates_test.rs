@@ -20,8 +20,8 @@
 
 use std::time::Duration;
 
-use teloxide::Bot;
 use teloxide::types::{ChatId, MessageId};
+use teloxide::Bot;
 
 use crate::channels::telegram::governor;
 use crate::channels::telegram::governor::test_support as ts;

@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use teloxide::types::ChatId;
 
 use crate::channels::telegram::governor::{
-    Bucket, Counters, EditClass, FinalDialect, INTERACTIVE_RESERVE, MAX_429_PAUSE, ensure_bucket,
-    format_summary, is_permanent_edit_error, note_429_pause,
+    ensure_bucket, format_summary, is_permanent_edit_error, note_429_pause, Bucket, Counters,
+    EditClass, FinalDialect, INTERACTIVE_RESERVE, MAX_429_PAUSE,
 };
 
 #[test]
