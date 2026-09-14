@@ -96,6 +96,23 @@ impl Tool for CronManageTool {
                 "confirm": {
                     "type": "boolean",
                     "description": "Must be true to actually delete a job. Without it, delete only shows job details as a safety check."
+                },
+                "trigger_cmd": {
+                    "type": "string",
+                    "description": "Optional pre-flight shell command. If output is empty / non-zero based on trigger_on, job execution is short-circuited (0 tokens)."
+                },
+                "trigger_on": {
+                    "type": "string",
+                    "enum": ["non_empty", "exit_non_zero", "always"],
+                    "description": "Trigger condition: 'non_empty' (default, fires if stdout/stderr non-empty), 'exit_non_zero', 'always'."
+                },
+                "set_goal": {
+                    "type": "boolean",
+                    "description": "If true and deliver_to resolves to a session (oc://session/<uuid>), sets the active goal in that session."
+                },
+                "goal_template": {
+                    "type": "string",
+                    "description": "Template formatting trigger output into goal/notification text. Interpolates {output}, {stdout}, {stderr}, {exit_code}."
                 }
             },
             "required": ["action"]
@@ -255,7 +272,24 @@ impl CronManageTool {
             )));
         }
 
-        let mut job = CronJob::new(
+        let trigger_cmd = input
+            .get("trigger_cmd")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let trigger_on = input
+            .get("trigger_on")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let set_goal = input
+            .get("set_goal")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let goal_template = input
+            .get("goal_template")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let mut job = CronJob::new_with_trigger(
             name.to_string(),
             cron_expr.to_string(),
             tz,
@@ -266,6 +300,10 @@ impl CronManageTool {
             auto_approve,
             deliver_to.clone(),
             deliver_api_key,
+            trigger_cmd,
+            trigger_on,
+            set_goal,
+            goal_template,
         );
         job.next_run_at = crate::cron::next_run_utc(cron_expr, parsed_tz, chrono::Utc::now());
 
@@ -487,10 +525,49 @@ impl CronManageTool {
             }
         }
 
+        if let Some(val) = input.get("trigger_cmd") {
+            provided += 1;
+            let val_opt = val.as_str().filter(|s| !s.is_empty()).map(String::from);
+            if val_opt != job.trigger_cmd {
+                let desc = val_opt.as_deref().unwrap_or("none");
+                changed.push(format!("trigger_cmd -> {desc}"));
+                patch.trigger_cmd = Some(val_opt);
+            }
+        }
+
+        if let Some(val) = input.get("trigger_on") {
+            provided += 1;
+            let val_opt = val.as_str().filter(|s| !s.is_empty()).map(String::from);
+            if val_opt != job.trigger_on {
+                let desc = val_opt.as_deref().unwrap_or("non_empty");
+                changed.push(format!("trigger_on -> {desc}"));
+                patch.trigger_on = Some(val_opt);
+            }
+        }
+
+        if let Some(goal) = input.get("set_goal").and_then(|v| v.as_bool()) {
+            provided += 1;
+            if goal != job.set_goal {
+                patch.set_goal = Some(goal);
+                changed.push(format!("set_goal -> {goal}"));
+            }
+        }
+
+        if let Some(val) = input.get("goal_template") {
+            provided += 1;
+            let val_opt = val.as_str().filter(|s| !s.is_empty()).map(String::from);
+            if val_opt != job.goal_template {
+                let desc = val_opt.as_deref().unwrap_or("none");
+                changed.push(format!("goal_template -> {desc}"));
+                patch.goal_template = Some(val_opt);
+            }
+        }
+
         if provided == 0 {
             return Ok(ToolResult::error(
                 "Nothing to update: provide at least one field to change (name, cron, tz, prompt, \
-                 provider, model, thinking, auto_approve, deliver_to, deliver_api_key, enabled)."
+                 provider, model, thinking, auto_approve, deliver_to, deliver_api_key, enabled, \
+                 trigger_cmd, trigger_on, set_goal, goal_template)."
                     .to_string(),
             ));
         }

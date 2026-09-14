@@ -82,6 +82,10 @@ pub async fn schedule_background_rebuild(
         // Stamp the current profile so the guard in `tick()` lets it run here.
         // current_profile_name() honors the task-local profile scope.
         profile_name: Some(crate::config::profile::current_profile_name()),
+        trigger_cmd: None,
+        trigger_on: None,
+        set_goal: false,
+        goal_template: None,
     };
     repo.insert(&job).await?;
     tracing::info!("Background rebuild queued for session {session_id}");
@@ -378,6 +382,59 @@ impl CronScheduler {
                                     job.name,
                                     crate::config::opencrabs_home()
                                 );
+
+                                // Pre-flight trigger evaluation
+                                match crate::cron::PipelineExecutor::evaluate_trigger(&job).await {
+                                    crate::cron::TriggerOutcome::Skipped(ref trig_res) => {
+                                        tracing::info!(
+                                            "Cron job '{}' trigger condition not met — skipping execution",
+                                            job.name
+                                        );
+                                        let _ = crate::cron::PipelineExecutor::record_skipped_run(
+                                            &job,
+                                            trig_res,
+                                            &run_repo,
+                                        )
+                                        .await;
+                                        return Ok(());
+                                    }
+                                    crate::cron::TriggerOutcome::Error(err) => {
+                                        tracing::error!(
+                                            "Cron job '{}' trigger execution error: {err}",
+                                            job.name
+                                        );
+                                        let run = CronJobRun::new_running(
+                                            job.id,
+                                            job.name.clone(),
+                                            job.provider.clone(),
+                                            job.model.clone(),
+                                        );
+                                        let run_id = run.id.to_string();
+                                        let _ = run_repo.insert(&run).await;
+                                        let _ = run_repo.complete_error(&run_id, &format!("Trigger error: {err}")).await;
+                                        return Ok(());
+                                    }
+                                    crate::cron::TriggerOutcome::Fired(ref trig_res) => {
+                                        tracing::info!(
+                                            "Cron job '{}' trigger fired (exit={}, output_bytes={})",
+                                            job.name,
+                                            trig_res.exit_code,
+                                            trig_res.combined_output().len()
+                                        );
+                                        // If prompt is empty or explicitly pass-through, execute direct 0-token delivery
+                                        if job.prompt.trim().is_empty() {
+                                            return execute_direct_trigger_job(
+                                                &job,
+                                                &ctx,
+                                                &run_repo,
+                                                trig_res,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    crate::cron::TriggerOutcome::NoTrigger => {}
+                                }
+
                                 match resolve_or_create_cron_session(&ctx, &job).await {
                                     Ok(cron_sid) => {
                                         execute_job(
@@ -867,6 +924,9 @@ async fn execute_job(
                     .await;
                 }
             }
+
+            // Maybe dispatch goal to session
+            let _ = crate::cron::PipelineExecutor::maybe_dispatch_goal(job, ctx, &clean).await;
         }
         Err(e) => {
             tracing::error!("Cron job '{}' agent error: {e}", job.name);
@@ -1162,6 +1222,68 @@ async fn record_delivery_failure(
             "Failed to record delivery failure on run {run_id}: {e} (delivery was already lost: {reason})"
         );
     }
+}
+
+/// Execute direct 0-token trigger delivery (when prompt is empty and trigger fired).
+async fn execute_direct_trigger_job(
+    job: &CronJob,
+    ctx: &ServiceContext,
+    run_repo: &CronJobRunRepository,
+    trig_res: &crate::cron::TriggerResult,
+) -> anyhow::Result<()> {
+    let run = CronJobRun::new_running(
+        job.id,
+        job.name.clone(),
+        job.provider.clone(),
+        job.model.clone(),
+    );
+    let run_id = run.id.to_string();
+    if let Err(e) = run_repo.insert(&run).await {
+        tracing::error!("Failed to insert cron run record: {e}");
+    }
+
+    let raw_output = trig_res.combined_output();
+    let content = if let Some(ref tmpl) = job.goal_template {
+        crate::cron::interpolate_template(tmpl, trig_res)
+    } else {
+        raw_output
+    };
+
+    let clean = crate::utils::sanitize::strip_llm_artifacts(&content);
+
+    tracing::info!(
+        "Cron job '{}' direct trigger completed — 0 tokens, $0.00",
+        job.name
+    );
+
+    // Save result to DB (0 tokens)
+    if let Err(e) = run_repo.complete_success(&run_id, &clean, 0, 0, 0.0).await {
+        tracing::error!("Failed to save direct cron run result to DB: {e}");
+    }
+
+    // Deliver to configured channels
+    if let Some(ref deliver_to) = job.deliver_to {
+        for target in deliver_to
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let _ = deliver_result(
+                target,
+                &job.name,
+                &clean,
+                job.deliver_api_key.as_deref(),
+                Some(ctx.pool()),
+                Some(run_id.clone()),
+            )
+            .await;
+        }
+    }
+
+    // Maybe dispatch goal to session
+    let _ = crate::cron::PipelineExecutor::maybe_dispatch_goal(job, ctx, &clean).await;
+
+    Ok(())
 }
 
 /// Deliver cron result via HTTP POST to a generic webhook URL.

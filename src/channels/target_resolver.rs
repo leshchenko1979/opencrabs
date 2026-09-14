@@ -152,6 +152,16 @@ pub fn is_target_url(s: &str) -> bool {
     s.starts_with("oc://") || s == HERE_TOKEN
 }
 
+/// Extract session target identifier string from a target URL or legacy deliver_to string.
+/// Returns the raw UUID or prefix string when the target designates a session (e.g. `oc://session/<id>` or `session:<id>`).
+pub fn extract_session_target(target: &str) -> Option<&str> {
+    if let Some(rest) = target.strip_prefix("oc://session/") {
+        rest.split('/').next()
+    } else {
+        target.strip_prefix("session:")
+    }
+}
+
 /// What the resolver needs from the world. Implemented by the wiring context
 /// (ChannelManager + session lookup) so tests can drive resolution without
 /// a live daemon.
@@ -530,5 +540,27 @@ mod tests {
         assert_eq!(decode_segment(&enc).unwrap(), raw);
         assert!(decode_segment("%zz").is_err());
         assert!(decode_segment("%4").is_err());
+    }
+
+    #[test]
+    fn extract_session_target_handles_url_and_legacy() {
+        assert_eq!(
+            extract_session_target("oc://session/12345678-1234-1234-1234-123456789abc"),
+            Some("12345678-1234-1234-1234-123456789abc")
+        );
+        assert_eq!(
+            extract_session_target("oc://session/12345678"),
+            Some("12345678")
+        );
+        assert_eq!(
+            extract_session_target("oc://session/12345678/extra"),
+            Some("12345678")
+        );
+        assert_eq!(
+            extract_session_target("session:12345678-1234-1234-1234-123456789abc"),
+            Some("12345678-1234-1234-1234-123456789abc")
+        );
+        assert_eq!(extract_session_target("telegram:123456"), None);
+        assert_eq!(extract_session_target("oc://telegram/123456"), None);
     }
 }
