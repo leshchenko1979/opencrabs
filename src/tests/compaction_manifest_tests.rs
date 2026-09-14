@@ -1,5 +1,5 @@
-use crate::brain::agent::service::context::parse_context_manifest;
 use crate::brain::agent::service::AgentService;
+use crate::brain::agent::service::context::parse_context_manifest;
 use std::collections::HashSet;
 
 #[test]
@@ -84,6 +84,114 @@ fn test_parse_context_manifest_missing_or_malformed_fails_soft() {
 
     let malformed_block = "```context-manifest\nrandom gibberish with no colons\n```";
     assert_eq!(parse_context_manifest(malformed_block), None);
+}
+
+#[test]
+fn test_parse_skill_spec() {
+    assert_eq!(
+        crate::brain::skills::parse_skill_spec("opencrabs-dev"),
+        ("opencrabs-dev".to_string(), None)
+    );
+    assert_eq!(
+        crate::brain::skills::parse_skill_spec("/opencrabs-dev"),
+        ("opencrabs-dev".to_string(), None)
+    );
+    assert_eq!(
+        crate::brain::skills::parse_skill_spec("opencrabs-dev/editor.md"),
+        ("opencrabs-dev".to_string(), Some("editor.md".to_string()))
+    );
+    assert_eq!(
+        crate::brain::skills::parse_skill_spec("/opencrabs-dev/fleet-directives.md"),
+        (
+            "opencrabs-dev".to_string(),
+            Some("fleet-directives.md".to_string())
+        )
+    );
+}
+
+#[test]
+fn test_parse_context_manifest_with_aux_files_and_service_wiring() {
+    let summary = r#"
+## 10. Context Manifest
+```context-manifest
+active_skills:
+  - opencrabs-dev/editor.md
+  - /opencrabs-dev/fleet-directives.md
+  - miidas-factory
+discard_skills:
+  - opencrabs-dev/hq.md
+  - /a2a-gateway
+required_tools:
+  - telegram_send
+```
+"#;
+
+    let manifest = parse_context_manifest(summary).expect("should parse manifest with aux paths");
+    assert_eq!(
+        manifest.active_skills,
+        vec![
+            "opencrabs-dev/editor.md".to_string(),
+            "/opencrabs-dev/fleet-directives.md".to_string(),
+            "miidas-factory".to_string(),
+        ]
+    );
+    assert_eq!(
+        manifest.discard_skills,
+        vec![
+            "opencrabs-dev/hq.md".to_string(),
+            "/a2a-gateway".to_string(),
+        ]
+    );
+
+    let session_id = uuid::Uuid::new_v4();
+
+    for active in &manifest.active_skills {
+        let (slug, aux_file) = crate::brain::skills::parse_skill_spec(active);
+        crate::brain::tools::seen_skills::mark_seen(session_id, &slug);
+        crate::brain::tools::seen_skills::mark_active(session_id, &slug);
+        if let Some(file) = aux_file {
+            crate::brain::tools::seen_skills::mark_aux_seen(session_id, &slug, &file);
+        }
+    }
+
+    let active = crate::brain::tools::seen_skills::active_for_session(session_id);
+    assert!(active.contains("opencrabs-dev"));
+    assert!(active.contains("miidas-factory"));
+
+    let aux = crate::brain::tools::seen_skills::aux_seen_for_session(session_id);
+    let dev_aux = aux.get("opencrabs-dev").expect("opencrabs-dev aux files");
+    assert_eq!(
+        dev_aux,
+        &vec!["editor.md".to_string(), "fleet-directives.md".to_string()]
+    );
+
+    // Discard single aux file
+    let (slug, aux_file) = crate::brain::skills::parse_skill_spec("opencrabs-dev/editor.md");
+    if let Some(file) = aux_file {
+        crate::brain::tools::seen_skills::unmark_aux_seen(session_id, &slug, &file);
+    }
+    let aux_after = crate::brain::tools::seen_skills::aux_seen_for_session(session_id);
+    let dev_aux_after = aux_after
+        .get("opencrabs-dev")
+        .expect("opencrabs-dev aux files");
+    assert_eq!(dev_aux_after, &vec!["fleet-directives.md".to_string()]);
+    // Skill itself remains active
+    assert!(
+        crate::brain::tools::seen_skills::active_for_session(session_id).contains("opencrabs-dev")
+    );
+
+    // Discard entire skill
+    let (slug, aux_file) = crate::brain::skills::parse_skill_spec("opencrabs-dev");
+    if aux_file.is_none() {
+        crate::brain::tools::seen_skills::clear_aux_seen(session_id, &slug);
+        crate::brain::tools::seen_skills::unmark_seen(session_id, &slug);
+        crate::brain::tools::seen_skills::unmark_active(session_id, &slug);
+    }
+    assert!(
+        !crate::brain::tools::seen_skills::active_for_session(session_id).contains("opencrabs-dev")
+    );
+    let aux_final = crate::brain::tools::seen_skills::aux_seen_for_session(session_id);
+    assert!(!aux_final.contains_key("opencrabs-dev"));
 }
 
 #[test]
