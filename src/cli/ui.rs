@@ -1175,9 +1175,15 @@ async fn cmd_chat_inner(
     // reached from a tool with no service context, so unlike a detached
     // command it carries no callback of its own and resolves this instead
     // (#1036).
-    crate::brain::agent::service::session_routes::register_local_route(
-        message_enqueue_callback.clone(),
-    );
+    if headless {
+        crate::brain::agent::service::session_routes::register_headless_parking_route(
+            message_enqueue_callback.clone(),
+        );
+    } else {
+        crate::brain::agent::service::session_routes::register_local_route(
+            message_enqueue_callback.clone(),
+        );
+    }
 
     // Anything a previous process was doing died with it: detached commands
     // and sub-agents alike. Account for both and report each into the session
