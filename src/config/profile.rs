@@ -110,6 +110,11 @@ pub fn with_home_override<T>(home: PathBuf, f: impl FnOnce() -> T) -> T {
     PROFILE_HOME_OVERRIDE.sync_scope(home, f)
 }
 
+/// Return the active task-local profile home override if set, or `None`.
+pub fn profile_home_override() -> Option<PathBuf> {
+    PROFILE_HOME_OVERRIDE.try_with(|h| h.clone()).ok()
+}
+
 /// Run a future with `opencrabs_home()` pointed at an explicit directory.
 ///
 /// Async counterpart of `with_home_override`: the override is a task-local,
