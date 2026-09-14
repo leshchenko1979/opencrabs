@@ -258,4 +258,79 @@ impl NotifyQueueRepository {
             .map_err(interact_err)?
             .context("Failed to reap notify-queue rows for dead sessions")
     }
+
+    /// Reap undelivered rows older than `cutoff_created_at` in an atomic transaction (#182).
+    ///
+    /// Sessions that still exist in `sessions` but have no active channel route
+    /// (e.g. headless/cron sessions, archived worker topics, surfaceless sessions)
+    /// park pushes forever. After a ceiling window (e.g. 72h), this reaps them
+    /// so they do not leak table space or re-park into memory on every boot.
+    /// Returns the deleted rows so caller can log/audit what was dropped.
+    pub async fn reap_stale_unclaimed(
+        &self,
+        cutoff_created_at: i64,
+    ) -> Result<Vec<NotifyQueueRow>> {
+        let raw_rows = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let tx = conn.transaction()?;
+                let mapped = {
+                    let mut stmt = tx.prepare(
+                        "SELECT id, session_id, context_text, display_text, origin, bg_meta, created_at \
+                         FROM notify_queue WHERE created_at < ?1 ORDER BY created_at ASC",
+                    )?;
+                    stmt.query_map(params![cutoff_created_at], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                            row.get::<_, i64>(6)?,
+                        ))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+                };
+                tx.execute(
+                    "DELETE FROM notify_queue WHERE created_at < ?1",
+                    params![cutoff_created_at],
+                )?;
+                tx.commit()?;
+                Ok::<_, rusqlite::Error>(mapped)
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to reap stale unclaimed notify-queue rows")?;
+
+        Ok(raw_rows
+            .into_iter()
+            .filter_map(
+                |(id, session_id, context_text, display_text, origin, bg_meta, created_at)| {
+                    let bg_meta = bg_meta.and_then(|json| match serde_json::from_str(&json) {
+                        Ok(m) => Some(m),
+                        Err(e) => {
+                            tracing::warn!(
+                                "notify_queue: skipping corrupt bg_meta in reaped row: {}",
+                                e
+                            );
+                            None
+                        }
+                    });
+                    Some(NotifyQueueRow {
+                        id: Uuid::parse_str(&id).ok()?,
+                        session_id: Uuid::parse_str(&session_id).ok()?,
+                        context_text,
+                        display_text,
+                        origin: origin_from_db_str(&origin),
+                        bg_meta,
+                        created_at,
+                    })
+                },
+            )
+            .collect())
+    }
 }

@@ -234,3 +234,95 @@ async fn clear_dead_sessions_reaps_only_rows_for_missing_sessions() {
     assert_eq!(rows.len(), 1, "the live-session row survives");
     assert_eq!(rows[0].session_id, live);
 }
+
+#[tokio::test]
+async fn reap_stale_unclaimed_deletes_only_rows_past_age_cutoff() {
+    let (repo, db) = setup().await;
+    let now = 1_700_000_000i64;
+    let session = Uuid::new_v4();
+    let id_a = Uuid::new_v4();
+    let id_b = Uuid::new_v4();
+    let id_c = Uuid::new_v4();
+
+    // Insert rows with explicit created_at timestamps via raw SQL:
+    // Row A: 10h old
+    // Row B: 25h old (past 24h warning threshold, under 72h ceiling)
+    // Row C: 80h old (past 72h ceiling)
+    for (id, ts, text) in [
+        (id_a, now - 10 * 3600, "10h old"),
+        (id_b, now - 25 * 3600, "25h old"),
+        (id_c, now - 80 * 3600, "80h old"),
+    ] {
+        let sess_str = session.to_string();
+        raw(&db, move |conn| {
+            conn.execute(
+                "INSERT INTO notify_queue \
+                 (id, session_id, context_text, display_text, origin, bg_meta, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, 'session_notify', NULL, ?5)",
+                rusqlite::params![id.to_string(), sess_str, text, text, ts],
+            )
+        })
+        .await;
+    }
+
+    let cutoff = now - 72 * 3600;
+    let reaped = repo.reap_stale_unclaimed(cutoff).await.expect("reap");
+
+    // Exactly Row C reaped
+    assert_eq!(reaped.len(), 1);
+    assert_eq!(reaped[0].id, id_c);
+    assert_eq!(reaped[0].session_id, session);
+    assert_eq!(reaped[0].context_text, "80h old");
+    assert_eq!(reaped[0].origin, PushOrigin::SessionNotify);
+
+    // Rows A and B survive in DB
+    let remaining = repo.all().await.expect("all");
+    assert_eq!(remaining.len(), 2);
+    let remaining_ids: Vec<Uuid> = remaining.into_iter().map(|r| r.id).collect();
+    assert!(remaining_ids.contains(&id_a));
+    assert!(remaining_ids.contains(&id_b));
+    assert!(!remaining_ids.contains(&id_c));
+}
+
+#[tokio::test]
+async fn reap_stale_unclaimed_handles_empty_table_and_boundary_cases() {
+    let (repo, db) = setup().await;
+    let cutoff = 1_700_000_000i64;
+
+    // 1. Empty table returns Ok([]) without error
+    let reaped_empty = repo.reap_stale_unclaimed(cutoff).await.expect("reap empty");
+    assert!(reaped_empty.is_empty());
+
+    // 2. Exact boundary check: created_at == cutoff survives, cutoff - 1 is reaped
+    let session = Uuid::new_v4();
+    let id_at_boundary = Uuid::new_v4();
+    let id_below_boundary = Uuid::new_v4();
+
+    for (id, ts, text) in [
+        (id_at_boundary, cutoff, "at boundary"),
+        (id_below_boundary, cutoff - 1, "below boundary"),
+    ] {
+        let sess_str = session.to_string();
+        raw(&db, move |conn| {
+            conn.execute(
+                "INSERT INTO notify_queue \
+                 (id, session_id, context_text, display_text, origin, bg_meta, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, 'background_task', NULL, ?5)",
+                rusqlite::params![id.to_string(), sess_str, text, text, ts],
+            )
+        })
+        .await;
+    }
+
+    let reaped = repo
+        .reap_stale_unclaimed(cutoff)
+        .await
+        .expect("reap boundary");
+    assert_eq!(reaped.len(), 1);
+    assert_eq!(reaped[0].id, id_below_boundary);
+    assert_eq!(reaped[0].origin, PushOrigin::BackgroundTask);
+
+    let remaining = repo.all().await.expect("all");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, id_at_boundary);
+}
