@@ -400,9 +400,10 @@ impl AgentService {
             }
         }
 
-        // Last resort: every compaction attempt failed AND we're still over
-        // 80%. Truncate to keep the next request from going out at 200%+. No
-        // marker is persisted in this branch; the caller sees None back.
+        // Last resort: every compaction attempt failed.
+        // If context usage is still over 80%, safety-truncate to 80% and mark
+        // as truncated so the caller persists a truncation marker and keeps the
+        // turn unblocked. If below 80%, proceed gracefully with existing context.
         if summary_result.is_none() {
             let safety_target = (effective_max as f64 * 0.80) as usize;
             if context.token_count > safety_target {
@@ -415,6 +416,11 @@ impl AgentService {
                 context.hard_truncate_to(safety_target);
                 context.trim_to_fit(0);
                 truncated |= context.messages.len() < before_len;
+            } else {
+                tracing::warn!(
+                    "Compaction exhausted, but context is at {} tokens (<=80%) — proceeding with turn uncompacted",
+                    context.token_count,
+                );
             }
         }
 
