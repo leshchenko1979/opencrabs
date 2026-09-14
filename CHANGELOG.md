@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### ✨ Features
+
+- `feat(telegram_send)`: add `create_topic` and `rename_topic` actions for forum supergroups (#161)
+
 ### 🐛 Bug Fixes
 
 - `fix(daemon)`: await A2A gateway readiness before spawning cron schedulers (#196)
