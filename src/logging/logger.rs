@@ -324,10 +324,10 @@ impl std::io::Write for ResilientFileGuard<'_> {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        if let Some(guard) = self.appenders.as_mut() {
-            if let Some(appender) = guard.get_mut(&self.target_log_dir) {
-                return appender.flush();
-            }
+        if let Some(guard) = self.appenders.as_mut()
+            && let Some(appender) = guard.get_mut(&self.target_log_dir)
+        {
+            return appender.flush();
         }
         Ok(())
     }
