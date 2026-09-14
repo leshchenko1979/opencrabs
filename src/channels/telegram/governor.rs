@@ -49,9 +49,9 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use teloxide::Bot;
 use teloxide::prelude::Requester;
 use teloxide::types::{ChatId, MessageId, ParseMode};
+use teloxide::Bot;
 
 use crate::config::Config;
 
@@ -938,17 +938,7 @@ enum Verdict {
 /// queue forever (finals are never dropped at ADMISSION — wire failures are
 /// a different failure mode with their own telemetry).
 async fn deliver_final(chat_id: i64, msg_id: i32, mut pending: PendingFinal) {
-    let result = run_final_edit(
-        &pending.bot,
-        chat_id,
-        msg_id,
-        &pending.html,
-        pending.rich,
-        pending.dialect,
-        &pending.media,
-        pending.reply_markup.as_ref(),
-    )
-    .await;
+    let result = run_final_edit(chat_id, msg_id, &pending).await;
     let retry_after = match &result {
         Err(e) => super::rate_limit::parse_retry_after(e),
         Ok(()) => None,
@@ -1020,56 +1010,45 @@ async fn deliver_final(chat_id: i64, msg_id: i32, mut pending: PendingFinal) {
 /// The wire shapes a queued final can take, mirroring the call sites that
 /// produced the payload: rich HTML, classic HTML edit, or the markdown+media
 /// rich edit (plan card, #134, #229), where `html` carries the raw markdown body.
-async fn run_final_edit(
-    bot: &Bot,
-    chat_id: i64,
-    msg_id: i32,
-    html: &str,
-    rich: bool,
-    dialect: FinalDialect,
-    media: &[super::rich::mermaid::MediaEntry],
-    reply_markup: Option<&serde_json::Value>,
-) -> Result<(), String> {
-    match (rich, dialect) {
-        (true, FinalDialect::Markdown) => {
-            super::rich::api::edit_rich_markdown_media(
-                bot.api_url().as_str(),
-                bot.token(),
-                chat_id,
-                msg_id,
-                html,
-                media,
-                reply_markup,
-                "turn",
-                "-",
-            )
-            .await
-            .map_err(|e| e.to_string())
-        }
-        (true, FinalDialect::Html) => {
-            super::rich::api::edit_rich_html(
-                bot.api_url().as_str(),
-                bot.token(),
-                chat_id,
-                msg_id,
-                html,
-                reply_markup,
-                "turn",
-                "-",
-            )
-            .await
-            .map_err(|e| e.to_string())
-        }
+async fn run_final_edit(chat_id: i64, msg_id: i32, pending: &PendingFinal) -> Result<(), String> {
+    match (pending.rich, pending.dialect) {
+        (true, FinalDialect::Markdown) => super::rich::api::edit_rich_markdown_media(
+            pending.bot.api_url().as_str(),
+            pending.bot.token(),
+            chat_id,
+            msg_id,
+            &pending.html,
+            &pending.media,
+            pending.reply_markup.as_ref(),
+            "turn",
+            "-",
+        )
+        .await
+        .map_err(|e| e.to_string()),
+        (true, FinalDialect::Html) => super::rich::api::edit_rich_html(
+            pending.bot.api_url().as_str(),
+            pending.bot.token(),
+            chat_id,
+            msg_id,
+            &pending.html,
+            pending.reply_markup.as_ref(),
+            "turn",
+            "-",
+        )
+        .await
+        .map_err(|e| e.to_string()),
         (false, _) => {
             use teloxide::payloads::EditMessageTextSetters;
-            let mut req = bot
-                .edit_message_text(ChatId(chat_id), MessageId(msg_id), html)
+            let mut req = pending
+                .bot
+                .edit_message_text(ChatId(chat_id), MessageId(msg_id), &pending.html)
                 .parse_mode(ParseMode::Html);
-            if let Some(kb) = reply_markup
-                && let Ok(inline_kb) =
+            if let Some(kb) = &pending.reply_markup {
+                if let Ok(inline_kb) =
                     serde_json::from_value::<teloxide::types::InlineKeyboardMarkup>(kb.clone())
-            {
-                req = req.reply_markup(inline_kb);
+                {
+                    req = req.reply_markup(inline_kb);
+                }
             }
             req.await.map(|_| ()).map_err(|e| e.to_string())
         }
