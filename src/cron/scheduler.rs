@@ -281,9 +281,6 @@ impl CronScheduler {
         tracing::info!(
             "Adoptive cron scheduler started for profile '{profile_name}' — polling every 60s"
         );
-        if let Err(e) = ensure_weekly_dedup_scan_job(&self.repo).await {
-            tracing::warn!("Failed to seed weekly brain dedup scan job: {e}");
-        }
 
         if let Err(e) = self.backfill_missing_next_run().await {
             tracing::error!("Failed to backfill missing next_run_at on startup: {e}");
