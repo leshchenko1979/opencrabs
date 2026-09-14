@@ -43,6 +43,7 @@ pub(crate) use detect::{
 };
 pub(crate) use render_html::{
     markdown_to_html, markdown_to_html_mermaid, markdown_to_html_mermaid_p, markdown_to_html_p,
+    paragraph_html,
 };
 pub(crate) use table::{normalize_tables, reflow_collapsed_tables};
 #[cfg(test)]

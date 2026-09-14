@@ -315,7 +315,7 @@ fn render_inline(inline: &Inline, s: &mut String, wrap_p: bool) {
         Inline::Text(t) => {
             let esc = escape_html(t);
             if wrap_p {
-                s.push_str(&esc.replace('\n', "<br>"));
+                s.push_str(&soft_breaks_to_br(&esc));
             } else {
                 s.push_str(&esc);
             }
@@ -386,6 +386,68 @@ fn plain_one(inline: &Inline, s: &mut String) {
             }
         }
     }
+}
+
+/// The single owner of the rich dialect's soft-break rule.
+///
+/// The rich `sendRichMessage` dialect collapses a bare newline to whitespace
+/// (#1142), so a soft break inside a paragraph must be an explicit `<br>`.
+/// The AST renderer's `Inline::Text` arm delegates here, and the hand-rolled
+/// `<p>` sites build their paragraphs through [`paragraph_html`] — one rule,
+/// one home.
+///
+/// `fragment` must already be escaped (see [`escape`]). The only tags it can
+/// then contain are inline markup generated downstream, so `<code>` spans are
+/// copied verbatim: a newline inside inline code is data, not a break.
+pub(crate) fn soft_breaks_to_br(fragment: &str) -> String {
+    // The rule itself: the one place a soft break becomes an explicit break.
+    fn br(s: &str) -> String {
+        s.replace('\n', "<br>")
+    }
+    let mut out = String::with_capacity(fragment.len());
+    let mut rest = fragment;
+    while let Some(i) = rest.find('<') {
+        // Text before the tag: soft breaks apply.
+        out.push_str(&br(&rest[..i]));
+        if rest[i..].starts_with("<code>") {
+            match rest[i..].find("</code>") {
+                Some(end) => {
+                    out.push_str(&rest[i..i + end + "</code>".len()]);
+                    rest = &rest[i + end + "</code>".len()..];
+                }
+                None => {
+                    // Unterminated span: the remainder is code.
+                    out.push_str(&rest[i..]);
+                    return out;
+                }
+            }
+        } else {
+            // Some other tag — copy it through and keep scanning.
+            match rest[i..].find('>') {
+                Some(end) => {
+                    out.push_str(&rest[i..i + end + 1]);
+                    rest = &rest[i + end + 1..];
+                }
+                None => {
+                    out.push_str(&rest[i..]);
+                    return out;
+                }
+            }
+        }
+    }
+    out.push_str(&br(rest));
+    out
+}
+
+/// Wrap an already-escaped, inline-formatted fragment as a rich-dialect
+/// paragraph.
+///
+/// The `<p>` is hand-rolled rather than routed through the markdown AST
+/// renderer: that renderer escapes its input, which would mangle an
+/// already-tagged fragment (`<code>` would arrive as `&lt;code&gt;`). Keeping
+/// the wrap here means the soft-break rule lives in exactly one place.
+pub(crate) fn paragraph_html(fragment: &str) -> String {
+    format!("<p>{}</p>", soft_breaks_to_br(fragment))
 }
 
 /// Parse `text` and render it as Telegram HTML in one call (the fallback path).
