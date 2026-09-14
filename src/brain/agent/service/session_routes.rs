@@ -90,19 +90,39 @@ pub fn resolve_route(
 /// it always has a fallback. A sub-agent has no such handle — it is reached
 /// from a tool with no service context — so the local surface is registered
 /// once at startup and resolved on demand instead (#1036).
-static LOCAL_ROUTE: Mutex<Option<MessageEnqueueCallback>> = Mutex::new(None);
+#[derive(Clone)]
+enum LocalRouteDestination {
+    Interactive(MessageEnqueueCallback),
+    Parking(MessageEnqueueCallback),
+}
+
+static LOCAL_ROUTE: Mutex<Option<LocalRouteDestination>> = Mutex::new(None);
 
 /// Record the booting surface as the fallback destination. Called once per
 /// process start; re-registering replaces it.
 pub fn register_local_route(enqueue: MessageEnqueueCallback) {
     match LOCAL_ROUTE.lock() {
-        Ok(mut guard) => *guard = Some(enqueue),
+        Ok(mut guard) => *guard = Some(LocalRouteDestination::Interactive(enqueue)),
         Err(e) => {
             // Without it, a sub-agent finishing on a session no channel owns
             // has nowhere to report and its output is dropped.
             tracing::error!(
                 target: "background_task",
                 "Could not register the local delivery route: {e}"
+            );
+        }
+    }
+}
+
+/// Record that the booting surface has no interactive event loop and falls back
+/// to parking for channel-owned sessions (#88).
+pub fn register_headless_parking_route(enqueue: MessageEnqueueCallback) {
+    match LOCAL_ROUTE.lock() {
+        Ok(mut guard) => *guard = Some(LocalRouteDestination::Parking(enqueue)),
+        Err(e) => {
+            tracing::error!(
+                target: "background_task",
+                "Could not register the headless parking route: {e}"
             );
         }
     }
@@ -353,7 +373,7 @@ pub fn deliver_to_session(session_id: Uuid, msg: QueuedUserMessage, interrupt: b
         }
     };
     match local {
-        Some(route) => {
+        Some(LocalRouteDestination::Interactive(route)) => {
             // Same chokepoint rule as the `session_route` arm above (#111
             // follow-up, Part A): a local delivery retires its durable twin.
             super::notify_queue::clear_on_delivery(target, &msg);
@@ -363,6 +383,13 @@ pub fn deliver_to_session(session_id: Uuid, msg: QueuedUserMessage, interrupt: b
             } else {
                 Delivery::Delivered
             }
+        }
+        Some(LocalRouteDestination::Parking(route)) => {
+            // In headless mode, falling back to parking route means the session
+            // is not actively being processed by a local interactive UI.
+            // Awaiting channel sessions park honestly (#88).
+            route(target, msg);
+            Delivery::Parked
         }
         None => {
             tracing::error!(
