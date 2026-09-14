@@ -8,6 +8,7 @@ use crate::config::{Config, DaemonConfig};
 fn daemon_config_default_has_no_health_port() {
     let cfg = DaemonConfig::default();
     assert!(cfg.health_port.is_none());
+    assert!(cfg.adopt_profiles);
 }
 
 #[test]
@@ -15,9 +16,11 @@ fn daemon_config_deserializes_health_port() {
     let toml_str = r#"
         [daemon]
         health_port = 8080
+        adopt_profiles = false
     "#;
     let config: Config = toml::from_str(toml_str).unwrap();
     assert_eq!(config.daemon.health_port, Some(8080));
+    assert!(!config.daemon.adopt_profiles);
 }
 
 #[test]
@@ -27,6 +30,7 @@ fn daemon_config_deserializes_empty() {
     "#;
     let config: Config = toml::from_str(toml_str).unwrap();
     assert!(config.daemon.health_port.is_none());
+    assert!(config.daemon.adopt_profiles);
 }
 
 #[test]
@@ -34,6 +38,7 @@ fn daemon_config_missing_section_uses_default() {
     let toml_str = "";
     let config: Config = toml::from_str(toml_str).unwrap();
     assert!(config.daemon.health_port.is_none());
+    assert!(config.daemon.adopt_profiles);
 }
 
 #[test]

@@ -413,11 +413,8 @@ impl CronScheduler {
     pub fn spawn(self) -> tokio::task::JoinHandle<()> {
         let scheduler_profile = crate::config::profile::current_profile_name();
         tokio::spawn(async move {
-            crate::config::profile::with_profile_home_async(
-                Some(&scheduler_profile),
-                self.run(),
-            )
-            .await
+            crate::config::profile::with_profile_home_async(Some(&scheduler_profile), self.run())
+                .await
         })
     }
 
@@ -443,6 +440,37 @@ impl CronScheduler {
         }
 
         loop {
+            if let Err(e) = self.tick().await {
+                tracing::error!("Cron scheduler tick error: {e}");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    }
+
+    /// Run the polling loop for an adopted foreign profile (#184).
+    /// Periodically checks whether a native instance for `profile_name` has booted;
+    /// if so, gracefully exits so the native instance can acquire its own scheduler lock.
+    pub async fn run_adoptive(self, profile_name: String) {
+        tracing::info!(
+            "Adoptive cron scheduler started for profile '{profile_name}' — polling every 60s"
+        );
+        if let Err(e) = ensure_weekly_dedup_scan_job(&self.repo).await {
+            tracing::warn!("Failed to seed weekly brain dedup scan job: {e}");
+        }
+
+        if let Err(e) = self.backfill_missing_next_run().await {
+            tracing::error!("Failed to backfill missing next_run_at on startup: {e}");
+        }
+
+        loop {
+            // Check if native instance has booted (#184 cooperative yield)
+            if crate::config::profile::instance_running(&profile_name) {
+                tracing::info!(
+                    "Multi-profile daemon: native instance detected for profile '{profile_name}' — yielding scheduler lock"
+                );
+                break;
+            }
+
             if let Err(e) = self.tick().await {
                 tracing::error!("Cron scheduler tick error: {e}");
             }
