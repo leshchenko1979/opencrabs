@@ -15,6 +15,12 @@ fn make_tool() -> TelegramSendTool {
     TelegramSendTool::new(state)
 }
 
+async fn make_tool_with_bot() -> TelegramSendTool {
+    let state = Arc::new(TelegramState::new());
+    state.set_bot(teloxide::Bot::new("test-token")).await;
+    TelegramSendTool::new(state)
+}
+
 #[test]
 fn telegram_send_schema_declares_topic_actions_and_params() {
     let tool = make_tool();
@@ -47,7 +53,7 @@ fn telegram_send_schema_declares_topic_actions_and_params() {
 
 #[tokio::test]
 async fn telegram_send_rejects_empty_or_too_long_topic_name() {
-    let tool = make_tool();
+    let tool = make_tool_with_bot().await;
     let ctx = ToolExecutionContext::new(Uuid::new_v4());
 
     // Empty name
