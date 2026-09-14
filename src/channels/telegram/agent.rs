@@ -1713,7 +1713,17 @@ impl TelegramAgent {
                                 }
                                 return ResponseResult::Ok(());
                             }
-                            if data == "plan:ok" || data == "plan:no" || data == "plan:review" {
+                            if data == "plan:noop_impl" {
+                                if let Err(e) = bot
+                                    .answer_callback_query(query.id.clone())
+                                    .text("⏳ Implementation review is already running…")
+                                    .await
+                                {
+                                    tracing::warn!("Telegram: callback UI update failed: {e}");
+                                }
+                                return ResponseResult::Ok(());
+                            }
+                            if data == "plan:ok" || data == "plan:no" || data == "plan:review" || data == "plan:review_impl" {
                                 let caller_is_owner = config_rx
                                     .borrow()
                                     .channels
@@ -1892,6 +1902,69 @@ impl TelegramAgent {
                                     tokio::spawn(async move {
                                         execute_plan_review_subagent(
                                             bot2, state2, agent2, session_id, chat_id, thread_id,
+                                        )
+                                        .await;
+                                    });
+                                    return ResponseResult::Ok(());
+                                }
+
+                                // plan:review_impl — 🔍 Review implementation (#234). Spawns an
+                                // isolated read-only subagent that audits the delivered code changes
+                                // against the archived plan and acceptance criteria.
+                                if data == "plan:review_impl" {
+                                    if state.is_turn_active(session_id) {
+                                        if let Err(e) = bot
+                                            .answer_callback_query(query.id.clone())
+                                            .text(
+                                                "⛔ A turn is running. Review is refused while \
+                                                 busy; try again when it finishes.",
+                                            )
+                                            .show_alert(true)
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                "Telegram: callback UI update failed: {e}"
+                                            );
+                                        }
+                                        return ResponseResult::Ok(());
+                                    }
+                                    if state.is_plan_reviewing(session_id).await {
+                                        if let Err(e) = bot
+                                            .answer_callback_query(query.id.clone())
+                                            .text("⏳ Implementation review is already running…")
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                "Telegram: callback UI update failed: {e}"
+                                            );
+                                        }
+                                        return ResponseResult::Ok(());
+                                    }
+                                    if let Err(e) = bot
+                                        .answer_callback_query(query.id.clone())
+                                        .text("🔍 Auditing implementation…")
+                                        .await
+                                    {
+                                        tracing::warn!("Telegram: callback UI update failed: {e}");
+                                    }
+                                    state.set_plan_reviewing(session_id, true).await;
+                                    let card_mid = query.message.as_ref().map(|m| m.id());
+                                    if let (Some(mid), Some(markup)) = (
+                                        card_mid,
+                                        crate::channels::telegram::flow_chrome::PlanKb::CompletedReviewing
+                                            .keyboard(),
+                                    ) {
+                                        let _ = bot
+                                            .edit_message_reply_markup(chat_id, mid)
+                                            .reply_markup(markup)
+                                            .await;
+                                    }
+                                    let bot2 = bot.clone();
+                                    let state2 = state.clone();
+                                    let agent2 = agent.clone();
+                                    tokio::spawn(async move {
+                                        execute_review_impl_subagent(
+                                            bot2, state2, agent2, session_id, chat_id, thread_id, card_mid,
                                         )
                                         .await;
                                     });
@@ -2744,6 +2817,170 @@ async fn execute_plan_review_subagent(
     }
 
     finish(review_report.card_delta).await;
+}
+
+/// Spawns an isolated implementation-review worker on `plan:review_impl` tap (#234).
+///
+/// Audits the delivered code changes against the archived plan document and acceptance criteria,
+/// then delivers rich markdown findings back to the Telegram thread.
+async fn execute_review_impl_subagent(
+    bot: Bot,
+    state: Arc<TelegramState>,
+    agent: Arc<AgentService>,
+    session_id: Uuid,
+    chat_id: ChatId,
+    thread_id: Option<teloxide::types::ThreadId>,
+    card_mid: Option<MessageId>,
+) {
+    use crate::brain::tools::r#trait::Tool;
+
+    let restore_kb = {
+        let bot = bot.clone();
+        let state = state.clone();
+        async move {
+            state.set_plan_reviewing(session_id, false).await;
+            let target_mid = state
+                .plan_card(session_id)
+                .await
+                .map(|(mid, _)| mid)
+                .or(card_mid);
+            if let (Some(mid), Some(markup)) = (
+                target_mid,
+                crate::channels::telegram::flow_chrome::PlanKb::CompletedReview.keyboard(),
+            ) {
+                let _ = bot
+                    .edit_message_reply_markup(chat_id, mid)
+                    .reply_markup(markup)
+                    .await;
+            }
+        }
+    };
+
+    let post_report = |report_md: &str| {
+        let bot = bot.clone();
+        let report_md = report_md.to_string();
+        async move {
+            let chat_id_i64 = chat_id.0;
+            let send_res = crate::channels::telegram::rich::api::send_rich_markdown_id(
+                bot.api_url().as_str(),
+                bot.token(),
+                chat_id_i64,
+                thread_id,
+                &report_md,
+                None,
+                "review_impl",
+                "impl_findings",
+            )
+            .await;
+
+            if let Err(e) = send_res {
+                tracing::warn!(
+                    "Failed to deliver rich implementation review findings, falling back to basic send: {e}"
+                );
+                let _ = crate::channels::telegram::send::message_in_thread(
+                    &bot, chat_id, thread_id, &report_md,
+                )
+                .await;
+            }
+        }
+    };
+
+    let Some(manager) = agent.subagent_manager() else {
+        restore_kb.await;
+        post_report("⚠️ Review implementation unavailable: no sub-agent manager wired.").await;
+        return;
+    };
+    let registry = agent.tool_registry().clone();
+
+    let doc = crate::utils::plan_files::latest_archived_plan(session_id).await;
+    let (title, checklist) = match &doc {
+        Some(d) => crate::channels::telegram::flow_chrome::plan_document_sections(d),
+        None => (None, None),
+    };
+    let md_path = crate::utils::plan_files::plan_md_path(session_id).await;
+
+    let brief = {
+        let checklist_rendered = checklist.as_ref().map(|items| items.join("\n"));
+        crate::channels::telegram::plan_card::review_impl_brief(
+            title.as_deref().unwrap_or("Completed Plan"),
+            checklist_rendered
+                .as_deref()
+                .unwrap_or("No checklist recorded"),
+            Some(&md_path),
+        )
+    };
+
+    let input = crate::channels::telegram::plan_card::review_impl_spawn_input(session_id, brief);
+    let mut ctx = crate::brain::tools::ToolExecutionContext::new(session_id);
+    ctx.service_context = Some(agent.context().clone());
+    ctx.subagent_manager = Some(manager.clone());
+    ctx.parent_tool_registry = Some(registry.clone());
+    ctx.plan_session_override = Some(session_id);
+
+    let spawn_tool = crate::brain::tools::subagent::SpawnAgentTool::new(manager.clone(), registry);
+    let res = match spawn_tool.execute(input, &ctx).await {
+        Ok(res) => res,
+        Err(e) => {
+            restore_kb.await;
+            post_report(&format!("⚠️ Review implementation could not start: {e}")).await;
+            return;
+        }
+    };
+    if !res.success {
+        let msg = res
+            .error
+            .clone()
+            .filter(|e| !e.trim().is_empty())
+            .unwrap_or(res.output);
+        restore_kb.await;
+        post_report(&format!("⚠️ Review implementation could not start: {msg}")).await;
+        return;
+    }
+    let Some(child_id) = crate::channels::telegram::plan_card::plan_review_agent_id(&res.output)
+    else {
+        restore_kb.await;
+        post_report("⚠️ Review implementation started but its id could not be read.").await;
+        return;
+    };
+
+    const REVIEW_WAIT_SECS: u64 = 900;
+    let wait_tool = crate::brain::tools::subagent::WaitAgentTool::new(manager.clone());
+    let waited = wait_tool
+        .execute(
+            serde_json::json!({
+                "agent_id": child_id,
+                "timeout_secs": REVIEW_WAIT_SECS,
+            }),
+            &ctx,
+        )
+        .await;
+
+    let child_state = manager.get_state(&child_id);
+    let output = match waited {
+        Err(e) => format!("⚠️ Review implementation could not be awaited: {e}"),
+        Ok(_) => match child_state {
+            Some(crate::brain::tools::subagent::SubAgentState::Completed) => manager
+                .get_output(&child_id)
+                .unwrap_or_else(|| "⚠️ Review completed with no output.".to_string()),
+            Some(crate::brain::tools::subagent::SubAgentState::Failed(e)) => {
+                format!("⚠️ Review implementation failed: {e}")
+            }
+            Some(crate::brain::tools::subagent::SubAgentState::Cancelled) => {
+                "⚠️ Review implementation was cancelled.".to_string()
+            }
+            Some(crate::brain::tools::subagent::SubAgentState::AwaitingInput) => {
+                "⚠️ Review implementation paused for input.".to_string()
+            }
+            Some(crate::brain::tools::subagent::SubAgentState::Running) => {
+                "⚠️ Review implementation timed out; it may still finish in the background."
+                    .to_string()
+            }
+            None => "⚠️ Review implementation stopped: worker disappeared.".to_string(),
+        },
+    };
+
+    restore_kb.await;
+    post_report(&output).await;
 }
 
 #[derive(Clone)]

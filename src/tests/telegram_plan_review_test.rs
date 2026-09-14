@@ -18,9 +18,10 @@
 use crate::channels::telegram::TelegramState;
 use crate::channels::telegram::flow_chrome::PlanKb;
 use crate::channels::telegram::plan_card::{
-    PLAN_REVIEW_LABEL, PLAN_REVIEW_RUNNING_NOTE, format_plan_review_running_progress,
-    plan_card_with_footer, plan_review_agent_id, plan_review_delta, plan_review_effective_kb,
-    plan_review_footer_note, plan_review_spawn_input, plan_review_was_cancelled,
+    PLAN_REVIEW_LABEL, PLAN_REVIEW_RUNNING_NOTE, REVIEW_IMPL_LABEL,
+    format_plan_review_running_progress, plan_card_with_footer, plan_review_agent_id,
+    plan_review_delta, plan_review_effective_kb, plan_review_footer_note, plan_review_spawn_input,
+    plan_review_was_cancelled, review_impl_brief, review_impl_spawn_input,
 };
 use uuid::Uuid;
 
@@ -689,4 +690,73 @@ fn cancelled_review_is_not_delivered_as_findings() {
         !plan_review_was_cancelled(None),
         "a missing worker reports 'its worker disappeared', not silence"
     );
+}
+
+/// #234 — Completed plan card review keyboard and subagent contracts.
+#[test]
+fn completed_review_card_keyboard_structure() {
+    // 1. CompletedReview has a single button offering "🔍 Review implementation" -> "plan:review_impl"
+    let r_impl = rows(PlanKb::CompletedReview);
+    assert_eq!(
+        r_impl,
+        vec![vec![(
+            "🔍 Review implementation".to_string(),
+            "plan:review_impl".to_string()
+        )]],
+        "CompletedReview must carry a single '🔍 Review implementation' button"
+    );
+
+    // 2. CompletedReviewing has a single button indicating "⏳ Reviewing implementation…" -> "plan:noop_impl"
+    let r_reviewing = rows(PlanKb::CompletedReviewing);
+    assert_eq!(
+        r_reviewing,
+        vec![vec![(
+            "⏳ Reviewing implementation…".to_string(),
+            "plan:noop_impl".to_string()
+        )]],
+        "CompletedReviewing must carry a single '⏳ Reviewing implementation…' no-op button"
+    );
+}
+
+#[test]
+fn review_impl_spawn_input_sets_read_only_and_correct_label() {
+    let session_id = Uuid::new_v4();
+    let brief = "Test implementation review brief".to_string();
+    let input = review_impl_spawn_input(session_id, brief.clone());
+
+    assert_eq!(
+        input["session_id"].as_str().unwrap(),
+        session_id.to_string()
+    );
+    assert_eq!(input["brief"].as_str().unwrap(), brief);
+    assert_eq!(
+        input["read_only"].as_bool(),
+        Some(true),
+        "Implementation review worker MUST be read-only"
+    );
+    assert_eq!(
+        input["label"].as_str().unwrap(),
+        REVIEW_IMPL_LABEL,
+        "Implementation review worker must use the canonical label"
+    );
+}
+
+#[test]
+fn review_impl_brief_contains_structured_adversarial_prompt() {
+    let brief = review_impl_brief(
+        "Feature #234 Title",
+        "- [x] 1. First task\n- [x] 2. Second task",
+        Some(std::path::Path::new("/tmp/test_plan.md")),
+    );
+
+    assert!(brief.contains("## Plan: Feature #234 Title"));
+    assert!(brief.contains("## Completed Checklist"));
+    assert!(brief.contains("- [x] 1. First task"));
+    assert!(brief.contains("## Instructions for Implementation Review Worker"));
+    assert!(brief.contains("adverse-auditor"));
+    assert!(brief.contains("### 1. Grounding"));
+    assert!(brief.contains("### 2. Acceptance Criteria"));
+    assert!(brief.contains("### 3. Code & Architecture Audit"));
+    assert!(brief.contains("### 4. Output Report Format"));
+    assert!(brief.contains("## 🔍 Implementation Review: Feature #234 Title"));
 }
