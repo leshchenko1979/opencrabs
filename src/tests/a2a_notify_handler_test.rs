@@ -3,7 +3,7 @@
 use crate::a2a::handler::notify::*;
 use crate::a2a::test_helpers::helpers::placeholder_service_context;
 use crate::a2a::types::*;
-use crate::brain::agent::service::restart_recovery::{expect_channel_route, test_guard};
+use crate::brain::agent::service::restart_recovery::test_guard;
 use crate::brain::agent::service::session_routes::{ChannelOwnership, register_session_route};
 use crate::brain::agent::{PushOrigin, QueuedUserMessage};
 use crate::services::SessionService;
@@ -334,7 +334,7 @@ async fn notify_status_reports_unknown_id_honestly() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn surfaceless_session_parks_honestly() {
+async fn surfaceless_session_parks_honestly_in_headless_mode() {
     let _guard = test_guard();
     let ctx = placeholder_service_context().await;
     let session = SessionService::new(ctx.clone())
@@ -343,7 +343,10 @@ async fn surfaceless_session_parks_honestly() {
         .expect("session row created");
     let sid = session.id;
 
-    expect_channel_route(sid);
+    // Register headless parking route as fallback
+    crate::brain::agent::service::session_routes::register_headless_parking_route(
+        crate::brain::agent::service::restart_recovery::parking_route(),
+    );
 
     let resp =
         handle_session_notify(serde_json::json!(20), params(&sid.to_string(), "ping"), ctx).await;
