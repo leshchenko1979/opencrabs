@@ -48,5 +48,3 @@ pub(crate) use render_html::{
 #[cfg(test)]
 pub(crate) use table::shield_bare_leading_hashes;
 pub(crate) use table::{normalize_tables, reflow_collapsed_tables};
-#[cfg(test)]
-pub(crate) use table::shield_bare_leading_hashes;
