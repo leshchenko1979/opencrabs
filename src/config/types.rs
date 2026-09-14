@@ -265,13 +265,28 @@ pub struct BrowserConfig {
 }
 
 /// Daemon mode configuration (systemd / launchd service).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
     /// Health check HTTP port. When set, `opencrabs daemon` binds a tiny HTTP
     /// server on `0.0.0.0:<port>` that responds to `GET /health` with 200 OK.
     /// Useful for systemd watchdog, uptime monitors, and external health probes.
     #[serde(default)]
     pub health_port: Option<u16>,
+
+    /// Whether this daemon adopts and runs cron schedulers for secondary profiles (#184).
+    /// Defaults to true. When false, or when running with an explicit `-p <name>` flag,
+    /// foreign profiles are not adopted.
+    #[serde(default = "default_true")]
+    pub adopt_profiles: bool,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            health_port: None,
+            adopt_profiles: true,
+        }
+    }
 }
 
 /// A2A (Agent-to-Agent) protocol gateway configuration.
