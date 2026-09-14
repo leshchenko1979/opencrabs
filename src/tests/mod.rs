@@ -875,6 +875,7 @@ pub mod discord_table_convert_test;
 pub mod discord_thread_title_test;
 #[cfg(unix)]
 pub mod flock_retry_test;
+pub mod flow_entry_newlines_test;
 pub mod flow_progress_key_test;
 #[cfg(feature = "code-graph")]
 pub mod memory_search_code_graph_test;

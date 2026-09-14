@@ -675,8 +675,10 @@ pub(crate) fn render_flow_details_chrome_pref(
     if has_log {
         // The merged footer is the processing-log summary; the body is the full
         // <p>-wrapped entry list (one <p> per entry so the rich parser keeps
-        // them separated).
-        let body: String = out.iter().map(|e| format!("<p>{e}</p>")).collect();
+        // them separated). paragraph_html owns the rich dialect's soft-break
+        // rule (#35): a bare newline inside a <p> collapses to whitespace, so
+        // multi-paragraph entries must arrive with explicit <br>.
+        let body: String = out.iter().map(|e| super::rich::paragraph_html(e)).collect();
         msg.push_str(&format!(
             "<details><summary><sub>{footer}</sub></summary>{body}</details>"
         ));
