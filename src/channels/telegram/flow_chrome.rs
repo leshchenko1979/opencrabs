@@ -233,7 +233,10 @@ impl FlowSections {
     pub(crate) fn chrome_rich(&self, settled: bool) -> String {
         let mut out = String::new();
         if let Some(ref t) = self.plan_title {
-            out.push_str(&format!("<p>📋 <b>{}</b></p>", escape_html(t)));
+            out.push_str(&super::rich::paragraph_html(&format!(
+                "📋 <b>{}</b>",
+                escape_html(t)
+            )));
         }
         if let Some(ref sections) = self.prose {
             for sec in sections {
@@ -253,7 +256,7 @@ impl FlowSections {
                 out.push_str("<hr>");
             }
             for row in rows {
-                out.push_str(&format!("<p>{}</p>", escape_html(row)));
+                out.push_str(&super::rich::paragraph_html(&escape_html(row)));
             }
         }
         if let Some(ref g) = self.goal {
@@ -269,12 +272,12 @@ impl FlowSections {
                 }
                 if let [one] = paras.as_slice() {
                     let header = g.format_goal_header(one, settled);
-                    out.push_str(&format!("<p>{header}</p>"));
+                    out.push_str(&super::rich::paragraph_html(&header));
                 } else {
                     let header = g.format_goal_header(paras[0], settled);
                     let body: String = paras[1..]
                         .iter()
-                        .map(|p| format!("<p>{}</p>", escape_html(p)))
+                        .map(|p| super::rich::paragraph_html(&escape_html(p)))
                         .collect();
                     out.push_str(&format!(
                         "<details><summary>{header}</summary>{body}</details>"
