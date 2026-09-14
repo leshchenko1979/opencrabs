@@ -1043,12 +1043,10 @@ async fn run_final_edit(chat_id: i64, msg_id: i32, pending: &PendingFinal) -> Re
                 .bot
                 .edit_message_text(ChatId(chat_id), MessageId(msg_id), &pending.html)
                 .parse_mode(ParseMode::Html);
-            if let Some(kb) = &pending.reply_markup {
-                if let Ok(inline_kb) =
-                    serde_json::from_value::<teloxide::types::InlineKeyboardMarkup>(kb.clone())
-                {
-                    req = req.reply_markup(inline_kb);
-                }
+            if let Some(inline_kb) = pending.reply_markup.as_ref().and_then(|kb| {
+                serde_json::from_value::<teloxide::types::InlineKeyboardMarkup>(kb.clone()).ok()
+            }) {
+                req = req.reply_markup(inline_kb);
             }
             req.await.map(|_| ()).map_err(|e| e.to_string())
         }
