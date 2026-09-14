@@ -1813,25 +1813,16 @@ pub async fn classify_recently_active(
             recovery.unclassified.push(short_session_id(sid));
             continue;
         };
-        // #180 / #200: this binding was last refreshed by a BUTTON TAP that started a
-        // turn. A bot message after a tap is only the card the button rode in
-        // on, so it carries no completion signal — and if the kill landed in
-        // the dispatch→PROCESSING window, NET 1 has no row for this turn
-        // either. This is the one case where NET 2 is the only net left.
-        //
-        // However (#200), once the turn finishes, `turn_open_at` is cleared to NULL.
-        // We only short-circuit to `interrupted` if `turn_open_at` is still Some(_),
-        // proving the turn was in-flight when the daemon was killed.
-        // If `turn_open_at` is None, the turn completed normally; fall through
-        // to check `last_topic_sender` (which will see BOT_SENDER_ID and classify `completed`).
-        if crate::db::BindingOrigin::from_stored(b.last_origin.as_deref())
-            == crate::db::BindingOrigin::Callback
-            && b.turn_open_at.is_some()
-        {
+        // #180 / #200 / #226: if `turn_open_at` is still Some(_), a turn was actively
+        // in-flight when the daemon was killed or restarted (e.g. running tools, mid-compaction,
+        // or button tap callback), regardless of whether intermediate bot messages were emitted.
+        // Once a turn finishes normally, `turn_open_at` is cleared to NULL.
+        // If `turn_open_at` is Some(_), short-circuit to `interrupted`.
+        // If `turn_open_at` is None, fall through to check `last_topic_sender` and active goals.
+        if b.turn_open_at.is_some() {
             tracing::info!(
                 target: "telegram",
-                "Boot classifier (#180/#200): session {} was last refreshed by an in-flight button tap \
-                 turn — resuming",
+                "Boot classifier (#180/#200/#226): session {} was in-flight (turn_open_at is set) — resuming",
                 short_session_id(sid)
             );
             recovery
