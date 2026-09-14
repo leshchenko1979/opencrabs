@@ -77,6 +77,9 @@ async fn rich_card_never_relies_on_a_bare_newline_to_break_a_line() {
     let goal = GoalSection {
         text: "Ship it".to_string(),
         completed: false,
+        turns_used: 1,
+        max_turns: Some(20),
+        state: Some("active".to_string()),
     };
     let html = render_plan_card_rich_html(Some(TITLE), Some(&rows()), Some(&prose), Some(&goal))
         .await
@@ -144,6 +147,9 @@ async fn classic_card_keeps_the_blank_line_before_the_goal() {
     let goal = GoalSection {
         text: "Ship it".to_string(),
         completed: false,
+        turns_used: 1,
+        max_turns: Some(20),
+        state: Some("active".to_string()),
     };
     let html = render_plan_card_html(Some(TITLE), Some(&rows()), None, Some(&goal))
         .await
@@ -162,6 +168,9 @@ async fn classic_card_has_no_gap_before_the_goal_when_there_is_no_body() {
     let goal = GoalSection {
         text: "Ship it".to_string(),
         completed: false,
+        turns_used: 1,
+        max_turns: Some(20),
+        state: Some("active".to_string()),
     };
     let html = render_plan_card_html(Some(TITLE), None, None, Some(&goal))
         .await
@@ -383,6 +392,9 @@ async fn markdown_card_goal_sits_inside_details_after_a_gap() {
     let goal = GoalSection {
         text: "Ship it".to_string(),
         completed: false,
+        turns_used: 1,
+        max_turns: Some(20),
+        state: Some("active".to_string()),
     };
     let md = render_plan_card_markdown(Some(TITLE), Some(&rows()), None, Some(&goal))
         .await
@@ -390,7 +402,7 @@ async fn markdown_card_goal_sits_inside_details_after_a_gap() {
 
     assert!(
         md.contains(
-            "<p>☐ Third task</p>\n\n<details><summary><b>🎯</b></summary><p>Ship it</p></details>"
+            "<p>☐ Third task</p>\n\n<details><summary><b>🎯</b> (1/20 turns)</summary><p>Ship it</p></details>"
         ),
         "the goal must follow a blank-line gap and render inside details. \
          Got:\n{md}"

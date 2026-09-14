@@ -145,6 +145,9 @@ pub(crate) fn split_plan_prose(md: &str) -> Vec<ProseSection> {
 pub(crate) struct GoalSection {
     pub(crate) text: String,
     pub(crate) completed: bool,
+    pub(crate) turns_used: u32,
+    pub(crate) max_turns: Option<u32>,
+    pub(crate) state: Option<String>,
 }
 
 impl GoalSection {
@@ -159,6 +162,26 @@ impl GoalSection {
             "🎯"
         };
         format!("<b>{icon}</b>")
+    }
+
+    /// Turn counter suffix formatted for display:
+    /// - With max_turns: `(X/Y turns)`
+    /// - Without max_turns: `(turn X)`
+    pub(crate) fn turn_budget_str(&self) -> String {
+        match self.max_turns {
+            Some(max) => format!("({}/{} turns)", self.turns_used, max),
+            None => format!("(turn {})", self.turns_used),
+        }
+    }
+
+    /// Formats goal header with prefix, escaped text, and turn budget suffix.
+    pub(crate) fn format_goal_header(&self, text: &str, settled: bool) -> String {
+        format!(
+            "{} {} {}",
+            self.prefix(settled),
+            escape_html(text),
+            self.turn_budget_str()
+        )
     }
 }
 
@@ -244,17 +267,17 @@ impl FlowSections {
                 if self.checklist.is_some() || self.has_prose() {
                     out.push_str("<hr>");
                 }
-                let prefix = g.prefix(settled);
                 if let [one] = paras.as_slice() {
-                    out.push_str(&format!("<p>{prefix} {}</p>", escape_html(one)));
+                    let header = g.format_goal_header(one, settled);
+                    out.push_str(&format!("<p>{header}</p>"));
                 } else {
+                    let header = g.format_goal_header(paras[0], settled);
                     let body: String = paras[1..]
                         .iter()
                         .map(|p| format!("<p>{}</p>", escape_html(p)))
                         .collect();
                     out.push_str(&format!(
-                        "<details><summary>{prefix} {}</summary>{body}</details>",
-                        escape_html(paras[0])
+                        "<details><summary>{header}</summary>{body}</details>"
                     ));
                 }
             }
@@ -300,11 +323,8 @@ impl FlowSections {
                 if self.checklist.is_some() || self.has_prose() {
                     parts.push(String::new());
                 }
-                parts.push(format!(
-                    "<blockquote expandable>{} {}</blockquote>",
-                    g.prefix(settled),
-                    escape_html(text)
-                ));
+                let header = g.format_goal_header(text, settled);
+                parts.push(format!("<blockquote expandable>{header}</blockquote>"));
             }
         }
         parts.join("\n")
@@ -612,12 +632,24 @@ pub(crate) fn is_empty_scaffold_line(line: &str) -> bool {
 pub(crate) async fn load_goal_section(
     agent: &AgentService,
     session_id: Uuid,
-) -> Option<(String, bool)> {
+) -> Option<GoalSection> {
     let mgr = GoalManager::new(agent.context().clone());
     match mgr.get_goal(session_id).await {
         Ok(Some(goal)) if goal.state == "active" || goal.state == "completed" => {
             let text = goal.goal_text.trim().to_string();
-            (!text.is_empty()).then_some((text, goal.state == "completed"))
+            let turns_used = goal.turns_used.max(0) as u32;
+            let max_turns = if goal.max_turns > 0 {
+                Some(goal.max_turns as u32)
+            } else {
+                None
+            };
+            (!text.is_empty()).then_some(GoalSection {
+                text,
+                completed: goal.state == "completed",
+                turns_used,
+                max_turns,
+                state: Some(goal.state),
+            })
         }
         Ok(_) => None,
         Err(e) => {
@@ -734,31 +766,32 @@ pub(crate) async fn refresh_sections(
     let (plan_state, plan_kb) = load_plan_state_section(session_id, turn_active).await;
     let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
     let goal = match live_goal {
-        Some((text, false)) => {
-            // Active goal: show it and remember the text — several
+        Some(g) if !g.completed => {
+            // Active goal: show it and remember the snapshot — several
             // completions in one turn keep the LAST goal only.
-            s.retained_goal = Some(text.clone());
-            Some(GoalSection {
-                text,
-                completed: false,
-            })
+            s.retained_goal = Some(super::flow::RetainedGoal {
+                text: g.text.clone(),
+                turns_used: g.turns_used,
+                max_turns: g.max_turns,
+            });
+            Some(g)
         }
         // The turn-end judge marked it completed (row survives): retained
         // display, but only when it was sighted active earlier THIS turn —
         // a leftover completed row from a prior turn never re-renders.
-        Some((text, true)) => s.retained_goal.is_some().then_some(GoalSection {
-            text,
-            completed: true,
-        }),
+        Some(g) if g.completed => s.retained_goal.is_some().then_some(g),
         // Row gone. While a plan is Active that means clear_task_goal on a
         // task complete: keep the retained text until settle. In every
         // other state (Editing, or NoPlan after discard/clear) the goal
         // section is gone.
-        None if mode == PlanModeState::Active => s.retained_goal.clone().map(|text| GoalSection {
-            text,
+        None if mode == PlanModeState::Active => s.retained_goal.as_ref().map(|rg| GoalSection {
+            text: rg.text.clone(),
             completed: true,
+            turns_used: rg.turns_used,
+            max_turns: rg.max_turns,
+            state: Some("completed".to_string()),
         }),
-        None => None,
+        _ => None,
     };
     let next = FlowSections {
         plan_state,
