@@ -752,8 +752,8 @@ fn review_impl_brief_contains_structured_adversarial_prompt() {
     assert!(brief.contains("Title: Feature #234 Title"));
     assert!(brief.contains("Checklist & Deliverables:"));
     assert!(brief.contains("- [x] 1. First task"));
-    assert!(brief.contains("adversarial software implementation audit"));
     assert!(brief.contains("Archived Plan File: /tmp/test_plan.md"));
+    assert!(brief.contains("adversarial software implementation audit"));
     assert!(brief.contains("### STEP 1: CONTEXT & ACCEPTANCE CRITERIA"));
     assert!(brief.contains("### STEP 2: CODE & ARCHITECTURE AUDIT"));
     assert!(brief.contains("### STEP 3: TEST & ACCEPTANCE VERIFICATION"));
