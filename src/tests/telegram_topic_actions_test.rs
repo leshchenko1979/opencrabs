@@ -41,10 +41,14 @@ fn telegram_send_schema_declares_topic_actions_and_params() {
         enum_strs.contains(&"rename_topic"),
         "action enum missing rename_topic"
     );
+    assert!(
+        enum_strs.contains(&"bind_topic"),
+        "action enum missing bind_topic"
+    );
     assert_eq!(
         enum_strs.len(),
-        22,
-        "action enum should contain exactly 22 actions"
+        23,
+        "action enum should contain exactly 23 actions"
     );
 
     let name = props.get("name").expect("schema has name property");
