@@ -124,6 +124,8 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     include_str!("../migrations/20260913000001_session_bindings_turn_open_at.sql"),
     // #1529: WhatsApp newsletter poll cursors — watermark per-channel
     include_str!("../migrations/20260914000001_add_whatsapp_newsletter_cursors.sql"),
+    // FORK (#233): trigger-gated cron execution and goal dispatch columns.
+    include_str!("../migrations/20260915000001_add_cron_trigger_pipeline.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

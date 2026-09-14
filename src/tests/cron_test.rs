@@ -52,7 +52,7 @@ mod cli {
                 assert_eq!(name, "Daily Report");
                 assert_eq!(cron, "0 9 * * *");
                 assert_eq!(tz, "America/New_York");
-                assert_eq!(prompt, "Check emails and summarize");
+                assert_eq!(prompt, Some("Check emails and summarize".to_string()));
                 assert_eq!(provider, Some("anthropic".to_string()));
                 assert_eq!(model, Some("claude-sonnet-4-20250514".to_string()));
                 assert_eq!(thinking, "off");
@@ -121,7 +121,7 @@ mod cli {
             Some(Commands::Cron {
                 operation: CronCommands::Add { prompt, .. },
             }) => {
-                assert_eq!(prompt, "Hello");
+                assert_eq!(prompt, Some("Hello".to_string()));
             }
             _ => panic!("Expected Cron Add command"),
         }
@@ -195,6 +195,40 @@ mod cli {
             "0 9 * * *",
         ]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cron_add_with_trigger_cmd_without_prompt() {
+        let cli = Cli::try_parse_from([
+            "opencrabs",
+            "cron",
+            "add",
+            "--name",
+            "Test",
+            "--cron",
+            "0 9 * * *",
+            "--trigger-cmd",
+            "git status",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Cron {
+                operation:
+                    CronCommands::Add {
+                        name,
+                        cron,
+                        prompt,
+                        trigger_cmd,
+                        ..
+                    },
+            }) => {
+                assert_eq!(name, "Test");
+                assert_eq!(cron, "0 9 * * *");
+                assert_eq!(prompt, None);
+                assert_eq!(trigger_cmd, Some("git status".to_string()));
+            }
+            _ => panic!("Expected Cron Add command"),
+        }
     }
 
     #[test]
@@ -275,10 +309,10 @@ mod cli {
 // --- DB Repository Tests ---
 
 mod repository {
-    use crate::db::CronJobRepository;
-    use crate::db::Database;
     use crate::db::models::CronJob;
     use crate::db::repository::CronJobPatch;
+    use crate::db::CronJobRepository;
+    use crate::db::Database;
 
     async fn setup() -> (Database, CronJobRepository) {
         let db = Database::connect_in_memory()
@@ -1159,9 +1193,9 @@ mod tool {
 // --- Scheduler Logic Tests ---
 
 mod scheduler {
+    use crate::db::models::CronJob;
     use crate::db::CronJobRepository;
     use crate::db::Database;
-    use crate::db::models::CronJob;
     use chrono::{Duration, Utc};
 
     async fn setup() -> (Database, CronJobRepository) {
@@ -1297,7 +1331,7 @@ mod scheduler {
     /// scheduling again REPLACES it rather than stacking a second build.
     #[tokio::test]
     async fn schedule_background_rebuild_queues_one_shot_resumable_job() {
-        use crate::cron::{REBUILD_JOB_NAME, schedule_background_rebuild};
+        use crate::cron::{schedule_background_rebuild, REBUILD_JOB_NAME};
 
         let (db, repo) = setup().await;
         let sid = uuid::Uuid::new_v4();
@@ -1540,7 +1574,11 @@ mod blob_prompt_regression {
                         next_run_at TEXT,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
-                        profile_name TEXT
+                        profile_name TEXT,
+                        trigger_cmd TEXT,
+                        trigger_on TEXT,
+                        set_goal INTEGER NOT NULL DEFAULT 0,
+                        goal_template TEXT
                     );",
                 )
             })
