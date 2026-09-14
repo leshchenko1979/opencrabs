@@ -67,6 +67,14 @@ pub(crate) enum FlowEntry {
     System(String),
 }
 
+/// Snapshot of a goal sighted active this turn, along with its turn budget.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RetainedGoal {
+    pub(crate) text: String,
+    pub(crate) turns_used: u32,
+    pub(crate) max_turns: Option<u32>,
+}
+
 pub(crate) struct StreamingState {
     /// Whether this session's chat is a DM (owner-private). Drives scope-aware
     /// redaction: secrets show in DMs, scrub in group/channel chats (#677).
@@ -150,7 +158,11 @@ pub(crate) struct StreamingState {
     /// engine deletes the goal row when a plan task completes, so the chrome
     /// retains the text here and keeps the Goal section until settle. Per-turn
     /// state — a fresh StreamingState next turn drops any retained goal.
-    pub(crate) retained_goal: Option<String>,
+    /// Last active goal snapshot sighted this turn (ADR 0005 Decision 10): the
+    /// engine deletes the goal row when a plan task completes, so the chrome
+    /// retains the text and turn counters here and keeps the Goal section until settle. Per-turn
+    /// state — a fresh StreamingState next turn drops any retained goal.
+    pub(crate) retained_goal: Option<RetainedGoal>,
     /// Number of tool rounds completed (for display)
     pub(crate) tool_round_count: usize,
     /// When tool execution started (for elapsed time)

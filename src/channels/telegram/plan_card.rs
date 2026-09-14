@@ -199,17 +199,19 @@ async fn render_plan_card(
             if checklist.is_some() || has_prose {
                 blocks.push(CardBlock::ClassicGap);
             }
+            let turns_str = g.turn_budget_str();
             blocks.push(CardBlock::Block(match style {
                 CollapsibleStyle::BlockquoteExpandable => {
                     let capped = escape_html(truncate_chars(text, GOAL_TEXT_CAP));
                     format!(
-                        "<blockquote expandable>{} {capped}</blockquote>",
+                        "<blockquote expandable>{} {capped} {turns_str}</blockquote>",
                         g.prefix(true)
                     )
                 }
                 CollapsibleStyle::DetailsSummary => format!(
-                    "<details><summary>{}</summary>\n{}</details>",
+                    "<details><summary>{} {}</summary>\n{}</details>",
                     g.prefix(true),
+                    turns_str,
                     escape_html(text)
                 ),
             }));
@@ -325,9 +327,11 @@ pub(crate) async fn render_plan_card_markdown(
                 blocks.push(CardBlock::ClassicGap);
             }
             let text_html = super::rich::markdown_to_html_p(text);
+            let turns_str = g.turn_budget_str();
             blocks.push(CardBlock::Block(format!(
-                "<details><summary>{}</summary>{}</details>",
+                "<details><summary>{} {}</summary>{}</details>",
                 g.prefix(true),
+                turns_str,
                 text_html
             )));
         }
@@ -803,11 +807,7 @@ pub(crate) async fn refresh_plan_card(
     let goal = if checklist.is_some() {
         load_goal_section(agent, session_id)
             .await
-            .filter(|&(_, completed)| !completed)
-            .map(|(text, _)| GoalSection {
-                text,
-                completed: false,
-            })
+            .filter(|g| !g.completed)
     } else {
         None
     };
