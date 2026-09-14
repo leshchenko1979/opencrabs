@@ -32,6 +32,7 @@ pub(crate) const HISTORY_IMPORT_MAX_AGE_DAYS: i64 = 90;
 
 /// Message type tag distinguishing imported rows from live captures in the
 /// shared `channel_messages` store (decision 1).
+#[allow(dead_code)]
 pub(crate) const IMPORTED_TYPE: &str = "imported";
 
 /// One bounded PDO history request, anchored on a message already stored.
@@ -76,6 +77,7 @@ pub(crate) fn plan_import(
 
 /// Window filter for frames arriving at the capture gate: the phone may
 /// answer with messages older than the 90-day bound; those are dropped.
+#[allow(dead_code)]
 pub(crate) fn in_window(ts: DateTime<Utc>, now: DateTime<Utc>) -> bool {
     ts > now - Duration::days(HISTORY_IMPORT_MAX_AGE_DAYS)
 }
@@ -83,6 +85,7 @@ pub(crate) fn in_window(ts: DateTime<Utc>, now: DateTime<Utc>) -> bool {
 /// Per-chat opt-in (decision 2): exact match on the normalized chat id the
 /// live path formats (`Display` of the source JID), never a phone prefix
 /// scan — #1544's lesson is that loose key matching merges partitions.
+#[allow(dead_code)]
 pub(crate) fn opted_in(chats: &[String], chat_id: &str) -> bool {
     chats.iter().any(|c| c == chat_id)
 }

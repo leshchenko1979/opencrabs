@@ -168,6 +168,7 @@ fn id_from_params(params: &str) -> Option<String> {
 /// (#1411). Any other id (approval taps, foreign payloads, zero, junk)
 /// yields `None` so the ordinary message path stays untouched. Kept pure so
 /// the routing contract is testable without a live socket.
+#[allow(dead_code)]
 pub(crate) fn parse_suggestion_tap(id: &str) -> Option<usize> {
     let n: usize = id.strip_prefix("wa_suggest_")?.parse().ok()?;
     (n >= 1).then_some(n)
@@ -177,6 +178,7 @@ pub(crate) fn parse_suggestion_tap(id: &str) -> Option<usize> {
 /// is checked by the caller; this enforces the button cap, because a truncated
 /// card would silently drop selectable options. Pure for the same reason as
 /// [`parse_suggestion_tap`].
+#[allow(dead_code)]
 pub(crate) fn suggestion_card_fits(count: usize) -> bool {
     (1..=MAX_BUTTONS).contains(&count)
 }
