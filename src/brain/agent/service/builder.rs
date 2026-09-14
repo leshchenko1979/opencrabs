@@ -1990,13 +1990,10 @@ impl AgentService {
     /// body is re-injected into the system brain on every turn so it
     /// survives context compaction (#219).
     pub fn register_active_skill(&self, session_id: Uuid, skill_name: &str) {
-        // #179: canonicalise to the bare slug here — this pair is the choke
-        // point for BOTH entry paths into the active set. The slash-command
-        // path passes Skill::slash_name ("/foo") while the manifest path
-        // passes the bare slug ("foo"); without normalisation the same skill
-        // is keyed two ways and the re-injection matcher — which compares the
-        // bare Skill::name — silently misses one of them.
-        let slug = crate::brain::skills::normalize_skill_slug(skill_name);
+        // #179 & #216: canonicalise through parse_skill_spec — handles bare
+        // slug ("foo", "/foo") as well as in-skill files ("foo/bar.md", "/foo/bar.md").
+        // This pair is the choke point for BOTH entry paths into the active set.
+        let (slug, aux_file) = crate::brain::skills::parse_skill_spec(skill_name);
         // #138: slash invocation is skill consumption too — marking seen
         // (which persists to the DB) makes the compaction stamp's union
         // survive restarts for slash-invoked skills, not just read-loaded
@@ -2006,17 +2003,27 @@ impl AgentService {
         // now persists on the same row (the `active` column) instead of
         // dying with the process. Without this a restart re-injected nothing.
         crate::brain::tools::seen_skills::mark_active(session_id, &slug);
+
+        if let Some(file) = aux_file {
+            crate::brain::tools::seen_skills::mark_aux_seen(session_id, &slug, &file);
+        }
     }
 
     /// Unregister an active skill for a session (discarded during compaction).
     ///
     /// Normalised the same way as [`Self::register_active_skill`], so a discard
     /// written in either spelling removes the single bare-keyed entry (#179).
-    /// A legacy slashed DB row is cleared by `delete_skill` itself.
+    /// If an auxiliary file is specified (`foo/bar.md`), only that auxiliary
+    /// file is discarded from `seen_aux` without deactivating the parent skill.
     pub fn unregister_active_skill(&self, session_id: Uuid, skill_name: &str) {
-        let slug = crate::brain::skills::normalize_skill_slug(skill_name);
-        crate::brain::tools::seen_skills::unmark_seen(session_id, &slug);
-        crate::brain::tools::seen_skills::unmark_active(session_id, &slug);
+        let (slug, aux_file) = crate::brain::skills::parse_skill_spec(skill_name);
+        if let Some(file) = aux_file {
+            crate::brain::tools::seen_skills::unmark_aux_seen(session_id, &slug, &file);
+        } else {
+            crate::brain::tools::seen_skills::clear_aux_seen(session_id, &slug);
+            crate::brain::tools::seen_skills::unmark_seen(session_id, &slug);
+            crate::brain::tools::seen_skills::unmark_active(session_id, &slug);
+        }
     }
 
     /// Get the set of active skill names for a session. Returns empty set

@@ -1132,14 +1132,18 @@ impl AgentService {
              ### Current Context Inventory & Budgets:\n\
              {}\n\n\
              ### Manifest Rules:\n\
-             - `active_skills`: Skills that MUST remain active for pending work / ongoing tasks.\n\
-             - `discard_skills`: Skills whose tasks are complete and should be pruned to save budget.\n\
+             - `active_skills`: Skills that MUST remain active for pending work / ongoing tasks. \
+             You may specify the bare `<skill-slug>` (e.g. `opencrabs-dev`) or a specific in-skill document \
+             `<skill-slug>/<file.md>` (e.g. `opencrabs-dev/editor.md`, `opencrabs-dev/fleet-directives.md`) \
+             if only specific auxiliary procedures are needed.\n\
+             - `discard_skills`: Skills or specific auxiliary documents whose tasks are complete and should be pruned to save budget.\n\
              - `required_tools`: Extended lazy tools (e.g. telegram_send, browser_navigate, cron_manage, pg_query) \
              that the agent will need immediately on turn 1.\n\n\
              Format as YAML:\n\
              ```context-manifest\n\
              active_skills:\n\
                - <skill-slug>\n\
+               - <skill-slug>/<file.md>\n\
              discard_skills:\n\
                - <skill-slug>\n\
              required_tools:\n\
