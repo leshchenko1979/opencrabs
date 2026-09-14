@@ -1254,6 +1254,7 @@ async fn execute_direct_trigger_job(
                 &clean,
                 job.deliver_api_key.as_deref(),
                 Some(ctx.pool()),
+                Some(run_id.clone()),
             )
             .await;
         }
