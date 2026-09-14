@@ -270,6 +270,14 @@ struct BashInput {
     /// Optional flag to run detached in background (true) or force inline (false)
     #[serde(skip_serializing_if = "Option::is_none")]
     background: Option<bool>,
+
+    /// Optional: Maximum inline byte limit before truncation or disk spilling (default: 16000)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_bytes: Option<usize>,
+
+    /// Optional: When true (default), spills full output exceeding byte limit to disk. When false, clamps inline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spill_to_disk: Option<bool>,
 }
 
 #[async_trait]
@@ -316,6 +324,15 @@ impl Tool for BashTool {
                 "background": {
                     "type": "boolean",
                     "description": "Optional: Set to true to run the command in the background (detached), or false to force inline execution. If omitted, uses automatic heuristic detection."
+                },
+                "max_output_bytes": {
+                    "type": "integer",
+                    "description": "Optional: Maximum inline byte limit before truncation or disk spilling (default: 16000)",
+                    "minimum": 1
+                },
+                "spill_to_disk": {
+                    "type": "boolean",
+                    "description": "Optional: When true (default), spills full output exceeding byte limit to /tmp/opencrabs/tool_output/. When false, clamps inline without writing to disk."
                 }
             },
             "required": ["command"]
