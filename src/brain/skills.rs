@@ -503,7 +503,11 @@ pub fn resolve_skill_path(slug: &str) -> Option<PathBuf> {
     let projects_dir = crate::services::ProjectService::projects_dir();
     if let Ok(projects) = std::fs::read_dir(&projects_dir) {
         for project_entry in projects.flatten() {
-            let skill_path = project_entry.path().join("skills").join(&slug).join("SKILL.md");
+            let skill_path = project_entry
+                .path()
+                .join("skills")
+                .join(&slug)
+                .join("SKILL.md");
             if skill_path.is_file() {
                 return Some(skill_path);
             }
@@ -521,6 +525,45 @@ pub fn skill_file_mtime(slug: &str) -> Option<u64> {
     let modified = metadata.modified().ok()?;
     let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
     Some(duration.as_secs())
+}
+
+/// Parse a skill specification into its parent skill slug and optional
+/// auxiliary file name (e.g. `opencrabs-dev/editor.md` -> (`"opencrabs-dev"`, `Some("editor.md")`)).
+///
+/// Handles leading slash on the slug (`/foo` or `/foo/bar.md`), trims whitespace,
+/// and normalizes the slug with [`normalize_skill_slug`].
+///
+/// ```
+/// # use opencrabs::brain::skills::parse_skill_spec;
+/// assert_eq!(parse_skill_spec("opencrabs-dev"), ("opencrabs-dev".to_string(), None));
+/// assert_eq!(parse_skill_spec("/opencrabs-dev"), ("opencrabs-dev".to_string(), None));
+/// assert_eq!(
+///     parse_skill_spec("opencrabs-dev/editor.md"),
+///     ("opencrabs-dev".to_string(), Some("editor.md".to_string()))
+/// );
+/// assert_eq!(
+///     parse_skill_spec("/opencrabs-dev/fleet-directives.md"),
+///     ("opencrabs-dev".to_string(), Some("fleet-directives.md".to_string()))
+/// );
+/// assert_eq!(
+///     parse_skill_spec("  /opencrabs-dev/editor.md  "),
+///     ("opencrabs-dev".to_string(), Some("editor.md".to_string()))
+/// );
+/// ```
+pub fn parse_skill_spec(raw: &str) -> (String, Option<String>) {
+    let trimmed = raw.trim();
+    let without_leading_slash = trimmed.strip_prefix('/').unwrap_or(trimmed);
+    if let Some((slug, file)) = without_leading_slash.split_once('/') {
+        let clean_slug = normalize_skill_slug(slug);
+        let clean_file = file.trim();
+        if clean_file.is_empty() {
+            (clean_slug, None)
+        } else {
+            (clean_slug, Some(clean_file.to_string()))
+        }
+    } else {
+        (normalize_skill_slug(without_leading_slash), None)
+    }
 }
 
 /// Canonicalise a skill reference to its bare slug (#179).
@@ -582,8 +625,7 @@ pub fn active_skill_bodies(
             // Reinject consumed auxiliary files (issue #216).
             if let Some(files) = seen_aux.get(&skill.name) {
                 for file_name in files {
-                    if let Some(aux) = skill.auxiliary_files.iter().find(|a| &a.name == file_name)
-                    {
+                    if let Some(aux) = skill.auxiliary_files.iter().find(|a| &a.name == file_name) {
                         section.push_str(&format!(
                             "\n\n--- Active Auxiliary: {} ---\n{}",
                             aux.name, aux.body
@@ -635,6 +677,42 @@ pub fn skills_with_globs() -> Vec<Skill> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_skill_spec_extracts_slug_and_aux() {
+        assert_eq!(
+            parse_skill_spec("opencrabs-dev"),
+            ("opencrabs-dev".to_string(), None)
+        );
+        assert_eq!(
+            parse_skill_spec("/opencrabs-dev"),
+            ("opencrabs-dev".to_string(), None)
+        );
+        assert_eq!(
+            parse_skill_spec("  /opencrabs-dev  "),
+            ("opencrabs-dev".to_string(), None)
+        );
+        assert_eq!(
+            parse_skill_spec("opencrabs-dev/editor.md"),
+            ("opencrabs-dev".to_string(), Some("editor.md".to_string()))
+        );
+        assert_eq!(
+            parse_skill_spec("/opencrabs-dev/editor.md"),
+            ("opencrabs-dev".to_string(), Some("editor.md".to_string()))
+        );
+        assert_eq!(
+            parse_skill_spec("  /opencrabs-dev/fleet-directives.md  "),
+            (
+                "opencrabs-dev".to_string(),
+                Some("fleet-directives.md".to_string())
+            )
+        );
+        assert_eq!(
+            parse_skill_spec("opencrabs-dev/"),
+            ("opencrabs-dev".to_string(), None)
+        );
+        assert_eq!(parse_skill_spec(""), ("".to_string(), None));
+    }
 
     #[test]
     fn normalize_skill_slug_strips_at_most_one_sigil() {
@@ -714,7 +792,13 @@ mod tests {
 
     #[test]
     fn resolve_skill_path_and_mtime_nonexistent() {
-        assert_eq!(resolve_skill_path("definitely-nonexistent-skill-slug-xyz"), None);
-        assert_eq!(skill_file_mtime("definitely-nonexistent-skill-slug-xyz"), None);
+        assert_eq!(
+            resolve_skill_path("definitely-nonexistent-skill-slug-xyz"),
+            None
+        );
+        assert_eq!(
+            skill_file_mtime("definitely-nonexistent-skill-slug-xyz"),
+            None
+        );
     }
 }
