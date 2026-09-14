@@ -116,6 +116,29 @@ pub fn mark_aux_seen(session_id: Uuid, slug: &str, file: &str) {
         .insert(file.to_string());
 }
 
+/// Unmark an auxiliary file for `session_id` and `slug` (discarded during compaction).
+pub fn unmark_aux_seen(session_id: Uuid, slug: &str, file: &str) {
+    let slug = crate::brain::skills::normalize_skill_slug(slug);
+    let mut reg = aux_registry()
+        .lock()
+        .expect("seen_skills aux registry poisoned");
+    if let Some(files) = reg.get_mut(&(session_id, slug.clone())) {
+        files.remove(file);
+        if files.is_empty() {
+            reg.remove(&(session_id, slug));
+        }
+    }
+}
+
+/// Clear all consumed auxiliary files for `session_id` and `slug` (when whole skill is discarded).
+pub fn clear_aux_seen(session_id: Uuid, slug: &str) {
+    let slug = crate::brain::skills::normalize_skill_slug(slug);
+    aux_registry()
+        .lock()
+        .expect("seen_skills aux registry poisoned")
+        .remove(&(session_id, slug));
+}
+
 /// Retrieve all consumed auxiliary files for `session_id`, grouped by skill slug
 /// with sorted file names.
 pub fn aux_seen_for_session(session_id: Uuid) -> HashMap<String, Vec<String>> {
