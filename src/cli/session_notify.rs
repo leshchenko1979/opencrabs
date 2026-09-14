@@ -346,7 +346,10 @@ fn finish(
     exit_code: i32,
     detail: &str,
 ) -> Result<()> {
-    journal_line(target, outcome, exit_code, detail);
+    let caller = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
+    crate::brain::agent::service::notify_journal::record(
+        &caller, target, outcome, exit_code, detail,
+    );
     match format {
         OutputFormat::Json => {
             println!(
@@ -369,25 +372,4 @@ fn finish(
         }
     }
     std::process::exit(exit_code)
-}
-
-fn journal_line(target: &str, outcome: &str, exit_code: i32, detail: &str) {
-    use std::io::Write;
-
-    let path = crate::logging::log_dir().join("session-notify.journal");
-    let ts = chrono::Utc::now().to_rfc3339();
-    let caller = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
-    // Truncate detail so one pathological message cannot bloat the line.
-    let detail: String = detail.chars().take(500).collect();
-    let line = format!(
-        "{ts}\tcaller={caller}\ttarget={target}\toutcome={outcome}\texit={exit_code}\tdetail={detail}\n"
-    );
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .and_then(|mut f| f.write_all(line.as_bytes()));
 }
