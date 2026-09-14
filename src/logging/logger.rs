@@ -2,6 +2,7 @@
 //!
 //! Provides configurable logging with conditional file output for debug mode.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::Level;
@@ -186,22 +187,22 @@ impl LoggerGuard {
 /// Debug file logging is opt-in (`-d`), so the synchronous IO cost is an
 /// acceptable trade for a log that is actually reliable.
 pub(crate) struct ResilientFileWriter {
-    log_dir: PathBuf,
+    default_log_dir: PathBuf,
     prefix: String,
     // Built lazily on the first actual write, NOT at construction. The file
     // layer is always attached but runtime-gated by `debug_logs_enabled()`
     // (#678): when the gate is off, no event reaches `make_writer`, so a
-    // disabled process never creates an empty log directory or file. The
-    // appender is only materialized once debug logging is genuinely turned on.
-    appender: std::sync::Mutex<Option<tracing_appender::rolling::RollingFileAppender>>,
+    // disabled process never creates an empty log directory or file.
+    // Dynamic per-profile appenders are keyed by target log directory (#184).
+    appenders: std::sync::Mutex<HashMap<PathBuf, tracing_appender::rolling::RollingFileAppender>>,
 }
 
 impl ResilientFileWriter {
-    pub(crate) fn new(log_dir: PathBuf, prefix: String) -> Self {
+    pub(crate) fn new(default_log_dir: PathBuf, prefix: String) -> Self {
         Self {
-            log_dir,
+            default_log_dir,
             prefix,
-            appender: std::sync::Mutex::new(None),
+            appenders: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -218,10 +219,13 @@ impl ResilientFileWriter {
     pub(crate) fn appender_lock_for_test(
         &self,
     ) -> Result<
-        std::sync::MutexGuard<'_, Option<tracing_appender::rolling::RollingFileAppender>>,
+        std::sync::MutexGuard<
+            '_,
+            HashMap<PathBuf, tracing_appender::rolling::RollingFileAppender>,
+        >,
         std::sync::TryLockError<()>,
     > {
-        self.appender
+        self.appenders
             .lock()
             .map_err(|_| std::sync::TryLockError::WouldBlock)
     }
@@ -252,6 +256,12 @@ impl ResilientFileWriter {
 impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for ResilientFileWriter {
     type Writer = ResilientFileGuard<'a>;
     fn make_writer(&'a self) -> Self::Writer {
+        // Resolve target directory in calling task context: task-local profile override
+        // takes precedence over the process default log directory (#184).
+        let target_log_dir = crate::config::profile::profile_home_override()
+            .map(|h| h.join("logs"))
+            .unwrap_or_else(|| self.default_log_dir.clone());
+
         // Block on the lock rather than skipping the event.
         //
         // This used `try_lock` and dropped the event on `WouldBlock`, on the
@@ -267,58 +277,59 @@ impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for ResilientFileWriter
         //
         // Poisoning recovery below is the part that fixes #1077: a panic while
         // holding the lock must not silence logging for the rest of the run.
-        let appender = match self.appender.lock() {
+        let appenders = match self.appenders.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         ResilientFileGuard {
             parent: self,
-            appender: Some(appender),
+            target_log_dir,
+            appenders: Some(appenders),
         }
     }
 }
 
 pub(crate) struct ResilientFileGuard<'a> {
     parent: &'a ResilientFileWriter,
-    appender:
-        Option<std::sync::MutexGuard<'a, Option<tracing_appender::rolling::RollingFileAppender>>>,
+    target_log_dir: PathBuf,
+    appenders: Option<
+        std::sync::MutexGuard<
+            'a,
+            HashMap<PathBuf, tracing_appender::rolling::RollingFileAppender>,
+        >,
+    >,
 }
 
 impl std::io::Write for ResilientFileGuard<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         // If the guard is None (mutex contention), discard the write (#1077).
-        let guard = match self.appender.as_mut() {
+        let guard = match self.appenders.as_mut() {
             Some(g) => g,
             None => return Ok(buf.len()), // pretend success to avoid error spam
         };
-        // Lazily open the appender on the first write (see `ResilientFileWriter`).
-        if guard.is_none() {
-            **guard = Some(ResilientFileWriter::build(
-                &self.parent.log_dir,
-                &self.parent.prefix,
-            ));
-        }
-        let appender = guard.as_mut().expect("appender was just materialized");
+        let target_dir = &self.target_log_dir;
+        let prefix = &self.parent.prefix;
+        let appender = guard
+            .entry(target_dir.clone())
+            .or_insert_with(|| ResilientFileWriter::build(target_dir, prefix));
+
         let result = appender.write(buf);
         if result.is_err() {
             // Self-heal: rebuild the appender so the next event reopens the file
             // instead of every subsequent write hitting the same dead handle.
-            **guard = Some(ResilientFileWriter::build(
-                &self.parent.log_dir,
-                &self.parent.prefix,
-            ));
+            let new_appender = ResilientFileWriter::build(target_dir, prefix);
+            guard.insert(target_dir.clone(), new_appender);
         }
         result
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        match self.appender.as_mut() {
-            Some(guard) => match guard.as_mut() {
-                Some(appender) => appender.flush(),
-                None => Ok(()),
-            },
-            None => Ok(()),
+        if let Some(guard) = self.appenders.as_mut()
+            && let Some(appender) = guard.get_mut(&self.target_log_dir)
+        {
+            return appender.flush();
         }
+        Ok(())
     }
 }
 

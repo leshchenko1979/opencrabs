@@ -109,22 +109,49 @@ pub(crate) fn register_config_dependent_tools(
 /// gets a lightweight cron-only scheduler. No need to run N separate daemons.
 pub(crate) async fn cmd_daemon(config: &crate::config::Config) -> Result<()> {
     let active = crate::config::profile::active_profile()
+    let active = crate::config::profile::active_profile()
         .unwrap_or("default")
         .to_string();
-    match crate::config::profile::list_profiles() {
-        Ok(entries) => {
-            for entry in entries {
-                // The active profile is already covered by cmd_chat_inner's
-                // scheduler. Skipping it here avoids running its jobs twice.
-                if entry.name == active {
-                    continue;
+
+    // Only adopt secondary profiles if running the default profile and adoption is enabled (#184).
+    // An explicit `-p <name>` daemon is dedicated to that profile and does not adopt foreign profiles.
+    let is_default_profile = crate::config::profile::active_profile().is_none()
+        || crate::config::profile::active_profile() == Some("default");
+    let should_adopt = is_default_profile && config.daemon.adopt_profiles;
+
+    if should_adopt {
+        match crate::config::profile::list_profiles() {
+            Ok(entries) => {
+                for entry in entries {
+                    // The active profile is already covered by cmd_chat_inner's
+                    // scheduler. Skipping it here avoids running its jobs twice.
+                    if entry.name == active {
+                        continue;
+                    }
+                    // Don't adopt a profile's scheduler if that profile already has a
+                    // live daemon or TUI instance running.
+                    if crate::config::profile::instance_running(&entry.name) {
+                        tracing::info!(
+                            "Multi-profile daemon: '{}' has a live instance — not adopting its scheduler",
+                            entry.name
+                        );
+                        continue;
+                    }
+                    tokio::spawn(spawn_cron_scheduler_for_profile(entry.name));
                 }
-                tokio::spawn(spawn_cron_scheduler_for_profile(entry.name));
+            }
+            Err(e) => {
+                tracing::warn!("daemon: list_profiles failed, running active profile only: {e}");
             }
         }
-        Err(e) => {
-            tracing::warn!("daemon: list_profiles failed, running active profile only: {e}");
-        }
+    } else {
+        tracing::debug!(
+            "Multi-profile daemon: adoption skipped (active='{active}', adopt_profiles={})",
+            config.daemon.adopt_profiles
+        );
+    }
+    cmd_chat_inner(config, None, false, true).await
+        );
     }
     cmd_chat_inner(config, None, false, true).await
 }
@@ -215,7 +242,7 @@ async fn spawn_cron_scheduler_for_profile(profile_name: String) {
                 service_context,
             );
             tracing::info!("Multi-profile daemon: cron scheduler running for profile '{name}'");
-            scheduler.run().await; // loops forever
+            scheduler.run_adoptive(name).await;
             Ok(())
         })
         .await;
@@ -850,7 +877,7 @@ async fn cmd_chat_inner(
         .set_followup_store(crate::db::repository::PendingFollowupRepository::new(
             db.pool().clone(),
         ))
-        .await;
+
 
     // Register Telegram connect tool (agent-callable bot setup)
     #[cfg(feature = "telegram")]
