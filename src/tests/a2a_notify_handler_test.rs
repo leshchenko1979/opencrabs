@@ -333,6 +333,40 @@ async fn notify_status_reports_unknown_id_honestly() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn surfaceless_session_parks_honestly_in_headless_mode() {
+    let _guard = test_guard();
+    let ctx = placeholder_service_context().await;
+    let session = SessionService::new(ctx.clone())
+        .create_session(Some("#114 surfaceless test".to_string()))
+        .await
+        .expect("session row created");
+    let sid = session.id;
+
+    // Register headless parking route as fallback
+    crate::brain::agent::service::session_routes::register_headless_parking_route(
+        crate::brain::agent::service::restart_recovery::parking_route(),
+    );
+
+    let resp =
+        handle_session_notify(serde_json::json!(20), params(&sid.to_string(), "ping"), ctx).await;
+    assert!(resp.error.is_none(), "{resp:?}");
+    assert_eq!(outcome_of(&resp), "parked");
+    let detail = resp
+        .result
+        .unwrap()
+        .get("detail")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        detail.contains("queued for session"),
+        "detail should explain parking: {detail}"
+    );
+}
+
+#[tokio::test]
 async fn notify_status_requires_the_id() {
     let resp = crate::a2a::handler::notify::handle_notify_status(
         serde_json::json!(16),
