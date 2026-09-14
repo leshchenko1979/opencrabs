@@ -115,11 +115,7 @@ pub fn parse_manifest_text(text: &str) -> Option<ContextManifest> {
         }
     }
 
-    if found_any_key {
-        Some(manifest)
-    } else {
-        None
-    }
+    if found_any_key { Some(manifest) } else { None }
 }
 
 fn parse_inline_items(s: &str, target: &mut Vec<String>) {
@@ -610,10 +606,14 @@ impl AgentService {
     /// and report the whole ledger if everything dies.
     /// `pub(crate)` for the regression tests in `src/tests` — no caller outside
     /// Bound on a single summariser attempt for a session with no compaction
-    /// history to scale from. Not a guess: it is the 300s every HTTP provider
-    /// in this codebase already enforces per request
-    /// (`anthropic.rs::DEFAULT_TIMEOUT`), extended to the CLI providers that
-    /// ship no timeout at all.
+    /// history to scale from.
+    ///
+    /// Calibrated for real-world reasoning summarisers:
+    /// TTFT (~10s) + ample reasoning headroom (60–90s) + generation of up to
+    /// 8,000 output tokens at TPS=40 (200s) = ~270–300s.
+    ///
+    /// Not a guess: this covers the p95 of compaction durations across fleet
+    /// operations while preventing premature truncation of reasoning models.
     pub(crate) const COMPACTION_ATTEMPT_FLOOR: std::time::Duration =
         std::time::Duration::from_secs(300);
 
@@ -650,7 +650,10 @@ impl AgentService {
                 provider.complete(request).await
             } else {
                 let stream = provider.stream(request).await?;
-                super::compaction_stream::collect_stream(stream).await
+                let idle_timeout = provider
+                    .stream_idle_timeout()
+                    .unwrap_or(std::time::Duration::from_secs(30));
+                super::compaction_stream::collect_stream_with_timeout(stream, idle_timeout).await
             }
         };
         match tokio::time::timeout(deadline, attempt).await {
