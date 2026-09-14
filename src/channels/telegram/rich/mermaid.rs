@@ -17,6 +17,7 @@
 
 use super::ast::Block;
 pub use super::ast::MermaidResult;
+use crate::channels::telegram::markdown::escape_html;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
@@ -26,12 +27,8 @@ use std::time::{Duration, Instant};
 /// Base URL of the mermaid.ink image renderer. The diagram source is
 /// base64url-appended. NOTE: this sends the diagram text to a third party.
 const MERMAID_INK_BASE: &str = "https://mermaid.ink/img/";
-
-/// Dedicated vector endpoint for a diagram source (#189 Leg 4). Same base64url
-/// payload as [`ink_url`], over `https://mermaid.ink/svg/` — the endpoint
-/// serves a real `image/svg+xml`. Build-only URL: the browser does the fetch,
-/// this host never touches mermaid.ink for it.
-pub(crate) const MERMAID_INK_SVG_BASE: &str = "https://mermaid.ink/svg/";
+/// Vector endpoint base for [`ink_url_svg`] (owner directive 2026-09-10).
+const MERMAID_INK_SVG_BASE: &str = "https://mermaid.ink/svg/";
 
 /// Query parameters appended to every mermaid.ink render request.
 ///
@@ -245,10 +242,13 @@ pub(crate) fn ink_url(source: &str) -> String {
     ink_url_params(source, MERMAID_INK_PARAMS)
 }
 
-/// The dedicated vector endpoint for a diagram source (#189 Leg 4).
-/// Same base64url payload as [`ink_url`], over `https://mermaid.ink/svg/` —
-/// the endpoint serves a real `image/svg+xml`. Build-only URL: the browser
-/// does the fetch, the server never touches mermaid.ink for this.
+/// The dedicated vector endpoint for a diagram source (owner directive
+/// 2026-09-10 03:56Z: "for the plain html - instead of an error message, we
+/// should give a mermaid svg link"). Same base64url payload as [`ink_url`],
+/// over `https://mermaid.ink/svg/` — the endpoint serves a real
+/// `image/svg+xml` (live-verified 2026-09-10); `?type=svg` on `/img/` does
+/// NOT. Build-only URL: the browser does the fetch, the server never touches
+/// mermaid.ink for this.
 pub(crate) fn ink_url_svg(source: &str) -> String {
     format!("{}{}", MERMAID_INK_SVG_BASE, base64url(source))
 }
@@ -745,6 +745,77 @@ pub(crate) fn resolve_markdown_media(text: &str) -> BoxFuture<'static, (String, 
     .boxed()
 }
 
+/// Media tag names Telegram's rich-markdown parser resolves as media entities.
+/// A LIVE tag from model-authored prose is a whole-message rejection when its
+/// source cannot be resolved against the media array (live Bot API probes,
+/// 2026-09-11): bare `<img>` → `RICH_MESSAGE_PHOTO_INVALID`,
+/// `<img src="tg://photo?id=x">` → same, `<video src="tg://video?id=v">` →
+/// `RICH_MESSAGE_VIDEO_INVALID`, `<audio src="tg://audio?id=a">` →
+/// `RICH_MESSAGE_AUDIO_INVALID`. `<iframe>` and `<img src="https://…">` pass.
+/// Code-span quoting is NOT a safe hiding place: one unbalanced backtick in
+/// prose shifts span pairing for the rest of the section and exposes the tag
+/// (#134 root cause — a lone `<img>` in a 18.5K card body 400'd every send).
+const PROSE_MEDIA_TAGS: [&str; 3] = ["img", "video", "audio"];
+
+/// Escape the tag opener of every media tag in model-authored prose so the
+/// text still READS `<img>` but can never go live (see [`PROSE_MEDIA_TAGS`]).
+/// Markdown syntax is untouched — only the `<` of a media tag is rewritten.
+pub(crate) fn neutralize_prose_media_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find('<') {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos + 1..];
+        let bytes = tail.as_bytes();
+        let mut n = usize::from(bytes.first() == Some(&b'/'));
+        let name_start = n;
+        while n < bytes.len() && bytes[n].is_ascii_alphabetic() {
+            n += 1;
+        }
+        let is_media = n > name_start
+            && PROSE_MEDIA_TAGS
+                .iter()
+                .any(|t| tail[name_start..n].eq_ignore_ascii_case(t));
+        out.push_str(if is_media { "&lt;" } else { "<" });
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Rewrite `tg://photo?id=<X>` references in an already-resolved rich body
+/// whose `<X>` has no matching [`MediaEntry`] into the non-triggering
+/// `tg:photo?id=<X>` form (probe-verified 200, 2026-09-11). Telegram rejects
+/// the WHOLE message with `RICH_MESSAGE_PHOTO_INVALID` when a photo reference
+/// cannot be resolved, and prose can carry such a reference as an example of
+/// the construct. Sibling of [`neutralize_prose_media_html`], which closes the
+/// HTML-tag hole.
+pub(crate) fn neutralize_orphan_photo_refs(text: &str, media: &[MediaEntry]) -> String {
+    const PREFIX: &str = "tg://photo?id=";
+    if !text.contains(PREFIX) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find(PREFIX) {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + PREFIX.len()..];
+        let id_len = after
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+            .count();
+        let id = &after[..id_len];
+        if !id.is_empty() && media.iter().any(|m| m.id == id) {
+            out.push_str(PREFIX);
+        } else {
+            out.push_str("tg:photo?id=");
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Recursively replace every `Code{lang:"mermaid"}` block with a
 /// `Mermaid{source, result}` block by pre-validating each fence. Handles
 /// top-level fences and fences nested inside quotes, list items, and details.
@@ -828,32 +899,48 @@ pub(crate) fn markdown_failure_block_with_link(err: &str, source: &str) -> Strin
 /// HTML for a successfully rendered diagram: a bare `<img>` in a `<figure>`,
 /// which the Telegram rich-HTML parser turns into a native photo block.
 pub(crate) fn image_html(url: &str) -> String {
-    format!("<figure><img src=\"{}\"/></figure>", escape(url))
+    format!("<figure><img src=\"{}\"/></figure>", escape_html(url))
 }
 
 /// HTML for a diagram that could not be rendered: a bold warning line, the
 /// renderer's error note in a blockquote, and the original source in a code
 /// block so the reader can see (and fix) what failed.
-/// #189 Leg 4: generic svg escape-hatch link fragment for HTML-fallback
-/// contexts — a small `[svg]` anchor to the vector render.
+/// #134: rendered-image NOTE builder — NOT a failure: the diagram DID
+/// render (owner directive 2026-09-10 03:56Z: a successful render is
+/// never shown as an error). Legible explanation + raw source, with the
+/// caller appending [`svg_link_html`] for the full-size vector link.
+pub(crate) fn rendered_image_note(message: &str, source: &str) -> String {
+    format!(
+        "<b>🖼️ Diagram rendered as image</b>\n<blockquote>{}</blockquote>\n<pre><code>{}</code></pre>",
+        escape_html(message),
+        escape_html(source)
+    )
+}
+
+/// #134 / #220: generic svg escape-hatch link fragment for markdown contexts —
+/// a small `[Open SVG vector]` link to the full-size vector render when the diagram
+/// is capped or scaled down.
+pub(crate) fn svg_link_md(source: &str) -> String {
+    format!("\n[Open SVG vector]({})", ink_url_svg(source))
+}
+
+/// #134: generic svg escape-hatch link fragment for HTML-fallback
+/// contexts — a small `[svg]` anchor to the vector render (generic
+/// hatch; the caller owns the trigger copy, ruling (a) 2026-09-10:
+/// ONE semantic — generic hatch here, caller-side trigger).
 pub(crate) fn svg_link_html(source: &str) -> String {
-    format!("\n<a href=\"{}\">[svg]</a>", escape(&ink_url_svg(source)))
+    format!(
+        "\n<a href=\"{}\">[svg]</a>",
+        escape_html(&ink_url_svg(source))
+    )
 }
 
 pub(crate) fn failure_html(err: &str, source: &str) -> String {
     format!(
         "<b>⚠️ Mermaid diagram could not be rendered</b>\n<blockquote>{}</blockquote>\n<pre><code>{}</code></pre>",
-        escape(err),
-        escape(source)
+        escape_html(err),
+        escape_html(source)
     )
-}
-
-/// Minimal HTML entity escaping (matches render_html's escaping).
-/// Generic svg escape-hatch link fragment for markdown contexts —
-/// a small `[Open SVG vector]` link to the full-size vector render when the diagram
-/// is capped or scaled down.
-pub(crate) fn svg_link_md(source: &str) -> String {
-    format!("\n[Open SVG vector]({})", ink_url_svg(source))
 }
 
 /// Canonical correction rules for Mermaid diagrams shared across the codebase.
@@ -883,12 +970,6 @@ pub fn format_mermaid_error(context: &str, errors: &[String]) -> String {
              {rules}"
         )
     }
-}
-
-fn escape(t: &str) -> String {
-    t.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 #[cfg(test)]

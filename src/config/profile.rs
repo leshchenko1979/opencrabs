@@ -110,6 +110,11 @@ pub fn with_home_override<T>(home: PathBuf, f: impl FnOnce() -> T) -> T {
     PROFILE_HOME_OVERRIDE.sync_scope(home, f)
 }
 
+/// Return the active task-local profile home override if set, or `None`.
+pub fn profile_home_override() -> Option<PathBuf> {
+    PROFILE_HOME_OVERRIDE.try_with(|h| h.clone()).ok()
+}
+
 /// Run a future with `opencrabs_home()` pointed at an explicit directory.
 ///
 /// Async counterpart of `with_home_override`: the override is a task-local,
@@ -1284,6 +1289,7 @@ pub(crate) fn is_pid_alive(pid: u32) -> bool {
     // file whose PID parsed to 0 (corruption) would look alive forever and wedge
     // the channel that owns that credential (issue #192). Guard it on every
     // platform.
+    //
     // Likewise, any PID exceeding i32::MAX would wrap to a negative pid_t when cast
     // to i32. On Unix, negative PIDs signal process groups or all processes (e.g.
     // kill(-1, 0) signals every process the caller has permission to signal and

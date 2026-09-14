@@ -16,9 +16,10 @@ use crate::channels::telegram::rich::markdown_to_html_mermaid;
 use crate::channels::telegram::rich::mermaid::{
     MediaEntry, PREVALIDATE_CONNECT_TIMEOUT_SECS, PREVALIDATE_TIMEOUT_SECS, base64url, cache_get,
     cache_put, classify_render_failure, error_note, failure_html, find_mermaid_fences,
-    has_mermaid_fence, image_html, ink_url, is_diagram_capped, is_image_response,
+    has_mermaid_fence, image_html, ink_url, ink_url_svg, is_diagram_capped, is_image_response,
     looks_like_mermaid_source, markdown_failure_block, markdown_failure_block_with_link,
-    replacement_for, resolve_blocks, resolve_markdown_media,
+    neutralize_orphan_photo_refs, neutralize_prose_media_html, replacement_for, resolve_blocks,
+    resolve_markdown_media,
 };
 
 // ---------------------------------------------------------------------------
@@ -518,7 +519,7 @@ fn build_body_markdown_media_target_matches_prototype_shape() {
         url: Some("https://mermaid.ink/img/abc".into()),
         bytes: None,
     }];
-    let body = build_body_markdown_media_target(-100, None, None, "text", &media);
+    let body = build_body_markdown_media_target(-100, None, None, "text", &media, None);
     assert_eq!(body["chat_id"], -100);
     assert_eq!(body["rich_message"]["markdown"], "text");
     let arr = body["rich_message"]["media"]
@@ -534,8 +535,14 @@ fn build_body_markdown_media_target_matches_prototype_shape() {
 #[test]
 fn build_body_markdown_media_target_includes_thread_id_when_present() {
     use teloxide::types::{MessageId, ThreadId};
-    let body =
-        build_body_markdown_media_target(-100, Some(ThreadId(MessageId(249))), None, "m", &[]);
+    let body = build_body_markdown_media_target(
+        -100,
+        Some(ThreadId(MessageId(249))),
+        None,
+        "m",
+        &[],
+        None,
+    );
     assert_eq!(body["message_thread_id"], 249);
 }
 
@@ -546,7 +553,7 @@ fn build_body_markdown_media_target_bytes_entry_uses_attach_reference() {
         url: None,
         bytes: Some(vec![0x89, b'P']),
     }];
-    let body = build_body_markdown_media_target(-100, None, None, "text", &media);
+    let body = build_body_markdown_media_target(-100, None, None, "text", &media, None);
     let arr = body["rich_message"]["media"]
         .as_array()
         .expect("media array");
@@ -592,6 +599,41 @@ fn build_body_markdown_media_edit_bytes_entry_uses_attach_reference() {
         .as_array()
         .expect("media array");
     assert_eq!(arr[0]["media"]["media"], "attach://diag1");
+}
+
+// ---------------------------------------------------------------------------
+// multipart_scalar_fields (#102 — edit multipart must carry message_id;
+// send bodies carry none, so sends stay byte-identical)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn multipart_scalar_fields_carries_message_id_for_edits_only() {
+    let edit_body = serde_json::json!({
+        "chat_id": -100,
+        "message_id": 40827,
+        "rich_message": { "markdown": "text", "media": [] },
+    });
+    let edit_parts = multipart_scalar_fields(&edit_body);
+    assert!(edit_parts.contains(&("message_id".to_string(), "40827".to_string())));
+    assert!(edit_parts.contains(&("chat_id".to_string(), "-100".to_string())));
+    assert!(edit_parts.iter().any(|(name, _)| name == "rich_message"));
+
+    let send_body = serde_json::json!({
+        "chat_id": -100,
+        "rich_message": { "markdown": "text", "media": [] },
+    });
+    let send_parts = multipart_scalar_fields(&send_body);
+    assert!(!send_parts.iter().any(|(name, _)| name == "message_id"));
+
+    // #134 family: a keyboard riding the body becomes a form part — a
+    // multipart edit that omits reply_markup would clear the card's
+    // Approve/Discard buttons.
+    let kb =
+        serde_json::json!({ "inline_keyboard": [[{"text": "Approve", "callback_data": "y"}]] });
+    let mut kb_body = edit_body.clone();
+    kb_body["reply_markup"] = kb.clone();
+    let kb_parts = multipart_scalar_fields(&kb_body);
+    assert!(kb_parts.contains(&("reply_markup".to_string(), kb.to_string())));
 }
 
 // ---------------------------------------------------------------------------
@@ -747,6 +789,41 @@ fn ink_url_payload_is_base64url_without_padding() {
     assert!(!payload.contains('+') && !payload.contains('/'));
 }
 
+// ---------------------------------------------------------------------------
+// ink_url_svg (#134 family, owner directive 2026-09-10 03:56Z): the plain-
+// HTML fallback hands the reader a vector link instead of discarding a
+// successful render. Build-only URL — the browser does the fetch.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ink_url_svg_points_at_the_dedicated_vector_endpoint() {
+    let url = ink_url_svg("graph TD\n    A --> B");
+    assert!(
+        url.starts_with("https://mermaid.ink/svg/"),
+        "expected the /svg/ endpoint: {url}"
+    );
+    assert!(
+        !url.contains("?type=svg"),
+        "svg endpoint needs no param: {url}"
+    );
+}
+
+#[test]
+fn ink_url_svg_payload_matches_ink_url_payload() {
+    // Same diagram → same base64url payload on both endpoints; only the
+    // base differs.
+    let src = "pie\n    \"a\": 1";
+    let png_payload = ink_url(src)
+        .trim_start_matches("https://mermaid.ink/img/")
+        .split('?')
+        .next()
+        .unwrap()
+        .to_string();
+    let svg_url = ink_url_svg(src);
+    let svg_payload = svg_url.trim_start_matches("https://mermaid.ink/svg/");
+    assert_eq!(png_payload, svg_payload);
+}
+
 #[test]
 fn photo_fits_matches_the_measured_photo_box() {
     use crate::channels::telegram::rich::mermaid::photo_fits;
@@ -822,22 +899,66 @@ fn png_dims_rejects_non_png_and_short_buffers() {
     assert_eq!(png_dims(&hdr), None);
 }
 
-#[test]
-fn multipart_scalar_fields_carries_message_id_for_edits_only() {
-    let edit_body = serde_json::json!({
-        "chat_id": -100,
-        "message_id": 40827,
-        "rich_message": { "markdown": "text", "media": [] },
-    });
-    let edit_parts = multipart_scalar_fields(&edit_body);
-    assert!(edit_parts.contains(&("message_id".to_string(), "40827".to_string())));
-    assert!(edit_parts.contains(&("chat_id".to_string(), "-100".to_string())));
-    assert!(edit_parts.iter().any(|(name, _)| name == "rich_message"));
+// ---------------------------------------------------------------------------
+// #134 - prose media neutralisation
+//
+// Live Bot API probes, 2026-09-11: a LIVE `<img>` in a rich markdown body is a
+// whole-message 400 (RICH_MESSAGE_PHOTO_INVALID); `<video>`/`<audio>` fail the
+// same way with their own codes, and an escaped opener is inert. One unbalanced
+// backtick in prose is enough to expose a tag that was "hidden" inside a code
+// span, so quoting is not a fix.
+// ---------------------------------------------------------------------------
 
-    let send_body = serde_json::json!({
-        "chat_id": -100,
-        "rich_message": { "markdown": "text", "media": [] },
-    });
-    let send_parts = multipart_scalar_fields(&send_body);
-    assert!(!send_parts.iter().any(|(name, _)| name == "message_id"));
+#[test]
+fn prose_media_tags_are_escaped_and_other_html_survives() {
+    assert_eq!(
+        neutralize_prose_media_html("no `<img>` here"),
+        "no `&lt;img>` here"
+    );
+    assert_eq!(
+        neutralize_prose_media_html(r#"<IMG SRC="x">"#),
+        r#"&lt;IMG SRC="x">"#
+    );
+    assert_eq!(neutralize_prose_media_html("</img>"), "&lt;/img>");
+    assert_eq!(
+        neutralize_prose_media_html(r#"<video src="v">"#),
+        r#"&lt;video src="v">"#
+    );
+    assert_eq!(neutralize_prose_media_html("<audio>"), "&lt;audio>");
+    // Not media - prose keeps its own markup and plain text.
+    assert_eq!(neutralize_prose_media_html("<b>bold</b>"), "<b>bold</b>");
+    assert_eq!(
+        neutralize_prose_media_html("<iframe src=x>"),
+        "<iframe src=x>"
+    );
+    assert_eq!(neutralize_prose_media_html("a < b"), "a < b");
+    assert_eq!(neutralize_prose_media_html("images"), "images");
+    assert_eq!(neutralize_prose_media_html(""), "");
+}
+
+#[test]
+fn orphan_photo_refs_are_neutralised_but_resolved_ones_survive() {
+    let media = vec![MediaEntry {
+        id: "diag0".to_string(),
+        url: Some("https://example.invalid/d0.png".to_string()),
+        bytes: None,
+    }];
+    assert_eq!(
+        neutralize_orphan_photo_refs("![d](tg://photo?id=diag0)", &media),
+        "![d](tg://photo?id=diag0)",
+        "a ref with a matching media entry must keep resolving"
+    );
+    assert_eq!(
+        neutralize_orphan_photo_refs("![x](tg://photo?id=N)", &media),
+        "![x](tg:photo?id=N)",
+        "an orphan ref must lose its scheme so it cannot be resolved"
+    );
+    assert_eq!(
+        neutralize_orphan_photo_refs("![x](tg://photo?id=N)", &[]),
+        "![x](tg:photo?id=N)"
+    );
+    assert_eq!(
+        neutralize_orphan_photo_refs("nothing here", &media),
+        "nothing here"
+    );
 }

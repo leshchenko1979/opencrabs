@@ -2,7 +2,7 @@
 //!
 //! Allows reading file contents from the filesystem.
 
-use super::error::{Result, ToolError, validate_file_path};
+use super::error::{validate_file_path, Result, ToolError};
 use super::hashline::hash::{format_hashline, hash_line};
 use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
@@ -84,6 +84,14 @@ struct ReadInput {
     /// Optional: Output with hashline tags (HASH|content format, where HASH is a 4-char content hash)
     #[serde(default)]
     hashline: Option<bool>,
+
+    /// Optional: Maximum inline byte limit before truncation or disk spilling (default: 16000)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_bytes: Option<usize>,
+
+    /// Optional: When true (default), spills full output exceeding byte limit to disk. When false, clamps inline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spill_to_disk: Option<bool>,
 }
 
 #[async_trait]
@@ -117,6 +125,15 @@ impl Tool for ReadTool {
                 "hashline": {
                     "type": "boolean",
                     "description": "Optional: Output lines in HASH|content format (4-char content hash) for use with hashline_edit tool. Default: false."
+                },
+                "max_output_bytes": {
+                    "type": "integer",
+                    "description": "Optional: Maximum inline byte limit before truncation or disk spilling (default: 16000)",
+                    "minimum": 1
+                },
+                "spill_to_disk": {
+                    "type": "boolean",
+                    "description": "Optional: When true (default), spills full output exceeding byte limit to /tmp/opencrabs/tool_output/. When false, clamps inline without writing to disk."
                 }
             },
             "required": ["path"]
@@ -203,8 +220,16 @@ impl Tool for ReadTool {
             // A whole-file read of a skill definition counts as consuming
             // that skill (issue #131): the post-compaction stamp lists it
             // even though no slash command was ever issued.
+            // Branch for aux files (issue #216): reading SKILL.md marks the
+            // skill seen (and satisfies the skill gate), while reading an
+            // auxiliary .md file records aux usage without satisfying the gate.
             if let Some(slug) = super::seen_skills::skill_slug_from_path(&path) {
-                super::seen_skills::mark_seen(context.session_id, &slug);
+                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if file_name == "SKILL.md" {
+                    super::seen_skills::mark_seen(context.session_id, &slug);
+                } else {
+                    super::seen_skills::mark_aux_seen(context.session_id, &slug, file_name);
+                }
             }
             if contents.len() > OUTPUT_BUDGET {
                 // Budget path (#986): emit lines until the 128 KB budget is

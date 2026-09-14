@@ -9,6 +9,7 @@
 use super::ast::{Align, Block, Inline, List, MermaidResult, Table};
 use super::mermaid;
 use super::parse::parse_markdown;
+use crate::channels::telegram::markdown::escape_html;
 
 /// Render a block list to a Telegram-HTML string. Block-level elements are
 /// separated by a blank line so paragraphs, headings, lists, and tables keep
@@ -69,10 +70,10 @@ fn render_block(block: &Block, wrap_p: bool) -> String {
         Block::Code { lang, text } => match lang {
             Some(l) => format!(
                 "<pre><code class=\"language-{}\">{}</code></pre>",
-                escape(l),
-                escape(text)
+                escape_html(l),
+                escape_html(text)
             ),
-            None => format!("<pre><code>{}</code></pre>", escape(text)),
+            None => format!("<pre><code>{}</code></pre>", escape_html(text)),
         },
         // Resolved mermaid fence (#1044): embed the rendered image, or degrade
         // to a legible failure block. Both HTML shapes are built in
@@ -81,12 +82,17 @@ fn render_block(block: &Block, wrap_p: bool) -> String {
             MermaidResult::Image(url) => super::mermaid::image_html(url),
             // Locally-rendered PNG bytes are delivered via the multipart
             // markdown path, never through vector HTML `<img>` (Telegram
-            // rejects it). This arm is a defensive fallback — degrade
-            // legibly rather than leak raw binary.
-            MermaidResult::ImageBytes(_) => super::mermaid::failure_html(
-                "diagram rendered locally but could not be embedded in HTML",
-                source,
-            ),
+            // rejects it). This arm is a defensive fallback — but a
+            // SUCCESSFUL render is never discarded as a failure (owner
+            // directive 2026-09-10 03:56Z): degrade to the clamped-image
+            // note plus a small [svg] link the reader can open in a
+            // browser. Broken fences keep the legible failure block.
+            MermaidResult::ImageBytes(_) => {
+                super::mermaid::rendered_image_note(
+                    "open the svg link for the full-size vector",
+                    source,
+                ) + &super::mermaid::svg_link_html(source)
+            }
             // #189: same split as the markdown path — a transient failure
             // offers the svg hatch (the response had already passed the
             // image check, so the render may exist server-side), while a
@@ -100,7 +106,7 @@ fn render_block(block: &Block, wrap_p: bool) -> String {
             "<blockquote>{}</blockquote>",
             render_html_inner(inner, wrap_p)
         ),
-        Block::Math(expr) => format!("<pre>{}</pre>", escape(expr)),
+        Block::Math(expr) => format!("<pre>{}</pre>", escape_html(expr)),
         Block::Divider => "──────────".to_string(),
         // Telegram HTML has no <details> — render as flat indented blocks
         // with a bold summary header so content is still visible.
@@ -222,7 +228,7 @@ fn render_grid(table: &Table, header: &[String], rows: &[Vec<String>], width: &[
     for row in rows {
         lines.push(fmt(row));
     }
-    format!("<pre>{}</pre>", escape(&lines.join("\n")))
+    format!("<pre>{}</pre>", escape_html(&lines.join("\n")))
 }
 
 /// One- or two-column table → a `key: value` list. The header row is dropped
@@ -307,9 +313,9 @@ fn render_inline(inline: &Inline, s: &mut String, wrap_p: bool) {
         // in both dialects (a newline inside inline code is data, not a
         // break).
         Inline::Text(t) => {
-            let esc = escape(t);
+            let esc = escape_html(t);
             if wrap_p {
-                s.push_str(&esc.replace('\n', "<br>"));
+                s.push_str(&soft_breaks_to_br(&esc));
             } else {
                 s.push_str(&esc);
             }
@@ -331,11 +337,11 @@ fn render_inline(inline: &Inline, s: &mut String, wrap_p: bool) {
         }
         Inline::Code(t) | Inline::Math(t) => {
             s.push_str("<code>");
-            s.push_str(&escape(t));
+            s.push_str(&escape_html(t));
             s.push_str("</code>");
         }
         Inline::Link { content, url } => {
-            s.push_str(&format!("<a href=\"{}\">", escape(url)));
+            s.push_str(&format!("<a href=\"{}\">", escape_html(url)));
             for c in content {
                 render_inline(c, s, wrap_p);
             }
@@ -382,10 +388,66 @@ fn plain_one(inline: &Inline, s: &mut String) {
     }
 }
 
-fn escape(t: &str) -> String {
-    t.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+/// The single owner of the rich dialect's soft-break rule.
+///
+/// The rich `sendRichMessage` dialect collapses a bare newline to whitespace
+/// (#1142), so a soft break inside a paragraph must be an explicit `<br>`.
+/// The AST renderer's `Inline::Text` arm delegates here, and the hand-rolled
+/// `<p>` sites build their paragraphs through [`paragraph_html`] — one rule,
+/// one home.
+///
+/// `fragment` must already be escaped (see [`escape`]). The only tags it can
+/// then contain are inline markup generated downstream, so `<code>` spans are
+/// copied verbatim: a newline inside inline code is data, not a break.
+pub(crate) fn soft_breaks_to_br(fragment: &str) -> String {
+    // The rule itself: the one place a soft break becomes an explicit break.
+    fn br(s: &str) -> String {
+        s.replace('\n', "<br>")
+    }
+    let mut out = String::with_capacity(fragment.len());
+    let mut rest = fragment;
+    while let Some(i) = rest.find('<') {
+        // Text before the tag: soft breaks apply.
+        out.push_str(&br(&rest[..i]));
+        if rest[i..].starts_with("<code>") {
+            match rest[i..].find("</code>") {
+                Some(end) => {
+                    out.push_str(&rest[i..i + end + "</code>".len()]);
+                    rest = &rest[i + end + "</code>".len()..];
+                }
+                None => {
+                    // Unterminated span: the remainder is code.
+                    out.push_str(&rest[i..]);
+                    return out;
+                }
+            }
+        } else {
+            // Some other tag — copy it through and keep scanning.
+            match rest[i..].find('>') {
+                Some(end) => {
+                    out.push_str(&rest[i..i + end + 1]);
+                    rest = &rest[i + end + 1..];
+                }
+                None => {
+                    out.push_str(&rest[i..]);
+                    return out;
+                }
+            }
+        }
+    }
+    out.push_str(&br(rest));
+    out
+}
+
+/// Wrap an already-escaped, inline-formatted fragment as a rich-dialect
+/// paragraph.
+///
+/// The `<p>` is hand-rolled rather than routed through the markdown AST
+/// renderer: that renderer escapes its input, which would mangle an
+/// already-tagged fragment (`<code>` would arrive as `&lt;code&gt;`). Keeping
+/// the wrap here means the soft-break rule lives in exactly one place.
+pub(crate) fn paragraph_html(fragment: &str) -> String {
+    format!("<p>{}</p>", soft_breaks_to_br(fragment))
 }
 
 /// Parse `text` and render it as Telegram HTML in one call (the fallback path).
@@ -433,4 +495,77 @@ pub(crate) async fn markdown_to_html_mermaid_p(text: &str) -> String {
         blocks
     };
     render_html_p(&resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // #134 family, owner directive 03:56Z: the whole-message HTML fallback
+    // stops discarding a successful render — ImageBytes yields the
+    // rendered-image note + [svg] link. Broken fences keep the failure
+    // block. Direct render_html() (module-internal), no resolver involved.
+
+    #[test]
+    fn image_bytes_arm_yields_note_and_svg_link_not_failure() {
+        let blocks = vec![Block::Mermaid {
+            source: "graph TD\n    A --> B".into(),
+            result: MermaidResult::ImageBytes(vec![0x89, b'P']),
+        }];
+        let html = render_html(&blocks);
+        assert!(
+            html.contains("Diagram rendered as image"),
+            "ImageBytes must yield the rendered-image note banner. Got:\n{html}"
+        );
+        assert!(
+            html.contains("<a href=\"https://mermaid.ink/svg/"),
+            "the note must carry the svg link. Got:\n{html}"
+        );
+        assert!(
+            !html.contains("could not be rendered"),
+            "a SUCCESSFUL render must not read as a failure. Got:\n{html}"
+        );
+    }
+
+    #[test]
+    fn parse_error_arm_still_yields_the_failure_block() {
+        let blocks = vec![Block::Mermaid {
+            source: "graph TD\n    A -->".into(),
+            result: MermaidResult::ParseError("Parse error on line 2".into()),
+        }];
+        let html = render_html(&blocks);
+        assert!(
+            html.contains("Mermaid diagram could not be rendered"),
+            "broken fences keep the legible failure block. Got:\n{html}"
+        );
+        assert!(
+            !html.contains("[svg]"),
+            "no svg link for a render that never happened. Got:\n{html}"
+        );
+    }
+
+    #[test]
+    fn failed_arm_yields_the_svg_hatch() {
+        // #189 Leg 4: a TRANSIENT failure (transport/infra) offers the escape
+        // hatch — the response had already passed the `2xx + image/*` check
+        // before the body was lost, so the render very likely exists
+        // server-side. This is the arm the owner's dropped #180 diagram hit.
+        let blocks = vec![Block::Mermaid {
+            source: "flowchart TD\n    A --> B".into(),
+            result: MermaidResult::Failed("diagram renderer dropped the image".into()),
+        }];
+        let html = render_html(&blocks);
+        assert!(
+            html.contains("Mermaid diagram could not be rendered"),
+            "the transient failure keeps the legible block. Got:\n{html}"
+        );
+        assert!(
+            html.contains("<a href=\"https://mermaid.ink/svg/"),
+            "a transient failure must offer the svg hatch. Got:\n{html}"
+        );
+        assert!(
+            html.contains("diagram renderer dropped the image"),
+            "the renderer note must survive. Got:\n{html}"
+        );
+    }
 }

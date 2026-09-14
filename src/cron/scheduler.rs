@@ -12,7 +12,6 @@ use crate::config::Config;
 use crate::db::CronJobRepository;
 use crate::db::CronJobRunRepository;
 use crate::db::models::{CronJob, CronJobRun};
-use crate::db::repository::CronJobPatch;
 use crate::services::{ServiceContext, SessionService};
 use chrono::Utc;
 use std::sync::Arc;
@@ -36,35 +35,6 @@ fn is_active_profile(job_profile: Option<&str>, active: Option<&str>) -> bool {
 /// The originating session id is carried in `prompt` so the restart resumes
 /// the user's session.
 pub const REBUILD_JOB_NAME: &str = "__opencrabs_rebuild__";
-
-/// Reserved recurring job: weekly cross-file brain dedup scan (#765). Unlike
-/// the one-shot rebuild job, this one is NOT self-deleting — it fires every
-/// week as a safety net that catches cross-file drift the event-based trigger
-/// (brain writes) and the manual `/dedup` command can miss (template sync,
-/// manual edits, preamble changes). Report-only: files proposals, never applies.
-pub const DEDUP_SCAN_JOB_NAME: &str = "__opencrabs_dedup_scan__";
-
-/// Weekly dedup scan: Sunday 04:00 UTC (quiet window).
-///
-/// Weekday is 1 = Sunday in the `cron` crate, NOT the Unix 0 (see
-/// `cron_schedule_util_test::numeric_dow_is_sunday_first`). This job shipped
-/// as `0 4 * * 0`, which the crate rejects outright, so it never ran once and
-/// logged a parse failure every minute for its whole lifetime — the cross-file
-/// dedup scan that catches the same rule written into two brain files was dead
-/// the entire time (#1024).
-///
-/// Do NOT "fix" a Unix-style 0 by translating it to 7: 7 is Saturday under this
-/// numbering, so the job would run on the wrong day, silently — worse than not
-/// running. Rejecting 0 is deliberate (`cron_schedule_util_test::dow_zero_is_rejected`).
-pub(crate) const DEDUP_SCAN_CRON: &str = "0 4 * * 1";
-
-/// The pre-#1024 artifact this job originally shipped as: Unix-style dow 0,
-/// which the `cron` crate rejects outright (see [`DEDUP_SCAN_CRON`] docs).
-/// Rows still holding EXACTLY this value are repaired at startup (#1163).
-/// Any other expression — including other invalid ones — is treated as
-/// deliberate and never touched.
-pub(crate) const LEGACY_DEDUP_SCAN_CRON: &str = "0 4 * * 0";
-
 /// Warn-once guard for unparseable cron expressions (#1163): without it an
 /// invalid row warns on every ~60s tick — 1,440 warns/day for a job that
 /// never runs. One warning per process is enough to diagnose.
@@ -117,141 +87,6 @@ pub async fn schedule_background_rebuild(
     tracing::info!("Background rebuild queued for session {session_id}");
     Ok(())
 }
-
-/// Idempotently seed the reserved weekly brain-dedup scan job (#765). A no-op
-/// if a job named [`DEDUP_SCAN_JOB_NAME`] already exists, so repeated scheduler
-/// starts never stack duplicate jobs. The job runs the scanner directly (see
-/// [`run_dedup_scan_job`]) every Sunday at 04:00 UTC.
-pub(crate) async fn ensure_weekly_dedup_scan_job(repo: &CronJobRepository) -> anyhow::Result<()> {
-    if let Ok(existing) = repo.list_all().await
-        && let Some(job) = existing.iter().find(|j| j.name == DEDUP_SCAN_JOB_NAME)
-    {
-        // Repair-in-place (#1163): installs that seeded before #1024 hold
-        // LEGACY_DEDUP_SCAN_CRON, which this parser rejects outright. The
-        // name-idempotent early-return used to make that row immortal:
-        // dead job plus one warn per minute for life. Rewrite ONLY rows
-        // holding that exact legacy artifact; every other expression
-        // (including user-customized schedules) is deliberate and stays.
-        if job.cron_expr == LEGACY_DEDUP_SCAN_CRON {
-            let patch = CronJobPatch {
-                cron_expr: Some(DEDUP_SCAN_CRON.to_string()),
-                reset_next_run: true,
-                ..Default::default()
-            };
-            match repo.update_fields(&job.id.to_string(), patch).await {
-                Ok(true) => tracing::info!(
-                    "Repaired legacy dedup-scan schedule '{}' -> '{}' (#1163)",
-                    LEGACY_DEDUP_SCAN_CRON,
-                    DEDUP_SCAN_CRON
-                ),
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to repair legacy dedup-scan schedule")
-                }
-            }
-        }
-        return Ok(());
-    }
-    let mut job = CronJob::new(
-        DEDUP_SCAN_JOB_NAME.to_string(),
-        DEDUP_SCAN_CRON.to_string(),
-        "UTC".to_string(),
-        // Reserved job — the prompt is never run as an agent turn; kept as a
-        // human-readable descriptor only.
-        "reserved: weekly cross-file brain dedup scan (report-only)".to_string(),
-        None,
-        None,
-        "off".to_string(),
-        true,
-        // Deliver the interactive approval keyboard to the dev group so pending
-        // cross-file duplicates can be approved or rejected in-chat (#765).
-        Some("telegram:-1002554690655".to_string()),
-        None,
-    );
-    job.next_run_at = super::next_run_utc(&job.cron_expr, chrono_tz::UTC, chrono::Utc::now());
-    repo.insert(&job).await?;
-    tracing::info!("Seeded weekly brain dedup scan job ({DEDUP_SCAN_JOB_NAME})");
-    Ok(())
-}
-
-/// Execute the reserved weekly brain-dedup scan (#765): run the cross-file
-/// scanner directly against this profile's brain dir (no agent prompt, no LLM
-/// cost), filing report-only proposals into the Mission Control inbox. Never
-/// applies — merging across files changes enforcement scope and needs human
-/// approval. Runs inline (the scan touches a handful of small `.md` files) so
-/// it stays inside the per-profile home scope the scheduler's spawned task set,
-/// keeping `opencrabs_home()` pointed at the right profile. Delivers a summary
-/// to the job's channel only when something is pending, so a clean tree doesn't
-/// spam weekly.
-async fn run_dedup_scan_job(job: &CronJob) -> anyhow::Result<()> {
-    let brain_dir = crate::config::opencrabs_home();
-    let store = crate::brain::rsi_proposals::ProposalsStore::new();
-    store.prune_handled();
-    let filed = crate::brain::dedup_scan::file_dedup_proposals(&brain_dir, &store);
-    let pending = store.list_brain_dedup_proposals().len();
-    tracing::info!(
-        "Weekly brain dedup scan complete: {filed} new proposal(s), {pending} pending total"
-    );
-    if pending > 0 {
-        let msg = format!(
-            "🧹 Weekly brain dedup scan: {pending} pending cross-file duplicate proposal(s) \
-             ({filed} new this run). Review and approve in the Mission Control inbox."
-        );
-        // deliver_rebuild_status is the generic per-channel delivery helper
-        // (no-op when the job has no deliver_to); the name is rebuild-specific
-        // but the body just fans `msg` out to the job's configured channels.
-        deliver_rebuild_status(job, &msg).await;
-        // Follow the text summary with an interactive approval keyboard so the
-        // dev group can apply or reject the pending duplicates in-chat (#765).
-        // No-op when the job has no telegram target or the feature is off.
-        send_dedup_approval_keyboard(job).await;
-    }
-    Ok(())
-}
-
-/// Send the interactive brain-dedup approval keyboard to the job's Telegram
-/// target (#765). Parses the chat id from `deliver_to` (format
-/// `telegram:<chat_id>`), builds a bot from the keys.toml token, and posts the
-/// pending proposals with inline Approve/Reject buttons. Removals only happen
-/// on an explicit button tap; this just surfaces the pending list. Silent no-op
-/// when the job has no telegram target, the token is missing, or nothing filed.
-#[cfg(feature = "telegram")]
-async fn send_dedup_approval_keyboard(job: &CronJob) {
-    // Pull the first `telegram:<chat_id>` target out of the (possibly
-    // comma-separated) deliver_to list. A thread component (#104) is
-    // accepted by the grammar but the approval keyboard itself is
-    // chat-level — it goes to the chat's default topic.
-    let Some((chat_id, _thread)) = job.deliver_to.as_deref().and_then(|targets| {
-        targets
-            .split(',')
-            .map(str::trim)
-            .find_map(|t| t.strip_prefix("telegram:"))
-            .and_then(parse_telegram_target)
-    }) else {
-        return;
-    };
-    let Some(token) = read_channel_secret("telegram", "token") else {
-        tracing::warn!("No Telegram bot token in keys.toml, cannot send dedup approval keyboard");
-        return;
-    };
-    let bot = teloxide::Bot::new(token);
-    match crate::channels::telegram::dedup_approval::send_approval_request(
-        &bot,
-        teloxide::types::ChatId(chat_id),
-    )
-    .await
-    {
-        Ok(0) => {}
-        Ok(n) => tracing::info!(
-            "Sent dedup approval keyboard to Telegram chat {chat_id} ({n} proposal(s))"
-        ),
-        Err(e) => tracing::warn!("Failed to send dedup approval keyboard to {chat_id}: {e}"),
-    }
-}
-
-/// Non-telegram builds have no keyboard to send; keep the call site unconditional.
-#[cfg(not(feature = "telegram"))]
-async fn send_dedup_approval_keyboard(_job: &CronJob) {}
 
 /// Execute the reserved background-rebuild job: delete it first (one-shot, no
 /// retry on the 60s tick), build from source, then exec-restart into the
@@ -353,8 +188,15 @@ async fn deliver_rebuild_status(job: &CronJob, msg: &str) -> Vec<tokio::task::Jo
             .filter(|s| !s.is_empty())
         {
             // Rebuild status messages aren't worth reply recovery — no pool.
-            if let Some(h) =
-                deliver_result(target, &job.name, msg, job.deliver_api_key.as_deref(), None).await
+            if let Some(h) = deliver_result(
+                target,
+                &job.name,
+                msg,
+                job.deliver_api_key.as_deref(),
+                None,
+                None,
+            )
+            .await
             {
                 handles.push(h);
             }
@@ -404,7 +246,11 @@ impl CronScheduler {
     /// Spawn the scheduler as a background tokio task.
     /// Polls every 60 seconds for due jobs.
     pub fn spawn(self) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(self.run())
+        let scheduler_profile = crate::config::profile::current_profile_name();
+        tokio::spawn(async move {
+            crate::config::profile::with_profile_home_async(Some(&scheduler_profile), self.run())
+                .await
+        })
     }
 
     /// Run the polling loop in the CURRENT task (no internal spawn). The
@@ -416,19 +262,39 @@ impl CronScheduler {
         tracing::info!(
             "Cron scheduler started — polling every 60s (shared Cron session, compaction-isolated)"
         );
-        // Seed the reserved weekly brain-dedup safety-net job once per scheduler
-        // start (#765). Idempotent: a no-op if the job already exists. Runs in
-        // the per-profile home scope (daemon case), so the job is stamped with
-        // the correct profile.
-        if let Err(e) = ensure_weekly_dedup_scan_job(&self.repo).await {
-            tracing::warn!("Failed to seed weekly brain dedup scan job: {e}");
+        if let Err(e) = self.backfill_missing_next_run().await {
+            tracing::error!("Failed to backfill missing next_run_at on startup: {e}");
         }
+
+        loop {
+            if let Err(e) = self.tick().await {
+                tracing::error!("Cron scheduler tick error: {e}");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    }
+
+    /// Run the polling loop for an adopted foreign profile (#184).
+    /// Periodically checks whether a native instance for `profile_name` has booted;
+    /// if so, gracefully exits so the native instance can acquire its own scheduler lock.
+    pub async fn run_adoptive(self, profile_name: String) {
+        tracing::info!(
+            "Adoptive cron scheduler started for profile '{profile_name}' — polling every 60s"
+        );
 
         if let Err(e) = self.backfill_missing_next_run().await {
             tracing::error!("Failed to backfill missing next_run_at on startup: {e}");
         }
 
         loop {
+            // Check if native instance has booted (#184 cooperative yield)
+            if crate::config::profile::instance_running(&profile_name) {
+                tracing::info!(
+                    "Multi-profile daemon: native instance detected for profile '{profile_name}' — yielding scheduler lock"
+                );
+                break;
+            }
+
             if let Err(e) = self.tick().await {
                 tracing::error!("Cron scheduler tick error: {e}");
             }
@@ -489,28 +355,24 @@ impl CronScheduler {
                 let notifier = self.session_notifier.clone();
                 let job_name = job.name.clone();
                 let job_id = job.id;
+                let scheduler_profile = crate::config::profile::current_profile_name();
+                let target_profile = job
+                    .profile_name
+                    .as_deref()
+                    .unwrap_or(&scheduler_profile)
+                    .to_string();
+
                 tokio::spawn(
                     async move {
-                        // For foreign-profile jobs, wrap the ENTIRE execution in a
-                        // task-local profile home scope. This means every tool call
-                        // the agent makes (memory writes, config reads, file ops,
-                        // brain reads) resolves to the job's profile home, not the
+                        // Wrap the ENTIRE execution in a task-local profile home scope
+                        // (#182, #184). This means every tool call the agent makes
+                        // (memory writes, config reads, file ops, brain reads) and all
+                        // log events resolve to the job's profile home, not the
                         // process profile. The scope lives until the task ends, so
                         // it persists across every .await inside the agent loop.
-                        //
-                        // This spawned task does NOT inherit the scheduler's own
-                        // task-local home (tokio::spawn drops it), so it defaults to
-                        // the process global. We therefore scope whenever the job's
-                        // profile differs from the process global, which is exactly
-                        // the multi-profile daemon case: a per-profile scheduler's
-                        // jobs are stamped with a non-global profile and get scoped
-                        // here.
-                        let profile = job.profile_name.as_deref();
-                        let active = crate::config::profile::active_profile().unwrap_or("default");
-                        let needs_scope = profile.is_some() && profile != Some(active);
-
-                        let result = if needs_scope {
-                            crate::config::profile::with_profile_home_async(profile, async {
+                        let result = crate::config::profile::with_profile_home_async(
+                            Some(&target_profile),
+                            async {
                                 tracing::info!(
                                     "Cron job '{}' — task-local profile home set to {:?}",
                                     job.name,
@@ -530,24 +392,9 @@ impl CronScheduler {
                                     }
                                     Err(e) => Err(e),
                                 }
-                            })
-                            .await
-                        } else {
-                            match resolve_or_create_cron_session(&ctx, &job).await {
-                                Ok(cron_sid) => {
-                                    execute_job(
-                                        &job,
-                                        &factory,
-                                        &ctx,
-                                        cron_sid,
-                                        &run_repo,
-                                        notifier.as_ref(),
-                                    )
-                                    .await
-                                }
-                                Err(e) => Err(e),
-                            }
-                        };
+                            },
+                        )
+                        .await;
 
                         if let Err(e) = result {
                             tracing::error!("Cron job '{}' failed: {e}", job.name);
@@ -802,12 +649,6 @@ async fn execute_job(
         return run_rebuild_job(job, ctx, session_notifier).await;
     }
 
-    // Reserved weekly cross-file brain dedup scan (#765) — runs the scanner
-    // directly (no agent prompt, no LLM cost) and files report-only proposals.
-    if job.name == DEDUP_SCAN_JOB_NAME {
-        return run_dedup_scan_job(job).await;
-    }
-
     // Resolve the config + agent for this job's profile. A job created in a
     // non-active profile (shared-DB case, #182) runs under its own profile's
     // config + brain, not the process profile's.
@@ -1007,7 +848,8 @@ async fn execute_job(
                 tracing::error!("Failed to save cron run result to DB: {e}");
             }
 
-            // Optionally deliver to configured channels too
+            // Optionally deliver to configured channels too. Delivery
+            // failures stamp status='delivery_failed' on this run (#107).
             if let Some(ref deliver_to) = job.deliver_to {
                 for target in deliver_to
                     .split(',')
@@ -1020,6 +862,7 @@ async fn execute_job(
                         &clean,
                         job.deliver_api_key.as_deref(),
                         Some(ctx.pool()),
+                        Some(run_id.clone()),
                     )
                     .await;
                 }
@@ -1048,6 +891,7 @@ async fn execute_job(
                         &msg,
                         job.deliver_api_key.as_deref(),
                         Some(ctx.pool()),
+                        Some(run_id.clone()),
                     )
                     .await;
                 }
@@ -1143,6 +987,7 @@ async fn deliver_result(
     content: &str,
     api_key: Option<&str>,
     pool: Option<crate::db::Pool>,
+    run_id: Option<String>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     // Only the Telegram delivery arm uses the pool (to record the message for
     // reply recovery); other targets ignore it.
@@ -1156,21 +1001,27 @@ async fn deliver_result(
 
     // Leaked `oc://` target URL at fire time (#148 loud failure pin):
     // cron targets must be baked at create/update time. A leaked URL here
-    // means the bake step was bypassed — refuse loudly.
+    // means the bake step was bypassed — refuse loudly and record the failure.
     if crate::channels::target_resolver::is_target_url(deliver_to) {
-        tracing::error!(
-            "Unbaked target URL '{deliver_to}' reached delivery for job '{job_name}' — oc:// targets must be baked at create/update time (#148); refusing fire-time resolution"
+        let reason = format!(
+            "Unbaked target URL '{deliver_to}' reached delivery — oc:// targets must be baked at \
+             create/update time (#148); refusing fire-time resolution"
         );
+        tracing::error!("{} for job '{}'", reason, job_name);
+        record_delivery_failure(pool, run_id, &reason).await;
         return None;
     }
 
     let parts: Vec<&str> = deliver_to.splitn(2, ':').collect();
     if parts.len() != 2 {
+        let reason =
+            format!("Invalid deliver_to format '{deliver_to}' — expected 'channel:id' or HTTP URL");
         tracing::warn!(
-            "Invalid deliver_to format '{}' for job '{}' — expected 'channel:id' or HTTP URL",
-            deliver_to,
+            "{} for job '{}' — delivery NOT performed (#107)",
+            reason,
             job_name
         );
+        record_delivery_failure(pool, run_id, &reason).await;
         return None;
     }
 
@@ -1189,6 +1040,9 @@ async fn deliver_result(
 
     let delivery_msg = format!("⏰ **Cron: {job_name}**\n\n{msg}");
 
+    // Any arm that cannot prove a send happened records the failure on the
+    // run row (#107): status flips to 'delivery_failed' with the reason, so
+    // execution success and delivery success are never conflated again.
     match channel {
         "session" => {
             // Fork #144: deliver into a session's notify queue. Cron results
@@ -1232,21 +1086,26 @@ async fn deliver_result(
                             job_name,
                             &delivery_msg,
                             pool.clone(),
+                            run_id,
                         )
                         .await;
                     }
                     None => {
-                        tracing::error!(
+                        let reason = format!(
                             "Invalid Telegram deliver_to target '{target_id}' for job \
                              '{job_name}' — expected 'telegram:<chat_id>' or \
-                             'telegram:<chat_id>:<thread_id>'; not delivering"
+                             'telegram:<chat_id>:<thread_id>'; not delivering (#107)"
                         );
+                        tracing::error!("{reason}");
+                        record_delivery_failure(pool, run_id, &reason).await;
                     }
                 }
             }
             #[cfg(not(feature = "telegram"))]
             {
-                tracing::warn!("Telegram feature not enabled — cannot deliver cron result");
+                let reason = "Telegram feature not enabled — delivery NOT performed (#107)";
+                tracing::warn!("{reason} for job '{job_name}'");
+                record_delivery_failure(pool, run_id, reason).await;
             }
         }
         "discord" => {
@@ -1257,7 +1116,9 @@ async fn deliver_result(
             }
             #[cfg(not(feature = "discord"))]
             {
-                tracing::warn!("Discord feature not enabled — cannot deliver cron result");
+                let reason = "Discord feature not enabled — delivery NOT performed (#107)";
+                tracing::warn!("{reason} for job '{job_name}'");
+                record_delivery_failure(pool, run_id, reason).await;
             }
         }
         "slack" => {
@@ -1268,14 +1129,39 @@ async fn deliver_result(
             }
             #[cfg(not(feature = "slack"))]
             {
-                tracing::warn!("Slack feature not enabled — cannot deliver cron result");
+                let reason = "Slack feature not enabled — delivery NOT performed (#107)";
+                tracing::warn!("{reason} for job '{job_name}'");
+                record_delivery_failure(pool, run_id, reason).await;
             }
         }
         other => {
-            tracing::warn!("Unknown delivery channel '{other}' for job '{job_name}'");
+            let reason =
+                format!("Unknown delivery channel '{other}' — delivery NOT performed (#107)");
+            tracing::warn!("{} for job '{job_name}'", reason);
+            record_delivery_failure(pool, run_id, &reason).await;
         }
     }
     None
+}
+
+/// Stamp `status='delivery_failed'` (+ reason) onto a run row (#107). The run
+/// id is `None` for callers without one (rebuild-status delivery) — those keep
+/// log-only surfacing. Fire-and-forget: a stamp failure must not mask the
+/// delivery failure itself.
+async fn record_delivery_failure(
+    pool: Option<crate::db::Pool>,
+    run_id: Option<String>,
+    reason: &str,
+) {
+    let (Some(pool), Some(run_id)) = (pool, run_id) else {
+        return;
+    };
+    let repo = crate::db::CronJobRunRepository::new(pool);
+    if let Err(e) = repo.complete_delivery_failed(&run_id, reason).await {
+        tracing::error!(
+            "Failed to record delivery failure on run {run_id}: {e} (delivery was already lost: {reason})"
+        );
+    }
 }
 
 /// Deliver cron result via HTTP POST to a generic webhook URL.
@@ -1313,9 +1199,10 @@ async fn deliver_http(url: &str, job_name: &str, content: &str, api_key: Option<
 
 /// Read `channels.<channel>.<field>` (e.g. a bot token) from the active
 /// workspace's `keys.toml`. Cron delivery runs outside any channel's live
-/// connection, so it reads the credential straight off disk.
+/// connection, so it reads the credential straight off disk. Also used by
+/// cron_manage's fail-fast delivery validation (#107).
 #[cfg(any(feature = "telegram", feature = "discord", feature = "slack"))]
-fn read_channel_secret(channel: &str, field: &str) -> Option<String> {
+pub(crate) fn read_channel_secret(channel: &str, field: &str) -> Option<String> {
     let keys_path = crate::brain::BrainLoader::resolve_path().join("keys.toml");
     let content = std::fs::read_to_string(&keys_path).ok()?;
     content.parse::<toml::Table>().ok().and_then(|t| {
@@ -1372,9 +1259,12 @@ async fn deliver_telegram(
     job_name: &str,
     message: &str,
     pool: Option<crate::db::Pool>,
+    run_id: Option<String>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let Some(token) = read_channel_secret("telegram", "token") else {
-        tracing::warn!("No Telegram bot token found in keys.toml — cannot deliver cron result");
+        let reason = "No Telegram bot token in keys.toml — delivery NOT performed (#107)";
+        tracing::warn!("{reason} (job '{job_name}')");
+        record_delivery_failure(pool, run_id, reason).await;
         return None;
     };
     let bot = teloxide::Bot::new(token);
@@ -1422,44 +1312,57 @@ async fn deliver_telegram(
     // handle — their delivery survives the tick regardless.
     let message = message.to_string();
     let job_name = job_name.to_string();
+    let profile = crate::config::profile::current_profile_name();
     Some(tokio::spawn(async move {
-        match crate::channels::telegram::send::send_markdown_outbox(
-            &bot,
-            teloxide::types::ChatId(chat_id),
-            thread,
-            &message,
-            "cron",
-            &job_name,
-            None,
-        )
-        .await
-        {
-            Ok(outbox) => {
-                tracing::info!(
-                    "Cron result for '{job_name}' delivered to Telegram chat {chat_id}{} ({} part(s))",
-                    outbox
-                        .effective_thread_id
-                        .map(|t| format!(" thread {}", t.0.0))
-                        .unwrap_or_default(),
-                    outbox.sent.len()
-                );
-                // Persist keyed by message id so a reply to the cron post
-                // resolves to this exact content (#234, #169).
-                outbox.record_outgoing(pool, chat_id).await;
-            }
-            Err(e) => {
-                if let Some(t) = thread_id {
-                    tracing::error!(
-                        "Cron delivery for '{job_name}' to chat {chat_id} thread {t} failed: {e} — \
-                         if the error is 'message thread not found', topic {t} does not exist \
-                         in chat {chat_id}; fix the job's deliver_to (there is no fallback to the \
-                         default topic)"
+        crate::config::profile::with_profile_home_async(Some(&profile), async move {
+            match crate::channels::telegram::send::send_markdown_outbox(
+                &bot,
+                teloxide::types::ChatId(chat_id),
+                thread,
+                &message,
+                "cron",
+                &job_name,
+                None,
+            )
+            .await
+            {
+                Ok(outbox) => {
+                    tracing::info!(
+                        "Cron result for '{job_name}' delivered to Telegram chat {chat_id}{} ({} part(s))",
+                        outbox
+                            .effective_thread_id
+                            .map(|t| format!(" thread {}", t.0.0))
+                            .unwrap_or_default(),
+                        outbox.sent.len()
                     );
-                } else {
-                    tracing::error!("Cron delivery for '{job_name}' to chat {chat_id} failed: {e}");
+                    // Persist keyed by message id so a reply to the cron post
+                    // resolves to this exact content (#234, #169).
+                    outbox.record_outgoing(pool, chat_id).await;
+                }
+                Err(e) => {
+                    if let Some(t) = thread_id {
+                        tracing::error!(
+                            "Cron delivery for '{job_name}' to chat {chat_id} thread {t} failed: {e} — \
+                             if the error is 'message thread not found', topic {t} does not exist \
+                             in chat {chat_id}; fix the job's deliver_to (there is no fallback to the \
+                             default topic)"
+                        );
+                    } else {
+                        tracing::error!("Cron delivery for '{job_name}' to chat {chat_id} failed: {e}");
+                    }
+                    // Detached delivery: the outcome lands after the run row was
+                    // already stamped success (#107). Flip it so a silent drop
+                    // never masquerades as a clean run.
+                    record_delivery_failure(
+                        pool,
+                        run_id,
+                        &format!("Telegram send to chat {chat_id} failed: {e}"),
+                    )
+                    .await;
                 }
             }
-        }
+        })
+        .await
     }))
 }
 

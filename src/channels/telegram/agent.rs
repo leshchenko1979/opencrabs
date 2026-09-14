@@ -256,12 +256,17 @@ impl TelegramAgent {
                 let session_svc = session_svc.clone();
                 let shared_session = shared_session.clone();
                 let config_rx = config_rx.clone();
+                // #180 Leg A: a button tap must be able to record the session
+                // binding. `deps` owns the message path's handle; this is the
+                // callback path's own copy.
+                let cb_session_binding_repo = deps.session_binding_repo.clone();
                 move |bot: Bot, query: CallbackQuery| {
                     let state = telegram_state.clone();
                     let agent = agent.clone();
                     let session_svc = session_svc.clone();
                     let shared_session = shared_session.clone();
                     let config_rx = config_rx.clone();
+                    let cb_session_binding_repo = cb_session_binding_repo.clone();
                     async move {
                         if let Some(data) = query.data.as_deref() {
                             tracing::info!("Telegram callback query received: data={}", data);
@@ -467,6 +472,18 @@ impl TelegramAgent {
                                     let state_clone = state.clone();
                                     let rearm_token = tapped_token.clone();
                                     let query_id = query.id.clone();
+                                    // #180 Leg A: record the tap BEFORE the turn is
+                                    // dispatched. The kill this guards against lands
+                                    // between dispatch and the PROCESSING insert, so
+                                    // the row must be on disk before
+                                    // `resume_session_inner` is reached.
+                                    record_tap_binding(
+                                        &cb_session_binding_repo,
+                                        sid,
+                                        chat_id,
+                                        thread_id,
+                                    )
+                                    .await;
                                     tokio::spawn(async move {
                                         // Record the pick ON the suggestion block
                                         // rather than posting a new message.
@@ -536,6 +553,26 @@ impl TelegramAgent {
                                                         &picked_md,
                                                         picked_idx,
                                                     );
+                                                // #117 step 1: the tap consequence enters the
+                                                // G2 gate as Interactive — it shares the
+                                                // bucket's view of the throttle window and
+                                                // gets the reserved floor, but NEVER queues
+                                                // and NEVER drops (the gate's Interactive arm
+                                                // always returns true; payload below is only
+                                                // read by the finals drainer, which Interactive
+                                                // never feeds). The deferred retry inside the
+                                                // arms stays gate-free: it IS the reactive
+                                                // floor (#68/#76).
+                                                let _interactive_gate = super::governor::
+                                                    edit_admission(
+                                                    &bot_clone,
+                                                    chat_id,
+                                                    mid,
+                                                    super::governor::EditClass::Interactive,
+                                                    String::new(),
+                                                    false,
+                                                )
+                                                .await;
                                                 let outcome: Result<(), String> = match rewrite.clone() {
                                                     super::suggest_options::PickRewrite::RichMarkdownHost(
                                                         body,
@@ -602,6 +639,7 @@ impl TelegramAgent {
                                                             let echo_text = text.clone();
                                                             let echo_chooser = chooser.clone();
                                                             super::edit_retry::spawn_deferred(
+                                                                chat_id,
                                                                 wait,
                                                                 move || async move {
                                                                     refire_pick_edit(&bot_r, retry)
@@ -751,7 +789,7 @@ impl TelegramAgent {
                                                 text,
                                                 agent_clone,
                                                 state_clone,
-                                                false, // user button tap, not a push wake (#12)
+                                                Some(crate::brain::agent::PendingOrigin::User), // user button tap (#174)
                                             )
                                             .await
                                         {
@@ -762,20 +800,6 @@ impl TelegramAgent {
                                         }
                                     });
                                 }
-                                return Ok::<(), teloxide::RequestError>(());
-                            }
-
-                            // Brain dedup approval (#765): apply or reject a filed
-                            // cross-file duplicate proposal. Report-only upstream;
-                            // the removal only happens on this explicit tap.
-                            if let Some(rest) = data.strip_prefix(
-                                crate::channels::telegram::dedup_approval::DEDUP_PREFIX,
-                            ) {
-                                let brain_dir = crate::config::opencrabs_home();
-                                crate::channels::telegram::dedup_approval::handle_callback(
-                                    &bot, &query, rest, &brain_dir,
-                                )
-                                .await;
                                 return Ok::<(), teloxide::RequestError>(());
                             }
 
@@ -993,6 +1017,7 @@ impl TelegramAgent {
                                                 // window that killed the old immediate
                                                 // fallback.
                                                 super::edit_retry::spawn_deferred(
+                                                    chat,
                                                     wait,
                                                     {
                                                         let bot = bot.clone();
@@ -1675,7 +1700,30 @@ impl TelegramAgent {
                             // it, so the tapper is re-checked here. Approve is
                             // FORBIDDEN while a turn runs (refuse, never
                             // queue); Discard cancels the turn first.
-                            if data == "plan:ok" || data == "plan:no" {
+                            // Grayed Review button while a review runs (#155):
+                            // ack only, so a second tap can never start a
+                            // concurrent rewrite of the same plan.
+                            if data == "plan:noop" {
+                                if let Err(e) = bot
+                                    .answer_callback_query(query.id.clone())
+                                    .text("⏳ Plan review is already running…")
+                                    .await
+                                {
+                                    tracing::warn!("Telegram: callback UI update failed: {e}");
+                                }
+                                return ResponseResult::Ok(());
+                            }
+                            if data == "plan:noop_impl" {
+                                if let Err(e) = bot
+                                    .answer_callback_query(query.id.clone())
+                                    .text("⏳ Implementation review is already running…")
+                                    .await
+                                {
+                                    tracing::warn!("Telegram: callback UI update failed: {e}");
+                                }
+                                return ResponseResult::Ok(());
+                            }
+                            if data == "plan:ok" || data == "plan:no" || data == "plan:review" || data == "plan:review_impl" {
                                 let caller_is_owner = config_rx
                                     .borrow()
                                     .channels
@@ -1720,6 +1768,38 @@ impl TelegramAgent {
                                 let kb_msg_id = query.message.as_ref().map(|m| m.id());
 
                                 if data == "plan:no" {
+                                    // #155 D1: a review in flight is a DETACHED
+                                    // sub-agent. `cancel_session` below only
+                                    // fires the TURN token, which the review
+                                    // never registered — so without this the
+                                    // reviewer kept rewriting the plan (and
+                                    // re-posting the card) minutes after the
+                                    // discard. Stop it by its own id first.
+                                    //
+                                    // The id may not be published yet: a review
+                                    // spends seconds inside `spawn_agent` setup
+                                    // before it can name itself. Record the
+                                    // intent as well, so that review stops the
+                                    // moment it publishes instead of running on.
+                                    // Gated on a review actually being in flight:
+                                    // an ungated request would outlive this
+                                    // discard and stop the owner's NEXT review.
+                                    if state.is_plan_reviewing(session_id).await {
+                                        state.request_plan_review_cancel(session_id).await;
+                                    }
+                                    let review_child = state.plan_review_child(session_id).await;
+                                    let review_stopped = match (
+                                        review_child.as_deref(),
+                                        agent.subagent_manager(),
+                                    ) {
+                                        (Some(id), Some(manager)) => manager.cancel(id),
+                                        _ => false,
+                                    };
+                                    if review_stopped {
+                                        state.set_plan_reviewing(session_id, false).await;
+                                        state.clear_plan_review_running_note(session_id).await;
+                                        state.clear_plan_review_child(session_id).await;
+                                    }
                                     let cancelled = state.cancel_session(session_id).await;
                                     let mut reply =
                                         crate::utils::plan_mode::discard(session_id, agent.context())
@@ -1727,6 +1807,9 @@ impl TelegramAgent {
                                     if cancelled {
                                         reply =
                                             format!("⏹️ Cancelled the running turn. {reply}");
+                                    }
+                                    if review_stopped {
+                                        reply = format!("{reply} 🔍 Review stopped.");
                                     }
                                     if let Err(e) = bot
                                         .answer_callback_query(query.id.clone())
@@ -1752,6 +1835,139 @@ impl TelegramAgent {
                                         "plan callback reply",
                                     )
                                     .await;
+                                    return ResponseResult::Ok(());
+                                }
+
+                                // plan:review — 🔍 Review (#155). Spawns an
+                                // isolated subagent that cold-rereads the plan
+                                // `.md` and rewrites it through the normal write
+                                // path (so the Layer-2 template guard still
+                                // applies). It CANNOT approve or discard: the
+                                // card keeps both buttons live and the owner
+                                // decides. Refused while a turn runs (the plan
+                                // `.md` is being written by that turn) and while
+                                // a review is already in flight.
+                                if data == "plan:review" {
+                                    if state.is_turn_active(session_id) {
+                                        if let Err(e) = bot
+                                            .answer_callback_query(query.id.clone())
+                                            .text(
+                                                "⛔ A turn is running. Review is refused while \
+                                                 busy; try again when it finishes.",
+                                            )
+                                            .show_alert(true)
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                "Telegram: callback UI update failed: {e}"
+                                            );
+                                        }
+                                        return ResponseResult::Ok(());
+                                    }
+                                    if state.is_plan_reviewing(session_id).await {
+                                        if let Err(e) = bot
+                                            .answer_callback_query(query.id.clone())
+                                            .text("⏳ Plan review is already running…")
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                "Telegram: callback UI update failed: {e}"
+                                            );
+                                        }
+                                        return ResponseResult::Ok(());
+                                    }
+                                    if let Err(e) = bot
+                                        .answer_callback_query(query.id.clone())
+                                        .text("🔍 Reviewing the plan…")
+                                        .await
+                                    {
+                                        tracing::warn!("Telegram: callback UI update failed: {e}");
+                                    }
+                                    state.set_plan_reviewing(session_id, true).await;
+                                    // Grayed button lands immediately, before
+                                    // the subagent has produced anything.
+                                    crate::channels::telegram::plan_card::refresh_plan_card(
+                                        &bot,
+                                        chat_id,
+                                        thread_id,
+                                        &state,
+                                        &agent,
+                                        session_id,
+                                        crate::channels::telegram::flow_chrome::PlanKb::ApproveDiscard,
+                                    )
+                                    .await;
+                                    let bot2 = bot.clone();
+                                    let state2 = state.clone();
+                                    let agent2 = agent.clone();
+                                    tokio::spawn(async move {
+                                        execute_plan_review_subagent(
+                                            bot2, state2, agent2, session_id, chat_id, thread_id,
+                                        )
+                                        .await;
+                                    });
+                                    return ResponseResult::Ok(());
+                                }
+
+                                // plan:review_impl — 🔍 Review implementation (#234). Spawns an
+                                // isolated read-only subagent that audits the delivered code changes
+                                // against the archived plan and acceptance criteria.
+                                if data == "plan:review_impl" {
+                                    if state.is_turn_active(session_id) {
+                                        if let Err(e) = bot
+                                            .answer_callback_query(query.id.clone())
+                                            .text(
+                                                "⛔ A turn is running. Review is refused while \
+                                                 busy; try again when it finishes.",
+                                            )
+                                            .show_alert(true)
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                "Telegram: callback UI update failed: {e}"
+                                            );
+                                        }
+                                        return ResponseResult::Ok(());
+                                    }
+                                    if state.is_plan_reviewing(session_id).await {
+                                        if let Err(e) = bot
+                                            .answer_callback_query(query.id.clone())
+                                            .text("⏳ Implementation review is already running…")
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                "Telegram: callback UI update failed: {e}"
+                                            );
+                                        }
+                                        return ResponseResult::Ok(());
+                                    }
+                                    if let Err(e) = bot
+                                        .answer_callback_query(query.id.clone())
+                                        .text("🔍 Auditing implementation…")
+                                        .await
+                                    {
+                                        tracing::warn!("Telegram: callback UI update failed: {e}");
+                                    }
+                                    state.set_plan_reviewing(session_id, true).await;
+                                    let card_mid = query.message.as_ref().map(|m| m.id());
+                                    if let (Some(mid), Some(markup)) = (
+                                        card_mid,
+                                        crate::channels::telegram::flow_chrome::PlanKb::CompletedReviewing
+                                            .keyboard(),
+                                    ) {
+                                        let _ = bot
+                                            .edit_message_reply_markup(chat_id, mid)
+                                            .reply_markup(markup)
+                                            .await;
+                                    }
+                                    let bot2 = bot.clone();
+                                    let state2 = state.clone();
+                                    let agent2 = agent.clone();
+                                    tokio::spawn(async move {
+                                        execute_review_impl_subagent(
+                                            bot2, state2, agent2, session_id, chat_id, thread_id, card_mid,
+                                        )
+                                        .await;
+                                    });
                                     return ResponseResult::Ok(());
                                 }
 
@@ -1788,6 +2004,10 @@ impl TelegramAgent {
                                     crate::utils::plan_mode::ApproveOutcome::SeedTurn {
                                         prompt,
                                     } => {
+                                        // #155: the plan is leaving Editing, so
+                                        // the review footer must not resurface on
+                                        // a later plan primed in this session.
+                                        state.clear_plan_review_delta(session_id).await;
                                         if let Err(e) = bot
                                             .answer_callback_query(query.id.clone())
                                             .text("✅ Plan approved")
@@ -1807,6 +2027,7 @@ impl TelegramAgent {
                                                 Err(e) => match super::edit_retry::classify(&e) {
                                                     super::edit_retry::EditErr::RetryAfter(wait) => {
                                                         super::edit_retry::spawn_deferred(
+                                                            chat_id,
                                                             wait,
                                                             move || {
                                                                 let bot = bot2.clone();
@@ -1836,6 +2057,16 @@ impl TelegramAgent {
                                             "system",
                                             "plan_approved_notice",
                                             "plan approve notice",
+                                        )
+                                        .await;
+                                        // #180 Leg A: approving the plan with a tap
+                                        // starts a turn — record the binding before
+                                        // dispatch, same as the follow-up path.
+                                        record_tap_binding(
+                                            &cb_session_binding_repo,
+                                            session_id,
+                                            chat_id,
+                                            thread_id,
                                         )
                                         .await;
                                         // Visible seed turn, spawned so the
@@ -1869,7 +2100,7 @@ impl TelegramAgent {
                                                     prompt,
                                                     agent2,
                                                     state2,
-                                                    false, // user button tap, not a push wake (#12)
+                                                    Some(crate::brain::agent::PendingOrigin::User), // user plan approval button tap (#174)
                                                 )
                                                 .await
                                             {
@@ -1961,6 +2192,16 @@ impl TelegramAgent {
                                             .await
                                     };
                                     if let Some(sid) = sid {
+                                        // #180 Leg A: a generic callback tap that
+                                        // dispatches a turn is the same boot-recovery
+                                        // candidate as the follow-up and plan paths.
+                                        record_tap_binding(
+                                            &cb_session_binding_repo,
+                                            sid,
+                                            cb_chat,
+                                            cb_thread,
+                                        )
+                                        .await;
                                         let agent_cb = agent.clone();
                                         let bot_cb = bot.clone();
                                         let state_cb = state.clone();
@@ -1987,7 +2228,7 @@ impl TelegramAgent {
                                                     format!("[callback:{data_owned}]"),
                                                     agent_cb,
                                                     state_cb,
-                                                    false, // user-initiated callback tap (#12)
+                                                    Some(crate::brain::agent::PendingOrigin::User), // user-initiated callback tap (#174)
                                                 )
                                                 .await
                                             {
@@ -2242,6 +2483,506 @@ async fn refire_pick_edit(
     }
 }
 
+/// Run the plan-review subagent for `session_id` (#155) — the 🔍 Review
+/// button's worker.
+///
+/// The child is spawned with the exact `PLAN_REVIEW_LABEL` the spawn path keys
+/// its single write exception on, so while its parent is Editing (where every
+/// other child is read-only, #649) it can still rewrite the plan `.md`. That
+/// rewrite goes through the ordinary file-write path, so the Layer-2 template
+/// guard applies to it like any other write.
+///
+/// The child CANNOT approve or discard: this function never calls
+/// `try_approve` / `discard`. It only re-renders the card so the owner sees
+/// what changed.
+///
+/// Completion is collected with `wait_agent`, not by letting the child report
+/// itself. A child nobody waits on has its result pushed into the PARENT
+/// SESSION's queue with `interrupt=true` (`push_result`), which would start an
+/// unrequested turn — and an unrequested turn in a plan-editing session is a
+/// model run that could write files the owner never asked for, on top of a
+/// duplicated report. Registering as a waiter suppresses that push by
+/// construction (#1036), so the report arrives here exactly once.
+async fn execute_plan_review_subagent(
+    bot: teloxide::Bot,
+    state: Arc<TelegramState>,
+    agent: Arc<AgentService>,
+    session_id: Uuid,
+    chat_id: teloxide::types::ChatId,
+    thread_id: Option<teloxide::types::ThreadId>,
+) {
+    use crate::brain::tools::Tool as _;
+
+    let finish = |delta: String| {
+        let state = state.clone();
+        let bot = bot.clone();
+        let agent = agent.clone();
+        async move {
+            state.clear_plan_review_running_note(session_id).await;
+            state.clear_plan_review_child(session_id).await;
+            state.set_plan_reviewing(session_id, false).await;
+            state.set_plan_review_delta(session_id, delta).await;
+            // #155 D2: a review that finishes AFTER the owner discarded the plan
+            // must not resurrect the card. Discard deletes the plan, so with no
+            // plan content left there is nothing to render — remove the card
+            // instead of re-posting a headerless one.
+            let (title, checklist) =
+                crate::channels::telegram::flow_chrome::load_plan_sections(session_id).await;
+            let has_md_title =
+                crate::channels::telegram::flow_chrome::load_plan_md_title(session_id)
+                    .await
+                    .is_some();
+            let has_prose = crate::channels::telegram::flow_chrome::load_plan_prose(session_id)
+                .await
+                .is_some();
+            if title.is_none() && checklist.is_none() && !has_md_title && !has_prose {
+                crate::channels::telegram::plan_card::remove_plan_card(
+                    &bot, chat_id, &state, session_id,
+                )
+                .await;
+                return;
+            }
+            crate::channels::telegram::plan_card::refresh_plan_card(
+                &bot,
+                chat_id,
+                thread_id,
+                &state,
+                &agent,
+                session_id,
+                crate::channels::telegram::flow_chrome::PlanKb::ApproveDiscard,
+            )
+            .await;
+        }
+    };
+
+    let Some(manager) = agent.subagent_manager() else {
+        finish("⚠️ Review unavailable: no sub-agent manager wired.".to_string()).await;
+        return;
+    };
+    let registry = agent.tool_registry().clone();
+
+    let md_path = crate::utils::plan_files::plan_md_path(session_id).await;
+    let brief = format!(
+        "You are an adversarial software architecture and plan review agent.\n\
+         Your mission is to upgrade the implementation plan in-place to ensure it is concrete, \
+         feasible, edge-case hardened, and leaves zero ambiguity for the implementer.\n\
+         \n\
+         File: {md_path}\n\
+         \n\
+         ### STEP 1: GROUNDING & CODEBASE VERIFICATION\n\
+         1. Read the plan file completely.\n\
+         2. Inspect the codebase (using grep, read_file, glob) to verify every referenced file, \
+         function, struct, route, and tool exists and matches what the plan assumes.\n\
+         3. If the plan assumes a non-existent API or wrong pattern, correct the plan to reflect real codebase ground truth.\n\
+         \n\
+         ### STEP 2: ELIMINATE AMBIGUITY & UNRESOLVED FORKS\n\
+         - Hunt down all instances of \"or\", \"if needed\", \"optional\", \"TBD\", \"might\", \"consider\", or \"investigate later\".\n\
+         - Make the concrete technical decision upfront: pick the exact file, exact function, exact type, and exact sequence.\n\
+         - Do NOT leave design or scoping choices to the implementer unless strictly dependent on an external third party.\n\
+         \n\
+         ### STEP 3: ADVERSARIAL EDGE-CASE & FEASIBILITY AUDIT\n\
+         - Concurrency & State: Are shared state, locks, and active-turn collisions guarded?\n\
+         - Failure Modes: What happens on timeout, network drop, malformed payload, or missing data?\n\
+         - Integration Completeness: Are all new modules, callbacks, and routes wired into their dispatch points?\n\
+         - Acceptance Criteria: Ensure every step has verifiable, runnable commands and concrete outcomes (not vague prose).\n\
+         \n\
+         ### STEP 4: REWRITE THE PLAN IN PLACE\n\
+         Rewrite the plan directly in {md_path} ensuring:\n\
+         - All edge-cases, concrete decisions, and verified paths are incorporated into the Implementation Steps.\n\
+         - Section layout and Layer-2 contract are strictly preserved:\n\
+           * `## Context` with single-line `**Problem:** ...`, `**Target state:** ...`, `**Intent:** ...`\n\
+           * `## Implementation steps` with numbered items (`1. ...`, `2. ...`).\n\
+         - Do not alter the user's high-level goal or remove required deliverables.\n\
+         \n\
+         ### STEP 5: STRUCTURED REPORT\n\
+         End your output with three explicit sections:\n\
+         \n\
+         SUMMARY:\n\
+         <Bullet list of major edge cases, ambiguity fixes, and codebase corrections applied>\n\
+         \n\
+         OPEN_QUESTIONS:\n\
+         <If any major trade-offs, external blockers, or strategic questions require the operator's decision, list them here. If none, write: None>\n\
+         \n\
+         DELTA: <One concise summary sentence of what was changed>",
+        md_path = md_path.display()
+    );
+
+    let input = crate::channels::telegram::plan_card::plan_review_spawn_input(session_id, brief);
+    let mut ctx = crate::brain::tools::ToolExecutionContext::new(session_id);
+    ctx.service_context = Some(agent.context().clone());
+    ctx.subagent_manager = Some(manager.clone());
+    ctx.parent_tool_registry = Some(registry.clone());
+    ctx.plan_session_override = Some(session_id);
+
+    let spawn_tool = crate::brain::tools::subagent::SpawnAgentTool::new(manager.clone(), registry);
+    let res = match spawn_tool.execute(input, &ctx).await {
+        Ok(res) => res,
+        Err(e) => {
+            finish(format!("⚠️ Review could not start: {e}")).await;
+            return;
+        }
+    };
+    if !res.success {
+        let msg = res
+            .error
+            .clone()
+            .filter(|e| !e.trim().is_empty())
+            .unwrap_or(res.output);
+        finish(format!("⚠️ Review could not start: {msg}")).await;
+        return;
+    }
+    let Some(child_id) = crate::channels::telegram::plan_card::plan_review_agent_id(&res.output)
+    else {
+        finish("⚠️ Review started but its id could not be read.".to_string()).await;
+        return;
+    };
+    // #155 D1: publish the child id so the `plan:no` discard path can cancel
+    // this review. Without it the reviewer ran to natural completion minutes
+    // after the owner discarded, rewriting the plan and re-posting the card.
+    state
+        .set_plan_review_child(session_id, child_id.clone())
+        .await;
+    // A discard that landed while this review was still starting had no id to
+    // cancel — it recorded its intent instead, and this is where that intent is
+    // honoured. Stop the child BEFORE it can read the plan, then clean up by
+    // hand rather than through `finish`: `finish` refreshes the card, which
+    // would re-post one for a plan the owner already discarded.
+    if state.take_plan_review_cancel(session_id).await {
+        manager.cancel(&child_id);
+        state.clear_plan_review_running_note(session_id).await;
+        state.clear_plan_review_child(session_id).await;
+        state.set_plan_reviewing(session_id, false).await;
+        crate::channels::telegram::plan_card::remove_plan_card(&bot, chat_id, &state, session_id)
+            .await;
+        return;
+    }
+
+    // Live progress tracker task (#155): updates the plan card with turn & tool
+    // so the review doesn't appear frozen to the operator.
+    let progress_stop = std::sync::Arc::new(tokio::sync::Notify::new());
+    let progress_task = {
+        let stop = progress_stop.clone();
+        let child_id_c = child_id.clone();
+        let state_c = state.clone();
+        let bot_c = bot.clone();
+        let agent_c = agent.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+            let mut last_rendered = String::new();
+            loop {
+                tokio::select! {
+                    _ = stop.notified() => break,
+                    _ = interval.tick() => {
+                        if let Some(status) =
+                            crate::brain::agent::service::work_status::WorkStatus::read(&child_id_c)
+                        {
+                            // The clock rides the note (#155): the review's own
+                            // spawn-anchored elapsed time, in the flow footer's
+                            // format. It differs every tick, so the card edit
+                            // below is re-issued each tick — that IS the live
+                            // clock the owner asked for.
+                            let note = crate::channels::telegram::plan_card::format_plan_review_running_progress(
+                                status.progress.as_ref(),
+                                status.elapsed_secs(),
+                            );
+                            if note != last_rendered {
+                                state_c
+                                    .set_plan_review_running_note(session_id, note.clone())
+                                    .await;
+                                // #187 D3: mark the note rendered only if the card
+                                // actually took it. The suppression gate (#814 flood
+                                // control) skips the whole refresh before any read or
+                                // API work, and recording the note as rendered here
+                                // would make the next refresh carrying that same note
+                                // skip — leaving the card on the older footer.
+                                if crate::channels::telegram::plan_card::refresh_plan_card(
+                                    &bot_c,
+                                    chat_id,
+                                    thread_id,
+                                    &state_c,
+                                    &agent_c,
+                                    session_id,
+                                    crate::channels::telegram::flow_chrome::PlanKb::ApproveDiscard,
+                                )
+                                .await
+                                {
+                                    last_rendered = note;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    };
+
+    // Collect through `wait_agent` (which registers a waiter, suppressing the
+    // child's own push into this session — see the fn doc). The manager stays
+    // the authority on the OUTCOME: `wait_agent` returns early on a round
+    // boundary and reports a timeout as ordinary prose, so the terminal state
+    // is read back rather than parsed out of its message.
+    const REVIEW_WAIT_SECS: u64 = 900;
+    let wait_tool = crate::brain::tools::subagent::WaitAgentTool::new(manager.clone());
+    let waited = wait_tool
+        .execute(
+            serde_json::json!({
+                "agent_id": child_id,
+                "timeout_secs": REVIEW_WAIT_SECS,
+            }),
+            &ctx,
+        )
+        .await;
+
+    // Stop progress monitor now that wait returned
+    progress_stop.notify_one();
+    let _ = progress_task.await;
+
+    // A cancelled review has no findings to report: the owner discarded the plan
+    // and the review was stopped mid-flight (#186). Read the terminal state once,
+    // before the match consumes it, so the delivery below can be skipped.
+    let child_state = manager.get_state(&child_id);
+    let review_cancelled =
+        crate::channels::telegram::plan_card::plan_review_was_cancelled(child_state.as_ref());
+
+    let review_report = match waited {
+        Err(e) => crate::channels::telegram::plan_card::PlanReviewReport::simple(format!(
+            "⚠️ Review could not be awaited: {e}"
+        )),
+        Ok(_) => match child_state {
+            Some(crate::brain::tools::subagent::SubAgentState::Completed) => {
+                crate::channels::telegram::plan_card::parse_plan_review_report(
+                    manager.get_output(&child_id).as_deref(),
+                )
+            }
+            Some(crate::brain::tools::subagent::SubAgentState::Failed(e)) => {
+                crate::channels::telegram::plan_card::PlanReviewReport::simple(format!(
+                    "⚠️ Review failed: {e}"
+                ))
+            }
+            Some(crate::brain::tools::subagent::SubAgentState::Cancelled) => {
+                crate::channels::telegram::plan_card::PlanReviewReport::simple(
+                    "⚠️ Review was cancelled.",
+                )
+            }
+            Some(crate::brain::tools::subagent::SubAgentState::AwaitingInput) => {
+                crate::channels::telegram::plan_card::PlanReviewReport::simple(
+                    "⚠️ Review paused for input; the plan was left as it was.",
+                )
+            }
+            Some(crate::brain::tools::subagent::SubAgentState::Running) => {
+                crate::channels::telegram::plan_card::PlanReviewReport::simple(
+                    "⚠️ Review timed out; it may still finish in the background.",
+                )
+            }
+            None => crate::channels::telegram::plan_card::PlanReviewReport::simple(
+                "⚠️ Review stopped: its worker disappeared.",
+            ),
+        },
+    };
+
+    if review_cancelled {
+        // The owner cancelled the review — there is nothing to report. Stay silent
+        // and fall through to the cleanup below.
+        tracing::debug!(
+            "Plan review was cancelled by the owner — suppressing the findings delivery"
+        );
+    } else {
+        // Deliver findings as a native rich turn message to the thread
+        let findings_md = review_report.to_findings_markdown();
+        let chat_id_i64 = chat_id.0;
+        let send_res = crate::channels::telegram::rich::api::send_rich_markdown_id(
+            bot.api_url().as_str(),
+            bot.token(),
+            chat_id_i64,
+            thread_id,
+            &findings_md,
+            None,
+            "plan_review",
+            "review_findings",
+        )
+        .await;
+
+        if let Err(e) = send_res {
+            tracing::warn!(
+                "Failed to deliver rich plan review findings, falling back to basic send: {e}"
+            );
+            let _ = crate::channels::telegram::send::message_in_thread(
+                &bot,
+                chat_id,
+                thread_id,
+                &findings_md,
+            )
+            .await;
+        }
+    }
+
+    finish(review_report.card_delta).await;
+}
+
+/// Spawns an isolated implementation-review worker on `plan:review_impl` tap (#234).
+///
+/// Audits the delivered code changes against the archived plan document and acceptance criteria,
+/// then delivers rich markdown findings back to the Telegram thread.
+async fn execute_review_impl_subagent(
+    bot: Bot,
+    state: Arc<TelegramState>,
+    agent: Arc<AgentService>,
+    session_id: Uuid,
+    chat_id: ChatId,
+    thread_id: Option<teloxide::types::ThreadId>,
+    card_mid: Option<MessageId>,
+) {
+    use crate::brain::tools::r#trait::Tool;
+
+    let restore_kb = {
+        let bot = bot.clone();
+        let state = state.clone();
+        async move {
+            state.set_plan_reviewing(session_id, false).await;
+            let target_mid = state
+                .plan_card(session_id)
+                .await
+                .map(|(mid, _)| mid)
+                .or(card_mid);
+            if let (Some(mid), Some(markup)) = (
+                target_mid,
+                crate::channels::telegram::flow_chrome::PlanKb::CompletedReview.keyboard(),
+            ) {
+                let _ = bot
+                    .edit_message_reply_markup(chat_id, mid)
+                    .reply_markup(markup)
+                    .await;
+            }
+        }
+    };
+
+    let post_report = |report_md: &str| {
+        let bot = bot.clone();
+        let report_md = report_md.to_string();
+        async move {
+            let chat_id_i64 = chat_id.0;
+            let send_res = crate::channels::telegram::rich::api::send_rich_markdown_id(
+                bot.api_url().as_str(),
+                bot.token(),
+                chat_id_i64,
+                thread_id,
+                &report_md,
+                None,
+                "review_impl",
+                "impl_findings",
+            )
+            .await;
+
+            if let Err(e) = send_res {
+                tracing::warn!(
+                    "Failed to deliver rich implementation review findings, falling back to basic send: {e}"
+                );
+                let _ = crate::channels::telegram::send::message_in_thread(
+                    &bot, chat_id, thread_id, &report_md,
+                )
+                .await;
+            }
+        }
+    };
+
+    let Some(manager) = agent.subagent_manager() else {
+        restore_kb.await;
+        post_report("⚠️ Review implementation unavailable: no sub-agent manager wired.").await;
+        return;
+    };
+    let registry = agent.tool_registry().clone();
+
+    let doc = crate::utils::plan_files::latest_archived_plan(session_id).await;
+    let (title, checklist) = match &doc {
+        Some(d) => crate::channels::telegram::flow_chrome::plan_document_sections(d),
+        None => (None, None),
+    };
+    let md_path = crate::utils::plan_files::plan_md_path(session_id).await;
+
+    let brief = {
+        let checklist_rendered = checklist.as_ref().map(|items| items.join("\n"));
+        crate::channels::telegram::plan_card::review_impl_brief(
+            title.as_deref().unwrap_or("Completed Plan"),
+            checklist_rendered
+                .as_deref()
+                .unwrap_or("No checklist recorded"),
+            Some(&md_path),
+        )
+    };
+
+    let input = crate::channels::telegram::plan_card::review_impl_spawn_input(session_id, brief);
+    let mut ctx = crate::brain::tools::ToolExecutionContext::new(session_id);
+    ctx.service_context = Some(agent.context().clone());
+    ctx.subagent_manager = Some(manager.clone());
+    ctx.parent_tool_registry = Some(registry.clone());
+    ctx.plan_session_override = Some(session_id);
+
+    let spawn_tool = crate::brain::tools::subagent::SpawnAgentTool::new(manager.clone(), registry);
+    let res = match spawn_tool.execute(input, &ctx).await {
+        Ok(res) => res,
+        Err(e) => {
+            restore_kb.await;
+            post_report(&format!("⚠️ Review implementation could not start: {e}")).await;
+            return;
+        }
+    };
+    if !res.success {
+        let msg = res
+            .error
+            .clone()
+            .filter(|e| !e.trim().is_empty())
+            .unwrap_or(res.output);
+        restore_kb.await;
+        post_report(&format!("⚠️ Review implementation could not start: {msg}")).await;
+        return;
+    }
+    let Some(child_id) = crate::channels::telegram::plan_card::plan_review_agent_id(&res.output)
+    else {
+        restore_kb.await;
+        post_report("⚠️ Review implementation started but its id could not be read.").await;
+        return;
+    };
+
+    const REVIEW_WAIT_SECS: u64 = 900;
+    let wait_tool = crate::brain::tools::subagent::WaitAgentTool::new(manager.clone());
+    let waited = wait_tool
+        .execute(
+            serde_json::json!({
+                "agent_id": child_id,
+                "timeout_secs": REVIEW_WAIT_SECS,
+            }),
+            &ctx,
+        )
+        .await;
+
+    let child_state = manager.get_state(&child_id);
+    let output = match waited {
+        Err(e) => format!("⚠️ Review implementation could not be awaited: {e}"),
+        Ok(_) => match child_state {
+            Some(crate::brain::tools::subagent::SubAgentState::Completed) => manager
+                .get_output(&child_id)
+                .unwrap_or_else(|| "⚠️ Review completed with no output.".to_string()),
+            Some(crate::brain::tools::subagent::SubAgentState::Failed(e)) => {
+                format!("⚠️ Review implementation failed: {e}")
+            }
+            Some(crate::brain::tools::subagent::SubAgentState::Cancelled) => {
+                "⚠️ Review implementation was cancelled.".to_string()
+            }
+            Some(crate::brain::tools::subagent::SubAgentState::AwaitingInput) => {
+                "⚠️ Review implementation paused for input.".to_string()
+            }
+            Some(crate::brain::tools::subagent::SubAgentState::Running) => {
+                "⚠️ Review implementation timed out; it may still finish in the background."
+                    .to_string()
+            }
+            None => "⚠️ Review implementation stopped: worker disappeared.".to_string(),
+        },
+    };
+
+    restore_kb.await;
+    post_report(&output).await;
+}
+
 #[derive(Clone)]
 struct DispatchDeps {
     agent: Arc<AgentService>,
@@ -2363,6 +3104,43 @@ fn spawn_settle_watcher(
             spawn_handle_message(bot, final_msg, deps);
         }
     });
+}
+
+/// #180 Leg A — record that a BUTTON TAP started a turn.
+///
+/// Gate 1 of the boot classifier (#33) only looks at sessions whose binding
+/// moved inside `WAKE_RECENT_SECS`, and the only writer used to be the text
+/// path in `handler.rs`. A tap therefore never made its session a candidate —
+/// and when the session did surface, Gate 2 read the topic's trailing bot
+/// message as the turn's own reply and called it completed. Writing the
+/// binding here, with the `callback` origin, makes the tap a candidate AND
+/// tells Gate 2 that the trailing bot message carries no completion signal.
+///
+/// Called at the three callback sites that actually dispatch a turn: a
+/// follow-up suggestion, a plan approval, and generic callback routing.
+/// Config pickers such as `/models` deliberately do not call it — they start
+/// no turn, so a resume would be noise.
+async fn record_tap_binding(
+    repo: &SessionBindingRepository,
+    session_id: Uuid,
+    chat_id: teloxide::types::ChatId,
+    thread_id: Option<teloxide::types::ThreadId>,
+) {
+    if let Err(e) = repo
+        .upsert(
+            session_id.to_string(),
+            "telegram",
+            &chat_id.0.to_string(),
+            thread_id.map(|t| t.0.0),
+            crate::db::BindingOrigin::Callback,
+        )
+        .await
+    {
+        tracing::warn!(
+            "Telegram: could not record tap binding for session {session_id}: {e} \
+             (boot recovery will not see this turn — #180)"
+        );
+    }
 }
 
 /// Resolve the correct session ID for a callback query.

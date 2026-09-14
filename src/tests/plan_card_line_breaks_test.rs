@@ -77,6 +77,9 @@ async fn rich_card_never_relies_on_a_bare_newline_to_break_a_line() {
     let goal = GoalSection {
         text: "Ship it".to_string(),
         completed: false,
+        turns_used: 1,
+        max_turns: Some(20),
+        state: Some("active".to_string()),
     };
     let html = render_plan_card_rich_html(Some(TITLE), Some(&rows()), Some(&prose), Some(&goal))
         .await
@@ -91,7 +94,7 @@ async fn rich_card_never_relies_on_a_bare_newline_to_break_a_line() {
         "prose → checklist seam must be a real break. Got:\n{html}"
     );
     assert!(
-        rich_has_block_break_between(&html, "Third task", "goal"),
+        rich_has_block_break_between(&html, "Third task", "🎯"),
         "checklist → goal seam must be a real break. Got:\n{html}"
     );
 }
@@ -144,6 +147,9 @@ async fn classic_card_keeps_the_blank_line_before_the_goal() {
     let goal = GoalSection {
         text: "Ship it".to_string(),
         completed: false,
+        turns_used: 1,
+        max_turns: Some(20),
+        state: Some("active".to_string()),
     };
     let html = render_plan_card_html(Some(TITLE), Some(&rows()), None, Some(&goal))
         .await
@@ -162,6 +168,9 @@ async fn classic_card_has_no_gap_before_the_goal_when_there_is_no_body() {
     let goal = GoalSection {
         text: "Ship it".to_string(),
         completed: false,
+        turns_used: 1,
+        max_turns: Some(20),
+        state: Some("active".to_string()),
     };
     let html = render_plan_card_html(Some(TITLE), None, None, Some(&goal))
         .await
@@ -270,5 +279,189 @@ async fn rich_card_prose_routes_code_fences_through_the_gated_converter() {
     assert!(
         !html.contains("<figure"),
         "no mermaid fence means no figure resolution must happen. Got:\n{html}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #134 family: the rich card rides the MARKDOWN+media dialect. The body is
+// raw markdown (details/summary inline — markdown mode parses them natively,
+// live Bot API probes J/K + P1/P2, 2026-09-10), mermaid fences resolve
+// through `resolve_markdown_media` into a media array instead of HTML
+// conversion. Fence-free inputs only here — network-fencing shapes stay
+// pinned in telegram_mermaid_test.rs.
+// ---------------------------------------------------------------------------
+
+use crate::channels::telegram::plan_card::render_plan_card_markdown;
+
+#[tokio::test]
+async fn markdown_card_checklist_rows_stay_on_their_own_lines() {
+    let md = render_plan_card_markdown(Some(TITLE), Some(&rows()), None, None)
+        .await
+        .expect("a card with a title and checklist must render");
+
+    assert!(
+        md.contains("<p>☑ First task</p>\n<p>☑ Second task</p>\n<p>☐ Third task</p>"),
+        "markdown rows must be wrapped in <p>...</p> blocks so Telegram's rich \
+         message client preserves each checklist row on its own line. Got:\n{md}"
+    );
+    assert!(
+        md.starts_with("<p>📋 <b>"),
+        "the title must lead the card, bold-marked and wrapped in <p>. Got:\n{md}"
+    );
+}
+
+#[tokio::test]
+async fn markdown_card_prose_uses_inline_details_and_keeps_body_raw() {
+    let prose = vec![ProseSection {
+        heading: Some("Context".to_string()),
+        body: "Plain **markdown** body.".to_string(),
+    }];
+    let md = render_plan_card_markdown(Some(TITLE), None, Some(&prose), None)
+        .await
+        .expect("card with prose must render");
+
+    assert!(
+        md.contains(
+            "<details><summary><b>Context</b></summary>\n\nPlain **markdown** body.\n\n</details>"
+        ),
+        "prose must sit inside inline details as RAW markdown, separated from the \
+         summary by a blank line so the markdown block resumes instead of being \
+         swallowed as HTML text (the #941 oneliner regression). Got:\n{md}"
+    );
+    assert!(
+        md.starts_with("<p>📋 <b>"),
+        "title is wrapped in <p> while prose details are unmolested. Got:\n{md}"
+    );
+}
+
+#[tokio::test]
+async fn markdown_card_prose_keeps_the_mermaid_fence_for_the_media_pass() {
+    // Regression guard (acb8e205): `markdown_to_html_mermaid_p` CONSUMED the
+    // fence, so the caller's `resolve_markdown_media` found nothing to turn
+    // into an image and the card shipped an EMPTY media array — the owner's
+    // "the mermaid didn't render". The fence must survive this function.
+    let prose = vec![ProseSection {
+        heading: Some("Diagram".to_string()),
+        body: "```mermaid\nflowchart TD\n    A --> B\n```".to_string(),
+    }];
+    let md = render_plan_card_markdown(Some(TITLE), None, Some(&prose), None)
+        .await
+        .expect("card with a mermaid fence must render");
+
+    assert!(
+        md.contains("```mermaid"),
+        "the mermaid fence must ride through to the media pass untouched. Got:\n{md}"
+    );
+    assert!(
+        !md.contains("mermaid.ink") && !md.contains("<figure"),
+        "no HTML image note or figure may be emitted here — the media array \
+         carries the picture. Got:\n{md}"
+    );
+}
+
+#[tokio::test]
+async fn markdown_card_prose_lists_stay_markdown() {
+    // acb8e205 pre-converted the body to HTML, and `render_list` emits a
+    // literal `•`/`1.` glyph inside a `<p>` — a paragraph starting with a dot,
+    // not a list (the owner's "the lists don't render as lists"). Raw
+    // markdown keeps the list markers the dialect parses.
+    let prose = vec![ProseSection {
+        heading: Some("Context".to_string()),
+        body: "- **Problem:** one\n- **Target state:** two\n\n1. first step".to_string(),
+    }];
+    let md = render_plan_card_markdown(Some(TITLE), None, Some(&prose), None)
+        .await
+        .expect("card with prose must render");
+
+    assert!(
+        md.contains("- **Problem:** one"),
+        "bullets must stay markdown list items. Got:\n{md}"
+    );
+    assert!(
+        md.contains("1. first step"),
+        "ordered items must stay markdown list items. Got:\n{md}"
+    );
+    assert!(
+        !md.contains("•") && !md.contains("<p>1."),
+        "no literal bullet glyph may be emitted into the markdown dialect. Got:\n{md}"
+    );
+}
+
+#[tokio::test]
+async fn markdown_card_goal_sits_inside_details_after_a_gap() {
+    let goal = GoalSection {
+        text: "Ship it".to_string(),
+        completed: false,
+        turns_used: 1,
+        max_turns: Some(20),
+        state: Some("active".to_string()),
+    };
+    let md = render_plan_card_markdown(Some(TITLE), Some(&rows()), None, Some(&goal))
+        .await
+        .expect("card with a goal must render");
+
+    assert!(
+        md.contains(
+            "<p>☐ Third task</p>\n\n<details><summary><b>🎯</b> (1/20 turns)</summary><p>Ship it</p></details>"
+        ),
+        "the goal must follow a blank-line gap and render inside details. \
+         Got:\n{md}"
+    );
+}
+
+#[tokio::test]
+async fn markdown_card_empty_inputs_render_nothing() {
+    assert!(
+        render_plan_card_markdown(None, None, None, None)
+            .await
+            .is_none()
+    );
+    assert!(
+        render_plan_card_markdown(Some("   "), None, None, None)
+            .await
+            .is_none(),
+        "a whitespace-only title is not content"
+    );
+}
+
+#[tokio::test]
+async fn markdown_card_neutralises_prose_media_tags() {
+    // #134: a lone `<img>` in model-authored prose 400'd EVERY rich plan card
+    // (RICH_MESSAGE_PHOTO_INVALID, len=19765 in the daemon log) and slid the
+    // card into the classic-HTML fallback. Prose is text — the tag must ship
+    // inert while staying readable.
+    let prose = vec![ProseSection {
+        heading: Some("What could break".to_string()),
+        body: "Classic path untouched (no `<img>` in classic sendMessage HTML).".to_string(),
+    }];
+    let md = render_plan_card_markdown(Some(TITLE), None, Some(&prose), None)
+        .await
+        .expect("card with prose must render");
+
+    assert!(
+        !md.contains("<img"),
+        "a live <img> tag must never reach the rich body. Got:\n{md}"
+    );
+    assert!(
+        md.contains("&lt;img&gt;") || md.contains("&lt;img>") || md.contains("&amp;lt;img&gt;"),
+        "the tag must stay readable as text. Got:\n{md}"
+    );
+}
+
+#[tokio::test]
+async fn markdown_card_keeps_ordinary_prose_html() {
+    // The guard is scoped to media tags: prose markup that Telegram renders
+    // (bold, iframes, comparison operators) must pass through untouched.
+    let prose = vec![ProseSection {
+        heading: Some("Context".to_string()),
+        body: "<b>bold</b> and a < b".to_string(),
+    }];
+    let md = render_plan_card_markdown(Some(TITLE), None, Some(&prose), None)
+        .await
+        .expect("card with prose must render");
+
+    assert!(
+        md.contains("<b>bold</b> and a &lt; b") || md.contains("<b>bold</b> and a < b"),
+        "non-media prose HTML must survive. Got:\n{md}"
     );
 }

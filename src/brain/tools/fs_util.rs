@@ -49,7 +49,10 @@ pub async fn atomic_write_file(path: &Path, content: &[u8]) -> Result<(), ToolEr
         None
     };
 
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
 
     let tmp_path = parent.join(format!(
         ".tmp_{file_name}.{}.{}",

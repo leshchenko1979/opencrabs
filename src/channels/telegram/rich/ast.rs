@@ -67,6 +67,14 @@ pub enum MermaidResult {
     ParseError(String),
 }
 
+impl MermaidResult {
+    /// Whether this result represents a successfully rendered image.
+    #[allow(dead_code)]
+    pub fn is_image(&self) -> bool {
+        matches!(self, MermaidResult::Image(_) | MermaidResult::ImageBytes(_))
+    }
+}
+
 /// A bulleted or numbered list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct List {

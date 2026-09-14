@@ -17,9 +17,9 @@
 //! 3. any other rich failure still falls through to the HTML ladder with the
 //!    thread intact (no eviction, no behavior change).
 
-use crate::db::Database;
 use crate::db::models::ChannelMessage;
 use crate::db::repository::ChannelMessageRepository;
+use crate::db::Database;
 use teloxide::types::{ChatId, ThreadId};
 
 const CHAT: i64 = 133_526_395;

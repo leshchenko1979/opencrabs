@@ -156,6 +156,33 @@ async fn a_stream_that_ends_without_message_stop_keeps_its_text() {
     assert_eq!(summary_text(&response), "kept");
 }
 
+#[tokio::test]
+async fn stream_idle_timeout_aborts_stalled_stream() {
+    use crate::brain::agent::service::compaction_stream::collect_stream_with_timeout;
+    use futures::stream;
+    use std::time::Duration;
+
+    let hanging_stream = stream::unfold(0, |state| async move {
+        if state == 0 {
+            Some((Ok(start("r", "m", 0)), 1))
+        } else {
+            // Hang indefinitely
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            Some((Ok(text(0, "late")), 2))
+        }
+    });
+
+    let err = collect_stream_with_timeout(Box::pin(hanging_stream), Duration::from_millis(50))
+        .await
+        .expect_err("idle timeout should fire");
+
+    assert!(matches!(err, ProviderError::StreamError(ref msg) if msg.contains("idle timeout")));
+    assert!(
+        should_try_next_provider(&err),
+        "stream idle timeout must trigger fallback to next provider"
+    );
+}
+
 /// Counts which entry point compaction uses for a provider.
 struct PathMock {
     name: String,

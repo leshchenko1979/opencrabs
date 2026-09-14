@@ -75,6 +75,9 @@ pub(crate) struct PendingCompaction {
     /// Fill level at spawn time, reported as the "before" on the receipt so
     /// the number reflects the context that was actually summarised.
     snapshot_usage_pct: f64,
+    /// Token count at spawn time (#135) — absolute "before" for the
+    /// receipt, same boundary as `snapshot_usage_pct`.
+    snapshot_tokens: usize,
     started: std::time::Instant,
 }
 
@@ -317,6 +320,9 @@ impl AgentService {
         // CompactionSummary emit below.
         let compact_started = std::time::Instant::now();
         let before_pct = usage_pct;
+        // Absolute context size the summariser was invoked on (#135) —
+        // the "from" half of the receipt, same boundary as `before_pct`.
+        let before_tokens = context.token_count;
         // E2 (#29): the ETA hint rides the event — the duration this
         // session's LAST successful compaction actually took. `None` on the
         // first compaction: no history, no prediction (a static guess is
@@ -389,9 +395,10 @@ impl AgentService {
             }
         }
 
-        // Last resort: every compaction attempt failed AND we're still over
-        // 80%. Truncate to keep the next request from going out at 200%+. No
-        // marker is persisted in this branch; the caller sees None back.
+        // Last resort: every compaction attempt failed.
+        // If context usage is still over 80%, safety-truncate to 80% and mark
+        // as truncated so the caller persists a truncation marker and keeps the
+        // turn unblocked. If below 80%, proceed gracefully with existing context.
         if summary_result.is_none() {
             let safety_target = (effective_max as f64 * 0.80) as usize;
             if context.token_count > safety_target {
@@ -404,6 +411,11 @@ impl AgentService {
                 context.hard_truncate_to(safety_target);
                 context.trim_to_fit(0);
                 truncated |= context.messages.len() < before_len;
+            } else {
+                tracing::warn!(
+                    "Compaction exhausted, but context is at {} tokens (<=80%) — proceeding with turn uncompacted",
+                    context.token_count,
+                );
             }
         }
 
@@ -417,6 +429,7 @@ impl AgentService {
                 context,
                 summary,
                 before_pct,
+                before_tokens,
                 compact_started.elapsed(),
                 progress_callback,
             );
@@ -451,12 +464,17 @@ impl AgentService {
     /// it: clear the #909 pressure throttle so the ctx footer drops its
     /// marker, remember how long this took so the next compaction can quote a
     /// real ETA instead of a guess, and hand channels the receipt (#29).
+    /// 8 args: the receipt itself carries 6 fields — allow rather than
+    /// bundle into a struct the single caller would immediately unpack
+    /// (same shape as the #134 continuation helper).
+    #[allow(clippy::too_many_arguments)]
     fn note_compaction_success(
         &self,
         session_id: Uuid,
         context: &AgentContext,
         summary: &str,
         before_pct: f64,
+        before_tokens: usize,
         elapsed: std::time::Duration,
         progress_callback: &Option<ProgressCallback>,
     ) {
@@ -478,6 +496,8 @@ impl AgentService {
                     summary: summary.to_string(),
                     before_pct,
                     after_pct,
+                    before_tokens,
+                    after_tokens: context.token_count,
                     elapsed,
                 },
             );
@@ -571,6 +591,7 @@ impl AgentService {
             handle,
             snapshot_len,
             snapshot_usage_pct,
+            snapshot_tokens,
             started,
         } = pending;
 
@@ -582,6 +603,7 @@ impl AgentService {
                     context,
                     &summary,
                     snapshot_usage_pct,
+                    snapshot_tokens,
                     started.elapsed(),
                     progress_callback,
                 );
@@ -644,6 +666,18 @@ impl AgentService {
         let auto_approve = self.auto_approve_tools;
         let subagents = self.subagent_manager.clone();
         let attempt_deadline = self.compaction_attempt_deadline(session_id);
+        // #138 part 2: the inventory stamp lists the UNION (active ∪ seen).
+        // Re-injection below stays active-only on purpose.
+        let stamp_skills = crate::brain::tools::seen_skills::stamp_skills_for_session(session_id);
+        let seen_aux = crate::brain::tools::seen_skills::aux_seen_for_session(session_id);
+        let active_tools = self.tool_registry.active_tools(session_id);
+        let context_inventory = Self::format_context_inventory(
+            max_tokens,
+            &stamp_skills,
+            &seen_aux,
+            &active_tools,
+            Some(&self.tool_registry),
+        );
         // Its own token: this task answers to session teardown, never to a
         // context that grew impatient.
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -664,6 +698,7 @@ impl AgentService {
                 cancel,
                 attempt_deadline,
                 None,
+                context_inventory,
             )
             .await?;
             Ok(Self::decorate_compaction_summary(summary, session_id, subagents).await)
@@ -676,6 +711,7 @@ impl AgentService {
                     handle,
                     snapshot_len,
                     snapshot_usage_pct: usage_pct,
+                    snapshot_tokens: token_count,
                     started: std::time::Instant::now(),
                 },
             );

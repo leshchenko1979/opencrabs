@@ -458,11 +458,22 @@ impl Tool for SpawnAgentTool {
             // write-freeze). Currently reachable only after spawn_agent leaves
             // EDITING_DENIED_NAMES; landing this filter first keeps that
             // removal safe.
-            if matches!(
-                crate::utils::plan_files::plan_mode_state(context.session_id).await,
-                crate::utils::plan_files::PlanModeState::PreInitEditing
-                    | crate::utils::plan_files::PlanModeState::PostInitEditing
-            ) {
+            // #155: the plan Review worker is the ONE child that must write
+            // while its parent is Editing — rewriting the plan `.md` IS its
+            // job. Label-exact, so no other spawn can widen the grant; the
+            // child still goes through the Layer-2 template guard on write
+            // (`sync_md_to_json`), which is the point of routing the rewrite
+            // through the normal write path.
+            // `label` is a String that already defaulted to "sub-agent" when
+            // the caller omitted it, so this is a plain equality.
+            let is_plan_review_worker = label == super::PLAN_REVIEW_LABEL;
+            if !is_plan_review_worker
+                && matches!(
+                    crate::utils::plan_files::plan_mode_state(context.session_id).await,
+                    crate::utils::plan_files::PlanModeState::PreInitEditing
+                        | crate::utils::plan_files::PlanModeState::PostInitEditing
+                )
+            {
                 crate::brain::tools::plan_gate::restrict_registry_to_read_only(&child_registry);
                 tracing::info!(
                     "Sub-agent spawned under a Plan-mode Editing parent: \
@@ -526,10 +537,12 @@ impl Tool for SpawnAgentTool {
 
         // Create the status file in Pending state before spawning. new()
         // writes the file; we don't need the returned handle, but we do
-        // propagate any write error. The parent session is captured before
-        // the first write so the file is born with the binding (#110): if
-        // the daemon restarts mid-run, boot-resume can route the revived
-        // result back to the session that is waiting on it.
+        // propagate any write error. The parent is captured FIRST so the
+        // status file carries it: if a restart kills this agent mid-turn
+        // and boot-resume revives its session, the revived result must
+        // reach this session (#110). Kept as a `Uuid` too — the follow-up
+        // loop and the completion path below capture it by value (#110).
+        let parent_session_id = context.session_id;
         let parent_session_for_status = context.session_id.to_string();
         let _ = WorkStatus::new_agent(
             &agent_id,
@@ -548,10 +561,7 @@ impl Tool for SpawnAgentTool {
         let prompt_clone = full_prompt;
         let label_clone = label.clone();
         let mut input_rx = input_rx;
-        // The session that asked for this agent, so a result nobody is waiting
-        // on still reaches the caller instead of sitting in the manager map
-        // (#1036). Not the child's session, which nothing is listening to.
-        let parent_session_id = context.session_id;
+        // `parent_session_id` was captured above the status-file write (#110).
 
         let handle = tokio::spawn(async move {
             tracing::info!("Sub-agent {} starting: {}", agent_id_clone, prompt_clone);
@@ -563,7 +573,7 @@ impl Tool for SpawnAgentTool {
                     &label_clone,
                     &child_session_id.to_string(),
                     &prompt_clone,
-                    None,
+                    Some(&parent_session_for_status),
                 )
                 .expect("status file")
             });
@@ -577,16 +587,43 @@ impl Tool for SpawnAgentTool {
 
             let mut current_prompt = prompt_clone;
             let mut iteration: usize = 0;
+            let total_tool_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
             // Run prompt → wait for input → run again loop
             let final_output = loop {
                 iteration += 1;
+                let agent_id_for_progress = agent_id_clone.clone();
+                let tool_count_counter = total_tool_count.clone();
+                let progress_cb = std::sync::Arc::new(
+                    move |_sid: uuid::Uuid, event: crate::brain::agent::ProgressEvent| {
+                        if let crate::brain::agent::ProgressEvent::ToolStarted { tool_name, .. } =
+                            event
+                            && let Some(mut st) = WorkStatus::read(&agent_id_for_progress)
+                        {
+                            let count = tool_count_counter
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                + 1;
+                            let _ = st.update_progress_tool_count(
+                                iteration,
+                                count,
+                                Some(tool_name),
+                                None,
+                            );
+                        }
+                    },
+                );
+
                 let result = child_service
-                    .send_message_with_tools_and_mode(
+                    .send_message_with_tools_and_callback(
                         child_session_id,
                         current_prompt,
                         model_override.clone(),
                         Some(cancel_clone.clone()),
+                        None,
+                        Some(progress_cb),
+                        "subagent",
+                        None,
+                        None,
                     )
                     .await;
 
@@ -601,6 +638,14 @@ impl Tool for SpawnAgentTool {
                             response.content.chars().take(120).collect::<String>()
                         };
 
+                        // Re-read before writing (#187 D2). `status` is the
+                        // handle taken at spawn; the progress callback has been
+                        // writing `tool_count` through its own fresh read, and
+                        // `update_progress` takes `prev_tool_count` from THIS
+                        // copy — so writing from it reset the count to 0 at
+                        // every round boundary. Reload first so the callback's
+                        // count survives the round-end write.
+                        status.reload();
                         status
                             .update_progress(iteration, None, Some(summary))
                             .unwrap_or_else(|e| tracing::warn!("status write failed: {e}"));

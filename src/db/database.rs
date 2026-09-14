@@ -84,24 +84,44 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     include_str!("../migrations/20260828000001_pending_requests_origin.sql"),
     include_str!("../migrations/20260902000001_add_pending_followups.sql"),
     include_str!("../migrations/20260904000000_add_pending_followups_host_markdown.sql"),
-    // #111: durable notify queue — parked session_notify / background-task
-    // pushes survive restarts and re-offer at boot. Kept in filename order per
-    // the list invariant; databases already stamped past this index are
-    // repaired by `heal_notify_queue` after `to_latest` (#1401).
+    include_str!("../migrations/20260904120000_add_channel_messages_ship_plane.sql"),
+    // FORK (#73): durable parked-tombstone store — death reports survive
+    // restart storms instead of dying in the in-memory PARKED queue.
+    include_str!("../migrations/20260905000000_add_pending_tombstones.sql"),
+    // FORK (#111): durable notify queue — parked session_notify /
+    // background-task pushes survive restarts and re-offer at boot.
+    // Kept in filename order per the list invariant; databases already
+    // stamped past this index are repaired by `heal_notify_queue` after
+    // `to_latest` (#1401).
     include_str!("../migrations/20260906000001_add_notify_queue.sql"),
+    // FORK (#138): durable seen-skills store — the post-compaction skill
+    // inventory stamp (#125/#131) survives daemon restarts: every
+    // mark_seen writes a row, boot hydrates the in-memory registry back.
+    include_str!("../migrations/20260908000000_add_session_seen_skills.sql"),
+    // Upstream (#1462-class): pending-requests thread id — slots AFTER the
+    // fork's 20260908000000 (no version collision); prod DBs already past
+    // this index are covered by the heal pass below.
     include_str!("../migrations/20260908000001_pending_requests_thread_id.sql"),
+    // FORK (#150): skill glob gate — per-row compaction epoch on
+    // session_seen_skills. NULL (pre-feature rows) == epoch 0.
+    include_str!("../migrations/20260910000000_add_session_seen_skills_epoch.sql"),
     // #1510: projects.repo_remote, the adoption-only second identity. Appended
-    // last per the list invariant; the column is NULL by design on existing
-    // rows so no heal pass is needed.
+    // here in chronological filename order (index 45). Databases already stamped
+    // past index 45 are repaired by `heal_project_repo_remote` after `to_latest` (#1401).
     include_str!("../migrations/20260912000001_add_project_repo_remote.sql"),
-    // #138: durable seen-skills store — the post-compaction skill inventory
-    // stamp (#125/#131) survives daemon restarts: every mark_seen writes a row,
-    // boot hydrates the in-memory registry back. Appended last per the list
-    // invariant; the CREATE is idempotent, so no heal pass is needed.
-    include_str!("../migrations/20260913000001_add_session_seen_skills.sql"),
-    // #1529: per-newsletter poll cursors. Idempotent CREATE, so no heal
-    // pass; appended last per the list invariant above.
-    include_str!("../migrations/20260914000001_add_whatsapp_newsletter_cursors.sql"),
+    // FORK (#180): boot classifier origin signal — records whether a session
+    // binding was last refreshed by a text message or a button tap, so a
+    // tap-initiated turn killed before its PROCESSING row is still a
+    // candidate for recovery. NULL (pre-feature rows) == text semantics.
+    include_str!("../migrations/20260912160000_session_bindings_last_origin.sql"),
+    // FORK (#138 part 2): the active-skill flag. The re-injection driver and
+    // the inventory stamp both read the ACTIVE set, which used to live only
+    // in memory (`AgentService::active_skills`) and was born EMPTY after any
+    // restart. Persisted here so boot hydrates it alongside the seen set.
+    include_str!("../migrations/20260912210000_add_session_seen_skills_active.sql"),
+    // FORK (#200): track whether a button-tap turn is actively in-flight
+    // so boot classifier does not spuriously resume completed turns.
+    include_str!("../migrations/20260913000001_session_bindings_turn_open_at.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
@@ -367,6 +387,7 @@ impl Database {
                         conn,
                         user_version,
                     )?;
+                    crate::db::migration_heal::skip_applied_active_migration(conn, user_version)?;
 
                     migrations.to_latest(conn)?;
 
@@ -376,6 +397,8 @@ impl Database {
                     // the schema itself can say so.
                     crate::db::migration_heal::heal_pending_requests_origin(conn)?;
                     crate::db::migration_heal::heal_notify_queue(conn)?;
+                    crate::db::migration_heal::heal_project_repo_remote(conn)?;
+                    crate::db::migration_heal::heal_session_seen_skills_loaded_mtime(conn)?;
                     Ok(())
                 },
             )

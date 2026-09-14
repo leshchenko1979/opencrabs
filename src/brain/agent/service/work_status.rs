@@ -1,5 +1,9 @@
 //! Unified status files for detached work (#26 P1).
 //!
+#![allow(dead_code)]
+// upstream rework (#1313-#1319) removed callers of the
+// legacy/stale-status subset; kept intact for the forkwin port cycle to
+// disposition (round-4/5 precedent: tag, don't delete).
 //! One JSON status file per unit of detached work — both detached bash
 //! commands (#1160) and spawned sub-agents (#1038) — at
 //! `<opencrabs_home>/tmp/detached/<id>.json`. Before #26 this was two
@@ -136,6 +140,8 @@ impl WorkState {
 pub struct ProgressSnapshot {
     #[serde(default = "usize::default")]
     pub iteration: usize,
+    #[serde(default = "usize::default")]
+    pub tool_count: usize,
     #[serde(default)]
     pub last_tool: Option<String>,
     #[serde(default)]
@@ -330,15 +336,35 @@ impl WorkStatus {
         self.write()
     }
 
-    /// Update the progress snapshot after each tool-loop iteration.
+    /// Update the progress snapshot after each tool-loop iteration or tool execution (#155).
     pub fn update_progress(
         &mut self,
         iteration: usize,
         last_tool: Option<String>,
         last_event: Option<String>,
     ) -> std::io::Result<()> {
+        let prev_tool_count = self.progress.as_ref().map(|p| p.tool_count).unwrap_or(0);
         self.progress = Some(ProgressSnapshot {
             iteration,
+            tool_count: prev_tool_count,
+            last_tool,
+            last_event,
+            updated_at: Some(now_rfc3339()),
+        });
+        self.write()
+    }
+
+    /// Update the progress snapshot with explicit tool execution count (#155).
+    pub fn update_progress_tool_count(
+        &mut self,
+        iteration: usize,
+        tool_count: usize,
+        last_tool: Option<String>,
+        last_event: Option<String>,
+    ) -> std::io::Result<()> {
+        self.progress = Some(ProgressSnapshot {
+            iteration,
+            tool_count,
             last_tool,
             last_event,
             updated_at: Some(now_rfc3339()),
@@ -395,6 +421,42 @@ impl WorkStatus {
         serde_json::from_str(&data).ok()
     }
 
+    /// Re-read this handle from disk, returning whether the file was there
+    /// (#187 D2).
+    ///
+    /// A `WorkStatus` is a SNAPSHOT, not a live view: `read` is called once and
+    /// every later write re-serialises whatever that copy held. That becomes a
+    /// clobber as soon as a second writer updates the same file — the sub-agent
+    /// progress callback writes `tool_count` through its own fresh read, and
+    /// the round-end `update_progress`, whose `prev_tool_count` comes from the
+    /// spawn-time copy, reset it to 0 at every round boundary. Reload before
+    /// such a write so the other writer's fields survive it.
+    ///
+    /// A vanished file leaves the handle untouched: the caller is mid-write on
+    /// a status the sweep may have aged out, and blanking the handle would turn
+    /// a missing file into a wrong one.
+    pub fn reload(&mut self) -> bool {
+        match Self::read(&self.id) {
+            Some(fresh) => {
+                *self = fresh;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Seconds since this work item spawned (#155). Drives the plan-review
+    /// progress clock — the same wall-clock shape the flow chrome footer
+    /// already uses, so the review note reads like a turn's own footer rather
+    /// than inventing a second time format. `None` when `spawned_at` is
+    /// unparseable or lies in the future, so a caller renders NO clock instead
+    /// of a wrong one.
+    pub fn elapsed_secs(&self) -> Option<u64> {
+        let spawned = chrono::DateTime::parse_from_rfc3339(&self.spawned_at).ok()?;
+        let secs = (chrono::Utc::now() - spawned.with_timezone(&chrono::Utc)).num_seconds();
+        u64::try_from(secs).ok()
+    }
+
     /// Persist status to disk. Uses atomic rename for crash safety.
     fn write(&self) -> std::io::Result<()> {
         let path = status_path(&self.id);
@@ -443,6 +505,49 @@ impl WorkStatus {
                 && s.session_id == session_id
                 && !matches!(s.state, WorkState::Completed | WorkState::Failed)
         })
+    }
+
+    /// Finalize detached-COMMAND status files left `Running` by a restart
+    /// (#111 follow-up, Part D).
+    ///
+    /// [`crate::brain::agent::service::restart_recovery::report_interrupted`]
+    /// accounts for a killed command through its DB row and notifies the
+    /// owning session, but it never rewrites the status FILE — so every
+    /// restart-killed command left a file reading `Running` forever, and
+    /// every file reader (`tasks_list`, the waiter sweeps) saw work that no
+    /// longer existed. At boot no command can be live, so a `Running`
+    /// command file is stale by construction.
+    ///
+    /// Deliberately emits NO notice: the DB-row path already reported the
+    /// interruption, and a second notice would be a duplicate wake.
+    /// Returns how many files were finalized.
+    pub fn reconcile_stale_commands() -> usize {
+        let ids = match Self::list_all() {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(
+                    target: "background_task",
+                    "Could not list detached status files for boot reconcile: {e}"
+                );
+                return 0;
+            }
+        };
+        let mut finalized = 0usize;
+        for id in ids {
+            let Some(mut status) = Self::read(&id) else {
+                continue;
+            };
+            if status.kind == WorkKind::Command && status.state == WorkState::Running {
+                match status.mark_interrupted() {
+                    Ok(()) => finalized += 1,
+                    Err(e) => tracing::warn!(
+                        target: "background_task",
+                        "Could not finalize stale command status '{id}': {e}"
+                    ),
+                }
+            }
+        }
+        finalized
     }
 }
 

@@ -372,7 +372,7 @@ pub(crate) fn build_enqueue_callback(
                 msg.context_text,
                 agent,
                 state,
-                true, // push-initiated wake (#12): track for restart recovery
+                Some(crate::brain::agent::PendingOrigin::System), // push-initiated wake (#12): track for restart recovery
             )
             .await
             {
@@ -400,7 +400,7 @@ pub(crate) async fn resume_session(
     prompt: String,
     agent: Arc<AgentService>,
     telegram_state: Arc<TelegramState>,
-    track_push_turn: bool,
+    track_origin: Option<crate::brain::agent::PendingOrigin>,
 ) -> anyhow::Result<()> {
     // Claim the session's turn slot for the whole replay (#1222). A recovery
     // replay drives the SAME edit loop as an ingress turn but used to run
@@ -416,7 +416,11 @@ pub(crate) async fn resume_session(
         Some(guard) => guard,
         None => {
             tracing::warn!(
-                "Telegram: resume_session {session_id} skipped — a turn is already active for this session"
+                "Telegram: resume_session {session_id} contended — turn already active, re-queueing as detached work (#227)"
+            );
+            telegram_state.enqueue_detached_result(
+                session_id,
+                crate::brain::agent::QueuedUserMessage::plain(prompt),
             );
             return Ok(());
         }
@@ -432,7 +436,7 @@ pub(crate) async fn resume_session(
         prompt,
         agent,
         telegram_state,
-        track_push_turn,
+        track_origin,
     )
     .await;
 
@@ -484,30 +488,36 @@ pub(crate) fn flush_queued_after_turn(
     Box::pin(async move {
         // Empty is the common case (one cheap lock check) — a real inference
         // only fires when something was queued.
-        let (detached, leftover_reactions): (Vec<_>, Vec<_>) = telegram_state
-            .drain_queued_items(session_id)
+        let drained = telegram_state.drain_queued_items(session_id);
+        let (detached, leftover_reactions): (Vec<_>, Vec<_>) = drained
             .into_iter()
             .partition(|item| item.origin == super::state::QueuedOrigin::DetachedWork);
 
         if !detached.is_empty() {
-            let combined = detached
+            // Merge detached results and leftover reactions when detached work is present (#227).
+            // Draining mixed queues into a single combined turn prevents competing turns where
+            // synchronous reaction execution would race against spawned detached resume.
+            let mut all_msgs: Vec<_> = detached.into_iter().map(|item| item.msg).collect();
+            let has_reactions = !leftover_reactions.is_empty();
+            if has_reactions {
+                all_msgs.extend(leftover_reactions.into_iter().map(|item| item.msg));
+            }
+            let combined = all_msgs
                 .iter()
-                .map(|i| i.msg.context_text.as_str())
+                .map(|m| m.context_text.as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
             tracing::info!(
-                "Telegram: {} detached result(s) landed during final delivery for session \
-                 {session_id} — resuming with a full tool loop rather than the toolless flush",
-                detached.len()
+                "Telegram: {} queued item(s) (including detached) landed during final delivery for session \
+                 {session_id} — resuming with a full tool loop rather than the toolless flush (#227)",
+                all_msgs.len()
             );
             let bot_for_resume = bot.clone();
             let agent_for_resume = agent.clone();
             let state_for_resume = telegram_state.clone();
             let chat_for_resume = chat_id;
-            let detached_for_clear: Vec<_> = detached
-                .iter()
-                .map(|item| (session_id, item.msg.clone()))
-                .collect();
+            let items_for_clear: Vec<_> =
+                all_msgs.iter().map(|m| (session_id, m.clone())).collect();
             // Spawned: the turn guard is already dropped above, so the resumed
             // turn can take it, and this caller must not block until that whole
             // turn finishes.
@@ -520,7 +530,7 @@ pub(crate) fn flush_queued_after_turn(
                     combined,
                     agent_for_resume,
                     state_for_resume,
-                    true, // end-of-turn detached flush is a push-initiated wake (#12)
+                    Some(crate::brain::agent::PendingOrigin::System), // end-of-turn detached flush is a push-initiated wake (#12)
                 )
                 .await
                 {
@@ -535,10 +545,11 @@ pub(crate) fn flush_queued_after_turn(
                 // unconditionally — a lost in-memory retry costs a plain
                 // undelivered push, the pre-#111 behavior; a surviving row
                 // costs a duplicate.
-                for (_sid, m) in &detached_for_clear {
+                for (_sid, m) in &items_for_clear {
                     crate::brain::agent::service::notify_queue::clear_on_delivery(session_id, m);
                 }
             });
+            return;
         }
 
         let leftover_reactions: Vec<_> = leftover_reactions.into_iter().map(|i| i.msg).collect();
@@ -575,7 +586,7 @@ pub(crate) fn flush_queued_after_turn(
                         combined,
                         agent.clone(),
                         telegram_state.clone(),
-                        true, // stranded-reaction flush is a push-initiated wake (#12)
+                        Some(crate::brain::agent::PendingOrigin::System), // stranded-reaction flush is a push-initiated wake (#12)
                     )
                     .await;
                     // Retire the durable twin on resume ATTEMPT (#111): this
@@ -615,7 +626,7 @@ pub(crate) async fn resume_session_inner(
     prompt: String,
     agent: Arc<AgentService>,
     telegram_state: Arc<TelegramState>,
-    track_push_turn: bool,
+    track_origin: Option<crate::brain::agent::PendingOrigin>,
 ) -> anyhow::Result<()> {
     tracing::info!(
         "Telegram: resume_session {} with full streaming pipeline",
@@ -675,6 +686,17 @@ pub(crate) async fn resume_session_inner(
         is_cli: agent.provider_for_session(session_id).cli_handles_tools(),
     }));
 
+    // #61: publish this turn's flow roll while it is live — same as the
+    // user-turn site in handler.rs. Push-initiated turns open flow blocks
+    // too, so their notifies must fold into them as well. Named binding —
+    // the guard must live to the end of the turn, not the statement.
+    let _live_flow = telegram_state.register_live_flow(
+        session_id,
+        super::state::LiveFlowHandle {
+            streaming: std::sync::Arc::clone(&streaming),
+        },
+    );
+
     let edit_cancel = CancellationToken::new();
 
     // Edit loop — same as handle_message
@@ -704,6 +726,7 @@ pub(crate) async fn resume_session_inner(
         let st = streaming.clone();
         let bot_typing = bot.clone();
         let chat_typing = chat_id;
+        let ctx_max = agent.context_limit_for_session(session_id);
         Arc::new(move |_sid, event| match event {
             // Auto-compaction silent window — immediate typing refresh plus
             // the visible start line in the flow body (#29).
@@ -849,6 +872,8 @@ pub(crate) async fn resume_session_inner(
             ProgressEvent::CompactionSummary {
                 before_pct,
                 after_pct,
+                before_tokens,
+                after_tokens,
                 elapsed,
                 ..
             } => {
@@ -857,8 +882,20 @@ pub(crate) async fn resume_session_inner(
                     s.header_preview = None;
                     s.display_queue
                         .push(DisplayItem::Intermediate(compacted_flow_line(
-                            before_pct, after_pct, elapsed,
+                            before_pct,
+                            after_pct,
+                            before_tokens,
+                            after_tokens,
+                            elapsed,
                         )));
+                    // Resumed turns get the same live-meter treatment (#135):
+                    // post-compaction token count lands in the footer slot.
+                    s.sections.ctx = Some(crate::utils::format_ctx_footer(
+                        u32::try_from(after_tokens).unwrap_or(u32::MAX),
+                        ctx_max,
+                        None,
+                    ));
+                    s.dirty = true;
                 }
             }
             _ => {}
@@ -872,37 +909,64 @@ pub(crate) async fn resume_session_inner(
         .await;
 
     let chat_id_str = chat_id.0.to_string();
-    let result = if track_push_turn {
-        // Push-initiated wake (bg-resume completion, stranded flush, boot
-        // re-delivery): tracked with origin `system` so a kill mid-tool
-        // leaves a boot-visible row (#12). The prompt IS the original push
-        // text for push wakes, so it persists correctly.
-        agent
-            .send_push_turn(
-                session_id,
-                prompt,
-                None,
-                Some(cancel_token.clone()),
-                None, // no approval callback for resume
-                Some(progress_cb),
-                "telegram",
-                Some(&chat_id_str),
-                None, // boot re-delivery routing stays chat-level (#12)
-            )
-            .await
-    } else {
-        agent
-            .resume_interrupted_turn(
-                session_id,
-                prompt,
-                None,
-                Some(cancel_token.clone()),
-                None, // no approval callback for resume
-                Some(progress_cb),
-                "telegram",
-                Some(&chat_id_str),
-            )
-            .await
+    let thread_id_str = thread_id.map(|t| t.0.to_string());
+    let thread_id_opt = thread_id_str.as_deref();
+
+    let result = match track_origin {
+        Some(crate::brain::agent::PendingOrigin::System) => {
+            // Push-initiated wake (bg-resume completion, stranded flush, boot
+            // re-delivery): tracked with origin `system` so a kill mid-tool
+            // leaves a boot-visible row (#12). The prompt IS the original push
+            // text for push wakes, so it persists correctly.
+            agent
+                .send_push_turn(
+                    session_id,
+                    prompt,
+                    None,
+                    Some(cancel_token.clone()),
+                    None, // no approval callback for resume
+                    Some(progress_cb),
+                    "telegram",
+                    Some(&chat_id_str),
+                    None, // boot re-delivery routing stays chat-level (#12)
+                )
+                .await
+        }
+        Some(crate::brain::agent::PendingOrigin::User) => {
+            // User-initiated button tap / callback / plan approval (#174):
+            // tracked with origin `user` so a restart mid-tool-loop leaves a
+            // pending row and auto-resumes seamlessly on boot.
+            agent
+                .send_message_with_tools_and_callback(
+                    session_id,
+                    prompt,
+                    None,
+                    Some(cancel_token.clone()),
+                    None, // no approval callback for resume
+                    Some(progress_cb),
+                    "telegram",
+                    Some(&chat_id_str),
+                    thread_id_opt,
+                )
+                .await
+        }
+        None => {
+            // Boot replay of an interrupted turn: resume-of-resume must stay
+            // untracked (#729/#12) so failures or restarts don't leave perpetual
+            // rows piling up.
+            agent
+                .resume_interrupted_turn(
+                    session_id,
+                    prompt,
+                    None,
+                    Some(cancel_token.clone()),
+                    None, // no approval callback for resume
+                    Some(progress_cb),
+                    "telegram",
+                    Some(&chat_id_str),
+                )
+                .await
+        }
     };
 
     telegram_state.remove_cancel_token(session_id).await;
@@ -1073,6 +1137,7 @@ pub(crate) async fn resume_session_inner(
             options,
             merge_host,
             trailer,
+            Some(channel_msg_repo.clone()), // #91 glue rung, same as handle_message
         )
         .await;
     }
@@ -1657,58 +1722,158 @@ pub(crate) fn short_session_id(uuid: Uuid) -> String {
 /// window are recorded.
 pub const WAKE_RECENT_SECS: i64 = 600;
 
-/// Log every Telegram-bound session that was active shortly before boot but
-/// is not currently being resumed, so the stranded set is auditable (#1227).
+/// Promote the boot wake pass from notifier to RECOVERY (#33, owner-approved
+/// design 2026-08-29 22:02Z). The on-disk journal only rescues turns that
+/// were literally mid-loop at the kill instant; between-turn sessions have no
+/// row (#1224 re-registers their routes, which drains parked reports, but
+/// that happens quietly). This pass now CLASSIFIES every recently-active,
+/// not-already-resumed session by consulting the topic's last persisted
+/// message in `channel_messages` (already in the DB — zero schema change):
 ///
-/// The on-disk journal only rescues turns that were literally mid-loop at the
-/// kill instant; between-turn sessions have no row (#1224 re-registers their
-/// delivery routes, which drains parked reports, but that happens quietly).
-/// This pass names them in the log instead: it runs no turn, re-executes
-/// nothing, and sends no message — the former "I'm back" bubble was removed
-/// per #34 (owner direction 2026-08-29: remove the UX message, leave
-/// logging), because it promised resumption the feature does not yet deliver
-/// and was never persisted in `channel_messages`, so it could not be audited.
+/// - last message is from the user, no bot reply after it → the turn was
+///   interrupted → the caller runs the existing `resume_session`
+///   continuation prompt. A real turn, not a bubble (#34 law stands: this
+///   pass itself still sends nothing).
+/// - bot already replied → turn completed before the kill → log only.
+/// - no persisted topic messages → unclassifiable → log only (resuming
+///   blind could replay noise the journal never saw).
+pub struct BootWakeRecovery {
+    /// `(session_id, chat_id, thread_id_raw)` triples whose topic's last
+    /// message is from a user. Caller spawns the resume continuation.
+    pub interrupted: Vec<(Uuid, i64, Option<i64>)>,
+    /// Short session ids whose turn completed before the kill — log only.
+    pub completed: Vec<String>,
+    /// Short session ids with no classifiable topic history — log only.
+    pub unclassified: Vec<String>,
+}
+
+/// Check if a session has an active, unexhausted goal in `goal_state`.
 ///
-/// Sessions whose ids are in `already_resumed` are skipped: those were roused
-/// by a full continuation prompt via `resume_session` already. Returns how
-/// many sessions landed in the log.
-pub async fn wake_recently_active(
+/// If `state == 'active'` and `turns_used < max_turns`, the session was driving
+/// an autonomous goal that was interrupted by daemon restart (#218).
+pub async fn has_active_goal(pool: &crate::db::Pool, session_id: Uuid) -> bool {
+    let sid = session_id.to_string();
+    let Ok(conn) = pool.get().await else {
+        return false;
+    };
+    conn.interact(move |conn| {
+        use rusqlite::OptionalExtension;
+        let mut stmt = conn.prepare_cached(
+            "SELECT 1 FROM goal_state \
+             WHERE session_id = ?1 AND state = 'active' AND turns_used < max_turns \
+             LIMIT 1",
+        )?;
+        let exists: Option<i32> = stmt
+            .query_row(rusqlite::params![sid], |row| row.get(0))
+            .optional()?;
+        Ok::<bool, rusqlite::Error>(exists.is_some())
+    })
+    .await
+    .unwrap_or(Ok(false))
+    .unwrap_or(false)
+}
+
+pub async fn classify_recently_active(
     pool: crate::db::Pool,
     already_resumed: &std::collections::HashSet<Uuid>,
-) -> usize {
+) -> BootWakeRecovery {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let since_epoch = now.saturating_sub(WAKE_RECENT_SECS);
-    let repo = crate::db::SessionBindingRepository::new(pool);
-    let Ok(bindings) = repo.recent_for_channel("telegram", since_epoch).await else {
+    let binding_repo = crate::db::SessionBindingRepository::new(pool.clone());
+    let msg_repo = crate::db::ChannelMessageRepository::new(pool.clone());
+    let Ok(bindings) = binding_repo
+        .recent_for_channel("telegram", since_epoch)
+        .await
+    else {
         tracing::warn!(target: "telegram", "Boot wake could not read recent session bindings");
-        return 0;
+        return BootWakeRecovery {
+            interrupted: Vec::new(),
+            completed: Vec::new(),
+            unclassified: Vec::new(),
+        };
     };
 
-    let mut stranded: Vec<String> = Vec::new();
+    let mut recovery = BootWakeRecovery {
+        interrupted: Vec::new(),
+        completed: Vec::new(),
+        unclassified: Vec::new(),
+    };
+    let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     for b in bindings {
         let Ok(sid) = Uuid::parse_str(&b.session_id) else {
             continue;
         };
-        if already_resumed.contains(&sid) {
+        if already_resumed.contains(&sid) || !seen.insert(sid) {
             continue;
         }
-        stranded.push(short_session_id(sid));
+        let Ok(chat_id) = b.chat_id.parse::<i64>() else {
+            recovery.unclassified.push(short_session_id(sid));
+            continue;
+        };
+        // #180 / #200 / #226: if `turn_open_at` is still Some(_), a turn was actively
+        // in-flight when the daemon was killed or restarted (e.g. running tools, mid-compaction,
+        // or button tap callback), regardless of whether intermediate bot messages were emitted.
+        // Once a turn finishes normally, `turn_open_at` is cleared to NULL.
+        // If `turn_open_at` is Some(_), short-circuit to `interrupted`.
+        // If `turn_open_at` is None, fall through to check `last_topic_sender` and active goals.
+        if b.turn_open_at.is_some() {
+            tracing::info!(
+                target: "telegram",
+                "Boot classifier (#180/#200/#226): session {} was in-flight (turn_open_at is set) — resuming",
+                short_session_id(sid)
+            );
+            recovery
+                .interrupted
+                .push((sid, chat_id, b.thread_id.map(i64::from)));
+            continue;
+        }
+        let last_sender = msg_repo
+            .last_topic_sender(
+                "telegram",
+                &b.chat_id,
+                b.thread_id.map(|t| t.to_string()).as_deref(),
+            )
+            .await
+            .ok()
+            .flatten();
+        match last_sender {
+            Some(sender) if sender != crate::db::models::BOT_SENDER_ID => {
+                recovery
+                    .interrupted
+                    .push((sid, chat_id, b.thread_id.map(i64::from)));
+            }
+            Some(_) => {
+                // #218: If the bot sent the last message, check whether an autonomous
+                // goal was actively in-flight. If an active, unexhausted goal exists,
+                // the session was interrupted across restart and must resume so the
+                // tool loop's goal hook continues driving it.
+                if has_active_goal(&pool, sid).await {
+                    tracing::info!(
+                        target: "telegram",
+                        "Boot classifier (#218): session {} has active unexhausted goal — resuming",
+                        short_session_id(sid)
+                    );
+                    recovery
+                        .interrupted
+                        .push((sid, chat_id, b.thread_id.map(i64::from)));
+                } else {
+                    recovery.completed.push(short_session_id(sid));
+                }
+            }
+            None => recovery.unclassified.push(short_session_id(sid)),
+        }
     }
 
-    let scheduled = stranded.len();
-    if scheduled > 0 {
+    if !recovery.completed.is_empty() || !recovery.unclassified.is_empty() {
         tracing::info!(
             target: "telegram",
-            "Boot wake pass (log-only, #34): recently-active sessions not resumed: [{}]",
-            stranded.join(",")
-        );
-        tracing::info!(
-            target: "telegram",
-            "Scheduled boot wake for {scheduled} recently-active session(s) (#1227)"
+            "Boot classifier (#33): completed_before_kill=[{}] unclassified=[{}]",
+            recovery.completed.join(","),
+            recovery.unclassified.join(",")
         );
     }
-    scheduled
+    recovery
 }

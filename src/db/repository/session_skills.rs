@@ -10,8 +10,8 @@
 //! DB error as a WARN + continue — the in-memory registry keeps functioning,
 //! a stamp just loses restart durability. No panic paths.
 
-use crate::db::Pool;
 use crate::db::database::interact_err;
+use crate::db::Pool;
 use anyhow::{Context, Result};
 use rusqlite::params;
 use uuid::Uuid;
@@ -26,12 +26,11 @@ impl SessionSkillsRepository {
         Self { pool }
     }
 
-    /// Record that `session_id` consumed skill `slug` at compaction `epoch`.
-    /// Upsert — the (session_id, slug) pair is the primary key, so repeats
-    /// refresh `seen_at` AND `epoch` (issue #150: the skill glob gate compares
-    /// the stored epoch against the session's current epoch, so a stale row
-    /// must always be updatable to the new epoch). Idempotent with the
-    /// in-memory registry's semantics.
+    /// Record that `session_id` consumed skill `slug` at the given
+    /// compaction `epoch`. Upsert — the (session_id, slug) pair is the
+    /// primary key, so repeats refresh `seen_at` AND `epoch` (issue #150:
+    /// the gate compares stored epoch against the session's current epoch,
+    /// so a stale row must always be updatable to the new epoch).
     pub async fn record(&self, session_id: Uuid, slug: &str, epoch: u64) -> Result<()> {
         let sid = session_id.to_string();
         let slug = slug.to_string();
@@ -54,38 +53,112 @@ impl SessionSkillsRepository {
         Ok(())
     }
 
-    /// All (session_id, slug, epoch) rows — the boot-hydrate feed. Bounded by
-    /// the stamp's own cleanup: rows for sessions deleted by normal session
-    /// pruning are removed by [`Self::prune_missing_sessions`].
-    pub async fn all(&self) -> Result<Vec<(Uuid, String, Option<i64>)>> {
+    /// All (session_id, slug, epoch, active, loaded_mtime) rows — the boot-hydrate feed for
+    /// BOTH registries (#138 part 2: the seen set and the active set hydrate
+    /// from this one query) plus loaded_mtime (#210). Epoch is `None` for pre-feature rows (treated as
+    /// 0 by the hydrate); `active` is false for every row that predates the
+    /// active flag. Bounded by the stamp's own cleanup: rows for sessions
+    /// deleted by normal session pruning are removed by
+    /// [`Self::prune_missing_sessions`].
+    pub async fn all(&self) -> Result<Vec<(Uuid, String, Option<i64>, bool, Option<i64>)>> {
         let rows = self
             .pool
             .get()
             .await
             .context("Failed to get connection")?
             .interact(move |conn| {
-                let mut stmt =
-                    conn.prepare("SELECT session_id, slug, epoch FROM session_seen_skills")?;
+                let mut stmt = conn
+                    .prepare("SELECT session_id, slug, epoch, active, loaded_mtime FROM session_seen_skills")?;
                 let mapped = stmt.query_map([], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, Option<i64>>(2)?,
+                        r.get::<_, i64>(3)? != 0,
+                        r.get::<_, Option<i64>>(4)?,
                     ))
                 })?;
-                // Pin the error parameter explicitly: `anyhow::Result` is in
-                // scope and rusqlite::Error has several `From` impls
-                // (rusqlite_migration, HookError), so a bare `Ok(vec)` leaves
-                // E uninferable (E0282/E0283).
-                mapped.collect::<rusqlite::Result<Vec<(String, String, Option<i64>)>>>()
+                mapped.collect::<std::result::Result<Vec<(String, String, Option<i64>, bool, Option<i64>)>, _>>()
             })
             .await
             .map_err(interact_err)?
             .context("Failed to read seen skills")?;
         Ok(rows
             .into_iter()
-            .filter_map(|(sid, slug, epoch)| Uuid::parse_str(&sid).ok().map(|id| (id, slug, epoch)))
+            .filter_map(|(sid, slug, epoch, active, loaded_mtime)| {
+                Uuid::parse_str(&sid)
+                    .ok()
+                    .map(|id| (id, slug, epoch, active, loaded_mtime))
+            })
             .collect())
+    }
+
+    /// Update `loaded_mtime` for one (session_id, slug) pair (#210).
+    /// Upserts so that active or seen skills can store loaded_mtime even if not previously recorded.
+    pub async fn set_loaded_mtime(&self, session_id: Uuid, slug: &str, mtime: u64) -> Result<()> {
+        let sid = session_id.to_string();
+        let slug = slug.to_string();
+        let mtime = mtime as i64;
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "INSERT INTO session_seen_skills (session_id, slug, loaded_mtime) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT(session_id, slug) DO UPDATE SET loaded_mtime = excluded.loaded_mtime",
+                    params![sid, slug, mtime],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to set loaded_mtime")?;
+        Ok(())
+    }
+
+    /// Flip the ACTIVE flag for one (session, slug) row (#138 part 2).
+    ///
+    /// This is the durability layer for the two consumers that used to read an
+    /// in-memory-only map — the per-turn body re-injection and the compaction
+    /// inventory stamp — so both survive a daemon restart.
+    ///
+    /// Activation UPSERTS: the row may not exist yet when the active path runs
+    /// before the seen path ever did. The insert deliberately carries only
+    /// `active` — `seen_at` takes its column default and `epoch` stays NULL
+    /// (epoch 0 semantics) — and on conflict ONLY `active` is written, so a
+    /// later `record()` (which writes epoch/seen_at) is never clobbered by a
+    /// re-activation.
+    ///
+    /// Deactivation is a plain UPDATE, deliberately NOT an upsert: the discard
+    /// path deletes the row outright, and an upserting deactivate would
+    /// resurrect it as a phantom seen-only row. It matches the legacy
+    /// sigil-prefixed spelling too, exactly like [`Self::delete_skill`].
+    pub async fn set_active(&self, session_id: Uuid, slug: &str, active: bool) -> Result<()> {
+        let sid = session_id.to_string();
+        let slug = slug.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                if active {
+                    conn.execute(
+                        "INSERT INTO session_seen_skills (session_id, slug, active) VALUES (?1, ?2, 1) \
+                         ON CONFLICT(session_id, slug) DO UPDATE SET active = 1",
+                        params![sid, slug],
+                    )
+                } else {
+                    conn.execute(
+                        "UPDATE session_seen_skills SET active = 0 \
+                         WHERE session_id = ?1 AND (slug = ?2 OR slug = '/' || ?2)",
+                        params![sid, slug],
+                    )
+                }
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to set active flag")?;
+        Ok(())
     }
 
     /// Drop rows whose session no longer exists (normal session pruning).
@@ -108,5 +181,32 @@ impl SessionSkillsRepository {
             .map_err(interact_err)?
             .context("Failed to prune seen skills")?;
         Ok(n as u64)
+    }
+
+    /// Delete a single seen-skill record for a session.
+    ///
+    /// Matches the bare slug **and** a legacy sigil-prefixed row (#179): before
+    /// slugs were canonicalised the slash-command path persisted `/foo` while
+    /// every other path persisted `foo`, so a stale row can outlive the fix.
+    /// Clearing both forms on the first discard retires those without a
+    /// migration — `'/' || ?2` is a no-op match when the row is already bare.
+    pub async fn delete_skill(&self, session_id: Uuid, slug: &str) -> Result<()> {
+        let sid = session_id.to_string();
+        let slug = slug.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "DELETE FROM session_seen_skills \
+                     WHERE session_id = ?1 AND (slug = ?2 OR slug = '/' || ?2)",
+                    rusqlite::params![sid, slug],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to delete seen skill")?;
+        Ok(())
     }
 }

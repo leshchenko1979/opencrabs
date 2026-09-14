@@ -30,15 +30,23 @@ const SECTION_TEXT_CAP: usize = 150;
 
 /// Which plan keyboard the latest flow message owns. Keyboards attach only
 /// after `plan init` succeeds: Approve + Discard while the design plan is
-/// Editing, Discard only while a checklist is Active, none otherwise.
+/// Editing, Discard only while a checklist is Active, CompletedReview while
+/// the plan is archived/completed, none otherwise.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlanKb {
     #[default]
     None,
-    /// Editing design plan: ✅ Approve + 🗑 Discard.
+    /// Editing design plan: 🔍 Review + ✅ Approve + 🗑 Discard.
     ApproveDiscard,
+    /// Editing design plan with a review subagent running: the Review button
+    /// is replaced by a grayed ⏳ Reviewing… that only acks (#155).
+    ReviewingApproveDiscard,
     /// Active checklist: 🗑 Discard only.
     DiscardOnly,
+    /// Completed / archived plan: 🔍 Review implementation (#234).
+    CompletedReview,
+    /// Completed / archived plan with an implementation review running (#234).
+    CompletedReviewing,
 }
 
 impl PlanKb {
@@ -49,12 +57,31 @@ impl PlanKb {
         use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
         match self {
             PlanKb::None => None,
-            PlanKb::ApproveDiscard => Some(InlineKeyboardMarkup::new(vec![vec![
-                InlineKeyboardButton::callback("✅ Approve plan", "plan:ok"),
-                InlineKeyboardButton::callback("🗑 Discard", "plan:no"),
-            ]])),
+            PlanKb::ApproveDiscard => Some(InlineKeyboardMarkup::new(vec![
+                vec![InlineKeyboardButton::callback("✅ Approve plan", "plan:ok")],
+                vec![
+                    InlineKeyboardButton::callback("🔍 Review", "plan:review"),
+                    InlineKeyboardButton::callback("🗑 Discard", "plan:no"),
+                ],
+            ])),
+            PlanKb::ReviewingApproveDiscard => Some(InlineKeyboardMarkup::new(vec![
+                vec![InlineKeyboardButton::callback(
+                    "⏳ Approve plan",
+                    "plan:noop",
+                )],
+                vec![
+                    InlineKeyboardButton::callback("⏳ Reviewing…", "plan:noop"),
+                    InlineKeyboardButton::callback("🗑 Discard", "plan:no"),
+                ],
+            ])),
             PlanKb::DiscardOnly => Some(InlineKeyboardMarkup::new(vec![vec![
                 InlineKeyboardButton::callback("🗑 Discard plan", "plan:no"),
+            ]])),
+            PlanKb::CompletedReview => Some(InlineKeyboardMarkup::new(vec![vec![
+                InlineKeyboardButton::callback("🔍 Review implementation", "plan:review_impl"),
+            ]])),
+            PlanKb::CompletedReviewing => Some(InlineKeyboardMarkup::new(vec![vec![
+                InlineKeyboardButton::callback("⏳ Reviewing implementation…", "plan:noop_impl"),
             ]])),
         }
     }
@@ -122,26 +149,50 @@ pub(crate) fn split_plan_prose(md: &str) -> Vec<ProseSection> {
 /// bullets, inline markdown elsewhere. Blank source lines come through as
 /// The flow-message Goal section (ADR 0005 Decision 10): the goal text plus
 /// whether it is a retained completed goal (the live `GoalManager` entry
-/// completed or cleared mid-turn). A completed goal keeps the `🎯 Goal:`
-/// prefix while the turn runs and swaps only the icon to `✅ Goal:` on the
-/// settled render; an active goal is `🎯 Goal:` everywhere.
+/// completed or cleared mid-turn). A completed goal keeps the `🎯`
+/// prefix while the turn runs and swaps only the icon to `✅` on the
+/// settled render; an active goal is `🎯` everywhere.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct GoalSection {
     pub(crate) text: String,
     pub(crate) completed: bool,
+    pub(crate) turns_used: u32,
+    pub(crate) max_turns: Option<u32>,
+    pub(crate) state: Option<String>,
 }
 
 impl GoalSection {
-    /// Bold section prefix with the Decision 10 icon: `✅` only for a
-    /// completed goal on a settled render, `🎯` everywhere else. The `Goal:`
-    /// word never changes.
+    /// Bold section marker with the Decision 10 icon: `✅` only for a
+    /// completed goal on a settled render, `🎯` everywhere else. Dart-only
+    /// (owner option B, #77): the `Goal:` word is dropped — the dart is the
+    /// section marker.
     pub(crate) fn prefix(&self, settled: bool) -> String {
         let icon = if self.completed && settled {
             "✅"
         } else {
             "🎯"
         };
-        format!("<b>{icon} Goal:</b>")
+        format!("<b>{icon}</b>")
+    }
+
+    /// Turn counter suffix formatted for display:
+    /// - With max_turns: `(X/Y turns)`
+    /// - Without max_turns: `(turn X)`
+    pub(crate) fn turn_budget_str(&self) -> String {
+        match self.max_turns {
+            Some(max) => format!("({}/{} turns)", self.turns_used, max),
+            None => format!("(turn {})", self.turns_used),
+        }
+    }
+
+    /// Formats goal header with prefix, escaped text, and turn budget suffix.
+    pub(crate) fn format_goal_header(&self, text: &str, settled: bool) -> String {
+        format!(
+            "{} {} {}",
+            self.prefix(settled),
+            escape_html(text),
+            self.turn_budget_str()
+        )
     }
 }
 
@@ -193,7 +244,10 @@ impl FlowSections {
     pub(crate) fn chrome_rich(&self, settled: bool) -> String {
         let mut out = String::new();
         if let Some(ref t) = self.plan_title {
-            out.push_str(&format!("<p>📋 <b>{}</b></p>", escape_html(t)));
+            out.push_str(&super::rich::paragraph_html(&format!(
+                "📋 <b>{}</b>",
+                escape_html(t)
+            )));
         }
         if let Some(ref sections) = self.prose {
             for sec in sections {
@@ -213,7 +267,7 @@ impl FlowSections {
                 out.push_str("<hr>");
             }
             for row in rows {
-                out.push_str(&format!("<p>{}</p>", escape_html(row)));
+                out.push_str(&super::rich::paragraph_html(&escape_html(row)));
             }
         }
         if let Some(ref g) = self.goal {
@@ -227,17 +281,17 @@ impl FlowSections {
                 if self.checklist.is_some() || self.has_prose() {
                     out.push_str("<hr>");
                 }
-                let prefix = g.prefix(settled);
                 if let [one] = paras.as_slice() {
-                    out.push_str(&format!("<p>{prefix} {}</p>", escape_html(one)));
+                    let header = g.format_goal_header(one, settled);
+                    out.push_str(&super::rich::paragraph_html(&header));
                 } else {
+                    let header = g.format_goal_header(paras[0], settled);
                     let body: String = paras[1..]
                         .iter()
-                        .map(|p| format!("<p>{}</p>", escape_html(p)))
+                        .map(|p| super::rich::paragraph_html(&escape_html(p)))
                         .collect();
                     out.push_str(&format!(
-                        "<details><summary>{prefix} {}</summary>{body}</details>",
-                        escape_html(paras[0])
+                        "<details><summary>{header}</summary>{body}</details>"
                     ));
                 }
             }
@@ -283,11 +337,8 @@ impl FlowSections {
                 if self.checklist.is_some() || self.has_prose() {
                     parts.push(String::new());
                 }
-                parts.push(format!(
-                    "<blockquote expandable>{} {}</blockquote>",
-                    g.prefix(settled),
-                    escape_html(text)
-                ));
+                let header = g.format_goal_header(text, settled);
+                parts.push(format!("<blockquote expandable>{header}</blockquote>"));
             }
         }
         parts.join("\n")
@@ -448,6 +499,24 @@ pub(crate) async fn load_plan_sections(session_id: Uuid) -> (Option<String>, Opt
     plan_document_sections(&plan)
 }
 
+/// The plan `.md`'s first level-1 heading, when the file exists (#155).
+///
+/// The card's title normally comes from the plan JSON; the `.md` H1 is the
+/// only other source of it, and it is stripped out of the prose sections by
+/// design. So a JSON-less `.md` — a reviewer rewrite after a discard, or a
+/// hand-authored plan — would otherwise render a card with no `📋` header at
+/// all. Only a true `# ` heading matches; `## ` does not.
+pub(crate) async fn load_plan_md_title(session_id: Uuid) -> Option<String> {
+    let path = crate::utils::plan_files::plan_md_path(session_id).await;
+    let body = tokio::fs::read_to_string(&path).await.ok()?;
+    body.lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("# "))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| crate::utils::truncate_str(t, SECTION_TEXT_CAP).to_string())
+}
+
 /// Title + checklist rows for a plan card, from any document — live or
 /// archived (#1158). Same row shape either way: full ballot checklist
 /// (ADR 0005 Decision 3, one `status_mark()` row per task), quality glyphs,
@@ -577,12 +646,24 @@ pub(crate) fn is_empty_scaffold_line(line: &str) -> bool {
 pub(crate) async fn load_goal_section(
     agent: &AgentService,
     session_id: Uuid,
-) -> Option<(String, bool)> {
+) -> Option<GoalSection> {
     let mgr = GoalManager::new(agent.context().clone());
     match mgr.get_goal(session_id).await {
         Ok(Some(goal)) if goal.state == "active" || goal.state == "completed" => {
             let text = goal.goal_text.trim().to_string();
-            (!text.is_empty()).then_some((text, goal.state == "completed"))
+            let turns_used = goal.turns_used.max(0) as u32;
+            let max_turns = if goal.max_turns > 0 {
+                Some(goal.max_turns as u32)
+            } else {
+                None
+            };
+            (!text.is_empty()).then_some(GoalSection {
+                text,
+                completed: goal.state == "completed",
+                turns_used,
+                max_turns,
+                state: Some(goal.state),
+            })
         }
         Ok(_) => None,
         Err(e) => {
@@ -699,31 +780,32 @@ pub(crate) async fn refresh_sections(
     let (plan_state, plan_kb) = load_plan_state_section(session_id, turn_active).await;
     let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
     let goal = match live_goal {
-        Some((text, false)) => {
-            // Active goal: show it and remember the text — several
+        Some(g) if !g.completed => {
+            // Active goal: show it and remember the snapshot — several
             // completions in one turn keep the LAST goal only.
-            s.retained_goal = Some(text.clone());
-            Some(GoalSection {
-                text,
-                completed: false,
-            })
+            s.retained_goal = Some(super::flow::RetainedGoal {
+                text: g.text.clone(),
+                turns_used: g.turns_used,
+                max_turns: g.max_turns,
+            });
+            Some(g)
         }
         // The turn-end judge marked it completed (row survives): retained
         // display, but only when it was sighted active earlier THIS turn —
         // a leftover completed row from a prior turn never re-renders.
-        Some((text, true)) => s.retained_goal.is_some().then_some(GoalSection {
-            text,
-            completed: true,
-        }),
+        Some(g) if g.completed => s.retained_goal.is_some().then_some(g),
         // Row gone. While a plan is Active that means clear_task_goal on a
         // task complete: keep the retained text until settle. In every
         // other state (Editing, or NoPlan after discard/clear) the goal
         // section is gone.
-        None if mode == PlanModeState::Active => s.retained_goal.clone().map(|text| GoalSection {
-            text,
+        None if mode == PlanModeState::Active => s.retained_goal.as_ref().map(|rg| GoalSection {
+            text: rg.text.clone(),
             completed: true,
+            turns_used: rg.turns_used,
+            max_turns: rg.max_turns,
+            state: Some("completed".to_string()),
         }),
-        None => None,
+        _ => None,
     };
     let next = FlowSections {
         plan_state,

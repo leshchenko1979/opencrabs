@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::time::timeout;
 
-const GATEWAY_TIMEOUT: &str = "<html><body><h1>504 Gateway Time-out</h1></body></html>";
+const BAD_GATEWAY: &str = "<html><body><h1>502 Bad Gateway</h1></body></html>";
 
 fn completion_json() -> String {
     r#"{"id":"chatcmpl-1520","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"summary text"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#.to_string()
@@ -50,17 +50,13 @@ fn fast_retries(max_attempts: u32) -> RetryConfig {
 }
 
 #[tokio::test]
-async fn a_retried_504_on_complete_leaves_a_retry_notice() {
+async fn a_retried_502_on_complete_leaves_a_retry_notice() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(serve_sequence(
         listener,
         vec![
-            (
-                "504 Gateway Time-out",
-                "text/html",
-                GATEWAY_TIMEOUT.to_string(),
-            ),
+            ("502 Bad Gateway", "text/html", BAD_GATEWAY.to_string()),
             ("200 OK", "application/json", completion_json()),
         ],
     ));
@@ -80,7 +76,7 @@ async fn a_retried_504_on_complete_leaves_a_retry_notice() {
     assert_eq!(*attempt, 1);
     assert_eq!(*max, 3);
     assert!(
-        reason.contains("test-model") && reason.contains("server error 504"),
+        reason.contains("test-model") && reason.contains("server error 502"),
         "notice names the model and the cause: {reason}"
     );
     assert!(

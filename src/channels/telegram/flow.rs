@@ -67,6 +67,14 @@ pub(crate) enum FlowEntry {
     System(String),
 }
 
+/// Snapshot of a goal sighted active this turn, along with its turn budget.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RetainedGoal {
+    pub(crate) text: String,
+    pub(crate) turns_used: u32,
+    pub(crate) max_turns: Option<u32>,
+}
+
 pub(crate) struct StreamingState {
     /// Whether this session's chat is a DM (owner-private). Drives scope-aware
     /// redaction: secrets show in DMs, scrub in group/channel chats (#677).
@@ -150,7 +158,11 @@ pub(crate) struct StreamingState {
     /// engine deletes the goal row when a plan task completes, so the chrome
     /// retains the text here and keeps the Goal section until settle. Per-turn
     /// state — a fresh StreamingState next turn drops any retained goal.
-    pub(crate) retained_goal: Option<String>,
+    /// Last active goal snapshot sighted this turn (ADR 0005 Decision 10): the
+    /// engine deletes the goal row when a plan task completes, so the chrome
+    /// retains the text and turn counters here and keeps the Goal section until settle. Per-turn
+    /// state — a fresh StreamingState next turn drops any retained goal.
+    pub(crate) retained_goal: Option<RetainedGoal>,
     /// Number of tool rounds completed (for display)
     pub(crate) tool_round_count: usize,
     /// When tool execution started (for elapsed time)
@@ -663,8 +675,10 @@ pub(crate) fn render_flow_details_chrome_pref(
     if has_log {
         // The merged footer is the processing-log summary; the body is the full
         // <p>-wrapped entry list (one <p> per entry so the rich parser keeps
-        // them separated).
-        let body: String = out.iter().map(|e| format!("<p>{e}</p>")).collect();
+        // them separated). paragraph_html owns the rich dialect's soft-break
+        // rule (#35): a bare newline inside a <p> collapses to whitespace, so
+        // multi-paragraph entries must arrive with explicit <br>.
+        let body: String = out.iter().map(|e| super::rich::paragraph_html(e)).collect();
         msg.push_str(&format!(
             "<details><summary><sub>{footer}</sub></summary>{body}</details>"
         ));
@@ -789,16 +803,22 @@ pub(crate) fn compacting_flow_line(
 
 /// Flow-block body line posted when compaction finishes (#29). Doubles as
 /// the definitive completion signal: arrival means the silent window is
-/// over, so a FAILED compaction never emits one (no false ✅).
+/// over, so a FAILED compaction never emits one (no false ✅). Absolute
+/// token counts added alongside the percentages (#135): the owner reads
+/// "94,559 → 34,197 tokens", not just "94% → 34%".
 pub(crate) fn compacted_flow_line(
     before_pct: f64,
     after_pct: f64,
+    before_tokens: usize,
+    after_tokens: usize,
     elapsed: std::time::Duration,
 ) -> String {
     format!(
-        "✅ Compacted: {:.0}% → {:.0}% in {}",
+        "✅ Compacted: {:.0}% → {:.0}% ({} → {} tokens) in {}",
         before_pct,
         after_pct,
+        crate::utils::format_token_count(u32::try_from(before_tokens).unwrap_or(u32::MAX)),
+        crate::utils::format_token_count(u32::try_from(after_tokens).unwrap_or(u32::MAX)),
         humanize_duration(elapsed.as_secs().max(1))
     )
 }

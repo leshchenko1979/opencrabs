@@ -865,11 +865,12 @@ pub async fn sync_md_to_json(session_id: Uuid) -> Result<(), String> {
             if let Err(e) = std::fs::write(&md, &plan.description) {
                 tracing::warn!("Failed to restore refused plan .md write: {e}");
             }
+            let err = crate::channels::telegram::rich::mermaid::format_mermaid_error(
+                "plan markdown",
+                &parse_errors,
+            );
             return Err(format!(
-                "PLAN WRITE REFUSED: Mermaid diagram syntax error in plan markdown.\n\n\
-                 Renderer diagnostic:\n{}\n\n\
-                 Please fix the Mermaid diagram syntax in the plan design and try again.",
-                parse_errors.join("\n")
+                "PLAN WRITE REFUSED: {err}\n\nPlease fix the Mermaid diagram syntax in the plan design and try again."
             ));
         }
     }

@@ -9,7 +9,7 @@ use crate::brain::agent::{AgentService, ProgressCallback};
 use crate::config::{Config, RespondTo};
 use crate::db::SessionBindingRepository;
 use crate::db::models::ChannelMessage as DbChannelMessage;
-use crate::db::{ChannelMessageRepository, MessageRepository};
+use crate::db::{BindingOrigin, ChannelMessageRepository, MessageRepository};
 use crate::services::SessionService;
 use crate::utils::sanitize::redact_secrets;
 use crate::utils::truncate_str;
@@ -1877,17 +1877,15 @@ pub(crate) async fn handle_message(
         topic_id,
     );
 
+    // Register session → chat for approval routing, scoped to the forum topic
     // Register session binding, persist route, and wire delivery probes (#170).
     // Consolidated in TelegramState::bind_session_topic so proactive bindings
     // and inbound message handling share the exact same registration path.
     if let Err(e) = telegram_state
-        .bind_session_topic(session_id, msg.chat.id.0, topic_id)
+        .bind_session_topic(session_id, msg.chat.id.0, topic_id, BindingOrigin::Text)
         .await
     {
-        tracing::warn!(
-            "Could not bind session {session_id} to chat {}: {e}",
-            msg.chat.id.0
-        );
+        tracing::warn!("Could not bind session {session_id} to chat {}: {e}", msg.chat.id.0);
     }
 
     // Resolution is complete and the binding is visible, so a message that
@@ -2550,8 +2548,13 @@ pub(crate) async fn handle_message(
     );
 
     // Progress callback: accumulates streaming chunks + tool status into shared state
-    let progress_cb: ProgressCallback =
-        progress::build_progress_cb(&streaming, &bot, msg.chat.id, thread_id);
+    let progress_cb: ProgressCallback = progress::build_progress_cb(
+        &streaming,
+        &bot,
+        msg.chat.id,
+        thread_id,
+        agent.context_limit_for_session(session_id),
+    );
 
     // Build Telegram-native approval + follow-up-question callbacks
     // for this session
@@ -2868,7 +2871,7 @@ pub(crate) async fn handle_message(
     // stranded. Empty is the common case (one cheap lock check) — a real
     // inference only fires when something was queued.
     //
-    // The body moved to `resume::flush_queued_after_turn` so the
+    // #201: the body moved to `resume::flush_queued_after_turn` so the
     // resume wrapper runs the exact same flush after its own guard drops —
     // see the helper for the origin split (#1213) and the resume semantics.
     super::resume::flush_queued_after_turn(
@@ -2907,6 +2910,7 @@ pub(crate) async fn handle_message(
             options,
             merge_host,
             trailer,
+            Some(channel_msg_repo.clone()),
         )
         .await;
     }

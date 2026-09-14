@@ -118,29 +118,42 @@ pub(crate) async fn cmd_daemon(config: &crate::config::Config) -> Result<()> {
     // The guard is passed into cmd_chat_inner so it is not re-acquired (flock self-denial).
     let active_lock = crate::config::profile::acquire_scheduler_lock(&active);
 
-    match crate::config::profile::list_profiles() {
-        Ok(entries) => {
-            for entry in entries {
-                // The active profile is already covered by cmd_chat_inner's
-                // scheduler. Skipping it here avoids running its jobs twice.
-                if entry.name == active {
-                    continue;
+    // Only adopt secondary profiles if running the default profile and adoption is enabled (#184).
+    // An explicit `-p <name>` daemon is dedicated to that profile and does not adopt foreign profiles.
+    let is_default_profile = crate::config::profile::active_profile().is_none()
+        || crate::config::profile::active_profile() == Some("default");
+    let should_adopt = is_default_profile && config.daemon.adopt_profiles;
+
+    if should_adopt {
+        match crate::config::profile::list_profiles() {
+            Ok(entries) => {
+                for entry in entries {
+                    // The active profile is already covered by cmd_chat_inner's
+                    // scheduler. Skipping it here avoids running its jobs twice.
+                    if entry.name == active {
+                        continue;
+                    }
+                    // #194: Don't adopt a profile's scheduler if that profile already has a
+                    // live daemon or TUI instance running.
+                    if crate::config::profile::instance_running(&entry.name) {
+                        tracing::info!(
+                            "Multi-profile daemon: '{}' has a live instance — not adopting its scheduler",
+                            entry.name
+                        );
+                        continue;
+                    }
+                    tokio::spawn(spawn_cron_scheduler_for_profile(entry.name));
                 }
-                // #194: Don't adopt a profile's scheduler if that profile already has a
-                // live daemon or TUI instance running.
-                if crate::config::profile::instance_running(&entry.name) {
-                    tracing::info!(
-                        "Multi-profile daemon: '{}' has a live instance — not adopting its scheduler",
-                        entry.name
-                    );
-                    continue;
-                }
-                tokio::spawn(spawn_cron_scheduler_for_profile(entry.name));
+            }
+            Err(e) => {
+                tracing::warn!("daemon: list_profiles failed, running active profile only: {e}");
             }
         }
-        Err(e) => {
-            tracing::warn!("daemon: list_profiles failed, running active profile only: {e}");
-        }
+    } else {
+        tracing::debug!(
+            "Multi-profile daemon: adoption skipped (active='{active}', adopt_profiles={})",
+            config.daemon.adopt_profiles
+        );
     }
     cmd_chat_inner(config, None, false, true, active_lock).await
 }
@@ -231,7 +244,7 @@ async fn spawn_cron_scheduler_for_profile(profile_name: String) {
                 service_context,
             );
             tracing::info!("Multi-profile daemon: cron scheduler running for profile '{name}'");
-            scheduler.run().await; // loops forever
+            scheduler.run_adoptive(name).await;
             Ok(())
         })
         .await;
@@ -927,15 +940,6 @@ async fn cmd_chat_inner(
         ),
     ));
 
-    // Register WhatsApp history search tool (#1525, read-only retrieval
-    // over the shared channel_messages store)
-    #[cfg(feature = "whatsapp")]
-    tool_registry.register(Arc::new(
-        crate::brain::tools::whatsapp_history::WhatsAppHistoryTool::new(
-            crate::db::ChannelMessageRepository::new(db.pool().clone()),
-        ),
-    ));
-
     // Shared Discord state for proactive messaging
     #[cfg(feature = "discord")]
     let discord_state = Arc::new(crate::channels::discord::DiscordState::new());
@@ -1175,9 +1179,15 @@ async fn cmd_chat_inner(
     // reached from a tool with no service context, so unlike a detached
     // command it carries no callback of its own and resolves this instead
     // (#1036).
-    crate::brain::agent::service::session_routes::register_local_route(
-        message_enqueue_callback.clone(),
-    );
+    if headless {
+        crate::brain::agent::service::session_routes::register_headless_parking_route(
+            message_enqueue_callback.clone(),
+        );
+    } else {
+        crate::brain::agent::service::session_routes::register_local_route(
+            message_enqueue_callback.clone(),
+        );
+    }
 
     // Anything a previous process was doing died with it: detached commands
     // and sub-agents alike. Account for both and report each into the session
@@ -1484,7 +1494,7 @@ async fn cmd_chat_inner(
                                 };
                                 match crate::channels::telegram::handler::resume_session(
                                     bot, chat, thread_id, session_id, prompt, agent, tg,
-                                    false, // boot replay of an EXISTING row: resume-of-resume must stay untracked (#729/#12)
+                                    None, // boot replay of an EXISTING row: resume-of-resume must stay untracked (#729/#12)
                                 )
                                 .await
                                 {
@@ -1540,7 +1550,7 @@ async fn cmd_chat_inner(
                                     // it to the parent, finalize the status file,
                                     // and skip the surface event nobody reads.
                                     if let Some(mut agent_status) = crate::brain::agent::service::work_status::WorkStatus::find_agent_by_session(&session_id.to_string()) {
-                                        crate::brain::agent::service::restart_recovery::deliver_revived_agent_outcome(&mut agent_status, Ok(&response.content));
+                                        crate::brain::agent::service::restart_recovery::deliver_revived_agent_outcome(&mut agent_status, Ok(&response.content)).await;
                                         return;
                                     }
                                     match channel.as_str() {
@@ -1626,7 +1636,7 @@ async fn cmd_chat_inner(
                                     // this outcome either way — report and
                                     // finalize instead of dropping it.
                                     if let Some(mut agent_status) = crate::brain::agent::service::work_status::WorkStatus::find_agent_by_session(&session_id.to_string()) {
-                                        crate::brain::agent::service::restart_recovery::deliver_revived_agent_outcome(&mut agent_status, Err(&e.to_string()));
+                                        crate::brain::agent::service::restart_recovery::deliver_revived_agent_outcome(&mut agent_status, Err(&e.to_string())).await;
                                         return;
                                     }
                                     if channel == "tui" {
@@ -1685,18 +1695,70 @@ async fn cmd_chat_inner(
         });
     }
 
-    // Wake (#1227): recently-active bound sessions that were NOT mid-turn at
-    // boot have no journal row, so they look dead until someone pokes one.
-    // #1224 re-registers their routes (draining parked reports) at connect,
-    // but quietly. Log the stranded set so it is auditable; purely
-    // informational — it runs no turn, re-executes nothing, sends no message
-    // (the former "I'm back" bubble was removed per #34).
+    // Boot-classifier recovery (#33, owner-approved design 2026-08-29):
+    // recently-active bound sessions that were NOT mid-turn at boot have no
+    // journal row, so they used to look dead until someone poked one. The
+    // classifier consults each topic's last persisted message: user-last =
+    // interrupted turn → run the real `resume_session` continuation (a real
+    // turn, not a bubble — the #34 removal law is untouched); bot-last =
+    // completed before the kill → log only; nothing persisted → log only.
     #[cfg(feature = "telegram")]
-    crate::channels::telegram::resume::wake_recently_active(
-        db.pool().clone(),
-        &resumed_session_ids,
-    )
-    .await;
+    {
+        let recovery = crate::channels::telegram::resume::classify_recently_active(
+            db.pool().clone(),
+            &resumed_session_ids,
+        )
+        .await;
+        let rescue_count = recovery.interrupted.len();
+        for (sid, chat_id, thread_raw) in recovery.interrupted {
+            let agent = app.agent_service().clone();
+            let tg = telegram_state.clone();
+            let thread_id =
+                thread_raw.map(|t| teloxide::types::ThreadId(teloxide::types::MessageId(t as i32)));
+            let prompt = "[System: A restart just occurred while you were \
+                processing a request. Read the conversation context and continue \
+                where you left off naturally. Do not mention the restart or \
+                any interruption — just pick up seamlessly.]"
+                .to_string();
+            tokio::spawn(async move {
+                // The bot may not be authenticated yet at boot — wait for it
+                // exactly like the pending-requests resume path above.
+                let Some(bot) = crate::channels::bg_resume::wait_ready(
+                    || tg.bot(),
+                    "boot classifier: telegram bot",
+                )
+                .await
+                else {
+                    tracing::warn!(
+                        "Boot classifier (#33): bot never became ready — session {sid} stays comatose"
+                    );
+                    return;
+                };
+                // Boot replay of an EXISTING user turn: resume-of-resume must
+                // stay untracked (#729/#12) — same contract as the pending-
+                // requests loop above.
+                if let Err(e) = crate::channels::telegram::handler::resume_session(
+                    bot,
+                    teloxide::types::ChatId(chat_id),
+                    thread_id,
+                    sid,
+                    prompt,
+                    agent,
+                    tg,
+                    None,
+                )
+                .await
+                {
+                    tracing::error!("Boot classifier resume failed for session {sid}: {e}");
+                }
+            });
+        }
+        if rescue_count > 0 {
+            tracing::info!(
+                "Boot classifier (#33): spawned {rescue_count} interrupted-turn continuation(s)"
+            );
+        }
+    }
 
     // Channel manager — handles dynamic spawn/stop of channel agents on config reload
     let channel_manager = Arc::new(crate::channels::ChannelManager::new(

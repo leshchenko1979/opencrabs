@@ -615,62 +615,6 @@ pub(crate) async fn handle_message(
     let idle_timeout_hours = wa_cfg.session_idle_hours;
     let voice_config = cfg.voice_config();
 
-    // #1525: recovered history frames must not wake the agent. Offline sync
-    // and PDO recovery arrive through this same pipeline, flagged on the
-    // message info; for opted-in chats they are stored (windowed, tagged
-    // `imported`, deduped by platform id) and the handler ends here.
-    // Non-opted-in chats keep exactly their existing handling — the feature
-    // changes only what it was added for.
-    {
-        let recovered = info.is_offline || info.unavailable_request_id.is_some();
-        if recovered && !wa_cfg.history_import_chats.is_empty() {
-            let hist_key = format!("{}", info.source.chat);
-            if super::history::opted_in(&wa_cfg.history_import_chats, &hist_key) {
-                if let Some(t) = text.as_deref()
-                    && !t.is_empty()
-                    && super::history::in_window(info.timestamp, chrono::Utc::now())
-                {
-                    let pmid = info.id.to_string();
-                    match channel_msg_repo
-                        .content_by_platform_message_id("whatsapp", &hist_key, &pmid)
-                        .await
-                    {
-                        Ok(None) => {
-                            let cm = DbChannelMessage {
-                                created_at: info.timestamp,
-                                ..DbChannelMessage::new(
-                                    "whatsapp".into(),
-                                    hist_key.clone(),
-                                    if info.source.is_group {
-                                        Some(hist_key.clone())
-                                    } else {
-                                        None
-                                    },
-                                    phone.clone(),
-                                    info.push_name.clone(),
-                                    t.to_string(),
-                                    super::history::IMPORTED_TYPE.into(),
-                                    Some(pmid),
-                                )
-                            };
-                            if let Err(e) = channel_msg_repo.insert(&cm).await {
-                                tracing::warn!("whatsapp history: import capture failed: {e}");
-                            }
-                        }
-                        Ok(Some(_)) => {
-                            // An earlier frame of the same sync already stored
-                            // this message — id-level dedupe, nothing to add.
-                        }
-                        Err(e) => {
-                            tracing::warn!("whatsapp history: dedupe lookup failed: {e}")
-                        }
-                    }
-                }
-                return;
-            }
-        }
-    }
-
     // SECURITY: owner / self-chat authorization. The bot pairs AS the owner's
     // account, so the owner's messages arrive in the "Message Yourself"
     // self-chat (is_from_me, chat == sender). `wa_should_respond` accepts that
@@ -716,12 +660,6 @@ pub(crate) async fn handle_message(
         return;
     }
 
-    // #1411: a tap on a SUGGESTION card is not an approval. The digit lives
-    // here, captured inside the approval block below (the only scope with the
-    // parsed tap id) and fed into `content` where the ordinary follow-up
-    // router can claim it exactly like a typed "2".
-    let mut suggestion_pick: Option<usize> = None;
-
     // Pending approval check: if a tool approval is waiting for this phone,
     // interpret this message as Yes / Always / No instead of routing to the agent.
     // Handles both button taps and plain text replies. #1411: a native-flow
@@ -757,18 +695,6 @@ pub(crate) async fn handle_message(
         } else {
             None
         };
-
-        // #1411: a tap on a SUGGESTION card is not an approval. Capture the
-        // button's number here (the only scope with the parsed tap id); edit 3
-        // feeds it into `content` where the ordinary follow-up router can claim
-        // it exactly like a typed "2".
-        if choice.is_none()
-            && let Some(n) = btn_id
-                .as_deref()
-                .and_then(super::interactive::parse_suggestion_tap)
-        {
-            suggestion_pick = Some(n);
-        }
 
         // OC-01: an approval prompt is keyed by sender phone, so an allowlisted
         // non-owner who caused the tool could approve or YOLO their own call. Gate
@@ -963,15 +889,6 @@ pub(crate) async fn handle_message(
                 content.push_str(&format!("\n\n{injected}"));
             }
         }
-    }
-
-    // #1411: a suggestion-card tap carries no caption; stand the captured
-    // digit in for the typed reply the follow-up router below expects. A tap
-    // that arrives with its own caption keeps the caption (typed wins).
-    if let Some(n) = suggestion_pick
-        && content.trim().is_empty()
-    {
-        content = n.to_string();
     }
 
     if content.is_empty() {
@@ -1503,9 +1420,6 @@ pub(crate) async fn handle_message(
         let jid_cb = reply_target.clone();
         let was_streamed_cb = was_streamed.clone();
         let wa_state_cb = wa_state.clone();
-        // Copied, not borrowed: the callback must be 'static, so `wa_cfg`
-        // cannot be referenced inside it (#1411).
-        let interactive_cb = wa_cfg.interactive_buttons;
         // #1407 gating for streamed text now lives in `stream.rs`, alongside
         // the send-or-edit choice it has to pace.
         Arc::new(move |session_id, event| match event {
@@ -1581,18 +1495,13 @@ pub(crate) async fn handle_message(
                     }
                 });
             }
-            // Optional follow-up suggestions (#600): a native-flow card when
-            // the owner opted into `interactive_buttons` and the set fits the
-            // 3-button cap; otherwise the numbered text list (#1411). A bare
-            // numeric reply selects one via the inbound router either way, and
-            // the card body carries the same instructions, so the typed path
-            // survives clients that do not render buttons. Anything else
-            // clears the set.
+            // Optional follow-up suggestions (#600): no button UI, so post a
+            // numbered list. A bare numeric reply selects one (see the inbound
+            // router); anything else clears the set.
             ProgressEvent::SuggestedOptions(options) if !options.is_empty() => {
                 let client = client_cb.clone();
                 let jid = jid_cb.clone();
                 let wa = wa_state_cb.clone();
-                let interactive = interactive_cb;
                 let raw_options: Vec<String> = options.into_iter().map(|item| item.label).collect();
                 tokio::spawn(async move {
                     let numbered: String = raw_options
@@ -1604,30 +1513,10 @@ pub(crate) async fn handle_message(
                     let body = format!(
                         "\u{1f4a1} Suggested next:\n\n{numbered}\n\nReply with a number, or type your own."
                     );
-                    let buttons: Vec<super::interactive::Button> = raw_options
-                        .iter()
-                        .enumerate()
-                        .map(|(i, o)| {
-                            super::interactive::Button::new(
-                                format!("wa_suggest_{}", i + 1),
-                                o.clone(),
-                            )
-                        })
-                        .collect();
-                    let card =
-                        interactive && super::interactive::suggestion_card_fits(raw_options.len());
                     wa.set_pending_followups(session_id, raw_options).await;
-                    let msg = if card {
-                        super::interactive::build(
-                            &body,
-                            Some("Tap an option, or reply with the number."),
-                            &buttons,
-                        )
-                    } else {
-                        waproto::whatsapp::Message {
-                            conversation: Some(body),
-                            ..Default::default()
-                        }
+                    let msg = waproto::whatsapp::Message {
+                        conversation: Some(body),
+                        ..Default::default()
                     };
                     if let Err(e) = client.send_message(jid, msg).await {
                         tracing::warn!(error = %e, "failed to send WhatsApp message");

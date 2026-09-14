@@ -111,6 +111,43 @@ pub(crate) fn skip_applied_thread_id_migration(
     Ok(true)
 }
 
+/// Index of the `session_seen_skills_active` migration in the current list (1-based).
+const ACTIVE_MIGRATION_INDEX: i64 = 48;
+
+/// Stamp past the `session_seen_skills_active` migration when its column is already
+/// there, so `to_latest` does not re-run an ALTER that has already happened (#209, #212).
+///
+/// On prod, databases were already stamped at `user_version = 47` with column `active`
+/// existing. When `20260912000001_add_project_repo_remote.sql` was sorted to index 45
+/// (to maintain alphabetical filename order), `add_session_seen_skills_active` shifted
+/// to index 47 (migration 48). When `to_latest` ran on a database stamped 47, it replayed
+/// migration 48 and crashed on `duplicate column name: active`.
+///
+/// This guard runs BEFORE `to_latest`. If `user_version == 47` and `active` already
+/// exists, it updates `user_version` to 48 so `to_latest` skips it safely.
+pub(crate) fn skip_applied_active_migration(
+    conn: &rusqlite::Connection,
+    user_version: i64,
+) -> rusqlite::Result<bool> {
+    if user_version != ACTIVE_MIGRATION_INDEX - 1 {
+        return Ok(false);
+    }
+    if !has_column(conn, "session_seen_skills", "active")? {
+        return Ok(false);
+    }
+    // If loaded_mtime is missing, add it before skipping the migration
+    if !has_column(conn, "session_seen_skills", "loaded_mtime")? {
+        conn.execute_batch("ALTER TABLE session_seen_skills ADD COLUMN loaded_mtime INTEGER;")?;
+    }
+    conn.pragma_update(None, "user_version", ACTIVE_MIGRATION_INDEX)?;
+    tracing::warn!(
+        "Stamped past the session_seen_skills_active migration: column 'active' was already \
+         present at version {user_version}, so replaying it would have failed startup on a \
+         duplicate column (#209, #212)."
+    );
+    Ok(true)
+}
+
 /// Add `pending_requests.origin` when migration 37 was skipped.
 ///
 /// Mirrors `src/migrations/20260828000001_pending_requests_origin.sql`, which
@@ -126,5 +163,36 @@ pub(crate) fn heal_pending_requests_origin(conn: &rusqlite::Connection) -> rusql
         "Healed pending_requests: the origin column of migration 37 was missing although the \
          schema was stamped past it (#1401). Restart recovery could not record turns until now."
     );
+    Ok(true)
+}
+
+/// Add `projects.repo_remote` and its index when migration 48 was skipped on upstream builds.
+///
+/// Mirrors `src/migrations/20260912000001_add_project_repo_remote.sql`.
+pub(crate) fn heal_project_repo_remote(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    if !has_table(conn, "projects")? || has_column(conn, "projects", "repo_remote")? {
+        return Ok(false);
+    }
+    conn.execute_batch(
+        "ALTER TABLE projects ADD COLUMN repo_remote TEXT; \
+         CREATE INDEX IF NOT EXISTS idx_projects_repo_remote ON projects(repo_remote);",
+    )?;
+    tracing::warn!(
+        "Healed projects: repo_remote was missing although the schema was stamped past it (#1401, #209)."
+    );
+    Ok(true)
+}
+
+/// Add `session_seen_skills.loaded_mtime` when migration was skipped or partially applied (#210).
+pub(crate) fn heal_session_seen_skills_loaded_mtime(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<bool> {
+    if !has_table(conn, "session_seen_skills")?
+        || has_column(conn, "session_seen_skills", "loaded_mtime")?
+    {
+        return Ok(false);
+    }
+    conn.execute_batch("ALTER TABLE session_seen_skills ADD COLUMN loaded_mtime INTEGER;")?;
+    tracing::warn!("Healed session_seen_skills: added missing loaded_mtime column (#210).");
     Ok(true)
 }

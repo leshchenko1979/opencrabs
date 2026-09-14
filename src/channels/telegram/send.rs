@@ -14,7 +14,6 @@
 //! you'd get from `bot.send_message(chat_id, text)` directly. Safe to use
 //! everywhere even in non-topic chats.
 
-use teloxide::Bot;
 use teloxide::payloads::ForwardMessageSetters;
 use teloxide::payloads::SendChatActionSetters;
 use teloxide::payloads::SendDocumentSetters;
@@ -25,6 +24,7 @@ use teloxide::payloads::SendPollSetters;
 use teloxide::prelude::Requester;
 use teloxide::requests::JsonRequest;
 use teloxide::types::{ChatAction, ChatId, InlineKeyboardMarkup, InputFile, MessageId, ThreadId};
+use teloxide::Bot;
 
 /// Look up the thread_id of the most recent Telegram message stored for
 /// `chat_id` in `channel_messages`. Returns `None` when no row exists,
@@ -235,7 +235,7 @@ pub async fn fire_chat_action<C>(
     C: Into<ChatId>,
 {
     let chat = chat_id.into();
-    if !super::governor::admit_chat_action(chat, thread_id.map(|t| t.0.0)).await {
+    if !super::governor::admit_chat_action(chat, thread_id.map(|t| t.0 .0)).await {
         return;
     }
     if let Err(e) = chat_action_in_thread(bot, chat, thread_id, action)
@@ -283,7 +283,7 @@ pub async fn best_effort_note<C>(
             "note",
             why,
             chat.0,
-            thread_id.map(|t| t.0.0),
+            thread_id.map(|t| t.0 .0),
             m.id.0,
             len,
             &hash8,
@@ -308,6 +308,7 @@ pub async fn best_effort_note<C>(
                 let detail2 = origin_detail.to_string();
                 let why2 = why.to_string();
                 super::edit_retry::spawn_deferred(
+                    chat,
                     wait,
                     move || async move {
                         let request = message_in_thread(&bot2, chat2, thread2, &text2);
@@ -400,7 +401,7 @@ pub(crate) async fn send_markdown_outbox(
                 return Ok(OutboxSent {
                     sent: vec![(id, markdown.to_string())],
                     effective_thread_id: thread_id,
-                });
+                })
             }
             Err(e) => {
                 // Stale-topic auto-route (#116): a remembered topic that was
@@ -413,7 +414,7 @@ pub(crate) async fn send_markdown_outbox(
                 // HTML ladder with the thread intact.
                 if e.to_string().contains("message thread not found") && thread_id.is_some() {
                     if let Some(tid) = thread_id {
-                        let evicted = evict_dead_topic(chat_id.0, tid.0.0).await;
+                        let evicted = evict_dead_topic(chat_id.0, tid.0 .0).await;
                         tracing::warn!(
                             "{origin}/{origin_detail}: remembered topic {} is gone \
                              (message thread not found) — evicted {evicted} rows, retrying unthreaded",
@@ -437,7 +438,7 @@ pub(crate) async fn send_markdown_outbox(
                             return Ok(OutboxSent {
                                 sent: vec![(id, markdown.to_string())],
                                 effective_thread_id: None,
-                            });
+                            })
                         }
                         Err(e2) => {
                             tracing::warn!(
@@ -459,7 +460,7 @@ pub(crate) async fn send_markdown_outbox(
     // stale-topic eviction above fired, `thread_id` is now None — the
     // ladder (and its plain-text fallback, the #116 poisoning leg) is
     // re-addressed to General/DM instead of the dead topic.
-    let thread = thread_id.map(|t| t.0.0);
+    let thread = thread_id.map(|t| t.0 .0);
     let html = super::handler::markdown_to_telegram_html(markdown);
     let chunks = super::handler::split_message(&html, 4096);
     let total = chunks.len();
@@ -496,11 +497,11 @@ pub(crate) async fn send_markdown_outbox(
                 let es = e.to_string();
                 if es.contains("message thread not found") && thread_id.is_some() {
                     if let Some(tid) = thread_id {
-                        let evicted = evict_dead_topic(chat_id.0, tid.0.0).await;
+                        let evicted = evict_dead_topic(chat_id.0, tid.0 .0).await;
                         tracing::warn!(
                             "{origin}/{origin_detail}: HTML ladder hit dead topic {} \
                              — evicted {evicted} rows, retrying chunk unthreaded",
-                            tid.0.0
+                            tid.0 .0
                         );
                     }
                     thread_id = None;
@@ -601,7 +602,7 @@ pub(crate) async fn record_outgoing(
     };
     let repo = crate::db::ChannelMessageRepository::new(pool);
     let chat_id_str = chat_id.to_string();
-    let thread = thread_id.map(|t| t.0.0.to_string());
+    let thread = thread_id.map(|t| t.0 .0.to_string());
     for (mid, content) in sent {
         if content.trim().is_empty() {
             continue;
@@ -651,7 +652,7 @@ pub(crate) async fn send_buttons_raw(
         "reply_markup": keyboard,
     });
     if let Some(t) = thread_id {
-        payload["message_thread_id"] = serde_json::json!(t.0.0);
+        payload["message_thread_id"] = serde_json::json!(t.0 .0);
     }
     // #118 wire evidence: log the EXACT payload leaving the process — body bytes
     // (len+hash8) and the serialized keyboard row count. This is the logging gap
@@ -668,7 +669,7 @@ pub(crate) async fn send_buttons_raw(
             .map(|s| s.len())
             .unwrap_or(0),
         chat_id,
-        thread_id.map(|t| t.0.0),
+        thread_id.map(|t| t.0 .0),
     );
     if kb_rows == 0 {
         return Err(

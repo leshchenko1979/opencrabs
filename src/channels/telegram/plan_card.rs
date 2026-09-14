@@ -36,6 +36,9 @@ pub(crate) enum CollapsibleStyle {
     /// prose truncated to `CARD_PROSE_BUDGET`.
     BlockquoteExpandable,
     /// Rich `sendRichMessage` (32K chars): `<details><summary>`, no truncation.
+    /// Production callers migrated to the markdown+media dialect; the test-only
+    /// `render_plan_card_rich_html` is the remaining constructor.
+    #[cfg_attr(not(test), expect(dead_code))]
     DetailsSummary,
 }
 
@@ -188,7 +191,7 @@ async fn render_plan_card(
         }
     }
 
-    // Goal: style-dependent wrapper + truncation on classic only.
+    // Goal dart marker (owner option B, #77 — word dropped): truncation on classic only.
     if let Some(g) = goal {
         let text = g.text.trim();
         if !text.is_empty() {
@@ -196,17 +199,19 @@ async fn render_plan_card(
             if checklist.is_some() || has_prose {
                 blocks.push(CardBlock::ClassicGap);
             }
+            let turns_str = g.turn_budget_str();
             blocks.push(CardBlock::Block(match style {
                 CollapsibleStyle::BlockquoteExpandable => {
                     let capped = escape_html(truncate_chars(text, GOAL_TEXT_CAP));
                     format!(
-                        "<blockquote expandable>{} {capped}</blockquote>",
+                        "<blockquote expandable>{} {capped} {turns_str}</blockquote>",
                         g.prefix(true)
                     )
                 }
                 CollapsibleStyle::DetailsSummary => format!(
-                    "<details><summary>{} goal</summary>\n{}</details>",
+                    "<details><summary>{} {}</summary>\n{}</details>",
                     g.prefix(true),
+                    turns_str,
                     escape_html(text)
                 ),
             }));
@@ -237,6 +242,9 @@ pub(crate) async fn render_plan_card_html(
 
 /// Rich `sendRichMessage` card: `<details><summary>` collapsibles, 32K-char
 /// limit, no truncation — prose renders in full.
+/// Production callers migrated to the markdown+media dialect (dd70fdd6);
+/// kept for test coverage of the card-assembly invariants.
+#[cfg(test)]
 pub(crate) async fn render_plan_card_rich_html(
     title: Option<&str>,
     checklist: Option<&[String]>,
@@ -251,6 +259,116 @@ pub(crate) async fn render_plan_card_rich_html(
         goal,
     )
     .await
+}
+
+/// Markdown-mode rich card (#134 family): the same blocks as the rich HTML
+/// variant, but committed to the markdown input dialect — details/summary
+/// collapsibles inline (the dialect parses them natively, live-Bot-API
+/// probe J/K 2026-09-10) and checklist rows wrapped in `<p>` so each row
+/// breaks. Prose bodies ship RAW markdown, separated from the `</summary>`
+/// line by a blank line; converting them to HTML first broke lists, tables
+/// and the mermaid fence (see the block comment inside). Mermaid fences
+/// in prose are NOT resolved here: the caller resolves the ASSEMBLED body
+/// once through `resolve_markdown_media`, so every card re-render reuses
+/// one diagN numbering per body instead of per-section (reviewer major #1).
+pub(crate) async fn render_plan_card_markdown(
+    title: Option<&str>,
+    checklist: Option<&[String]>,
+    prose: Option<&[ProseSection]>,
+    goal: Option<&GoalSection>,
+) -> Option<String> {
+    let mut blocks: Vec<CardBlock> = Vec::new();
+
+    if let Some(t) = title.map(str::trim).filter(|t| !t.is_empty()) {
+        blocks.push(CardBlock::Line(format!("📋 <b>{}</b>", escape_html(t))));
+    }
+
+    if let Some(sections) = prose.filter(|s| !s.is_empty()) {
+        for sec in sections {
+            // Markdown mode ships the body RAW. Pre-converting it to HTML
+            // (acb8e205) was wrong three ways, all visible in one card:
+            //   * `render_list` emits a literal `•`/`1.` GLYPH inside a `<p>`
+            //     — a paragraph starting with a dot, not a list;
+            //   * `render_key_value` joins table rows with bare newlines and
+            //     no block wrapper, so the rows fuse;
+            //   * `markdown_to_html_mermaid_p` CONSUMES the mermaid fence, so
+            //     the caller's `resolve_markdown_media` found nothing to turn
+            //     into an image and the card shipped an empty media array.
+            // Raw markdown keeps lists, pipe tables and fences intact for the
+            // markdown input dialect.
+            //
+            // The BLANK LINE after </summary> is load-bearing: `<details>`
+            // opens a CommonMark HTML block, and without a terminating blank
+            // line the body is swallowed as HTML text and renders as literal
+            // markdown — the #941 oneliner regression.
+            let body = super::rich::mermaid::neutralize_prose_media_html(&sec.body);
+            let body = body.trim();
+            blocks.push(CardBlock::Block(match &sec.heading {
+                Some(h) => format!(
+                    "<details><summary><b>{}</b></summary>\n\n{body}\n\n</details>",
+                    escape_html(h)
+                ),
+                None => body.to_string(),
+            }));
+        }
+    }
+
+    if let Some(rows) = checklist {
+        for row in rows {
+            blocks.push(CardBlock::Line(escape_html(row)));
+        }
+    }
+
+    if let Some(g) = goal {
+        let text = g.text.trim();
+        if !text.is_empty() {
+            let has_prose = prose.is_some_and(|p| !p.is_empty());
+            if checklist.is_some() || has_prose {
+                blocks.push(CardBlock::ClassicGap);
+            }
+            let text_html = super::rich::markdown_to_html_p(text);
+            let turns_str = g.turn_budget_str();
+            blocks.push(CardBlock::Block(format!(
+                "<details><summary>{} {}</summary>{}</details>",
+                g.prefix(true),
+                turns_str,
+                text_html
+            )));
+        }
+    }
+
+    // Markdown serializer: same single-variant shape as the DetailsSummary
+    // serializer but with markdown line semantics — Lines are wrapped in <p>
+    // to preserve individual paragraph lines in Telegram's rich message
+    // client, Blocks carry their own collapsibles (<details>).
+    let mut out = String::new();
+    for b in &blocks {
+        match b {
+            CardBlock::Line(s) => {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str("<p>");
+                out.push_str(s);
+                out.push_str("</p>");
+            }
+            CardBlock::Block(s) => {
+                // Skip the separator when the output already ends with a
+                // blank line (an explicit ClassicGap) — otherwise the gap
+                // doubles into two empty lines before the block.
+                if !out.is_empty() && !out.ends_with("\n\n") {
+                    out.push('\n');
+                }
+                out.push_str(s);
+            }
+            CardBlock::ClassicGap => {
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 /// Result of a plan card edit attempt.
@@ -314,6 +432,381 @@ async fn handle_create_failure(error: &str, state: &TelegramState, session_id: U
     }
 }
 
+/// Spawn label for the plan-review worker (#155). The subagent spawn path
+/// keys its single write-grant exception on this exact label, so the two
+/// sides must never drift — both read this one constant.
+pub(crate) const PLAN_REVIEW_LABEL: &str = crate::brain::tools::subagent::PLAN_REVIEW_LABEL;
+
+/// Spawn label for the implementation review worker (#234).
+pub(crate) const REVIEW_IMPL_LABEL: &str = crate::brain::tools::subagent::REVIEW_IMPL_LABEL;
+
+/// Card footer while a review subagent is rewriting the plan (#155).
+pub(crate) const PLAN_REVIEW_RUNNING_NOTE: &str = "🔍 Review subagent rewriting plan…";
+
+/// Whether a finished plan-review child was cancelled by the owner (#186).
+///
+/// `SubAgentState::Cancelled` is reachable for a review child only from the
+/// discard paths (the cancel-intent honour and the discard handler in
+/// `agent.rs`), so a cancelled review means exactly "the owner killed the plan
+/// mid-review". Such a run has no findings — the caller must NOT deliver a
+/// report card for it.
+pub(crate) fn plan_review_was_cancelled(
+    state: Option<&crate::brain::tools::subagent::SubAgentState>,
+) -> bool {
+    matches!(
+        state,
+        Some(crate::brain::tools::subagent::SubAgentState::Cancelled)
+    )
+}
+
+/// Cap on the one-line review delta rendered into the card footer. The delta
+/// is a card line, not a report: the review worker is collected through
+/// `wait_agent`, so its full report is deliberately NOT echoed into the
+/// session — the delta is the only thing the owner is shown.
+const PLAN_REVIEW_DELTA_CAP: usize = 200;
+
+/// Marker the review brief asks the worker to end its report with, so the
+/// card delta is the worker's own summary rather than a scraped prose line.
+const PLAN_REVIEW_DELTA_MARKER: &str = "DELTA:";
+
+/// The keyboard a plan card should show, given whether a review is running
+/// (#155). Only the Editing keyboard grays out — a running review must not
+/// invent a keyboard for the checklist or absent states.
+pub(crate) fn plan_review_effective_kb(plan_kb: PlanKb, reviewing: bool) -> PlanKb {
+    if reviewing && plan_kb == PlanKb::ApproveDiscard {
+        PlanKb::ReviewingApproveDiscard
+    } else {
+        plan_kb
+    }
+}
+
+/// Format the running note for an in-flight review with live progress (#155).
+///
+/// `elapsed_secs` is the review's own wall clock, rendered through
+/// [`super::flow::humanize_duration`] — the SAME formatter the flow chrome
+/// footer uses (`45s`, then `1 min 30s`), so the review note and a turn's own
+/// footer read alike instead of drifting into two time formats (owner order
+/// 2026-09-12). `None` drops the segment rather than printing a placeholder.
+pub(crate) fn format_plan_review_running_progress(
+    progress: Option<&crate::brain::agent::service::work_status::ProgressSnapshot>,
+    elapsed_secs: Option<u64>,
+) -> String {
+    let mut segs: Vec<String> = Vec::new();
+    // A snapshot that carries no tool news contributes no segment: `iteration
+    // == 0 && tool_count == 0` is the shape a freshly-created status file has,
+    // and its `last_tool` is not something the progress callback produces. That
+    // guard stays — it is about the TOOL segments.
+    if let Some(p) = progress.filter(|p| p.tool_count > 0 || p.iteration > 0) {
+        if p.tool_count > 0 {
+            segs.push(format!("🛠 {}", p.tool_count));
+        }
+        if let Some(tool) = p.last_tool.as_deref().filter(|t| !t.is_empty()) {
+            segs.push(tool.to_string());
+        }
+    }
+    // #186 D1: the clock is NOT gated behind `progress`. `WorkStatus.progress`
+    // is written at ROUND END, so for a review's entire first round it is
+    // `None` — exactly the stretch where the owner has nothing else to watch.
+    // This function used to early-return the bare note in that case, silently
+    // discarding `elapsed_secs` and dropping the live clock in the one case it
+    // exists for.
+    if let Some(secs) = elapsed_secs {
+        segs.push(super::flow::humanize_duration(secs));
+    }
+    if segs.is_empty() {
+        return PLAN_REVIEW_RUNNING_NOTE.to_string();
+    }
+    format!("🔍 Review subagent running ({})…", segs.join(" · "))
+}
+
+/// Footer note for the card, if any (#155). The running note wins over a
+/// stale delta, so the owner never reads a previous review's summary while a
+/// new one is mid-flight.
+pub(crate) fn plan_review_footer_note(
+    plan_kb: PlanKb,
+    reviewing: bool,
+    running_note: Option<String>,
+    delta: Option<String>,
+) -> Option<String> {
+    // The footer belongs to the EDITING card only. The same renderer draws the
+    // Active checklist card (Discard-only) and the None card, and a review
+    // delta or a "reviewing…" note left over on either of those would describe
+    // a plan state that no longer exists.
+    if !matches!(
+        plan_kb,
+        PlanKb::ApproveDiscard | PlanKb::ReviewingApproveDiscard
+    ) {
+        return None;
+    }
+    if reviewing {
+        return Some(
+            running_note
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| PLAN_REVIEW_RUNNING_NOTE.to_string()),
+        );
+    }
+    delta.filter(|d| !d.trim().is_empty())
+}
+
+/// Append the footer to a rendered card body (#155). Deliberately outside the
+/// renderers: both production arms of `refresh_plan_card` call one renderer
+/// each, so appending here covers rich and classic alike — without threading a
+/// fifth parameter through every renderer and its many test call sites.
+///
+/// `small` picks the dialect's footnote shape (owner order 2026-09-12, #155):
+/// the rich arm passes `true`, so the review footer — live progress while a
+/// review runs, or the last review's delta — rides as `<sub>` small text, the
+/// same shape the flow chrome footer already uses. The classic HTML arm passes
+/// `false`: classic Telegram HTML has no `<sub>` and 400s on the tag, so the
+/// note stays plain there.
+pub(crate) fn plan_card_with_footer(body: String, footer: Option<&str>, small: bool) -> String {
+    let Some(note) = footer.map(str::trim).filter(|n| !n.is_empty()) else {
+        return body;
+    };
+    if small {
+        format!("{body}\n\n<sub>{note}</sub>")
+    } else {
+        format!("{body}\n\n{note}")
+    }
+}
+
+/// Spawn input for the plan-review worker (#155). Pure so the test asserts the
+/// exact contract the production path sends instead of a copy of it.
+pub(crate) fn plan_review_spawn_input(session_id: Uuid, brief: String) -> serde_json::Value {
+    serde_json::json!({
+        "prompt": brief,
+        "label": PLAN_REVIEW_LABEL,
+        "plan_session": session_id.to_string(),
+        "read_only": false,
+    })
+}
+
+/// Spawn input for the implementation-review worker (#234). Pure so the test
+/// asserts the exact contract the production path sends.
+pub(crate) fn review_impl_spawn_input(session_id: Uuid, brief: String) -> serde_json::Value {
+    serde_json::json!({
+        "prompt": brief,
+        "label": REVIEW_IMPL_LABEL,
+        "plan_session": session_id.to_string(),
+        "read_only": true,
+    })
+}
+
+/// Construct the implementation review brief prompt (#234).
+pub(crate) fn review_impl_brief(
+    doc_title: &str,
+    doc_checklist: &str,
+    md_path: Option<&std::path::Path>,
+) -> String {
+    let mut brief = format!(
+        "You are an adversarial software implementation audit and verification agent.\n\
+         Your mission is to rigorously audit the delivered codebase changes for a completed task plan against ground truth, stated acceptance criteria, and architecture quality standards.\n\
+         \n\
+         ### COMPLETED PLAN\n\
+         Title: {doc_title}\n\
+         \n\
+         Checklist & Deliverables:\n\
+         {doc_checklist}\n"
+    );
+    if let Some(p) = md_path {
+        brief.push_str(&format!("\nArchived Plan File: {}\n", p.display()));
+    }
+    brief.push_str(
+        "\n### STEP 1: CONTEXT & ACCEPTANCE CRITERIA\n\
+         1. Inspect the tasks, deliverables, and checkable acceptance criteria above.\n\
+         2. Determine the commit range / changed files for this implementation using `git status`, `git log`, and `git diff`.\n\
+         \n\
+         ### STEP 2: CODE & ARCHITECTURE AUDIT\n\
+         1. Inspect every modified and created file.\n\
+         2. Verify code quality, DRY/modularisation, proper error handling, edge-case hardening, and absence of dead code or debug artifacts.\n\
+         3. Check for proper synchronization/concurrency guards where shared state is modified.\n\
+         \n\
+         ### STEP 3: TEST & ACCEPTANCE VERIFICATION\n\
+         1. Verify unit/integration tests exist covering the new functionality.\n\
+         2. Ensure every checkable acceptance criterion from the plan has been verified against real codebase receipts.\n\
+         \n\
+         ### STEP 4: STRUCTURED REPORT\n\
+         Deliver your final findings in rich markdown using the following structure:\n\
+         \n\
+         ## Implementation Audit Report: <Title>\n\
+         \n\
+         ### 1. Executive Summary\n\
+         - Verdict: [PASS | ISSUES DETECTED | INCOMPLETE]\n\
+         - Overview of verified deliverables and scope.\n\
+         \n\
+         ### 2. Acceptance Criteria Checklist\n\
+         | Task | Acceptance Criteria | Verified | Evidence / Notes |\n\
+         |---|---|---|---|\n\
+         \n\
+         ### 3. Code Quality & Architectural Observations\n\
+         - DRY & modularisation findings.\n\
+         - Concurrency, error handling, and edge cases.\n\
+         \n\
+         ### 4. Actionable Recommendations\n\
+         - Concrete fixes or next steps (or \"None — implementation is clean and ready\")."
+    );
+    brief
+}
+
+/// Child agent id from a `spawn_agent` tool result (#155). The spawn returns
+/// `Spawned sub-agent '<label>' with id: <id>`; parse the id rather than
+/// treating that acknowledgement as the worker's report — the defect the first
+/// attempt shipped.
+pub(crate) fn plan_review_agent_id(spawn_output: &str) -> Option<String> {
+    let rest = spawn_output.split_once("with id: ")?.1;
+    let id = rest.split_whitespace().next().unwrap_or_default();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+/// Structured outcome of a finished plan review report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlanReviewReport {
+    pub(crate) card_delta: String,
+    pub(crate) full_summary: Option<String>,
+    pub(crate) open_questions: Vec<String>,
+}
+
+impl PlanReviewReport {
+    pub(crate) fn simple(card_delta: impl Into<String>) -> Self {
+        Self {
+            card_delta: card_delta.into(),
+            full_summary: None,
+            open_questions: Vec::new(),
+        }
+    }
+
+    pub(crate) fn to_findings_markdown(&self) -> String {
+        let mut out = String::from("### 🔍 Plan Review Findings\n\n");
+        out.push_str(&format!("**Result:** {}\n\n", self.card_delta));
+        if let Some(summary) = &self.full_summary {
+            out.push_str("#### Summary of Changes\n");
+            out.push_str(summary);
+            out.push_str("\n\n");
+        }
+        if !self.open_questions.is_empty() {
+            out.push_str("#### ❓ Open Questions for Discussion\n");
+            for (i, q) in self.open_questions.iter().enumerate() {
+                out.push_str(&format!("{}. {}\n", i + 1, q));
+            }
+            out.push('\n');
+        }
+        out
+    }
+}
+
+/// Parse a review worker's full output into card delta, full summary, and open questions.
+pub(crate) fn parse_plan_review_report(report: Option<&str>) -> PlanReviewReport {
+    let Some(report) = report else {
+        return PlanReviewReport::simple("✨ Review finished but returned no report.");
+    };
+
+    let mut open_questions = Vec::new();
+    let mut in_open_questions = false;
+    let mut summary_lines = Vec::new();
+    let mut in_summary = false;
+    let mut delta_line = None;
+
+    for line in report.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with(PLAN_REVIEW_DELTA_MARKER) {
+            let d = trimmed
+                .strip_prefix(PLAN_REVIEW_DELTA_MARKER)
+                .unwrap()
+                .trim();
+            if !d.is_empty() {
+                delta_line = Some(d.to_string());
+            }
+        } else if trimmed.starts_with("OPEN_QUESTIONS:") {
+            in_open_questions = true;
+            in_summary = false;
+            let rest = trimmed.strip_prefix("OPEN_QUESTIONS:").unwrap().trim();
+            if !rest.is_empty() {
+                open_questions.push(rest.to_string());
+            }
+        } else if trimmed.starts_with("SUMMARY:") {
+            in_summary = true;
+            in_open_questions = false;
+            let rest = trimmed.strip_prefix("SUMMARY:").unwrap().trim();
+            if !rest.is_empty() {
+                summary_lines.push(rest.to_string());
+            }
+        } else if in_open_questions {
+            if trimmed.starts_with('#') || trimmed.starts_with("DELTA:") {
+                in_open_questions = false;
+            } else if trimmed.starts_with('-')
+                || trimmed.starts_with('*')
+                || trimmed.starts_with("•")
+            {
+                let q = trimmed.trim_start_matches(['-', '*', '•', ' ']).trim();
+                if !q.is_empty() {
+                    open_questions.push(q.to_string());
+                }
+            } else if !trimmed.is_empty() && trimmed.starts_with(|c: char| c.is_ascii_digit()) {
+                let q = trimmed
+                    .trim_start_matches(|c: char| {
+                        c.is_ascii_digit() || c == '.' || c == ')' || c == ' '
+                    })
+                    .trim();
+                if !q.is_empty() {
+                    open_questions.push(q.to_string());
+                }
+            }
+        } else if in_summary {
+            if trimmed.starts_with('#')
+                || trimmed.starts_with("DELTA:")
+                || trimmed.starts_with("OPEN_QUESTIONS:")
+            {
+                in_summary = false;
+            } else if !trimmed.is_empty() {
+                summary_lines.push(trimmed.to_string());
+            }
+        }
+    }
+
+    let card_delta = match delta_line {
+        Some(s) => format!("✨ Review: {}", clamp_review_delta(&s)),
+        None => {
+            if !summary_lines.is_empty() {
+                format!("✨ Review: {}", clamp_review_delta(&summary_lines[0]))
+            } else {
+                "✨ Review finished (no summary line returned).".to_string()
+            }
+        }
+    };
+
+    let full_summary = if !summary_lines.is_empty() {
+        Some(summary_lines.join("\n"))
+    } else {
+        None
+    };
+
+    PlanReviewReport {
+        card_delta,
+        full_summary,
+        open_questions,
+    }
+}
+
+/// One-line card delta from a finished review's report (#155). Reads the
+/// worker's own `DELTA:` line; falls back to a status line so the card always
+/// says something true about what happened.
+#[cfg(test)]
+pub(crate) fn plan_review_delta(report: Option<&str>) -> String {
+    parse_plan_review_report(report).card_delta
+}
+
+/// Clamp a review summary to the footer budget, marking the cut with an
+/// ellipsis — a silently shortened sentence reads as a complete one, and the
+/// owner would never know the worker had more to say.
+fn clamp_review_delta(s: &str) -> String {
+    let cut = truncate_chars(s, PLAN_REVIEW_DELTA_CAP);
+    if cut.len() == s.len() {
+        s.to_string()
+    } else {
+        format!("{cut}…")
+    }
+}
+
 /// Create or update the session's plan card to reflect the live plan state,
 /// carrying `plan_kb`. Removes the card when the plan is gone.
 ///
@@ -321,6 +814,15 @@ async fn handle_create_failure(error: &str, state: &TelegramState, session_id: U
 /// (32K char limit, native `<details><summary>` collapsibles). On any rich
 /// API failure, falls back to the classic HTML `sendMessage` path (4096 chars,
 /// `<blockquote expandable>`).
+///
+/// Returns whether this refresh actually dealt with the card. `false` means the
+/// suppression gate (#814 flood control) skipped the whole call before any read
+/// or API work — the card still shows its previous state. A caller that records
+/// "the card now shows X" must not do so on a `false`: it would mark content
+/// rendered that was never sent, and the next refresh carrying that same
+/// content would then skip (#187 D3). Every other exit reports `true`, because
+/// each one either landed the content or handed it to the governor, which is
+/// the authority on landing it.
 pub(crate) async fn refresh_plan_card(
     bot: &Bot,
     chat: ChatId,
@@ -329,13 +831,13 @@ pub(crate) async fn refresh_plan_card(
     agent: &AgentService,
     session_id: Uuid,
     plan_kb: PlanKb,
-) {
+) -> bool {
     // Telegram asked us to wait. The card is chrome, so skipping an update
     // beats renewing the flood-control window on every refresh (#814).
     // Checked BEFORE taking the lock, so a throttled session releases waiters
     // immediately instead of queueing them behind a write that will not happen.
     if state.plan_card_suppressed(session_id).await {
-        return;
+        return false;
     }
 
     // Serialise everything below (#822). The sequence is check-whether-a-card-
@@ -348,21 +850,50 @@ pub(crate) async fn refresh_plan_card(
     // create is exactly what leaves the window open.
     let card_lock = state.plan_card_lock(session_id).await;
     let _guard = card_lock.lock().await;
-    let (title, checklist) = load_plan_sections(session_id).await;
+    let (json_title, checklist) = load_plan_sections(session_id).await;
     let prose = load_plan_prose(session_id).await;
+    // #155 D2: the title normally comes from the plan JSON, and the `.md` H1 is
+    // stripped out of the prose by design, so nothing else supplies one. When
+    // the JSON is gone but the `.md` survives — a reviewer rewrite after a
+    // discard, or a hand-authored plan — the card lost its `📋` header
+    // entirely. Fall back to that H1.
+    let title = match json_title {
+        Some(t) => Some(t),
+        None => super::flow_chrome::load_plan_md_title(session_id).await,
+    };
+    // Goal scoping (owner rule 2026-09-03, #84): a completed goal belongs to
+    // the plan it was set under and renders only in the finalize chrome's ✅
+    // card. The live card drops `completed` rows — the row survives in
+    // goal_state after the turn-end judge marks it done, and without this
+    // filter every NEWLY primed plan's card re-rendered the old goal text
+    // (live instance: session 2fae1230, 2026-09-03). The flow path keeps its
+    // own turn-local retained_goal guard for same-turn sighting.
     let goal = if checklist.is_some() {
         load_goal_section(agent, session_id)
             .await
-            .map(|(text, completed)| GoalSection { text, completed })
+            .filter(|g| !g.completed)
     } else {
         None
     };
     let use_rich = Config::current().channels.telegram.rich_messages;
 
-    // Try rich path first when enabled: sendRichMessage (32K, native
-    // <details><summary> collapsibles) with reply_markup for the keyboard.
+    // #155: a plan review in flight grays the Review button and explains
+    // itself in the footer; a finished review leaves its one-line delta there.
+    let reviewing = state.is_plan_reviewing(session_id).await;
+    let running_note = state.plan_review_running_note(session_id).await;
+    let delta = state.plan_review_delta(session_id).await;
+    let plan_kb = plan_review_effective_kb(plan_kb, reviewing);
+    let footer_note = plan_review_footer_note(plan_kb, reviewing, running_note, delta);
+
+    // Try rich path first when enabled: sendRichMessage (32K) as the
+    // markdown+media dialect (#134 family) — raw markdown prose with inline
+    // details/summary collapsibles (probe-proven, 2026-09-10) and rendered
+    // mermaid diagrams riding the media array instead of a bare HTML string
+    // that drops every diagram (the defect HQ's card exposed). The assembled
+    // body resolves through `resolve_markdown_media` exactly ONCE, so diagN
+    // numbering is stable per body.
     if use_rich
-        && let Some(rich_html) = render_plan_card_rich_html(
+        && let Some(md) = render_plan_card_markdown(
             title.as_deref(),
             checklist.as_deref(),
             prose.as_deref(),
@@ -370,13 +901,35 @@ pub(crate) async fn refresh_plan_card(
         )
         .await
     {
+        let (rich_md, media) = super::rich::mermaid::resolve_markdown_media(&md).await;
+        // A `tg://photo?id=X` reference with no matching media entry is a
+        // whole-message 400 (`RICH_MESSAGE_PHOTO_INVALID`); prose can carry
+        // one as an example. Neutralise orphans AFTER resolution so the refs
+        // the resolver just created keep resolving.
+        let rich_md = super::rich::mermaid::neutralize_orphan_photo_refs(&rich_md, &media);
+        let rich_md = super::rich::normalize_tables(&rich_md);
+        // #155 footer rides the body, so it lands inside the signature below —
+        // a footer-only change (review started, or a new delta) must re-render.
+        let rich_md = plan_card_with_footer(rich_md, footer_note.as_deref(), true);
         let kb_val = plan_kb
             .keyboard()
             .and_then(|m| serde_json::to_value(m).ok());
-        let rich_sig = format!("rich:{rich_html}\u{1}{plan_kb:?}");
+        // Sig covers the media array too: identical prose with a changed
+        // diagram (re-render bytes/url) must not sig-skip.
+        let rich_sig = format!(
+            "richmd:{rich_md}\u{1}{:?}\u{1}{plan_kb:?}",
+            media
+                .iter()
+                .map(|m| (
+                    m.id.clone(),
+                    m.url.clone(),
+                    m.bytes.as_ref().map(|b| b.len())
+                ))
+                .collect::<Vec<_>>()
+        );
         if let Some((mid, last_sig)) = state.plan_card(session_id).await {
             if last_sig == rich_sig {
-                return;
+                return true;
             }
             // G2 flood governor (#1211): plan-card refreshes are FINAL class —
             // never dropped. When the edit bucket is empty the payload queues
@@ -385,31 +938,32 @@ pub(crate) async fn refresh_plan_card(
             // (a permanently failed queue drain self-heals on the next
             // differing-content plan change). Media and keyboard ride the
             // queued final via edit_admission_media_kb (owner law: extend,
-            // never bypass the governor, #155, #229).
+            // never bypass the governor, #155).
             let admitted = super::governor::edit_admission_media_kb(
                 bot,
                 chat,
                 mid,
                 super::governor::EditClass::Final,
-                rich_html.clone(),
+                rich_md.clone(),
                 true,
-                Vec::new(),
+                media.clone(),
                 kb_val.clone(),
-                super::governor::FinalDialect::Html,
+                super::governor::FinalDialect::Markdown,
             )
             .await;
             if !admitted {
                 state
                     .set_plan_card(session_id, chat, thread_id, mid, rich_sig)
                     .await;
-                return;
+                return true;
             }
-            match super::rich::api::edit_rich_html(
+            match super::rich::api::edit_rich_markdown_media(
                 bot.api_url().as_str(),
                 bot.token(),
                 chat.0,
                 mid.0,
-                &rich_html,
+                &rich_md,
+                &media,
                 kb_val.as_ref(),
                 "turn",
                 "-",
@@ -420,7 +974,7 @@ pub(crate) async fn refresh_plan_card(
                     state
                         .set_plan_card(session_id, chat, thread_id, mid, rich_sig)
                         .await;
-                    return;
+                    return true;
                 }
                 Err(e) => {
                     let outcome = handle_edit_failure(
@@ -434,7 +988,7 @@ pub(crate) async fn refresh_plan_card(
                     )
                     .await;
                     match outcome {
-                        EditOutcome::Saved | EditOutcome::Suppressed => return,
+                        EditOutcome::Saved | EditOutcome::Suppressed => return true,
                         EditOutcome::Gone => { /* fall through to create */ }
                     }
                 }
@@ -443,12 +997,14 @@ pub(crate) async fn refresh_plan_card(
         // No live card or edit failed: create fresh via rich API.
         // G3 send pacing (#1211): a fresh card is a full message post.
         super::governor::pace_send(chat).await;
-        match super::rich::api::send_rich_html_id(
+        match super::rich::api::send_rich_markdown_media_target_id(
             bot.api_url().as_str(),
             bot.token(),
             chat.0,
             thread_id,
-            &rich_html,
+            None,
+            &rich_md,
+            &media,
             kb_val.as_ref(),
             "turn",
             "-",
@@ -459,7 +1015,7 @@ pub(crate) async fn refresh_plan_card(
                 state
                     .set_plan_card(session_id, chat, thread_id, MessageId(mid), rich_sig)
                     .await;
-                return;
+                return true;
             }
             Err(e) => {
                 tracing::warn!("Rich plan card create failed: {e} — falling back to HTML");
@@ -489,14 +1045,17 @@ pub(crate) async fn refresh_plan_card(
         } else {
             remove_plan_card_locked(bot, chat, state, session_id).await;
         }
-        return;
+        return true;
     };
+    // #155: footer rides the body, so it lands inside `signature` below — a
+    // footer-only change (review started, or a new delta) must re-render.
+    let html = plan_card_with_footer(html, footer_note.as_deref(), false);
     let kb = plan_kb.keyboard();
     let signature = format!("{html}\u{1}{plan_kb:?}");
 
     if let Some((mid, last_sig)) = state.plan_card(session_id).await {
         if last_sig == signature {
-            return;
+            return true;
         }
         // G2 flood governor (#1211): same FINAL contract as the rich path —
         // queue latest-wins when the edit bucket is empty, never drop.
@@ -513,7 +1072,7 @@ pub(crate) async fn refresh_plan_card(
             state
                 .set_plan_card(session_id, chat, thread_id, mid, signature)
                 .await;
-            return;
+            return true;
         }
         let mut req = bot
             .edit_message_text(chat, mid, html.clone())
@@ -526,7 +1085,7 @@ pub(crate) async fn refresh_plan_card(
                 state
                     .set_plan_card(session_id, chat, thread_id, mid, signature)
                     .await;
-                return;
+                return true;
             }
             Err(e) => {
                 let outcome = handle_edit_failure(
@@ -540,7 +1099,7 @@ pub(crate) async fn refresh_plan_card(
                 )
                 .await;
                 match outcome {
-                    EditOutcome::Saved | EditOutcome::Suppressed => return,
+                    EditOutcome::Saved | EditOutcome::Suppressed => return true,
                     EditOutcome::Gone => { /* fall through to create */ }
                 }
             }
@@ -564,6 +1123,7 @@ pub(crate) async fn refresh_plan_card(
             handle_create_failure(&e.to_string(), state, session_id).await;
         }
     }
+    true
 }
 
 /// Delete the session's plan card and stop tracking it. Used both as terminal
@@ -651,7 +1211,7 @@ async fn finalize_plan_card_locked(
     state: &Arc<TelegramState>,
     session_id: Uuid,
 ) -> bool {
-    let Some((mid, _sig)) = state.plan_card(session_id).await else {
+    let Some((_mid, _sig)) = state.plan_card(session_id).await else {
         // Nothing tracked: finalized once already, or never posted (card
         // tracking is in-memory — a restart empties it). Either way
         // deliberately NOT reposting is what kills resurrection. Consume
@@ -687,17 +1247,23 @@ async fn finalize_plan_card_locked(
         armed: true,
     };
     let (title, checklist) = super::flow_chrome::plan_document_sections(&doc);
-    let empty_kb = serde_json::json!({ "inline_keyboard": [] });
+    let plan_kb = super::flow_chrome::PlanKb::CompletedReview;
+    let empty_kb = plan_kb
+        .keyboard()
+        .and_then(|m| serde_json::to_value(m).ok())
+        .unwrap_or_else(|| serde_json::json!({ "inline_keyboard": [] }));
 
     let use_rich = Config::current().channels.telegram.rich_messages;
 
-    // Completed forms, mirrored dual-path as in refresh_plan_card.
+    // Completed forms, mirrored dual-path as in refresh_plan_card. The rich
+    // form rides the markdown dialect now (#134 family) — checklist-only
+    // body, no media; the ✅/notice chrome is markdown-bold + plain italic.
     let rich = if use_rich {
-        render_plan_card_rich_html(title.as_deref(), checklist.as_deref(), None, None)
+        render_plan_card_markdown(title.as_deref(), checklist.as_deref(), None, None)
             .await
             .map(|mut r| {
                 r = r.replacen("📋", "✅", 1);
-                r.push_str("\n<i>Plan completed and archived.</i>");
+                r.push_str("\n*Plan completed and archived.*");
                 r
             })
     } else {
@@ -716,12 +1282,14 @@ async fn finalize_plan_card_locked(
     if use_rich && let Some(rich) = &rich {
         // G3 send pacing (#1211): a fresh card is a full message post.
         super::governor::pace_send(chat).await;
-        match super::rich::api::send_rich_html_id(
+        match super::rich::api::send_rich_markdown_media_target_id(
             bot.api_url().as_str(),
             bot.token(),
             chat.0,
             thread_id,
+            None,
             rich,
+            &[],
             Some(&empty_kb),
             "turn",
             "-",
@@ -735,10 +1303,14 @@ async fn finalize_plan_card_locked(
     if posted.is_none() {
         // G3 send pacing (#1211): a fresh card is a full message post.
         super::governor::pace_send(chat).await;
-        let req = message_in_thread(bot, chat, thread_id, html.clone()).parse_mode(ParseMode::Html);
+        let mut req =
+            message_in_thread(bot, chat, thread_id, html.clone()).parse_mode(ParseMode::Html);
+        if let Some(markup) = plan_kb.keyboard() {
+            req = req.reply_markup(markup);
+        }
         match req.await {
             Ok(m) => posted = Some(m.id),
-            Err(e) => tracing::warn!("Telegram plan card restick post failed ({mid:?}): {e}"),
+            Err(e) => tracing::warn!("Telegram plan card restick post failed: {e}"),
         }
     }
 
@@ -790,12 +1362,13 @@ async fn finalize_plan_card_locked(
             };
             let mut edited = false;
             if use_rich && let Some(rich) = &rich {
-                match super::rich::api::edit_rich_html(
+                match super::rich::api::edit_rich_markdown_media(
                     bot.api_url().as_str(),
                     bot.token(),
                     chat.0,
                     mid.0,
                     rich,
+                    &[],
                     Some(&empty_kb),
                     "turn",
                     "-",
@@ -809,12 +1382,13 @@ async fn finalize_plan_card_locked(
                 }
             }
             if !edited {
-                match bot
+                let mut req = bot
                     .edit_message_text(chat, mid, html.clone())
-                    .parse_mode(teloxide::types::ParseMode::Html)
-                    .reply_markup(super::suggest_options::empty_keyboard())
-                    .await
-                {
+                    .parse_mode(teloxide::types::ParseMode::Html);
+                if let Some(markup) = plan_kb.keyboard() {
+                    req = req.reply_markup(markup);
+                }
+                match req.await {
                     Ok(_) => edited = true,
                     Err(e) => {
                         tracing::warn!("Telegram plan card finalize edit failed ({mid:?}): {e}")
@@ -861,6 +1435,11 @@ pub(crate) async fn remove_plan_card(
     // instead: the lock is not reentrant, so re-acquiring it deadlocks.
     let card_lock = state.plan_card_lock(session_id).await;
     let _guard = card_lock.lock().await;
+    // #155: the card is going away, so the review footer goes with it — a
+    // stale "✨ Review: …" must never resurface on a later plan in the same
+    // session (the same stale-chrome family the goal-scoping filter fixed).
+    state.clear_plan_review_delta(session_id).await;
+    state.clear_plan_review_running_note(session_id).await;
     remove_plan_card_locked(bot, chat, state, session_id).await;
 }
 

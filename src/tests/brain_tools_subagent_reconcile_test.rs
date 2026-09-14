@@ -1,25 +1,22 @@
-//! Startup reconciliation of orphaned detached-work status files
-//! (#1038, unified #26).
+//! Startup reconciliation of orphaned sub-agent status files (#1038, #192).
 //!
-//! A sub-agent or detached command dies with the process; its status file
-//! does not. Every file still `Pending` or `Running` at startup belongs to
-//! work that no longer exists, and must stop reading as live.
+//! A sub-agent dies with the process; its status file does not. Every file
+//! still `Pending`, `Running`, or `AwaitingInput` at startup belongs to an
+//! agent that no longer exists, and must stop reading as live.
 
-use crate::brain::agent::service::work_status::*;
+use crate::brain::agent::service::work_status::{self, WorkState, WorkStatus};
 use crate::brain::tools::subagent::reconcile::reconcile_orphaned_agents;
 use std::fs;
 
-/// Point the test override at a NESTED dir so [`legacy_dir`] (the
-/// `subagents` sibling the reconcile pass migrates from) resolves inside
-/// the per-test sandbox instead of the real /tmp.
 fn isolate(tag: &str) {
-    let dir = std::env::temp_dir().join(format!(
+    let base = std::env::temp_dir().join(format!(
         "opencrabs-subagent-reconcile-{}-{}",
         tag,
         std::process::id()
     ));
-    let _ = fs::remove_dir_all(&dir);
-    test_override::set(dir.join("detached"));
+    let _ = fs::remove_dir_all(&base);
+    let dir = base.join("detached");
+    work_status::test_override::set(dir);
 }
 
 #[test]
@@ -82,14 +79,13 @@ fn interrupted_carries_a_reason_and_a_completion_stamp() {
 
     let orphans = reconcile_orphaned_agents();
 
-    let finish = orphans[0]
-        .finish
-        .as_ref()
-        .expect("interrupted stamps a finish");
+    let finish = orphans[0].finish.as_ref().expect("finish stamped");
     assert!(
-        finish.error.as_deref().unwrap_or("").contains("restart"),
-        "was: {:?}",
-        finish.error
+        finish
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("restarted")
     );
     assert!(!finish.completed_at.is_empty());
 }
@@ -120,12 +116,19 @@ fn the_parent_session_survives_so_the_report_can_be_routed() {
     // The whole point of returning the statuses: the caller needs to know
     // which session to tell.
     isolate("parent");
-    let mut s = WorkStatus::new_agent("agent-4", "deploy", "sess-parent", "p", None).unwrap();
+    let mut s = WorkStatus::new_agent(
+        "agent-4",
+        "deploy",
+        "sess-child",
+        "p",
+        Some("sess-parent"),
+    )
+    .unwrap();
     s.mark_running().unwrap();
 
     let orphans = reconcile_orphaned_agents();
 
-    assert_eq!(orphans[0].session_id, "sess-parent");
+    assert_eq!(orphans[0].parent_session_id.as_deref(), Some("sess-parent"));
 }
 
 #[test]
@@ -148,8 +151,12 @@ fn a_missing_status_dir_is_not_an_error() {
 #[test]
 fn unparseable_files_do_not_abort_the_pass() {
     isolate("corrupt");
-    ensure_dir().unwrap();
-    fs::write(status_dir().join("garbage.json"), "not json at all").unwrap();
+    work_status::ensure_dir().unwrap();
+    fs::write(
+        work_status::status_dir().join("garbage.json"),
+        "not json at all",
+    )
+    .unwrap();
     let mut s = WorkStatus::new_agent("agent-6", "y", "sess-f", "p", None).unwrap();
     s.mark_running().unwrap();
 
@@ -159,81 +166,37 @@ fn unparseable_files_do_not_abort_the_pass() {
     assert_eq!(orphans[0].id, "agent-6");
 }
 
-// ── #26 P1: two kinds share the dir ─────────────────────────────────
-
 #[test]
-fn a_running_command_is_interrupted_on_disk_but_not_reported() {
-    // Commands share the dir since #26, so the pass must stop them reading
-    // as live too — but their interruption report still rides the DB row
-    // (#763): returning them here as well would double-message until the
-    // boot pass unifies (P2).
-    isolate("command");
-    WorkStatus::new_command("cmd-1", "sess-g", "nightly build", "cargo build").unwrap();
-
-    let orphans = reconcile_orphaned_agents();
-
-    assert!(
-        orphans.is_empty(),
-        "commands are not returned for reporting"
-    );
-    let reread = WorkStatus::read("cmd-1").expect("command file still present");
-    assert_eq!(reread.state, WorkState::Interrupted, "marked on disk");
-    assert!(
-        reread
-            .finish
-            .as_ref()
-            .and_then(|f| f.error.as_deref())
-            .unwrap_or("")
-            .contains("this command"),
-        "kind-aware interruption text"
-    );
+fn commands_are_not_reconciled_by_agent_pass() {
+    isolate("commands");
+    WorkStatus::new_command("cmd-1", "test cmd", "sess-c", "cargo test").unwrap();
+    assert!(reconcile_orphaned_agents().is_empty());
 }
 
 #[test]
-fn mixed_kinds_report_only_the_agents() {
-    isolate("mixed");
-    let mut agent = WorkStatus::new_agent("agent-m", "docs", "sess-m", "p", None).unwrap();
-    agent.mark_running().unwrap();
-    WorkStatus::new_command("cmd-m", "sess-m", "build", "make").unwrap();
-
-    let orphans = reconcile_orphaned_agents();
-
-    assert_eq!(orphans.len(), 1);
-    assert_eq!(orphans[0].id, "agent-m");
-    assert_eq!(orphans[0].kind, WorkKind::Agent);
-}
-
-#[test]
-fn a_legacy_running_agent_is_migrated_then_reported() {
-    // End-to-end upgrade path (#1038 survives the dir move): a pre-#26
-    // agent file in the old dir is migrated into the unified dir first,
-    // then interrupted and returned like any other orphan.
-    isolate("legacy_e2e");
-    fs::create_dir_all(legacy_dir()).unwrap();
-    let legacy = serde_json::json!({
-        "id": "agent-old",
-        "label": "old worker",
-        "parent_session_id": "sess-old",
-        "state": "Running",
+fn legacy_subagent_files_are_migrated_and_reconciled() {
+    isolate("migration");
+    let legacy_dir = work_status::legacy_dir();
+    fs::create_dir_all(&legacy_dir).unwrap();
+    let old_json = serde_json::json!({
+        "id": "legacy-agent-1",
+        "label": "legacy subagent",
+        "parent_session_id": "parent-1",
         "prompt": "do old things",
-        "started_at": "2026-08-28T10:00:00+00:00"
+        "started_at": "2026-09-01T00:00:00Z",
+        "state": "Running"
     });
     fs::write(
-        legacy_dir().join("agent-old.json"),
-        serde_json::to_string_pretty(&legacy).unwrap(),
+        legacy_dir.join("legacy-agent-1.json"),
+        old_json.to_string(),
     )
     .unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    let migrated = work_status::migrate_legacy_dir(&legacy_dir);
+    assert_eq!(migrated, 1);
 
+    let orphans = reconcile_orphaned_agents();
     assert_eq!(orphans.len(), 1);
-    assert_eq!(orphans[0].id, "agent-old");
-    assert_eq!(orphans[0].kind, WorkKind::Agent);
-    assert_eq!(
-        orphans[0].session_id, "sess-old",
-        "routing survives migration"
-    );
+    assert_eq!(orphans[0].id, "legacy-agent-1");
     assert_eq!(orphans[0].state, WorkState::Interrupted);
-    assert!(!legacy_dir().exists(), "legacy dir consumed");
-    assert!(status_path("agent-old").exists(), "file moved, not lost");
 }

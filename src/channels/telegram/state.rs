@@ -249,6 +249,30 @@ pub struct TelegramState {
     ///
     /// Per session, so unrelated chats never wait on each other.
     plan_card_locks: Mutex<HashMap<Uuid, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    /// Sessions with a plan-review subagent in flight (#155). While set, the
+    /// plan card's Review button renders grayed and a second tap is refused,
+    /// so one Editing plan can never accumulate concurrent rewrites of the
+    /// same `.md`.
+    plan_reviewing: Mutex<HashMap<Uuid, bool>>,
+    /// Last completed plan review's one-line delta, per session (#155). Shown
+    /// as the card footer until the next review replaces it or the card goes
+    /// away — this is what makes the review's result visible without the
+    /// owner having to read the subagent's full report.
+    plan_review_deltas: Mutex<HashMap<Uuid, String>>,
+    /// Running note or live progress for an in-flight plan review, per session.
+    plan_review_running_notes: Mutex<HashMap<Uuid, String>>,
+    /// Sub-agent id of the plan review currently in flight, per session (#155).
+    /// Its PRESENCE is the cancellation handle: `plan:no` reads it to stop a
+    /// running review, which would otherwise keep rewriting the plan (and
+    /// re-posting the card) minutes after the owner discarded it.
+    plan_review_children: Mutex<HashMap<Uuid, String>>,
+    /// Sessions whose in-flight plan review has been asked to STOP (#155 D1).
+    /// A discard can land between `set_plan_reviewing(true)` and the review
+    /// publishing its child id — a window seconds wide, spanning a card refresh
+    /// and the whole `spawn_agent` setup. In that window there is no id to
+    /// cancel, so the intent is recorded here and honoured at publish time;
+    /// without it the reviewer ran on and rewrote the plan after a discard.
+    plan_review_cancels: Mutex<HashMap<Uuid, bool>>,
     /// Photo batching buffer: (chat_id, user_id, media_group_id) → Vec<(img_marker, Option<caption>)>
     /// When user sends multiple photos in an album, we buffer them and only fire the agent
     /// after a quiet period (no new photos for 3s). Keyed by media_group_id to avoid merging
@@ -436,6 +460,11 @@ impl TelegramState {
             enqueue_callback: Mutex::new(None),
             plan_card_backoff: Mutex::new(HashMap::new()),
             plan_card_locks: Mutex::new(HashMap::new()),
+            plan_reviewing: Mutex::new(HashMap::new()),
+            plan_review_deltas: Mutex::new(HashMap::new()),
+            plan_review_running_notes: Mutex::new(HashMap::new()),
+            plan_review_children: Mutex::new(HashMap::new()),
+            plan_review_cancels: Mutex::new(HashMap::new()),
             photo_buffer: Mutex::new(HashMap::new()),
             photo_debounce: Mutex::new(HashMap::new()),
             text_buffer: Mutex::new(HashMap::new()),
@@ -931,10 +960,34 @@ impl TelegramState {
             .and_then(|e| e.host.clone())
     }
 
-    /// #59: peek the dead-host record of a #597-cleared stash entry WITHOUT
-    /// consuming it — the stale-shell tap needs the host SHAPE (rich body
-    /// buttons vs glued/classic reply-markup) to pick the right strip; the
-    /// record is forgotten only after the strip succeeds (`forget_stale_host`).
+    /// #91: does any live suggestion keyboard — pending or stale-but-not-yet-
+    /// stripped — already ride this message? The cross-turn glue refuses such
+    /// targets: a second keyboard on one bubble breaks the first one's taps,
+    /// and a #59 stale strip would later rip the glue's fresh buttons off.
+    pub(crate) async fn message_hosts_live_keyboard(
+        &self,
+        mid: teloxide::types::MessageId,
+    ) -> bool {
+        if self
+            .pending_followups
+            .lock()
+            .await
+            .values()
+            .any(|e| e.host.as_ref().is_some_and(|h| h.message_id == mid))
+        {
+            return true;
+        }
+        self.stale_hosts
+            .lock()
+            .await
+            .iter()
+            .any(|(_, h)| h.message_id == mid)
+    }
+
+    /// #59: the host shape of an expired token's bubble, if its keyboard
+    /// still renders somewhere. Read-only — the record survives until the
+    /// strip is confirmed, so repeated taps on the same zombie stay
+    /// log-attributable instead of silently degrading to the blind strip.
     pub(crate) async fn peek_stale_host(&self, token: &str) -> Option<MergedHost> {
         self.stale_hosts
             .lock()
@@ -1195,7 +1248,10 @@ impl TelegramState {
     }
 
     /// Give the session binding map durable backing. Called at startup (#170).
-    pub(crate) async fn set_binding_store(&self, repo: crate::db::SessionBindingRepository) {
+    pub(crate) async fn set_binding_store(
+        &self,
+        repo: crate::db::SessionBindingRepository,
+    ) {
         *self.binding_store.lock().await = Some(repo);
     }
 
@@ -1208,34 +1264,42 @@ impl TelegramState {
     }
 
     /// Authoritative method to bind a session to a chat/topic (#170).
-    /// Updates in-memory mappings, persistent database storage, session delivery route,
-    /// turn probe, and channel ownership probe.
+    /// Updates in-memory maps, sync ownership mirror, persistent database storage,
+    /// session delivery route, turn probe, and channel ownership probe.
     pub async fn bind_session_topic(
         self: &std::sync::Arc<Self>,
         session_id: Uuid,
         chat_id: i64,
         topic_id: Option<i32>,
+        origin: crate::db::repository::session_binding::BindingOrigin,
     ) -> Result<(), String> {
         // 1. In-memory mappings + sync ownership mirror
-        self.register_session_chat(session_id, chat_id, topic_id)
-            .await;
+        self.register_session_chat(session_id, chat_id, topic_id).await;
 
         // 2. Persistent storage
         let store = self.binding_store.lock().await.clone();
+        #[allow(clippy::collapsible_if)]
         if let Some(repo) = store {
-            repo.upsert(
-                session_id.to_string(),
-                "telegram",
-                &chat_id.to_string(),
-                topic_id,
-            )
-            .await
-            .map_err(|e| format!("could not persist session binding for {session_id}: {e}"))?;
+            if let Err(e) = repo
+                .upsert(
+                    session_id.to_string(),
+                    "telegram",
+                    &chat_id.to_string(),
+                    topic_id,
+                    origin,
+                )
+                .await
+            {
+                tracing::warn!("bind_session_topic: could not persist session binding for {session_id}: {e}");
+            }
         }
 
         // 3. Session routing
         let enqueue = self.enqueue_callback.lock().await.clone();
-        crate::brain::agent::service::session_routes::claim_for_channel(session_id, enqueue);
+        crate::brain::agent::service::session_routes::claim_for_channel(
+            session_id,
+            enqueue,
+        );
 
         // 4. Probes
         {
@@ -1395,6 +1459,126 @@ impl TelegramState {
             tracing::warn!("Failed to clear plan card for session {session_id}: {e}");
         }
         existing
+    }
+
+    /// True while a plan-review subagent is rewriting this session's plan
+    /// (#155). Read by the card renderer (grays the Review button) and by the
+    /// callback (refuses a second tap), so one Editing plan can never
+    /// accumulate concurrent rewrites of the same `.md`.
+    pub(crate) async fn is_plan_reviewing(&self, session_id: Uuid) -> bool {
+        self.plan_reviewing
+            .lock()
+            .await
+            .get(&session_id)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Set or clear the plan-review-in-flight flag for `session_id` (#155).
+    pub(crate) async fn set_plan_reviewing(&self, session_id: Uuid, reviewing: bool) {
+        let mut guard = self.plan_reviewing.lock().await;
+        if reviewing {
+            guard.insert(session_id, true);
+        } else {
+            guard.remove(&session_id);
+        }
+    }
+
+    /// The last completed plan review's one-line delta for `session_id` (#155),
+    /// rendered as the card footer until the next review replaces it.
+    pub(crate) async fn plan_review_delta(&self, session_id: Uuid) -> Option<String> {
+        self.plan_review_deltas
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+    }
+
+    /// Record the one-line delta of a finished plan review (#155).
+    pub(crate) async fn set_plan_review_delta(&self, session_id: Uuid, delta: String) {
+        self.plan_review_deltas
+            .lock()
+            .await
+            .insert(session_id, delta);
+    }
+
+    /// Running note or live progress for a plan review in flight.
+    pub(crate) async fn plan_review_running_note(&self, session_id: Uuid) -> Option<String> {
+        self.plan_review_running_notes
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+    }
+
+    /// Record the live progress note of an in-flight plan review.
+    pub(crate) async fn set_plan_review_running_note(&self, session_id: Uuid, note: String) {
+        self.plan_review_running_notes
+            .lock()
+            .await
+            .insert(session_id, note);
+    }
+
+    /// Clear the live progress note of a plan review.
+    pub(crate) async fn clear_plan_review_running_note(&self, session_id: Uuid) {
+        self.plan_review_running_notes
+            .lock()
+            .await
+            .remove(&session_id);
+    }
+
+    /// Sub-agent id of the plan review in flight for `session_id` (#155).
+    /// `Some` means a review is running and can be cancelled by that id.
+    pub(crate) async fn plan_review_child(&self, session_id: Uuid) -> Option<String> {
+        self.plan_review_children
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+    }
+
+    /// Publish the sub-agent id of a plan review that has just started (#155),
+    /// so the discard path has something to cancel.
+    pub(crate) async fn set_plan_review_child(&self, session_id: Uuid, child_id: String) {
+        self.plan_review_children
+            .lock()
+            .await
+            .insert(session_id, child_id);
+    }
+
+    /// Forget the in-flight review's id once it is terminal or cancelled (#155).
+    pub(crate) async fn clear_plan_review_child(&self, session_id: Uuid) {
+        self.plan_review_children.lock().await.remove(&session_id);
+    }
+
+    /// Ask the in-flight plan review for `session_id` to stop (#155 D1).
+    ///
+    /// Safe to call when the review has NOT yet published its child id: the
+    /// review checks this the moment it publishes, so a discard that lands in
+    /// that window still stops it instead of letting it rewrite the plan.
+    pub(crate) async fn request_plan_review_cancel(&self, session_id: Uuid) {
+        self.plan_review_cancels
+            .lock()
+            .await
+            .insert(session_id, true);
+    }
+
+    /// Consume a pending plan-review cancel request (#155 D1).
+    ///
+    /// `remove`, not `get`: a request belongs to exactly ONE review, so a stale
+    /// flag can never stop the next review the owner starts.
+    pub(crate) async fn take_plan_review_cancel(&self, session_id: Uuid) -> bool {
+        self.plan_review_cancels
+            .lock()
+            .await
+            .remove(&session_id)
+            .unwrap_or(false)
+    }
+
+    /// Forget the plan-review delta for `session_id` (#155) — called when the
+    /// plan leaves Editing, so a stale delta never shows on a later plan.
+    pub(crate) async fn clear_plan_review_delta(&self, session_id: Uuid) {
+        self.plan_review_deltas.lock().await.remove(&session_id);
     }
 
     /// Mark `session_id` as having a turn in flight, returning an RAII guard

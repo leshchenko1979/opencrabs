@@ -13,6 +13,7 @@ pub(crate) mod compaction_prompts;
 pub(crate) mod compaction_stream;
 pub(crate) mod context;
 pub(crate) mod context_rows;
+pub(crate) mod detached_status;
 pub(crate) mod work_status;
 #[allow(unused_imports)] // only used in test code
 pub(crate) use context::{format_editing_reminder, format_plan_reminder, plan_state_block};
@@ -24,6 +25,7 @@ pub(crate) mod helpers;
 pub(crate) mod loop_break;
 mod messaging;
 mod model_refresh;
+pub(crate) mod notify_journal;
 pub(crate) mod notify_policy;
 pub(crate) mod notify_queue;
 pub(crate) mod notify_receipts;

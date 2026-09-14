@@ -69,10 +69,7 @@ async fn test_atomic_write_preserves_permissions() {
     perms.set_mode(0o755);
     fs::set_permissions(&file_path, perms).expect("set permissions");
 
-    let original_mode = fs::metadata(&file_path)
-        .expect("metadata")
-        .permissions()
-        .mode();
+    let original_mode = fs::metadata(&file_path).expect("metadata").permissions().mode();
 
     atomic_write_file(&file_path, b"#!/bin/sh\necho new run\n")
         .await

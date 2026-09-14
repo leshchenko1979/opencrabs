@@ -1,5 +1,7 @@
 use super::builder::AgentService;
+use super::compaction::CompactionOutcome;
 use super::compaction_notice::CompactionNotifier;
+use super::compaction_prompts::CompactionKind;
 use super::types::*;
 use crate::brain::agent::context::AgentContext;
 use crate::brain::agent::error::{AgentError, Result};
@@ -45,6 +47,141 @@ pub(crate) fn check_intra_turn_time_marker(
         Some((format!("[System: Current time: {time_str}]"), now))
     } else {
         None
+    }
+}
+
+/// Default inline byte threshold for tool results before disk spilling (16 KB ≈ 4,000 tokens).
+pub(crate) const DEFAULT_MAX_INLINE_TOOL_BYTES: usize = 16_000;
+
+/// Absolute hard limit on tool result characters when spilling is disabled (50 KB).
+pub(crate) const MAX_TOOL_RESULT_CHARS: usize = 50_000;
+
+/// Number of head lines to keep in truncated preview.
+pub(crate) const PREVIEW_HEAD_LINES: usize = 40;
+
+/// Number of tail lines to keep in truncated preview.
+pub(crate) const PREVIEW_TAIL_LINES: usize = 40;
+
+/// Destination directory for spilled tool output logs.
+pub(crate) const TOOL_OUTPUT_DIR: &str = "/tmp/opencrabs/tool_output";
+
+/// Process and cap tool result content blocks.
+/// Offloads oversized outputs (>16 KB default or custom `max_output_bytes`) to disk
+/// at `/tmp/opencrabs/tool_output/session_{session_id}_{call_id}.log` with 40-line head/tail preview,
+/// or clamps inline if `spill_to_disk` is false.
+pub(crate) async fn process_tool_results_capping(
+    session_id: Uuid,
+    tool_results: &mut [ContentBlock],
+    tool_inputs_by_id: &std::collections::HashMap<&str, (&str, &Value)>,
+) {
+    for block in tool_results.iter_mut() {
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        } = block
+        {
+            let (max_output_bytes, spill_to_disk) = tool_inputs_by_id
+                .get(tool_use_id.as_str())
+                .map(|(_, input)| {
+                    let max_bytes = input
+                        .get("max_output_bytes")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as usize);
+                    let spill = input
+                        .get("spill_to_disk")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    (max_bytes, spill)
+                })
+                .unwrap_or((None, true));
+
+            let effective_limit = max_output_bytes.unwrap_or(DEFAULT_MAX_INLINE_TOOL_BYTES);
+            if content.len() <= effective_limit {
+                continue;
+            }
+
+            let total_bytes = content.len();
+            let total_lines = content.lines().count();
+
+            if spill_to_disk {
+                // Sanitize tool_use_id for filesystem safety
+                let sanitized_id: String = tool_use_id
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect();
+                let file_path = format!("{}/session_{}_{}.log", TOOL_OUTPUT_DIR, session_id, sanitized_id);
+
+                // Write full raw content to disk
+                if let Err(e) = tokio::fs::create_dir_all(TOOL_OUTPUT_DIR).await {
+                    tracing::warn!("Failed to create tool output dir {TOOL_OUTPUT_DIR}: {e}");
+                }
+                if let Err(e) = tokio::fs::write(&file_path, content.as_bytes()).await {
+                    tracing::warn!("Failed to write spilled tool output to {file_path}: {e}");
+                }
+
+                // Format head and tail preview
+                let lines: Vec<&str> = content.lines().collect();
+                let preview_text = if lines.len() > (PREVIEW_HEAD_LINES + PREVIEW_TAIL_LINES) {
+                    let head = lines[..PREVIEW_HEAD_LINES].join("\n");
+                    let tail = lines[lines.len() - PREVIEW_TAIL_LINES..].join("\n");
+                    let skipped = lines.len() - (PREVIEW_HEAD_LINES + PREVIEW_TAIL_LINES);
+                    format!("{head}\n\n[... {skipped} lines omitted ...]\n\n{tail}")
+                } else {
+                    // Lines count <= 80 but byte length > effective_limit (e.g. few very long lines)
+                    let half_budget = effective_limit / 2;
+                    let mut head_cut = half_budget.min(content.len());
+                    while head_cut > 0 && !content.is_char_boundary(head_cut) {
+                        head_cut -= 1;
+                    }
+                    let head = &content[..head_cut];
+
+                    let mut tail_start = content.len().saturating_sub(half_budget);
+                    while tail_start < content.len() && !content.is_char_boundary(tail_start) {
+                        tail_start += 1;
+                    }
+                    let tail = &content[tail_start..];
+                    format!("{head}\n\n[... content omitted ...]\n\n{tail}")
+                };
+
+                *content = format!(
+                    "{preview_text}\n\n[Output truncated: {total_bytes} bytes ({total_lines} lines) exceeded {effective_limit} bytes limit.\n\
+                     Full output saved to: {file_path}\n\
+                     To inspect: use read_file with start_line/line_count, grep on the file, or call with max_output_bytes / spill_to_disk=false.]"
+                );
+
+                tracing::warn!(
+                    "Tool result content spilled to disk: {} → {} bytes (path: {})",
+                    total_bytes,
+                    content.len(),
+                    file_path
+                );
+            } else {
+                // Hard clamp inline without writing to disk
+                let max_clamp = max_output_bytes.unwrap_or(MAX_TOOL_RESULT_CHARS);
+                let mut cut = max_clamp.min(content.len());
+                while cut > 0 && !content.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                content.truncate(cut);
+                content.push_str(&format!(
+                    "\n\n[Output truncated: {} bytes ({} lines) exceeded {} bytes limit (spill_to_disk=false).\n\
+                     Re-call with start_line/line_count (read_file), head/tail, grep --max-count, or set a larger max_output_bytes.]",
+                    total_bytes, total_lines, effective_limit
+                ));
+                tracing::warn!(
+                    "Tool result content clamped inline (no spill): {} �� {} bytes",
+                    total_bytes,
+                    content.len()
+                );
+            }
+        }
     }
 }
 
@@ -491,43 +628,63 @@ impl AgentService {
         session_id: Uuid,
         kind: super::compaction_prompts::CompactionKind,
     ) -> String {
-        // Union (issue #131): slash-invoked skills (#219 registry) plus
-        // skills the session CONSUMED by reading (seen_skills registry) —
-        // the inventory must reflect every way the agent loaded a skill.
-        // Deduped by BTreeSet; slash-invocation wins nothing extra because
-        // both registries store the same slug strings.
-        let active: std::collections::BTreeSet<String> = self
-            .active_skills_for_session(session_id)
-            .into_iter()
-            .collect();
-        // Epoch bump (#150) BEFORE the seen-inventory read below is NOT
-        // required and after it is not harmful: `note_compaction` bumps a
-        // per-session epoch counter and clears nothing, so
-        // `seen_for_session` is unaffected either way (decision 5 — a
-        // clearing implementation would empty the stamp's inventory).
         crate::brain::tools::seen_skills::note_compaction(session_id);
-        let seen: std::collections::BTreeSet<String> =
-            crate::brain::tools::seen_skills::seen_for_session(session_id)
-                .into_iter()
-                .collect();
-        let skills: Vec<String> = active.union(&seen).cloned().collect();
-        tracing::debug!(
-            "continuation_prompt({kind:?}): skill inventory stamp = {skills:?} \
-             (active {}/{} + seen {}/{})",
-            skills.len(),
-            active.len(),
-            seen.len(),
-            skills.len()
-        );
-        super::compaction_prompts::append_skill_stamp(
-            super::compaction_prompts::build_continuation(
-                kind,
-                self.silent_compaction,
-                self.auto_approve_tools,
-                super::compaction_prompts::PlanRecovery::for_session(session_id).await,
-            ),
-            &skills,
+        super::compaction_prompts::build_continuation(
+            kind,
+            self.silent_compaction,
+            self.auto_approve_tools,
+            super::compaction_prompts::PlanRecovery::for_session(session_id).await,
         )
+    }
+
+    /// Persist the compaction marker, then inject the stamped continuation
+    /// (issue #134): the single adoption path for all six compaction sites.
+    /// A site adopting this helper cannot skip the continuation or its
+    /// #125/#131 skill stamp. Errors are returned so each site keeps its
+    /// own handling (Manual propagates; budget sites log and continue).
+    #[allow(clippy::too_many_arguments)] // 8 args = outcome + kind + suffix + persist
+    async fn apply_compaction_continuation(
+        &self,
+        session_id: Uuid,
+        message_service: &MessageService,
+        context: &mut AgentContext,
+        outcome: &CompactionOutcome,
+        kind: super::compaction_prompts::CompactionKind,
+        marker_suffix: &str,
+        persist: bool,
+    ) -> Result<()> {
+        let marker_content = outcome.marker(marker_suffix);
+        message_service
+            .create_message(session_id, "user".to_string(), marker_content.clone())
+            .await
+            .map_err(AgentError::db)?;
+
+        // Curate active skills and lazy tools according to the machine-readable manifest.
+        if let CompactionOutcome::Summarised(summary) = outcome
+            && let Some(manifest) =
+                crate::brain::agent::service::context::parse_context_manifest(summary)
+        {
+            for discard_slug in manifest.discard_skills {
+                self.unregister_active_skill(session_id, &discard_slug);
+            }
+            for active_slug in manifest.active_skills {
+                self.register_active_skill(session_id, &active_slug);
+            }
+            if !manifest.required_tools.is_empty() {
+                self.tool_registry
+                    .activate_tools(session_id, manifest.required_tools);
+            }
+        }
+
+        let cont_text = self.continuation_prompt(session_id, kind).await;
+        if persist {
+            message_service
+                .create_message(session_id, "user".to_string(), cont_text.clone())
+                .await
+                .map_err(AgentError::db)?;
+        }
+        context.add_message(Message::user(cont_text));
+        Ok(())
     }
 
     /// Core tool-execution loop — called by all public shims.
@@ -716,11 +873,24 @@ impl AgentService {
                  resumes it (#1462)"
             );
         }
-        if track_origin.is_some()
-            && !cancelled_by_shutdown
-            && let Err(e) = pending_repo.delete(request_id).await
-        {
-            tracing::warn!("Failed to clean up pending request: {}", e);
+        if track_origin.is_some() && !cancelled_by_shutdown {
+            if let Err(e) = pending_repo.delete(request_id).await {
+                tracing::warn!("Failed to clean up pending request: {}", e);
+            }
+            // #200: if this turn was started by a button tap, clear turn_open_at
+            // so boot recovery knows the turn completed and does not spuriously
+            // re-execute it. Shutdown cancellations preserve the open marker.
+            let binding_repo = crate::db::SessionBindingRepository::new(self.context.pool());
+            if let Err(e) = binding_repo
+                .clear_turn_open_at(&session_id.to_string())
+                .await
+            {
+                tracing::warn!(
+                    "Failed to clear turn_open_at for session {}: {}",
+                    session_id,
+                    e
+                );
+            }
         }
 
         result
@@ -1155,25 +1325,43 @@ impl AgentService {
         // get compacted away; this ensures the full instructions are always
         // present in the system prompt for the current session.
         let active_skills = self.active_skills_for_session(session_id);
+        let mut skill_update_hints = Vec::new();
         if !active_skills.is_empty() {
             let skills = crate::brain::skills::load_all_skills();
-            let mut skill_section = String::new();
-            for skill in &skills {
-                if active_skills.contains(&skill.slash_name) {
-                    // `prompt_body()` carries the review-gate reminder for
-                    // flagged skills so the gate survives compaction too.
-                    skill_section.push_str(&format!(
-                        "\n\n--- Active Skill: {} ---\n{}",
-                        skill.slash_name,
-                        skill.prompt_body()
-                    ));
-                }
-            }
+            // #179: selection lives in `active_skill_bodies` (matching the
+            // IDENTITY field, the bare slug) so the contract "a skill
+            // registered in the documented `- <skill-slug>` form IS injected"
+            // is directly testable rather than buried in this loop.
+            // #216: pass consumed auxiliary files for the session.
+            let seen_aux = crate::brain::tools::seen_skills::aux_seen_for_session(session_id);
+            let skill_section =
+                crate::brain::skills::active_skill_bodies(&active_skills, &skills, &seen_aux);
             if !skill_section.is_empty()
                 && let Some(ref mut brain) = context.system_brain
             {
                 brain.push_str(&skill_section);
                 context.token_count += AgentContext::estimate_tokens(&skill_section);
+            }
+
+            // Detect modified active skills on disk at turn start (#210).
+            // Replaces fleet-wide fanout notifications with JIT turn-start hints.
+            for slug in &active_skills {
+                if let Some(mtime) = crate::brain::skills::skill_file_mtime(slug) {
+                    let recorded = crate::brain::tools::seen_skills::get_skill_loaded_mtime(session_id, slug);
+                    match recorded {
+                        Some(prev_mtime) if mtime > prev_mtime => {
+                            skill_update_hints.push(format!(
+                                "[SYSTEM HINT: Active skill '{slug}' was updated on disk since your last turn. Review changed directives before executing work.]"
+                            ));
+                            crate::brain::tools::seen_skills::record_skill_loaded_mtime(session_id, slug, mtime);
+                        }
+                        None => {
+                            // First time seeing this active skill file mtime: record baseline
+                            crate::brain::tools::seen_skills::record_skill_loaded_mtime(session_id, slug, mtime);
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -1222,8 +1410,12 @@ impl AgentService {
         // directly), so the reminder is context-only and never piles up (#571
         // follow-up).
         let brain_dir = self.brain_workspace_path();
-        let context_user_message =
+        let mut context_user_message =
             Self::augment_user_message(session_id, &user_message, brain_dir.as_deref()).await;
+        if !skill_update_hints.is_empty() {
+            let hints_joined = skill_update_hints.join("\n");
+            context_user_message = format!("{hints_joined}\n\n{context_user_message}");
+        }
         let user_msg = Self::build_user_message(&context_user_message);
         context.add_message(user_msg);
 
@@ -1277,17 +1469,6 @@ impl AgentService {
             );
             match compacted {
                 Ok(summary) => {
-                    // Persist compaction marker to DB so restarts load from this point
-                    let compaction_marker = format!(
-                        "[CONTEXT COMPACTION — The conversation was automatically compacted. \
-                         Below is a structured summary of everything before this point.]\n\n{}",
-                        summary
-                    );
-                    message_service
-                        .create_message(session_id, "user".to_string(), compaction_marker)
-                        .await
-                        .map_err(AgentError::db)?;
-
                     // Persist summary as the assistant response (for DB/search continuity)
                     message_service
                         .append_content(assistant_db_msg.id, &summary)
@@ -1296,19 +1477,18 @@ impl AgentService {
 
                     // Add a brief continuation prompt to context — matches
                     // auto-compaction behavior but uses a short sentence instead
-                    // of the full POST-COMPACTION PROTOCOL. Persisted to DB so
-                    // the next turn sees it.
-                    let cont_text = self
-                        .continuation_prompt(
-                            session_id,
-                            super::compaction_prompts::CompactionKind::Manual,
-                        )
-                        .await;
-                    message_service
-                        .create_message(session_id, "user".to_string(), cont_text.clone())
-                        .await
-                        .map_err(AgentError::db)?;
-                    context.add_message(Message::user(cont_text));
+                    // of the full POST-COMPACTION PROTOCOL (#134 helper below
+                    // persists marker + stamped continuation).
+                    self.apply_compaction_continuation(
+                        session_id,
+                        &message_service,
+                        &mut context,
+                        &CompactionOutcome::Summarised(summary),
+                        CompactionKind::Manual,
+                        "",
+                        true,
+                    )
+                    .await?;
 
                     if let Some(ref cb) = progress_callback {
                         cb(session_id, ProgressEvent::TokenCount(context.token_count));
@@ -1403,21 +1583,17 @@ impl AgentService {
         };
 
         if let Some(ref outcome) = compaction_result {
-            // Persist compaction marker to DB so restarts load from this point
-            if let Err(e) = message_service
-                .create_message(session_id, "user".to_string(), outcome.marker(""))
-                .await
-            {
-                tracing::error!("Failed to persist compaction marker to DB: {}", e);
-            }
-
-            let cont_text = self
-                .continuation_prompt(
-                    session_id,
-                    super::compaction_prompts::CompactionKind::Regular,
-                )
-                .await;
-            context.add_message(Message::user(cont_text));
+            self.apply_compaction_continuation(
+                session_id,
+                &message_service,
+                &mut context,
+                outcome,
+                CompactionKind::Regular,
+                "",
+                true,
+            )
+            .await
+            .unwrap_or_else(|e| tracing::error!("compaction marker persist failed: {e}"));
         }
 
         // Restore the directory `/cd` persisted for this session before the
@@ -1901,21 +2077,17 @@ impl AgentService {
                 )
                 .await
             } {
-                // Persist compaction marker to DB so restarts load from this point
-                if let Err(e) = message_service
-                    .create_message(session_id, "user".to_string(), outcome.marker(""))
-                    .await
-                {
-                    tracing::error!("Failed to persist mid-loop compaction marker to DB: {}", e);
-                }
-
-                let cont_text = self
-                    .continuation_prompt(
-                        session_id,
-                        super::compaction_prompts::CompactionKind::MidLoop,
-                    )
-                    .await;
-                context.add_message(Message::user(cont_text));
+                self.apply_compaction_continuation(
+                    session_id,
+                    &message_service,
+                    &mut context,
+                    outcome,
+                    CompactionKind::MidLoop,
+                    "",
+                    true,
+                )
+                .await
+                .unwrap_or_else(|e| tracing::error!("mid-loop persist failed: {e}"));
             }
 
             // Build LLM request with tools if available
@@ -2173,29 +2345,17 @@ impl AgentService {
                         .await
                     {
                         Ok(summary) => {
-                            // Persist compaction marker to DB so restarts load from this point
-                            let compaction_marker = format!(
-                                "[CONTEXT COMPACTION — The conversation was automatically compacted. \
-                                 Below is a structured summary of everything before this point.]\n\n{}",
-                                summary
-                            );
-                            if let Err(e) = message_service
-                                .create_message(session_id, "user".to_string(), compaction_marker)
-                                .await
-                            {
-                                tracing::error!(
-                                    "Failed to persist emergency compaction marker to DB: {}",
-                                    e
-                                );
-                            }
-
-                            let cont_text = self
-                                .continuation_prompt(
-                                    session_id,
-                                    super::compaction_prompts::CompactionKind::Emergency,
-                                )
-                                .await;
-                            context.add_message(Message::user(cont_text));
+                            self.apply_compaction_continuation(
+                                session_id,
+                                &message_service,
+                                &mut context,
+                                &CompactionOutcome::Summarised(summary),
+                                CompactionKind::Emergency,
+                                "",
+                                true,
+                            )
+                            .await
+                            .unwrap_or_else(|e| tracing::error!("emergency persist failed: {e}"));
 
                             // Notify user about emergency compaction
                             if let Some(ref cb) = progress_callback {
@@ -4031,26 +4191,17 @@ impl AgentService {
                 )
                 .await
             } {
-                if let Err(e) = message_service
-                    .create_message(
-                        session_id,
-                        "user".to_string(),
-                        outcome.marker(" after token calibration revealed high context usage"),
-                    )
-                    .await
-                {
-                    tracing::error!(
-                        "Failed to persist post-calibration compaction marker: {}",
-                        e
-                    );
-                }
-                context.add_message(Message::user(
-                    "[SYSTEM: Context was auto-compacted after calibration. \
-                     Review the summary above. The \"IMMEDIATE TASK\" section tells you \
-                     exactly what to do next. Continue that task immediately. \
-                     Do NOT start a new topic or deviate to unrelated work.]"
-                        .to_string(),
-                ));
+                self.apply_compaction_continuation(
+                    session_id,
+                    &message_service,
+                    &mut context,
+                    outcome,
+                    CompactionKind::MidLoop,
+                    " after token calibration revealed high context usage",
+                    true,
+                )
+                .await
+                .unwrap_or_else(|e| tracing::error!("post-calibration persist failed: {e}"));
             }
 
             // --- CANCEL CHECK BEFORE STREAM DROP RETRY ---
@@ -7310,42 +7461,20 @@ impl AgentService {
             }
 
             // Cap oversized tool_result bodies BEFORE they enter context.
-            // A single 1 MB read_file output (e.g., an HTML file with an
-            // embedded base64 PNG) dumps ~256k tokens into context in one
-            // push — exceeding the model's window AND the compaction
-            // summarizer's window, triggering a hard-truncate-to-zero
-            // cascade observed today on session 5ed9ff25 (read of
-            // opencrabs-retro-release.html, 1,025,562 bytes → ctx jumps
-            // 8k → 738k → 0 messages after truncate). Truncate generously
-            // (50 KB chars ≈ 12k tokens, ~6% of a 200k window) and
-            // instruct the agent to re-call with offsets / grep / line
-            // ranges for the part it actually needs.
-            const MAX_TOOL_RESULT_CHARS: usize = 50_000;
-            for block in tool_results.iter_mut() {
-                if let ContentBlock::ToolResult { content, .. } = block
-                    && content.len() > MAX_TOOL_RESULT_CHARS
-                {
-                    let original_len = content.len();
-                    let mut cut = MAX_TOOL_RESULT_CHARS;
-                    while cut > 0 && !content.is_char_boundary(cut) {
-                        cut -= 1;
+            // Large tool outputs are spilled to disk at 16 KB (default) with 40-line head/tail preview,
+            // or clamped inline if spill_to_disk is false (#226).
+            let tool_inputs_by_id: std::collections::HashMap<&str, (&str, &Value)> = response
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolUse { id, name, input } => {
+                        Some((id.as_str(), (name.as_str(), input)))
                     }
-                    content.truncate(cut);
-                    content.push_str(&format!(
-                        "\n\n[Output truncated: {} → {} bytes. Re-call with \
-                         start_line/line_count (read_file), head/tail, \
-                         grep --max-count, or similar to fetch specific \
-                         portions instead of the whole blob.]",
-                        original_len, cut,
-                    ));
-                    tracing::warn!(
-                        "Tool result content capped: {} → {} bytes (max {} chars)",
-                        original_len,
-                        cut,
-                        MAX_TOOL_RESULT_CHARS,
-                    );
-                }
-            }
+                    _ => None,
+                })
+                .collect();
+
+            process_tool_results_capping(session_id, &mut tool_results, &tool_inputs_by_id).await;
 
             // Add user message with tool results to context
             let tool_result_msg = Message {
@@ -7405,21 +7534,17 @@ impl AgentService {
                 )
                 .await
             } {
-                // Persist compaction marker to DB so restarts load from this point
-                if let Err(e) = message_service
-                    .create_message(session_id, "user".to_string(), outcome.marker(""))
-                    .await
-                {
-                    tracing::error!("Failed to persist post-tool compaction marker to DB: {}", e);
-                }
-
-                let cont_text = self
-                    .continuation_prompt(
-                        session_id,
-                        super::compaction_prompts::CompactionKind::PostTool,
-                    )
-                    .await;
-                context.add_message(Message::user(cont_text));
+                self.apply_compaction_continuation(
+                    session_id,
+                    &message_service,
+                    &mut context,
+                    outcome,
+                    CompactionKind::PostTool,
+                    "",
+                    true,
+                )
+                .await
+                .unwrap_or_else(|e| tracing::error!("post-tool persist failed: {e}"));
             }
 
             // Check for queued user messages to inject between tool iterations.
