@@ -22,6 +22,9 @@ fn sections(title: Option<&str>, checklist: Option<Vec<&str>>, goal: Option<&str
         goal: goal.map(|text| GoalSection {
             text: text.to_string(),
             completed: false,
+            turns_used: 0,
+            max_turns: Some(20),
+            state: Some("active".to_string()),
         }),
         ctx: None,
     }
@@ -43,6 +46,72 @@ fn tline(label: &str, context: &str) -> FlowLine {
 }
 
 // ── clock glyph (Decision 13) ──
+
+#[tokio::test]
+async fn test_goal_turn_budget_formatting() {
+    let active_capped = GoalSection {
+        text: "Fix visibility".to_string(),
+        completed: false,
+        turns_used: 3,
+        max_turns: Some(20),
+        state: Some("active".to_string()),
+    };
+    assert_eq!(active_capped.turn_budget_str(), "(3/20 turns)");
+    assert_eq!(
+        active_capped.format_goal_header("Fix visibility", false),
+        "<b>🎯</b> Fix visibility (3/20 turns)"
+    );
+
+    let settled_completed = GoalSection {
+        text: "Fix visibility".to_string(),
+        completed: true,
+        turns_used: 5,
+        max_turns: Some(20),
+        state: Some("completed".to_string()),
+    };
+    assert_eq!(
+        settled_completed.format_goal_header("Fix visibility", true),
+        "<b>✅</b> Fix visibility (5/20 turns)"
+    );
+
+    let active_uncapped = GoalSection {
+        text: "Fix visibility".to_string(),
+        completed: false,
+        turns_used: 12,
+        max_turns: None,
+        state: Some("active".to_string()),
+    };
+    assert_eq!(active_uncapped.turn_budget_str(), "(turn 12)");
+    assert_eq!(
+        active_uncapped.format_goal_header("Fix visibility", false),
+        "<b>🎯</b> Fix visibility (turn 12)"
+    );
+
+    // Multi-paragraph goal rich chrome
+    let multi_para = FlowSections {
+        plan_state: None,
+        plan_kb: Default::default(),
+        plan_title: None,
+        prose: None,
+        checklist: None,
+        goal: Some(GoalSection {
+            text: "Heading paragraph\n\nSecond paragraph body".to_string(),
+            completed: false,
+            turns_used: 2,
+            max_turns: Some(15),
+            state: Some("active".to_string()),
+        }),
+        ctx: None,
+    };
+    let rich_html = multi_para.chrome_rich(false);
+    assert!(rich_html.contains("<details><summary><b>🎯</b> Heading paragraph (2/15 turns)</summary><p>Second paragraph body</p></details>"));
+
+    // Classic chrome
+    let classic_html = multi_para.chrome_classic(false);
+    assert!(
+        classic_html.contains("<blockquote expandable><b>🎯</b> Heading paragraph (2/15 turns)")
+    );
+}
 
 #[test]
 fn clock_glyph_formats_minutes_and_hours() {
@@ -1108,12 +1177,16 @@ async fn plan_card_renders_goal_after_checklist() {
     let active = GoalSection {
         text: "Ship v0.3.68 without regressions".to_string(),
         completed: false,
+        turns_used: 3,
+        max_turns: Some(20),
+        state: Some("active".to_string()),
     };
     let html = render_plan_card_html(Some("Design plan"), Some(&rows), None, Some(&active))
         .await
         .unwrap();
     assert!(html.contains("<blockquote expandable><b>🎯</b>"));
     assert!(html.contains("Ship v0.3.68 without regressions"));
+    assert!(html.contains("(3/20 turns)"));
     let checklist_pos = html.find("Task two").unwrap();
     let goal_pos = html.find("🎯").unwrap();
     assert!(checklist_pos < goal_pos);
@@ -1122,21 +1195,29 @@ async fn plan_card_renders_goal_after_checklist() {
     let done = GoalSection {
         text: "Ship v0.3.68 without regressions".to_string(),
         completed: true,
+        turns_used: 7,
+        max_turns: Some(20),
+        state: Some("completed".to_string()),
     };
     let html_done = render_plan_card_html(Some("Design plan"), Some(&rows), None, Some(&done))
         .await
         .unwrap();
     assert!(html_done.contains("<blockquote expandable><b>✅</b>"));
+    assert!(html_done.contains("(7/20 turns)"));
 
     // Goal text is HTML-escaped inside the expandable.
     let evil = GoalSection {
         text: "a <b> & c".to_string(),
         completed: false,
+        turns_used: 0,
+        max_turns: None,
+        state: Some("active".to_string()),
     };
     let html_evil = render_plan_card_html(Some("Design plan"), Some(&rows), None, Some(&evil))
         .await
         .unwrap();
     assert!(html_evil.contains("a &lt;b&gt; &amp; c"));
+    assert!(html_evil.contains("(turn 0)"));
     assert!(!html_evil.contains("a <b> & c"));
 
     // No goal: nothing renders, same as before.
