@@ -463,8 +463,6 @@ impl TelegramAgent {
                                     let agent_clone = agent.clone();
                                     let bot_clone = bot.clone();
                                     let state_clone = state.clone();
-                                    let rearm_token = tapped_token.clone();
-                                    let query_id = query.id.clone();
                                     // #180 Leg A: record the tap BEFORE the turn is
                                     // dispatched. The kill this guards against lands
                                     // between dispatch and the PROCESSING insert, so
