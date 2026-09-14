@@ -665,6 +665,29 @@ fn fall_through_policy_covers_transient_and_auth_but_not_internal() {
     assert!(!should_try_next_provider(&ProviderError::Internal(
         "bug".to_string()
     )));
+    // Gateway timeouts (504, 524) must NOT be retried in-place (#18),
+    // but MUST trigger fallback chain traversal.
+    let err_524 = ProviderError::ApiError {
+        status: 524,
+        message: "A timeout occurred".to_string(),
+        error_type: None,
+    };
+    assert!(!err_524.is_retryable(), "524 must not retry in place");
+    assert!(
+        should_try_next_provider(&err_524),
+        "524 must walk the fallback chain"
+    );
+
+    let err_504 = ProviderError::ApiError {
+        status: 504,
+        message: "Gateway Timeout".to_string(),
+        error_type: None,
+    };
+    assert!(!err_504.is_retryable(), "504 must not retry in place");
+    assert!(
+        should_try_next_provider(&err_504),
+        "504 must walk the fallback chain"
+    );
 }
 
 /// A summariser that stops answering must not stop the session (#1255).
