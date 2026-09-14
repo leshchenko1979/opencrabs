@@ -220,6 +220,50 @@ async fn post_init_gates_mutators_to_md_only() {
                 .needs_approval()
         );
 
+        // Bare filename and relative paths target the session .md.
+        let bare = format!(".opencrabs_plan_{sid}.md");
+        assert!(
+            check_plan_gate(sid, "write_file", &mut_tool(), &json!({"path": bare}))
+                .await
+                .is_allowed(),
+            "bare filename must be allowed post-init"
+        );
+        assert!(
+            check_plan_gate(
+                sid,
+                "edit_file",
+                &mut_tool(),
+                &json!({"path": format!("./{bare}")})
+            )
+            .await
+            .is_allowed(),
+            "relative dot-slash filename must be allowed post-init"
+        );
+        assert!(
+            check_plan_gate(
+                sid,
+                "write_file",
+                &mut_tool(),
+                &json!({"path": format!("session/{bare}")})
+            )
+            .await
+            .is_allowed(),
+            "session/ relative path must be allowed post-init"
+        );
+
+        // Different session ID or unrelated file goes to approval.
+        let other_sid = Uuid::new_v4();
+        assert!(
+            check_plan_gate(
+                sid,
+                "write_file",
+                &mut_tool(),
+                &json!({"path": format!(".opencrabs_plan_{other_sid}.md")})
+            )
+            .await
+            .needs_approval()
+        );
+
         // Read-only tools flow through.
         for (name, hints) in [("read_file", &ro()), ("grep", &ro()), ("plan", &ro())] {
             assert!(

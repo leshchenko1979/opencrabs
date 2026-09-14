@@ -370,6 +370,33 @@ async fn sync_refused_first_write_restores_scaffold_not_empty() {
     .await;
 }
 
+#[tokio::test]
+async fn sync_refused_first_write_with_mermaid_error_restores_scaffold() {
+    in_temp_home(async {
+        let sid = Uuid::new_v4();
+        let plan = PlanDocument::new(sid, "Fresh design".to_string());
+        save_plan(&plan).await.unwrap();
+        let md_path = create_design_md(sid, "Fresh design").await.unwrap();
+
+        let broken_mermaid = "# Fresh design\n\n## Context\n- **Problem:** fresh\n- **Target state:** fixed\n- **Intent:** test\n\n## Implementation steps\n1. Do something\n\n```mermaid\nsequenceDiagram\nNote over A,B,C: Broken\n```\n";
+        crate::channels::telegram::rich::mermaid::cache_put(
+            "sequenceDiagram\nNote over A,B,C: Broken",
+            &crate::channels::telegram::rich::mermaid::MermaidResult::ParseError(
+                "Parse error on line 2: Expecting 'TXT', got ','".into(),
+            ),
+        );
+        std::fs::write(&md_path, broken_mermaid).unwrap();
+        let error = sync_md_to_json(sid).await.unwrap_err();
+        assert!(error.contains("PLAN WRITE REFUSED: Mermaid diagram syntax error in plan markdown."));
+        let restored = std::fs::read_to_string(&md_path).unwrap();
+        assert!(restored.contains("## Context"));
+        assert!(restored.contains("## Implementation steps"));
+        assert!(restored.contains("1. \n   - Done when: "));
+        assert_eq!(load_plan(sid).await.unwrap().description, "");
+    })
+    .await;
+}
+
 #[test]
 fn template_warnings_flag_missing_sections() {
     let empty = template_section_warnings("just prose, no structure");

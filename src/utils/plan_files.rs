@@ -814,6 +814,24 @@ pub fn design_scaffold(title: &str) -> String {
     )
 }
 
+fn restore_and_refuse(md: &Path, plan: &PlanDocument, error_message: String) -> Result<(), String> {
+    // The generic write tool has already updated the .md by the time the
+    // registry reaches this mirror. Restore the pre-write state so a
+    // refused write has no observable persistence side effect: the last
+    // accepted body, or the scaffold when nothing has been mirrored yet.
+    // A fresh plan's description is empty; restoring it would delete the
+    // draft AND the scaffold the guard's own contract depends on.
+    let restore = if plan.description.trim().is_empty() {
+        design_scaffold(&plan.title)
+    } else {
+        plan.description.clone()
+    };
+    if let Err(e) = std::fs::write(md, restore) {
+        tracing::warn!("Failed to restore refused plan .md write: {e}");
+    }
+    Err(error_message)
+}
+
 /// Sync the session `.md` body into the plan JSON `description` (the
 /// Editing mirror). Tasks are never touched: Editing cannot persist a
 /// checklist. Malformed template bodies are refused and restored from the
@@ -837,24 +855,14 @@ pub async fn sync_md_to_json(session_id: Uuid) -> Result<(), String> {
 
     let warnings = template_section_warnings(&body);
     if !warnings.is_empty() {
-        // The generic write tool has already updated the .md by the time the
-        // registry reaches this mirror. Restore the pre-write state so a
-        // refused write has no observable persistence side effect: the last
-        // accepted body, or the scaffold when nothing has been mirrored yet.
-        // A fresh plan's description is empty; restoring it would delete the
-        // draft AND the scaffold the guard's own contract depends on.
-        let restore = if plan.description.trim().is_empty() {
-            design_scaffold(&plan.title)
-        } else {
-            plan.description.clone()
-        };
-        if let Err(e) = std::fs::write(&md, restore) {
-            tracing::warn!("Failed to restore refused plan .md write: {e}");
-        }
-        return Err(format!(
-            "PLAN TEMPLATE WRITE REFUSED: {}\n\nPlan template contract: each `**Label:**` must be a single line: label + space + text",
-            warnings.join("; ")
-        ));
+        return restore_and_refuse(
+            &md,
+            &plan,
+            format!(
+                "PLAN TEMPLATE WRITE REFUSED: {}\n\nPlan template contract: each `**Label:**` must be a single line: label + space + text",
+                warnings.join("; ")
+            ),
+        );
     }
 
     #[cfg(feature = "telegram")]
@@ -862,16 +870,17 @@ pub async fn sync_md_to_json(session_id: Uuid) -> Result<(), String> {
         let parse_errors =
             crate::channels::telegram::rich::mermaid::preflight_parse_errors(&body).await;
         if !parse_errors.is_empty() {
-            if let Err(e) = std::fs::write(&md, &plan.description) {
-                tracing::warn!("Failed to restore refused plan .md write: {e}");
-            }
             let err = crate::channels::telegram::rich::mermaid::format_mermaid_error(
                 "plan markdown",
                 &parse_errors,
             );
-            return Err(format!(
-                "PLAN WRITE REFUSED: {err}\n\nPlease fix the Mermaid diagram syntax in the plan design and try again."
-            ));
+            return restore_and_refuse(
+                &md,
+                &plan,
+                format!(
+                    "PLAN WRITE REFUSED: {err}\n\nPlease fix the Mermaid diagram syntax in the plan design and try again."
+                ),
+            );
         }
     }
 

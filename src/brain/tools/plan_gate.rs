@@ -159,12 +159,23 @@ pub(crate) async fn write_targets_session_md(session_id: Uuid, input: &Value) ->
     else {
         return false;
     };
-    let md = plan_files::plan_md_path(session_id).await;
+    if raw.trim().is_empty() {
+        return false;
+    }
+    let expected_filename = format!(".opencrabs_plan_{session_id}.md");
     let candidate = PathBuf::from(raw);
+    if candidate.file_name().and_then(|n| n.to_str()) == Some(&expected_filename) {
+        return true;
+    }
+    let md = plan_files::plan_md_path(session_id).await;
     if candidate.is_absolute() {
         paths_match(&candidate, &md)
     } else {
         paths_match(&crate::config::opencrabs_home().join(&candidate), &md)
+            || paths_match(
+                &plan_files::session_dir(session_id).await.join(&candidate),
+                &md,
+            )
     }
 }
 
