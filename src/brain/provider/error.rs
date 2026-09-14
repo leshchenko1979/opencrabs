@@ -202,6 +202,16 @@ impl ProviderError {
             {
                 false
             }
+            // Upstream gateway timeouts (Cloudflare 524, HTTP 504 Gateway Timeout).
+            // When an upstream proxy or gateway times out waiting for the model
+            // backend (e.g. summarizer heavy prompt or slow provider queue),
+            // retrying the SAME provider with exponential backoff burns minutes
+            // (e.g. 4 attempts * ~250s = 16.7 minutes of stall; #18).
+            // Mark it NON-retryable for in-place retries so it immediately fails
+            // out of `retry_with_notify`. `should_try_next_provider` explicitly
+            // recognizes gateway timeouts and rolls immediately to the fallback provider.
+            ProviderError::ApiError { status: 504, .. }
+            | ProviderError::ApiError { status: 524, .. } => false,
             ProviderError::ApiError { status, .. } if *status >= 500 => true,
             // A 4xx whose body is an HTML page is an infrastructure / CDN /
             // load-balancer error page, NOT a real JSON API client error.
@@ -366,6 +376,15 @@ pub fn should_try_next_provider(err: &ProviderError) -> bool {
     if err.is_quota_exhausted() {
         return true;
     }
+    // Upstream gateway timeouts (504, Cloudflare 524). Bypasses in-place
+    // retry to avoid 16-minute backoff stall (#18), but should immediately
+    // roll to fallback provider.
+    if matches!(
+        err,
+        ProviderError::ApiError { status: 504, .. } | ProviderError::ApiError { status: 524, .. }
+    ) {
+        return true;
+    }
     match err {
         // Model not supported here — a fallback may carry it, and the caller
         // remaps to the fallback's default model anyway.
@@ -401,6 +420,8 @@ pub fn short_error_reason(err: &ProviderError) -> String {
         ProviderError::ApiError { status, .. } if *status == 429 => "rate limited".to_string(),
         ProviderError::ApiError { status: 401, .. }
         | ProviderError::ApiError { status: 403, .. } => "auth error".to_string(),
+        ProviderError::ApiError { status: 504, .. }
+        | ProviderError::ApiError { status: 524, .. } => "gateway timeout".to_string(),
         ProviderError::ApiError { status, .. } if *status >= 500 => {
             format!("server error {status}")
         }
