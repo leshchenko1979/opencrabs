@@ -17,6 +17,7 @@
 
 use super::ast::Block;
 pub use super::ast::MermaidResult;
+use crate::channels::telegram::markdown::escape_html;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
@@ -654,25 +655,15 @@ pub(crate) fn markdown_failure_block(err: &str, source: &str) -> String {
 /// HTML for a successfully rendered diagram: a bare `<img>` in a `<figure>`,
 /// which the Telegram rich-HTML parser turns into a native photo block.
 pub(crate) fn image_html(url: &str) -> String {
-    format!("<figure><img src=\"{}\"/></figure>", escape(url))
+    format!("<figure><img src=\"{}\"/></figure>", escape_html(url))
 }
 
-/// HTML for a diagram that could not be rendered: a bold warning line, the
-/// renderer's error note in a blockquote, and the original source in a code
-/// block so the reader can see (and fix) what failed.
 pub(crate) fn failure_html(err: &str, source: &str) -> String {
     format!(
         "<b>⚠️ Mermaid diagram could not be rendered</b>\n<blockquote>{}</blockquote>\n<pre><code>{}</code></pre>",
-        escape(err),
-        escape(source)
+        escape_html(err),
+        escape_html(source)
     )
-}
-
-/// Minimal HTML entity escaping (matches render_html's escaping).
-fn escape(t: &str) -> String {
-    t.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 #[cfg(test)]
