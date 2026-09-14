@@ -17,7 +17,8 @@ use crate::brain::provider::{
     ContentBlock, ContentDelta, LLMResponse, ProviderError, ProviderStream, StreamEvent, TokenUsage,
 };
 
-/// Drain `stream` and fold it into a single response.
+/// Drain `stream` and fold it into a single response, bounded by
+/// `idle_timeout` between successive stream chunks (#18).
 ///
 /// Only text deltas form the summary: reasoning deltas are the model's
 /// deliberation, and the summariser request carries no tools, so tool-input
@@ -25,8 +26,9 @@ use crate::brain::provider::{
 /// as the provider's own error so the fallback walk can decide what to do
 /// with it. A stream that ends without `MessageStop` still yields whatever
 /// text arrived.
-pub(crate) async fn collect_stream(
+pub(crate) async fn collect_stream_with_timeout(
     mut stream: ProviderStream,
+    idle_timeout: std::time::Duration,
 ) -> std::result::Result<LLMResponse, ProviderError> {
     let mut id = String::new();
     let mut model = String::new();
@@ -34,7 +36,22 @@ pub(crate) async fn collect_stream(
     let mut usage = TokenUsage::default();
     let mut stop_reason = None;
 
-    while let Some(item) = stream.next().await {
+    loop {
+        let item = match tokio::time::timeout(idle_timeout, stream.next()).await {
+            Ok(Some(item)) => item,
+            Ok(None) => break,
+            Err(_) => {
+                tracing::warn!(
+                    "Compaction stream idle timeout after {:?} — no chunk received",
+                    idle_timeout
+                );
+                return Err(ProviderError::StreamError(format!(
+                    "stream idle timeout after {}s",
+                    idle_timeout.as_secs()
+                )));
+            }
+        };
+
         match item? {
             StreamEvent::MessageStart { message } => {
                 id = message.id;
@@ -80,4 +97,12 @@ pub(crate) async fn collect_stream(
         streaming_active_secs: None,
         tool_text_leak: false,
     })
+}
+
+/// Drain `stream` and fold it into a single response using default 30s idle timeout.
+#[cfg(test)]
+pub(crate) async fn collect_stream(
+    stream: ProviderStream,
+) -> std::result::Result<LLMResponse, ProviderError> {
+    collect_stream_with_timeout(stream, std::time::Duration::from_secs(30)).await
 }
