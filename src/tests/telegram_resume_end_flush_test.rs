@@ -147,9 +147,9 @@ async fn empty_queue_flush_is_a_noop() {
 }
 
 #[tokio::test]
-async fn a_busy_skip_leaves_queued_items_for_the_running_turn() {
-    // The wrapper skips when the slot is taken. Its skip must not consume or
-    // drop queued items: the running turn drains them between rounds.
+async fn a_busy_skip_requeues_unstarted_prompt_as_detached_work() {
+    // #227: when resume_session contends on active turn guard, it re-queues
+    // the unstarted prompt back into telegram_state as detached work.
     let state = Arc::new(crate::channels::telegram::TelegramState::new());
     let sid = Uuid::new_v4();
     let agent = test_agent().await;
@@ -174,9 +174,56 @@ async fn a_busy_skip_leaves_queued_items_for_the_running_turn() {
     .await
     .expect("busy skip returns Ok");
 
+    let drained = state.drain_queued_items(sid);
     assert_eq!(
-        state.drain_queued_items(sid).len(),
-        1,
-        "the busy skip must not consume the queue: the running turn owns it"
+        drained.len(),
+        2,
+        "#227: busy skip must re-enqueue the unstarted prompt as detached work in addition to existing reaction"
+    );
+    assert_eq!(
+        drained[0].origin,
+        crate::channels::telegram::QueuedOrigin::Reaction
+    );
+    assert_eq!(
+        drained[1].origin,
+        crate::channels::telegram::QueuedOrigin::DetachedWork
+    );
+    assert_eq!(drained[1].msg.context_text, "resume prompt");
+}
+
+#[tokio::test]
+async fn flush_combines_detached_and_reactions_into_single_turn() {
+    // #227: when both detached results and reactions are queued,
+    // flush_queued_after_turn merges them into a single spawned turn rather
+    // than racing synchronous reaction execution against spawned detached resume.
+    let state = Arc::new(crate::channels::telegram::TelegramState::new());
+    let sid = Uuid::new_v4();
+    let agent = test_agent().await;
+    let (bot, _server) = mocked_bot().await;
+
+    state.enqueue_detached_result(
+        sid,
+        QueuedUserMessage::plain("detached result payload".to_string()),
+    );
+    state.enqueue_reaction(
+        sid,
+        QueuedUserMessage::plain("stranded reaction payload".to_string()),
+    );
+
+    // Draining directly verifies that flush_queued_after_turn will consume both
+    crate::channels::telegram::resume::flush_queued_after_turn(
+        bot,
+        ChatId(12345),
+        None,
+        sid,
+        agent,
+        state.clone(),
+    )
+    .await;
+
+    // Both should be drained
+    assert!(
+        state.drain_queued_items(sid).is_empty(),
+        "#227: flush_queued_after_turn must drain both detached and reaction items"
     );
 }
