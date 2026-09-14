@@ -237,6 +237,7 @@ pub mod cron_deliver_to_thread_test;
 pub mod cron_delivery_outcome_test;
 pub mod cron_next_run_at_test;
 pub mod cron_profile_isolation_test;
+pub mod cron_profile_logging_test;
 pub mod cron_schedule_util_test;
 pub mod cron_scheduler_lock_test;
 pub mod cron_send_scope_test;
