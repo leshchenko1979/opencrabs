@@ -83,6 +83,14 @@ struct ReadInput {
     /// Optional: Output with hashline tags (HASH|content format, where HASH is a 4-char content hash)
     #[serde(default)]
     hashline: Option<bool>,
+
+    /// Optional: Maximum inline byte limit before truncation or disk spilling (default: 16000)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_bytes: Option<usize>,
+
+    /// Optional: When true (default), spills full output exceeding byte limit to disk. When false, clamps inline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spill_to_disk: Option<bool>,
 }
 
 #[async_trait]
@@ -116,6 +124,15 @@ impl Tool for ReadTool {
                 "hashline": {
                     "type": "boolean",
                     "description": "Optional: Output lines in HASH|content format (4-char content hash) for use with hashline_edit tool. Default: false."
+                },
+                "max_output_bytes": {
+                    "type": "integer",
+                    "description": "Optional: Maximum inline byte limit before truncation or disk spilling (default: 16000)",
+                    "minimum": 1
+                },
+                "spill_to_disk": {
+                    "type": "boolean",
+                    "description": "Optional: When true (default), spills full output exceeding byte limit to /tmp/opencrabs/tool_output/. When false, clamps inline without writing to disk."
                 }
             },
             "required": ["path"]
