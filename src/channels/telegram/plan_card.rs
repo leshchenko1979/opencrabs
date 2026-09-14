@@ -443,6 +443,9 @@ pub(crate) async fn handle_create_failure(error: &str, state: &TelegramState, se
 /// sides must never drift — both read this one constant.
 pub(crate) const PLAN_REVIEW_LABEL: &str = crate::brain::tools::subagent::PLAN_REVIEW_LABEL;
 
+/// Spawn label for the implementation review worker (#234).
+pub(crate) const REVIEW_IMPL_LABEL: &str = crate::brain::tools::subagent::REVIEW_IMPL_LABEL;
+
 /// Card footer while a review subagent is rewriting the plan (#155).
 pub(crate) const PLAN_REVIEW_RUNNING_NOTE: &str = "🔍 Review subagent rewriting plan…";
 
@@ -582,6 +585,73 @@ pub(crate) fn plan_review_spawn_input(session_id: Uuid, brief: String) -> serde_
         "plan_session": session_id.to_string(),
         "read_only": false,
     })
+}
+
+/// Spawn input for the implementation-review worker (#234). Pure so the test
+/// asserts the exact contract the production path sends.
+pub(crate) fn review_impl_spawn_input(session_id: Uuid, brief: String) -> serde_json::Value {
+    serde_json::json!({
+        "prompt": brief,
+        "label": REVIEW_IMPL_LABEL,
+        "plan_session": session_id.to_string(),
+        "read_only": true,
+    })
+}
+
+/// Construct the implementation review brief prompt (#234).
+pub(crate) fn review_impl_brief(
+    doc_title: &str,
+    doc_checklist: &str,
+    md_path: Option<&std::path::Path>,
+) -> String {
+    let mut brief = format!(
+        "You are an adversarial software implementation audit and verification agent.\n\
+         Your mission is to rigorously audit the delivered codebase changes for a completed task plan against ground truth, stated acceptance criteria, and architecture quality standards.\n\
+         \n\
+         ### COMPLETED PLAN\n\
+         Title: {doc_title}\n\
+         \n\
+         Checklist & Deliverables:\n\
+         {doc_checklist}\n"
+    );
+    if let Some(p) = md_path {
+        brief.push_str(&format!("\nArchived Plan File: {}\n", p.display()));
+    }
+    brief.push_str(
+        "\n### STEP 1: CONTEXT & ACCEPTANCE CRITERIA\n\
+         1. Inspect the tasks, deliverables, and checkable acceptance criteria above.\n\
+         2. Determine the commit range / changed files for this implementation using `git status`, `git log`, and `git diff`.\n\
+         \n\
+         ### STEP 2: CODE & ARCHITECTURE AUDIT\n\
+         1. Inspect every modified and created file.\n\
+         2. Verify code quality, DRY/modularisation, proper error handling, edge-case hardening, and absence of dead code or debug artifacts.\n\
+         3. Check for proper synchronization/concurrency guards where shared state is modified.\n\
+         \n\
+         ### STEP 3: TEST & ACCEPTANCE VERIFICATION\n\
+         1. Verify unit/integration tests exist covering the new functionality.\n\
+         2. Ensure every checkable acceptance criterion from the plan has been verified against real codebase receipts.\n\
+         \n\
+         ### STEP 4: STRUCTURED REPORT\n\
+         Deliver your final findings in rich markdown using the following structure:\n\
+         \n\
+         ## Implementation Audit Report: <Title>\n\
+         \n\
+         ### 1. Executive Summary\n\
+         - Verdict: [PASS | ISSUES DETECTED | INCOMPLETE]\n\
+         - Overview of verified deliverables and scope.\n\
+         \n\
+         ### 2. Acceptance Criteria Checklist\n\
+         | Task | Acceptance Criteria | Verified | Evidence / Notes |\n\
+         |---|---|---|---|\n\
+         \n\
+         ### 3. Code Quality & Architectural Observations\n\
+         - DRY & modularisation findings.\n\
+         - Concurrency, error handling, and edge cases.\n\
+         \n\
+         ### 4. Actionable Recommendations\n\
+         - Concrete fixes or next steps (or \"None — implementation is clean and ready\")."
+    );
+    brief
 }
 
 /// Child agent id from a `spawn_agent` tool result (#155). The spawn returns
@@ -1147,7 +1217,7 @@ async fn finalize_plan_card_locked(
     state: &Arc<TelegramState>,
     session_id: Uuid,
 ) -> bool {
-    let Some((mid, _sig)) = state.plan_card(session_id).await else {
+    let Some((_mid, _sig)) = state.plan_card(session_id).await else {
         // Nothing tracked: finalized once already, or never posted (card
         // tracking is in-memory — a restart empties it). Either way
         // deliberately NOT reposting is what kills resurrection. Consume
@@ -1183,7 +1253,11 @@ async fn finalize_plan_card_locked(
         armed: true,
     };
     let (title, checklist) = super::flow_chrome::plan_document_sections(&doc);
-    let empty_kb = serde_json::json!({ "inline_keyboard": [] });
+    let plan_kb = super::flow_chrome::PlanKb::CompletedReview;
+    let empty_kb = plan_kb
+        .keyboard()
+        .and_then(|m| serde_json::to_value(m).ok())
+        .unwrap_or_else(|| serde_json::json!({ "inline_keyboard": [] }));
 
     let use_rich = Config::current().channels.telegram.rich_messages;
 
@@ -1222,7 +1296,7 @@ async fn finalize_plan_card_locked(
             None,
             rich,
             &[],
-            None,
+            Some(&empty_kb),
             "turn",
             "-",
         )
@@ -1235,10 +1309,14 @@ async fn finalize_plan_card_locked(
     if posted.is_none() {
         // G3 send pacing (#1211): a fresh card is a full message post.
         super::governor::pace_send(chat).await;
-        let req = message_in_thread(bot, chat, thread_id, html.clone()).parse_mode(ParseMode::Html);
+        let mut req =
+            message_in_thread(bot, chat, thread_id, html.clone()).parse_mode(ParseMode::Html);
+        if let Some(markup) = plan_kb.keyboard() {
+            req = req.reply_markup(markup);
+        }
         match req.await {
             Ok(m) => posted = Some(m.id),
-            Err(e) => tracing::warn!("Telegram plan card restick post failed ({mid:?}): {e}"),
+            Err(e) => tracing::warn!("Telegram plan card restick post failed: {e}"),
         }
     }
 
@@ -1310,12 +1388,13 @@ async fn finalize_plan_card_locked(
                 }
             }
             if !edited {
-                match bot
+                let mut req = bot
                     .edit_message_text(chat, mid, html.clone())
-                    .parse_mode(teloxide::types::ParseMode::Html)
-                    .reply_markup(super::suggest_options::empty_keyboard())
-                    .await
-                {
+                    .parse_mode(teloxide::types::ParseMode::Html);
+                if let Some(markup) = plan_kb.keyboard() {
+                    req = req.reply_markup(markup);
+                }
+                match req.await {
                     Ok(_) => edited = true,
                     Err(e) => {
                         tracing::warn!("Telegram plan card finalize edit failed ({mid:?}): {e}")

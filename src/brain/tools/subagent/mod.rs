@@ -39,3 +39,6 @@ pub use wait::WaitAgentTool;
 /// Editing-parent read-only rule) and the Telegram plan card (which sends it),
 /// so the grant and its caller can never drift apart.
 pub(crate) const PLAN_REVIEW_LABEL: &str = "plan-review";
+
+/// Spawn label for the implementation review worker (#234).
+pub(crate) const REVIEW_IMPL_LABEL: &str = "review-implementation";
