@@ -1247,8 +1247,8 @@ impl TelegramState {
     }
 
     /// Authoritative method to bind a session to a chat/topic (#170).
-    /// Updates in-memory mappings, persistent database storage, session delivery route,
-    /// turn probe, and channel ownership probe.
+    /// Updates in-memory maps, sync ownership mirror, persistent database storage,
+    /// session delivery route, turn probe, and channel ownership probe.
     pub async fn bind_session_topic(
         self: &std::sync::Arc<Self>,
         session_id: Uuid,
@@ -1257,21 +1257,24 @@ impl TelegramState {
         origin: crate::db::repository::session_binding::BindingOrigin,
     ) -> Result<(), String> {
         // 1. In-memory mappings + sync ownership mirror
-        self.register_session_chat(session_id, chat_id, topic_id)
-            .await;
+        self.register_session_chat(session_id, chat_id, topic_id).await;
 
         // 2. Persistent storage
         let store = self.binding_store.lock().await.clone();
+        #[allow(clippy::collapsible_if)]
         if let Some(repo) = store {
-            repo.upsert(
-                session_id.to_string(),
-                "telegram",
-                &chat_id.to_string(),
-                topic_id,
-                origin,
-            )
-            .await
-            .map_err(|e| format!("could not persist session binding for {session_id}: {e}"))?;
+            if let Err(e) = repo
+                .upsert(
+                    session_id.to_string(),
+                    "telegram",
+                    &chat_id.to_string(),
+                    topic_id,
+                    origin,
+                )
+                .await
+            {
+                tracing::warn!("bind_session_topic: could not persist session binding for {session_id}: {e}");
+            }
         }
 
         // 3. Session routing
