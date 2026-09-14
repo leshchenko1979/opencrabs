@@ -257,11 +257,11 @@ async fn topics_for_chat_message_count_includes_all_rows_after_rename() {
 #[test]
 fn telegram_send_tool_schema_describes_bot_observed_scope_for_list_topics() {
     use crate::brain::tools::telegram_send::TelegramSendTool;
-    use crate::brain::traits::Tool;
+    use crate::brain::tools::Tool;
     use std::sync::Arc;
 
     let tool = TelegramSendTool::new(Arc::default());
-    let schema = tool.parameters();
+    let schema = tool.input_schema();
     let action_desc = schema["properties"]["action"]["description"]
         .as_str()
         .expect("action description must exist");
