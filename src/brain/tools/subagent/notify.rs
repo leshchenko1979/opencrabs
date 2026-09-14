@@ -9,7 +9,7 @@
 //! from=<uuid>]` header prepended to every delivery.
 
 use crate::brain::agent::service::notify_policy::{
-    CONFIRM_CAP, DeliveryMode, confirm_route, resolve_mode,
+    confirm_route, resolve_mode, DeliveryMode, CONFIRM_CAP,
 };
 use crate::brain::tools::error::{Result, ToolError};
 use crate::brain::tools::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
@@ -281,7 +281,11 @@ impl Tool for SessionNotifyTool {
 
         use crate::brain::agent::service::notify_receipts;
         use crate::brain::agent::service::quiet_delivery;
-        use crate::brain::agent::service::session_routes::{Delivery, deliver_to_session};
+        use crate::brain::agent::service::session_routes::{deliver_to_session, Delivery};
+
+        let caller_str = from.to_string();
+        let target_str = target.to_string();
+        use crate::brain::agent::service::notify_journal;
 
         let goal = input
             .get("goal")
@@ -327,6 +331,17 @@ impl Tool for SessionNotifyTool {
             // The deferred id is a first-class notification id: status-checkable
             // like any send receipt (stamped injected when the release drains).
             notify_receipts::record_queued(id, target);
+            notify_journal::record(
+                &caller_str,
+                &target_str,
+                "deferred",
+                0,
+                &format!(
+                    "quiet_window quiet_for={}s max_delay={}s notify_id={id}",
+                    quiet_for.as_secs(),
+                    max_delay.as_secs()
+                ),
+            );
             return Ok(verdict(
                 true,
                 "deferred",
@@ -360,6 +375,13 @@ impl Tool for SessionNotifyTool {
                 notify_receipts::record_queued(notify_id, target);
                 if confirm {
                     let (state, detail, reason) = confirm_route(target, CONFIRM_CAP).await;
+                    notify_journal::record(
+                        &caller_str,
+                        &target_str,
+                        state,
+                        0,
+                        &format!("{detail} reason={reason} notify_id={notify_id}"),
+                    );
                     return Ok(verdict(
                         true,
                         state,
@@ -371,6 +393,13 @@ impl Tool for SessionNotifyTool {
                         ],
                     ));
                 }
+                notify_journal::record(
+                    &caller_str,
+                    &target_str,
+                    "delivered",
+                    0,
+                    &format!("notify_id={notify_id}"),
+                );
                 Ok(verdict(
                     true,
                     "delivered",
@@ -390,6 +419,13 @@ impl Tool for SessionNotifyTool {
             Delivery::Parked => {
                 maybe_set_goal(target, goal, goal_max_turns, context).await;
                 notify_receipts::record_queued(notify_id, target);
+                notify_journal::record(
+                    &caller_str,
+                    &target_str,
+                    "queued",
+                    0,
+                    &format!("awaiting_channel_claim notify_id={notify_id}"),
+                );
                 Ok(verdict(
                     true,
                     "queued",
@@ -420,6 +456,13 @@ impl Tool for SessionNotifyTool {
                 if let Some(to) = redirected_to {
                     extra.push(("notify_redirected_to", to.to_string()));
                 }
+                notify_journal::record(
+                    &caller_str,
+                    &target_str,
+                    "refused_in_flight",
+                    1,
+                    &format!("mid_turn target={who}"),
+                );
                 Ok(verdict(
                     false,
                     "refused",
@@ -432,19 +475,28 @@ impl Tool for SessionNotifyTool {
                     &extra,
                 ))
             }
-            Delivery::NoRoute => Ok(verdict(
-                false,
-                "refused",
-                format!(
-                    "No live route for session {target} in this process — it has not messaged \
-                     since boot, or belongs to another instance/profile. Use a2a_send for \
-                     cross-instance targets."
-                ),
-                &[
-                    ("notify_target", target.to_string()),
-                    ("notify_reason", "no_route".to_string()),
-                ],
-            )),
+            Delivery::NoRoute => {
+                notify_journal::record(
+                    &caller_str,
+                    &target_str,
+                    "no_route",
+                    1,
+                    "no live route in this process",
+                );
+                Ok(verdict(
+                    false,
+                    "refused",
+                    format!(
+                        "No live route for session {target} in this process — it has not messaged \
+                         since boot, or belongs to another instance/profile. Use a2a_send for \
+                         cross-instance targets."
+                    ),
+                    &[
+                        ("notify_target", target.to_string()),
+                        ("notify_reason", "no_route".to_string()),
+                    ],
+                ))
+            }
             // The target no longer owns its channel (fork #17): the message
             // was redirected to the session that owns it NOW (fork #19) — a
             // success, not a refusal, and the reply names where it went.
@@ -453,6 +505,15 @@ impl Tool for SessionNotifyTool {
                 notify_receipts::record_queued(notify_id, to);
                 if confirm {
                     let (state, detail, reason) = confirm_route(to, CONFIRM_CAP).await;
+                    notify_journal::record(
+                        &caller_str,
+                        &target_str,
+                        state,
+                        0,
+                        &format!(
+                            "{detail} redirected_to={to} reason={reason} notify_id={notify_id}"
+                        ),
+                    );
                     return Ok(verdict(
                         true,
                         state,
@@ -465,6 +526,13 @@ impl Tool for SessionNotifyTool {
                         ],
                     ));
                 }
+                notify_journal::record(
+                    &caller_str,
+                    &target_str,
+                    "redirected",
+                    0,
+                    &format!("redirected_to={to} notify_id={notify_id}"),
+                );
                 Ok(verdict(
                     true,
                     "redirected",
