@@ -214,9 +214,7 @@ fn requires_checkable_criteria(task_type: &TaskType) -> bool {
 fn format_mermaid_plan_error(context: &str, errors: &[String]) -> String {
     let err = crate::channels::telegram::rich::mermaid::format_mermaid_error(context, errors);
     format!(
-        "PLAN TASK REFUSED: {err}
-
-Please fix the Mermaid diagram syntax in the task description and try again."
+        "PLAN TASK REFUSED: {err}\n\nPlease fix the Mermaid diagram syntax in the task description and try again."
     )
 }
 
