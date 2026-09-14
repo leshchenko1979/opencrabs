@@ -412,10 +412,13 @@ impl CronScheduler {
     /// Polls every 60 seconds for due jobs.
     pub fn spawn(self) -> tokio::task::JoinHandle<()> {
         let scheduler_profile = crate::config::profile::current_profile_name();
-        tokio::spawn(crate::config::profile::with_profile_home_async(
-            Some(&scheduler_profile),
-            self.run(),
-        ))
+        tokio::spawn(async move {
+            crate::config::profile::with_profile_home_async(
+                Some(&scheduler_profile),
+                self.run(),
+            )
+            .await
+        })
     }
 
     /// Run the polling loop in the CURRENT task (no internal spawn). The
@@ -1464,7 +1467,7 @@ async fn deliver_telegram(
     let message = message.to_string();
     let job_name = job_name.to_string();
     let profile = crate::config::profile::current_profile_name();
-    Some(tokio::spawn(
+    Some(tokio::spawn(async move {
         crate::config::profile::with_profile_home_async(Some(&profile), async move {
             match crate::channels::telegram::send::send_markdown_outbox(
                 &bot,
@@ -1512,8 +1515,9 @@ async fn deliver_telegram(
                     .await;
                 }
             }
-        }),
-    ))
+        })
+        .await
+    }))
 }
 
 /// Whether a `get_chat` result describes a forum (topics-enabled) group.
