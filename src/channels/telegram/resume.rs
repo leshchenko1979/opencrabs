@@ -416,7 +416,11 @@ pub(crate) async fn resume_session(
         Some(guard) => guard,
         None => {
             tracing::warn!(
-                "Telegram: resume_session {session_id} skipped — a turn is already active for this session"
+                "Telegram: resume_session {session_id} contended — turn already active, re-queueing as detached work (#227)"
+            );
+            telegram_state.enqueue_detached_result(
+                session_id,
+                crate::brain::agent::QueuedUserMessage::plain(prompt),
             );
             return Ok(());
         }
@@ -484,30 +488,36 @@ pub(crate) fn flush_queued_after_turn(
     Box::pin(async move {
         // Empty is the common case (one cheap lock check) — a real inference
         // only fires when something was queued.
-        let (detached, leftover_reactions): (Vec<_>, Vec<_>) = telegram_state
-            .drain_queued_items(session_id)
+        let drained = telegram_state.drain_queued_items(session_id);
+        let (detached, leftover_reactions): (Vec<_>, Vec<_>) = drained
             .into_iter()
             .partition(|item| item.origin == super::state::QueuedOrigin::DetachedWork);
 
         if !detached.is_empty() {
-            let combined = detached
+            // Merge detached results and leftover reactions when detached work is present (#227).
+            // Draining mixed queues into a single combined turn prevents competing turns where
+            // synchronous reaction execution would race against spawned detached resume.
+            let mut all_msgs: Vec<_> = detached.into_iter().map(|item| item.msg).collect();
+            let has_reactions = !leftover_reactions.is_empty();
+            if has_reactions {
+                all_msgs.extend(leftover_reactions.into_iter().map(|item| item.msg));
+            }
+            let combined = all_msgs
                 .iter()
-                .map(|i| i.msg.context_text.as_str())
+                .map(|m| m.context_text.as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
             tracing::info!(
-                "Telegram: {} detached result(s) landed during final delivery for session \
-                 {session_id} — resuming with a full tool loop rather than the toolless flush",
-                detached.len()
+                "Telegram: {} queued item(s) (including detached) landed during final delivery for session \
+                 {session_id} — resuming with a full tool loop rather than the toolless flush (#227)",
+                all_msgs.len()
             );
             let bot_for_resume = bot.clone();
             let agent_for_resume = agent.clone();
             let state_for_resume = telegram_state.clone();
             let chat_for_resume = chat_id;
-            let detached_for_clear: Vec<_> = detached
-                .iter()
-                .map(|item| (session_id, item.msg.clone()))
-                .collect();
+            let items_for_clear: Vec<_> =
+                all_msgs.iter().map(|m| (session_id, m.clone())).collect();
             // Spawned: the turn guard is already dropped above, so the resumed
             // turn can take it, and this caller must not block until that whole
             // turn finishes.
@@ -535,10 +545,11 @@ pub(crate) fn flush_queued_after_turn(
                 // unconditionally — a lost in-memory retry costs a plain
                 // undelivered push, the pre-#111 behavior; a surviving row
                 // costs a duplicate.
-                for (_sid, m) in &detached_for_clear {
+                for (_sid, m) in &items_for_clear {
                     crate::brain::agent::service::notify_queue::clear_on_delivery(session_id, m);
                 }
             });
+            return;
         }
 
         let leftover_reactions: Vec<_> = leftover_reactions.into_iter().map(|i| i.msg).collect();
