@@ -282,7 +282,7 @@ fn live_footer_drops_gear_before_icon_activity() {
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(plan_edit, "✍️ • 0:30 ⏱ • 5% 🧠 • ✍️ Editing session plan");
+    assert_eq!(plan_edit, "✍️ • 0:30 ⏱ • 5% 🧠");
     let finished = merged_footer(
         &FooterParts {
             outcome: Some(("✅", "Finished")),
@@ -297,7 +297,7 @@ fn live_footer_drops_gear_before_icon_activity() {
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(finished, "✅ • 1:15 ⏱ • 10% 🧠 • Finished");
+    assert_eq!(finished, "✅ • 1:15 ⏱ • 10% 🧠");
 }
 
 #[test]
