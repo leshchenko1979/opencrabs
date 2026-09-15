@@ -48,6 +48,70 @@ pub(crate) enum DisplayItem {
     System(String),
 }
 
+/// Unified runtime flow event for tool roll event ingestion.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FlowEvent {
+    /// Tool execution event with associated tool class and completion status
+    Tool {
+        name: String,
+        context: String,
+        completed: Option<bool>,
+    },
+    /// Background detached task lifecycle event (spawned / finished)
+    BackgroundTask { action: String, details: String },
+    /// Subagent lifecycle event (spawned / finished)
+    Subagent { action: String, details: String },
+    /// Context compaction event (started / finished)
+    Compaction { details: String },
+    /// Inbound notification received
+    Notification { source: String, summary: String },
+    /// Mid-turn queued user message injected
+    QueuedInput { summary: String },
+    /// System resilience / fallback / retry event
+    SystemAlert { icon: &'static str, message: String },
+    /// Model intermediate narration text
+    Narration(String),
+}
+
+impl FlowEvent {
+    /// Formats the event into a single display line with its class/status icon.
+    pub fn render_line(&self) -> String {
+        match self {
+            FlowEvent::Tool {
+                name,
+                context,
+                completed,
+            } => {
+                let icon = tool_entry_icon(name, *completed);
+                if context.is_empty() {
+                    format!("{icon} {name}")
+                } else {
+                    format!("{icon} {name} {context}")
+                }
+            }
+            FlowEvent::BackgroundTask { action, details } => {
+                format!("⏏️ task {action}: {details}")
+            }
+            FlowEvent::Subagent { action, details } => {
+                format!("🤖 subagent {action}: {details}")
+            }
+            FlowEvent::Compaction { details } => {
+                format!("{details}")
+            }
+            FlowEvent::Notification { source, summary } => {
+                format!("✉️ notify from {source}: {summary}")
+            }
+            FlowEvent::QueuedInput { summary } => {
+                format!("📥 queued input: {summary}")
+            }
+            FlowEvent::SystemAlert { icon, message } => {
+                format!("{icon} {message}")
+            }
+            FlowEvent::Narration(text) => text.clone(),
+        }
+    }
+}
+
 /// One entry in the in-place processing log (the growing `<blockquote
 /// expandable>` message). Tool entries reference `tool_msgs` by index so a
 /// status flip (⚙️ → ✅/❌) re-renders live; text entries hold the already
@@ -1075,6 +1139,77 @@ pub(crate) fn tool_status_icon(completed: Option<bool>) -> &'static str {
     }
 }
 
+/// Tool functional class for class-only icon representation in the tool roll.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolClass {
+    FileRead,
+    FileEdit,
+    Search,
+    Shell,
+    Plan,
+    Comms,
+    Config,
+    Brain,
+    Web,
+    Other,
+}
+
+impl ToolClass {
+    pub(crate) fn from_tool_name(name: &str) -> Self {
+        match name {
+            "read_file" | "read_opencrabs_file" => ToolClass::FileRead,
+            "write_file"
+            | "edit_file"
+            | "hashline_edit"
+            | "write_opencrabs_file"
+            | "notebook_edit" => ToolClass::FileEdit,
+            "grep" | "glob" | "ls" | "memory_search" | "exa_search" | "web_search"
+            | "brave_search" | "channel_search" | "session_search" | "grep_docs" => {
+                ToolClass::Search
+            }
+            "bash" | "execute_code" => ToolClass::Shell,
+            "plan" | "goal_manage" | "session_context" | "tasks_list" => ToolClass::Plan,
+            "session_notify" | "telegram_send" | "a2a_send" | "discord_send" | "slack_send"
+            | "whatsapp_send" | "tg_send_message" | "tg_send_to_phone" => ToolClass::Comms,
+            "config_manager" | "tool_manage" | "tool_search" | "cron_manage" | "profile_list"
+            | "slash_command" => ToolClass::Config,
+            "load_brain_file" | "feedback_record" | "feedback_analyze" | "self_improve" => {
+                ToolClass::Brain
+            }
+            "http_request" | "web_scrape" | "browser_navigate" | "browser_click"
+            | "browser_type" | "browser_eval" | "browser_content" | "browser_screenshot"
+            | "browser_wait" | "browser_find" | "browser_close" | "pg_query" | "n8n_api" => {
+                ToolClass::Web
+            }
+            _ => ToolClass::Other,
+        }
+    }
+
+    /// Single class icon representing the tool when successful / running.
+    pub(crate) fn class_icon(self) -> &'static str {
+        match self {
+            ToolClass::FileRead => "📄",
+            ToolClass::FileEdit => "📝",
+            ToolClass::Search => "🔍",
+            ToolClass::Shell => "💻",
+            ToolClass::Plan => "📋",
+            ToolClass::Comms => "✉️",
+            ToolClass::Config => "⚙️",
+            ToolClass::Brain => "🧠",
+            ToolClass::Web => "🌐",
+            ToolClass::Other => "⛏",
+        }
+    }
+}
+
+/// Resolved icon for a tool entry: class icon on running/success, cross on failure.
+pub(crate) fn tool_entry_icon(tool_name: &str, completed: Option<bool>) -> &'static str {
+    match completed {
+        Some(false) => "❌",
+        _ => ToolClass::from_tool_name(tool_name).class_icon(),
+    }
+}
+
 /// Resolve the open processing-log flow (tool calls + intermediate text, in
 /// order) into renderable lines.
 pub(crate) fn flow_lines(s: &StreamingState) -> Vec<FlowLine> {
@@ -1082,7 +1217,7 @@ pub(crate) fn flow_lines(s: &StreamingState) -> Vec<FlowLine> {
         .iter()
         .filter_map(|entry| match entry {
             FlowEntry::Tool(idx) => s.tool_msgs.get(*idx).map(|t| FlowLine::Tool {
-                label: format!("{} {}", tool_status_icon(t.completed), t.name),
+                label: format!("{} {}", tool_entry_icon(&t.name, t.completed), t.name),
                 context: t.context.clone(),
                 raw_context: t.raw_context.clone(),
             }),
