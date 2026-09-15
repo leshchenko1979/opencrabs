@@ -94,3 +94,24 @@ fn duplicate_rows_are_ambiguous() {
     let prefix = id.to_string()[..8].to_string();
     assert_eq!(resolve_session_target(&sessions, &prefix), None);
 }
+
+#[test]
+fn session_target_recognition_and_extraction() {
+    use crate::channels::target_resolver::{extract_session_target, is_session_target};
+
+    let full_uuid = "12345678-1234-1234-1234-123456789abc";
+    let url_target = format!("oc://session/{full_uuid}");
+    let legacy_target = format!("session:{full_uuid}");
+    let channel_target = "telegram:123456:78";
+    let url_channel = "oc://telegram/123456/78";
+
+    assert!(is_session_target(&url_target));
+    assert!(is_session_target(&legacy_target));
+    assert!(!is_session_target(channel_target));
+    assert!(!is_session_target(url_channel));
+
+    assert_eq!(extract_session_target(&url_target), Some(full_uuid));
+    assert_eq!(extract_session_target(&legacy_target), Some(full_uuid));
+    assert_eq!(extract_session_target(channel_target), None);
+    assert_eq!(extract_session_target(url_channel), None);
+}
