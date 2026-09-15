@@ -80,14 +80,16 @@ fn flow_telemetry_html_dom_placement() {
 
     let html = render_flow(&s);
 
-    // Check telemetry line presence
+    // Check telemetry line presence (Option A: state_icon • time ⏱ • tools ⛏ • detached ⏏️ • subagents 🤖 • queued ���️)
     assert!(
-        html.contains("2 ⛏ • 0:42 ⏱ • 1 ⏏️ • 2 🤖 • 3 ✉️"),
+        html.contains("⚙ • 0:42 ⏱ • 2 ⛏ • 1 ⏏️ • 2 🤖 • 3 ✉️"),
         "HTML must contain fully populated telemetry bar: {html}"
     );
 
     // Verify placement: telemetry line must appear before <blockquote expandable>
-    let telem_pos = html.find("2 ⛏ • 0:42 ⏱").expect("telemetry bar present");
+    let telem_pos = html
+        .find("⚙ • 0:42 ⏱ • 2 ⛏")
+        .expect("telemetry bar present");
     let quote_pos = html
         .find("<blockquote expandable>")
         .expect("blockquote present");
@@ -107,13 +109,13 @@ fn flow_telemetry_details_dom_placement() {
 
     // Check paragraph-wrapped telemetry line in rich details
     assert!(
-        details_html.contains("<p>2 ⛏ • 0:42 ⏱ • 2 ⏏️ • 1 ✉️</p>"),
+        details_html.contains("<p>⚙ • 0:42 ⏱ • 2 ⛏ • 2 ⏏️ • 1 ✉️</p>"),
         "Details HTML must contain paragraph-wrapped telemetry bar: {details_html}"
     );
 
     // Verify placement: paragraph telemetry must appear before <details>
     let telem_pos = details_html
-        .find("<p>2 ⛏ • 0:42 ⏱")
+        .find("<p>⚙ • 0:42 ⏱ • 2 ⛏")
         .expect("telemetry bar present");
     let details_pos = details_html.find("<details>").expect("details tag present");
     assert!(
@@ -135,7 +137,7 @@ fn flow_telemetry_zero_suppression_in_renders() {
 
     let html = render_flow(&s);
     assert!(
-        html.contains("2 ⛏ • 0:42 ⏱"),
+        html.contains("⚙ • 0:42 ⏱ • 2 ⛏"),
         "Base metrics always shown: {html}"
     );
     assert!(
@@ -150,7 +152,7 @@ fn flow_telemetry_zero_suppression_in_renders() {
 
     let details_html = render_flow_details_state(&s);
     assert!(
-        details_html.contains("<p>2 ⛏ • 0:42 ⏱</p>"),
+        details_html.contains("<p>⚙ • 0:42 ⏱ • 2 ⛏</p>"),
         "Base metrics paragraph in rich details: {details_html}"
     );
     assert!(
@@ -175,14 +177,14 @@ fn flow_telemetry_absent_when_no_tool_log() {
     s.flow_entries.clear();
     let html = render_flow(&s);
     assert!(
-        !html.contains("⚙️"),
-        "No telemetry bar when tool log is empty: {html}"
+        !html.contains("⛏"),
+        "No tool count when tool log is empty: {html}"
     );
 
     let details_html = render_flow_details_state(&s);
     assert!(
-        !details_html.contains("⚙️"),
-        "No telemetry bar in details when tool log is empty: {details_html}"
+        !details_html.contains("⛏"),
+        "No tool count in details when tool log is empty: {details_html}"
     );
 }
 
@@ -194,13 +196,13 @@ fn flow_telemetry_settled_outcome_renders() {
 
     let html = render_flow(&s);
     assert!(
-        html.contains("2 ⛏ • 0:42 ⏱ • 4 ✉️"),
+        html.contains("✅ • 0:42 ⏱ • 2 ⛏ • 4 ✉️"),
         "Settled outcome includes telemetry: {html}"
     );
 
     let details_html = render_flow_details_state(&s);
     assert!(
-        details_html.contains("<p>2 ⛏ • 0:42 ⏱ • 4 ✉️</p>"),
+        details_html.contains("<p>✅ • 0:42 ⏱ • 2 ⛏ • 4 ✉️</p>"),
         "Settled outcome in details includes telemetry: {details_html}"
     );
 }
