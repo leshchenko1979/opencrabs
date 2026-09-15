@@ -973,14 +973,16 @@ impl HeaderMarkup {
     }
 }
 
-/// Strip leading tool status glyphs (running gear `⚙️`, completed check `✅`/`✓`/`✔`,
+/// Strip leading tool status glyphs (running pick `⛏`/`⚙️`, completed check `✅`/`✓`/`✔`,
 /// or failed cross `❌`/`✗`/`✖` and variation selectors) and any following whitespace
 /// from a status message, so live headers/footers do not render bare tool completion
-/// icons or double gears on unsettled turns. Text starting with genuine status icons
+/// icons or double tools on unsettled turns. Text starting with genuine status icons
 /// like `⏳` (compaction) is preserved.
 pub(crate) fn strip_leading_tool_status_icons(s: &str) -> &str {
-    s.trim_start_matches(['⚙', '✅', '❌', '✓', '✔', '✗', '✖', '\u{fe0f}', '\u{fe0e}'])
-        .trim_start()
+    s.trim_start_matches([
+        '⛏', '⚙', '✅', '❌', '✓', '✔', '✗', '✖', '\u{fe0f}', '\u{fe0e}',
+    ])
+    .trim_start()
 }
 
 /// Strip a leading running-gear (`⚙️`, base `⚙` plus its optional variation
@@ -1047,14 +1049,14 @@ pub(crate) fn flow_header_text(
             if let Some(dur) = duration {
                 segs.push(markup.italic(dur));
             }
-            // The standing gear is dropped when the status already leads with
+            // The standing icon is dropped when the status already leads with
             // an icon (#29 fix round, owner directive) — the pinned
             // `⏳ Compacting context…` header and icon-led tool activity render
-            // bare, never `⚙️ ⏳ …`.
+            // bare, never `⛏ ⏳ …`.
             if icon_led {
                 segs.join(" • ")
             } else {
-                format!("⚙️ {}", segs.join(" • "))
+                format!("⛏ {}", segs.join(" • "))
             }
         }
         FlowHeader::Settled {
@@ -1075,7 +1077,7 @@ pub(crate) fn flow_header_text(
 /// Status glyph for a tool call: running, succeeded, or failed.
 pub(crate) fn tool_status_icon(completed: Option<bool>) -> &'static str {
     match completed {
-        None => "⚙️",
+        None => "⛏",
         Some(true) => "✅",
         Some(false) => "❌",
     }
