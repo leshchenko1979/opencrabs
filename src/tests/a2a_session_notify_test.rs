@@ -42,6 +42,7 @@ fn outcome_of(resp: &JsonRpcResponse) -> String {
 // (session_notify_test precedent).
 #[allow(clippy::await_holding_lock)]
 async fn a2a_notify_dispatches_goal_to_target_session() {
+    let _guard = test_guard();
     let ctx = placeholder_service_context().await;
     let svc = SessionService::new(ctx.clone());
     let session = svc
