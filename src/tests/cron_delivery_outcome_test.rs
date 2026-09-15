@@ -141,8 +141,82 @@ fn delivery_target_validation_rejects_silent_drop_shapes() {
     assert!(validate_delivery_target("telegram-only").is_err());
     // Empty id.
     assert!(validate_delivery_target("telegram:").is_err());
+    assert!(validate_delivery_target("session:").is_err());
+    assert!(validate_delivery_target("oc://session/").is_err());
     // Webhooks carry no host-side credential — always valid.
     assert!(validate_delivery_target("https://example.com/hook").is_ok());
+    // Session targets are valid destinations (active turn injection).
+    assert!(validate_delivery_target("session:12345678-1234-1234-1234-123456789abc").is_ok());
+    assert!(validate_delivery_target("oc://session/12345678-1234-1234-1234-123456789abc").is_ok());
+}
+
+#[tokio::test]
+async fn test_cron_set_goal_requires_session() {
+    use crate::brain::tools::cron_manage::CronManageTool;
+    use crate::brain::tools::r#trait::{Tool, ToolExecutionContext};
+    use serde_json::json;
+
+    let pool = test_db().await;
+    let repo = crate::db::repository::CronJobRepository::new(pool.clone());
+    let tool = CronManageTool::new(repo);
+    let ctx = ToolExecutionContext::new(uuid::Uuid::new_v4());
+
+    // 1. Create with set_goal = true but no deliver_to -> REJECTED
+    let input_no_deliver = json!({
+        "action": "create",
+        "name": "goal-job-1",
+        "cron": "0 0 * * *",
+        "tz": "UTC",
+        "prompt": "do something",
+        "set_goal": true
+    });
+    let res = tool.execute(input_no_deliver, &ctx).await.unwrap();
+    assert!(!res.success, "set_goal without deliver_to must be rejected");
+    assert!(
+        res.error
+            .unwrap_or_default()
+            .contains("set_goal requires oc://session"),
+        "error message must explain set_goal requires session target"
+    );
+
+    // 2. Create with set_goal = true and channel delivery -> REJECTED
+    let input_channel_deliver = json!({
+        "action": "create",
+        "name": "goal-job-2",
+        "cron": "0 0 * * *",
+        "tz": "UTC",
+        "prompt": "do something",
+        "deliver_to": "https://example.com/webhook",
+        "set_goal": true
+    });
+    let res2 = tool.execute(input_channel_deliver, &ctx).await.unwrap();
+    assert!(
+        !res2.success,
+        "set_goal with channel delivery must be rejected"
+    );
+    assert!(
+        res2.error
+            .unwrap_or_default()
+            .contains("set_goal requires oc://session"),
+        "error message must explain channel delivery is passive"
+    );
+
+    // 3. Create with set_goal = true and session delivery -> SUCCESS
+    let input_session_deliver = json!({
+        "action": "create",
+        "name": "goal-job-3",
+        "cron": "0 0 * * *",
+        "tz": "UTC",
+        "prompt": "do something",
+        "deliver_to": "oc://session/12345678-1234-1234-1234-123456789abc",
+        "set_goal": true
+    });
+    let res3 = tool.execute(input_session_deliver, &ctx).await.unwrap();
+    assert!(
+        res3.success,
+        "set_goal with session delivery must succeed: {:?}",
+        res3.error
+    );
 }
 
 #[test]

@@ -1,8 +1,8 @@
 //! Cron CLI subcommands — add, list, remove, enable, disable.
 
 use super::args::CronCommands;
-use crate::db::CronJobRepository;
 use crate::db::models::CronJob;
+use crate::db::CronJobRepository;
 use anyhow::Result;
 
 /// Cron job management CLI handler
@@ -97,6 +97,20 @@ async fn cmd_add(
             "Unknown timezone '{tz}'. Use an IANA name like 'America/New_York', 'Europe/London', or 'UTC'."
         ),
     };
+
+    // Validate set_goal requires session delivery target
+    if set_goal {
+        let target_is_session = deliver_to
+            .as_deref()
+            .map(crate::channels::target_resolver::is_session_target)
+            .unwrap_or(false);
+        if !target_is_session {
+            anyhow::bail!(
+                "Cannot create job: --set-goal requires oc://session/<uuid> delivery target. \
+                 Channel deliveries (telegram, discord, etc.) are passive outputs and cannot set session goals."
+            );
+        }
+    }
 
     if (repo.find_by_name(&name).await?).is_some() {
         anyhow::bail!("A cron job named '{name}' already exists");

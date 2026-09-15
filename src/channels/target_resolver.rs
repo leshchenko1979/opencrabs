@@ -162,6 +162,11 @@ pub fn extract_session_target(target: &str) -> Option<&str> {
     }
 }
 
+/// Does this target designate a session (e.g. `oc://session/<id>` or `session:<id>`)?
+pub fn is_session_target(target: &str) -> bool {
+    extract_session_target(target).is_some()
+}
+
 /// What the resolver needs from the world. Implemented by the wiring context
 /// (ChannelManager + session lookup) so tests can drive resolution without
 /// a live daemon.
