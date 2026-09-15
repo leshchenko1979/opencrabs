@@ -725,10 +725,10 @@ fn review_impl_spawn_input_sets_read_only_and_correct_label() {
     let input = review_impl_spawn_input(session_id, brief.clone());
 
     assert_eq!(
-        input["session_id"].as_str().unwrap(),
+        input["plan_session"].as_str().unwrap(),
         session_id.to_string()
     );
-    assert_eq!(input["brief"].as_str().unwrap(), brief);
+    assert_eq!(input["prompt"].as_str().unwrap(), brief);
     assert_eq!(
         input["read_only"].as_bool(),
         Some(true),
@@ -749,14 +749,14 @@ fn review_impl_brief_contains_structured_adversarial_prompt() {
         Some(std::path::Path::new("/tmp/test_plan.md")),
     );
 
-    assert!(brief.contains("## Plan: Feature #234 Title"));
-    assert!(brief.contains("## Completed Checklist"));
+    assert!(brief.contains("Title: Feature #234 Title"));
+    assert!(brief.contains("Checklist & Deliverables:"));
     assert!(brief.contains("- [x] 1. First task"));
-    assert!(brief.contains("## Instructions for Implementation Review Worker"));
-    assert!(brief.contains("adverse-auditor"));
-    assert!(brief.contains("### 1. Grounding"));
-    assert!(brief.contains("### 2. Acceptance Criteria"));
-    assert!(brief.contains("### 3. Code & Architecture Audit"));
-    assert!(brief.contains("### 4. Output Report Format"));
-    assert!(brief.contains("## 🔍 Implementation Review: Feature #234 Title"));
+    assert!(brief.contains("adversarial software implementation audit"));
+    assert!(brief.contains("Archived Plan File: /tmp/test_plan.md"));
+    assert!(brief.contains("### STEP 1: CONTEXT & ACCEPTANCE CRITERIA"));
+    assert!(brief.contains("### STEP 2: CODE & ARCHITECTURE AUDIT"));
+    assert!(brief.contains("### STEP 3: TEST & ACCEPTANCE VERIFICATION"));
+    assert!(brief.contains("### STEP 4: STRUCTURED REPORT"));
+    assert!(brief.contains("## Implementation Audit Report: <Title>"));
 }
