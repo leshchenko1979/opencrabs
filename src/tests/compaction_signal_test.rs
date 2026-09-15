@@ -69,6 +69,7 @@ fn compacting_footer_suppresses_duplicate_activity_segment() {
         5,
         None,
         true,
+        None,
     );
     assert_eq!(
         compacting.matches("Compacting context").count(),
@@ -84,6 +85,7 @@ fn compacting_footer_suppresses_duplicate_activity_segment() {
         5,
         None,
         false,
+        None,
     );
     assert_eq!(
         idle.matches("Compacting context").count(),
