@@ -309,12 +309,22 @@ fn preview_bash_comment_survives_long_command_no_truncation() {
 
 #[test]
 fn preview_narration_beats_bash_comments() {
-    // Priority 1 (narration) wins over priority 2 (bash comments).
+    // Single-pass chronological: when narration is the latest event, it wins.
     let out = latest_activity_preview(&[
         bash_line("# --- Installing deps ---\nnpm install"),
         FlowLine::Text("Wiring up the new module.".to_string()),
     ]);
     assert_eq!(out.as_deref(), Some("Wiring up the new module."));
+}
+
+#[test]
+fn preview_tool_overwrites_earlier_narration() {
+    // Single-pass chronological (#249): a later tool call overwrites earlier narration.
+    let out = latest_activity_preview(&[
+        FlowLine::Text("Wiring up the new module.".to_string()),
+        tline("🔍 glob", "src/**/*.rs"),
+    ]);
+    assert_eq!(out.as_deref(), Some("🔍 glob src/**/*.rs"));
 }
 
 // ── Mixed processing-log flow (tool calls + intermediate text) — #300 ──
@@ -329,11 +339,11 @@ fn tool_plus_text_folds_into_one_blockquote() {
         ],
         None,
     );
-    // ADR 0005 F1: tool + text fold into one blockquote body; the narration-led
-    // status/count rides in the merged footer below the block.
-    assert!(out.starts_with("<blockquote expandable><b>✅ bash</b> <code>git status</code>\n\n"));
-    let footer = out.rsplit('\n').next().unwrap();
-    assert_eq!(footer, "⚙ • 0:00 ⏱ • ⛏ Checked the tree, all clean.");
+    // ADR 0005 F1: tool + text fold into one blockquote body; the latest tool
+    // preview (Option A summary header) rides on the block.
+    assert!(out.contains("<blockquote expandable><b>⛏ ✅ read_file handler.rs</b>\n\n"));
+    let top_line = out.lines().next().unwrap();
+    assert_eq!(top_line, "⚙ • 0:00 ⏱ • 2 ⛏");
     assert!(out.contains("<b>✅ bash</b> <code>git status</code>"));
     assert!(out.contains("Checked the tree, all clean."));
     assert!(out.contains("<b>✅ read_file</b> <code>handler.rs</code>"));
@@ -344,10 +354,12 @@ fn tool_plus_text_folds_into_one_blockquote() {
 fn text_only_flow_uses_processing_log_header() {
     let out = render_flow_html(&[FlowLine::Text("Switching provider…".to_string())], None);
     // Text-only flow (0 tools) still has an entry, so it renders a block; the
-    // footer log-summary shows the activity with a cog and no `N tool calls`.
-    assert!(out.contains("<blockquote expandable>Switching provider…</blockquote>"));
-    let footer = out.rsplit('\n').next().unwrap();
-    assert_eq!(footer, "⚙ • 0:00 ⏱ • ⛏ Switching provider…");
+    // summary header shows the activity with a cog and no `N tool calls`.
+    assert!(out.contains(
+        "<blockquote expandable><b>⛏ Switching provider…</b>\n\nSwitching provider…</blockquote>"
+    ));
+    let top_line = out.lines().next().unwrap();
+    assert_eq!(top_line, "⚙ • 0:00 ⏱");
     assert!(!out.contains("tool calls"));
 }
 
@@ -374,8 +386,7 @@ fn blank_text_entries_are_dropped() {
     // Blank text is dropped, leaving one tool entry rendered as a normal block.
     assert_eq!(
         out,
-        "<blockquote expandable><b>✅ bash</b> <code>x</code></blockquote>\n\
-         ⚙ • 0:00 ⏱ • ⛏ bash x"
+        "⚙ • 0:00 ⏱ • 1 ⛏\n<blockquote expandable><b>⛏ ✅ bash x</b>\n\n<b>✅ bash</b> <code>x</code></blockquote>"
     );
 }
 
