@@ -207,7 +207,7 @@ fn live_header_drops_gear_before_icon_status() {
         ),
         "<b>⏳ Compacting context…</b> • <i>11 tool calls</i> • <i>1:05</i>"
     );
-    // Plain status keeps the gear (#509 shape unchanged).
+    // Plain status keeps the tool pick (#509 shape).
     assert_eq!(
         flow_header_text(
             3,
@@ -215,14 +215,14 @@ fn live_header_drops_gear_before_icon_status() {
             Some("Reading logs"),
             HeaderMarkup::Html
         ),
-        "⚙️ <b>Reading logs</b> • <i>3 tool calls</i> • <i>0:12</i>"
+        "⛏ <b>Reading logs</b> • <i>3 tool calls</i> • <i>0:12</i>"
     );
 }
 
 #[test]
 fn live_footer_drops_gear_before_icon_activity() {
     // In-flight activity strips tool outcome glyphs (✅/❌) so unsettled turns
-    // maintain the running ⚙️ cog, while system pins like ⏳ remain bare (#1052).
+    // maintain the running ⛏ pick, while system pins like ⏳ remain bare (#1052).
     let tool_done = merged_footer(
         &FooterParts {
             outcome: None,
@@ -231,13 +231,13 @@ fn live_footer_drops_gear_before_icon_activity() {
             activity: Some("✅ bash git status"),
             tool_count: 1,
             has_log: true,
-            ctx: None,
+            ctx: Some("ctx: 8K/200K 4%"),
             elapsed_secs: 0,
             bg: None,
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(tool_done, "⚙️ bash git status • 1 tool calls • ⏱ 0:00");
+    assert_eq!(tool_done, "⏱ 0:00 • 🧠 4% • ⛏ bash git status");
     let icon = merged_footer(
         &FooterParts {
             outcome: None,
@@ -252,7 +252,7 @@ fn live_footer_drops_gear_before_icon_activity() {
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(icon, "⏳ Compacting context… • 1 tool calls • ⏱ 0:00");
+    assert_eq!(icon, "⏱ 0:00 • ⏳ Compacting context…");
     let plain = merged_footer(
         &FooterParts {
             outcome: None,
@@ -267,14 +267,13 @@ fn live_footer_drops_gear_before_icon_activity() {
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(plain, "⚙️ Reading the handler. • 2 tool calls • ⏱ 0:00");
+    assert_eq!(plain, "⏱ 0:00 • ⛏ Reading the handler.");
 }
 
 #[test]
 fn icon_led_segment_retires_the_bare_cog_fallback() {
     // With an icon-led pin as the only narration (activity suppressed by the
-    // compaction dedupe, zero tool calls), the bare-⚙️ fallback segment is
-    // redundant — the icon already signals activity.
+    // compaction dedupe, zero tool calls), clock leads followed by the icon.
     let out = merged_footer(
         &FooterParts {
             outcome: None,
@@ -289,5 +288,5 @@ fn icon_led_segment_retires_the_bare_cog_fallback() {
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(out, "⏳ Compacting context… • ⏱ 1:05");
+    assert_eq!(out, "⏱ 1:05 • ⏳ Compacting context…");
 }
