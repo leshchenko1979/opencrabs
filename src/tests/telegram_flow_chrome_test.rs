@@ -115,10 +115,10 @@ async fn test_goal_turn_budget_formatting() {
 
 #[test]
 fn clock_glyph_formats_minutes_and_hours() {
-    assert_eq!(clock_glyph(0), "⏱ 0:00");
-    assert_eq!(clock_glyph(9), "⏱ 0:09");
-    assert_eq!(clock_glyph(83), "⏱ 1:23");
-    assert_eq!(clock_glyph(3665), "⏱ 1:01:05");
+    assert_eq!(clock_glyph(0), "0:00 ⏱");
+    assert_eq!(clock_glyph(9), "0:09 ⏱");
+    assert_eq!(clock_glyph(83), "1:23 ⏱");
+    assert_eq!(clock_glyph(3665), "1:01:05 ⏱");
 }
 
 // ── chrome assembly: title / prose / checklist / goal (Decision 3 / 12 / 13) ──
@@ -1337,7 +1337,7 @@ fn deliverable_rich_report_surfaces_mermaid_diagrams() {
 
 #[test]
 fn test_telemetry_metrics_format_line_zero_suppression() {
-    // Base case: all zero optional fields -> only gear and clock
+    // Base case: all zero optional fields -> only pick and clock
     let base = TelemetryMetrics {
         tool_count: 0,
         elapsed_secs: 0,
@@ -1345,7 +1345,7 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
         subagents: 0,
         queued_messages: 0,
     };
-    assert_eq!(base.format_line(), "⚙️ 0 • ⏱ 0:00");
+    assert_eq!(base.format_line(), "0 ⛏ • 0:00 ⏱");
 
     // Partial cases: zero suppression for non-positive fields
     let partial_bg = TelemetryMetrics {
@@ -1355,7 +1355,7 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
         subagents: 0,
         queued_messages: 0,
     };
-    assert_eq!(partial_bg.format_line(), "⚙️ 3 • ⏱ 1:05 • ⏏️ 2");
+    assert_eq!(partial_bg.format_line(), "3 ⛏ • 1:05 ⏱ • 2 ⏏️");
 
     let partial_subagents = TelemetryMetrics {
         tool_count: 1,
@@ -1364,7 +1364,7 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
         subagents: 1,
         queued_messages: 0,
     };
-    assert_eq!(partial_subagents.format_line(), "⚙️ 1 • ⏱ 0:10 • 🤖 1");
+    assert_eq!(partial_subagents.format_line(), "1 ⛏ • 0:10 ⏱ • 1 🤖");
 
     let partial_queued = TelemetryMetrics {
         tool_count: 5,
@@ -1373,7 +1373,7 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
         subagents: 0,
         queued_messages: 4,
     };
-    assert_eq!(partial_queued.format_line(), "⚙️ 5 • ⏱ 1:00:05 • ✉️ 4");
+    assert_eq!(partial_queued.format_line(), "5 ⛏ • 1:00:05 ⏱ • 4 ✉️");
 
     // All non-zero fields present
     let all_present = TelemetryMetrics {
@@ -1385,6 +1385,6 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
     };
     assert_eq!(
         all_present.format_line(),
-        "⚙️ 4 • ⏱ 0:30 • ⏏️ 1 • 🤖 2 • ✉️ 3"
+        "4 ⛏ • 0:30 ⏱ • 1 ⏏️ • 2 🤖 • 3 ✉️"
     );
 }
