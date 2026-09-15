@@ -396,6 +396,7 @@ impl TelemetryMetrics {
 /// Inputs to the merged flow footer (ADR 0005 Decision 12). The renderer
 /// decomposes its `FlowHeader` / lines / sections into these primitives so the
 /// footer join lives in one place and both the classic and rich paths agree.
+/// Structure follows: `<state_icon> • <time> ⏱ • <pct>% 🧠` (plus `⛏ <tool>` when active).
 pub(crate) struct FooterParts<'a> {
     /// Settled outcome `(icon, verb)` (e.g. `("✅", "Finished")`) once the turn
     /// ends; `None` while live. Drives segment 1 and drops the in-flight cog.
