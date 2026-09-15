@@ -45,8 +45,8 @@ fn empty_group_renders_footer_only() {
     // collapses to the plain merged footer, which with elapsed_secs=0 (the
     // wrapper passes 0) is just the clock. The legacy live-status argument no
     // longer feeds the footer.
-    assert_eq!(render_flow_html(&[], None), "⚙ • 0:00 ⏱");
-    assert_eq!(render_flow_html(&[], Some("45s")), "⚙ • 0:00 ⏱");
+    assert_eq!(render_flow_html(&[], None), "⏱ 0:00");
+    assert_eq!(render_flow_html(&[], Some("45s")), "⏱ 0:00");
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn single_tool_renders_block() {
     assert_eq!(
         out,
         "<blockquote expandable><b>✅ bash</b> <code>git status</code></blockquote>\n\
-         ⚙ • 0:00 ⏱ • ⛏ bash git status"
+         ✅ bash git status • 1 tool calls • ⏱ 0:00"
     );
     assert!(out.contains("<blockquote expandable>"));
 }
@@ -88,7 +88,7 @@ fn multiple_tools_render_expandable_blockquote() {
     assert!(out.starts_with("<blockquote expandable><b>✅ bash</b> <code>cargo fmt</code>\n\n"));
     assert!(out.contains("</blockquote>\n"));
     let footer = out.rsplit('\n').next().unwrap();
-    assert_eq!(footer, "⚙ • 0:00 ⏱ • ⛏ grep pattern");
+    assert_eq!(footer, "❌ grep pattern • 3 tool calls • ⏱ 0:00");
     assert!(out.contains("<b>✅ bash</b> <code>cargo fmt</code>"));
     assert!(out.contains("<b>✅ read_file</b> <code>handler.rs</code>"));
     assert!(out.contains("<b>❌ grep</b> <code>pattern</code>"));
@@ -108,7 +108,10 @@ fn blocks_are_separated_by_blank_lines() {
     // the narration-led status/count is in the merged footer, not a header row.
     assert!(out.starts_with("<blockquote expandable><b>✅ bash</b> <code>cargo fmt</code>\n\n"));
     let footer = out.rsplit('\n').next().unwrap();
-    assert_eq!(footer, "⚙ • 0:00 ⏱ • ⛏ Reformatted three files.");
+    assert_eq!(
+        footer,
+        "⚙️ Reformatted three files. • 2 tool calls • ⏱ 0:00"
+    );
     assert!(out.contains("<b>✅ bash</b> <code>cargo fmt</code>\n\nReformatted three files."));
     assert!(
         out.contains("Reformatted three files.\n\n<b>✅ read_file</b> <code>handler.rs</code>")
@@ -333,7 +336,10 @@ fn tool_plus_text_folds_into_one_blockquote() {
     // status/count rides in the merged footer below the block.
     assert!(out.starts_with("<blockquote expandable><b>✅ bash</b> <code>git status</code>\n\n"));
     let footer = out.rsplit('\n').next().unwrap();
-    assert_eq!(footer, "⚙ • 0:00 ⏱ • ⛏ Checked the tree, all clean.");
+    assert_eq!(
+        footer,
+        "⚙️ Checked the tree, all clean. • 2 tool calls • ⏱ 0:00"
+    );
     assert!(out.contains("<b>✅ bash</b> <code>git status</code>"));
     assert!(out.contains("Checked the tree, all clean."));
     assert!(out.contains("<b>✅ read_file</b> <code>handler.rs</code>"));
@@ -347,7 +353,7 @@ fn text_only_flow_uses_processing_log_header() {
     // footer log-summary shows the activity with a cog and no `N tool calls`.
     assert!(out.contains("<blockquote expandable>Switching provider…</blockquote>"));
     let footer = out.rsplit('\n').next().unwrap();
-    assert_eq!(footer, "⚙ • 0:00 ⏱ • ⛏ Switching provider…");
+    assert_eq!(footer, "⚙️ Switching provider… • ⏱ 0:00");
     assert!(!out.contains("tool calls"));
 }
 
@@ -375,13 +381,13 @@ fn blank_text_entries_are_dropped() {
     assert_eq!(
         out,
         "<blockquote expandable><b>✅ bash</b> <code>x</code></blockquote>\n\
-         ⚙ • 0:00 ⏱ • ⛏ bash x"
+         ✅ bash x • 1 tool calls • ⏱ 0:00"
     );
 }
 
 #[test]
 fn empty_flow_renders_footer_only() {
-    assert_eq!(render_flow_html(&[], None), "⚙ • 0:00 ⏱");
+    assert_eq!(render_flow_html(&[], None), "⏱ 0:00");
 }
 
 // ── folded_duplicates_final: block dedup against the final answer ──
@@ -471,7 +477,7 @@ fn live_status_rides_in_footer() {
     );
     assert!(out.starts_with("<blockquote expandable><b>✅ bash</b> <code>cargo fmt</code>\n\n"));
     let footer = out.rsplit('\n').next().unwrap();
-    assert_eq!(footer, "⚙ • 0:00 ⏱ • ⛏ Reading the handler.");
+    assert_eq!(footer, "⚙️ Reading the handler. • 2 tool calls • ⏱ 0:00");
 }
 
 #[test]
@@ -488,7 +494,7 @@ fn no_duration_still_leads_with_activity() {
     );
     assert!(out.starts_with("<blockquote expandable><b>✅ bash</b> <code>cargo fmt</code>\n\n"));
     let footer = out.rsplit('\n').next().unwrap();
-    assert_eq!(footer, "⚙ • 0:00 ⏱ • ⛏ read_file handler.rs");
+    assert_eq!(footer, "✅ read_file handler.rs • 2 tool calls • ⏱ 0:00");
     assert!(!out.contains("45s"));
 }
 
@@ -509,7 +515,7 @@ fn running_tool_fallback_does_not_double_the_gear() {
         "the running-tool fallback must not double the footer gear: {out}"
     );
     let footer = out.rsplit('\n').next().unwrap();
-    assert_eq!(footer, "⚙ • 0:00 ⏱ • ⛏ bash gh pr list");
+    assert_eq!(footer, "⚙️ bash gh pr list • 2 tool calls • ⏱ 0:00");
 }
 
 #[test]
@@ -521,7 +527,7 @@ fn live_status_on_text_only_flow_uses_processing_log_header() {
     // Text-only flow: the narration + cog rides in the footer, no tool count.
     assert!(out.contains("<blockquote expandable>Looking into it.</blockquote>"));
     let footer = out.rsplit('\n').next().unwrap();
-    assert_eq!(footer, "⚙ • 0:00 ⏱ • ⛏ Looking into it.");
+    assert_eq!(footer, "⚙️ Looking into it. • ⏱ 0:00");
 }
 
 #[test]
@@ -533,7 +539,7 @@ fn single_tool_progress_rides_in_footer() {
     assert_eq!(
         out,
         "<blockquote expandable><b>⚙️ bash</b> <code>git status</code></blockquote>\n\
-         ⚙ • 0:00 ⏱ • ⛏ bash git status"
+         ⚙️ bash git status • 1 tool calls • ⏱ 0:00"
     );
     assert!(out.contains("<blockquote expandable>"));
 }
@@ -598,7 +604,7 @@ fn flow_header_live_and_settled_formats() {
             Some("✅ glob reviews/20260915-c14/**"),
             HeaderMarkup::Markdown
         ),
-        "⛏ **glob reviews/20260915-c14/\\*\\*** • _55 tool calls_ • _3:14_"
+        "⛏ **glob reviews/20260915-c14/** • _55 tool calls_ • _3:14_"
     );
     assert_eq!(
         flow_header_text(
@@ -678,7 +684,7 @@ fn settled_outcome_renders_block_header_over_lone_tool() {
     );
     let footer = out.rsplit('\n').next().unwrap();
     assert_eq!(
-        footer, "❌ • 0:00 ⏱ • ⛏ bash cargo test",
+        footer, "❌ Failed • 1 tool calls • ⏱ 0:00",
         "settled footer: {out}"
     );
 }
@@ -703,7 +709,15 @@ fn settled_block_carries_no_activity_preview_classic() {
     // The narration still lives in the collapsed body log, but the settled
     // footer shows only the outcome + bare count — no cog, no stale activity.
     let footer = out.rsplit('\n').next().unwrap();
-    assert_eq!(footer, "✅ • 0:00 ⏱ • ⛏ Running the test suite");
+    assert_eq!(footer, "✅ Finished • 1 tool calls • ⏱ 0:00");
+    assert!(
+        !footer.contains("Running the test suite"),
+        "settled footer must not carry a preview: {out}"
+    );
+    assert!(
+        !footer.contains("⚙️"),
+        "settled footer carries no cog: {out}"
+    );
     assert!(out.contains("Running the test suite"));
 }
 
@@ -724,9 +738,14 @@ fn settled_block_carries_no_activity_preview_rich() {
     );
     let summary_end = out.find("</summary>").expect("summary");
     let summary = &out[..summary_end];
-    assert_eq!(
-        summary,
-        "<details><summary><sub>✅ • 0:00 ⏱ • ⛏ Running the test suite</sub>"
+    assert!(summary.contains("✅ Finished • 1 tool calls"));
+    assert!(
+        !summary.contains("Running the test suite"),
+        "settled summary must not carry a preview: {summary}"
+    );
+    assert!(
+        !summary.contains("⚙️"),
+        "settled summary carries no cog: {summary}"
     );
 }
 
@@ -787,7 +806,7 @@ fn rich_single_tool_live_status_appends() {
 #[test]
 fn details_empty_group_renders_footer_only() {
     // ADR 0005 F1: no entries → a plain <sub> footer line, no <details> wrapper.
-    assert_eq!(render_flow_details(&[], None), "<sub>⚙ • 0:00 ⏱</sub>");
+    assert_eq!(render_flow_details(&[], None), "<sub>⏱ 0:00</sub>");
 }
 
 #[test]
@@ -797,7 +816,7 @@ fn details_single_tool_renders_details_block() {
     let out = render_flow_details(&[tline("✅ bash", "git status")], None);
     assert_eq!(
         out,
-        "<details><summary><sub>⚙ • 0:00 ⏱ • ⛏ bash git status</sub></summary>\
+        "<details><summary><sub>✅ bash git status • 1 tool calls • ⏱ 0:00</sub></summary>\
          <p><b>✅ bash</b> <code>git status</code></p></details>"
     );
     assert!(out.contains("<details>"));
@@ -813,7 +832,9 @@ fn details_multiple_tools_wrap_in_collapsed_details() {
     // footer is the <sub> summary and carries the latest-activity preview so the
     // collapsed block shows progress with the body hidden (#405); with no
     // narration it falls back to the most recent tool line.
-    assert!(out.starts_with("<details><summary><sub>⚙ • 0:00 ⏱ • ⛏ read file.rs</sub></summary>"));
+    assert!(out.starts_with(
+        "<details><summary><sub>✅ read file.rs • 2 tool calls • ⏱ 0:00</sub></summary>"
+    ));
     assert!(out.ends_with("</details>"));
     assert!(!out.contains("<details open"));
     // Each entry is its own <p>: the rich HTML parser ignores raw newlines,
@@ -836,9 +857,9 @@ fn details_summary_carries_live_status() {
     let summary = &out[..summary_end];
     // ADR 0005 F1: the merged footer is the summary — cog + narration + count +
     // clock. The wrapper passes elapsed_secs=0, so the clock reads 0:00.
-    assert!(summary.contains("⚙ • 0:00 ⏱ • ⛏ Grepping."));
+    assert!(summary.contains("⚙️ Grepping. • 2 tool calls • ⏱ 0:00"));
     // Summary is wrapped in <sub> for visual de-emphasis (#436).
-    assert!(summary.contains("<sub>⚙ • 0:00 ⏱"));
+    assert!(summary.contains("<sub>⚙️ Grepping."));
     // Latest-activity preview rides in the summary (#405): the rich <details>
     // collapses to the summary ALONE, hiding the body, so without the preview
     // the collapsed block shows no progress at all.
@@ -861,7 +882,7 @@ fn details_collapsed_summary_shows_intermediate_narration() {
     let summary_end = out.find("</summary>").expect("summary");
     let summary = &out[..summary_end];
     // ADR 0005 F1: narration leads the merged-footer summary after the cog.
-    assert!(summary.contains("⛏ Running the test suite"));
+    assert!(summary.contains("⚙️ Running the test suite"));
 }
 
 #[test]
