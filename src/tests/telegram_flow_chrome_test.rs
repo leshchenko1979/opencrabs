@@ -1366,8 +1366,13 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
         subagents: 2,
         queued_messages: 3,
     };
+    // Goal presence check
     assert_eq!(
-        all_present.format_line(),
-        "4 ⛏ • 0:30 ⏱ • 1 ⏏️ • 2 🤖 • 3 ✉️"
+        all_present.format_telemetry_line("⚙", Some("12%"), true),
+        "⚙ • 0:30 ⏱ • 12% 🧠 • 🎯 • 4 ⛏ • 1 ⏏️ • 2 🤖 • 3 ✉️"
+    );
+    assert_eq!(
+        all_present.format_telemetry_line("⚙", Some("12%"), false),
+        "⚙ • 0:30 ⏱ • 12% 🧠 • 4 ⛏ • 1 ⏏️ • 2 🤖 • 3 ✉️"
     );
 }

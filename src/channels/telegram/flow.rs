@@ -515,6 +515,7 @@ fn footer_parts<'a>(
         FlowHeader::Settled { icon, verb, .. } => Some((*icon, *verb)),
         FlowHeader::Live(_) => None,
     };
+    let has_goal = sections.goal.is_some();
     super::flow_chrome::FooterParts {
         outcome,
         plan_state: sections.plan_state.as_deref(),
@@ -524,6 +525,7 @@ fn footer_parts<'a>(
         has_log,
         ctx: sections.ctx.as_deref(),
         elapsed_secs,
+        has_goal,
         bg,
     }
 }
