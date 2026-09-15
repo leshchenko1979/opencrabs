@@ -141,7 +141,7 @@ pub async fn handle_session_notify(
     // longer exists. An ARCHIVED row passes: archived sessions auto-route
     // like anywhere else (#19 redirect to the successor occupying the
     // channel), so the gate checks existence only, never activity.
-    let session_svc = SessionService::new(service_context);
+    let session_svc = SessionService::new(service_context.clone());
     match session_svc.get_session(session_id).await {
         Ok(Some(_session)) => {}
         Ok(None) => {
