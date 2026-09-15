@@ -290,21 +290,6 @@ impl CronManageTool {
             set_goal,
             goal_template,
         );
-            name.to_string(),
-            cron_expr.to_string(),
-            tz,
-            prompt.to_string(),
-            provider,
-            model,
-            thinking,
-            auto_approve,
-            deliver_to.clone(),
-            deliver_api_key,
-            trigger_cmd,
-            trigger_on,
-            set_goal,
-            goal_template,
-        );
         job.next_run_at = crate::cron::next_run_utc(cron_expr, parsed_tz, chrono::Utc::now());
 
         let job_id = job.id.to_string();
