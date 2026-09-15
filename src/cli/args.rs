@@ -284,7 +284,7 @@ pub enum CronCommands {
         #[arg(long, default_value = "true")]
         auto_approve: bool,
 
-        /// Channel to deliver results (e.g. telegram:123456 or oc://target)
+        /// Delivery destination: passive channel output (e.g. 'oc://telegram/...', 'telegram:123456') or active session turn injection ('oc://session/<uuid>')
         #[arg(long, alias = "deliver")]
         deliver_to: Option<String>,
 
@@ -296,7 +296,7 @@ pub enum CronCommands {
         #[arg(long)]
         trigger_on: Option<String>,
 
-        /// Set active goal in destination session (when deliver_to is session:// or oc://session/)
+        /// Set active goal in destination session (requires deliver_to pointing to oc://session/<uuid> or session:<uuid>)
         #[arg(long)]
         set_goal: bool,
 
