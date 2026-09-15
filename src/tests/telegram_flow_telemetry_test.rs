@@ -150,7 +150,7 @@ fn flow_telemetry_zero_suppression_in_renders() {
 
     let details_html = render_flow_details_state(&s);
     assert!(
-        details_html.contains("<p>⚙️ 2 • ⏱ 0:42</p>"),
+        details_html.contains("<p>2 ⛏ • 0:42 ⏱</p>"),
         "Base metrics paragraph in rich details: {details_html}"
     );
     assert!(
