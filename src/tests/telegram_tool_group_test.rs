@@ -982,3 +982,33 @@ fn long_folded_narration_is_capped_in_the_block() {
     // so the long entry is body-only and its full run must NOT appear.
     assert!(!out.contains(&long), "body narration must be truncated");
 }
+
+#[test]
+fn test_tool_class_icons() {
+    use crate::channels::telegram::flow::{ToolClass, tool_entry_icon};
+
+    assert_eq!(ToolClass::from_tool_name("read_file").class_icon(), "📄");
+    assert_eq!(ToolClass::from_tool_name("write_file").class_icon(), "📝");
+    assert_eq!(ToolClass::from_tool_name("grep").class_icon(), "🔍");
+    assert_eq!(ToolClass::from_tool_name("bash").class_icon(), "💻");
+    assert_eq!(ToolClass::from_tool_name("plan").class_icon(), "📋");
+    assert_eq!(
+        ToolClass::from_tool_name("session_notify").class_icon(),
+        "✉️"
+    );
+    assert_eq!(
+        ToolClass::from_tool_name("config_manager").class_icon(),
+        "⚙️"
+    );
+    assert_eq!(
+        ToolClass::from_tool_name("load_brain_file").class_icon(),
+        "🧠"
+    );
+    assert_eq!(ToolClass::from_tool_name("http_request").class_icon(), "🌐");
+
+    // Completion status mapping: running/success uses class icon, failure uses ❌
+    assert_eq!(tool_entry_icon("read_file", None), "📄");
+    assert_eq!(tool_entry_icon("read_file", Some(true)), "📄");
+    assert_eq!(tool_entry_icon("read_file", Some(false)), "❌");
+    assert_eq!(tool_entry_icon("bash", Some(false)), "❌");
+}
