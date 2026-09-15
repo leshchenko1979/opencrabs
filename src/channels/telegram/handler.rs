@@ -1885,7 +1885,10 @@ pub(crate) async fn handle_message(
         .bind_session_topic(session_id, msg.chat.id.0, topic_id, BindingOrigin::Text)
         .await
     {
-        tracing::warn!("Could not bind session {session_id} to chat {}: {e}", msg.chat.id.0);
+        tracing::warn!(
+            "Could not bind session {session_id} to chat {}: {e}",
+            msg.chat.id.0
+        );
     }
 
     // Resolution is complete and the binding is visible, so a message that
@@ -2508,6 +2511,7 @@ pub(crate) async fn handle_message(
         bg_indicator: None,
         bg_count: None,
         subagent_counts: Default::default(),
+        queued_count: 0,
         sent_intermediates: Vec::new(),
         intermediate_msg_ids: Vec::new(),
         voice_msg_ids: Vec::new(),
@@ -2802,6 +2806,7 @@ pub(crate) async fn handle_message(
         // must wait on them too, split working vs awaiting collection, or a
         // turn ending with agents mid-work reads "✅ Finished".
         s.subagent_counts = subagent_counts_for(&agent, session_id);
+        s.queued_count = telegram_state.queued_items_count(session_id);
     }
     // Recompute sections now that the turn has settled: the plan Approve/Discard
     // keyboard attaches only at turn end (load_plan_state_section keys off

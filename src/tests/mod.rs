@@ -409,6 +409,7 @@ pub mod tasks_list_test;
 pub mod telegram_callback_session_topic_test;
 pub mod telegram_cancel_token_no_drop_test;
 pub mod telegram_details_fallback_render_test;
+pub mod telegram_draft_streaming_compat_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_general_topic_delivery_test;
 #[cfg(feature = "telegram")]
@@ -431,7 +432,6 @@ pub mod telegram_token_redaction_test;
 pub mod telegram_topic_routing_test;
 #[cfg(feature = "telegram-userbot")]
 pub mod telegram_userbot_boundary_test;
-pub mod telegram_draft_streaming_compat_test;
 pub mod telegram_userbot_config_test;
 #[cfg(feature = "telegram-userbot")]
 pub mod telegram_userbot_reconcile_test;
@@ -864,6 +864,7 @@ pub mod telegram_bg_resume_gate_test;
 mod telegram_caption_test;
 pub mod telegram_command_sanitize_test;
 pub mod telegram_flow_chrome_test;
+pub mod telegram_flow_telemetry_test;
 pub mod telegram_followup_pick_test;
 pub mod telegram_group_history_capture_test;
 pub mod telegram_group_migration_test;

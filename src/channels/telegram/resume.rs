@@ -678,6 +678,7 @@ pub(crate) async fn resume_session_inner(
         bg_indicator: None,
         bg_count: None,
         subagent_counts: Default::default(),
+        queued_count: 0,
         sent_intermediates: Vec::new(),
         intermediate_msg_ids: Vec::new(),
         voice_msg_ids: Vec::new(),
@@ -1070,6 +1071,7 @@ pub(crate) async fn resume_session_inner(
         // Sub-agent counts ride the same settle stamp as the crash-resume
         // path's background tasks (#1183 parity with handle_message).
         s.subagent_counts = super::handler::subagent_counts_for(&agent, session_id);
+        s.queued_count = telegram_state.queued_items_count(session_id);
     }
     // Recompute sections at settle so the plan Approve/Discard keyboard, which
     // attaches only at turn end (#571), materializes on the final render — the

@@ -9,7 +9,7 @@ use crate::channels::telegram::flow::{
     settled_icon_verb, subagent_waiting_phrase,
 };
 use crate::channels::telegram::flow_chrome::{
-    FlowSections, GoalSection, ProseSection, clock_glyph, split_plan_prose,
+    FlowSections, GoalSection, ProseSection, TelemetryMetrics, clock_glyph, split_plan_prose,
 };
 
 fn sections(title: Option<&str>, checklist: Option<Vec<&str>>, goal: Option<&str>) -> FlowSections {
@@ -750,6 +750,7 @@ fn settled_footer_shows_bg_indicator_when_task_running() {
         517,
         Some("cargo test running"),
         false,
+        None,
     );
     assert!(
         with_bg.ends_with("⏱ 8:37 • 🔧 cargo test running"),
@@ -764,6 +765,7 @@ fn settled_footer_shows_bg_indicator_when_task_running() {
         517,
         None,
         false,
+        None,
     );
     assert!(
         without_bg.ends_with("⏱ 8:37") && !without_bg.contains('🔧'),
@@ -778,6 +780,7 @@ fn settled_footer_shows_bg_indicator_when_task_running() {
         517,
         Some("3 tasks running"),
         false,
+        None,
     );
     assert!(
         many.contains("🔧 3 tasks running"),
@@ -980,6 +983,7 @@ fn cli_cap_truncates_body_api_keeps_it_full_html() {
         2,
         None,
         false,
+        None,
     );
     let api = render_flow_html_chrome_pref(
         &lines,
@@ -990,6 +994,7 @@ fn cli_cap_truncates_body_api_keeps_it_full_html() {
         2,
         None,
         false,
+        None,
     );
     assert!(
         cli.contains('…'),
@@ -1019,6 +1024,7 @@ fn cli_cap_truncates_body_api_keeps_it_full_details() {
         2,
         None,
         false,
+        None,
     );
     let api = render_flow_details_chrome_pref(
         &lines,
@@ -1029,6 +1035,7 @@ fn cli_cap_truncates_body_api_keeps_it_full_details() {
         2,
         None,
         false,
+        None,
     );
     assert!(
         cli.contains('…'),
@@ -1058,6 +1065,7 @@ fn short_narration_untouched_by_either_cap() {
             2,
             None,
             false,
+            None,
         );
         assert!(out.contains("brief note"));
         assert!(
@@ -1325,4 +1333,58 @@ fn deliverable_rich_report_surfaces_mermaid_diagrams() {
     // Unclosed fence stays folded (matches final-delivery semantics).
     let unclosed = "Draft diagram:\n\n```mermaid\ngraph TD\n    A --> B\n";
     assert!(!is_deliverable_rich_report(unclosed));
+}
+
+#[test]
+fn test_telemetry_metrics_format_line_zero_suppression() {
+    // Base case: all zero optional fields -> only gear and clock
+    let base = TelemetryMetrics {
+        tool_count: 0,
+        elapsed_secs: 0,
+        detached_tasks: 0,
+        subagents: 0,
+        queued_messages: 0,
+    };
+    assert_eq!(base.format_line(), "⚙️ 0 • ⏱ 0:00");
+
+    // Partial cases: zero suppression for non-positive fields
+    let partial_bg = TelemetryMetrics {
+        tool_count: 3,
+        elapsed_secs: 65,
+        detached_tasks: 2,
+        subagents: 0,
+        queued_messages: 0,
+    };
+    assert_eq!(partial_bg.format_line(), "⚙️ 3 • ⏱ 1:05 • ⏏️ 2");
+
+    let partial_subagents = TelemetryMetrics {
+        tool_count: 1,
+        elapsed_secs: 10,
+        detached_tasks: 0,
+        subagents: 1,
+        queued_messages: 0,
+    };
+    assert_eq!(partial_subagents.format_line(), "⚙️ 1 • ⏱ 0:10 • 🤖 1");
+
+    let partial_queued = TelemetryMetrics {
+        tool_count: 5,
+        elapsed_secs: 3605,
+        detached_tasks: 0,
+        subagents: 0,
+        queued_messages: 4,
+    };
+    assert_eq!(partial_queued.format_line(), "⚙️ 5 • ⏱ 1:00:05 • ✉️ 4");
+
+    // All non-zero fields present
+    let all_present = TelemetryMetrics {
+        tool_count: 4,
+        elapsed_secs: 30,
+        detached_tasks: 1,
+        subagents: 2,
+        queued_messages: 3,
+    };
+    assert_eq!(
+        all_present.format_line(),
+        "⚙️ 4 • ⏱ 0:30 • ⏏️ 1 • 🤖 2 • ✉️ 3"
+    );
 }
