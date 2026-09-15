@@ -352,9 +352,9 @@ impl FlowSections {
 pub(crate) fn clock_glyph(secs: u64) -> String {
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
     if h > 0 {
-        format!("⏱ {h}:{m:02}:{s:02}")
+        format!("{h}:{m:02}:{s:02} ⏱")
     } else {
-        format!("⏱ {m}:{s:02}")
+        format!("{m}:{s:02} ⏱")
     }
 }
 
@@ -373,21 +373,21 @@ pub(crate) struct TelemetryMetrics {
 
 impl TelemetryMetrics {
     /// Format the telemetry bar line with zero-suppression.
-    /// Always includes `⚙️ <tool_count>` and `⏱ <elapsed>` (via `clock_glyph`).
-    /// Appends `⏏️ <detached_tasks>` if > 0, `🤖 <subagents>` if > 0, and `✉️ <queued_messages>` if > 0.
+    /// Always includes `<tool_count> ⛏` and `<elapsed> ⏱` (via `clock_glyph`).
+    /// Appends `<detached_tasks> ⏏️` if > 0, `<subagents> 🤖` if > 0, and `<queued_messages> ✉️` if > 0.
     /// Segments are joined with `" • "`.
     pub(crate) fn format_line(&self) -> String {
         let mut segs: Vec<String> = Vec::new();
-        segs.push(format!("⛏ {}", self.tool_count));
+        segs.push(format!("{} ⛏", self.tool_count));
         segs.push(clock_glyph(self.elapsed_secs));
         if self.detached_tasks > 0 {
-            segs.push(format!("⏏️ {}", self.detached_tasks));
+            segs.push(format!("{} ⏏️", self.detached_tasks));
         }
         if self.subagents > 0 {
-            segs.push(format!("🤖 {}", self.subagents));
+            segs.push(format!("{} 🤖", self.subagents));
         }
         if self.queued_messages > 0 {
-            segs.push(format!("✉️ {}", self.queued_messages));
+            segs.push(format!("{} ✉️", self.queued_messages));
         }
         segs.join(" • ")
     }
@@ -423,7 +423,7 @@ pub(crate) struct FooterParts<'a> {
     pub(crate) bg: Option<&'a str>,
 }
 
-/// Extract context percentage from formatted ctx string and format as `🧠 X%`.
+/// Extract context percentage from formatted ctx string and format as `<pct>% 🧠`.
 pub(crate) fn format_brain_ctx(ctx: Option<&str>) -> Option<String> {
     let s = ctx?;
     if let Some(pct_idx) = s.find('%') {
@@ -431,22 +431,20 @@ pub(crate) fn format_brain_ctx(ctx: Option<&str>) -> Option<String> {
         if let Some(start) = before.rfind(|c: char| !c.is_ascii_digit() && c != '.') {
             let num = before[start + 1..].trim();
             if !num.is_empty() {
-                return Some(format!("🧠 {num}%"));
+                return Some(format!("{num}% 🧠"));
             }
         } else if !before.is_empty() {
-            return Some(format!("🧠 {before}%"));
+            return Some(format!("{before}% 🧠"));
         }
     }
     None
 }
 
 /// Build the merged flow footer / summary line: one ` • `-joined string.
-/// Format: `⏱ <time> • 🧠 <pct>% • <activity/outcome>`.
-/// Time leads, followed by the brain context percentage, then the live
-/// activity preview (with running `⛏` tool icon) or settled terminal outcome
-/// (`✅ Finished`, `❌ Failed`, etc.). Redundant tool call counts, verbose ctx
-/// tokens, trailing clock, and detached background bits are stripped from the
-/// summary.
+/// Format: `<state_icon> • <time> ⏱ • <pct>% 🧠 • <activity/outcome>`.
+/// State icon leads (⚙ for unsettled, ✍️ for editing plan, ✅ for finished outcome),
+/// followed by elapsed time with clock, brain context percentage, then live
+/// activity preview (with running `⛏` tool icon) or settled terminal outcome.
 pub(crate) fn merged_footer(parts: &FooterParts, markup: HeaderMarkup) -> String {
     let esc = |s: &str| match markup {
         HeaderMarkup::Html => escape_html(s),
@@ -454,17 +452,32 @@ pub(crate) fn merged_footer(parts: &FooterParts, markup: HeaderMarkup) -> String
     };
     let mut segs: Vec<String> = Vec::new();
 
-    // Segment 1 — clock first (ADR 0005 update)
+    // Segment 1 — state icon: ⚙ (unsettled), ✍️ (editing plan), ✅ / outcome icon (finished)
+    let state_icon = if let Some((icon, _)) = parts.outcome {
+        icon
+    } else if parts.plan_state.as_deref().is_some_and(|ps| {
+        ps.contains("Editing")
+            || ps.contains("✍️")
+            || ps.contains("Discussing")
+            || ps.contains("📝")
+    }) {
+        "✍️"
+    } else {
+        "⚙"
+    };
+    segs.push(state_icon.to_string());
+
+    // Segment 2 — clock (ADR 0005 update: time first, number before icon)
     segs.push(clock_glyph(parts.elapsed_secs));
 
-    // Segment 2 — brain icon + context percentage
+    // Segment 3 — brain icon + context percentage (number before icon)
     if let Some(brain_ctx) = format_brain_ctx(parts.ctx) {
         segs.push(esc(&brain_ctx));
     }
 
-    // Segment 3 — outcome or live activity / status
-    if let Some((icon, verb)) = parts.outcome {
-        segs.push(format!("{icon} {}", esc(verb)));
+    // Segment 4 — outcome or live activity / status
+    if let Some((_, verb)) = parts.outcome {
+        segs.push(esc(verb));
     } else {
         if parts.has_log
             && let Some(act) = parts.activity

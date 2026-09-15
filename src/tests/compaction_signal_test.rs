@@ -237,7 +237,7 @@ fn live_footer_drops_gear_before_icon_activity() {
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(tool_done, "⏱ 0:00 • 🧠 4% • ⛏ bash git status");
+    assert_eq!(tool_done, "⚙ • 0:00 ⏱ • 4% 🧠 • ⛏ bash git status");
     let icon = merged_footer(
         &FooterParts {
             outcome: None,
@@ -252,7 +252,7 @@ fn live_footer_drops_gear_before_icon_activity() {
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(icon, "⏱ 0:00 • ⏳ Compacting context…");
+    assert_eq!(icon, "⚙ • 0:00 ⏱ • ⏳ Compacting context…");
     let plain = merged_footer(
         &FooterParts {
             outcome: None,
@@ -267,13 +267,43 @@ fn live_footer_drops_gear_before_icon_activity() {
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(plain, "⏱ 0:00 • ⛏ Reading the handler.");
+    assert_eq!(plain, "⚙ • 0:00 ⏱ • ⛏ Reading the handler.");
+    let plan_edit = merged_footer(
+        &FooterParts {
+            outcome: None,
+            plan_state: Some("✍️ Editing session plan"),
+            working_on: None,
+            activity: None,
+            tool_count: 0,
+            has_log: false,
+            ctx: Some("ctx: 10K/200K 5%"),
+            elapsed_secs: 30,
+            bg: None,
+        },
+        HeaderMarkup::Markdown,
+    );
+    assert_eq!(plan_edit, "✍️ • 0:30 ⏱ • 5% 🧠 • ✍️ Editing session plan");
+    let finished = merged_footer(
+        &FooterParts {
+            outcome: Some(("✅", "Finished")),
+            plan_state: None,
+            working_on: None,
+            activity: None,
+            tool_count: 5,
+            has_log: true,
+            ctx: Some("ctx: 20K/200K 10%"),
+            elapsed_secs: 75,
+            bg: None,
+        },
+        HeaderMarkup::Markdown,
+    );
+    assert_eq!(finished, "✅ • 1:15 ⏱ • 10% 🧠 • Finished");
 }
 
 #[test]
 fn icon_led_segment_retires_the_bare_cog_fallback() {
     // With an icon-led pin as the only narration (activity suppressed by the
-    // compaction dedupe, zero tool calls), clock leads followed by the icon.
+    // compaction dedupe, zero tool calls), state icon + clock leads followed by the icon.
     let out = merged_footer(
         &FooterParts {
             outcome: None,
@@ -288,5 +318,5 @@ fn icon_led_segment_retires_the_bare_cog_fallback() {
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(out, "⏱ 1:05 • ⏳ Compacting context…");
+    assert_eq!(out, "⚙ • 1:05 ⏱ • ⏳ Compacting context…");
 }
