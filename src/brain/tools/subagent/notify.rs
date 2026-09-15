@@ -303,20 +303,20 @@ impl Tool for SessionNotifyTool {
             max_turns: Option<u32>,
             context: &ToolExecutionContext,
         ) {
-            if let Some(goal_text) = goal {
-                if let Some(ref svc) = context.service_context {
-                    let goal_mgr = crate::brain::goal::GoalManager::new(svc.clone());
-                    if let Err(e) = goal_mgr
-                        .set_goal(target_id, goal_text.to_string(), None, None, max_turns)
-                        .await
-                    {
-                        tracing::warn!(
-                            error = %e,
-                            session_id = %target_id,
-                            "failed to dispatch goal via session_notify"
-                        );
-                    }
-                }
+            let Some(goal_text) = goal else { return };
+            let Some(ref svc) = context.service_context else {
+                return;
+            };
+            let goal_mgr = crate::brain::goal::GoalManager::new(svc.clone());
+            if let Err(e) = goal_mgr
+                .set_goal(target_id, goal_text.to_string(), None, None, max_turns)
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    session_id = %target_id,
+                    "failed to dispatch goal via session_notify"
+                );
             }
         }
 
