@@ -46,6 +46,7 @@ fn base_state(with_card: bool) -> StreamingState {
             working: 0,
             awaiting: 0,
         },
+        queued_count: 0,
         sent_intermediates: Vec::new(),
         intermediate_msg_ids: Vec::new(),
         voice_msg_ids: Vec::new(),

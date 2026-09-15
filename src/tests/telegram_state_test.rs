@@ -44,6 +44,7 @@ fn open_roll() -> std::sync::Arc<std::sync::Mutex<StreamingState>> {
         bg_indicator: None,
         bg_count: None,
         subagent_counts: Default::default(),
+        queued_count: 0,
         sent_intermediates: Vec::new(),
         intermediate_msg_ids: Vec::new(),
         voice_msg_ids: Vec::new(),
@@ -195,4 +196,44 @@ fn notify_fold_dedup_is_per_session() {
         "other session folds the same fp"
     );
     assert!(state.note_notify_fold_at(a, 5, now));
+}
+
+/// Queued items count query accurately reports pending queue length
+/// across enqueue and drain operations per session.
+#[test]
+fn queued_items_count_lifecycle() {
+    let state = TelegramState::new();
+    let sid = Uuid::new_v4();
+    let sid2 = Uuid::new_v4();
+
+    assert_eq!(
+        state.queued_items_count(sid),
+        0,
+        "fresh state has 0 queued items"
+    );
+
+    state.enqueue_reaction(
+        sid,
+        crate::brain::agent::QueuedUserMessage::plain("first message".to_string()),
+    );
+    assert_eq!(state.queued_items_count(sid), 1);
+    assert_eq!(
+        state.queued_items_count(sid2),
+        0,
+        "unrelated session unaffected"
+    );
+
+    state.enqueue_detached_result(
+        sid,
+        crate::brain::agent::QueuedUserMessage::plain("second message".to_string()),
+    );
+    assert_eq!(state.queued_items_count(sid), 2);
+
+    let drained = state.drain_reaction(sid);
+    assert!(drained.is_some());
+    assert_eq!(state.queued_items_count(sid), 1);
+
+    let all_drained = state.drain_queued_items(sid);
+    assert_eq!(all_drained.len(), 1);
+    assert_eq!(state.queued_items_count(sid), 0);
 }
