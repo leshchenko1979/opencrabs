@@ -49,6 +49,7 @@ pub(crate) enum DisplayItem {
 }
 
 /// Unified runtime flow event for tool roll event ingestion.
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum FlowEvent {
     /// Tool execution event with associated tool class and completion status
@@ -75,6 +76,7 @@ pub enum FlowEvent {
 
 impl FlowEvent {
     /// Formats the event into a single display line with its class/status icon.
+    #[allow(dead_code)]
     pub fn render_line(&self) -> String {
         match self {
             FlowEvent::Tool {
@@ -95,9 +97,7 @@ impl FlowEvent {
             FlowEvent::Subagent { action, details } => {
                 format!("🤖 subagent {action}: {details}")
             }
-            FlowEvent::Compaction { details } => {
-                format!("{details}")
-            }
+            FlowEvent::Compaction { details } => details.to_string(),
             FlowEvent::Notification { source, summary } => {
                 format!("✉️ notify from {source}: {summary}")
             }
@@ -1131,6 +1131,7 @@ pub(crate) fn flow_header_text(
 }
 
 /// Status glyph for a tool call: running, succeeded, or failed.
+#[allow(dead_code)]
 pub(crate) fn tool_status_icon(completed: Option<bool>) -> &'static str {
     match completed {
         None => "⛏",
