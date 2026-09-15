@@ -3198,6 +3198,7 @@ pub(crate) fn collect_command_catalog() -> Vec<teloxide::types::BotCommand> {
             "Mission control: analytics, activity, inbox & schedule",
         ),
         BotCommand::new("compact", "Compact conversation context"),
+        BotCommand::new("clear", "Clear context here at no cost; history stays"),
         BotCommand::new("goal", "Set/track an autonomous goal"),
         BotCommand::new("profiles", "Manage profiles (create, switch, migrate)"),
         BotCommand::new(

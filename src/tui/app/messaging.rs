@@ -909,6 +909,32 @@ impl App {
                 }
                 true
             }
+            "/clear" => {
+                // Cut the agent's context here at no cost (#1585). History
+                // stays on screen; the footer drops to the baseline a new
+                // session starts at.
+                if self.is_processing {
+                    self.push_system_message(crate::tui::clear_notice::busy());
+                    return true;
+                }
+                let Some(session_id) = self.current_session.as_ref().map(|s| s.id) else {
+                    self.push_system_message(crate::tui::clear_notice::no_session());
+                    return true;
+                };
+                match self.agent_service.clear_context(session_id).await {
+                    Ok(receipt) => {
+                        let base = self.agent_service.base_context_tokens();
+                        self.session_input_tokens.insert(session_id, base);
+                        self.last_input_tokens = Some(base);
+                        self.push_system_message(crate::tui::clear_notice::cleared(&receipt));
+                    }
+                    Err(e) => {
+                        tracing::error!("/clear failed: {e}");
+                        self.error_message = Some(crate::tui::clear_notice::failed(&e));
+                    }
+                }
+                true
+            }
             "/theme" => {
                 use crate::tui::render::presets;
                 use crate::tui::render::theme;
@@ -1227,7 +1253,11 @@ impl App {
                 true
             }
             "/help" => {
-                self.mode = AppMode::Help;
+                // Through `switch_mode`, never a bare `self.mode` assignment:
+                // entering help is what loads the command catalog (#1586).
+                if let Err(e) = self.switch_mode(AppMode::Help).await {
+                    tracing::warn!("Failed to open help screen: {e}");
+                }
                 true
             }
             "/mission-control" => {
@@ -1581,47 +1611,6 @@ impl App {
 
     /// Expand a DB message into one or more DisplayMessages.
     /// Assistant messages may contain tool markers that get reconstructed into ToolCallGroup display messages.
-    /// Find the byte length of a balanced JSON array starting at `s[0] == '['`.
-    /// Tracks string and escape state so `-->` or `]` tokens inside string
-    /// values don't terminate the scan prematurely (e.g. cargo/rustc
-    /// diagnostics like `--> src/main.rs:42` embedded in a tool-call output).
-    /// Returns `None` if the input doesn't start with `[` or is unbalanced.
-    fn find_balanced_json_end(s: &str) -> Option<usize> {
-        let bytes = s.as_bytes();
-        if bytes.first() != Some(&b'[') {
-            return None;
-        }
-        let mut depth: i32 = 0;
-        let mut in_string = false;
-        let mut escape = false;
-        for (idx, &b) in bytes.iter().enumerate() {
-            if escape {
-                escape = false;
-                continue;
-            }
-            if in_string {
-                match b {
-                    b'\\' => escape = true,
-                    b'"' => in_string = false,
-                    _ => {}
-                }
-                continue;
-            }
-            match b {
-                b'"' => in_string = true,
-                b'[' | b'{' => depth += 1,
-                b']' | b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(idx + 1);
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-
     /// Supports both v1 (`<!-- tools: desc1 | desc2 -->`) and v2 (`<!-- tools-v2: [JSON] -->`) formats.
     /// Extract reasoning blocks from text. Handles:
     /// - `<!-- reasoning -->...<!-- /reasoning -->`
@@ -1785,7 +1774,9 @@ impl App {
         cost: Option<f64>,
         first_text: &mut bool,
     ) {
-        use crate::tui::app::reasoning_split::{Segment, is_intermediate, split_segments};
+        use crate::tui::app::reasoning_split::{
+            BLOCKED_LABEL, Segment, is_intermediate, split_segments,
+        };
         let segments = split_segments(region);
         for (i, seg) in segments.iter().enumerate() {
             let (content, details) = match seg {
@@ -1812,6 +1803,9 @@ impl App {
                     }
                 }
                 Segment::Reasoning(r) => (String::new(), Some(r.clone())),
+                // Narration the phantom detector refused to deliver (#1172).
+                // Collapsed and labelled, never answer text (#1584).
+                Segment::Blocked(b) => (String::new(), Some(format!("{BLOCKED_LABEL}\n\n{b}"))),
             };
             if content.is_empty() && details.is_none() {
                 continue;
@@ -1869,29 +1863,14 @@ impl App {
 
         let mut result = Vec::new();
 
-        // Find the next tool marker (either v1 or v2)
-        fn find_next_marker(s: &str) -> Option<(usize, bool)> {
-            let v2_pos = s.find("<!-- tools-v2:");
-            let v1_pos = s.find("<!-- tools:");
-            match (v2_pos, v1_pos) {
-                (Some(v2), Some(v1)) => {
-                    if v2 <= v1 {
-                        Some((v2, true))
-                    } else {
-                        Some((v1, false))
-                    }
-                }
-                (Some(v2), None) => Some((v2, true)),
-                (None, Some(v1)) => Some((v1, false)),
-                (None, None) => None,
-            }
-        }
-
+        // A ledger counts only at the start of a line and only if it parses;
+        // a quoted or truncated opener stays text of the block it sits in
+        // (#1587).
         let mut remaining = content.as_str();
         let mut first_text = true;
-        while let Some((marker_start, is_v2)) = find_next_marker(remaining) {
+        while let Some(ledger) = super::ledger_scan::next_ledger(remaining) {
             // Text before marker
-            let text_before = remaining[..marker_start].trim();
+            let text_before = remaining[..ledger.start].trim();
             if !text_before.is_empty() {
                 Self::push_segments(
                     &mut result,
@@ -1903,46 +1882,9 @@ impl App {
                     &mut first_text,
                 );
             }
-
-            let marker_len = if is_v2 {
-                "<!-- tools-v2:".len()
-            } else {
-                "<!-- tools:".len()
-            };
-            let after_marker = &remaining[marker_start + marker_len..];
-
-            // v2 markers contain a JSON array that may include `-->` inside
-            // string values (e.g. cargo/rustc diagnostics like
-            // `--> src/main.rs:42`). A naive find("-->") terminates at the
-            // first inner arrow, truncates the JSON, and fails to parse.
-            // Use balanced JSON scanning to find the true closing `]`, then
-            // look for `-->` after it.
-            let (tools_str, close_end) = if is_v2 {
-                let trimmed = after_marker.trim_start();
-                let lead = after_marker.len() - trimmed.len();
-                if let Some(array_end) = Self::find_balanced_json_end(trimmed) {
-                    let tail = &trimmed[array_end..];
-                    let tail_lead = tail.len() - tail.trim_start().len();
-                    let post = &tail[tail_lead..];
-                    if post.starts_with("-->") {
-                        let end = lead + array_end + tail_lead + 3;
-                        (after_marker[..end - 3].trim(), end)
-                    } else {
-                        // No closing `-->` after balanced array — malformed
-                        remaining = after_marker;
-                        break;
-                    }
-                } else {
-                    // No balanced JSON array found — malformed
-                    remaining = after_marker;
-                    break;
-                }
-            } else if let Some(end) = after_marker.find("-->") {
-                (after_marker[..end].trim(), end + 3)
-            } else {
-                remaining = after_marker;
-                break;
-            };
+            let is_v2 = ledger.is_v2;
+            let tools_str = ledger.body;
+            let close_end = ledger.end;
 
             let calls: Vec<ToolCallEntry> = if is_v2 {
                 // v2: parse JSON array with descriptions, success, output, and tool input
@@ -2001,7 +1943,7 @@ impl App {
                     duration_secs: None,
                 });
             }
-            remaining = &after_marker[close_end..];
+            remaining = &remaining[close_end..];
         }
 
         // Any remaining text after the last marker
