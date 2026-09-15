@@ -1747,6 +1747,24 @@ pub struct BootWakeRecovery {
     pub unclassified: Vec<String>,
 }
 
+/// Check if a session has active autonomous work (goal #218 or active plan #244).
+///
+/// Returns `Some("goal")` if an active unexhausted goal exists,
+/// `Some("plan")` if an active incomplete plan exists on disk,
+/// and `None` otherwise.
+pub async fn has_active_autonomous_work(
+    pool: &crate::db::Pool,
+    session_id: Uuid,
+) -> Option<&'static str> {
+    if has_active_goal(pool, session_id).await {
+        return Some("goal");
+    }
+    if crate::utils::plan_files::has_active_plan(session_id).await {
+        return Some("plan");
+    }
+    None
+}
+
 /// Check if a session has an active, unexhausted goal in `goal_state`.
 ///
 /// If `state == 'active'` and `turns_used < max_turns`, the session was driving
@@ -1818,7 +1836,7 @@ pub async fn classify_recently_active(
         // or button tap callback), regardless of whether intermediate bot messages were emitted.
         // Once a turn finishes normally, `turn_open_at` is cleared to NULL.
         // If `turn_open_at` is Some(_), short-circuit to `interrupted`.
-        // If `turn_open_at` is None, fall through to check `last_topic_sender` and active goals.
+        // If `turn_open_at` is None, fall through to check `last_topic_sender` and active autonomous work.
         if b.turn_open_at.is_some() {
             tracing::info!(
                 target: "telegram",
@@ -1846,16 +1864,35 @@ pub async fn classify_recently_active(
                     .push((sid, chat_id, b.thread_id.map(i64::from)));
             }
             Some(_) => {
-                // #218: If the bot sent the last message, check whether an autonomous
-                // goal was actively in-flight. If an active, unexhausted goal exists,
-                // the session was interrupted across restart and must resume so the
-                // tool loop's goal hook continues driving it.
-                if has_active_goal(&pool, sid).await {
-                    tracing::info!(
-                        target: "telegram",
-                        "Boot classifier (#218): session {} has active unexhausted goal — resuming",
-                        short_session_id(sid)
-                    );
+                // #218 / #244: If the bot sent the last message, check whether autonomous
+                // work was actively in-flight (active goal #218 or active incomplete plan #244).
+                // If so, the session was interrupted across restart and must resume so the
+                // tool loop continues driving autonomous execution.
+                if let Some(work_type) = has_active_autonomous_work(&pool, sid).await {
+                    match work_type {
+                        "goal" => {
+                            tracing::info!(
+                                target: "telegram",
+                                "Boot classifier (#218): session {} has active unexhausted goal — resuming",
+                                short_session_id(sid)
+                            );
+                        }
+                        "plan" => {
+                            tracing::info!(
+                                target: "telegram",
+                                "Boot classifier (#244): session {} has active plan with incomplete tasks — resuming",
+                                short_session_id(sid)
+                            );
+                        }
+                        other => {
+                            tracing::info!(
+                                target: "telegram",
+                                "Boot classifier: session {} has active autonomous work ({}) — resuming",
+                                short_session_id(sid),
+                                other
+                            );
+                        }
+                    }
                     recovery
                         .interrupted
                         .push((sid, chat_id, b.thread_id.map(i64::from)));
