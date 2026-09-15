@@ -914,6 +914,14 @@ pub(crate) fn rendered_image_note(message: &str, source: &str) -> String {
     )
 }
 
+/// #134 / #220 / #239: generic svg escape-hatch link fragment for markdown contexts —
+/// a small `[Open SVG vector]` link to the full-size vector render when the diagram
+/// is capped or scaled down. Always padded with trailing newline so subsequent markdown
+/// blocks (e.g. tables, headers) start on a fresh line and retain proper block spacing.
+pub(crate) fn svg_link_md(source: &str) -> String {
+    format!("\n[Open SVG vector]({})\n", ink_url_svg(source))
+}
+
 /// #134: generic svg escape-hatch link fragment for HTML-fallback
 /// contexts — a small `[svg]` anchor to the vector render (generic
 /// hatch; the caller owns the trigger copy, ruling (a) 2026-09-10:
@@ -934,14 +942,6 @@ pub(crate) fn failure_html(err: &str, source: &str) -> String {
         escape_html(err),
         escape_html(source)
     )
-}
-
-/// Generic svg escape-hatch link fragment for markdown contexts —
-/// a small `[Open SVG vector]` link to the full-size vector render when the diagram
-/// is capped or scaled down. Always padded with trailing newline so subsequent markdown
-/// blocks (e.g. tables, headers) start on a fresh line and retain proper block spacing.
-pub(crate) fn svg_link_md(source: &str) -> String {
-    format!("\n[Open SVG vector]({})\n", ink_url_svg(source))
 }
 
 /// Canonical correction rules for Mermaid diagrams shared across the codebase.
