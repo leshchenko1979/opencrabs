@@ -119,16 +119,10 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // in memory (`AgentService::active_skills`) and was born EMPTY after any
     // restart. Persisted here so boot hydrates it alongside the seen set.
     include_str!("../migrations/20260912210000_add_session_seen_skills_active.sql"),
-    // #138: durable seen-skills store — the post-compaction skill inventory
-    // stamp (#125/#131) survives daemon restarts: every mark_seen writes a row,
-    // boot hydrates the in-memory registry back. Appended last per the list
-    // invariant; the CREATE is idempotent, so no heal pass is needed.
-    include_str!("../migrations/20260913000001_add_session_seen_skills.sql"),
     // FORK (#200): track whether a button-tap turn is actively in-flight
     // so boot classifier does not spuriously resume completed turns.
     include_str!("../migrations/20260913000001_session_bindings_turn_open_at.sql"),
-    // #1529: per-newsletter poll cursors. Idempotent CREATE, so no heal
-    // pass; appended last per the list invariant above.
+    // #1529: WhatsApp newsletter poll cursors — watermark per-channel
     include_str!("../migrations/20260914000001_add_whatsapp_newsletter_cursors.sql"),
 ];
 
