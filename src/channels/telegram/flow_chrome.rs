@@ -475,28 +475,23 @@ pub(crate) fn merged_footer(parts: &FooterParts, markup: HeaderMarkup) -> String
         segs.push(esc(&brain_ctx));
     }
 
-    // Segment 4 — outcome or live activity / status
-    if let Some((_, verb)) = parts.outcome {
-        segs.push(esc(verb));
-    } else {
-        if parts.has_log
-            && let Some(act) = parts.activity
-        {
-            let act = strip_leading_tool_status_icons(act);
-            if !act.is_empty() {
-                let live_activity = if starts_with_icon(act) {
-                    esc(act)
-                } else {
-                    format!("⛏ {}", esc(act))
-                };
-                segs.push(live_activity);
-            }
+    // Segment 4 — live activity preview if present (or icon-led status like ⏳ compaction; no prose)
+    if parts.has_log
+        && let Some(act) = parts.activity
+    {
+        let act = strip_leading_tool_status_icons(act);
+        if !act.is_empty() {
+            let live_activity = if starts_with_icon(act) {
+                esc(act)
+            } else {
+                format!("⛏ {}", esc(act))
+            };
+            segs.push(live_activity);
         }
-        if let Some(ps) = parts.plan_state {
-            segs.push(esc(ps));
-        } else if let Some(w) = parts.working_on {
-            segs.push(esc(w));
-        }
+    } else if let Some(w) = parts.working_on
+        && starts_with_icon(w)
+    {
+        segs.push(esc(w));
     }
 
     segs.join(" • ")
