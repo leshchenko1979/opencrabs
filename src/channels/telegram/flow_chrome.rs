@@ -410,6 +410,7 @@ pub(crate) struct FooterParts<'a> {
     /// while live and only when a log exists.
     pub(crate) activity: Option<&'a str>,
     /// Count of tool entries in the log (`N tool calls` when `>= 1`).
+    #[allow(dead_code)]
     pub(crate) tool_count: usize,
     /// Whether a processing log exists at all (drives segment 2 presence).
     pub(crate) has_log: bool,
@@ -420,6 +421,7 @@ pub(crate) struct FooterParts<'a> {
     /// Background-work indicator (#1054): `Some(label)` when detached tasks
     /// are still running at settle time. Renders as the final footer segment
     /// `🔧 <label> running` (or `🔧 N tasks running`) after the clock.
+    #[allow(dead_code)]
     pub(crate) bg: Option<&'a str>,
 }
 
@@ -455,7 +457,7 @@ pub(crate) fn merged_footer(parts: &FooterParts, markup: HeaderMarkup) -> String
     // Segment 1 — state icon: ⚙ (unsettled), ✍️ (editing plan), ✅ / outcome icon (finished)
     let state_icon = if let Some((icon, _)) = parts.outcome {
         icon
-    } else if parts.plan_state.as_deref().is_some_and(|ps| {
+    } else if parts.plan_state.is_some_and(|ps| {
         ps.contains("Editing")
             || ps.contains("✍️")
             || ps.contains("Discussing")
