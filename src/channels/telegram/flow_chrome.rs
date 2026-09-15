@@ -398,6 +398,7 @@ impl TelemetryMetrics {
     }
 
     /// Legacy / standalone format helper.
+    #[allow(dead_code)]
     pub(crate) fn format_line(&self) -> String {
         self.format_telemetry_line("⚙", None)
     }
@@ -424,6 +425,7 @@ pub(crate) struct FooterParts<'a> {
     #[allow(dead_code)]
     pub(crate) tool_count: usize,
     /// Whether a processing log exists at all (drives segment 2 presence).
+    #[allow(dead_code)]
     pub(crate) has_log: bool,
     /// Ctx budget string (segment 3), display-only, before the clock.
     pub(crate) ctx: Option<&'a str>,
@@ -519,6 +521,7 @@ pub(crate) fn standalone_telemetry_line(
 
 /// Build the merged flow footer / summary line: one ` • `-joined string.
 /// Format: `<state_icon> • <time> ⏱ • <pct>% 🧠` (plus active tool if no separate header).
+#[allow(dead_code)]
 pub(crate) fn merged_footer(parts: &FooterParts, markup: HeaderMarkup) -> String {
     standalone_telemetry_line(parts, None, markup)
 }
