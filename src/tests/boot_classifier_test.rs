@@ -12,10 +12,24 @@
 //! arbitrary sender id.
 
 use crate::channels::telegram::resume::classify_recently_active;
+use crate::config::profile::{home_for_profile, with_profile_home_async};
 use crate::db::models::{ChannelMessage, Session, BOT_SENDER_ID};
 use crate::db::{ChannelMessageRepository, Database, SessionBindingRepository, SessionRepository};
+use crate::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus, TaskType};
+use crate::utils::plan_files::save_plan;
 use std::collections::HashSet;
 use uuid::Uuid;
+
+async fn in_temp_home<F, T>(f: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let profile = format!("boot-classifier-test-{}", Uuid::new_v4());
+    let out = with_profile_home_async(Some(&profile), f).await;
+    let home = home_for_profile(Some(&profile));
+    let _ = std::fs::remove_dir_all(&home);
+    out
+}
 
 async fn test_db() -> Database {
     let db = Database::connect_in_memory().await.unwrap();
@@ -416,4 +430,221 @@ async fn paused_goal_with_bot_last_classifies_completed() {
     );
     assert_eq!(r.completed.len(), 1);
     assert_eq!(r.completed[0], &sid.to_string()[..8]);
+}
+
+/// #244: A session with an active plan containing pending/incomplete tasks
+/// whose bot sent the last message before daemon kill was interrupted while
+/// executing a multi-step plan. It must classify as `interrupted` so it resumes.
+#[tokio::test]
+async fn active_plan_with_bot_last_classifies_interrupted() {
+    in_temp_home(async {
+        let db = test_db().await;
+        let sid = Uuid::new_v4();
+        bind_session(&db, sid, "-100901", Some(101)).await;
+        store_msg(&db, "-100901", Some("101"), "user:alexey", "execute plan").await;
+        store_msg(
+            &db,
+            "-100901",
+            Some("101"),
+            BOT_SENDER_ID,
+            "Finished task 1, starting task 2",
+        )
+        .await;
+
+        let mut plan = PlanDocument::new(sid, "Multi-step build".to_string());
+        plan.status = PlanStatus::Active;
+        let mut t1 = PlanTask::new(1, "Task 1".to_string(), "d1".to_string(), TaskType::Edit);
+        t1.status = TaskStatus::Completed;
+        let t2 = PlanTask::new(2, "Task 2".to_string(), "d2".to_string(), TaskType::Edit);
+        plan.add_task(t1);
+        plan.add_task(t2);
+        save_plan(&plan).await.unwrap();
+
+        let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
+        assert_eq!(
+            r.interrupted.len(),
+            1,
+            "active incomplete plan must classify as interrupted when bot spoke last (#244)"
+        );
+        assert_eq!(r.interrupted[0].0, sid);
+        assert_eq!(r.interrupted[0].1, -100901);
+        assert_eq!(r.interrupted[0].2, Some(101));
+        assert!(r.completed.is_empty());
+    })
+    .await;
+}
+
+/// #244: If all tasks in an active plan are Completed or Skipped, the plan is
+/// finished; when bot spoke last, it must classify as `completed`.
+#[tokio::test]
+async fn active_plan_all_completed_tasks_with_bot_last_classifies_completed() {
+    in_temp_home(async {
+        let db = test_db().await;
+        let sid = Uuid::new_v4();
+        bind_session(&db, sid, "-100902", Some(102)).await;
+        store_msg(&db, "-100902", Some("102"), "user:alexey", "execute plan").await;
+        store_msg(
+            &db,
+            "-100902",
+            Some("102"),
+            BOT_SENDER_ID,
+            "All tasks complete!",
+        )
+        .await;
+
+        let mut plan = PlanDocument::new(sid, "Finished plan".to_string());
+        plan.status = PlanStatus::Active;
+        let mut t1 = PlanTask::new(1, "Task 1".to_string(), "d1".to_string(), TaskType::Edit);
+        t1.status = TaskStatus::Completed;
+        let mut t2 = PlanTask::new(2, "Task 2".to_string(), "d2".to_string(), TaskType::Edit);
+        t2.status = TaskStatus::Skipped;
+        plan.add_task(t1);
+        plan.add_task(t2);
+        save_plan(&plan).await.unwrap();
+
+        let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
+        assert!(
+            r.interrupted.is_empty(),
+            "fully completed active plan must not classify as interrupted"
+        );
+        assert_eq!(r.completed.len(), 1);
+        assert_eq!(r.completed[0], &sid.to_string()[..8]);
+    })
+    .await;
+}
+
+/// #244: An unapproved draft plan in `PlanStatus::Editing` is waiting for user
+/// approval, not actively executing tasks; when bot spoke last, it classifies as `completed`.
+#[tokio::test]
+async fn editing_plan_with_bot_last_classifies_completed() {
+    in_temp_home(async {
+        let db = test_db().await;
+        let sid = Uuid::new_v4();
+        bind_session(&db, sid, "-100903", Some(103)).await;
+        store_msg(&db, "-100903", Some("103"), "user:alexey", "plan this").await;
+        store_msg(
+            &db,
+            "-100903",
+            Some("103"),
+            BOT_SENDER_ID,
+            "Here is the plan draft, awaiting approval",
+        )
+        .await;
+
+        let mut plan = PlanDocument::new(sid, "Draft plan".to_string());
+        plan.status = PlanStatus::Editing;
+        plan.pending_approval = true;
+        let t1 = PlanTask::new(1, "Task 1".to_string(), "d1".to_string(), TaskType::Edit);
+        plan.add_task(t1);
+        save_plan(&plan).await.unwrap();
+
+        let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
+        assert!(
+            r.interrupted.is_empty(),
+            "editing draft plan must not classify as interrupted"
+        );
+        assert_eq!(r.completed.len(), 1);
+        assert_eq!(r.completed[0], &sid.to_string()[..8]);
+    })
+    .await;
+}
+
+/// #244: A plan with `pre_init_editing = true` is in pre-init planning mode,
+/// not actively executing tasks; when bot spoke last, it classifies as `completed`.
+#[tokio::test]
+async fn pre_init_editing_plan_with_bot_last_classifies_completed() {
+    in_temp_home(async {
+        let db = test_db().await;
+        let sid = Uuid::new_v4();
+        bind_session(&db, sid, "-100904", Some(104)).await;
+        store_msg(&db, "-100904", Some("104"), "user:alexey", "make a plan").await;
+        store_msg(
+            &db,
+            "-100904",
+            Some("104"),
+            BOT_SENDER_ID,
+            "I will create a plan for you",
+        )
+        .await;
+
+        let mut plan = PlanDocument::new(sid, "Pre-init plan".to_string());
+        plan.status = PlanStatus::Active;
+        plan.pre_init_editing = true;
+        let t1 = PlanTask::new(1, "Task 1".to_string(), "d1".to_string(), TaskType::Edit);
+        plan.add_task(t1);
+        save_plan(&plan).await.unwrap();
+
+        let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
+        assert!(
+            r.interrupted.is_empty(),
+            "pre-init editing plan must not classify as interrupted"
+        );
+        assert_eq!(r.completed.len(), 1);
+        assert_eq!(r.completed[0], &sid.to_string()[..8]);
+    })
+    .await;
+}
+
+/// #244: An active plan with 0 tasks has no work to execute; when bot spoke
+/// last, it classifies as `completed`.
+#[tokio::test]
+async fn active_plan_empty_tasks_with_bot_last_classifies_completed() {
+    in_temp_home(async {
+        let db = test_db().await;
+        let sid = Uuid::new_v4();
+        bind_session(&db, sid, "-100905", Some(105)).await;
+        store_msg(
+            &db,
+            "-100905",
+            Some("105"),
+            "user:alexey",
+            "init empty plan",
+        )
+        .await;
+        store_msg(
+            &db,
+            "-100905",
+            Some("105"),
+            BOT_SENDER_ID,
+            "Empty plan initialized",
+        )
+        .await;
+
+        let mut plan = PlanDocument::new(sid, "Empty plan".to_string());
+        plan.status = PlanStatus::Active;
+        save_plan(&plan).await.unwrap();
+
+        let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
+        assert!(
+            r.interrupted.is_empty(),
+            "empty active plan must not classify as interrupted"
+        );
+        assert_eq!(r.completed.len(), 1);
+        assert_eq!(r.completed[0], &sid.to_string()[..8]);
+    })
+    .await;
+}
+
+/// #244: Verify WAKE_RECENT_SECS is set to 3600 (60 minutes) and queries
+/// bindings updated within 3600 seconds.
+#[tokio::test]
+async fn wake_recent_secs_constant_value_is_3600() {
+    assert_eq!(
+        crate::channels::telegram::resume::WAKE_RECENT_SECS,
+        3600,
+        "WAKE_RECENT_SECS must be 3600 seconds (60 minutes, #244)"
+    );
+    let db = test_db().await;
+    let sid = Uuid::new_v4();
+    bind_session(&db, sid, "-100906", Some(106)).await;
+    let repo = SessionBindingRepository::new(db.pool().clone());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // 30 minutes ago (1800s): inside 3600s window
+    let since = now - crate::channels::telegram::resume::WAKE_RECENT_SECS;
+    let recent = repo.recent_for_channel("telegram", since).await.unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].session_id, sid.to_string());
 }
