@@ -372,14 +372,19 @@ pub(crate) struct TelemetryMetrics {
 }
 
 impl TelemetryMetrics {
-    /// Format the telemetry bar line with zero-suppression.
-    /// Always includes `<tool_count> ⛏` and `<elapsed> ⏱` (via `clock_glyph`).
-    /// Appends `<detached_tasks> ⏏️` if > 0, `<subagents> 🤖` if > 0, and `<queued_messages> ✉️` if > 0.
-    /// Segments are joined with `" • "`.
-    pub(crate) fn format_line(&self) -> String {
+    /// Format the telemetry bar line (Option A) with zero-suppression.
+    /// Format: `<state_icon> • <time> ⏱ • <pct>% 🧠 • <tool_count> ⛏ • <detached> ⏏️ • <subagents> 🤖 • <queued> ✉️`
+    /// Numbers strictly lead icons with spaces.
+    pub(crate) fn format_telemetry_line(&self, state_icon: &str, ctx: Option<&str>) -> String {
         let mut segs: Vec<String> = Vec::new();
-        segs.push(format!("{} ⛏", self.tool_count));
+        segs.push(state_icon.to_string());
         segs.push(clock_glyph(self.elapsed_secs));
+        if let Some(brain_ctx) = format_brain_ctx(ctx) {
+            segs.push(brain_ctx);
+        }
+        if self.tool_count > 0 {
+            segs.push(format!("{} ⛏", self.tool_count));
+        }
         if self.detached_tasks > 0 {
             segs.push(format!("{} ⏏️", self.detached_tasks));
         }
@@ -390,6 +395,11 @@ impl TelemetryMetrics {
             segs.push(format!("{} ✉️", self.queued_messages));
         }
         segs.join(" • ")
+    }
+
+    /// Legacy / standalone format helper.
+    pub(crate) fn format_line(&self) -> String {
+        self.format_telemetry_line("⚙", None)
     }
 }
 
@@ -443,19 +453,43 @@ pub(crate) fn format_brain_ctx(ctx: Option<&str>) -> Option<String> {
     None
 }
 
-/// Build the merged flow footer / summary line: one ` • `-joined string.
-/// Format: `<state_icon> • <time> ⏱ • <pct>% 🧠 • <activity/outcome>`.
-/// State icon leads (⚙ for unsettled, ✍️ for editing plan, ✅ for finished outcome),
-/// followed by elapsed time with clock, brain context percentage, then live
-/// activity preview (with running `⛏` tool icon) or settled terminal outcome.
-pub(crate) fn merged_footer(parts: &FooterParts, markup: HeaderMarkup) -> String {
+/// Build the tool roll summary header (the preview on the collapsible block).
+/// Strictly tool activity (e.g. `⛏ tool_name args` or `⏳ Compacting context…`).
+/// Zero telemetry metrics and zero status prose (no "Finished", "Editing plan", "Waiting...").
+pub(crate) fn summary_header(parts: &FooterParts, markup: HeaderMarkup) -> String {
     let esc = |s: &str| match markup {
         HeaderMarkup::Html => escape_html(s),
         HeaderMarkup::Markdown => s.to_string(),
     };
-    let mut segs: Vec<String> = Vec::new();
+    if let Some(act) = parts.activity {
+        let act = strip_leading_tool_status_icons(act);
+        if !act.is_empty() {
+            if starts_with_icon(act) {
+                return esc(act);
+            } else {
+                return format!("⛏ {}", esc(act));
+            }
+        }
+    }
+    if let Some(w) = parts.working_on
+        && starts_with_icon(w)
+    {
+        return esc(w);
+    }
+    "⛏ Processing log".to_string()
+}
 
-    // Segment 1 — state icon: ⚙ (unsettled), ✍️ (editing plan), ✅ / outcome icon (finished)
+/// Build the standalone telemetry line (Option A).
+/// Format: `<state_icon> • <time> ⏱ • <pct>% 🧠` (plus tool/subagent/detached counts if any).
+pub(crate) fn standalone_telemetry_line(
+    parts: &FooterParts,
+    telemetry: Option<&TelemetryMetrics>,
+    markup: HeaderMarkup,
+) -> String {
+    let esc = |s: &str| match markup {
+        HeaderMarkup::Html => escape_html(s),
+        HeaderMarkup::Markdown => s.to_string(),
+    };
     let state_icon = if let Some((icon, _)) = parts.outcome {
         icon
     } else if parts.plan_state.is_some_and(|ps| {
@@ -468,36 +502,25 @@ pub(crate) fn merged_footer(parts: &FooterParts, markup: HeaderMarkup) -> String
     } else {
         "⚙"
     };
-    segs.push(state_icon.to_string());
 
-    // Segment 2 — clock (ADR 0005 update: time first, number before icon)
-    segs.push(clock_glyph(parts.elapsed_secs));
-
-    // Segment 3 — brain icon + context percentage (number before icon)
-    if let Some(brain_ctx) = format_brain_ctx(parts.ctx) {
-        segs.push(esc(&brain_ctx));
-    }
-
-    // Segment 4 — live activity preview if present (or icon-led status like ⏳ compaction; no prose)
-    if parts.has_log
-        && let Some(act) = parts.activity
-    {
-        let act = strip_leading_tool_status_icons(act);
-        if !act.is_empty() {
-            let live_activity = if starts_with_icon(act) {
-                esc(act)
-            } else {
-                format!("⛏ {}", esc(act))
-            };
-            segs.push(live_activity);
+    if let Some(telem) = telemetry {
+        let line = telem.format_telemetry_line(state_icon, parts.ctx);
+        esc(&line)
+    } else {
+        let mut segs: Vec<String> = Vec::new();
+        segs.push(state_icon.to_string());
+        segs.push(clock_glyph(parts.elapsed_secs));
+        if let Some(brain_ctx) = format_brain_ctx(parts.ctx) {
+            segs.push(esc(&brain_ctx));
         }
-    } else if let Some(w) = parts.working_on
-        && starts_with_icon(w)
-    {
-        segs.push(esc(w));
+        segs.join(" • ")
     }
+}
 
-    segs.join(" • ")
+/// Build the merged flow footer / summary line: one ` • `-joined string.
+/// Format: `<state_icon> • <time> ⏱ • <pct>% 🧠` (plus active tool if no separate header).
+pub(crate) fn merged_footer(parts: &FooterParts, markup: HeaderMarkup) -> String {
+    standalone_telemetry_line(parts, None, markup)
 }
 
 /// Read the plan title + full `☐`/`☑` checklist rows from the live session
