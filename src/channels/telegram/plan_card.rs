@@ -550,10 +550,8 @@ where
                             status.progress.as_ref(),
                             status.elapsed_secs(),
                         );
-                        if note != last_rendered {
-                            if on_progress(note.clone()).await {
-                                last_rendered = note;
-                            }
+                        if note != last_rendered && on_progress(note.clone()).await {
+                            last_rendered = note;
                         }
                     }
                 }
