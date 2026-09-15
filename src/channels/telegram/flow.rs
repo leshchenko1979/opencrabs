@@ -195,6 +195,8 @@ pub(crate) struct StreamingState {
     /// registries — sub-agents live outside `BackgroundTaskManager`, which the
     /// pre-#1183 header read exclusively.
     pub(crate) subagent_counts: SubagentCounts,
+    /// Count of pending queued reactions / user messages mid-turn (#232).
+    pub(crate) queued_count: usize,
     /// Intermediate texts already sent — used to dedup final response
     pub(crate) sent_intermediates: Vec<String>,
     /// Message IDs of every intermediate chunk delivered to Telegram, so a
@@ -427,6 +429,7 @@ pub(crate) fn render_flow_html_chrome(
         elapsed_secs,
         None,
         false,
+        None,
     )
 }
 
@@ -518,6 +521,7 @@ pub(crate) fn render_flow_html_chrome_pref(
     elapsed_secs: u64,
     bg: Option<&str>,
     compacting: bool,
+    telemetry: Option<&super::flow_chrome::TelemetryMetrics>,
 ) -> String {
     let (out, tool_count) = flow_body_entries(lines, narration_cap);
     let has_log = !out.is_empty();
@@ -563,6 +567,9 @@ pub(crate) fn render_flow_html_chrome_pref(
     if has_log {
         if !msg.is_empty() {
             msg.push_str("\n\n");
+        }
+        if let Some(telem) = telemetry {
+            msg.push_str(&format!("{}\n", telem.format_line()));
         }
         msg.push_str(&format!(
             "<blockquote expandable>{}</blockquote>\n{footer}",
@@ -617,6 +624,7 @@ pub(crate) fn render_flow_details_chrome(
         elapsed_secs,
         None,
         false,
+        None,
     )
 }
 
@@ -637,6 +645,7 @@ pub(crate) fn render_flow_details_chrome_pref(
     elapsed_secs: u64,
     bg: Option<&str>,
     compacting: bool,
+    telemetry: Option<&super::flow_chrome::TelemetryMetrics>,
 ) -> String {
     let (out, tool_count) = flow_body_entries(lines, narration_cap);
     let has_log = !out.is_empty();
@@ -678,6 +687,9 @@ pub(crate) fn render_flow_details_chrome_pref(
         // them separated). paragraph_html owns the rich dialect's soft-break
         // rule (#35): a bare newline inside a <p> collapses to whitespace, so
         // multi-paragraph entries must arrive with explicit <br>.
+        if let Some(telem) = telemetry {
+            msg.push_str(&super::rich::paragraph_html(&telem.format_line()));
+        }
         let body: String = out.iter().map(|e| super::rich::paragraph_html(e)).collect();
         msg.push_str(&format!(
             "<details><summary><sub>{footer}</sub></summary>{body}</details>"
@@ -1081,12 +1093,21 @@ pub(crate) fn flow_lines(s: &StreamingState) -> Vec<FlowLine> {
 pub(crate) fn render_flow(s: &StreamingState) -> String {
     let narration_cap = narration_cap_for(s.is_cli);
     let elapsed = s.turn_started_at.elapsed().as_secs();
+    let lines = flow_lines(s);
+    let (_, tool_count) = flow_body_entries(&lines, narration_cap);
+    let telem = super::flow_chrome::TelemetryMetrics {
+        tool_count,
+        elapsed_secs: elapsed,
+        detached_tasks: s.bg_count.unwrap_or(0),
+        subagents: s.subagent_counts.total(),
+        queued_messages: s.queued_count,
+    };
     match s.flow_outcome {
         Some(outcome) => {
             let (icon, verb) = settled_icon_verb(s.bg_count, s.subagent_counts, outcome);
             let duration = humanize_duration(elapsed);
             render_flow_html_chrome_pref(
-                &flow_lines(s),
+                &lines,
                 &FlowHeader::Settled {
                     icon,
                     verb: verb.as_str(),
@@ -1098,10 +1119,11 @@ pub(crate) fn render_flow(s: &StreamingState) -> String {
                 elapsed,
                 s.bg_indicator.as_deref(),
                 false, // settled renders drop the activity segment regardless
+                Some(&telem),
             )
         }
         None => render_flow_html_chrome_pref(
-            &flow_lines(s),
+            &lines,
             &FlowHeader::Live(s.flow_status.as_deref()),
             s.header_preview.as_deref(),
             &s.sections,
@@ -1109,6 +1131,7 @@ pub(crate) fn render_flow(s: &StreamingState) -> String {
             elapsed,
             s.bg_indicator.as_deref(),
             s.compacting,
+            Some(&telem),
         ),
     }
 }
@@ -1118,12 +1141,21 @@ pub(crate) fn render_flow(s: &StreamingState) -> String {
 pub(crate) fn render_flow_details_state(s: &StreamingState) -> String {
     let narration_cap = narration_cap_for(s.is_cli);
     let elapsed = s.turn_started_at.elapsed().as_secs();
+    let lines = flow_lines(s);
+    let (_, tool_count) = flow_body_entries(&lines, narration_cap);
+    let telem = super::flow_chrome::TelemetryMetrics {
+        tool_count,
+        elapsed_secs: elapsed,
+        detached_tasks: s.bg_count.unwrap_or(0),
+        subagents: s.subagent_counts.total(),
+        queued_messages: s.queued_count,
+    };
     match s.flow_outcome {
         Some(outcome) => {
             let (icon, verb) = settled_icon_verb(s.bg_count, s.subagent_counts, outcome);
             let duration = humanize_duration(elapsed);
             render_flow_details_chrome_pref(
-                &flow_lines(s),
+                &lines,
                 &FlowHeader::Settled {
                     icon,
                     verb: verb.as_str(),
@@ -1135,10 +1167,11 @@ pub(crate) fn render_flow_details_state(s: &StreamingState) -> String {
                 elapsed,
                 s.bg_indicator.as_deref(),
                 false, // settled renders drop the activity segment regardless
+                Some(&telem),
             )
         }
         None => render_flow_details_chrome_pref(
-            &flow_lines(s),
+            &lines,
             &FlowHeader::Live(s.flow_status.as_deref()),
             s.header_preview.as_deref(),
             &s.sections,
@@ -1146,6 +1179,7 @@ pub(crate) fn render_flow_details_state(s: &StreamingState) -> String {
             elapsed,
             s.bg_indicator.as_deref(),
             s.compacting,
+            Some(&telem),
         ),
     }
 }

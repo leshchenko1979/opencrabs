@@ -298,6 +298,10 @@ pub(crate) fn spawn_edit_loop(
                             .as_deref()
                             .map(|t| format!("🧠 {t}"));
                         let flow_needs_refresh = !snap.tool_edits.is_empty() || settle_flow;
+                        {
+                            let mut s = st.lock().unwrap_or_else(|e| e.into_inner());
+                            s.queued_count = tg.queued_items_count(sid);
+                        }
                         super::flow_chrome::tick_flow_header(
                             &bot,
                             chat,

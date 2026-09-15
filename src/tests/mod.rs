@@ -445,7 +445,6 @@ pub mod telegram_token_redaction_test;
 pub mod telegram_topic_routing_test;
 #[cfg(feature = "telegram-userbot")]
 pub mod telegram_userbot_boundary_test;
-pub mod telegram_draft_streaming_compat_test;
 pub mod telegram_userbot_config_test;
 #[cfg(feature = "telegram-userbot")]
 pub mod telegram_userbot_reconcile_test;
@@ -901,6 +900,7 @@ pub mod telegram_caption_test;
 pub mod telegram_code_fence_balance_test;
 pub mod telegram_command_sanitize_test;
 pub mod telegram_flow_chrome_test;
+pub mod telegram_flow_telemetry_test;
 pub mod telegram_followup_midturn_queue_test;
 pub mod telegram_followup_pick_test;
 pub mod telegram_group_history_capture_test;

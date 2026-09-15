@@ -1257,7 +1257,8 @@ impl TelegramState {
         origin: crate::db::repository::session_binding::BindingOrigin,
     ) -> Result<(), String> {
         // 1. In-memory mappings + sync ownership mirror
-        self.register_session_chat(session_id, chat_id, topic_id).await;
+        self.register_session_chat(session_id, chat_id, topic_id)
+            .await;
 
         // 2. Persistent storage
         let store = self.binding_store.lock().await.clone();
@@ -1273,7 +1274,9 @@ impl TelegramState {
                 )
                 .await
             {
-                tracing::warn!("bind_session_topic: could not persist session binding for {session_id}: {e}");
+                tracing::warn!(
+                    "bind_session_topic: could not persist session binding for {session_id}: {e}"
+                );
             }
         }
 
@@ -1805,6 +1808,15 @@ impl TelegramState {
                 Vec::new()
             }
         }
+    }
+
+    /// Return the count of currently pending queued items for `session_id`.
+    /// Inspect-only query used by flow card telemetry.
+    pub(crate) fn queued_items_count(&self, session_id: Uuid) -> usize {
+        self.pending_reactions
+            .lock()
+            .map(|map| map.get(&session_id).map_or(0, |q| q.len()))
+            .unwrap_or(0)
     }
 
     /// A [`MessageQueueCallback`](crate::brain::agent::MessageQueueCallback) that
