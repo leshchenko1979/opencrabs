@@ -1072,14 +1072,28 @@ pub(crate) fn validate_delivery_target(target: &str) -> std::result::Result<(), 
         return Ok(());
     }
 
+    // Session targets: validate target id presence and format.
+    if is_session_target(target) {
+        if let Some(id_str) = extract_session_target(target) {
+            if id_str.trim().is_empty() {
+                return Err(format!("'{target}' has an empty session id"));
+            }
+            return Ok(());
+        }
+        return Err(format!("'{target}' is not a valid session target"));
+    }
+
     let Some((channel, target_id)) = target.split_once(':') else {
-        return Err(format!("'{target}' is not 'channel:id' or an HTTP(S) URL"));
+        return Err(format!(
+            "'{target}' is not 'channel:id', 'oc://session/<id>', or an HTTP(S) URL"
+        ));
     };
     if target_id.trim().is_empty() {
         return Err(format!("'{target}' has an empty id"));
     }
 
     match channel {
+        "session" => Ok(()),
         "telegram" => {
             #[cfg(feature = "telegram")]
             {
@@ -1114,7 +1128,7 @@ pub(crate) fn validate_delivery_target(target: &str) -> std::result::Result<(), 
             Ok(())
         }
         other => Err(format!(
-            "unknown delivery channel '{other}' (valid: telegram, discord, slack, or an HTTP(S) URL)"
+            "unknown delivery channel '{other}' (valid: session, telegram, discord, slack, or an HTTP(S) URL)"
         )),
     }
 }
