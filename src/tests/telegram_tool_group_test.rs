@@ -312,12 +312,22 @@ fn preview_bash_comment_survives_long_command_no_truncation() {
 
 #[test]
 fn preview_narration_beats_bash_comments() {
-    // Priority 1 (narration) wins over priority 2 (bash comments).
+    // Single-pass chronological: when narration is the latest event, it wins.
     let out = latest_activity_preview(&[
         bash_line("# --- Installing deps ---\nnpm install"),
         FlowLine::Text("Wiring up the new module.".to_string()),
     ]);
     assert_eq!(out.as_deref(), Some("Wiring up the new module."));
+}
+
+#[test]
+fn preview_tool_overwrites_earlier_narration() {
+    // Single-pass chronological (#249): a later tool call overwrites earlier narration.
+    let out = latest_activity_preview(&[
+        FlowLine::Text("Wiring up the new module.".to_string()),
+        tline("🔍 glob", "src/**/*.rs"),
+    ]);
+    assert_eq!(out.as_deref(), Some("🔍 glob src/**/*.rs"));
 }
 
 // ── Mixed processing-log flow (tool calls + intermediate text) — #300 ──
@@ -332,13 +342,13 @@ fn tool_plus_text_folds_into_one_blockquote() {
         ],
         None,
     );
-    // ADR 0005 F1: tool + text fold into one blockquote body; the narration-led
-    // status/count rides in the merged footer below the block.
+    // ADR 0005 F1: tool + text fold into one blockquote body; the latest tool
+    // preview (Option A summary header) rides on the block.
     assert!(out.starts_with("<blockquote expandable><b>✅ bash</b> <code>git status</code>\n\n"));
     let footer = out.rsplit('\n').next().unwrap();
     assert_eq!(
         footer,
-        "⚙️ Checked the tree, all clean. • 2 tool calls • ⏱ 0:00"
+        "⚙️ ✅ read_file handler.rs • 2 tool calls • ⏱ 0:00"
     );
     assert!(out.contains("<b>✅ bash</b> <code>git status</code>"));
     assert!(out.contains("Checked the tree, all clean."));
