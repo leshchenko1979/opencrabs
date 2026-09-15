@@ -501,7 +501,7 @@ async fn partially_filled_design_scaffold_keeps_only_real_content() {
 #[test]
 fn header_only_html_is_plain_footer_line() {
     // Pre-tool phase, non-plan: no log, so a plain footer line with the
-    // Working-on status and the clock — no blockquote, no <sub> on classic.
+    // telemetry line — no blockquote, no <sub> on classic.
     let out = render_flow_html_chrome(
         &[],
         &FlowHeader::Live(Some("10s")),
@@ -533,9 +533,9 @@ fn header_only_html_leads_with_chrome_then_footer() {
 
 #[test]
 fn header_only_settled_no_tool_turn_puts_ctx_before_clock() {
-    // Settled no-tool turn: footer = outcome ��� ctx → clock, ctx BEFORE the clock.
+    // Settled no-tool turn: footer = outcome icon → clock → ctx %
     let secs = FlowSections {
-        ctx: Some("ctx 9.1k/200k".to_string()),
+        ctx: Some("9.1% (9.1k/200k)".to_string()),
         ..Default::default()
     };
     let out = render_flow_html_chrome(
@@ -549,7 +549,7 @@ fn header_only_settled_no_tool_turn_puts_ctx_before_clock() {
         &secs,
         3,
     );
-    assert_eq!(out, "✅ • 0:03 ⏱");
+    assert_eq!(out, "✅ • 0:03 ⏱ • 9.1% 🧠");
 }
 
 #[test]
@@ -561,7 +561,7 @@ fn header_only_details_is_plain_sub_footer_line() {
         &FlowSections::default(),
         5,
     );
-    assert_eq!(out, "<sub>⚙ • 0:05 ⏱ • 🧠 reading the diff</sub>");
+    assert_eq!(out, "<sub>⚙ • 0:05 ⏱</sub>");
     assert!(
         !out.contains("<details>"),
         "no log details before first entry"
@@ -595,15 +595,10 @@ fn html_populated_flow_has_no_outer_expandable() {
         "the whole message must not be one outer expandable"
     );
     // The processing log lives in its OWN expandable, chrome outside it.
-    assert!(out.contains("<blockquote expandable><b>✅ bash</b> <code>git status</code>"));
-    assert!(
-        out.contains("</blockquote>\n"),
-        "footer is a plain line under the log"
-    );
-    // In-flight footer: cog on the log summary, clock last.
-    assert!(out.contains("⚙"), "in-flight log summary carries the cog");
-    assert!(out.contains("0:20 ⏱"));
-    assert!(out.contains("⛏ read_file a.rs"));
+    assert!(out.contains(
+        "<blockquote expandable><b>⛏ read_file a.rs</b>\n\n<b>✅ bash</b> <code>git status</code>"
+    ));
+    assert!(out.contains("⚙ • 0:20 ⏱"));
 }
 
 #[test]
@@ -622,13 +617,14 @@ fn details_populated_flow_keeps_chrome_outside_the_details() {
         "<p><b>🎯</b> finish the audit (0/20 turns)</p><p>&nbsp;</p><details><summary><sub>"
     ));
     assert!(out.ends_with("</details>"));
-    assert!(out.contains("0:08 ⏱"));
+    assert!(out.contains("⏱ 0:08"));
 }
 
 #[test]
 fn footer_shows_both_working_on_status_and_activity_summary() {
-    // Under updated summary structure, live activity leads the activity segment
-    // while the plain state icon and clock form the prefix.
+    // ADR 0005 footer merge: Working-on is segment 1, the live activity is the
+    // segment-2 log summary — both visible (the old "activity beats fallback"
+    // collapsed-preview rule is gone).
     let lines = [
         tline("✅ bash", "ls"),
         FlowLine::Text("Now checking the config.".to_string()),
@@ -642,14 +638,20 @@ fn footer_shows_both_working_on_status_and_activity_summary() {
         30,
     );
     assert!(
-        out.contains("⚙ • 0:30 ⏱ • ⛏ Now checking the config."),
-        "live summary with activity present: {out}"
+        out.contains("Working on: ship it"),
+        "status segment present"
+    );
+    assert!(
+        out.contains("Now checking the config."),
+        "activity summary present"
     );
 }
 
 #[test]
 fn live_footer_leads_with_activity_before_reasoning() {
-    // Live summary line leads with state icon and clock, followed by active tool preview.
+    // #1052: live order is latest activity → reasoning/status → tool count →
+    // clock. The narration (what the agent is DOING) is the progress signal;
+    // the reasoning excerpt is supplementary context.
     let lines = [
         tline("✅ bash", "ls"),
         FlowLine::Text("Now checking the config.".to_string()),
@@ -666,17 +668,18 @@ fn live_footer_leads_with_activity_before_reasoning() {
         .rsplit("</blockquote>\n")
         .next()
         .expect("footer present");
-    assert_eq!(
-        footer,
-        "⚙ • 0:30 ⏱ • ⛏ Now checking the config.",
-        "activity summary formatted cleanly"
+    assert!(
+        footer.starts_with(
+            "⚙️ Now checking the config. • Working on: ship it • 2 tool calls • ⏱ 0:30"
+        ),
+        "activity leads, reasoning second: got {footer:?}"
     );
 }
 
 #[test]
 fn single_tool_gets_its_own_log_block_and_footer() {
     // The lone-tool-plain shortcut is gone under ADR 0005: even one entry sits
-    // in its own expandable with the footer below.
+    // in its own expandable with the telemetry line.
     let out = render_flow_html_chrome(
         &[tline("✅ bash", "git status")],
         &FlowHeader::Live(None),
@@ -687,16 +690,14 @@ fn single_tool_gets_its_own_log_block_and_footer() {
     assert!(out.starts_with("📋 <b>Plan</b>\n\n"));
     assert!(
         out.contains(
-            "<blockquote expandable><b>✅ bash</b> <code>git status</code></blockquote>\n"
+            "<blockquote expandable><b>⛏ bash git status</b>\n\n<b>✅ bash</b> <code>git status</code></blockquote>"
         )
     );
-    assert!(out.contains("0:00 ⏱"));
+    assert!(out.contains("⚙ • 0:00 ⏱"));
 }
 
 #[test]
 fn settled_footer_drops_the_cog() {
-    // Settled footer: outcome carries ✅/❌, the log summary is a bare tool
-    // count with NO cog (Decision 4 / 12).
     let lines = [tline("✅ bash", "ls"), tline("✅ grep", "todo")];
     let out = render_flow_html_chrome(
         &lines,
@@ -709,21 +710,14 @@ fn settled_footer_drops_the_cog() {
         &FlowSections::default(),
         124,
     );
-    // Footer is the plain final line under the log block.
-    let footer = out
-        .rsplit("</blockquote>\n")
-        .next()
-        .expect("footer present");
-    assert!(footer.starts_with("✅ • 2:04 ⏱") || footer.contains("2:04 ⏱"));
-    assert!(
-        !footer.contains("⚙"),
-        "settled footer never carries the cog"
-    );
+    assert!(out.contains("✅ • 2:04 ⏱"));
 }
 
 #[test]
 fn settled_footer_shows_bg_indicator_when_task_running() {
-    // Settled summary maintains clean <state_icon> • <time> ⏱ (no stray trailing bits)
+    // #1054: a settled turn ending with detached work shows the indicator as
+    // the final segment after the clock; with nothing running the footer is
+    // unchanged (no stray wrench).
     let lines = [tline("✅ bash", "ls"), tline("✅ grep", "todo")];
     let header = FlowHeader::Settled {
         icon: "✅",
@@ -742,8 +736,8 @@ fn settled_footer_shows_bg_indicator_when_task_running() {
         None,
     );
     assert!(
-        with_bg.contains("✅ • 8:37 ⏱"),
-        "settled footer carries state icon and clock: {with_bg:?}"
+        with_bg.ends_with("⏱ 8:37 • 🔧 cargo test running"),
+        "bg indicator rides after the clock: {with_bg:?}"
     );
     let without_bg = render_flow_html_chrome_pref(
         &lines,
@@ -757,8 +751,8 @@ fn settled_footer_shows_bg_indicator_when_task_running() {
         None,
     );
     assert!(
-        without_bg.contains("✅ • 8:37 ⏱") && !without_bg.contains('🔧'),
-        "no indicator when nothing is detached: {without_bg:?}"
+        without_bg.ends_with("⏱ 8:37") && !without_bg.contains('🔧'),
+        "no indicator when nothing is detached"
     );
     let many = render_flow_details_chrome_pref(
         &lines,
@@ -772,8 +766,8 @@ fn settled_footer_shows_bg_indicator_when_task_running() {
         None,
     );
     assert!(
-        many.contains("✅ • 8:37 ⏱"),
-        "details path has clean settled footer: {many:?}"
+        many.contains("🔧 3 tasks running"),
+        "multiple tasks show the count, rich path included: {many:?}"
     );
 }
 

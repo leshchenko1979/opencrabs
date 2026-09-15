@@ -536,19 +536,20 @@ pub(crate) fn render_flow_html_chrome_pref(
     } else {
         latest_activity_preview(lines)
     };
-    let footer = super::flow_chrome::merged_footer(
-        &footer_parts(
-            header,
-            fallback_status,
-            sections,
-            activity.as_deref(),
-            tool_count,
-            has_log,
-            elapsed_secs,
-            bg,
-        ),
-        HeaderMarkup::Html,
+    let parts = footer_parts(
+        header,
+        fallback_status,
+        sections,
+        activity.as_deref(),
+        tool_count,
+        has_log,
+        elapsed_secs,
+        bg,
     );
+    let telem_line =
+        super::flow_chrome::standalone_telemetry_line(&parts, telemetry, HeaderMarkup::Html);
+    let summary_hdr = super::flow_chrome::summary_header(&parts, HeaderMarkup::Html);
+
     // Always-visible plan chrome in the locked vertical order (title, prose
     // expandables, ☐/☑ checklist rows, goal — ADR 0005 Decision 3), assembled
     // for the classic Bot API HTML dialect (blank lines stand in for the rich
@@ -560,26 +561,22 @@ pub(crate) fn render_flow_html_chrome_pref(
     if !chrome.is_empty() {
         msg.push_str(&chrome);
     }
-    // A blank line separates any chrome above from the log/footer cluster
-    // (Decision 13, classic uses blank lines). The log body is the full entry
-    // list in one expandable with no summary line above it; the merged footer
-    // is the plain final line under it.
+    // A blank line separates any chrome above from the log/footer cluster.
+    // Top: Telemetry line (Option A)
+    // Below: Tool roll blockquote expandable (with activity preview on summary)
     if has_log {
         if !msg.is_empty() {
             msg.push_str("\n\n");
         }
-        if let Some(telem) = telemetry {
-            msg.push_str(&format!("{}\n", telem.format_line()));
-        }
         msg.push_str(&format!(
-            "<blockquote expandable>{}</blockquote>\n{footer}",
+            "{telem_line}\n<blockquote expandable><b>{summary_hdr}</b>\n\n{}</blockquote>",
             out.join("\n\n")
         ));
     } else {
         if !msg.is_empty() {
             msg.push_str("\n\n");
         }
-        msg.push_str(&footer);
+        msg.push_str(&telem_line);
     }
     msg
 }
@@ -657,19 +654,19 @@ pub(crate) fn render_flow_details_chrome_pref(
     } else {
         latest_activity_preview(lines)
     };
-    let footer = super::flow_chrome::merged_footer(
-        &footer_parts(
-            header,
-            fallback_status,
-            sections,
-            activity.as_deref(),
-            tool_count,
-            has_log,
-            elapsed_secs,
-            bg,
-        ),
-        HeaderMarkup::Html,
+    let parts = footer_parts(
+        header,
+        fallback_status,
+        sections,
+        activity.as_deref(),
+        tool_count,
+        has_log,
+        elapsed_secs,
+        bg,
     );
+    let telem_line =
+        super::flow_chrome::standalone_telemetry_line(&parts, telemetry, HeaderMarkup::Html);
+    let summary_hdr = super::flow_chrome::summary_header(&parts, HeaderMarkup::Html);
 
     let mut msg = String::new();
     let chrome = sections.chrome_rich(matches!(header, FlowHeader::Settled { .. }));
@@ -682,21 +679,16 @@ pub(crate) fn render_flow_details_chrome_pref(
         msg.push_str("<p>&nbsp;</p>");
     }
     if has_log {
-        // The merged footer is the processing-log summary; the body is the full
-        // <p>-wrapped entry list (one <p> per entry so the rich parser keeps
-        // them separated). paragraph_html owns the rich dialect's soft-break
-        // rule (#35): a bare newline inside a <p> collapses to whitespace, so
-        // multi-paragraph entries must arrive with explicit <br>.
-        if let Some(telem) = telemetry {
-            msg.push_str(&super::rich::paragraph_html(&telem.format_line()));
-        }
+        // Top: Telemetry line (Option A)
+        // Below: Collapsible details with activity summary header
+        msg.push_str(&super::rich::paragraph_html(&telem_line));
         let body: String = out.iter().map(|e| super::rich::paragraph_html(e)).collect();
         msg.push_str(&format!(
-            "<details><summary><sub>{footer}</sub></summary>{body}</details>"
+            "<details><summary><sub>{summary_hdr}</sub></summary>{body}</details>"
         ));
     } else {
         // No log yet: a plain <sub> footer line.
-        msg.push_str(&format!("<sub>{footer}</sub>"));
+        msg.push_str(&format!("<sub>{telem_line}</sub>"));
     }
     msg
 }
