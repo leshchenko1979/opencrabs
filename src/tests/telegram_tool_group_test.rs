@@ -560,7 +560,7 @@ fn humanize_duration_precise_then_minutes() {
 
 #[test]
 fn flow_header_live_and_settled_formats() {
-    // Live order (#509): gear + bold status message FIRST, then the italic
+    // Live order (#509): pick + bold status message FIRST, then the italic
     // tool-call count, then the italic duration, `•`-separated.
     assert_eq!(
         flow_header_text(
@@ -569,12 +569,12 @@ fn flow_header_live_and_settled_formats() {
             Some("Reading logs"),
             HeaderMarkup::Html
         ),
-        "⚙️ <b>Reading logs</b> • <i>3 tool calls</i> • <i>45s</i>"
+        "⛏ <b>Reading logs</b> • <i>3 tool calls</i> • <i>45s</i>"
     );
     // No status message, duration present → count + duration (italic), no lead.
     assert_eq!(
         flow_header_text(3, &FlowHeader::Live(Some("45s")), None, HeaderMarkup::Html),
-        "⚙️ <i>3 tool calls</i> • <i>45s</i>"
+        "⛏ <i>3 tool calls</i> • <i>45s</i>"
     );
     // Neither status nor duration (just started) → plain bold count / log.
     assert_eq!(
@@ -593,10 +593,10 @@ fn flow_header_live_and_settled_formats() {
             Some("Reading logs"),
             HeaderMarkup::Markdown
         ),
-        "⚙️ **Reading logs** • _3 tool calls_ • _45s_"
+        "⛏ **Reading logs** • _3 tool calls_ • _45s_"
     );
     // Live header with completed/failed tool status glyphs strips the glyph
-    // so in-flight turns keep the ⚙️ gear and do NOT present bare ✅ / ❌.
+    // so in-flight turns keep the ⛏ pick and do NOT present bare ✅ / ❌.
     assert_eq!(
         flow_header_text(
             55,
@@ -604,7 +604,7 @@ fn flow_header_live_and_settled_formats() {
             Some("✅ glob reviews/20260915-c14/**"),
             HeaderMarkup::Markdown
         ),
-        "⚙️ **glob reviews/20260915-c14/** • _55 tool calls_ • _3:14_"
+        "⛏ **glob reviews/20260915-c14/** • _55 tool calls_ • _3:14_"
     );
     assert_eq!(
         flow_header_text(
@@ -613,10 +613,10 @@ fn flow_header_live_and_settled_formats() {
             Some("❌ read_file missing.md"),
             HeaderMarkup::Html
         ),
-        "⚙️ <b>read_file missing.md</b> • <i>55 tool calls</i> • <i>3:14</i>"
+        "⛏ <b>read_file missing.md</b> • <i>55 tool calls</i> • <i>3:14</i>"
     );
     // Live header with genuine system status icons (like ⏳ compaction) keeps
-    // the icon bare and drops the standing gear.
+    // the icon bare and drops the standing pick.
     assert_eq!(
         flow_header_text(
             2,
