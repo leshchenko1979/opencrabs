@@ -46,5 +46,7 @@ pub(crate) use render_html::{
     paragraph_html,
 };
 #[cfg(test)]
-pub(crate) use table::{balance_code_fences, shield_bare_leading_hashes};
+pub(crate) use table::{
+    balance_code_fences, infer_missing_table_separators, shield_bare_leading_hashes,
+};
 pub(crate) use table::{normalize_tables, reflow_collapsed_tables};
