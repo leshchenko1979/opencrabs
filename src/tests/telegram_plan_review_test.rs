@@ -106,9 +106,17 @@ fn effective_keyboard_grays_only_the_editing_card() {
         plan_review_effective_kb(PlanKb::ApproveDiscard, false),
         PlanKb::ApproveDiscard
     );
+    assert_eq!(
+        plan_review_effective_kb(PlanKb::CompletedReview, true),
+        PlanKb::CompletedReviewing
+    );
+    assert_eq!(
+        plan_review_effective_kb(PlanKb::CompletedReview, false),
+        PlanKb::CompletedReview
+    );
     // Any other card shape is passed through untouched: a review can only be
-    // started from the Editing card, so graying anything else would be a
-    // rendering lie.
+    // started from the Editing or CompletedReview card, so graying anything else
+    // would be a rendering lie.
     for kb in [PlanKb::None, PlanKb::DiscardOnly] {
         assert_eq!(plan_review_effective_kb(kb, true), kb);
         assert_eq!(plan_review_effective_kb(kb, false), kb);
@@ -759,4 +767,44 @@ fn review_impl_brief_contains_structured_adversarial_prompt() {
     assert!(brief.contains("### STEP 3: TEST & ACCEPTANCE VERIFICATION"));
     assert!(brief.contains("### STEP 4: STRUCTURED REPORT"));
     assert!(brief.contains("## Implementation Audit Report: <Title>"));
+}
+
+#[test]
+fn completed_review_card_renders_running_progress_footer() {
+    let running_note = "🔍 Review subagent running (🛠 2 · bash · 14s)…".to_string();
+
+    // While reviewing is true, completed cards render the running note
+    assert_eq!(
+        plan_review_footer_note(
+            PlanKb::CompletedReview,
+            true,
+            Some(running_note.clone()),
+            None
+        ),
+        Some(running_note.clone())
+    );
+    assert_eq!(
+        plan_review_footer_note(
+            PlanKb::CompletedReviewing,
+            true,
+            Some(running_note.clone()),
+            None
+        ),
+        Some(running_note)
+    );
+
+    // When reviewing is false, completed cards have no footer note
+    assert_eq!(
+        plan_review_footer_note(PlanKb::CompletedReview, false, None, None),
+        None
+    );
+    assert_eq!(
+        plan_review_footer_note(
+            PlanKb::CompletedReview,
+            false,
+            None,
+            Some("✨ Stale delta".to_string())
+        ),
+        None
+    );
 }

@@ -470,11 +470,15 @@ const PLAN_REVIEW_DELTA_CAP: usize = 200;
 const PLAN_REVIEW_DELTA_MARKER: &str = "DELTA:";
 
 /// The keyboard a plan card should show, given whether a review is running
-/// (#155). Only the Editing keyboard grays out — a running review must not
-/// invent a keyboard for the checklist or absent states.
+/// (#155, #234). Both the Editing and CompletedReview keyboards gray out —
+/// a running review must not invent a keyboard for the checklist or absent states.
 pub(crate) fn plan_review_effective_kb(plan_kb: PlanKb, reviewing: bool) -> PlanKb {
-    if reviewing && plan_kb == PlanKb::ApproveDiscard {
-        PlanKb::ReviewingApproveDiscard
+    if reviewing {
+        match plan_kb {
+            PlanKb::ApproveDiscard => PlanKb::ReviewingApproveDiscard,
+            PlanKb::CompletedReview => PlanKb::CompletedReviewing,
+            other => other,
+        }
     } else {
         plan_kb
     }
@@ -519,7 +523,47 @@ pub(crate) fn format_plan_review_running_progress(
     format!("🔍 Review subagent running ({})…", segs.join(" · "))
 }
 
-/// Footer note for the card, if any (#155). The running note wins over a
+/// Spawn a background task that polls `WorkStatus` for `child_id` every 3s and
+/// invokes `on_progress(note)` when the progress text changes (#155, #234).
+/// Returns `(stop_notify, join_handle)`.
+pub(crate) fn spawn_subagent_progress_tracker<F, Fut>(
+    child_id: String,
+    mut on_progress: F,
+) -> (Arc<tokio::sync::Notify>, tokio::task::JoinHandle<()>)
+where
+    F: FnMut(String) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = bool> + Send + 'static,
+{
+    let stop = Arc::new(tokio::sync::Notify::new());
+    let stop_c = stop.clone();
+    let handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+        let mut last_rendered = String::new();
+        loop {
+            tokio::select! {
+                _ = stop_c.notified() => break,
+                _ = interval.tick() => {
+                    if let Some(status) =
+                        crate::brain::agent::service::work_status::WorkStatus::read(&child_id)
+                    {
+                        let note = format_plan_review_running_progress(
+                            status.progress.as_ref(),
+                            status.elapsed_secs(),
+                        );
+                        if note != last_rendered {
+                            if on_progress(note.clone()).await {
+                                last_rendered = note;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    (stop, handle)
+}
+
+/// Footer note for the card, if any (#155, #234). The running note wins over a
 /// stale delta, so the owner never reads a previous review's summary while a
 /// new one is mid-flight.
 pub(crate) fn plan_review_footer_note(
@@ -528,6 +572,19 @@ pub(crate) fn plan_review_footer_note(
     running_note: Option<String>,
     delta: Option<String>,
 ) -> Option<String> {
+    if matches!(
+        plan_kb,
+        PlanKb::CompletedReview | PlanKb::CompletedReviewing
+    ) {
+        if reviewing {
+            return Some(
+                running_note
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| PLAN_REVIEW_RUNNING_NOTE.to_string()),
+            );
+        }
+        return None;
+    }
     // The footer belongs to the EDITING card only. The same renderer draws the
     // Active checklist card (Discard-only) and the None card, and a review
     // delta or a "reviewing…" note left over on either of those would describe
@@ -1197,6 +1254,83 @@ impl Drop for FinalizeAbortGuard {
     }
 }
 
+/// Renders the completed plan card body in HTML and Markdown (#234).
+pub(crate) async fn render_completed_plan_card_body(
+    session_id: Uuid,
+) -> Option<(String, Option<String>)> {
+    let doc = crate::utils::plan_files::latest_archived_plan(session_id).await?;
+    let (title, checklist) = super::flow_chrome::plan_document_sections(&doc);
+    let use_rich = Config::current().channels.telegram.rich_messages;
+    let rich = if use_rich {
+        render_plan_card_markdown(title.as_deref(), checklist.as_deref(), None, None)
+            .await
+            .map(|mut r| {
+                r = r.replacen("📋", "✅", 1);
+                r.push_str("\n*Plan completed and archived.*");
+                r
+            })
+    } else {
+        None
+    };
+    let mut html = render_plan_card_html(title.as_deref(), checklist.as_deref(), None, None)
+        .await
+        .unwrap_or_else(|| "<b>Plan</b>".to_string());
+    html = html.replacen("📋", "✅", 1);
+    html.push_str("\n<i>Plan completed and archived.</i>");
+    Some((html, rich))
+}
+
+/// Refresh/edit a completed plan card in-place with the specified keyboard and running note (#234).
+pub(crate) async fn refresh_completed_plan_card(
+    bot: &Bot,
+    chat: ChatId,
+    mid: MessageId,
+    session_id: Uuid,
+    plan_kb: PlanKb,
+    running_note: Option<&str>,
+) -> bool {
+    let Some((html, rich)) = render_completed_plan_card_body(session_id).await else {
+        return false;
+    };
+    let use_rich = Config::current().channels.telegram.rich_messages;
+    let kb_val = plan_kb
+        .keyboard()
+        .and_then(|m| serde_json::to_value(m).ok());
+    if use_rich && let Some(rich) = rich {
+        let rich_md = plan_card_with_footer(rich, running_note, true);
+        match super::rich::api::edit_rich_markdown_media(
+            bot.api_url().as_str(),
+            bot.token(),
+            chat.0,
+            mid.0,
+            &rich_md,
+            &[],
+            kb_val.as_ref(),
+            "turn",
+            "-",
+        )
+        .await
+        {
+            Ok(()) => return true,
+            Err(e) => tracing::warn!("Telegram completed plan card rich edit failed: {e}"),
+        }
+    }
+    let html = plan_card_with_footer(html, running_note, false);
+    let mut req = bot
+        .edit_message_text(chat, mid, html)
+        .parse_mode(ParseMode::Html);
+    if let Some(markup) = plan_kb.keyboard() {
+        req = req.reply_markup(markup);
+    }
+    match req.await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!("Telegram completed plan card HTML edit failed: {e}");
+            false
+        }
+    }
+}
+
 /// Finalization body, for callers already holding the per-session card lock.
 ///
 /// `refresh_plan_card` runs the same lock and, on its no-live-plan path (the
@@ -1226,7 +1360,7 @@ async fn finalize_plan_card_locked(
         crate::utils::plan_files::take_plan_just_archived(session_id).await;
         return true;
     };
-    let Some(doc) = crate::utils::plan_files::latest_archived_plan(session_id).await else {
+    let Some((html, rich)) = render_completed_plan_card_body(session_id).await else {
         // No archived document to render from: terminal, consume (#16).
         // Logged (#16 round 2): the stem-drift bug routed EVERY finalize
         // through this branch (reader prefix never matched the dot-less
@@ -1246,7 +1380,6 @@ async fn finalize_plan_card_locked(
         session_id,
         armed: true,
     };
-    let (title, checklist) = super::flow_chrome::plan_document_sections(&doc);
     let plan_kb = super::flow_chrome::PlanKb::CompletedReview;
     let empty_kb = plan_kb
         .keyboard()
@@ -1254,26 +1387,6 @@ async fn finalize_plan_card_locked(
         .unwrap_or_else(|| serde_json::json!({ "inline_keyboard": [] }));
 
     let use_rich = Config::current().channels.telegram.rich_messages;
-
-    // Completed forms, mirrored dual-path as in refresh_plan_card. The rich
-    // form rides the markdown dialect now (#134 family) — checklist-only
-    // body, no media; the ✅/notice chrome is markdown-bold + plain italic.
-    let rich = if use_rich {
-        render_plan_card_markdown(title.as_deref(), checklist.as_deref(), None, None)
-            .await
-            .map(|mut r| {
-                r = r.replacen("📋", "✅", 1);
-                r.push_str("\n*Plan completed and archived.*");
-                r
-            })
-    } else {
-        None
-    };
-    let mut html = render_plan_card_html(title.as_deref(), checklist.as_deref(), None, None)
-        .await
-        .unwrap_or_else(|| "<b>Plan</b>".to_string());
-    html = html.replacen("📋", "✅", 1);
-    html.push_str("\n<i>Plan completed and archived.</i>");
 
     // Restick-to-bottom (#1231): post the completed card fresh at the bottom
     // FIRST, so a post failure can fall back to the card already present — the

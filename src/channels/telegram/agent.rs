@@ -2628,63 +2628,35 @@ async fn execute_plan_review_subagent(
         return;
     }
 
-    // Live progress tracker task (#155): updates the plan card with turn & tool
+    // Live progress tracker task (#155, #234): updates the plan card with turn & tool
     // so the review doesn't appear frozen to the operator.
-    let progress_stop = std::sync::Arc::new(tokio::sync::Notify::new());
-    let progress_task = {
-        let stop = progress_stop.clone();
-        let child_id_c = child_id.clone();
-        let state_c = state.clone();
+    let (progress_stop, progress_task) = {
         let bot_c = bot.clone();
+        let state_c = state.clone();
         let agent_c = agent.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
-            let mut last_rendered = String::new();
-            loop {
-                tokio::select! {
-                    _ = stop.notified() => break,
-                    _ = interval.tick() => {
-                        if let Some(status) =
-                            crate::brain::agent::service::work_status::WorkStatus::read(&child_id_c)
-                        {
-                            // The clock rides the note (#155): the review's own
-                            // spawn-anchored elapsed time, in the flow footer's
-                            // format. It differs every tick, so the card edit
-                            // below is re-issued each tick — that IS the live
-                            // clock the owner asked for.
-                            let note = crate::channels::telegram::plan_card::format_plan_review_running_progress(
-                                status.progress.as_ref(),
-                                status.elapsed_secs(),
-                            );
-                            if note != last_rendered {
-                                state_c
-                                    .set_plan_review_running_note(session_id, note.clone())
-                                    .await;
-                                // #187 D3: mark the note rendered only if the card
-                                // actually took it. The suppression gate (#814 flood
-                                // control) skips the whole refresh before any read or
-                                // API work, and recording the note as rendered here
-                                // would make the next refresh carrying that same note
-                                // skip — leaving the card on the older footer.
-                                if crate::channels::telegram::plan_card::refresh_plan_card(
-                                    &bot_c,
-                                    chat_id,
-                                    thread_id,
-                                    &state_c,
-                                    &agent_c,
-                                    session_id,
-                                    crate::channels::telegram::flow_chrome::PlanKb::ApproveDiscard,
-                                )
-                                .await
-                                {
-                                    last_rendered = note;
-                                }
-                            }
-                        }
-                    }
+        crate::channels::telegram::plan_card::spawn_subagent_progress_tracker(
+            child_id.clone(),
+            move |note| {
+                let bot = bot_c.clone();
+                let state = state_c.clone();
+                let agent = agent_c.clone();
+                async move {
+                    state
+                        .set_plan_review_running_note(session_id, note.clone())
+                        .await;
+                    crate::channels::telegram::plan_card::refresh_plan_card(
+                        &bot,
+                        chat_id,
+                        thread_id,
+                        &state,
+                        &agent,
+                        session_id,
+                        crate::channels::telegram::flow_chrome::PlanKb::ApproveDiscard,
+                    )
+                    .await
                 }
-            }
-        })
+            },
+        )
     };
 
     // Collect through `wait_agent` (which registers a waiter, suppressing the
@@ -2809,20 +2781,23 @@ async fn execute_review_impl_subagent(
         let bot = bot.clone();
         let state = state.clone();
         async move {
+            state.clear_plan_review_running_note(session_id).await;
             state.set_plan_reviewing(session_id, false).await;
             let target_mid = state
                 .plan_card(session_id)
                 .await
                 .map(|(mid, _)| mid)
                 .or(card_mid);
-            if let (Some(mid), Some(markup)) = (
-                target_mid,
-                crate::channels::telegram::flow_chrome::PlanKb::CompletedReview.keyboard(),
-            ) {
-                let _ = bot
-                    .edit_message_reply_markup(chat_id, mid)
-                    .reply_markup(markup)
-                    .await;
+            if let Some(mid) = target_mid {
+                let _ = crate::channels::telegram::plan_card::refresh_completed_plan_card(
+                    &bot,
+                    chat_id,
+                    mid,
+                    session_id,
+                    crate::channels::telegram::flow_chrome::PlanKb::CompletedReview,
+                    None,
+                )
+                .await;
             }
         }
     };
@@ -2914,6 +2889,43 @@ async fn execute_review_impl_subagent(
         return;
     };
 
+    // Live progress tracker task (#155, #234): updates the completed plan card
+    // with turn & tool so the review doesn't appear frozen to the operator.
+    let (progress_stop, progress_task) = {
+        let bot_c = bot.clone();
+        let state_c = state.clone();
+        crate::channels::telegram::plan_card::spawn_subagent_progress_tracker(
+            child_id.clone(),
+            move |note| {
+                let bot = bot_c.clone();
+                let state = state_c.clone();
+                async move {
+                    state
+                        .set_plan_review_running_note(session_id, note.clone())
+                        .await;
+                    let target_mid = state
+                        .plan_card(session_id)
+                        .await
+                        .map(|(mid, _)| mid)
+                        .or(card_mid);
+                    if let Some(mid) = target_mid {
+                        crate::channels::telegram::plan_card::refresh_completed_plan_card(
+                            &bot,
+                            chat_id,
+                            mid,
+                            session_id,
+                            crate::channels::telegram::flow_chrome::PlanKb::CompletedReviewing,
+                            Some(&note),
+                        )
+                        .await
+                    } else {
+                        false
+                    }
+                }
+            },
+        )
+    };
+
     const REVIEW_WAIT_SECS: u64 = 900;
     let wait_tool = crate::brain::tools::subagent::WaitAgentTool::new(manager.clone());
     let waited = wait_tool
@@ -2925,6 +2937,10 @@ async fn execute_review_impl_subagent(
             &ctx,
         )
         .await;
+
+    // Stop progress monitor now that wait returned
+    progress_stop.notify_one();
+    let _ = progress_task.await;
 
     let child_state = manager.get_state(&child_id);
     let output = match waited {
