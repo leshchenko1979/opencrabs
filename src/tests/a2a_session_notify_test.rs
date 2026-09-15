@@ -35,21 +35,23 @@ fn outcome_of(resp: &JsonRpcResponse) -> String {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn a2a_notify_dispatches_goal_to_target_session() {
+    let _guard = test_guard();
     let ctx = placeholder_service_context().await;
-    let svc = SessionService::new(ctx.clone());
-    let session = svc
-        .create_session("goal-target".to_string(), None, None, None, None, None)
+    let session = SessionService::new(ctx.clone())
+        .create_session(Some("goal-target".to_string()))
         .await
         .expect("session creates");
 
-    let _g = test_guard().await;
-    let sink = Arc::new(Mutex::new(Vec::new()));
-    let sink_clone = sink.clone();
-    register_session_route(session.id, move |msg: QueuedUserMessage| {
-        sink_clone.lock().unwrap().push(msg);
-        Ok(())
-    });
+    let captured: Arc<Mutex<Option<QueuedUserMessage>>> = Arc::new(Mutex::new(None));
+    let sink = captured.clone();
+    register_session_route(
+        session.id,
+        Arc::new(move |_id, queued| {
+            *sink.lock().unwrap() = Some(queued);
+        }),
+    );
 
     let mut p = params(&session.id.to_string(), "wake with goal");
     p["goal"] = serde_json::json!("converge on clean audit");
@@ -66,7 +68,7 @@ async fn a2a_notify_dispatches_goal_to_target_session() {
         .expect("goal query succeeds")
         .expect("goal exists");
     assert_eq!(state.goal_text, "converge on clean audit");
-    assert_eq!(state.max_turns, Some(5));
+    assert_eq!(state.max_turns, 5);
 }
 
 #[tokio::test]
