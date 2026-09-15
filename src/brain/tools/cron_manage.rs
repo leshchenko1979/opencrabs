@@ -103,8 +103,7 @@ impl Tool for CronManageTool {
                 },
                 "trigger_on": {
                     "type": "string",
-                    "enum": ["non_empty", "exit_non_zero", "always"],
-                    "description": "Trigger condition: 'non_empty' (default, fires if stdout/stderr non-empty), 'exit_non_zero', 'always'."
+                    "description": "Trigger condition: 'non_empty' (default, fires if stdout/stderr non-empty), 'exit_non_zero', 'exit_zero', 'regex:<pattern>', 'always'."
                 },
                 "set_goal": {
                     "type": "boolean",
@@ -186,14 +185,23 @@ impl CronManageTool {
             )));
         }
 
-        let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
-            Some(p) if !p.is_empty() => p,
-            _ => {
-                return Ok(ToolResult::error(
-                    "'prompt' is required for create".to_string(),
-                ));
-            }
-        };
+        let prompt_input = input
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let trigger_cmd_input = input
+            .get("trigger_cmd")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+
+        if prompt_input.is_empty() && trigger_cmd_input.is_empty() {
+            return Ok(ToolResult::error(
+                "Either 'prompt' or 'trigger_cmd' is required for create".to_string(),
+            ));
+        }
+        let prompt = prompt_input;
 
         // Check for duplicate name
         if let Ok(Some(_)) = self.repo.find_by_name(name).await {

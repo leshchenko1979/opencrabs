@@ -16,6 +16,22 @@ fn test_trigger_condition_parse() {
         TriggerCondition::ExitNonZero
     );
     assert_eq!(
+        TriggerCondition::parse(Some("exit_zero")),
+        TriggerCondition::ExitZero
+    );
+    assert_eq!(
+        TriggerCondition::parse(Some("exitzero")),
+        TriggerCondition::ExitZero
+    );
+    assert_eq!(
+        TriggerCondition::parse(Some("regex:disk [0-9]+%")),
+        TriggerCondition::Regex("disk [0-9]+%".into())
+    );
+    assert_eq!(
+        TriggerCondition::parse(Some("re:ERROR.*")),
+        TriggerCondition::Regex("ERROR.*".into())
+    );
+    assert_eq!(
         TriggerCondition::parse(Some("always")),
         TriggerCondition::Always
     );
@@ -23,6 +39,44 @@ fn test_trigger_condition_parse() {
         TriggerCondition::parse(Some("unknown_custom")),
         TriggerCondition::NonEmpty
     );
+}
+
+#[test]
+fn test_trigger_condition_exit_zero() {
+    let cond = TriggerCondition::ExitZero;
+
+    let res_success = TriggerResult {
+        stdout: "ok".into(),
+        stderr: String::new(),
+        exit_code: 0,
+    };
+    assert!(cond.should_fire(&res_success));
+
+    let res_failure = TriggerResult {
+        stdout: String::new(),
+        stderr: "err".into(),
+        exit_code: 1,
+    };
+    assert!(!cond.should_fire(&res_failure));
+}
+
+#[test]
+fn test_trigger_condition_regex() {
+    let cond = TriggerCondition::Regex("alert:\\s*([0-9]+)".into());
+
+    let res_match = TriggerResult {
+        stdout: "alert: 42 anomalies detected".into(),
+        stderr: String::new(),
+        exit_code: 0,
+    };
+    assert!(cond.should_fire(&res_match));
+
+    let res_no_match = TriggerResult {
+        stdout: "all systems normal".into(),
+        stderr: String::new(),
+        exit_code: 0,
+    };
+    assert!(!cond.should_fire(&res_no_match));
 }
 
 #[test]
