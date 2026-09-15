@@ -1369,7 +1369,7 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
     // Goal presence check
     assert_eq!(
         all_present.format_telemetry_line("⚙", Some("12%"), true),
-        "⚙ • 0:30 ⏱ • 12% 🧠 • 🎯 • 4 ⛏ • 1 ⏏️ • 2 🤖 • 3 ✉️"
+        "🎯 • ⚙ • 0:30 ⏱ • 12% 🧠 • 4 ⛏ • 1 ⏏️ • 2 🤖 • 3 ✉️"
     );
     assert_eq!(
         all_present.format_telemetry_line("⚙", Some("12%"), false),

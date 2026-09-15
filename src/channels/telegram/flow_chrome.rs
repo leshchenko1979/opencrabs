@@ -382,13 +382,13 @@ impl TelemetryMetrics {
         has_goal: bool,
     ) -> String {
         let mut segs: Vec<String> = Vec::new();
+        if has_goal {
+            segs.push("🎯".to_string());
+        }
         segs.push(state_icon.to_string());
         segs.push(clock_glyph(self.elapsed_secs));
         if let Some(brain_ctx) = format_brain_ctx(ctx) {
             segs.push(brain_ctx);
-        }
-        if has_goal {
-            segs.push("🎯".to_string());
         }
         if self.tool_count > 0 {
             segs.push(format!("{} ⛏", self.tool_count));
@@ -520,13 +520,13 @@ pub(crate) fn standalone_telemetry_line(
         esc(&line)
     } else {
         let mut segs: Vec<String> = Vec::new();
+        if parts.has_goal {
+            segs.push("🎯".to_string());
+        }
         segs.push(state_icon.to_string());
         segs.push(clock_glyph(parts.elapsed_secs));
         if let Some(brain_ctx) = format_brain_ctx(parts.ctx) {
             segs.push(esc(&brain_ctx));
-        }
-        if parts.has_goal {
-            segs.push("🎯".to_string());
         }
         segs.join(" • ")
     }
