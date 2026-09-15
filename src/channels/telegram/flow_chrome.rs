@@ -378,7 +378,7 @@ impl TelemetryMetrics {
     /// Segments are joined with `" • "`.
     pub(crate) fn format_line(&self) -> String {
         let mut segs: Vec<String> = Vec::new();
-        segs.push(format!("⚙️ {}", self.tool_count));
+        segs.push(format!("⛏ {}", self.tool_count));
         segs.push(clock_glyph(self.elapsed_secs));
         if self.detached_tasks > 0 {
             segs.push(format!("⏏️ {}", self.detached_tasks));
@@ -423,27 +423,46 @@ pub(crate) struct FooterParts<'a> {
     pub(crate) bg: Option<&'a str>,
 }
 
-/// Build the merged flow footer: one ` • `-joined string (ADR 0005 Decision
-/// 12, amended by #1052). Settled: outcome → tool count → ctx → clock. Live:
-/// latest activity → reasoning/status → tool count → ctx → clock, because the
-/// narration (what the agent is DOING) is the progress signal and the
-/// reasoning excerpt is supplementary (#1052). The renderer wraps it: rich as
-/// `<sub>` (plain footer line, or the processing-log `<summary>`); classic as
-/// a plain final line. In-flight the log summary carries the `⚙️` cog; a
-/// settled footer never does (segment 1 carries the `✅`/`❌` outcome
-/// instead).
+/// Extract context percentage from formatted ctx string and format as `🧠 X%`.
+pub(crate) fn format_brain_ctx(ctx: Option<&str>) -> Option<String> {
+    let s = ctx?;
+    if let Some(pct_idx) = s.find('%') {
+        let before = &s[..pct_idx];
+        if let Some(start) = before.rfind(|c: char| !c.is_ascii_digit() && c != '.') {
+            let num = before[start + 1..].trim();
+            if !num.is_empty() {
+                return Some(format!("🧠 {num}%"));
+            }
+        } else if !before.is_empty() {
+            return Some(format!("🧠 {before}%"));
+        }
+    }
+    None
+}
+
+/// Build the merged flow footer / summary line: one ` • `-joined string.
+/// Format: `⏱ <time> • 🧠 <pct>% • <activity/outcome>`.
+/// Time leads, followed by the brain context percentage, then the live
+/// activity preview (with running `⛏` tool icon) or settled terminal outcome
+/// (`✅ Finished`, `❌ Failed`, etc.). Redundant tool call counts, verbose ctx
+/// tokens, trailing clock, and detached background bits are stripped from the
+/// summary.
 pub(crate) fn merged_footer(parts: &FooterParts, markup: HeaderMarkup) -> String {
     let esc = |s: &str| match markup {
         HeaderMarkup::Html => escape_html(s),
         HeaderMarkup::Markdown => s.to_string(),
     };
-    let settled = parts.outcome.is_some();
     let mut segs: Vec<String> = Vec::new();
 
-    // Segment 1 — settled outcome leads. LIVE turns lead with the latest
-    // activity (#1052), then the reasoning/status. Strip a leading cog from
-    // the activity so the prefix is never doubled (#509 follow-up).
-    let mut live_activity = String::new();
+    // Segment 1 — clock first (ADR 0005 update)
+    segs.push(clock_glyph(parts.elapsed_secs));
+
+    // Segment 2 — brain icon + context percentage
+    if let Some(brain_ctx) = format_brain_ctx(parts.ctx) {
+        segs.push(esc(&brain_ctx));
+    }
+
+    // Segment 3 — outcome or live activity / status
     if let Some((icon, verb)) = parts.outcome {
         segs.push(format!("{icon} {}", esc(verb)));
     } else {
@@ -452,17 +471,12 @@ pub(crate) fn merged_footer(parts: &FooterParts, markup: HeaderMarkup) -> String
         {
             let act = strip_leading_tool_status_icons(act);
             if !act.is_empty() {
-                // Gear is dropped when the activity already leads with its own
-                // icon (#29 fix round, owner directive): the
-                // `⏳ Compacting context — 66% full…` body entry renders bare.
-                // Tool status icons (✅/❌) are stripped so in-flight activity
-                // maintains the running ⚙️ cog and never bare ✅/❌.
-                live_activity = if starts_with_icon(act) {
+                let live_activity = if starts_with_icon(act) {
                     esc(act)
                 } else {
-                    format!("⚙️ {}", esc(act))
+                    format!("⛏ {}", esc(act))
                 };
-                segs.push(live_activity.clone());
+                segs.push(live_activity);
             }
         }
         if let Some(ps) = parts.plan_state {
@@ -470,49 +484,6 @@ pub(crate) fn merged_footer(parts: &FooterParts, markup: HeaderMarkup) -> String
         } else if let Some(w) = parts.working_on {
             segs.push(esc(w));
         }
-    }
-
-    // Segment 2 — progress-log summary, only when a log exists. Settled turns
-    // show a bare tool-call count with no cog (the stale narration is dropped,
-    // #498). Live turns show the count alone when the activity segment already
-    // carries the cog, else the cog rides the count (#1052 split).
-    if parts.has_log {
-        // Once another segment already leads with an icon, the standing gear
-        // has nothing left to signal (#29 fix round, owner directive): the
-        // count renders bare and the bare-cog fallback is dropped.
-        let gear_taken = segs.iter().any(|s| starts_with_icon(s));
-        let mut seg2 = String::new();
-        if parts.tool_count >= 1 {
-            let count = format!("{} tool calls", parts.tool_count);
-            seg2 = if settled || !live_activity.is_empty() || gear_taken {
-                count
-            } else {
-                format!("⚙️ {count}")
-            };
-        } else if !settled && live_activity.is_empty() && !gear_taken {
-            // In-flight log with no tools and no activity preview yet: a bare
-            // cog beats an empty segment so the footer still reads as active.
-            seg2 = "⚙️".to_string();
-        }
-        if !seg2.is_empty() {
-            segs.push(seg2);
-        }
-    }
-
-    // Segment 3 — ctx, before the clock.
-    if let Some(c) = parts.ctx {
-        segs.push(esc(c));
-    }
-
-    // Segment 4 — clock, always last (the #1054 background-task indicator
-    // appends after it when present).
-    segs.push(clock_glyph(parts.elapsed_secs));
-
-    // Segment 5 — background-work indicator (#1054): a settled turn that ends
-    // with detached work looks identical to a complete one without this, and
-    // the typing indicator staying alive is too easy to miss.
-    if let Some(bg) = parts.bg {
-        segs.push(format!("🔧 {}", esc(bg)));
     }
 
     segs.join(" • ")
