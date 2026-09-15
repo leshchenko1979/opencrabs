@@ -331,34 +331,33 @@ pub(crate) enum FlowLine {
 /// when there is no narration; (3) the most recent tool label + context. Each
 /// renderer escapes/styles the returned text.
 pub(crate) fn latest_activity_preview(lines: &[FlowLine]) -> Option<String> {
-    // Priority 1: the whole most-recent human-readable intermediary text.
-    if let Some(text) = lines.iter().rev().find_map(|l| match l {
-        FlowLine::Text(t) => human_readable_preview(t),
-        FlowLine::Tool { .. } => None,
-    }) {
-        return Some(text);
+    for line in lines.iter().rev() {
+        match line {
+            FlowLine::Tool {
+                label,
+                raw_context,
+                context,
+            } => {
+                // If it's a bash tool with line-start `#` comments, prefer those comments
+                if is_bash_tool(label)
+                    && let Some(comments) = extract_status_from_text(raw_context)
+                {
+                    return Some(comments);
+                }
+                return Some(if context.is_empty() {
+                    label.clone()
+                } else {
+                    format!("{label} {context}")
+                });
+            }
+            FlowLine::Text(t) => {
+                if let Some(text) = human_readable_preview(t) {
+                    return Some(text);
+                }
+            }
+        }
     }
-    // Priority 2: line-start `#` comments from the most recent bash command
-    // (the agent narrates its steps in the command itself, no separate text).
-    // Reads raw_context, NOT the decorated/truncated display context (#488):
-    // the wrapper prefix hides a first-line `#` and truncation drops comments.
-    if let Some(comments) = lines.iter().rev().find_map(|l| match l {
-        FlowLine::Tool {
-            label, raw_context, ..
-        } if is_bash_tool(label) => extract_status_from_text(raw_context),
-        _ => None,
-    }) {
-        return Some(comments);
-    }
-    // Fallback: the most recent tool label + context.
-    lines.iter().rev().find_map(|l| match l {
-        FlowLine::Tool { label, context, .. } => Some(if context.is_empty() {
-            label.clone()
-        } else {
-            format!("{label} {context}")
-        }),
-        FlowLine::Text(_) => None,
-    })
+    None
 }
 
 /// A flow tool line is a bash call when its name (the last word of the
