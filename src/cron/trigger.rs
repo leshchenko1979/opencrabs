@@ -2,30 +2,49 @@ use std::time::Duration;
 use tokio::process::Command;
 
 /// Condition required for a trigger to fire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum TriggerCondition {
     /// Fires if stdout or stderr contains any non-whitespace output (default).
     #[default]
     NonEmpty,
     /// Fires if the command exits with a non-zero exit code.
     ExitNonZero,
+    /// Fires if the command exits with a zero exit code (success).
+    ExitZero,
+    /// Fires if the combined stdout/stderr output matches the provided regular expression.
+    Regex(String),
     /// Fires whenever the trigger command finishes executing, regardless of output or exit status.
     Always,
 }
 
 impl TriggerCondition {
     pub fn parse(s: Option<&str>) -> Self {
-        match s.map(|v| v.trim().to_lowercase()).as_deref() {
-            Some("exit_non_zero") | Some("exitnonzero") | Some("non_zero") => Self::ExitNonZero,
-            Some("always") => Self::Always,
+        let raw = match s.map(str::trim) {
+            Some(v) if !v.is_empty() => v,
+            _ => return Self::NonEmpty,
+        };
+
+        if let Some(pat) = raw
+            .strip_prefix("regex:")
+            .or_else(|| raw.strip_prefix("re:"))
+        {
+            return Self::Regex(pat.trim().to_string());
+        }
+
+        match raw.to_lowercase().as_str() {
+            "exit_non_zero" | "exitnonzero" | "non_zero" => Self::ExitNonZero,
+            "exit_zero" | "exitzero" | "zero" | "exit_0" => Self::ExitZero,
+            "always" => Self::Always,
             _ => Self::NonEmpty,
         }
     }
 
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::NonEmpty => "non_empty",
             Self::ExitNonZero => "exit_non_zero",
+            Self::ExitZero => "exit_zero",
+            Self::Regex(s) => s.as_str(),
             Self::Always => "always",
         }
     }
@@ -34,6 +53,14 @@ impl TriggerCondition {
         match self {
             Self::NonEmpty => !result.combined_output().trim().is_empty(),
             Self::ExitNonZero => result.exit_code != 0,
+            Self::ExitZero => result.exit_code == 0,
+            Self::Regex(pat) => match regex::Regex::new(pat) {
+                Ok(re) => re.is_match(&result.combined_output()),
+                Err(e) => {
+                    tracing::warn!("Invalid regex trigger condition '{pat}': {e}");
+                    false
+                }
+            },
             Self::Always => true,
         }
     }
@@ -126,6 +153,22 @@ mod tests {
             TriggerCondition::ExitNonZero
         );
         assert_eq!(
+            TriggerCondition::parse(Some("exit_zero")),
+            TriggerCondition::ExitZero
+        );
+        assert_eq!(
+            TriggerCondition::parse(Some("exitzero")),
+            TriggerCondition::ExitZero
+        );
+        assert_eq!(
+            TriggerCondition::parse(Some("regex:disk [0-9]+%")),
+            TriggerCondition::Regex("disk [0-9]+%".into())
+        );
+        assert_eq!(
+            TriggerCondition::parse(Some("re:ERROR.*")),
+            TriggerCondition::Regex("ERROR.*".into())
+        );
+        assert_eq!(
             TriggerCondition::parse(Some("always")),
             TriggerCondition::Always
         );
@@ -158,6 +201,17 @@ mod tests {
         assert!(!TriggerCondition::ExitNonZero.should_fire(&empty_success));
         assert!(!TriggerCondition::ExitNonZero.should_fire(&with_output_success));
         assert!(TriggerCondition::ExitNonZero.should_fire(&empty_fail));
+
+        // ExitZero
+        assert!(TriggerCondition::ExitZero.should_fire(&empty_success));
+        assert!(TriggerCondition::ExitZero.should_fire(&with_output_success));
+        assert!(!TriggerCondition::ExitZero.should_fire(&empty_fail));
+
+        // Regex
+        let re_cond = TriggerCondition::Regex("disk [0-9]+%".into());
+        assert!(!re_cond.should_fire(&empty_success));
+        assert!(re_cond.should_fire(&with_output_success));
+        assert!(!re_cond.should_fire(&empty_fail));
 
         // Always
         assert!(TriggerCondition::Always.should_fire(&empty_success));
