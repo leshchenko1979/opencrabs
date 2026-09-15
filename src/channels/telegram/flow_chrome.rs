@@ -358,6 +358,41 @@ pub(crate) fn clock_glyph(secs: u64) -> String {
     }
 }
 
+/// Telemetry metrics for the flow card telemetry bar.
+///
+/// Displayed directly above the tool quote block in classic HTML and rich details
+/// flow cards with zero-suppression for optional/conditional fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct TelemetryMetrics {
+    pub(crate) tool_count: usize,
+    pub(crate) elapsed_secs: u64,
+    pub(crate) detached_tasks: usize,
+    pub(crate) subagents: usize,
+    pub(crate) queued_messages: usize,
+}
+
+impl TelemetryMetrics {
+    /// Format the telemetry bar line with zero-suppression.
+    /// Always includes `⚙️ <tool_count>` and `⏱ <elapsed>` (via `clock_glyph`).
+    /// Appends `⏏️ <detached_tasks>` if > 0, `🤖 <subagents>` if > 0, and `✉️ <queued_messages>` if > 0.
+    /// Segments are joined with `" • "`.
+    pub(crate) fn format_line(&self) -> String {
+        let mut segs: Vec<String> = Vec::new();
+        segs.push(format!("⚙️ {}", self.tool_count));
+        segs.push(clock_glyph(self.elapsed_secs));
+        if self.detached_tasks > 0 {
+            segs.push(format!("⏏️ {}", self.detached_tasks));
+        }
+        if self.subagents > 0 {
+            segs.push(format!("🤖 {}", self.subagents));
+        }
+        if self.queued_messages > 0 {
+            segs.push(format!("✉️ {}", self.queued_messages));
+        }
+        segs.join(" • ")
+    }
+}
+
 /// Inputs to the merged flow footer (ADR 0005 Decision 12). The renderer
 /// decomposes its `FlowHeader` / lines / sections into these primitives so the
 /// footer join lives in one place and both the classic and rich paths agree.
