@@ -226,7 +226,7 @@ pub async fn handle_session_notify(
     } = mode
     {
         let id = quiet_delivery::defer_quiet(session_id, msg, quiet_for, max_delay);
-        maybe_set_a2a_goal(session_id, goal, goal_max_turns, &ctx).await;
+        maybe_set_a2a_goal(session_id, goal, goal_max_turns, &service_context).await;
         notify_receipts::record_queued(id, session_id);
         let detail_str = format!(
             "deferred for session {session_id}: delivers once the session has been \
@@ -261,7 +261,7 @@ pub async fn handle_session_notify(
 
     let (outcome, detail, extra) = match deliver_to_session(session_id, msg, interrupt) {
         Delivery::Delivered => {
-            maybe_set_a2a_goal(session_id, goal, goal_max_turns, &ctx).await;
+            maybe_set_a2a_goal(session_id, goal, goal_max_turns, &service_context).await;
             notify_receipts::record_queued(notify_id, session_id);
             if confirm {
                 let (state, cdetail, reason) = confirm_route(session_id, CONFIRM_CAP).await;
@@ -283,7 +283,7 @@ pub async fn handle_session_notify(
             }
         }
         Delivery::Redirected { to } => {
-            maybe_set_a2a_goal(to, goal, goal_max_turns, &ctx).await;
+            maybe_set_a2a_goal(to, goal, goal_max_turns, &service_context).await;
             notify_receipts::record_queued(notify_id, to);
             if confirm {
                 let (state, cdetail, reason) = confirm_route(to, CONFIRM_CAP).await;
@@ -315,7 +315,7 @@ pub async fn handle_session_notify(
         // the last restart (#1206). Reporting this as a failure would be the
         // opposite of what happened — same reading as the agent tool.
         Delivery::Parked => {
-            maybe_set_a2a_goal(session_id, goal, goal_max_turns, &ctx).await;
+            maybe_set_a2a_goal(session_id, goal, goal_max_turns, &service_context).await;
             notify_receipts::record_queued(notify_id, session_id);
             (
                 "parked",
