@@ -152,7 +152,14 @@ pub(crate) fn clean_tool_entry(
         | "browser_find"
         | "browser_close"
         | "pg_query"
-        | "n8n_api" => (icon.to_string(), context.to_string()),
+        | "n8n_api"
+        | "cron_manage" => {
+            if context.trim().is_empty() {
+                (format!("{icon} {name}"), context.to_string())
+            } else {
+                (icon.to_string(), context.to_string())
+            }
+        }
         _ => {
             // For multi-action tools like plan, config_manager, session_context, session_notify, etc.
             // keep tool name or action context
@@ -1238,6 +1245,7 @@ pub enum ToolClass {
     Config,
     Brain,
     Web,
+    Cron,
     Other,
 }
 
@@ -1258,8 +1266,10 @@ impl ToolClass {
             "plan" | "goal_manage" | "session_context" | "tasks_list" => ToolClass::Plan,
             "session_notify" | "telegram_send" | "a2a_send" | "discord_send" | "slack_send"
             | "whatsapp_send" | "tg_send_message" | "tg_send_to_phone" => ToolClass::Comms,
-            "config_manager" | "tool_manage" | "tool_search" | "cron_manage" | "profile_list"
-            | "slash_command" => ToolClass::Config,
+            "config_manager" | "tool_manage" | "tool_search" | "profile_list" | "slash_command" => {
+                ToolClass::Config
+            }
+            "cron_manage" => ToolClass::Cron,
             "load_brain_file" | "feedback_record" | "feedback_analyze" | "self_improve" => {
                 ToolClass::Brain
             }
@@ -1284,6 +1294,7 @@ impl ToolClass {
             ToolClass::Config => "⚙️",
             ToolClass::Brain => "🧠",
             ToolClass::Web => "🌐",
+            ToolClass::Cron => "⏰",
             ToolClass::Other => "⛏",
         }
     }
