@@ -790,6 +790,8 @@ enum Admission {
 /// declared window still goes out immediately (the #68 floor owns its 429).
 /// Fire-and-forget safe: best-effort estimate of which bucket felt the 429.
 pub(crate) fn note_429_pause(chat: ChatId, wait: Duration) {
+    // Record in global cooldown lock so all concurrent operations across all chats/topics coordinate
+    super::rate_limit::record_global_429(wait);
     let chat_id = chat.0;
     if chat_id >= 0 {
         return; // DMs ungoverned, matching every other gate
