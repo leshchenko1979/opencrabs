@@ -152,7 +152,8 @@ pub(crate) fn clean_tool_entry(
         | "browser_find"
         | "browser_close"
         | "pg_query"
-        | "n8n_api" => (icon.to_string(), context.to_string()),
+        | "n8n_api"
+        | "suggest_options" => (icon.to_string(), context.to_string()),
         _ => {
             // For multi-action tools like plan, config_manager, session_context, session_notify, etc.
             // keep tool name or action context
@@ -1238,6 +1239,7 @@ pub enum ToolClass {
     Config,
     Brain,
     Web,
+    Suggest,
     Other,
 }
 
@@ -1268,6 +1270,7 @@ impl ToolClass {
             | "browser_wait" | "browser_find" | "browser_close" | "pg_query" | "n8n_api" => {
                 ToolClass::Web
             }
+            "suggest_options" => ToolClass::Suggest,
             _ => ToolClass::Other,
         }
     }
@@ -1284,6 +1287,7 @@ impl ToolClass {
             ToolClass::Config => "⚙️",
             ToolClass::Brain => "🧠",
             ToolClass::Web => "🌐",
+            ToolClass::Suggest => "💡",
             ToolClass::Other => "⛏",
         }
     }

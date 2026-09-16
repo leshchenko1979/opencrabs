@@ -66,6 +66,20 @@ pub fn tool_context_hint(name: &str, input: &serde_json::Value) -> String {
                 None => Some(op.to_string()),
             }
         }
+        "suggest_options" => {
+            let count = safe
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.len())
+                .unwrap_or(0);
+            if count == 1 {
+                Some("1 option".to_string())
+            } else if count > 1 {
+                Some(format!("{count} options"))
+            } else {
+                None
+            }
+        }
         "task_manager" => {
             let op = safe
                 .get("operation")

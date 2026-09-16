@@ -9,12 +9,12 @@
 //! `render_flow_details` emits exactly that wrapper.
 
 use crate::channels::telegram::flow::{
-    extract_status_from_text, flow_header_text, humanize_duration, latest_activity_preview,
-    pop_trailing_folded_texts, render_flow_details_with, render_flow_html_with, FlowEntry,
-    FlowHeader, FlowOutcome, HeaderMarkup,
+    FlowEntry, FlowHeader, FlowOutcome, HeaderMarkup, extract_status_from_text, flow_header_text,
+    humanize_duration, latest_activity_preview, pop_trailing_folded_texts,
+    render_flow_details_with, render_flow_html_with,
 };
 use crate::channels::telegram::handler::{
-    folded_duplicates_final, render_flow_details, render_flow_html, render_flow_rich, FlowLine,
+    FlowLine, folded_duplicates_final, render_flow_details, render_flow_html, render_flow_rich,
 };
 
 fn tline(label: &str, context: &str) -> FlowLine {
@@ -104,9 +104,13 @@ fn blocks_are_separated_by_blank_lines() {
     );
     // ADR 0005 F1: entries sit inside the blockquote separated by blank lines;
     // the narration-led status/count is in the merged footer, not a header row.
-    assert!(out.starts_with("⚙ • 0:00 ⏱\n<blockquote expandable><b>⛏ read_file handler.rs</b>\n\n"));
+    assert!(
+        out.starts_with("⚙ • 0:00 ⏱\n<blockquote expandable><b>⛏ read_file handler.rs</b>\n\n")
+    );
     assert!(out.contains("<b>✅ bash</b> <code>cargo fmt</code>\n\nReformatted three files."));
-    assert!(out.contains("Reformatted three files.\n\n<b>✅ read_file</b> <code>handler.rs</code>"));
+    assert!(
+        out.contains("Reformatted three files.\n\n<b>✅ read_file</b> <code>handler.rs</code>")
+    );
 }
 
 #[test]
@@ -474,7 +478,9 @@ fn live_status_rides_in_footer() {
         ],
         Some("45s"),
     );
-    assert!(out.starts_with("⚙ • 0:00 ⏱\n<blockquote expandable><b>⛏ read_file handler.rs</b>\n\n"));
+    assert!(
+        out.starts_with("⚙ • 0:00 ⏱\n<blockquote expandable><b>⛏ read_file handler.rs</b>\n\n")
+    );
     assert!(out.contains("<b>✅ bash</b> <code>cargo fmt</code>\n\nReading the handler.\n\n<b>⚙️ read_file</b> <code>handler.rs</code>"));
 }
 
@@ -490,7 +496,9 @@ fn no_duration_still_leads_with_activity() {
         ],
         None,
     );
-    assert!(out.starts_with("⚙ • 0:00 ⏱\n<blockquote expandable><b>⛏ read_file handler.rs</b>\n\n"));
+    assert!(
+        out.starts_with("⚙ • 0:00 ⏱\n<blockquote expandable><b>⛏ read_file handler.rs</b>\n\n")
+    );
     assert!(out.contains(
         "<b>✅ bash</b> <code>cargo fmt</code>\n\n<b>✅ read_file</b> <code>handler.rs</code>"
     ));
@@ -936,10 +944,12 @@ fn text_only_flow_pops_everything() {
         FlowEntry::Text("plus a follow-up".into()),
     ];
     let (reclaimed, _) = pop_trailing_folded_texts(&mut entries, false);
-    assert!(reclaimed
-        .as_deref()
-        .unwrap_or_default()
-        .starts_with("the whole answer"));
+    assert!(
+        reclaimed
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("the whole answer")
+    );
     assert!(entries.is_empty());
 }
 
@@ -976,7 +986,7 @@ fn long_folded_narration_is_capped_in_the_block() {
 
 #[test]
 fn test_tool_class_icons() {
-    use crate::channels::telegram::flow::{tool_entry_icon, ToolClass};
+    use crate::channels::telegram::flow::{ToolClass, tool_entry_icon};
 
     assert_eq!(ToolClass::from_tool_name("read_file").class_icon(), "📄");
     assert_eq!(ToolClass::from_tool_name("write_file").class_icon(), "📝");
@@ -996,18 +1006,31 @@ fn test_tool_class_icons() {
         "🧠"
     );
     assert_eq!(ToolClass::from_tool_name("http_request").class_icon(), "🌐");
+    assert_eq!(
+        ToolClass::from_tool_name("suggest_options").class_icon(),
+        "💡"
+    );
 
     // Completion status mapping: running/success uses class icon, failure uses ❌
     assert_eq!(tool_entry_icon("read_file", None), "📄");
     assert_eq!(tool_entry_icon("read_file", Some(true)), "📄");
     assert_eq!(tool_entry_icon("read_file", Some(false)), "❌");
     assert_eq!(tool_entry_icon("bash", Some(false)), "❌");
+    assert_eq!(tool_entry_icon("suggest_options", Some(true)), "💡");
 
     // Clean tool entry mapping
     let (icon, target) =
         crate::channels::telegram::flow::clean_tool_entry("read_file", Some(true), "foo.rs");
     assert_eq!(icon, "📄");
     assert_eq!(target, "foo.rs");
+
+    let (icon, target) = crate::channels::telegram::flow::clean_tool_entry(
+        "suggest_options",
+        Some(true),
+        "2 options",
+    );
+    assert_eq!(icon, "💡");
+    assert_eq!(target, "2 options");
 
     let (plan_label, plan_target) =
         crate::channels::telegram::flow::clean_tool_entry("plan", Some(true), "show_plan");
