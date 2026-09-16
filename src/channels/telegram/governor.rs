@@ -49,9 +49,9 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use teloxide::Bot;
 use teloxide::prelude::Requester;
 use teloxide::types::{ChatId, MessageId, ParseMode};
-use teloxide::Bot;
 
 use crate::config::Config;
 
@@ -293,13 +293,85 @@ pub(crate) fn ensure_bucket(
 // ---------------------------------------------------------------------------
 
 /// Dialect of the queued final payload (#229). Distinguishes HTML (classic/rich)
-/// from Markdown (rich plan cards), ensuring media-empty markdown edits do not
-/// get sent to Telegram as HTML and corrupt whitespace / formatting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum FinalDialect {
-    #[default]
-    Html,
-    Markdown,
+/// The wire payload shapes a governed Telegram edit can carry (#254).
+/// Replaces loose (html, rich, media, reply_markup, dialect) argument tuples with
+/// an explicit wire shape so callers cannot pass markdown to an HTML endpoint or vice versa.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum EditPayload {
+    /// Classic Telegram `editMessageText` (HTML formatted).
+    ClassicHtml {
+        html: String,
+        reply_markup: Option<serde_json::Value>,
+    },
+    /// Bot API 10.1 rich HTML edit (`editRichMessage`).
+    RichHtml {
+        html: String,
+        reply_markup: Option<serde_json::Value>,
+    },
+    /// Bot API 10.1 rich Markdown + Mermaid media edit (`editRichMessage` with markdown & media).
+    RichMarkdownMedia {
+        markdown: String,
+        media: Vec<super::rich::mermaid::MediaEntry>,
+        reply_markup: Option<serde_json::Value>,
+    },
+}
+
+impl EditPayload {
+    /// Create a classic HTML payload without keyboard.
+    pub(crate) fn classic_html(html: impl Into<String>) -> Self {
+        Self::ClassicHtml {
+            html: html.into(),
+            reply_markup: None,
+        }
+    }
+
+    /// Create a classic HTML payload with optional inline keyboard.
+    pub(crate) fn classic_html_kb(
+        html: impl Into<String>,
+        reply_markup: Option<serde_json::Value>,
+    ) -> Self {
+        Self::ClassicHtml {
+            html: html.into(),
+            reply_markup,
+        }
+    }
+
+    /// Create a rich HTML payload without keyboard.
+    pub(crate) fn rich_html(html: impl Into<String>) -> Self {
+        Self::RichHtml {
+            html: html.into(),
+            reply_markup: None,
+        }
+    }
+
+    /// Create a rich HTML payload with optional inline keyboard.
+    pub(crate) fn rich_html_kb(
+        html: impl Into<String>,
+        reply_markup: Option<serde_json::Value>,
+    ) -> Self {
+        Self::RichHtml {
+            html: html.into(),
+            reply_markup,
+        }
+    }
+
+    /// Create a rich Markdown payload with media entries and optional inline keyboard.
+    pub(crate) fn rich_markdown_media(
+        markdown: impl Into<String>,
+        media: Vec<super::rich::mermaid::MediaEntry>,
+        reply_markup: Option<serde_json::Value>,
+    ) -> Self {
+        Self::RichMarkdownMedia {
+            markdown: markdown.into(),
+            media,
+            reply_markup,
+        }
+    }
+
+    /// Empty payload for gates/classes that do not send wire text on drain (e.g. Interactive UI).
+    pub(crate) fn empty() -> Self {
+        Self::classic_html(String::new())
+    }
 }
 
 /// A final edit Telegram refused transiently, held latest-wins per message id
@@ -307,18 +379,7 @@ pub(crate) enum FinalDialect {
 #[derive(Clone)]
 struct PendingFinal {
     bot: Bot,
-    /// HTML for rich/classic finals; MARKDOWN when `dialect` is `FinalDialect::Markdown`
-    /// (the markdown+media edit dialect shares this field — see `run_final_edit`).
-    html: String,
-    /// Rich-API edit when true, classic HTML `editMessageText` otherwise.
-    rich: bool,
-    /// Dialect of the final payload (#229).
-    dialect: FinalDialect,
-    /// Media entries (rendered mermaid diagrams) for the markdown+media edit
-    /// dialect (#134 family). Empty for every other final shape.
-    media: Vec<super::rich::mermaid::MediaEntry>,
-    /// Optional inline keyboard markup preserved across queued final drains (#155).
-    reply_markup: Option<serde_json::Value>,
+    payload: EditPayload,
     attempts: u32,
 }
 
@@ -712,44 +773,17 @@ pub(crate) fn note_429_pause(chat: ChatId, wait: Duration) {
 /// its edit now; false when the governor handled it (dropped chrome, or the
 /// payload was queued as a final). `html`/`rich` describe the payload so a
 /// queued final can be executed verbatim by the drainer without the caller
+/// G2 gate ahead of `editMessageText` and `editRichMessage`.
+///
+/// Drops intermediate edits under pressure (preview/brain/status) and queues
+/// the final edit latest-wins per message id, keeping user-visible state
 /// staying alive.
 pub(crate) async fn edit_admission(
     bot: &Bot,
     chat_id: ChatId,
     msg_id: MessageId,
     class: EditClass,
-    html: String,
-    rich: bool,
-) -> bool {
-    edit_admission_media_kb(
-        bot,
-        chat_id,
-        msg_id,
-        class,
-        html,
-        rich,
-        Vec::new(),
-        None,
-        FinalDialect::Html,
-    )
-    .await
-}
-
-/// Media-and-keyboard-bearing variant of [`edit_admission`] (#134, #155, #229):
-/// preserves rendered-mermaid [`MediaEntry`]s, optional `reply_markup`, and the
-/// payload [`FinalDialect`] across queued final drains so rate-governed plan card
-/// and rich edits do not strip media, lose keyboards, or corrupt formatting dialects.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn edit_admission_media_kb(
-    bot: &Bot,
-    chat_id: ChatId,
-    msg_id: MessageId,
-    class: EditClass,
-    html: String,
-    rich: bool,
-    media: Vec<super::rich::mermaid::MediaEntry>,
-    reply_markup: Option<serde_json::Value>,
-    dialect: FinalDialect,
+    payload: EditPayload,
 ) -> bool {
     // DMs untouched (positive ids), matching the G1 scope guard.
     if chat_id.0 >= 0 {
@@ -801,11 +835,7 @@ pub(crate) async fn edit_admission_media_kb(
                     msg_id.0,
                     PendingFinal {
                         bot: bot.clone(),
-                        html,
-                        rich,
-                        dialect,
-                        media,
-                        reply_markup,
+                        payload,
                         attempts: 0,
                     },
                 )
@@ -1007,43 +1037,46 @@ async fn deliver_final(chat_id: i64, msg_id: i32, mut pending: PendingFinal) {
 }
 
 /// The wire shapes a queued final can take, mirroring the call sites that
-/// The wire shapes a queued final can take, mirroring the call sites that
 /// produced the payload: rich HTML, classic HTML edit, or the markdown+media
-/// rich edit (plan card, #134, #229), where `html` carries the raw markdown body.
+/// rich edit (plan card, #134, #229, #254).
 async fn run_final_edit(chat_id: i64, msg_id: i32, pending: &PendingFinal) -> Result<(), String> {
-    match (pending.rich, pending.dialect) {
-        (true, FinalDialect::Markdown) => super::rich::api::edit_rich_markdown_media(
+    match &pending.payload {
+        EditPayload::RichMarkdownMedia {
+            markdown,
+            media,
+            reply_markup,
+        } => super::rich::api::edit_rich_markdown_media(
             pending.bot.api_url().as_str(),
             pending.bot.token(),
             chat_id,
             msg_id,
-            &pending.html,
-            &pending.media,
-            pending.reply_markup.as_ref(),
+            markdown,
+            media,
+            reply_markup.as_ref(),
             "turn",
             "-",
         )
         .await
         .map_err(|e| e.to_string()),
-        (true, FinalDialect::Html) => super::rich::api::edit_rich_html(
+        EditPayload::RichHtml { html, reply_markup } => super::rich::api::edit_rich_html(
             pending.bot.api_url().as_str(),
             pending.bot.token(),
             chat_id,
             msg_id,
-            &pending.html,
-            pending.reply_markup.as_ref(),
+            html,
+            reply_markup.as_ref(),
             "turn",
             "-",
         )
         .await
         .map_err(|e| e.to_string()),
-        (false, _) => {
+        EditPayload::ClassicHtml { html, reply_markup } => {
             use teloxide::payloads::EditMessageTextSetters;
             let mut req = pending
                 .bot
-                .edit_message_text(ChatId(chat_id), MessageId(msg_id), &pending.html)
+                .edit_message_text(ChatId(chat_id), MessageId(msg_id), html)
                 .parse_mode(ParseMode::Html);
-            if let Some(inline_kb) = pending.reply_markup.as_ref().and_then(|kb| {
+            if let Some(inline_kb) = reply_markup.as_ref().and_then(|kb| {
                 serde_json::from_value::<teloxide::types::InlineKeyboardMarkup>(kb.clone()).ok()
             }) {
                 req = req.reply_markup(inline_kb);
