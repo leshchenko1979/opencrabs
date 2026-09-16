@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use teloxide::types::ChatId;
 
 use crate::channels::telegram::governor::{
-    Bucket, Counters, EditClass, EditPayload, INTERACTIVE_RESERVE, MAX_429_PAUSE, ensure_bucket,
-    format_summary, is_permanent_edit_error, note_429_pause,
+    ensure_bucket, format_summary, is_permanent_edit_error, note_429_pause, Bucket, Counters,
+    EditClass, EditPayload, INTERACTIVE_RESERVE, MAX_429_PAUSE,
 };
 
 #[test]
@@ -259,7 +259,10 @@ fn edit_payload_variants_and_constructors() {
         }
     );
 
-    let rich_kb = EditPayload::rich_html_kb("<b>rich</b>", kb.clone());
+    let rich_kb = EditPayload::RichHtml {
+        html: "<b>rich</b>".to_string(),
+        reply_markup: kb.clone(),
+    };
     assert_eq!(
         rich_kb,
         EditPayload::RichHtml {
