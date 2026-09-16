@@ -371,6 +371,8 @@ pub struct TelegramState {
     /// chat.  Entries are ephemeral, in-memory, and evictable (LIFO
     /// overwrite is fine; one active set per session is the norm).
     callback_origins: std::sync::Mutex<HashMap<String, Uuid>>,
+    /// Stateful deduplication tracker for proactive DM config alerts (#263).
+    config_alert_state: std::sync::Arc<crate::channels::telegram::config_alerts::ConfigAlertState>,
 }
 
 impl Default for TelegramState {
@@ -483,7 +485,17 @@ impl TelegramState {
             last_sticky_action: std::sync::Mutex::new(HashMap::new()),
             media_dedup: super::outbound_dedup::MediaSendDedup::default(),
             callback_origins: std::sync::Mutex::new(HashMap::new()),
+            config_alert_state: std::sync::Arc::new(
+                crate::channels::telegram::config_alerts::ConfigAlertState::new(),
+            ),
         }
+    }
+
+    /// Access the stateful proactive config alert tracker (#263).
+    pub fn config_alert_state(
+        &self,
+    ) -> &std::sync::Arc<crate::channels::telegram::config_alerts::ConfigAlertState> {
+        &self.config_alert_state
     }
 
     /// Claim an outbound media send, returning `true` if it is fresh and
