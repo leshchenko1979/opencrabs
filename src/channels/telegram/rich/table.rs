@@ -101,7 +101,8 @@ pub(crate) fn ensure_blank_line_before_tables(text: &str) -> String {
             i += 1;
             continue;
         }
-        if !in_fence && let Some((_, next)) = try_parse(&lines, i) {
+        let table_parse = if in_fence { None } else { try_parse(&lines, i) };
+        if let Some((_, next)) = table_parse {
             let prev_is_text = out.last().is_some_and(|prev| !prev.trim().is_empty());
             if prev_is_text {
                 out.push(String::new());
