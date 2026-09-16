@@ -49,9 +49,9 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use teloxide::Bot;
 use teloxide::prelude::Requester;
 use teloxide::types::{ChatId, MessageId, ParseMode};
+use teloxide::Bot;
 
 use crate::config::Config;
 
@@ -404,17 +404,6 @@ impl EditPayload {
         Self::RichHtml {
             html: html.into(),
             reply_markup: None,
-        }
-    }
-
-    /// Create a rich HTML payload with optional inline keyboard.
-    pub(crate) fn rich_html_kb(
-        html: impl Into<String>,
-        reply_markup: Option<serde_json::Value>,
-    ) -> Self {
-        Self::RichHtml {
-            html: html.into(),
-            reply_markup,
         }
     }
 
