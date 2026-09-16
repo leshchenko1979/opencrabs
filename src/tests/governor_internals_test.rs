@@ -176,12 +176,17 @@ fn pause_429_blocks_bulk_but_not_interactive() {
 }
 
 /// note_429_pause clamps to MAX_429_PAUSE and is a noop for DMs/disabled.
-#[test]
-fn note_429_pause_clamps_and_respects_scope() {
+#[tokio::test]
+async fn note_429_pause_clamps_and_respects_scope() {
+    let _guard = crate::channels::telegram::governor::test_support::registry_guard().await;
+    crate::channels::telegram::governor::test_support::reset(0);
+
     // DM chat: noop, no panic.
     note_429_pause(ChatId(42), Duration::from_secs(500));
     // Cap arithmetic: the function clamps before arming; assert constant.
     assert_eq!(MAX_429_PAUSE, Duration::from_secs(45));
+
+    crate::channels::telegram::governor::test_support::reset(0);
 }
 
 /// #117: reserve is clamped below capacity so a mis-sized constant cannot
