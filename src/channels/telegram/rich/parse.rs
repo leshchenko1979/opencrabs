@@ -5,10 +5,12 @@
 use super::ast::Block;
 use super::inline::parse_inlines;
 use super::{list, table};
+use crate::channels::telegram::markdown::decode_named_entities;
 
 /// Parse a markdown document into a block list.
 pub(crate) fn parse_markdown(input: &str) -> Vec<Block> {
-    let normalized = super::table::balance_code_fences(input);
+    let decoded = decode_named_entities(input);
+    let normalized = super::table::balance_code_fences(decoded.as_ref());
     let lines: Vec<String> = normalized.lines().map(str::to_string).collect();
     parse_blocks(&lines)
 }
