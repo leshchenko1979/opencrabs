@@ -155,16 +155,18 @@ pub(crate) fn clean_tool_entry(
         | "n8n_api"
         | "cron_manage"
         | "suggest_options" => {
-            if context.trim().is_empty() {
-                (format!("{icon} {name}"), context.to_string())
+            let ctx = context.trim();
+            if ctx.is_empty() {
+                // If there is no argument context (e.g. `ls` with default cwd), keep tool name so it doesn't render as a bare icon.
+                (format!("{icon} {name}"), String::new())
             } else {
-                (icon.to_string(), context.to_string())
+                (icon.to_string(), ctx.to_string())
             }
         }
         _ => {
             // For multi-action tools like plan, config_manager, session_context, session_notify, etc.
             // keep tool name or action context
-            (format!("{icon} {name}"), context.to_string())
+            (format!("{icon} {name}"), context.trim().to_string())
         }
     }
 }
@@ -605,13 +607,14 @@ fn flow_body_entries(lines: &[FlowLine], narration_cap: usize) -> (Vec<String>, 
         match line {
             FlowLine::Tool { label, context, .. } => {
                 tool_count += 1;
-                let rendered = if context.is_empty() {
+                let ctx = context.trim();
+                let rendered = if ctx.is_empty() {
                     format!("<b>{}</b>", escape_html(label))
                 } else {
                     format!(
                         "<b>{}</b> <code>{}</code>",
                         escape_html(label),
-                        escape_html(context)
+                        escape_html(ctx)
                     )
                 };
 
@@ -871,10 +874,11 @@ pub(crate) fn render_flow_rich(
         match line {
             FlowLine::Tool { label, context, .. } => {
                 tool_count += 1;
-                if context.is_empty() {
+                let ctx = context.trim();
+                if ctx.is_empty() {
                     out.push(format!("**{label}**"));
                 } else {
-                    out.push(format!("**{label}** `{context}`"));
+                    out.push(format!("**{label}** `{ctx}`"));
                 }
             }
             FlowLine::Text(text) => {
