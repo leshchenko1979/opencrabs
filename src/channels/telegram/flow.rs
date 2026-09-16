@@ -1529,7 +1529,15 @@ pub(crate) async fn refresh_flow_rich_details(
         freeze_flow_block_and_strip_kb(bot, chat, streaming, mid, "rich size limit reached").await;
         return;
     }
-    if !super::governor::edit_admission(bot, chat, mid, class, details.clone(), true).await {
+    if !super::governor::edit_admission(
+        bot,
+        chat,
+        mid,
+        class,
+        super::governor::EditPayload::rich_html(details.clone()),
+    )
+    .await
+    {
         return;
     }
     match super::rich::api::edit_rich_html(
@@ -1640,7 +1648,15 @@ pub(crate) async fn refresh_flow_html(
     }
     // The plan Approve/Discard keyboard now rides the persistent plan card, not
     // the flow block (#580), so no reply_markup is attached here.
-    if !super::governor::edit_admission(bot, chat, mid, class, html.clone(), false).await {
+    if !super::governor::edit_admission(
+        bot,
+        chat,
+        mid,
+        class,
+        super::governor::EditPayload::classic_html(html.clone()),
+    )
+    .await
+    {
         return;
     }
     let req = bot

@@ -560,8 +560,7 @@ impl TelegramAgent {
                                                     chat_id,
                                                     mid,
                                                     super::governor::EditClass::Interactive,
-                                                    String::new(),
-                                                    false,
+                                                    super::governor::EditPayload::empty(),
                                                 )
                                                 .await;
                                                 let outcome: Result<(), String> = match rewrite.clone() {
