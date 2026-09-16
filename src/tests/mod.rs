@@ -887,6 +887,7 @@ pub mod telegram_long_rate_limit_test;
 pub mod telegram_md_to_html_test;
 pub mod telegram_mermaid_test;
 pub mod telegram_model_callback_data_test;
+pub mod telegram_named_entities_test;
 pub mod telegram_outbox_record_test;
 pub mod telegram_photo_batching_test;
 mod telegram_photo_thread_scope_test;
