@@ -169,10 +169,8 @@ fn probe_file_case_insensitive(dir: &Path, filename: &str) -> Option<(PathBuf, S
         let path = entry.path();
         if path.is_file() {
             let file_name = entry.file_name();
-            if let Some(name_str) = file_name.to_str() {
-                if name_str.to_lowercase() == target_lower {
-                    return Some((path, name_str.to_string()));
-                }
+            if let Some(name_str) = file_name.to_str().filter(|s| s.to_lowercase() == target_lower) {
+                return Some((path, name_str.to_string()));
             }
         }
     }
