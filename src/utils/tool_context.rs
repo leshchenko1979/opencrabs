@@ -136,7 +136,7 @@ pub fn tool_context_hint(name: &str, input: &serde_json::Value) -> String {
             // old tail-truncation kept).
             let tilde = tilde_home(&h);
             let truncated = truncate_middle(&tilde, 80);
-            format!(" {truncated}")
+            truncated.to_string()
         }
         _ => String::new(),
     }
