@@ -2533,49 +2533,17 @@ async fn execute_plan_review_subagent(
     let registry = agent.tool_registry().clone();
 
     let md_path = crate::utils::plan_files::plan_md_path(session_id).await;
-    let brief = format!(
-        "You are an adversarial software architecture and plan review agent.\n\
-         Your mission is to upgrade the implementation plan in-place to ensure it is concrete, \
-         feasible, edge-case hardened, and leaves zero ambiguity for the implementer.\n\
-         \n\
-         File: {md_path}\n\
-         \n\
-         ### STEP 1: GROUNDING & CODEBASE VERIFICATION\n\
-         1. Read the plan file completely.\n\
-         2. Inspect the codebase (using grep, read_file, glob) to verify every referenced file, \
-         function, struct, route, and tool exists and matches what the plan assumes.\n\
-         3. If the plan assumes a non-existent API or wrong pattern, correct the plan to reflect real codebase ground truth.\n\
-         \n\
-         ### STEP 2: ELIMINATE AMBIGUITY & UNRESOLVED FORKS\n\
-         - Hunt down all instances of \"or\", \"if needed\", \"optional\", \"TBD\", \"might\", \"consider\", or \"investigate later\".\n\
-         - Make the concrete technical decision upfront: pick the exact file, exact function, exact type, and exact sequence.\n\
-         - Do NOT leave design or scoping choices to the implementer unless strictly dependent on an external third party.\n\
-         \n\
-         ### STEP 3: ADVERSARIAL EDGE-CASE & FEASIBILITY AUDIT\n\
-         - Concurrency & State: Are shared state, locks, and active-turn collisions guarded?\n\
-         - Failure Modes: What happens on timeout, network drop, malformed payload, or missing data?\n\
-         - Integration Completeness: Are all new modules, callbacks, and routes wired into their dispatch points?\n\
-         - Acceptance Criteria: Ensure every step has verifiable, runnable commands and concrete outcomes (not vague prose).\n\
-         \n\
-         ### STEP 4: REWRITE THE PLAN IN PLACE\n\
-         Rewrite the plan directly in {md_path} ensuring:\n\
-         - All edge-cases, concrete decisions, and verified paths are incorporated into the Implementation Steps.\n\
-         - Section layout and Layer-2 contract are strictly preserved:\n\
-           * `## Context` with single-line `**Problem:** ...`, `**Target state:** ...`, `**Intent:** ...`\n\
-           * `## Implementation steps` with numbered items (`1. ...`, `2. ...`).\n\
-         - Do not alter the user's high-level goal or remove required deliverables.\n\
-         \n\
-         ### STEP 5: STRUCTURED REPORT\n\
-         End your output with three explicit sections:\n\
-         \n\
-         SUMMARY:\n\
-         <Bullet list of major edge cases, ambiguity fixes, and codebase corrections applied>\n\
-         \n\
-         OPEN_QUESTIONS:\n\
-         <If any major trade-offs, external blockers, or strategic questions require the operator's decision, list them here. If none, write: None>\n\
-         \n\
-         DELTA: <One concise summary sentence of what was changed>",
-        md_path = md_path.display()
+    let working_dir = agent.get_working_directory_for_session(session_id);
+    let profile_home = crate::config::profile::resolve_profile_home();
+    let resolved = crate::brain::resolve_review_instructions(
+        crate::brain::ReviewKind::Plan,
+        &working_dir,
+        &profile_home,
+    );
+    let source_label = resolved.source.display_label();
+    let brief = crate::channels::telegram::plan_card::plan_review_brief(
+        &md_path,
+        resolved.content.as_deref(),
     );
 
     let input = crate::channels::telegram::plan_card::plan_review_spawn_input(session_id, brief);
@@ -2655,6 +2623,7 @@ async fn execute_plan_review_subagent(
                             let note = crate::channels::telegram::plan_card::format_plan_review_running_progress(
                                 status.progress.as_ref(),
                                 status.elapsed_secs(),
+                                Some(&source_label),
                             );
                             if note != last_rendered {
                                 state_c
@@ -2870,6 +2839,14 @@ async fn execute_review_impl_subagent(
     };
     let md_path = crate::utils::plan_files::plan_md_path(session_id).await;
 
+    let working_dir = agent.get_working_directory_for_session(session_id);
+    let profile_home = crate::config::profile::resolve_profile_home();
+    let resolved = crate::brain::resolve_review_instructions(
+        crate::brain::ReviewKind::Implementation,
+        &working_dir,
+        &profile_home,
+    );
+
     let brief = {
         let checklist_rendered = checklist.as_ref().map(|items| items.join("\n"));
         crate::channels::telegram::plan_card::review_impl_brief(
@@ -2878,6 +2855,7 @@ async fn execute_review_impl_subagent(
                 .as_deref()
                 .unwrap_or("No checklist recorded"),
             Some(&md_path),
+            resolved.content.as_deref(),
         )
     };
 

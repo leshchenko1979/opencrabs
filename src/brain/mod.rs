@@ -18,6 +18,7 @@ pub mod plans;
 pub mod prompt_builder;
 pub mod provider;
 pub mod provider_spec;
+pub mod review_instructions;
 pub mod rsi;
 pub mod rsi_command_patterns;
 pub mod rsi_disposition;
@@ -40,6 +41,9 @@ pub mod tools;
 // Brain re-exports
 pub use commands::{CommandLoader, UserCommand};
 pub use prompt_builder::BrainLoader;
+pub use review_instructions::{
+    resolve_review_instructions, ResolvedReviewInstructions, ReviewKind, ReviewSource,
+};
 pub use self_update::SelfUpdater;
 
 // LLM re-exports
