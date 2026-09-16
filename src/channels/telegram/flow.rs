@@ -112,6 +112,55 @@ impl FlowEvent {
     }
 }
 
+/// Clean tool entry formatting: strips redundant binary tool names for single-purpose
+/// tools while retaining sub-command verbs for multi-purpose tools (e.g. `📋 show_plan`).
+pub(crate) fn clean_tool_entry(
+    name: &str,
+    completed: Option<bool>,
+    context: &str,
+) -> (String, String) {
+    let icon = tool_entry_icon(name, completed);
+    match name {
+        "read_file"
+        | "read_opencrabs_file"
+        | "write_file"
+        | "edit_file"
+        | "hashline_edit"
+        | "write_opencrabs_file"
+        | "notebook_edit"
+        | "grep"
+        | "glob"
+        | "ls"
+        | "memory_search"
+        | "exa_search"
+        | "web_search"
+        | "brave_search"
+        | "channel_search"
+        | "session_search"
+        | "grep_docs"
+        | "bash"
+        | "execute_code"
+        | "http_request"
+        | "web_scrape"
+        | "browser_navigate"
+        | "browser_click"
+        | "browser_type"
+        | "browser_eval"
+        | "browser_content"
+        | "browser_screenshot"
+        | "browser_wait"
+        | "browser_find"
+        | "browser_close"
+        | "pg_query"
+        | "n8n_api" => (icon.to_string(), context.to_string()),
+        _ => {
+            // For multi-action tools like plan, config_manager, session_context, session_notify, etc.
+            // keep tool name or action context
+            (format!("{icon} {name}"), context.to_string())
+        }
+    }
+}
+
 /// One entry in the in-place processing log (the growing `<blockquote
 /// expandable>` message). Tool entries reference `tool_msgs` by index so a
 /// status flip (⚙️ → ✅/❌) re-renders live; text entries hold the already
@@ -529,42 +578,80 @@ fn footer_parts<'a>(
 }
 
 /// Build the flow-message body entries (tool + intermediate-text lines) shared
-/// by the classic and rich renderers, plus the tool count. `Text` narration is
-/// inline-formatted and capped per `narration_cap` (tight for CLI, uncapped for
-/// API — #532).
+/// by the classic and rich renderers, plus the tool count.
+/// Implements consecutive repetition deduplication with leading `N ×` format (#251).
 fn flow_body_entries(lines: &[FlowLine], narration_cap: usize) -> (Vec<String>, usize) {
     let mut out: Vec<String> = Vec::new();
     let mut tool_count = 0usize;
+
+    // Deduplicate consecutive identical lines with `N ×`
+    struct Run {
+        rendered: String,
+        count: usize,
+        is_tool: bool,
+    }
+
+    let mut runs: Vec<Run> = Vec::new();
+
     for line in lines {
         match line {
             FlowLine::Tool { label, context, .. } => {
                 tool_count += 1;
-                if context.is_empty() {
-                    out.push(format!("<b>{}</b>", escape_html(label)));
+                let rendered = if context.is_empty() {
+                    format!("<b>{}</b>", escape_html(label))
                 } else {
-                    // Context (path / command / query) as monospace so it reads
-                    // as code, not prose, inside the expanded block (#306).
-                    out.push(format!(
+                    format!(
                         "<b>{}</b> <code>{}</code>",
                         escape_html(label),
                         escape_html(context)
-                    ));
+                    )
+                };
+
+                if let Some(last) = runs.last_mut()
+                    && last.rendered == rendered
+                {
+                    last.count += 1;
+                } else {
+                    runs.push(Run {
+                        rendered,
+                        count: 1,
+                        is_tool: true,
+                    });
                 }
             }
             FlowLine::Text(text) => {
                 let text = text.trim();
                 if !text.is_empty() {
-                    // Same inline markdown as the final completion so the
-                    // expanded log is formatted, not raw source (#306); capped
-                    // for CLI (#489), uncapped for API (#532). Display-only.
-                    out.push(format_inline(&escape_html(&cap_narration(
-                        text,
-                        narration_cap,
-                    ))));
+                    let rendered = format_inline(&escape_html(&cap_narration(text, narration_cap)));
+                    runs.push(Run {
+                        rendered,
+                        count: 1,
+                        is_tool: false,
+                    });
                 }
             }
         }
     }
+
+    for run in runs {
+        if run.count > 1 && run.is_tool {
+            // Apply `N ×` right after the leading icon tag or bold tag
+            // e.g. "<b>📄</b> <code>foo.rs</code>" -> "<b>📄 3 ×</b> <code>foo.rs</code>"
+            if let Some(pos) = run.rendered.find("</b>") {
+                let (prefix, suffix) = run.rendered.split_at(pos);
+                out.push(format!(
+                    "{prefix} {} ×</b>{suffix}",
+                    run.count,
+                    suffix = &suffix[4..]
+                ));
+            } else {
+                out.push(format!("{} × {}", run.count, run.rendered));
+            }
+        } else {
+            out.push(run.rendered);
+        }
+    }
+
     (out, tool_count)
 }
 
@@ -1216,10 +1303,13 @@ pub(crate) fn flow_lines(s: &StreamingState) -> Vec<FlowLine> {
     s.flow_entries
         .iter()
         .filter_map(|entry| match entry {
-            FlowEntry::Tool(idx) => s.tool_msgs.get(*idx).map(|t| FlowLine::Tool {
-                label: format!("{} {}", tool_entry_icon(&t.name, t.completed), t.name),
-                context: t.context.clone(),
-                raw_context: t.raw_context.clone(),
+            FlowEntry::Tool(idx) => s.tool_msgs.get(*idx).map(|t| {
+                let (label, context) = clean_tool_entry(&t.name, t.completed, &t.context);
+                FlowLine::Tool {
+                    label,
+                    context,
+                    raw_context: t.raw_context.clone(),
+                }
             }),
             FlowEntry::Text(text) | FlowEntry::System(text) => Some(FlowLine::Text(text.clone())),
         })

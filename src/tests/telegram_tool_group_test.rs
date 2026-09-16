@@ -1022,4 +1022,15 @@ fn test_tool_class_icons() {
     assert_eq!(tool_entry_icon("read_file", Some(true)), "📄");
     assert_eq!(tool_entry_icon("read_file", Some(false)), "❌");
     assert_eq!(tool_entry_icon("bash", Some(false)), "❌");
+
+    // Clean tool entry mapping
+    let (icon, target) =
+        crate::channels::telegram::flow::clean_tool_entry("read_file", Some(true), "foo.rs");
+    assert_eq!(icon, "📄");
+    assert_eq!(target, "foo.rs");
+
+    let (plan_label, plan_target) =
+        crate::channels::telegram::flow::clean_tool_entry("plan", Some(true), "show_plan");
+    assert_eq!(plan_label, "📋 plan");
+    assert_eq!(plan_target, "show_plan");
 }
