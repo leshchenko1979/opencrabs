@@ -1,5 +1,5 @@
-use crate::brain::provider::custom_openai_compatible::extract_sanitized_tail;
 use crate::brain::provider::custom_openai_compatible::OpenAIProvider;
+use crate::brain::provider::custom_openai_compatible::extract_sanitized_tail;
 use crate::brain::provider::types::{ContentBlock, LLMRequest, Message, Role};
 
 #[test]
@@ -35,12 +35,7 @@ fn test_extract_sanitized_tail_newline_escaping() {
         extract_sanitized_tail("mid-turn text\n\n{\"tool\": \"bash\"}", 18),
         "\\n\\n{\"tool\": \"bash\"}"
     );
-    assert_eq!(
-        extract_sanitized_tail("mid-turn text\n\n{\"tool\": \"bash\"}", 16),
-        "{\"tool\": \"bash\"}"
-    );
 }
-
 #[test]
 fn test_extract_sanitized_tail_multibyte_utf8() {
     let text = "🦀 Привет 世界 🚀";

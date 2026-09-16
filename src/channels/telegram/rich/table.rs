@@ -210,13 +210,13 @@ fn parse_alignment(sep: &str, cols: usize) -> Vec<Align> {
 
 /// Single canonical table-normalization entry for the rich plane (#132):
 /// balance unclosed / runaway code fences (#240), expand collapsed one-line
-/// tables first (so [`try_parse`] can see them), infer missing table
-/// separators (#239), then insert the blank line Telegram's rich parser demands
-/// before a table block (#95). Every rich-build entry point and the
-/// structure-detection gate call THIS — never the individual passes
-/// individually — so gate and renderer always agree on the same text and a new
-/// send path inherits all fixes (#690, #980, #1085, #239, #240 whack-a-mole retired).
-/// All passes are idempotent and fence-safe; pipe-free input returns unchanged.
+/// tables first (so [`try_parse`] can see them), infer missing table separators
+/// (#239), then insert the blank line Telegram's rich parser demands before a
+/// table block (#95). Every rich-build entry point and the structure-detection
+/// gate call THIS — never the passes individually — so gate and renderer always
+/// agree on the same text and a new send path inherits all fixes (#690, #980,
+/// #1085, #239, #240 whack-a-mole retired). All passes are idempotent and fence-safe;
+/// pipe-free input returns unchanged.
 ///
 /// Also shields bare leading hashes (e.g. `#174`) so Telegram's rich parser
 /// doesn't promote them into headings without CommonMark's required trailing space (#193).
@@ -360,61 +360,43 @@ pub(crate) fn balance_code_fences(text: &str) -> String {
     let mut fence_has_lang = false;
 
     let lines: Vec<&str> = text.split('\n').collect();
-    let mut i = 0;
-
-    while i < lines.len() {
-        let line = lines[i];
+    for (idx, line) in lines.iter().enumerate() {
         let trimmed = line.trim_start();
-
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             let ch = trimmed.chars().next().unwrap();
             let count = trimmed.chars().take_while(|&c| c == ch).count();
-            if count >= 3 {
-                let rest = trimmed[count..].trim();
-                let has_backtick_in_info = ch == '`' && rest.contains('`');
-
-                if !has_backtick_in_info {
-                    if !in_fence {
-                        in_fence = true;
-                        fence_char = ch;
-                        fence_len = count;
-                        fence_has_lang = !rest.is_empty();
-                        out.push(line.to_string());
-                        i += 1;
-                        continue;
-                    } else if ch == fence_char && count >= fence_len && rest.is_empty() {
-                        in_fence = false;
-                        fence_has_lang = false;
-                        out.push(line.to_string());
-                        i += 1;
-                        continue;
-                    }
-                }
-            }
-        }
-
-        // Check for runaway bare fence: if inside an unlabeled fence and we hit a top-level
-        // ATX heading or a GFM table delimiter row, close the fence early before this line.
-        if in_fence && !fence_has_lang {
-            let is_heading = trimmed.starts_with('#') && super::detect::is_atx_heading(trimmed);
-            let is_table_sep = is_separator(trimmed);
-            let is_table_start = if i + 1 < lines.len() {
-                looks_like_row(trimmed) && is_separator(lines[i + 1].trim_start())
-            } else {
-                false
-            };
-
-            if is_heading || is_table_sep || is_table_start {
-                out.push(fence_char.to_string().repeat(fence_len));
+            if !in_fence {
+                in_fence = true;
+                fence_char = ch;
+                fence_len = count;
+                let after = &trimmed[count..].trim();
+                fence_has_lang = !after.is_empty();
+                out.push(line.to_string());
+                continue;
+            } else if ch == fence_char && count >= fence_len {
                 in_fence = false;
                 out.push(line.to_string());
-                i += 1;
                 continue;
             }
         }
 
+        if in_fence && !fence_has_lang {
+            if trimmed.starts_with("## ") || trimmed.starts_with("### ") || trimmed.starts_with("#### ") {
+                out.push(fence_char.to_string().repeat(fence_len));
+                in_fence = false;
+            } else if trimmed.starts_with("|---") || trimmed.starts_with("|:---") || trimmed.starts_with("| ---") {
+                if idx > 0 && !out.is_empty() {
+                    let prev = out.pop().unwrap();
+                    out.push(fence_char.to_string().repeat(fence_len));
+                    out.push(prev);
+                } else {
+                    out.push(fence_char.to_string().repeat(fence_len));
+                }
+                in_fence = false;
+            }
+        }
+
         out.push(line.to_string());
-        i += 1;
     }
 
     if in_fence {
@@ -427,37 +409,6 @@ pub(crate) fn balance_code_fences(text: &str) -> String {
     }
     result
 }
-
-/// Escape bare leading `#` (not followed by space, or not a valid ATX heading)
-/// with a backslash (`\#`) so Telegram's native rich parser does not promote
-/// lines like `#174`, list items like `- #224`, or quotes like `> #236`
-/// into `<h1>` headers (#193, #243, adolfousier/opencrabs#1257).
-///
-/// Leaves code fences (``` and ~~~) and valid ATX headings untouched.
-pub(crate) fn shield_bare_leading_hashes(text: &str) -> String {
-    if !text.contains('#') {
-        return text.to_string();
-    }
-
-    let mut out = String::with_capacity(text.len() + 16);
-    let mut in_fence = false;
-    let mut fence_char = ' ';
-    let mut fence_len = 0;
-
-    for (i, line) in text.split('\n').enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-
-        let trimmed = line.trim_start();
-
-        // Check for code fence start/end
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            let ch = trimmed.chars().next().unwrap();
-            let count = trimmed.chars().take_while(|&c| c == ch).count();
-            if !in_fence {
-                in_fence = true;
-                fence_char = ch;
                 fence_len = count;
                 out.push_str(line);
                 continue;

@@ -305,17 +305,6 @@ impl CronScheduler {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         }
     }
-
-    /// One scheduler tick: check all enabled jobs and execute any that are due.
-    async fn tick(&self) -> anyhow::Result<()> {
-        let mut jobs = self.repo.list_enabled().await?;
-        let now = Utc::now();
-
-        // Ensure all enabled jobs have next_run_at populated even if created externally
-        // or through legacy paths (#202).
-        for job in &mut jobs {
-            if job.next_run_at.is_none()
-                && let Some(next) = super::next_run_utc(&job.cron_expr, job_tz(job), now)
             {
                 let patch = crate::db::repository::CronJobPatch {
                     next_run_at: Some(Some(next)),

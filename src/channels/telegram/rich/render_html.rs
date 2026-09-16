@@ -449,7 +449,6 @@ pub(crate) fn soft_breaks_to_br(fragment: &str) -> String {
 pub(crate) fn paragraph_html(fragment: &str) -> String {
     format!("<p>{}</p>", soft_breaks_to_br(fragment))
 }
-
 /// Parse `text` and render it as Telegram HTML in one call (the fallback path).
 pub(crate) fn markdown_to_html(text: &str) -> String {
     render_html(&parse_markdown(text))

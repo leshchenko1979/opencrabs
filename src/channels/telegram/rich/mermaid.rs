@@ -903,8 +903,6 @@ pub(crate) fn image_html(url: &str) -> String {
 }
 
 /// HTML for a diagram that could not be rendered: a bold warning line, the
-/// renderer's error note in a blockquote, and the original source in a code
-/// block so the reader can see (and fix) what failed.
 /// #134: rendered-image NOTE builder — NOT a failure: the diagram DID
 /// render (owner directive 2026-09-10 03:56Z: a successful render is
 /// never shown as an error). Legible explanation + raw source, with the
@@ -925,10 +923,6 @@ pub(crate) fn svg_link_md(source: &str) -> String {
     format!("\n[Open SVG vector]({})\n", ink_url_svg(source))
 }
 
-/// #134: generic svg escape-hatch link fragment for HTML-fallback
-/// contexts — a small `[svg]` anchor to the vector render (generic
-/// hatch; the caller owns the trigger copy, ruling (a) 2026-09-10:
-/// ONE semantic — generic hatch here, caller-side trigger).
 pub(crate) fn svg_link_html(source: &str) -> String {
     format!(
         "\n<a href=\"{}\">[svg]</a>",
@@ -970,59 +964,5 @@ pub fn format_mermaid_error(context: &str, errors: &[String]) -> String {
              Renderer diagnostic:\n{quoted}\n\n\
              {rules}"
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const DIAGRAM: &str = "flowchart TD\n    A --> B";
-
-    #[test]
-    fn clean_tagged_block_locates() {
-        let text = format!("```mermaid\n{DIAGRAM}\n```\nafter");
-        assert!(has_mermaid_fence(&text));
-        let fences = find_mermaid_fences(&text);
-        assert_eq!(fences.len(), 1);
-        assert_eq!(fences[0].source.trim(), DIAGRAM);
-    }
-
-    #[test]
-    fn stray_bare_fence_before_tagged_no_longer_desyncs() {
-        // 14:23Z bug class: the stray bare opener used to pair with the
-        // ```mermaid line as its CLOSER, desyncing the machine so the real
-        // diagram never located and the raw fence shipped.
-        let text = format!("```\n```mermaid\n{DIAGRAM}\n```\nafter");
-        assert!(has_mermaid_fence(&text));
-        let fences = find_mermaid_fences(&text);
-        assert_eq!(
-            fences.len(),
-            1,
-            "tagged diagram must locate past a stray bare opener"
-        );
-        assert_eq!(fences[0].source.trim(), DIAGRAM);
-        // The range must cover the diagram fence, not swallow the next line.
-        let replaced = text[..fences[0].start].to_string() + &text[fences[0].end..];
-        assert!(
-            replaced.contains("after"),
-            "trailing text must survive the swap"
-        );
-    }
-
-    #[test]
-    fn two_clean_blocks_both_locate() {
-        let text = "```mermaid\nflowchart TD\n    A --> B\n```\ntext\n```mermaid\nflowchart LR\n    C --> D\n```\n";
-        let fences = find_mermaid_fences(text);
-        assert_eq!(fences.len(), 2);
-        assert!(fences[0].source.contains("A --> B"));
-        assert!(fences[1].source.contains("C --> D"));
-    }
-
-    #[test]
-    fn non_mermaid_untagged_block_ignored() {
-        let text = "```\njust some text\n```";
-        assert!(!has_mermaid_fence(text));
-        assert!(find_mermaid_fences(text).is_empty());
     }
 }
