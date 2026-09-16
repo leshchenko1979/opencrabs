@@ -173,6 +173,33 @@ impl NotifyQueueRepository {
         Ok(())
     }
 
+    /// Drop a batch of rows for pushes that have been delivered in one transaction.
+    pub async fn clear_batch(&self, ids: &[Uuid]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let id_strs: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let tx = conn.transaction()?;
+                {
+                    let mut stmt = tx.prepare("DELETE FROM notify_queue WHERE id = ?1")?;
+                    for id in id_strs {
+                        stmt.execute(params![id])?;
+                    }
+                }
+                tx.commit()?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to clear batch of notify queue rows")?;
+        Ok(())
+    }
+
     /// Drop every undelivered push for a session.
     ///
     /// Called when that session's route claims (or a flush delivers) the

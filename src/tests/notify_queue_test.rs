@@ -326,3 +326,31 @@ async fn reap_stale_unclaimed_handles_empty_table_and_boundary_cases() {
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].id, id_at_boundary);
 }
+
+#[tokio::test]
+async fn clear_batch_removes_multiple_rows_atomically() {
+    let (repo, _db) = setup().await;
+    let session = Uuid::new_v4();
+    let id_1 = Uuid::new_v4();
+    let id_2 = Uuid::new_v4();
+    let id_3 = Uuid::new_v4();
+
+    for (id, text) in [(id_1, "msg 1"), (id_2, "msg 2"), (id_3, "msg 3")] {
+        repo.record(id, session, text, text, PushOrigin::SessionNotify, None)
+            .await
+            .expect("record");
+    }
+
+    assert_eq!(repo.all().await.expect("all").len(), 3);
+
+    // Empty slice is a no-op
+    repo.clear_batch(&[]).await.expect("clear empty batch");
+    assert_eq!(repo.all().await.expect("all").len(), 3);
+
+    // Batch clear id_1 and id_3
+    repo.clear_batch(&[id_1, id_3]).await.expect("clear batch");
+
+    let remaining = repo.all().await.expect("all");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, id_2);
+}
