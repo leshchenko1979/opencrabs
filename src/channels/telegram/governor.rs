@@ -1378,6 +1378,7 @@ pub(crate) mod test_support {
     pub(crate) fn reset(offset_ms: u64) {
         peers().lock().unwrap_or_else(|e| e.into_inner()).clear();
         *GLOBAL_PACER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        super::rate_limit::reset_global_cooldown();
         CLOCK_OFFSET_MS.store(offset_ms, Ordering::Relaxed);
     }
 
