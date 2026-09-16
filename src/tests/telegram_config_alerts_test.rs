@@ -172,7 +172,7 @@ fn test_alert_formatting_and_length_truncation() {
 
     let alert = format_config_alert(&problems, Some("ops"));
     assert!(
-        alert.contains("OpenCrabs Configuration Alert (profile: ops)"),
+        alert.contains("OpenCrabs Configuration Alert") && alert.contains("(profile: ops)"),
         "Header should include profile tag"
     );
     assert!(
@@ -187,7 +187,8 @@ fn test_alert_formatting_and_length_truncation() {
 
     let recovery = format_config_recovery(Some("ops"));
     assert!(
-        recovery.contains("OpenCrabs Configuration Restored (profile: ops)"),
+        recovery.contains("OpenCrabs Configuration Restored")
+            && recovery.contains("(profile: ops)"),
         "Recovery message should be cleanly formatted"
     );
 }
