@@ -94,6 +94,8 @@ pub fn search_chunks(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|e| format!("Failed to open memory store for vector search: {e}"))?;
+    conn.busy_timeout(std::time::Duration::from_secs(30))
+        .map_err(|e| format!("Failed to set busy timeout for vector search: {e}"))?;
 
     // Bodies are deliberately not selected here. The scan touches every
     // embedded chunk, and joining document text onto it would pull the whole

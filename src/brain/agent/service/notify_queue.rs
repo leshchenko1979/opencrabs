@@ -144,6 +144,7 @@ pub(crate) async fn redeliver_persisted() -> usize {
         }
     };
     let mut count = 0usize;
+    let mut delivered_ids = Vec::new();
     for row in rows {
         // Origin and bg_meta are preserved: the echo rendering and the
         // receipt path depend on them, and the row IS the message.
@@ -154,15 +155,7 @@ pub(crate) async fn redeliver_persisted() -> usize {
             bg_meta: row.bg_meta.clone(),
         };
         if super::restart_recovery::deliver_or_park(row.session_id, msg) {
-            if let Err(e) = repo.clear(row.id).await {
-                // Worst case the push is delivered twice, never zero times.
-                tracing::error!(
-                    target: "background_task",
-                    "Delivered persisted push {} but could not clear its row; it may be \
-                     re-delivered after the next restart: {e:#}",
-                    row.id
-                );
-            }
+            delivered_ids.push(row.id);
         } else {
             // Parked again (#111 follow-up, Part C): a row that keeps
             // surviving boots has no clear path. Log it as a defect rather
@@ -181,6 +174,16 @@ pub(crate) async fn redeliver_persisted() -> usize {
             }
         }
         count += 1;
+    }
+
+    if let Err(e) = repo.clear_batch(&delivered_ids).await {
+        // Worst case the pushes are delivered twice, never zero times.
+        tracing::error!(
+            target: "background_task",
+            "Delivered {} persisted push(es) but could not batch clear their rows; they may be \
+             re-delivered after the next restart: {e:#}",
+            delivered_ids.len()
+        );
     }
 
     // Only NOW reap by age (#182). A row is "unclaimed" because the pass
