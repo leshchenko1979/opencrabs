@@ -96,6 +96,10 @@ const SEND_MAX_HOLD: Duration = Duration::from_secs(30);
 /// error paths plus the next differing-content refresh take over afterwards.
 const FINAL_MAX_ATTEMPTS: u32 = 8;
 
+/// Drain-loop spacing. One queued final per tick keeps drained edits roughly
+/// on the edit bucket's cadence without a dedicated wakeup channel.
+const DRAIN_TICK: Duration = Duration::from_millis(400);
+
 /// Process-wide token bucket pacer for all Telegram requests across all chats/topics.
 /// Enforces a ~25 req/s global ceiling with burst capacity of 25.
 static GLOBAL_PACER: Mutex<Option<Bucket>> = Mutex::new(None);
