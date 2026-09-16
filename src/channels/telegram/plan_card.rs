@@ -496,8 +496,12 @@ pub(crate) fn plan_review_effective_kb(plan_kb: PlanKb, reviewing: bool) -> Plan
 pub(crate) fn format_plan_review_running_progress(
     progress: Option<&crate::brain::agent::service::work_status::ProgressSnapshot>,
     elapsed_secs: Option<u64>,
+    source_label: Option<&str>,
 ) -> String {
     let mut segs: Vec<String> = Vec::new();
+    if let Some(src) = source_label.filter(|s| !s.is_empty()) {
+        segs.push(src.to_string());
+    }
     // A snapshot that carries no tool news contributes no segment: `iteration
     // == 0 && tool_count == 0` is the shape a freshly-created status file has,
     // and its `last_tool` is not something the progress callback produces. That
@@ -584,6 +588,7 @@ pub(crate) fn plan_review_spawn_input(session_id: Uuid, brief: String) -> serde_
         "label": PLAN_REVIEW_LABEL,
         "plan_session": session_id.to_string(),
         "read_only": false,
+        "include_brain": true,
     })
 }
 
@@ -595,14 +600,83 @@ pub(crate) fn review_impl_spawn_input(session_id: Uuid, brief: String) -> serde_
         "label": REVIEW_IMPL_LABEL,
         "plan_session": session_id.to_string(),
         "read_only": true,
+        "include_brain": true,
     })
 }
 
-/// Construct the implementation review brief prompt (#234).
+/// Construct the plan review brief prompt (#155, #256).
+pub(crate) fn plan_review_brief(
+    md_path: &std::path::Path,
+    custom_instructions: Option<&str>,
+) -> String {
+    let mut brief = format!(
+        "You are an adversarial software architecture and plan review agent.\n\
+         Your mission is to upgrade the implementation plan in-place to ensure it is concrete, \
+         feasible, edge-case hardened, and leaves zero ambiguity for the implementer.\n\
+         \n\
+         File: {}\n\
+         \n\
+         ### STEP 1: GROUNDING & CODEBASE VERIFICATION\n\
+         1. Read the plan file completely.\n\
+         2. Inspect the codebase (using grep, read_file, glob) to verify every referenced file, \
+         function, struct, route, and tool exists and matches what the plan assumes.\n\
+         3. Use `memory_search` with scope=\"brain\" to check codified workspace rules and governance policies.\n\
+         4. Use `memory_search` with scope=\"external\" to inspect symbol definitions, callers, callees, and dependencies across the code graph.\n\
+         5. If the plan assumes a non-existent API or wrong pattern, correct the plan to reflect real codebase ground truth.\n\
+         \n\
+         ### STEP 2: ELIMINATE AMBIGUITY & UNRESOLVED FORKS\n\
+         - Hunt down all instances of \"or\", \"if needed\", \"optional\", \"TBD\", \"might\", \"consider\", or \"investigate later\".\n\
+         - Make the concrete technical decision upfront: pick the exact file, exact function, exact type, and exact sequence.\n\
+         - Do NOT leave design or scoping choices to the implementer unless strictly dependent on an external third party.\n\
+         \n\
+         ### STEP 3: ADVERSARIAL EDGE-CASE & FEASIBILITY AUDIT\n\
+         - Concurrency & State: Are shared state, locks, and active-turn collisions guarded?\n\
+         - Failure Modes: What happens on timeout, network drop, malformed payload, or missing data?\n\
+         - Integration Completeness: Are all new modules, callbacks, and routes wired into their dispatch points?\n\
+         - Acceptance Criteria: Ensure every step has verifiable, runnable commands and concrete outcomes (not vague prose).\n",
+        md_path.display()
+    );
+
+    if let Some(custom) = custom_instructions {
+        if !custom.trim().is_empty() {
+            brief.push_str(&format!(
+                "\n### CUSTOM REVIEW STANDARDS & CONVENTIONS\n\
+                 Apply the following project/profile review directives during your audit:\n\
+                 {}\n",
+                custom.trim()
+            ));
+        }
+    }
+
+    brief.push_str(
+        "\n### STEP 4: REWRITE THE PLAN IN PLACE\n\
+         Rewrite the plan directly in the plan file ensuring:\n\
+         - All edge-cases, concrete decisions, and verified paths are incorporated into the Implementation Steps.\n\
+         - Section layout and Layer-2 contract are strictly preserved:\n\
+           * `## Context` with single-line `**Problem:** ...`, `**Target state:** ...`, `**Intent:** ...`\n\
+           * `## Implementation steps` with numbered items (`1. ...`, `2. ...`).\n\
+         - Do not alter the user's high-level goal or remove required deliverables.\n\
+         \n\
+         ### STEP 5: STRUCTURED REPORT\n\
+         End your output with three explicit sections:\n\
+         \n\
+         SUMMARY:\n\
+         <Bullet list of major edge cases, ambiguity fixes, and codebase corrections applied>\n\
+         \n\
+         OPEN_QUESTIONS:\n\
+         <If any major trade-offs, external blockers, or strategic questions require the operator's decision, list them here. If none, write: None>\n\
+         \n\
+         DELTA: <One concise summary sentence of what was changed>"
+    );
+    brief
+}
+
+/// Construct the implementation review brief prompt (#234, #256).
 pub(crate) fn review_impl_brief(
     doc_title: &str,
     doc_checklist: &str,
     md_path: Option<&std::path::Path>,
+    custom_instructions: Option<&str>,
 ) -> String {
     let mut brief = format!(
         "You are an adversarial software implementation audit and verification agent.\n\
@@ -621,13 +695,28 @@ pub(crate) fn review_impl_brief(
         "\n### STEP 1: CONTEXT & ACCEPTANCE CRITERIA\n\
          1. Inspect the tasks, deliverables, and checkable acceptance criteria above.\n\
          2. Determine the commit range / changed files for this implementation using `git status`, `git log`, and `git diff`.\n\
+         3. Use `memory_search` with scope=\"brain\" to check codified workspace governance, rules, and security policies.\n\
+         4. Use `memory_search` with scope=\"external\" to check callers, callees, and impacted symbols across the code graph.\n\
          \n\
          ### STEP 2: CODE & ARCHITECTURE AUDIT\n\
          1. Inspect every modified and created file.\n\
          2. Verify code quality, DRY/modularisation, proper error handling, edge-case hardening, and absence of dead code or debug artifacts.\n\
-         3. Check for proper synchronization/concurrency guards where shared state is modified.\n\
-         \n\
-         ### STEP 3: TEST & ACCEPTANCE VERIFICATION\n\
+         3. Check for proper synchronization/concurrency guards where shared state is modified.\n"
+    );
+
+    if let Some(custom) = custom_instructions {
+        if !custom.trim().is_empty() {
+            brief.push_str(&format!(
+                "\n### CUSTOM REVIEW STANDARDS & CONVENTIONS\n\
+                 Audit the codebase against the following project/profile review directives:\n\
+                 {}\n",
+                custom.trim()
+            ));
+        }
+    }
+
+    brief.push_str(
+        "\n### STEP 3: TEST & ACCEPTANCE VERIFICATION\n\
          1. Verify unit/integration tests exist covering the new functionality.\n\
          2. Ensure every checkable acceptance criterion from the plan has been verified against real codebase receipts.\n\
          \n\
