@@ -141,41 +141,40 @@ pub fn audit_config_problems(
     ];
 
     for (name, provider_opt) in built_in_providers {
-        if let Some(p) = provider_opt {
-            if p.enabled && p.api_key.as_ref().map_or(true, |k| k.trim().is_empty()) {
-                problems.push(ConfigProblem {
-                    kind: ConfigProblemKind::MissingProviderApiKey {
-                        provider: name.to_string(),
-                        model: p
-                            .default_model
-                            .as_deref()
-                            .unwrap_or("(not set)")
-                            .to_string(),
-                    },
-                    severity: Severity::Error,
-                    remediation: format!(
-                        "Set API key for [{name}] in keys.toml or run /onboard:{name}"
-                    ),
-                });
-            }
+        if let Some(p) = provider_opt
+            && p.enabled
+            && p.api_key.as_ref().is_none_or(|k| k.trim().is_empty())
+        {
+            problems.push(ConfigProblem {
+                kind: ConfigProblemKind::MissingProviderApiKey {
+                    provider: name.to_string(),
+                    model: p
+                        .default_model
+                        .as_deref()
+                        .unwrap_or("(not set)")
+                        .to_string(),
+                },
+                severity: Severity::Error,
+                remediation: format!(
+                    "Set API key for [{name}] in keys.toml or run /onboard:{name}"
+                ),
+            });
         }
     }
 
     // 3. Audit custom providers
     if let Some(ref custom) = config.providers.custom {
         for (name, p) in custom {
-            if p.enabled {
-                if p.base_url.as_ref().map_or(true, |u| u.trim().is_empty()) {
-                    problems.push(ConfigProblem {
-                        kind: ConfigProblemKind::CustomProviderMissingBaseUrl {
-                            provider: name.clone(),
-                        },
-                        severity: Severity::Error,
-                        remediation: format!(
-                            "Set base_url under [providers.custom.{name}] in config.toml"
-                        ),
-                    });
-                }
+            if p.enabled && p.base_url.as_ref().is_none_or(|u| u.trim().is_empty()) {
+                problems.push(ConfigProblem {
+                    kind: ConfigProblemKind::CustomProviderMissingBaseUrl {
+                        provider: name.clone(),
+                    },
+                    severity: Severity::Error,
+                    remediation: format!(
+                        "Set base_url under [providers.custom.{name}] in config.toml"
+                    ),
+                });
             }
         }
     }
@@ -192,7 +191,7 @@ pub fn audit_config_problems(
             config
                 .providers
                 .custom_by_name(custom_name)
-                .map_or(false, |p| {
+                .is_some_and(|p| {
                     p.enabled && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
                 })
         } else {
@@ -201,86 +200,54 @@ pub fn audit_config_problems(
                     .providers
                     .anthropic
                     .as_ref()
-                    .map_or(false, |p| p.enabled),
-                "openai" => config
-                    .providers
-                    .openai
-                    .as_ref()
-                    .map_or(false, |p| p.enabled),
-                "gemini" => config
-                    .providers
-                    .gemini
-                    .as_ref()
-                    .map_or(false, |p| p.enabled),
+                    .is_some_and(|p| p.enabled),
+                "openai" => config.providers.openai.as_ref().is_some_and(|p| p.enabled),
+                "gemini" => config.providers.gemini.as_ref().is_some_and(|p| p.enabled),
                 "openrouter" => config
                     .providers
                     .openrouter
                     .as_ref()
-                    .map_or(false, |p| p.enabled),
-                "minimax" => config
-                    .providers
-                    .minimax
-                    .as_ref()
-                    .map_or(false, |p| p.enabled),
-                "zai" => config.providers.zai.as_ref().map_or(false, |p| p.enabled),
+                    .is_some_and(|p| p.enabled),
+                "minimax" => config.providers.minimax.as_ref().is_some_and(|p| p.enabled),
+                "zai" => config.providers.zai.as_ref().is_some_and(|p| p.enabled),
                 "moonshot" => config
                     .providers
                     .moonshot
                     .as_ref()
-                    .map_or(false, |p| p.enabled),
-                "xiaomi" => config
-                    .providers
-                    .xiaomi
-                    .as_ref()
-                    .map_or(false, |p| p.enabled),
-                "qwen" => config.providers.qwen.as_ref().map_or(false, |p| p.enabled),
-                "github" => config
-                    .providers
-                    .github
-                    .as_ref()
-                    .map_or(false, |p| p.enabled),
-                "ollama" => config
-                    .providers
-                    .ollama
-                    .as_ref()
-                    .map_or(false, |p| p.enabled),
+                    .is_some_and(|p| p.enabled),
+                "xiaomi" => config.providers.xiaomi.as_ref().is_some_and(|p| p.enabled),
+                "qwen" => config.providers.qwen.as_ref().is_some_and(|p| p.enabled),
+                "github" => config.providers.github.as_ref().is_some_and(|p| p.enabled),
+                "ollama" => config.providers.ollama.as_ref().is_some_and(|p| p.enabled),
                 "claude-cli" => config
                     .providers
                     .claude_cli
                     .as_ref()
-                    .map_or(false, |p| p.enabled),
+                    .is_some_and(|p| p.enabled),
                 "opencode-cli" => config
                     .providers
                     .opencode_cli
                     .as_ref()
-                    .map_or(false, |p| p.enabled),
+                    .is_some_and(|p| p.enabled),
                 "codex-cli" => config
                     .providers
                     .codex_cli
                     .as_ref()
-                    .map_or(false, |p| p.enabled),
+                    .is_some_and(|p| p.enabled),
                 "command-code-cli" => config
                     .providers
                     .command_code_cli
                     .as_ref()
-                    .map_or(false, |p| p.enabled),
-                "codex" => config.providers.codex.as_ref().map_or(false, |p| p.enabled),
+                    .is_some_and(|p| p.enabled),
+                "codex" => config.providers.codex.as_ref().is_some_and(|p| p.enabled),
                 "opencode" => config
                     .providers
                     .opencode
                     .as_ref()
-                    .map_or(false, |p| p.enabled),
-                "bedrock" => config
-                    .providers
-                    .bedrock
-                    .as_ref()
-                    .map_or(false, |p| p.enabled),
-                "vertex" => config
-                    .providers
-                    .vertex
-                    .as_ref()
-                    .map_or(false, |p| p.enabled),
-                _ => config.providers.custom_by_name(dp).map_or(false, |p| {
+                    .is_some_and(|p| p.enabled),
+                "bedrock" => config.providers.bedrock.as_ref().is_some_and(|p| p.enabled),
+                "vertex" => config.providers.vertex.as_ref().is_some_and(|p| p.enabled),
+                _ => config.providers.custom_by_name(dp).is_some_and(|p| {
                     p.enabled && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
                 }),
             }
@@ -300,104 +267,95 @@ pub fn audit_config_problems(
     }
 
     // 5. Audit fallback providers
-    if let Some(ref fb) = config.providers.fallback {
-        if fb.enabled {
-            for p_name in &fb.providers {
-                let is_valid = if let Some(custom_name) = p_name.strip_prefix("custom/") {
-                    config
-                        .providers
-                        .custom_by_name(custom_name)
-                        .map_or(false, |p| {
-                            p.enabled && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
-                        })
-                } else {
-                    match p_name.as_str() {
-                        "anthropic" => config.providers.anthropic.as_ref().map_or(false, |p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "openai" => config.providers.openai.as_ref().map_or(false, |p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "gemini" => config.providers.gemini.as_ref().map_or(false, |p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "openrouter" => config.providers.openrouter.as_ref().map_or(false, |p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "minimax" => config.providers.minimax.as_ref().map_or(false, |p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "zai" => config.providers.zai.as_ref().map_or(false, |p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "moonshot" => config.providers.moonshot.as_ref().map_or(false, |p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "xiaomi" => config.providers.xiaomi.as_ref().map_or(false, |p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "qwen" => config.providers.qwen.as_ref().map_or(false, |p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "github" => config
-                            .providers
-                            .github
-                            .as_ref()
-                            .map_or(false, |p| p.enabled),
-                        "ollama" => config
-                            .providers
-                            .ollama
-                            .as_ref()
-                            .map_or(false, |p| p.enabled),
-                        _ => config.providers.custom_by_name(p_name).map_or(false, |p| {
-                            p.enabled && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
-                        }),
-                    }
-                };
-
-                if !is_valid {
-                    problems.push(ConfigProblem {
-                        kind: ConfigProblemKind::InvalidFallbackProvider {
-                            provider: p_name.clone(),
-                            reason: "provider is not configured, disabled, or lacks credentials".into(),
-                        },
-                        severity: Severity::Warning,
-                        remediation: format!("Configure provider '{p_name}' or remove it from fallback.providers in config.toml"),
-                    });
+    if let Some(ref fb) = config.providers.fallback
+        && fb.enabled
+    {
+        for p_name in &fb.providers {
+            let is_valid = if let Some(custom_name) = p_name.strip_prefix("custom/") {
+                config
+                    .providers
+                    .custom_by_name(custom_name)
+                    .is_some_and(|p| {
+                        p.enabled && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
+                    })
+            } else {
+                match p_name.as_str() {
+                    "anthropic" => config.providers.anthropic.as_ref().is_some_and(|p| {
+                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                    }),
+                    "openai" => config.providers.openai.as_ref().is_some_and(|p| {
+                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                    }),
+                    "gemini" => config.providers.gemini.as_ref().is_some_and(|p| {
+                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                    }),
+                    "openrouter" => config.providers.openrouter.as_ref().is_some_and(|p| {
+                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                    }),
+                    "minimax" => config.providers.minimax.as_ref().is_some_and(|p| {
+                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                    }),
+                    "zai" => config.providers.zai.as_ref().is_some_and(|p| {
+                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                    }),
+                    "moonshot" => config.providers.moonshot.as_ref().is_some_and(|p| {
+                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                    }),
+                    "xiaomi" => config.providers.xiaomi.as_ref().is_some_and(|p| {
+                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                    }),
+                    "qwen" => config.providers.qwen.as_ref().is_some_and(|p| {
+                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                    }),
+                    "github" => config.providers.github.as_ref().is_some_and(|p| p.enabled),
+                    "ollama" => config.providers.ollama.as_ref().is_some_and(|p| p.enabled),
+                    _ => config.providers.custom_by_name(p_name).is_some_and(|p| {
+                        p.enabled && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
+                    }),
                 }
+            };
+
+            if !is_valid {
+                problems.push(ConfigProblem {
+                    kind: ConfigProblemKind::InvalidFallbackProvider {
+                        provider: p_name.clone(),
+                        reason: "provider is not configured, disabled, or lacks credentials".into(),
+                    },
+                    severity: Severity::Warning,
+                    remediation: format!("Configure provider '{p_name}' or remove it from fallback.providers in config.toml"),
+                });
             }
         }
     }
 
     // 6. Audit memory embeddings
-    if config.memory.vector_enabled {
-        if let Some(ref emb) = config.memory.embedding {
-            if emb.url.is_some() && emb.api_key.as_ref().map_or(true, |k| k.trim().is_empty()) {
-                problems.push(ConfigProblem {
-                    kind: ConfigProblemKind::EmbeddingKeyMissing {
-                        provider: "memory.embedding".into(),
-                    },
-                    severity: Severity::Warning,
-                    remediation: "Set api_key for [memory.embedding] in config.toml or [providers.memory_embedding] in keys.toml".into(),
-                });
-            }
-        }
+    if config.memory.vector_enabled
+        && let Some(ref emb) = config.memory.embedding
+        && emb.url.is_some()
+        && emb.api_key.as_ref().is_none_or(|k| k.trim().is_empty())
+    {
+        problems.push(ConfigProblem {
+            kind: ConfigProblemKind::EmbeddingKeyMissing {
+                provider: "memory.embedding".into(),
+            },
+            severity: Severity::Warning,
+            remediation: "Set api_key for [memory.embedding] in config.toml or [providers.memory_embedding] in keys.toml".into(),
+        });
     }
 
     // 7. Audit unrecognized / typo config keys
-    if !raw_config_toml.trim().is_empty() {
-        if let Ok(ignored) = crate::config::sections::ignored_key_paths(raw_config_toml) {
-            if !ignored.is_empty() {
-                problems.push(ConfigProblem {
-                    kind: ConfigProblemKind::IgnoredOrTypoConfigKeys(ignored.clone()),
-                    severity: Severity::Warning,
-                    remediation: format!(
-                        "Remove or correct unrecognized config keys in config.toml: {}",
-                        ignored.join(", ")
-                    ),
-                });
-            }
-        }
+    if !raw_config_toml.trim().is_empty()
+        && let Ok(ignored) = crate::config::sections::ignored_key_paths(raw_config_toml)
+        && !ignored.is_empty()
+    {
+        problems.push(ConfigProblem {
+            kind: ConfigProblemKind::IgnoredOrTypoConfigKeys(ignored.clone()),
+            severity: Severity::Warning,
+            remediation: format!(
+                "Remove or correct unrecognized config keys in config.toml: {}",
+                ignored.join(", ")
+            ),
+        });
     }
 
     // 8. Audit Telegram bot_owner
@@ -553,28 +511,28 @@ pub fn resolve_recipient_chat_ids(config: &Config, owner_chat_id: Option<i64>) -
     let tg = &config.channels.telegram;
 
     for owner in &tg.bot_owner {
-        if let Ok(id) = owner.trim().parse::<i64>() {
-            if !targets.contains(&id) {
-                targets.push(id);
-            }
+        if let Ok(id) = owner.trim().parse::<i64>()
+            && !targets.contains(&id)
+        {
+            targets.push(id);
         }
     }
 
     if targets.is_empty() {
         for user in &tg.allowed_users {
-            if let Ok(id) = user.trim().parse::<i64>() {
-                if !targets.contains(&id) {
-                    targets.push(id);
-                    break;
-                }
+            if let Ok(id) = user.trim().parse::<i64>()
+                && !targets.contains(&id)
+            {
+                targets.push(id);
+                break;
             }
         }
     }
 
-    if let Some(id) = owner_chat_id {
-        if !targets.contains(&id) {
-            targets.push(id);
-        }
+    if let Some(id) = owner_chat_id
+        && !targets.contains(&id)
+    {
+        targets.push(id);
     }
 
     targets
@@ -622,7 +580,7 @@ pub async fn run_proactive_config_audit(
         return;
     }
 
-    let profile = crate::config::active_profile().map(ToString::to_string);
+    let profile = crate::config::profile::active_profile().map(ToString::to_string);
     let is_recovery = problems.is_empty() && alert_state.check_and_reset_recovery();
 
     let msg = if is_recovery {
