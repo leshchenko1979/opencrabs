@@ -3,9 +3,7 @@
 use std::fs;
 use tempfile::tempdir;
 
-use opencrabs::brain::review_instructions::{
-    resolve_review_instructions, ReviewKind, ReviewSource,
-};
+use crate::brain::review_instructions::{resolve_review_instructions, ReviewKind, ReviewSource};
 
 #[test]
 fn test_plan_review_precedence_in_project_workspace() {
