@@ -637,15 +637,13 @@ pub(crate) fn plan_review_brief(
         md_path.display()
     );
 
-    if let Some(custom) = custom_instructions {
-        if !custom.trim().is_empty() {
-            brief.push_str(&format!(
-                "\n### CUSTOM REVIEW STANDARDS & CONVENTIONS\n\
-                 Apply the following project/profile review directives during your audit:\n\
-                 {}\n",
-                custom.trim()
-            ));
-        }
+    if let Some(custom) = custom_instructions.filter(|c| !c.trim().is_empty()) {
+        brief.push_str(&format!(
+            "\n### CUSTOM REVIEW STANDARDS & CONVENTIONS\n\
+             Apply the following project/profile review directives during your audit:\n\
+             {}\n",
+            custom.trim()
+        ));
     }
 
     brief.push_str(
@@ -704,15 +702,13 @@ pub(crate) fn review_impl_brief(
          3. Check for proper synchronization/concurrency guards where shared state is modified.\n"
     );
 
-    if let Some(custom) = custom_instructions {
-        if !custom.trim().is_empty() {
-            brief.push_str(&format!(
-                "\n### CUSTOM REVIEW STANDARDS & CONVENTIONS\n\
-                 Audit the codebase against the following project/profile review directives:\n\
-                 {}\n",
-                custom.trim()
-            ));
-        }
+    if let Some(custom) = custom_instructions.filter(|c| !c.trim().is_empty()) {
+        brief.push_str(&format!(
+            "\n### CUSTOM REVIEW STANDARDS & CONVENTIONS\n\
+             Audit the codebase against the following project/profile review directives:\n\
+             {}\n",
+            custom.trim()
+        ));
     }
 
     brief.push_str(
