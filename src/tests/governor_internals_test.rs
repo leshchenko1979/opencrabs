@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use teloxide::types::ChatId;
 
 use crate::channels::telegram::governor::{
-    ensure_bucket, format_summary, is_permanent_edit_error, note_429_pause, Bucket, Counters,
-    EditClass, FinalDialect, INTERACTIVE_RESERVE, MAX_429_PAUSE,
+    Bucket, Counters, EditClass, EditPayload, INTERACTIVE_RESERVE, MAX_429_PAUSE, ensure_bucket,
+    format_summary, is_permanent_edit_error, note_429_pause,
 };
 
 #[test]
@@ -227,11 +227,65 @@ fn rate_limiter_defaults_sized_below_group_limit() {
     assert_eq!(cfg.sends_ceiling_per_minute, 18);
 }
 
-/// #229: FinalDialect defaults to Html and supports Markdown variant.
+/// #254: EditPayload enum variants and helper constructors construct expected wire shapes.
 #[test]
-fn final_dialect_defaults_to_html() {
-    assert_eq!(FinalDialect::default(), FinalDialect::Html);
-    assert_ne!(FinalDialect::Html, FinalDialect::Markdown);
+fn edit_payload_variants_and_constructors() {
+    let classic = EditPayload::classic_html("<b>hello</b>");
+    assert_eq!(
+        classic,
+        EditPayload::ClassicHtml {
+            html: "<b>hello</b>".to_string(),
+            reply_markup: None,
+        }
+    );
+
+    let kb =
+        Some(serde_json::json!({"inline_keyboard": [[{"text": "OK", "callback_data": "ok"}]]}));
+    let classic_kb = EditPayload::classic_html_kb("<b>hello</b>", kb.clone());
+    assert_eq!(
+        classic_kb,
+        EditPayload::ClassicHtml {
+            html: "<b>hello</b>".to_string(),
+            reply_markup: kb.clone(),
+        }
+    );
+
+    let rich = EditPayload::rich_html("<b>rich</b>");
+    assert_eq!(
+        rich,
+        EditPayload::RichHtml {
+            html: "<b>rich</b>".to_string(),
+            reply_markup: None,
+        }
+    );
+
+    let rich_kb = EditPayload::rich_html_kb("<b>rich</b>", kb.clone());
+    assert_eq!(
+        rich_kb,
+        EditPayload::RichHtml {
+            html: "<b>rich</b>".to_string(),
+            reply_markup: kb.clone(),
+        }
+    );
+
+    let rich_md = EditPayload::rich_markdown_media("# Heading\n- Item", Vec::new(), kb.clone());
+    assert_eq!(
+        rich_md,
+        EditPayload::RichMarkdownMedia {
+            markdown: "# Heading\n- Item".to_string(),
+            media: Vec::new(),
+            reply_markup: kb,
+        }
+    );
+
+    let empty = EditPayload::empty();
+    assert_eq!(
+        empty,
+        EditPayload::ClassicHtml {
+            html: String::new(),
+            reply_markup: None,
+        }
+    );
 }
 
 /// Tests for the process-wide proactive pacer & global 429 cooldown lock (#262).

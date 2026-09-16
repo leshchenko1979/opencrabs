@@ -1028,18 +1028,18 @@ pub(crate) async fn refresh_plan_card(
             // tracked signature is saved now so identical later refreshes skip
             // (a permanently failed queue drain self-heals on the next
             // differing-content plan change). Media and keyboard ride the
-            // queued final via edit_admission_media_kb (owner law: extend,
-            // never bypass the governor, #155, #229).
-            let admitted = super::governor::edit_admission_media_kb(
+            // queued final via EditPayload::rich_markdown_media (owner law: extend,
+            // never bypass the governor, #155, #254).
+            let admitted = super::governor::edit_admission(
                 bot,
                 chat,
                 mid,
                 super::governor::EditClass::Final,
-                rich_md.clone(),
-                true,
-                media.clone(),
-                kb_val.clone(),
-                super::governor::FinalDialect::Markdown,
+                super::governor::EditPayload::rich_markdown_media(
+                    rich_md.clone(),
+                    media.clone(),
+                    kb_val.clone(),
+                ),
             )
             .await;
             if !admitted {
@@ -1150,13 +1150,13 @@ pub(crate) async fn refresh_plan_card(
         }
         // G2 flood governor (#1211): same FINAL contract as the rich path —
         // queue latest-wins when the edit bucket is empty, never drop.
+        let kb_val = kb.as_ref().and_then(|k| serde_json::to_value(k).ok());
         let admitted = super::governor::edit_admission(
             bot,
             chat,
             mid,
             super::governor::EditClass::Final,
-            html.clone(),
-            false,
+            super::governor::EditPayload::classic_html_kb(html.clone(), kb_val),
         )
         .await;
         if !admitted {
