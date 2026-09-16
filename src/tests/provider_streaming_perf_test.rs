@@ -35,6 +35,10 @@ fn test_extract_sanitized_tail_newline_escaping() {
         extract_sanitized_tail("mid-turn text\n\n{\"tool\": \"bash\"}", 18),
         "\\n\\n{\"tool\": \"bash\"}"
     );
+    assert_eq!(
+        extract_sanitized_tail("mid-turn text\n\n{\"tool\": \"bash\"}", 16),
+        "{\"tool\": \"bash\"}"
+    );
 }
 
 #[test]

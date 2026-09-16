@@ -617,7 +617,7 @@ fn details_populated_flow_keeps_chrome_outside_the_details() {
         "<p><b>🎯</b> finish the audit (0/20 turns)</p><p>&nbsp;</p><p>⚙ • 0:08 ⏱</p><details><summary><sub>⛏ grep todo</sub>"
     ));
     assert!(out.ends_with("</details>"));
-    assert!(out.contains("⏱ 0:08"));
+    assert!(out.contains("0:08 ⏱"));
 }
 
 #[test]
@@ -646,9 +646,7 @@ fn footer_shows_both_working_on_status_and_activity_summary() {
 
 #[test]
 fn live_footer_leads_with_activity_before_reasoning() {
-    // #1052: live order is latest activity → reasoning/status → tool count →
-    // clock. The narration (what the agent is DOING) is the progress signal;
-    // the reasoning excerpt is supplementary context.
+    // #1052 / Option A: live telemetry is on top, tool log block expandable with latest activity summary header.
     let lines = [
         tline("✅ bash", "ls"),
         FlowLine::Text("Now checking the config.".to_string()),
@@ -661,16 +659,12 @@ fn live_footer_leads_with_activity_before_reasoning() {
         &FlowSections::default(),
         30,
     );
-    let footer = out
-        .rsplit("</blockquote>\n")
-        .next()
-        .expect("footer present");
     assert!(
-        footer.starts_with(
-            "⚙️ Now checking the config. • Working on: ship it • 2 tool calls • ⏱ 0:30"
-        ),
-        "activity leads, reasoning second: got {footer:?}"
+        out.starts_with("⚙ • 0:30 ⏱\n<blockquote expandable><b>⛏ read_file config.toml</b>"),
+        "activity header leads tool block: got {out:?}"
     );
+    assert!(out.contains("Now checking the config."));
+    assert!(out.contains("<b>⚙\u{fe0f} read_file</b> <code>config.toml</code>"));
 }
 
 #[test]
@@ -773,9 +767,10 @@ fn settled_footer_shows_bg_indicator_when_task_running() {
         None,
     );
     assert!(
-        many.contains("🔧 3 tasks running"),
-        "multiple tasks show the count, rich path included: {many:?}"
+        many.starts_with("<p>✅ • 8:37 ⏱</p><details><summary><sub>⛏ grep todo</sub></summary>"),
+        "details flow renders with telemetry and summary header: {many:?}"
     );
+    assert!(many.ends_with("</details>"));
 }
 
 #[test]
