@@ -15,14 +15,14 @@
 //! 3. The result is a one-line delta rendered as the card footer, derived from
 //!    the worker's `DELTA:` line, never from the spawn acknowledgement.
 
-use crate::channels::telegram::TelegramState;
 use crate::channels::telegram::flow_chrome::PlanKb;
 use crate::channels::telegram::plan_card::{
-    PLAN_REVIEW_LABEL, PLAN_REVIEW_RUNNING_NOTE, REVIEW_IMPL_LABEL,
     format_plan_review_running_progress, plan_card_with_footer, plan_review_agent_id,
-    plan_review_delta, plan_review_effective_kb, plan_review_footer_note, plan_review_spawn_input,
-    plan_review_was_cancelled, review_impl_brief, review_impl_spawn_input,
+    plan_review_brief, plan_review_delta, plan_review_effective_kb, plan_review_footer_note,
+    plan_review_spawn_input, plan_review_was_cancelled, review_impl_brief, review_impl_spawn_input,
+    PLAN_REVIEW_LABEL, PLAN_REVIEW_RUNNING_NOTE, REVIEW_IMPL_LABEL,
 };
+use crate::channels::telegram::TelegramState;
 use uuid::Uuid;
 
 /// The exact rows Telegram would receive, as `(text, callback_data)` pairs.
@@ -62,7 +62,7 @@ fn editing_card_offers_review_approve_discard() {
     assert_eq!(
         rows[1],
         vec![
-            ("🔍 Review".to_string(), "plan:review".to_string()),
+            ("🔍 Review plan".to_string(), "plan:review".to_string()),
             ("🗑 Discard".to_string(), "plan:no".to_string()),
         ],
         "Row 2 carries Review and Discard"
@@ -81,7 +81,7 @@ fn reviewing_card_disables_approve_and_review_with_noop() {
     assert_eq!(
         rows[1],
         vec![
-            ("⏳ Reviewing…".to_string(), "plan:noop".to_string()),
+            ("⏳ Reviewing plan…".to_string(), "plan:noop".to_string()),
             ("🗑 Discard".to_string(), "plan:no".to_string()),
         ],
         "while a review runs the Review slot becomes a no-op ack, and Discard stays live"
@@ -182,7 +182,7 @@ fn running_review_footer_shows_live_progress_note() {
 #[test]
 fn format_progress_snapshot_handles_various_states() {
     assert_eq!(
-        format_plan_review_running_progress(None, None),
+        format_plan_review_running_progress(None, None, None),
         PLAN_REVIEW_RUNNING_NOTE
     );
 
@@ -194,7 +194,7 @@ fn format_progress_snapshot_handles_various_states() {
         updated_at: None,
     };
     assert_eq!(
-        format_plan_review_running_progress(Some(&p_zero), None),
+        format_plan_review_running_progress(Some(&p_zero), None, None),
         PLAN_REVIEW_RUNNING_NOTE
     );
 
@@ -206,8 +206,13 @@ fn format_progress_snapshot_handles_various_states() {
         updated_at: None,
     };
     assert_eq!(
-        format_plan_review_running_progress(Some(&p_tool), None),
+        format_plan_review_running_progress(Some(&p_tool), None, None),
         "🔍 Review subagent running (🛠 4 · read_file)…"
+    );
+
+    assert_eq!(
+        format_plan_review_running_progress(Some(&p_tool), None, Some("PLAN_REVIEW.md")),
+        "🔍 Review subagent running (PLAN_REVIEW.md · 🛠 4 · read_file)…"
     );
 
     let p_notool = crate::brain::agent::service::work_status::ProgressSnapshot {
@@ -218,7 +223,7 @@ fn format_progress_snapshot_handles_various_states() {
         updated_at: None,
     };
     assert_eq!(
-        format_plan_review_running_progress(Some(&p_notool), None),
+        format_plan_review_running_progress(Some(&p_notool), None, None),
         "🔍 Review subagent running (🛠 2)…"
     );
 }
@@ -239,22 +244,22 @@ fn progress_note_carries_the_flow_footer_clock() {
         updated_at: None,
     };
     assert_eq!(
-        format_plan_review_running_progress(Some(&p), Some(45)),
+        format_plan_review_running_progress(Some(&p), Some(45), None),
         "🔍 Review subagent running (🛠 4 · read_file · 45s)…"
     );
     assert_eq!(
-        format_plan_review_running_progress(Some(&p), Some(60)),
+        format_plan_review_running_progress(Some(&p), Some(60), None),
         "🔍 Review subagent running (🛠 4 · read_file · 1 min 0s)…",
         "60s is the first minute-form reading — same boundary as the flow footer"
     );
     assert_eq!(
-        format_plan_review_running_progress(Some(&p), Some(90)),
-        "🔍 Review subagent running (🛠 4 · read_file · 1 min 30s)…"
+        format_plan_review_running_progress(Some(&p), Some(90), Some("profile/CODE.md")),
+        "🔍 Review subagent running (profile/CODE.md · 🛠 4 · read_file · 1 min 30s)…"
     );
     // No elapsed (an unparseable spawn stamp) DROPS the segment; it must never
     // print a placeholder clock that reads like a real one.
     assert_eq!(
-        format_plan_review_running_progress(Some(&p), None),
+        format_plan_review_running_progress(Some(&p), None, None),
         "🔍 Review subagent running (🛠 4 · read_file)…"
     );
     // A tool-less tick still clocks — the count is optional, the time is not.
@@ -266,7 +271,7 @@ fn progress_note_carries_the_flow_footer_clock() {
         updated_at: None,
     };
     assert_eq!(
-        format_plan_review_running_progress(Some(&p_notool), Some(7)),
+        format_plan_review_running_progress(Some(&p_notool), Some(7), None),
         "🔍 Review subagent running (🛠 2 · 7s)…"
     );
 }
@@ -282,19 +287,19 @@ fn progress_note_carries_the_flow_footer_clock() {
 #[test]
 fn review_clock_renders_without_a_progress_snapshot() {
     assert_eq!(
-        format_plan_review_running_progress(None, Some(45)),
+        format_plan_review_running_progress(None, Some(45), None),
         "🔍 Review subagent running (45s)…",
         "a review whose progress has not been written yet still shows its clock"
     );
     assert_eq!(
-        format_plan_review_running_progress(None, Some(90)),
+        format_plan_review_running_progress(None, Some(90), None),
         "🔍 Review subagent running (1 min 30s)…",
         "the ungated clock keeps the flow footer's minute form"
     );
     // With neither a snapshot nor a clock there is genuinely nothing to say —
     // the bare note is still the floor.
     assert_eq!(
-        format_plan_review_running_progress(None, None),
+        format_plan_review_running_progress(None, None, None),
         PLAN_REVIEW_RUNNING_NOTE
     );
     // A zero-progress snapshot is the same "no tool news" case: its TOOL
@@ -308,7 +313,7 @@ fn review_clock_renders_without_a_progress_snapshot() {
         updated_at: None,
     };
     assert_eq!(
-        format_plan_review_running_progress(Some(&p_zero), Some(12)),
+        format_plan_review_running_progress(Some(&p_zero), Some(12), None),
         "🔍 Review subagent running (12s)…"
     );
 }
@@ -472,6 +477,11 @@ fn review_worker_is_spawned_under_the_label_the_write_grant_keys_on() {
         Some(false),
         "rewriting the plan `.md` is the worker's entire purpose"
     );
+    assert_eq!(
+        input["include_brain"].as_bool(),
+        Some(true),
+        "review worker inherits profile brain context"
+    );
     assert_eq!(input["prompt"].as_str(), Some("review the plan"));
 }
 
@@ -536,12 +546,10 @@ fn structured_report_parses_summary_open_questions_and_delta() {
         "Do we need a dedicated log topic for review audits?"
     );
     assert!(parsed.full_summary.is_some());
-    assert!(
-        parsed
-            .full_summary
-            .unwrap()
-            .contains("Verified src/channels/telegram/flow_chrome.rs")
-    );
+    assert!(parsed
+        .full_summary
+        .unwrap()
+        .contains("Verified src/channels/telegram/flow_chrome.rs"));
 }
 
 #[test]
@@ -735,6 +743,11 @@ fn review_impl_spawn_input_sets_read_only_and_correct_label() {
         "Implementation review worker MUST be read-only"
     );
     assert_eq!(
+        input["include_brain"].as_bool(),
+        Some(true),
+        "Implementation review worker inherits profile brain context"
+    );
+    assert_eq!(
         input["label"].as_str().unwrap(),
         REVIEW_IMPL_LABEL,
         "Implementation review worker must use the canonical label"
@@ -747,6 +760,7 @@ fn review_impl_brief_contains_structured_adversarial_prompt() {
         "Feature #234 Title",
         "- [x] 1. First task\n- [x] 2. Second task",
         Some(std::path::Path::new("/tmp/test_plan.md")),
+        Some("Always require tempdir for test isolation."),
     );
 
     assert!(brief.contains("Title: Feature #234 Title"));
@@ -755,8 +769,31 @@ fn review_impl_brief_contains_structured_adversarial_prompt() {
     assert!(brief.contains("adversarial software implementation audit"));
     assert!(brief.contains("Archived Plan File: /tmp/test_plan.md"));
     assert!(brief.contains("### STEP 1: CONTEXT & ACCEPTANCE CRITERIA"));
+    assert!(brief.contains("memory_search"));
+    assert!(brief.contains("scope=\"brain\""));
+    assert!(brief.contains("scope=\"external\""));
     assert!(brief.contains("### STEP 2: CODE & ARCHITECTURE AUDIT"));
+    assert!(brief.contains("### CUSTOM REVIEW STANDARDS & CONVENTIONS"));
+    assert!(brief.contains("Always require tempdir for test isolation."));
     assert!(brief.contains("### STEP 3: TEST & ACCEPTANCE VERIFICATION"));
     assert!(brief.contains("### STEP 4: STRUCTURED REPORT"));
     assert!(brief.contains("## Implementation Audit Report: <Title>"));
+}
+
+#[test]
+fn plan_review_brief_contains_memory_search_and_custom_instructions() {
+    let brief = plan_review_brief(
+        std::path::Path::new("/tmp/test_plan.md"),
+        Some("Ensure all network calls have timeouts."),
+    );
+
+    assert!(brief.contains("adversarial software architecture and plan review agent"));
+    assert!(brief.contains("File: /tmp/test_plan.md"));
+    assert!(brief.contains("memory_search"));
+    assert!(brief.contains("scope=\"brain\""));
+    assert!(brief.contains("scope=\"external\""));
+    assert!(brief.contains("### CUSTOM REVIEW STANDARDS & CONVENTIONS"));
+    assert!(brief.contains("Ensure all network calls have timeouts."));
+    assert!(brief.contains("### STEP 4: REWRITE THE PLAN IN PLACE"));
+    assert!(brief.contains("### STEP 5: STRUCTURED REPORT"));
 }

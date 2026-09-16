@@ -60,7 +60,7 @@ impl PlanKb {
             PlanKb::ApproveDiscard => Some(InlineKeyboardMarkup::new(vec![
                 vec![InlineKeyboardButton::callback("✅ Approve plan", "plan:ok")],
                 vec![
-                    InlineKeyboardButton::callback("🔍 Review", "plan:review"),
+                    InlineKeyboardButton::callback("🔍 Review plan", "plan:review"),
                     InlineKeyboardButton::callback("🗑 Discard", "plan:no"),
                 ],
             ])),
@@ -70,7 +70,7 @@ impl PlanKb {
                     "plan:noop",
                 )],
                 vec![
-                    InlineKeyboardButton::callback("⏳ Reviewing…", "plan:noop"),
+                    InlineKeyboardButton::callback("⏳ Reviewing plan…", "plan:noop"),
                     InlineKeyboardButton::callback("🗑 Discard", "plan:no"),
                 ],
             ])),
