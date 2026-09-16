@@ -61,10 +61,10 @@ pub fn resolve_review_instructions(
 ) -> ResolvedReviewInstructions {
     // 1. Search project locations
     let mut search_dirs = vec![working_dir.to_path_buf()];
-    if let Some(git_root) = find_git_repo_root(working_dir) {
-        if git_root != working_dir && !search_dirs.contains(&git_root) {
-            search_dirs.push(git_root);
-        }
+    if let Some(git_root) =
+        find_git_repo_root(working_dir).filter(|r| r != working_dir && !search_dirs.contains(r))
+    {
+        search_dirs.push(git_root);
     }
 
     let project_candidates: &[&str] = match kind {
@@ -88,16 +88,18 @@ pub fn resolve_review_instructions(
 
     for dir in &search_dirs {
         for &candidate in project_candidates {
-            if let Some((path, matched_filename)) = probe_file_case_insensitive(dir, candidate) {
-                if let Ok(raw_content) = std::fs::read_to_string(&path) {
-                    let extracted = extract_review_section(kind, candidate, &raw_content);
-                    if !extracted.trim().is_empty() {
-                        return ResolvedReviewInstructions {
-                            source: ReviewSource::ProjectFile(matched_filename),
-                            content: Some(extracted),
-                        };
-                    }
-                }
+            let Some((path, matched_filename)) = probe_file_case_insensitive(dir, candidate) else {
+                continue;
+            };
+            let Ok(raw_content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let extracted = extract_review_section(kind, candidate, &raw_content);
+            if !extracted.trim().is_empty() {
+                return ResolvedReviewInstructions {
+                    source: ReviewSource::ProjectFile(matched_filename),
+                    content: Some(extracted),
+                };
             }
         }
     }
@@ -109,17 +111,19 @@ pub fn resolve_review_instructions(
     };
 
     for &candidate in profile_candidates {
-        if let Some((path, matched_filename)) = probe_file_case_insensitive(profile_home, candidate)
-        {
-            if let Ok(raw_content) = std::fs::read_to_string(&path) {
-                let extracted = extract_review_section(kind, candidate, &raw_content);
-                if !extracted.trim().is_empty() {
-                    return ResolvedReviewInstructions {
-                        source: ReviewSource::ProfileBrain(matched_filename),
-                        content: Some(extracted),
-                    };
-                }
-            }
+        let Some((path, matched_filename)) = probe_file_case_insensitive(profile_home, candidate)
+        else {
+            continue;
+        };
+        let Ok(raw_content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let extracted = extract_review_section(kind, candidate, &raw_content);
+        if !extracted.trim().is_empty() {
+            return ResolvedReviewInstructions {
+                source: ReviewSource::ProfileBrain(matched_filename),
+                content: Some(extracted),
+            };
         }
     }
 
@@ -203,10 +207,10 @@ fn extract_review_section(kind: ReviewKind, candidate_pattern: &str, content: &s
         ],
     };
 
-    if let Some(section) = extract_heading_section(content, target_headings) {
-        if !section.trim().is_empty() {
-            return section.trim().to_string();
-        }
+    if let Some(section) =
+        extract_heading_section(content, target_headings).filter(|s| !s.trim().is_empty())
+    {
+        return section.trim().to_string();
     }
 
     // If no matching heading found, fall back to full content
@@ -229,10 +233,8 @@ fn extract_heading_section(content: &str, target_headings: &[&str]) -> Option<St
 
             if capturing {
                 // If we encounter a heading of equal or higher level, stop capturing
-                if let Some(start_level) = matched_heading_level {
-                    if hash_count <= start_level {
-                        break;
-                    }
+                if matched_heading_level.is_some_and(|start_level| hash_count <= start_level) {
+                    break;
                 }
             } else {
                 // Check if this heading matches any of target_headings
