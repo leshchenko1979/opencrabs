@@ -20,8 +20,8 @@
 
 use std::time::Duration;
 
-use teloxide::types::{ChatId, MessageId};
 use teloxide::Bot;
+use teloxide::types::{ChatId, MessageId};
 
 use crate::channels::telegram::governor;
 use crate::channels::telegram::governor::test_support as ts;
@@ -57,8 +57,7 @@ async fn dm_chat_ids_bypass_all_three_governors() {
                 ChatId(777),
                 MessageId(1),
                 governor::EditClass::Final,
-                "<b>x</b>".into(),
-                false,
+                governor::EditPayload::classic_html("<b>x</b>"),
             )
             .await
         );
@@ -177,7 +176,14 @@ async fn edit_ladder_drops_in_priority_order_and_queues_latest_wins_finals() {
         governor::EditClass::Status,
     ] {
         assert!(
-            !governor::edit_admission(&bot, CHAT, MessageId(5), class, "h".into(), false).await,
+            !governor::edit_admission(
+                &bot,
+                CHAT,
+                MessageId(5),
+                class,
+                governor::EditPayload::classic_html("h"),
+            )
+            .await,
             "{class:?} must DROP on an empty bucket"
         );
     }
@@ -196,8 +202,7 @@ async fn edit_ladder_drops_in_priority_order_and_queues_latest_wins_finals() {
             CHAT,
             MessageId(9),
             governor::EditClass::Final,
-            "<b>v1</b>".into(),
-            false,
+            governor::EditPayload::classic_html("<b>v1</b>"),
         )
         .await
     );
@@ -207,8 +212,7 @@ async fn edit_ladder_drops_in_priority_order_and_queues_latest_wins_finals() {
             CHAT,
             MessageId(9),
             governor::EditClass::Final,
-            "<b>v2</b>".into(),
-            false,
+            governor::EditPayload::classic_html("<b>v2</b>"),
         )
         .await
     );
@@ -233,8 +237,7 @@ async fn edit_ladder_drops_in_priority_order_and_queues_latest_wins_finals() {
             CHAT,
             MessageId(5),
             governor::EditClass::Interactive,
-            "h".into(),
-            false,
+            governor::EditPayload::classic_html("h"),
         )
         .await
     );
@@ -274,8 +277,7 @@ async fn interactive_edit_never_drops_or_queues_even_on_dry_bucket() {
             CHAT,
             MessageId(1),
             governor::EditClass::Status,
-            "h".into(),
-            false,
+            governor::EditPayload::classic_html("h"),
         )
         .await
     );
@@ -288,8 +290,7 @@ async fn interactive_edit_never_drops_or_queues_even_on_dry_bucket() {
             CHAT,
             MessageId(2),
             governor::EditClass::Interactive,
-            String::new(),
-            false,
+            governor::EditPayload::empty(),
         )
         .await,
         "Interactive must NEVER be refused — pass-through on a dry bucket"
@@ -316,8 +317,7 @@ async fn interactive_edit_never_drops_or_queues_even_on_dry_bucket() {
             CHAT,
             MessageId(3),
             governor::EditClass::Interactive,
-            String::new(),
-            false,
+            governor::EditPayload::empty(),
         )
         .await
     );
@@ -352,8 +352,7 @@ async fn direct_send_evicts_stale_queued_final_for_same_message() {
             CHAT,
             MessageId(9),
             governor::EditClass::Final,
-            "<b>v0 stale</b>".into(),
-            false,
+            governor::EditPayload::classic_html("<b>v0 stale</b>"),
         )
         .await
     );
@@ -375,8 +374,7 @@ async fn direct_send_evicts_stale_queued_final_for_same_message() {
             CHAT,
             MessageId(9),
             governor::EditClass::Interactive,
-            "<b>v1 fresh</b>".into(),
-            false,
+            governor::EditPayload::classic_html("<b>v1 fresh</b>"),
         )
         .await,
         "interactive direct edit must pass (floor spend, no refill needed)"
@@ -402,8 +400,7 @@ async fn direct_send_evicts_stale_queued_final_for_same_message() {
             CHAT,
             MessageId(77),
             governor::EditClass::Final,
-            "<b>other msg</b>".into(),
-            false,
+            governor::EditPayload::classic_html("<b>other msg</b>"),
         )
         .await
     );
@@ -413,8 +410,7 @@ async fn direct_send_evicts_stale_queued_final_for_same_message() {
             CHAT,
             MessageId(9),
             governor::EditClass::Interactive,
-            "<b>msg 9 again, direct</b>".into(),
-            false,
+            governor::EditPayload::classic_html("<b>msg 9 again, direct</b>"),
         )
         .await
     );
@@ -456,8 +452,7 @@ async fn interactive_reserve_shields_taps_from_bulk_drain() {
             CHAT,
             MessageId(1),
             governor::EditClass::Status,
-            "h".into(),
-            false,
+            governor::EditPayload::classic_html("h"),
         )
         .await,
         "chrome drops once free-above-floor token is spent"
@@ -469,8 +464,7 @@ async fn interactive_reserve_shields_taps_from_bulk_drain() {
             CHAT,
             MessageId(2),
             governor::EditClass::Interactive,
-            String::new(),
-            false,
+            governor::EditPayload::empty(),
         )
         .await,
         "the reserved floor must keep a tap admissible after bulk drained"
@@ -583,8 +577,7 @@ async fn drainer_wire_round(label: &str) {
             CHAT,
             MessageId(11),
             governor::EditClass::Final,
-            "<b>settled</b>".into(),
-            false,
+            governor::EditPayload::classic_html("<b>settled</b>"),
         )
         .await,
         "starved bucket queues the final"
@@ -733,16 +726,16 @@ async fn queued_rich_markdown_final_with_empty_media_drains_as_markdown() {
     .set_api_url(server.url().parse().unwrap());
 
     assert!(
-        !governor::edit_admission_media_kb(
+        !governor::edit_admission(
             &bot,
             CHAT,
             MessageId(12),
             governor::EditClass::Final,
-            "# Test Plan\n- **Item:** value".into(),
-            true,
-            Vec::new(),
-            None,
-            governor::FinalDialect::Markdown,
+            governor::EditPayload::rich_markdown_media(
+                "# Test Plan\n- **Item:** value",
+                Vec::new(),
+                None,
+            ),
         )
         .await,
         "starved bucket queues the final"
@@ -804,8 +797,7 @@ async fn queued_rich_html_final_drains_as_html() {
             CHAT,
             MessageId(13),
             governor::EditClass::Final,
-            "<b>Flow Summary</b>".into(),
-            true,
+            governor::EditPayload::rich_html("<b>Flow Summary</b>"),
         )
         .await,
         "starved bucket queues the final"
@@ -813,6 +805,72 @@ async fn queued_rich_html_final_drains_as_html() {
     assert_eq!(ts::snapshot(CHAT).unwrap().finals_pending, 1);
 
     wait_for_finals_drain(CHAT, "rich-html").await;
+
+    delivered.assert();
+    let snap = ts::snapshot(CHAT).unwrap();
+    assert_eq!(snap.delivered_finals, 1);
+    assert_eq!(snap.failed_finals, 0);
+    assert_eq!(snap.finals_pending, 0);
+}
+
+/// #254: Classic HTML finals with inline keyboard drain carrying the keyboard markup.
+#[tokio::test(start_paused = true)]
+async fn queued_classic_html_final_drains_with_keyboard() {
+    ensure_tracing_capture();
+    let _guard = ts::registry_guard().await;
+    ts::reset(9_000);
+    rl_config!(
+        enabled: true,
+        edits_per_minute: 60,
+        edit_burst: 2,
+    );
+
+    const CHAT: ChatId = ChatId(-100_333);
+    ts::mark_forum(CHAT);
+    ts::burn_bucket(CHAT, ts::BucketKind::Edits, 2, 1.0);
+
+    let mut server = mockito::Server::new_async().await;
+    let delivered = server
+        .mock("POST", "/botTESTTOKEN/editMessageText")
+        .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+            "chat_id": -100333,
+            "message_id": 14,
+            "text": "<b>Plan Final</b>",
+            "reply_markup": {
+                "inline_keyboard": [[{"text": "Execute", "callback_data": "plan:exec"}]]
+            }
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"ok":true,"result":true}"#)
+        .expect_at_least(1)
+        .expect_at_most(8)
+        .create_async()
+        .await;
+
+    let bot = Bot::with_client(
+        "TESTTOKEN",
+        reqwest_teloxide::Client::builder().build().unwrap(),
+    )
+    .set_api_url(server.url().parse().unwrap());
+
+    let kb = serde_json::json!({
+        "inline_keyboard": [[{"text": "Execute", "callback_data": "plan:exec"}]]
+    });
+    assert!(
+        !governor::edit_admission(
+            &bot,
+            CHAT,
+            MessageId(14),
+            governor::EditClass::Final,
+            governor::EditPayload::classic_html_kb("<b>Plan Final</b>", Some(kb)),
+        )
+        .await,
+        "starved bucket queues the final"
+    );
+    assert_eq!(ts::snapshot(CHAT).unwrap().finals_pending, 1);
+
+    wait_for_finals_drain(CHAT, "classic-html-kb").await;
 
     delivered.assert();
     let snap = ts::snapshot(CHAT).unwrap();
