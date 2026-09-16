@@ -989,7 +989,7 @@ pub(crate) async fn bake_delivery_target(
             return Ok(raw.to_string());
         };
         if let Ok(u) = uuid::Uuid::parse_str(id_str) {
-            return Ok(format!("oc://session/{u}"));
+            return Ok(format!("session:{u}"));
         }
         if let Some(sc) = &context.service_context {
             let service = crate::services::SessionService::new(sc.clone());
@@ -1006,11 +1006,11 @@ pub(crate) async fn bake_delivery_target(
                 let resolved =
                     crate::cli::session_resolve::resolve_one_by_prefix(&sessions, id_str);
                 if let Ok(session) = resolved {
-                    return Ok(format!("oc://session/{session}"));
+                    return Ok(format!("session:{session}"));
                 }
             }
         }
-        return Ok(format!("oc://session/{id_str}"));
+        return Ok(format!("session:{id_str}"));
     }
 
     if !is_target_url(raw) {
