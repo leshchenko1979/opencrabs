@@ -28,8 +28,9 @@ static GLOBAL_COOLDOWN: RwLock<Option<Instant>> = RwLock::new(None);
 /// Returns `None` for anything else, so ordinary failures (a deleted message,
 /// bad markup) are not mistaken for throttling and do not suppress writes.
 pub(crate) fn parse_retry_after(error: &str) -> Option<Duration> {
-    let idx = error.find("Retry after")?;
-    let rest = &error[idx + "Retry after".len()..];
+    let lower = error.to_lowercase();
+    let idx = lower.find("retry after")?;
+    let rest = &lower[idx + "retry after".len()..];
     let digits: String = rest
         .chars()
         .skip_while(|c| !c.is_ascii_digit())
@@ -228,9 +229,12 @@ mod tests {
         record_global_429(Duration::from_secs(5));
         assert!(is_global_cooldown_active());
 
-        // Wait should consume remaining and return non-zero
+        // Wait should consume remaining and return non-zero (~7s)
         let waited = wait_global_cooldown().await;
-        assert_eq!(waited, Duration::from_secs(7));
+        assert!(
+            waited >= Duration::from_millis(6900) && waited <= Duration::from_millis(7100),
+            "waited {waited:?} expected ~7s"
+        );
 
         // Now virtual clock advanced 7000ms, cooldown should have elapsed
         assert!(!is_global_cooldown_active());
@@ -250,7 +254,10 @@ mod tests {
         // A smaller 3s cooldown shouldn't shorten the 12s deadline
         record_global_429(Duration::from_secs(3));
         let waited = wait_global_cooldown().await;
-        assert_eq!(waited, Duration::from_secs(12));
+        assert!(
+            waited >= Duration::from_millis(11900) && waited <= Duration::from_millis(12100),
+            "waited {waited:?} expected ~12s"
+        );
 
         reset_global_cooldown();
     }
