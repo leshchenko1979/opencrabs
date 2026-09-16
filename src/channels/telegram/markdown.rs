@@ -5,6 +5,8 @@
 //! only visibility widened to pub(crate) so the handler glob re-export
 //! keeps every existing call site and test import stable).
 
+use std::borrow::Cow;
+
 use crate::config::Config;
 
 /// Convert simple markdown to Telegram HTML: `**bold**`/`*bold*`, `` `code` ``,
@@ -21,6 +23,8 @@ use crate::config::Config;
 /// pair around each `**` — which Telegram rejected, dropping the whole message
 /// to plain text with the raw tags showing.
 pub(crate) fn md_to_html(s: &str) -> String {
+    let decoded = decode_named_entities(s);
+    let s = decoded.as_ref();
     fn esc(s: &str) -> String {
         s.replace('&', "&amp;")
             .replace('<', "&lt;")
@@ -159,6 +163,8 @@ pub(crate) fn strip_html_tags(html: &str) -> String {
 /// `prefers_rich_render`. The legacy plan detector below handles
 /// old-format text that doesn't trigger rich detection.
 pub(crate) fn markdown_to_telegram_html(text: &str) -> String {
+    let decoded = decode_named_entities(text);
+    let text = decoded.as_ref();
     // Re-expand a table the model collapsed onto one line (#690) so it is
     // detected below and rendered as a grid instead of raw pipes. Idempotent, so
     // callers that already reflowed (delivery) are unaffected; this catches the
@@ -281,6 +287,154 @@ pub(crate) fn escape_html(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Decode standard named HTML entities to their direct Unicode representations
+/// before Markdown / Rich AST parsing (#258).
+///
+/// Telegram's Rich and HTML message parsers only recognize core XML entities
+/// (`&lt;`, `&gt;`, `&amp;`, `&quot;`). Standard named HTML entities like `&rarr;`,
+/// `&bull;`, `&mdash;`, `&hellip;`, `&check;`, or `&cross;` fail to decode in Telegram
+/// and render literally as raw entity strings.
+///
+/// This function transforms standard named HTML entities into Unicode glyphs while
+/// strictly preserving:
+/// - XML core entities (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`)
+/// - Numeric character references (`&#123;`, `&#x1F600;`, etc.)
+/// - Unknown / unmapped entities and unclosed ampersands (e.g. `AT&T`)
+pub(crate) fn decode_named_entities(input: &str) -> Cow<'_, str> {
+    if !input.contains('&') {
+        return Cow::Borrowed(input);
+    }
+
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    let mut out = String::new();
+    let mut last_copied = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'&' {
+            let start = i + 1;
+            let max_end = (start + 12).min(bytes.len());
+            let mut semi_pos = None;
+            for (idx, &b) in bytes[start..max_end].iter().enumerate() {
+                if b == b';' {
+                    semi_pos = Some(start + idx);
+                    break;
+                }
+                if !b.is_ascii_alphanumeric() && b != b'#' {
+                    break;
+                }
+            }
+
+            if let Some(semi) = semi_pos {
+                let name = &input[start..semi];
+                let is_syntax_entity = name.starts_with('#')
+                    || name == "lt"
+                    || name == "gt"
+                    || name == "amp"
+                    || name == "quot"
+                    || name == "apos";
+
+                if let Some(replacement) = (!is_syntax_entity)
+                    .then(|| map_named_entity(name))
+                    .flatten()
+                {
+                    if out.is_empty() {
+                        out.reserve(input.len());
+                    }
+                    out.push_str(&input[last_copied..i]);
+                    out.push_str(replacement);
+                    i = semi + 1;
+                    last_copied = i;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    if out.is_empty() {
+        Cow::Borrowed(input)
+    } else {
+        out.push_str(&input[last_copied..]);
+        Cow::Owned(out)
+    }
+}
+
+fn map_named_entity(name: &str) -> Option<&'static str> {
+    match name {
+        // Arrows
+        "rarr" => Some("→"),
+        "larr" => Some("←"),
+        "uarr" => Some("↑"),
+        "darr" => Some("↓"),
+        "rArr" => Some("⇒"),
+        "lArr" => Some("⇐"),
+        "uArr" => Some("⇑"),
+        "dArr" => Some("⇓"),
+        "harr" => Some("↔"),
+        "hArr" => Some("⇔"),
+
+        // Punctuation, Bullets & Dashes
+        "bull" => Some("•"),
+        "middot" => Some("·"),
+        "mdash" => Some("—"),
+        "ndash" => Some("–"),
+        "hellip" => Some("…"),
+        "prime" => Some("′"),
+        "Prime" => Some("″"),
+        "lsquo" => Some("‘"),
+        "rsquo" => Some("’"),
+        "ldquo" => Some("“"),
+        "rdquo" => Some("”"),
+        "laquo" => Some("«"),
+        "raquo" => Some("»"),
+        "para" => Some("¶"),
+        "sect" => Some("§"),
+        "dagger" => Some("†"),
+        "Dagger" => Some("‡"),
+
+        // Math & Comparison
+        "plusmn" => Some("±"),
+        "times" => Some("×"),
+        "divide" => Some("÷"),
+        "ne" => Some("≠"),
+        "le" => Some("≤"),
+        "ge" => Some("≥"),
+        "asymp" => Some("≈"),
+        "approx" => Some("≈"),
+        "equiv" => Some("≡"),
+        "infin" => Some("∞"),
+        "radic" => Some("√"),
+        "sum" => Some("∑"),
+        "prod" => Some("∏"),
+        "part" => Some("∂"),
+        "int" => Some("∫"),
+        "deg" => Some("°"),
+        "micro" => Some("µ"),
+        "permil" => Some("‰"),
+
+        // Marks & Symbols
+        "check" | "checkmark" => Some("✓"),
+        "cross" => Some("✗"),
+        "copy" => Some("©"),
+        "reg" => Some("®"),
+        "trade" => Some("™"),
+        "hearts" => Some("♥"),
+        "diams" => Some("♦"),
+        "clubs" => Some("♣"),
+        "spades" => Some("♠"),
+        "star" | "starf" => Some("★"),
+
+        // Spacing
+        "nbsp" => Some("\u{00A0}"),
+        "thinsp" => Some("\u{2009}"),
+        "ensp" => Some("\u{2002}"),
+        "emsp" => Some("\u{2003}"),
+
+        _ => None,
+    }
+}
+
 /// Apply inline formatting: `code`, **bold**, *italic*, _italic_, ~~strikethrough~~, [text](url)
 pub(crate) fn format_inline(text: &str) -> String {
     // First pass: convert markdown links [text](url) → <a href="url">text</a>
@@ -334,7 +488,11 @@ pub(crate) fn format_inline(text: &str) -> String {
         } else if chars[i] == '_' {
             // _italic_ — only match if not part of a word (e.g. my_var should stay)
             let prev_alnum = i > 0 && chars[i - 1].is_alphanumeric();
-            if !prev_alnum && let Some(end) = chars[i + 1..].iter().position(|&c| c == '_') {
+            if let Some(end) = chars[i + 1..]
+                .iter()
+                .position(|&c| c == '_')
+                .filter(|_| !prev_alnum)
+            {
                 let next_alnum =
                     i + 1 + end + 1 < chars.len() && chars[i + 1 + end + 1].is_alphanumeric();
                 if !next_alnum && end > 0 {
