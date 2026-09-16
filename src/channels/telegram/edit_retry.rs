@@ -142,8 +142,7 @@ pub fn edit_text_ui(
             chat_id,
             message_id,
             super::governor::EditClass::Interactive,
-            String::new(),
-            false,
+            super::governor::EditPayload::empty(),
         )
         .await;
 

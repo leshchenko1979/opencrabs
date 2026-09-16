@@ -419,8 +419,7 @@ pub(crate) fn spawn_edit_loop(
                                     chat,
                                     mid,
                                     super::governor::EditClass::BrainPreview,
-                                    display.clone(),
-                                    false,
+                                    super::governor::EditPayload::classic_html(display.clone()),
                                 )
                                 .await;
                                 if admitted
