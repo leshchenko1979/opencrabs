@@ -194,6 +194,24 @@ fn test_alert_formatting_and_length_truncation() {
 }
 
 #[test]
+fn test_command_catalog_overflow_alert_formatting() {
+    let problem = ConfigProblem {
+        kind: ConfigProblemKind::CommandCatalogOverflow {
+            count: 65,
+            raw_chars: 5200,
+        },
+        severity: Severity::Warning,
+        remediation: "Keep skill descriptions concise".into(),
+    };
+
+    let alert = format_config_alert(&[problem], Some("ops"));
+    assert!(alert.contains("Command & Skill Catalog Overflow"));
+    assert!(alert.contains("65 commands"));
+    assert!(alert.contains("5200 total raw characters"));
+    assert!(alert.contains("Keep skill descriptions concise"));
+}
+
+#[test]
 fn test_alert_deduplication_lifecycle() {
     let state = ConfigAlertState::new();
 

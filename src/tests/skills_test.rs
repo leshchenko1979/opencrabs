@@ -1,7 +1,7 @@
 //! Tests for the skill loader — frontmatter parsing, built-in registry,
 //! and user-directory overlay.
 
-use crate::brain::skills::{load_all_skills, resolve_skill, Skill, SkillSource};
+use crate::brain::skills::{Skill, SkillSource, load_all_skills, resolve_skill};
 
 #[test]
 fn parses_minimal_frontmatter() {
@@ -156,6 +156,30 @@ fn review_gate_defaults_false_and_prompt_is_untouched() {
         );
         assert_eq!(skill.prompt_body(), "Body.");
     }
+}
+
+#[test]
+fn parses_folded_block_scalar_description() {
+    let raw = "---\nname: folded-skill\ndescription: >\n  This is line one.\n  This is line two.\n\n  This is paragraph two.\n---\nBody.\n";
+    let skill = Skill::parse("folded-skill", raw, SkillSource::Builtin).unwrap();
+    assert_eq!(
+        skill.description,
+        "This is line one. This is line two.\n\nThis is paragraph two."
+    );
+}
+
+#[test]
+fn parses_literal_block_scalar_description() {
+    let raw = "---\nname: literal-skill\ndescription: |\n  Line one\n  Line two\n---\nBody.\n";
+    let skill = Skill::parse("literal-skill", raw, SkillSource::Builtin).unwrap();
+    assert_eq!(skill.description, "Line one\nLine two");
+}
+
+#[test]
+fn parses_folded_strip_indicator_scalar_description() {
+    let raw = "---\nname: folded-strip\ndescription: >-\n  First sentence.\n  Second sentence.\n---\nBody.\n";
+    let skill = Skill::parse("folded-strip", raw, SkillSource::Builtin).unwrap();
+    assert_eq!(skill.description, "First sentence. Second sentence.");
 }
 
 #[test]
