@@ -122,6 +122,14 @@ impl TelegramAgent {
                         .set_menu_skills_sig(super::menu_refresh::skills_signature())
                         .await;
 
+                    // Proactive DM config problems audit (#263)
+                    super::config_alerts::run_proactive_config_audit(
+                        &bot,
+                        &cfg,
+                        &self.telegram_state,
+                    )
+                    .await;
+
                     // One-time: organize any pre-subdir flat attachments under
                     // channel_attachments/telegram/ (#513). Idempotent.
                     super::media::migrate_flat_channel_attachments();
@@ -130,6 +138,24 @@ impl TelegramAgent {
                     tracing::warn!("Telegram: token validation failed: {}. Bot not started.", e);
                     return;
                 }
+            }
+
+            // #263: watch for live config reloads to proactively notify owner in DM
+            {
+                let mut watcher_rx = self.config_rx.clone();
+                let watcher_bot = bot.clone();
+                let watcher_state = self.telegram_state.clone();
+                tokio::spawn(async move {
+                    while watcher_rx.changed().await.is_ok() {
+                        let new_cfg = watcher_rx.borrow().clone();
+                        super::config_alerts::run_proactive_config_audit(
+                            &watcher_bot,
+                            &new_cfg,
+                            &watcher_state,
+                        )
+                        .await;
+                    }
+                });
             }
 
             let agent = self.agent_service.clone();
@@ -2353,10 +2379,8 @@ impl TelegramAgent {
                             let cfg = deps.config_rx.borrow().clone();
                             let state = deps.telegram_state.clone();
                             tokio::spawn(async move {
-                                super::menu_auto::maybe_auto_register(
-                                    &bot, chat_id, &cfg, &state,
-                                )
-                                .await;
+                                super::menu_auto::maybe_auto_register(&bot, chat_id, &cfg, &state)
+                                    .await;
                             });
                         }
 

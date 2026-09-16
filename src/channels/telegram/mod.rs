@@ -5,6 +5,7 @@
 
 pub(crate) mod agent;
 pub(crate) mod commands_tg;
+pub mod config_alerts;
 pub(crate) mod cowork;
 pub(crate) mod delivery;
 pub(crate) mod edit_retry;
