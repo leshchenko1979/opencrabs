@@ -20,8 +20,8 @@
 
 use std::time::Duration;
 
-use teloxide::Bot;
 use teloxide::types::{ChatId, MessageId};
+use teloxide::Bot;
 
 use crate::channels::telegram::governor;
 use crate::channels::telegram::governor::test_support as ts;
@@ -831,7 +831,7 @@ async fn queued_classic_html_final_drains_with_keyboard() {
 
     let mut server = mockito::Server::new_async().await;
     let delivered = server
-        .mock("POST", "/botTESTTOKEN/editMessageText")
+        .mock("POST", "/botTESTTOKEN/EditMessageText")
         .match_body(mockito::Matcher::PartialJson(serde_json::json!({
             "chat_id": -100333,
             "message_id": 14,
@@ -842,7 +842,9 @@ async fn queued_classic_html_final_drains_with_keyboard() {
         })))
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body(r#"{"ok":true,"result":true}"#)
+        .with_body(
+            r#"{"ok":true,"result":{"message_id":14,"date":1756166400,"chat":{"id":-100333,"title":"gates","type":"supergroup"},"text":"Plan Final"}}"#,
+        )
         .expect_at_least(1)
         .expect_at_most(8)
         .create_async()
