@@ -1381,11 +1381,6 @@ pub(crate) mod test_support {
         CLOCK_OFFSET_MS.store(offset_ms, Ordering::Relaxed);
     }
 
-    /// Reset the global pacer singleton.
-    pub(crate) fn reset_global_pacer() {
-        *GLOBAL_PACER.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    }
-
     /// Advance the virtual clock: bucket refills, hold budgets and drain
     /// cadence observe the jump on their next `gate_now` evaluation. No real
     /// sleeping anywhere — mocked passage of time per the #1211 test brief.
