@@ -135,7 +135,7 @@ pub(crate) fn clear_skipped_placeholders() -> Result<usize, String> {
 
     let conn = rusqlite::Connection::open(&db_path)
         .map_err(|e| format!("Failed to open store for placeholder sweep: {e}"))?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))
+    conn.busy_timeout(std::time::Duration::from_secs(30))
         .map_err(|e| format!("Failed to set busy timeout: {e}"))?;
 
     // Drop the vector blobs first: content_vectors is what identifies them, so

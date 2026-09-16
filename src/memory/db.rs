@@ -12,7 +12,7 @@
 //! wild was created by qmd, and `vector_search.rs` reads these tables
 //! directly, so the DDL below IS the migration story: there isn't one.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -91,7 +91,7 @@ impl Store {
         // WAL lets `vector_search` read on its own read-only connection
         // while this one writes. The busy timeout covers the rare writer/
         // snapshot overlap without changing any observable behavior.
-        conn.busy_timeout(std::time::Duration::from_secs(5))
+        conn.busy_timeout(std::time::Duration::from_secs(30))
             .map_err(|e| format!("Failed to set busy timeout: {e}"))?;
 
         let mut store = Self {
