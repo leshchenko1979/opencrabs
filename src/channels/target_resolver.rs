@@ -63,7 +63,7 @@ impl ResolvedTarget {
     /// WITHOUT `:1` (#1319): the scoping key never becomes a wire address.
     pub fn deliver_to(&self) -> String {
         match &self.destination {
-            TargetDestination::Session(_) => String::new(),
+            TargetDestination::Session(u) => format!("session:{u}"),
             TargetDestination::Channel {
                 channel,
                 chat_id,
@@ -567,5 +567,15 @@ mod tests {
         );
         assert_eq!(extract_session_target("telegram:123456"), None);
         assert_eq!(extract_session_target("oc://telegram/123456"), None);
+    }
+
+    #[test]
+    fn session_target_deliver_to_format() {
+        let u = Uuid::new_v4();
+        let rt = ResolvedTarget {
+            session: Some(u),
+            destination: TargetDestination::Session(u),
+        };
+        assert_eq!(rt.deliver_to(), format!("session:{u}"));
     }
 }

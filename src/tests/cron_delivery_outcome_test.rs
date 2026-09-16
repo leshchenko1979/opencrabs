@@ -134,6 +134,14 @@ async fn delivery_failure_never_overwrites_execution_error() {
 }
 
 #[test]
+fn session_delivery_target_passes_validation() {
+    assert!(validate_delivery_target("session:12345678-1234-1234-1234-123456789abc").is_ok());
+    assert!(validate_delivery_target("oc://session/12345678-1234-1234-1234-123456789abc").is_ok());
+    assert!(validate_delivery_target("session:").is_err());
+    assert!(validate_delivery_target("oc://session/").is_err());
+}
+
+#[test]
 fn delivery_target_validation_rejects_silent_drop_shapes() {
     // Unknown channel → every run would drop.
     assert!(validate_delivery_target("carrier:pigeon").is_err());
