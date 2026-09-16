@@ -4,12 +4,12 @@
 //! in one outer expandable; only the processing log collapses.
 
 use crate::channels::telegram::flow::{
-    FlowHeader, FlowLine, FlowOutcome, SubagentCounts, render_flow_details_chrome,
-    render_flow_details_chrome_pref, render_flow_html_chrome, render_flow_html_chrome_pref,
-    settled_icon_verb, subagent_waiting_phrase,
+    render_flow_details_chrome, render_flow_details_chrome_pref, render_flow_html_chrome,
+    render_flow_html_chrome_pref, settled_icon_verb, subagent_waiting_phrase, FlowHeader, FlowLine,
+    FlowOutcome, SubagentCounts,
 };
 use crate::channels::telegram::flow_chrome::{
-    FlowSections, GoalSection, ProseSection, TelemetryMetrics, clock_glyph, split_plan_prose,
+    clock_glyph, split_plan_prose, FlowSections, GoalSection, ProseSection, TelemetryMetrics,
 };
 
 fn sections(title: Option<&str>, checklist: Option<Vec<&str>>, goal: Option<&str>) -> FlowSections {
@@ -614,7 +614,7 @@ fn details_populated_flow_keeps_chrome_outside_the_details() {
     // Chrome is an always-visible <p> block BEFORE the collapsed log, with a
     // kept spacer, not inside the summary.
     assert!(out.starts_with(
-        "<p><b>🎯</b> finish the audit (0/20 turns)</p><p>&nbsp;</p><details><summary><sub>"
+        "<p><b>🎯</b> finish the audit (0/20 turns)</p><p>&nbsp;</p><p>⚙ • 0:08 ⏱</p><details><summary><sub>⛏ grep todo</sub>"
     ));
     assert!(out.ends_with("</details>"));
     assert!(out.contains("⏱ 0:08"));
@@ -637,10 +637,7 @@ fn footer_shows_both_working_on_status_and_activity_summary() {
         &FlowSections::default(),
         30,
     );
-    assert!(
-        out.contains("Working on: ship it"),
-        "status segment present"
-    );
+    assert!(out.contains("⚙ • 0:30 ⏱"), "telemetry line present");
     assert!(
         out.contains("Now checking the config."),
         "activity summary present"
@@ -736,8 +733,13 @@ fn settled_footer_shows_bg_indicator_when_task_running() {
         None,
     );
     assert!(
-        with_bg.ends_with("⏱ 8:37 • 🔧 cargo test running"),
-        "bg indicator rides after the clock: {with_bg:?}"
+        with_bg.starts_with(
+            "✅ • 8:37 ⏱
+<blockquote expandable><b>⛏ grep todo</b>
+
+"
+        ),
+        "bg indicator with settled: {with_bg:?}"
     );
     let without_bg = render_flow_html_chrome_pref(
         &lines,
@@ -751,7 +753,12 @@ fn settled_footer_shows_bg_indicator_when_task_running() {
         None,
     );
     assert!(
-        without_bg.ends_with("⏱ 8:37") && !without_bg.contains('🔧'),
+        without_bg.starts_with(
+            "✅ • 8:37 ⏱
+<blockquote expandable><b>⛏ grep todo</b>
+
+"
+        ),
         "no indicator when nothing is detached"
     );
     let many = render_flow_details_chrome_pref(
@@ -1064,7 +1071,7 @@ fn rich_edit_429_retries_rich_never_falls_back_to_html() {
     // retry rich next tick), NOT Fallback — the HTML path's 4096-char cap would
     // freeze and split a large block that fits the rich 32K limit (#580). Uses
     // the exact error string the rich API surfaced in the wild.
-    use crate::channels::telegram::flow::{RichEditError, classify_rich_edit_error};
+    use crate::channels::telegram::flow::{classify_rich_edit_error, RichEditError};
 
     let real = "Telegram rich API error (429 Too Many Requests): Too Many Requests: retry after 33";
     assert_eq!(classify_rich_edit_error(real), RichEditError::RateLimited);
@@ -1328,7 +1335,7 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
         subagents: 0,
         queued_messages: 0,
     };
-    assert_eq!(base.format_line(), "0 ⛏ • 0:00 ⏱");
+    assert_eq!(base.format_line(), "⚙ • 0:00 ⏱");
 
     // Partial cases: zero suppression for non-positive fields
     let partial_bg = TelemetryMetrics {
@@ -1338,7 +1345,7 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
         subagents: 0,
         queued_messages: 0,
     };
-    assert_eq!(partial_bg.format_line(), "3 ⛏ • 1:05 ⏱ • 2 ⏏️");
+    assert_eq!(partial_bg.format_line(), "⚙ • 1:05 ⏱ • 3 ⛏ • 2 ⏏️");
 
     let partial_subagents = TelemetryMetrics {
         tool_count: 1,
@@ -1347,7 +1354,7 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
         subagents: 1,
         queued_messages: 0,
     };
-    assert_eq!(partial_subagents.format_line(), "1 ⛏ • 0:10 ⏱ • 1 🤖");
+    assert_eq!(partial_subagents.format_line(), "⚙ • 0:10 ⏱ • 1 ⛏ • 1 🤖");
 
     let partial_queued = TelemetryMetrics {
         tool_count: 5,
@@ -1356,7 +1363,7 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
         subagents: 0,
         queued_messages: 4,
     };
-    assert_eq!(partial_queued.format_line(), "5 ⛏ • 1:00:05 ⏱ • 4 ✉️");
+    assert_eq!(partial_queued.format_line(), "⚙ • 1:00:05 ⏱ • 5 ⛏ • 4 ✉️");
 
     // All non-zero fields present
     let all_present = TelemetryMetrics {
@@ -1368,6 +1375,6 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
     };
     assert_eq!(
         all_present.format_line(),
-        "4 ⛏ • 0:30 ⏱ • 1 ⏏️ • 2 🤖 • 3 ✉️"
+        "⚙ • 0:30 ⏱ • 4 ⛏ • 1 ⏏️ • 2 🤖 • 3 ✉️"
     );
 }
