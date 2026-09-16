@@ -1005,8 +1005,23 @@ fn test_tool_class_icons() {
         ToolClass::from_tool_name("load_brain_file").class_icon(),
         "🧠"
     );
+    assert_eq!(
+        ToolClass::from_tool_name("memory_search").class_icon(),
+        "🧠"
+    );
+    assert_eq!(
+        ToolClass::from_tool_name("session_search").class_icon(),
+        "🧠"
+    );
+    assert_eq!(
+        ToolClass::from_tool_name("channel_search").class_icon(),
+        "🧠"
+    );
     assert_eq!(ToolClass::from_tool_name("http_request").class_icon(), "🌐");
     assert_eq!(ToolClass::from_tool_name("cron_manage").class_icon(), "⏰");
+    assert_eq!(ToolClass::from_tool_name("web_search").class_icon(), "🌐");
+    assert_eq!(ToolClass::from_tool_name("exa_search").class_icon(), "🌐");
+    assert_eq!(ToolClass::from_tool_name("brave_search").class_icon(), "🌐");
 
     // Completion status mapping: running/success uses class icon, failure uses ❌
     assert_eq!(tool_entry_icon("read_file", None), "📄");
