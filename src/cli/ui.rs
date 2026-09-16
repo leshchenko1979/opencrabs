@@ -453,11 +453,12 @@ async fn cmd_chat_inner(
     crate::config::MemoryConfig::auto_apply_vps_defaults();
 
     // Index existing memory files and warm up embedding engine in the background.
-    // Delay startup to avoid concurrent FFI access with resumed agent tasks
-    // and channel connections — llama-cpp GGML can segfault under contention.
+    // Delay startup (60s warmup) to avoid concurrent SQLite write contention and
+    // FFI access with resumed agent tasks, notify queues, and channel connections
+    // — llama-cpp GGML can segfault under contention.
     // When vector_enabled = false, only FTS reindex runs (no model download).
     tokio::spawn(async {
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         match crate::memory::get_store() {
             Ok(store) => {
                 match crate::memory::reindex(store).await {
