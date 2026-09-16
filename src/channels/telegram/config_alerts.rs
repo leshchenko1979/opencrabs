@@ -30,6 +30,7 @@ pub enum ConfigProblemKind {
     EmbeddingKeyMissing { provider: String },
     IgnoredOrTypoConfigKeys(Vec<String>),
     NoValidBotOwnerConfigured,
+    CommandCatalogOverflow { count: usize, raw_chars: usize },
 }
 
 impl ConfigProblemKind {
@@ -46,6 +47,7 @@ impl ConfigProblemKind {
             Self::EmbeddingKeyMissing { .. } => "Memory Embedding API Key Missing",
             Self::IgnoredOrTypoConfigKeys(_) => "Unrecognized / Typo Config Keys",
             Self::NoValidBotOwnerConfigured => "No Valid Telegram bot_owner Configured",
+            Self::CommandCatalogOverflow { .. } => "Command & Skill Catalog Overflow",
         }
     }
 
@@ -75,6 +77,11 @@ impl ConfigProblemKind {
             }
             Self::NoValidBotOwnerConfigured => {
                 "No numeric Telegram user ID was found in channels.telegram.bot_owner or allowed_users.".into()
+            }
+            Self::CommandCatalogOverflow { count, raw_chars } => {
+                format!(
+                    "Command & skill catalog has {count} commands ({raw_chars} total raw characters), exceeding safe Telegram menu limits (100 cmds / 4800 chars). Descriptions are being adaptively truncated."
+                )
             }
         }
     }
@@ -371,6 +378,37 @@ pub fn audit_config_problems(
                 kind: ConfigProblemKind::NoValidBotOwnerConfigured,
                 severity: Severity::Warning,
                 remediation: "Set a numeric Telegram user ID under channels.telegram.bot_owner in config.toml".into(),
+            });
+        }
+    }
+
+    // 9. Audit Command & Skill catalog payload limits
+    if config.channels.telegram.enabled {
+        let skills = crate::brain::skills::load_all_skills();
+        let brain_path = crate::brain::BrainLoader::resolve_path();
+        let loader = crate::brain::CommandLoader::from_brain_path(&brain_path);
+        let user_commands = loader.load();
+
+        // Built-ins (21 base commands) + user commands + skills
+        let total_count = 21 + user_commands.len() + skills.len();
+        let raw_chars: usize = user_commands
+            .iter()
+            .map(|c| c.name.len() + c.description.len())
+            .sum::<usize>()
+            + skills
+                .iter()
+                .map(|s| s.name.len() + s.description.len())
+                .sum::<usize>()
+            + 641; // Built-in names + descriptions char count
+
+        if total_count > 100 || raw_chars > 4800 {
+            problems.push(ConfigProblem {
+                kind: ConfigProblemKind::CommandCatalogOverflow {
+                    count: total_count,
+                    raw_chars,
+                },
+                severity: Severity::Warning,
+                remediation: "Review skill and custom command descriptions, keeping them concise to fit Telegram's menu payload limits.".into(),
             });
         }
     }

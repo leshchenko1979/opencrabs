@@ -163,63 +163,129 @@ impl Skill {
         let mut fm_globs: Vec<String> = Vec::new();
 
         // Open-key state: a top-level `key:` with no inline value opens a
-        // block list; subsequent indented `- item` lines belong to it.
-        // Modeled on directives.rs::field but re-implemented here — those
-        // helpers are private and return the wrong shape.
-        let mut open_key: Option<String> = None;
+        // block list or block scalar; subsequent indented lines belong to it.
+        // `open_key`: ("globs", is_scalar: false) or ("description", is_scalar: true, is_folded: bool).
+        enum OpenBlock {
+            List(String),
+            Scalar {
+                key: String,
+                folded: bool,
+                lines: Vec<String>,
+            },
+        }
+        let mut open_block: Option<OpenBlock> = None;
 
         for line in frontmatter.lines() {
             let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-
-            // Indented list item under an open block key.
-            let indent = line.len() - line.trim_start().len();
-            if indent > 0 && trimmed.starts_with('-') && open_key.as_deref() == Some("globs") {
-                let item = trimmed[1..].trim().trim_matches('"').trim_matches('\'');
-                if !item.is_empty() {
-                    fm_globs.push(item.to_string());
+            if trimmed.is_empty() {
+                if let Some(OpenBlock::Scalar { ref mut lines, .. }) = open_block {
+                    lines.push(String::new());
                 }
                 continue;
             }
-            if indent > 0 && trimmed.starts_with('-') {
-                continue;
-            }
-            // Indented non-list line (e.g. `globs: x/**` nested under
-            // `metadata:`) — belongs to a nested block, never to the
-            // top-level key set. Skip it and close any open block key:
-            // a nested region means the previous block list is over.
-            if indent > 0 {
-                open_key = None;
+            if trimmed.starts_with('#') {
                 continue;
             }
 
-            // Top-level key — closes any open block key.
-            open_key = None;
+            let indent = line.len() - line.trim_start().len();
+
+            // Indented line under an open block list.
+            if indent > 0 && trimmed.starts_with('-') {
+                if let Some(OpenBlock::List(ref k)) = open_block
+                    && k == "globs"
+                {
+                    let item = trimmed[1..].trim().trim_matches('"').trim_matches('\'');
+                    if !item.is_empty() {
+                        fm_globs.push(item.to_string());
+                    }
+                }
+                continue;
+            }
+
+            // Indented line under an open block scalar (e.g. `description: >` or `description: |`).
+            if indent > 0 {
+                if let Some(OpenBlock::Scalar { ref mut lines, .. }) = open_block {
+                    lines.push(line.trim().to_string());
+                    continue;
+                }
+                // Indented non-list line belonging to a nested block (e.g. metadata:).
+                // Close any open block key.
+                open_block = None;
+                continue;
+            }
+
+            // Top-level line (indent == 0) — flush any open block scalar first.
+            if let Some(OpenBlock::Scalar { key, folded, lines }) = open_block.take() {
+                let joined = if folded {
+                    // Folded style (>): lines joined with spaces, empty lines create paragraph breaks
+                    let mut paragraphs: Vec<String> = Vec::new();
+                    let mut cur_para: Vec<String> = Vec::new();
+                    for l in lines {
+                        if l.is_empty() {
+                            if !cur_para.is_empty() {
+                                paragraphs.push(cur_para.join(" "));
+                                cur_para.clear();
+                            }
+                        } else {
+                            cur_para.push(l);
+                        }
+                    }
+                    if !cur_para.is_empty() {
+                        paragraphs.push(cur_para.join(" "));
+                    }
+                    paragraphs.join("\n\n")
+                } else {
+                    // Literal style (|): lines joined with newlines
+                    lines.join("\n")
+                };
+                if key == "description" {
+                    fm_description = Some(joined.trim().to_string());
+                }
+            }
+            open_block = None;
 
             let Some((key, value)) = trimmed.split_once(':') else {
                 continue;
             };
             let key = key.trim();
             let value = value.trim();
-            // Inline value: strip quoting, then optional `[a, b]` flow form.
-            let value = value.trim_matches('"').trim_matches('\'');
 
             match key {
-                "name" => fm_name = Some(value.to_string()),
-                "description" => fm_description = Some(value.to_string()),
+                "name" => {
+                    let value = value.trim_matches('"').trim_matches('\'');
+                    fm_name = Some(value.to_string());
+                }
+                "description" => {
+                    let val_trimmed = value.trim_matches('"').trim_matches('\'').trim();
+                    if val_trimmed == ">" || val_trimmed == ">-" {
+                        open_block = Some(OpenBlock::Scalar {
+                            key: key.to_string(),
+                            folded: true,
+                            lines: Vec::new(),
+                        });
+                    } else if val_trimmed == "|" || val_trimmed == "|-" {
+                        open_block = Some(OpenBlock::Scalar {
+                            key: key.to_string(),
+                            folded: false,
+                            lines: Vec::new(),
+                        });
+                    } else {
+                        fm_description = Some(val_trimmed.to_string());
+                    }
+                }
                 "review_gate" => {
+                    let value = value.trim_matches('"').trim_matches('\'');
                     fm_review_gate = matches!(
                         value.to_ascii_lowercase().as_str(),
                         "true" | "yes" | "1" | "on"
                     );
                 }
                 "globs" => {
+                    let value = value.trim_matches('"').trim_matches('\'');
                     if value.is_empty() {
                         // Block list form: `globs:` with items on the
                         // following indented lines.
-                        open_key = Some(key.to_string());
+                        open_block = Some(OpenBlock::List(key.to_string()));
                     } else if let Some(inner) =
                         value.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
                     {
@@ -241,6 +307,33 @@ impl Skill {
                     }
                 }
                 _ => {} // unknown keys (incl. nested metadata blocks) ignored
+            }
+        }
+
+        // Flush any trailing open block scalar at end of frontmatter
+        if let Some(OpenBlock::Scalar { key, folded, lines }) = open_block.take() {
+            let joined = if folded {
+                let mut paragraphs: Vec<String> = Vec::new();
+                let mut cur_para: Vec<String> = Vec::new();
+                for l in lines {
+                    if l.is_empty() {
+                        if !cur_para.is_empty() {
+                            paragraphs.push(cur_para.join(" "));
+                            cur_para.clear();
+                        }
+                    } else {
+                        cur_para.push(l);
+                    }
+                }
+                if !cur_para.is_empty() {
+                    paragraphs.push(cur_para.join(" "));
+                }
+                paragraphs.join("\n\n")
+            } else {
+                lines.join("\n")
+            };
+            if key == "description" {
+                fm_description = Some(joined.trim().to_string());
             }
         }
 

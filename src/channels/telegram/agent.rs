@@ -3213,7 +3213,102 @@ async fn resolve_callback_session(
 /// entries and skills, names sanitized to Telegram's rules, deduped, capped
 /// at 100. Extracted from `register_bot_commands` so the solo-owner
 /// auto-registration path (`menu_auto`) publishes the exact same menu
-/// without config entries.
+/// Extract the first sentence or clause of a description, stripping markdown
+/// or bullet styling, and clean it up for compact Telegram menu rendering.
+pub(crate) fn clean_menu_description(desc: &str) -> String {
+    let flat = desc
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<&str>>()
+        .join(" ");
+
+    let trimmed = flat
+        .trim_start_matches(|c: char| c == '-' || c == '*' || c == '>' || c.is_whitespace())
+        .trim();
+
+    // Look for first sentence boundary (. followed by space, or period at end)
+    let first_sentence = if let Some(dot_pos) = trimmed.find(". ") {
+        &trimmed[..dot_pos]
+    } else if let Some(without_dot) = trimmed.strip_suffix('.') {
+        // If there's a period at the very end without trailing space, take the whole string minus period
+        without_dot
+    } else {
+        trimmed
+    };
+
+    let cleaned = first_sentence.trim();
+    if cleaned.is_empty() {
+        "Custom command".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+/// Budget a command catalog so its combined total character payload does not
+/// trigger Telegram's `BOT_COMMANDS_TOO_MUCH` error.
+///
+/// Telegram enforces an undocumented total payload limit across all command
+/// names and descriptions (typically ~5,200–5,750 characters total).
+///
+/// This function:
+/// 1. Dedups commands by sanitized name.
+/// 2. Cleans descriptions to their first sentence.
+/// 3. Computes the total text character count.
+/// 4. If total exceeds `max_budget` (default 4,800), calculates an adaptive
+///    per-item description limit and truncates items with ellipsis.
+pub(crate) fn budget_command_catalog(
+    mut commands: Vec<teloxide::types::BotCommand>,
+    max_budget: usize,
+) -> Vec<teloxide::types::BotCommand> {
+    // Dedup commands preserving order
+    let mut seen = std::collections::HashSet::new();
+    commands.retain(|c| seen.insert(c.command.clone()));
+
+    // Clean descriptions to concise first sentence
+    for c in &mut commands {
+        c.description = clean_menu_description(&c.description);
+    }
+
+    if commands.is_empty() {
+        return commands;
+    }
+
+    // Default per-item target cap for phone screen display: 50 characters
+    let target_cap = 50;
+    for c in &mut commands {
+        c.description = truncate_description(&c.description, target_cap);
+    }
+
+    let names_chars: usize = commands.iter().map(|c| c.command.chars().count()).sum();
+    let desc_chars: usize = commands.iter().map(|c| c.description.chars().count()).sum();
+    let total_chars = names_chars + desc_chars;
+
+    if total_chars > max_budget {
+        // Compute adaptive max description length so the full list fits
+        let available_for_descs = max_budget.saturating_sub(names_chars);
+        let adaptive_cap = (available_for_descs / commands.len()).max(8);
+
+        for c in &mut commands {
+            c.description = truncate_description(&c.description, adaptive_cap);
+        }
+    }
+
+    // Ensure no description is empty (Telegram rejects empty descriptions)
+    for c in &mut commands {
+        if c.description.trim().is_empty() {
+            c.description = "Command".to_string();
+        }
+    }
+
+    // Telegram hard limit: max 100 commands
+    commands.truncate(100);
+
+    commands
+}
+
+/// Collect all available bot commands across built-ins, commands.toml, and skills,
+/// budgeted and formatted for Telegram menu display.
 pub(crate) fn collect_command_catalog() -> Vec<teloxide::types::BotCommand> {
     use teloxide::types::BotCommand;
 
@@ -3266,8 +3361,7 @@ pub(crate) fn collect_command_catalog() -> Vec<teloxide::types::BotCommand> {
         if name.is_empty() {
             continue;
         }
-        let description = truncate_description(&cmd.description, 256);
-        commands.push(BotCommand::new(name, description));
+        commands.push(BotCommand::new(name, &cmd.description));
     }
 
     // Load skills and register them as commands.
@@ -3278,16 +3372,10 @@ pub(crate) fn collect_command_catalog() -> Vec<teloxide::types::BotCommand> {
         if name.is_empty() {
             continue;
         }
-        let description = truncate_description(&skill.description, 256);
-        commands.push(BotCommand::new(name, description));
+        commands.push(BotCommand::new(name, &skill.description));
     }
 
     // Normalize EVERY command name to Telegram's rules ([a-z0-9_], 1-32 chars).
-    // Telegram rejects the ENTIRE setMyCommands call if a single name is
-    // invalid, and it can't show hyphens, so the menu standard is the
-    // underscore form: `mission-control` → `mission_control`, consistent with
-    // every other multi-word command and skill. The canonical dash is kept in
-    // /help and accepted (alongside the underscore) by the dispatcher.
     for c in &mut commands {
         c.command = sanitize_command_name(&c.command);
     }
@@ -3434,13 +3522,47 @@ async fn register_scoped_menus(bot: &Bot, commands: Vec<teloxide::types::BotComm
     };
 
     let count = commands.len();
+    // Helper to send set_my_commands with a fallback retry on BOT_COMMANDS_TOO_MUCH
+    async fn set_commands_with_fallback<S>(
+        bot: &Bot,
+        cmds: &[BotCommand],
+        scope: S,
+        scope_name: &str,
+    ) -> Result<(), teloxide::RequestError>
+    where
+        S: Into<BotCommandScope> + Clone,
+    {
+        let res = bot
+            .set_my_commands(cmds.to_vec())
+            .scope(scope.clone().into())
+            .await;
+        if let Err(ref e) = res {
+            let err_str = e.to_string();
+            if err_str.contains("BOT_COMMANDS_TOO_MUCH") {
+                tracing::warn!(
+                    "Telegram: {scope_name} menu hit BOT_COMMANDS_TOO_MUCH, retrying with emergency budget (32 chars)"
+                );
+                let emergency_cmds = budget_command_catalog(cmds.to_vec(), 2500);
+                return bot
+                    .set_my_commands(emergency_cmds)
+                    .scope(scope.into())
+                    .await
+                    .map(|_| ());
+            }
+        }
+        res.map(|_| ())
+    }
+
     // Owner in DMs.
-    if let Err(e) = bot
-        .set_my_commands(commands.clone())
-        .scope(BotCommandScope::Chat {
+    if let Err(e) = set_commands_with_fallback(
+        bot,
+        &commands,
+        BotCommandScope::Chat {
             chat_id: Recipient::Id(ChatId(owner_id as i64)),
-        })
-        .await
+        },
+        "owner DM",
+    )
+    .await
     {
         tracing::warn!("Telegram: failed to set owner DM menu: {e}");
     }
@@ -3450,13 +3572,16 @@ async fn register_scoped_menus(bot: &Bot, commands: Vec<teloxide::types::BotComm
             continue;
         };
         // Owner inside the group.
-        if let Err(e) = bot
-            .set_my_commands(commands.clone())
-            .scope(BotCommandScope::ChatMember {
+        if let Err(e) = set_commands_with_fallback(
+            bot,
+            &commands,
+            BotCommandScope::ChatMember {
                 chat_id: Recipient::Id(ChatId(chat)),
                 user_id: UserId(owner_id),
-            })
-            .await
+            },
+            &format!("owner group {group_id}"),
+        )
+        .await
         {
             // A basic group that upgraded to a supergroup has a new chat id, and
             // every call against the old one fails from then on. Follow it once
