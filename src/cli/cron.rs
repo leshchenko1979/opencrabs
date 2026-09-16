@@ -1,8 +1,8 @@
 //! Cron CLI subcommands — add, list, remove, enable, disable.
 
 use super::args::CronCommands;
-use crate::db::models::CronJob;
 use crate::db::CronJobRepository;
+use crate::db::models::CronJob;
 use anyhow::Result;
 
 /// Cron job management CLI handler
@@ -115,6 +115,18 @@ async fn cmd_add(
     if (repo.find_by_name(&name).await?).is_some() {
         anyhow::bail!("A cron job named '{name}' already exists");
     }
+
+    let deliver_to = if let Some(ref d) = deliver_to {
+        if crate::channels::target_resolver::is_session_target(d) {
+            let id_str =
+                crate::channels::target_resolver::extract_session_target(d).unwrap_or(d.as_str());
+            Some(format!("session:{id_str}"))
+        } else {
+            deliver_to
+        }
+    } else {
+        deliver_to
+    };
 
     let mut job = CronJob::new_with_trigger(
         name.clone(),
