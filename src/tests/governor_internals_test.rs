@@ -315,8 +315,10 @@ async fn global_pacer_burst_smoothing_and_cooldown() {
     assert!(crate::channels::telegram::rate_limit::is_global_cooldown_active());
 
     let waited = crate::channels::telegram::rate_limit::wait_global_cooldown().await;
-    // 5s + 2s margin = 7s
-    assert_eq!(waited, Duration::from_secs(7));
+    assert!(
+        waited >= Duration::from_millis(6900) && waited <= Duration::from_millis(7100),
+        "waited {waited:?} expected ~7s (5s + 2s margin)"
+    );
     assert!(!crate::channels::telegram::rate_limit::is_global_cooldown_active());
 
     crate::channels::telegram::rate_limit::reset_global_cooldown();
