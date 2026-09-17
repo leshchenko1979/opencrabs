@@ -160,11 +160,19 @@ jobs:
         if: ${{ !inputs.fix && !inputs.lockregen && !inputs.fast }}
         # v0.4.23 law: the all-features test gate. Flags mirror upstream's
         # `test` job exactly (profile ci + mold linker).
+        #
+        # sccache REMOVED from THIS leg 2026-09-17 (HQ; owner escalation on
+        # "a lot of recent jobs have concurrency problems"). Evidence: after
+        # carrier a023cf49f (20:43:44Z) added RUSTC_WRAPPER=sccache here, EVERY
+        # `Run tests` run died with SIGTERM exit 143 mid-link (post-steps
+        # skipped, zero compiler/test errors) — while the 11 runs before that
+        # commit had zero 143s. The all-features thin-LTO test link under
+        # sccache exhausts the hosted runner. sccache STAYS on the Clippy leg
+        # (check-only; never died). Do NOT re-add here without a 143-free GREEN
+        # gate on this exact ref.
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-          SCCACHE_GHA_ENABLED: "true"
-          RUSTC_WRAPPER: "sccache"
         run: cargo test --locked --profile ci --all-features --verbose
 
       - name: Apply cargo fmt (fix mode)
