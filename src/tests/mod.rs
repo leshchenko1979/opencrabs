@@ -442,6 +442,7 @@ pub mod telegram_mentions_other_bot_test;
 pub mod telegram_menu_scope_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_queued_origin_test;
+pub mod telegram_queued_tag_test;
 pub mod telegram_reaction_routing_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_session_gate_test;

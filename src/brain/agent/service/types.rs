@@ -57,6 +57,7 @@ pub enum ProgressEvent {
     /// A queued user message was injected between tool iterations
     QueuedUserMessage {
         text: String,
+        origin: PushOrigin,
     },
     /// Real-time streaming chunk from the LLM (word-by-word)
     StreamingChunk {
@@ -227,6 +228,20 @@ pub enum PushOrigin {
     Ingress,
     /// Anything else — safe default, never renders a push echo.
     Other,
+}
+
+impl PushOrigin {
+    /// Short label used in flow and tool-roll event summaries (`📥 in: <tag>`).
+    pub fn tag(&self) -> &'static str {
+        match self {
+            PushOrigin::Ingress => "user",
+            PushOrigin::SessionNotify => "session",
+            PushOrigin::SubAgent => "subagent",
+            PushOrigin::Recovery => "system",
+            PushOrigin::BackgroundTask => "task",
+            PushOrigin::Other => "system",
+        }
+    }
 }
 
 /// Typed receipt payload for a background-task completion push (#15).

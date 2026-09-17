@@ -809,7 +809,7 @@ pub(crate) async fn resume_session_inner(
                     // below the placeholder.
                 }
             }
-            ProgressEvent::QueuedUserMessage { text } => {
+            ProgressEvent::QueuedUserMessage { text, origin } => {
                 detach_flow_for_followup(&st);
                 if let Ok(mut s) = st.lock() {
                     let preview = text.lines().next().unwrap_or("").trim();
@@ -825,8 +825,11 @@ pub(crate) async fn resume_session_inner(
                     } else {
                         preview.to_string()
                     };
-                    s.display_queue
-                        .push(DisplayItem::System(format!("📥 in: user \"{}\"", preview)));
+                    s.display_queue.push(DisplayItem::System(format!(
+                        "📥 in: {} \"{}\"",
+                        origin.tag(),
+                        preview
+                    )));
                 }
             }
             ProgressEvent::IntermediateText { text, reasoning: _ } => {
