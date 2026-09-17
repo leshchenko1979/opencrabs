@@ -1,8 +1,54 @@
 //! Tests for memory garbage collection, orphan pruning, and maintenance sweeps (#241).
 
+use crate::db::Database;
+use crate::db::models::{Message, Session};
+use crate::db::repository::{MessageRepository, SessionRepository};
 use crate::memory::db::{MemoryGcReport, Store};
+use crate::services::context::ServiceContext;
 use crate::services::maintenance::{leave, try_enter};
+use crate::services::session::SessionService;
 use tempfile::tempdir;
+
+#[tokio::test]
+async fn test_prune_expired_messages_via_session_service() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let session_repo = SessionRepository::new(db.pool().clone());
+    let message_repo = MessageRepository::new(db.pool().clone());
+
+    let session = Session::new(Some("t".to_string()), Some("m".to_string()), None);
+    session_repo.create(&session).await.unwrap();
+
+    let mut old_msg = Message::new(session.id, "user".into(), "old".into(), 1);
+    old_msg.created_at = chrono::Utc::now() - chrono::Duration::days(120);
+    message_repo.create(&old_msg).await.unwrap();
+
+    let mut fresh_msg = Message::new(session.id, "user".into(), "fresh".into(), 2);
+    fresh_msg.created_at = chrono::Utc::now() - chrono::Duration::days(5);
+    message_repo.create(&fresh_msg).await.unwrap();
+
+    let ctx = ServiceContext::new(db.pool().clone());
+    let svc = SessionService::new(ctx);
+
+    // Retention disabled (0 days) -> no-op
+    let pruned_disabled = svc.prune_expired_messages(0).await.unwrap();
+    assert_eq!(pruned_disabled, 0);
+    assert_eq!(
+        message_repo
+            .list_by_session(session.id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // Retention 90 days -> prunes old_msg
+    let pruned = svc.prune_expired_messages(90).await.unwrap();
+    assert_eq!(pruned, 1);
+    let rem = message_repo.list_by_session(session.id).await.unwrap();
+    assert_eq!(rem.len(), 1);
+    assert_eq!(rem[0].content, "fresh");
+}
 
 #[test]
 fn test_memory_gc_orphans() {
