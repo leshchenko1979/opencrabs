@@ -208,6 +208,23 @@ fn parse_alignment(sep: &str, cols: usize) -> Vec<Align> {
     align
 }
 
+/// Canonical rich markdown normalization entry point across all Telegram rich send
+/// and edit operations (#280).
+///
+/// Pipeline:
+/// 1. Decode named HTML entities (e.g. `&rarr;` -> `→`, `&bull;` -> `•`, `&mdash;` -> `—`, #258).
+/// 2. Balance code fences (#240), shield bare leading hashes (#193, #243), reflow
+///    collapsed one-line tables (#132, #690), infer missing table separators (#239),
+///    and ensure blank line padding before tables (#95) via [`normalize_tables`].
+/// 3. Enforce button layout fit constraints for interactive buttons ([`enforce_button_fit`]).
+///
+/// Idempotent and fence-safe.
+pub(crate) fn normalize_rich_markdown(text: &str) -> String {
+    let decoded = crate::channels::telegram::markdown::decode_named_entities(text);
+    let normalized = normalize_tables(&decoded);
+    crate::channels::telegram::suggest_options::enforce_button_fit(&normalized)
+}
+
 /// Single canonical table-normalization entry for the rich plane (#132):
 /// balance unclosed / runaway code fences (#240), expand collapsed one-line
 /// tables first (so [`try_parse`] can see them), infer missing table separators

@@ -63,7 +63,7 @@ pub(crate) async fn edit_rich_markdown(
     let mut body = serde_json::json!({
         "chat_id": chat_id,
         "message_id": message_id,
-        "rich_message": { "markdown": enforce_button_fit(markdown) },
+        "rich_message": { "markdown": super::normalize_rich_markdown(markdown) },
     });
     if let Some(kb) = reply_markup {
         body["reply_markup"] = kb.clone();
@@ -158,7 +158,7 @@ pub(crate) fn build_body_markdown_media_edit(
     serde_json::json!({
         "chat_id": chat_id,
         "message_id": message_id,
-        "rich_message": { "markdown": enforce_button_fit(markdown), "media": media_arr },
+        "rich_message": { "markdown": super::normalize_rich_markdown(markdown), "media": media_arr },
     })
 }
 
@@ -207,15 +207,10 @@ pub(crate) async fn send_rich_markdown_target_id(
     origin: &str,
     origin_detail: &str,
 ) -> anyhow::Result<i32> {
-    // #95/#132: Telegram's rich parser refuses a table that abuts a text line
-    // and can't see a table collapsed onto one line at all. normalize_tables
-    // is the single canonical entry — reflow + blank line — so every rich
-    // send inherits both fixes. The pass is idempotent and fence-safe.
-    let markdown = super::normalize_tables(markdown);
     let url = format!("{}/bot{token}/sendRichMessage", api_base(api_url));
     let result = post_rich(
         &url,
-        &build_body_target(chat_id, thread_id, reply_to, &markdown),
+        &build_body_target(chat_id, thread_id, reply_to, markdown),
         origin,
         origin_detail,
     )
@@ -449,7 +444,7 @@ pub(crate) fn build_body_target(
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
         "chat_id": chat_id,
-        "rich_message": { "markdown": enforce_button_fit(markdown) },
+        "rich_message": { "markdown": super::normalize_rich_markdown(markdown) },
     });
     if let Some(t) = thread_id {
         // ThreadId wraps a MessageId(i32).
@@ -509,16 +504,12 @@ pub(crate) async fn send_rich_markdown_media_target_id(
     origin: &str,
     origin_detail: &str,
 ) -> anyhow::Result<i32> {
-    // #95/#132: same normalization as the plain markdown dialect — the media
-    // path renders pipe tables natively too, so it gets the single canonical
-    // entry (reflow collapsed tables + blank line) as well.
-    let markdown = super::normalize_tables(markdown);
     let url = format!("{}/bot{token}/sendRichMessage", api_base(api_url));
     let body = build_body_markdown_media_target(
         chat_id,
         thread_id,
         reply_to,
-        &markdown,
+        markdown,
         media,
         reply_markup,
     );
@@ -729,7 +720,7 @@ pub(crate) fn build_body_markdown_media_target(
         .collect();
     let mut body = serde_json::json!({
         "chat_id": chat_id,
-        "rich_message": { "markdown": enforce_button_fit(markdown), "media": media_arr },
+        "rich_message": { "markdown": super::normalize_rich_markdown(markdown), "media": media_arr },
     });
     if let Some(t) = thread_id {
         body["message_thread_id"] = serde_json::json!(t.0.0);
