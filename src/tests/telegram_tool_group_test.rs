@@ -103,9 +103,9 @@ fn blocks_are_separated_by_blank_lines() {
         None,
     );
     // ADR 0005 F1: entries sit inside the blockquote separated by blank lines;
-    // the narration-led status/count is in the merged footer, not a header row.
+    // the summary header prefers the latest intermediary thought (#291).
     assert!(
-        out.starts_with("⚙ • 0:00 ⏱\n<blockquote expandable><b>⛏ read_file handler.rs</b>\n\n")
+        out.starts_with("⚙ • 0:00 ⏱\n<blockquote expandable><b>Reformatted three files.</b>\n\n")
     );
     assert!(out.contains("<b>✅ bash</b> <code>cargo fmt</code>\n\nReformatted three files."));
     assert!(
@@ -478,9 +478,7 @@ fn live_status_rides_in_footer() {
         ],
         Some("45s"),
     );
-    assert!(
-        out.starts_with("⚙ • 0:00 ⏱\n<blockquote expandable><b>⛏ read_file handler.rs</b>\n\n")
-    );
+    assert!(out.starts_with("⚙ • 0:00 ⏱\n<blockquote expandable><b>Reading the handler.</b>\n\n"));
     assert!(out.contains("<b>✅ bash</b> <code>cargo fmt</code>\n\nReading the handler.\n\n<b>⚙️ read_file</b> <code>handler.rs</code>"));
 }
 
@@ -530,10 +528,10 @@ fn live_status_on_text_only_flow_uses_processing_log_header() {
         &[FlowLine::Text("Looking into it.".to_string())],
         Some("15s"),
     );
-    // Text-only flow: the narration + cog rides in the footer, no tool count.
+    // Text-only flow: intermediary thought is preferred as the summary header (#291).
     assert_eq!(
         out,
-        "⚙ • 0:00 ⏱\n<blockquote expandable><b>⛏ Looking into it.</b>\n\nLooking into it.</blockquote>"
+        "⚙ • 0:00 ⏱\n<blockquote expandable><b>Looking into it.</b>\n\nLooking into it.</blockquote>"
     );
 }
 
@@ -706,18 +704,18 @@ fn settled_block_carries_no_activity_preview_classic() {
             duration: "3 min 15s",
         },
     );
-    // The narration still lives in the collapsed body log, but the settled
-    // footer shows only the outcome + bare count — no cog, no stale activity.
+    // The narration still lives in the collapsed body log, and the summary
+    // header prefers the intermediary thought (#291).
     assert!(
-        out.starts_with("✅ • 0:00 ⏱\n<blockquote expandable><b>⛏ Running the test suite</b>\n\n")
+        out.starts_with("✅ • 0:00 ⏱\n<blockquote expandable><b>Running the test suite</b>\n\n")
     );
     assert!(out.contains("Running the test suite"));
 }
 
 #[test]
 fn settled_block_carries_no_activity_preview_rich() {
-    // #498, rich <details> surface (the one Adolfo runs): settled summary is
-    // the outcome header alone, no trailing `•` preview stuck to it.
+    // #498, rich <details> surface (the one Adolfo runs): summary header
+    // prefers intermediary thought (#291).
     let out = render_flow_details_with(
         &[
             tline("✅ bash", "cargo test"),
@@ -730,7 +728,7 @@ fn settled_block_carries_no_activity_preview_rich() {
         },
     );
     assert!(
-        out.starts_with("<p>✅ • 0:00 ⏱</p><details><summary><sub>⛏ Running the test suite</sub>")
+        out.starts_with("<p>✅ • 0:00 ⏱</p><details><summary><sub>Running the test suite</sub>")
     );
 }
 
@@ -843,8 +841,8 @@ fn details_summary_carries_live_status() {
     // ADR 0005 F1: the merged footer is the summary — cog + narration + count +
     // clock. The wrapper passes elapsed_secs=0, so the clock reads 0:00.
     assert!(out.starts_with("<p>⚙ • 0:00 ⏱</p>"));
-    // Summary carries latest-activity preview (grep pattern since it is the last item)
-    assert!(summary.contains("<sub>⛏ grep pattern</sub>"));
+    // Summary carries latest intermediary thought (#291)
+    assert!(summary.contains("<sub>Grepping.</sub>"));
 }
 
 #[test]
@@ -852,7 +850,7 @@ fn details_collapsed_summary_shows_intermediate_narration() {
     // Regression (#405): the COLLAPSED rich block must surface the latest
     // narration in its summary — the body is hidden by default, so the summary
     // is the only place a user sees mid-turn progress. Narration wins over the
-    // trailing tool line as the preview source (#481).
+    // trailing tool line as the preview source (#481, #291).
     let out = render_flow_details(
         &[
             FlowLine::Text("Running the test suite".to_string()),
@@ -862,8 +860,8 @@ fn details_collapsed_summary_shows_intermediate_narration() {
     );
     let summary_end = out.find("</summary>").expect("summary");
     let summary = &out[..summary_end];
-    // Activity preview shows latest item (bash cargo test)
-    assert!(summary.contains("⛏ bash cargo test"));
+    // Summary header prefers intermediary thought (#291)
+    assert!(summary.contains("Running the test suite"));
 }
 
 #[test]
@@ -876,7 +874,7 @@ fn details_escapes_html_in_tool_context() {
 
 #[test]
 fn collapsed_preview_prefers_narration_over_tool_line() {
-    // #481: the status source is the most recent human-readable narration — the
+    // #481, #291: the status source is the most recent human-readable narration — the
     // latest thing the agent SAID — even when a tool line follows it (that
     // narration usually describes the tool now running), which reads better
     // than a bare "⚙️ read_file src/agent.rs".
@@ -888,10 +886,11 @@ fn collapsed_preview_prefers_narration_over_tool_line() {
         ],
         None,
     );
-    // ADR 0005 F1: the narration preview now rides in the merged footer, not a
-    // header line above the entries.
+    // Intermediary thought preview rides in the summary header (#291).
     assert!(
-        out.contains("<blockquote expandable><b>⛏ read_file src/agent.rs</b>\n\n"),
+        out.contains(
+            "<blockquote expandable><b>Checking how the scheduler resolves the next run</b>\n\n"
+        ),
         "header must carry the latest activity preview: {out}"
     );
     // Full chronological log still follows for the expanded view.
