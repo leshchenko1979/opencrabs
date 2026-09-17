@@ -648,7 +648,7 @@ fn footer_shows_both_working_on_status_and_activity_summary() {
 
 #[test]
 fn live_footer_leads_with_activity_before_reasoning() {
-    // #1052 / Option A: live telemetry is on top, tool log block expandable with latest activity summary header.
+    // #1052 / Option A / #291: live telemetry is on top, tool log block expandable with latest thought summary header.
     let lines = [
         tline("✅ bash", "ls"),
         FlowLine::Text("Now checking the config.".to_string()),
@@ -662,11 +662,53 @@ fn live_footer_leads_with_activity_before_reasoning() {
         30,
     );
     assert!(
-        out.starts_with("⚙ • 0:30 ⏱\n<blockquote expandable><b>⛏ read_file config.toml</b>"),
-        "activity header leads tool block: got {out:?}"
+        out.starts_with("⚙ • 0:30 ⏱\n<blockquote expandable><b>Now checking the config.</b>"),
+        "thought header leads tool block: got {out:?}"
     );
     assert!(out.contains("Now checking the config."));
     assert!(out.contains("<b>⚙\u{fe0f} read_file</b> <code>config.toml</code>"));
+}
+
+#[test]
+fn summary_header_prefers_latest_intermediary_thought_with_truncation_and_fallback() {
+    use crate::channels::telegram::flow_chrome::{FooterParts, HeaderMarkup, summary_header};
+
+    let parts_with_thought = FooterParts {
+        thought: Some(
+            "I will now inspect the server configuration and verify that all ports are open and listening properly on the host.",
+        ),
+        activity: Some("⛏ read_file config.toml"),
+        ..Default::default()
+    };
+    let header = summary_header(&parts_with_thought, HeaderMarkup::Html);
+    assert_eq!(
+        header, "I will now inspect the server configuration and verify that all ports are open…",
+        "thought truncated to 80 chars with ellipsis"
+    );
+
+    let parts_with_short_thought = FooterParts {
+        thought: Some("Finding the file…"),
+        activity: Some("⛏ read_file config.toml"),
+        ..Default::default()
+    };
+    let header_short = summary_header(&parts_with_short_thought, HeaderMarkup::Html);
+    assert_eq!(header_short, "Finding the file…");
+
+    let parts_with_activity_only = FooterParts {
+        thought: None,
+        activity: Some("⛏ read_file config.toml"),
+        ..Default::default()
+    };
+    let header_act = summary_header(&parts_with_activity_only, HeaderMarkup::Html);
+    assert_eq!(header_act, "⛏ read_file config.toml");
+
+    let parts_empty = FooterParts {
+        thought: None,
+        activity: None,
+        ..Default::default()
+    };
+    let header_empty = summary_header(&parts_empty, HeaderMarkup::Html);
+    assert_eq!(header_empty, "⛏ Processing log");
 }
 
 #[test]

@@ -419,6 +419,19 @@ pub(crate) fn latest_activity_preview(lines: &[FlowLine]) -> Option<String> {
     None
 }
 
+/// Extract the latest human-readable intermediary thought / prose entry preceding
+/// active or recent tool calls (#291).
+pub(crate) fn latest_intermediary_thought(lines: &[FlowLine]) -> Option<String> {
+    for line in lines.iter().rev() {
+        if let FlowLine::Text(t) = line {
+            if let Some(text) = human_readable_preview(t) {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
 /// A flow tool line is a bash call when its name (the last word of the
 /// `{icon} {name}` label) is `bash`.
 fn is_bash_tool(label: &str) -> bool {
@@ -564,6 +577,7 @@ fn footer_parts<'a>(
     header: &'a FlowHeader,
     fallback_status: Option<&'a str>,
     sections: &'a super::flow_chrome::FlowSections,
+    thought: Option<&'a str>,
     activity: Option<&'a str>,
     tool_count: usize,
     has_log: bool,
@@ -579,6 +593,7 @@ fn footer_parts<'a>(
         outcome,
         plan_state: sections.plan_state.as_deref(),
         working_on: fallback_status,
+        thought,
         activity,
         tool_count,
         has_log,
@@ -699,10 +714,16 @@ pub(crate) fn render_flow_html_chrome_pref(
     } else {
         latest_activity_preview(lines)
     };
+    let thought = if compacting {
+        None
+    } else {
+        latest_intermediary_thought(lines)
+    };
     let parts = footer_parts(
         header,
         fallback_status,
         sections,
+        thought.as_deref(),
         activity.as_deref(),
         tool_count,
         has_log,
@@ -817,10 +838,16 @@ pub(crate) fn render_flow_details_chrome_pref(
     } else {
         latest_activity_preview(lines)
     };
+    let thought = if compacting {
+        None
+    } else {
+        latest_intermediary_thought(lines)
+    };
     let parts = footer_parts(
         header,
         fallback_status,
         sections,
+        thought.as_deref(),
         activity.as_deref(),
         tool_count,
         has_log,
