@@ -6,46 +6,37 @@ use std::time::Duration;
 
 use crate::brain::agent::service::nudge::{in_pressure_warning_band, should_emit_pressure_warning};
 use crate::channels::telegram::flow::{
-    compacted_flow_line, compacting_flow_line, flow_header_text, render_flow_html_chrome_pref,
-    render_flow_rich, starts_with_icon, FlowHeader, FlowLine, HeaderMarkup, COMPACTING_HEADER_TEXT,
+    COMPACTING_HEADER_TEXT, FlowHeader, FlowLine, HeaderMarkup, compacted_flow_line,
+    compacting_flow_line, flow_header_text, render_flow_html_chrome_pref, render_flow_rich,
+    starts_with_icon,
 };
-use crate::channels::telegram::flow_chrome::{merged_footer, FlowSections, FooterParts};
+use crate::channels::telegram::flow_chrome::{FlowSections, FooterParts, merged_footer};
 
 #[test]
 fn compacting_line_without_prediction() {
-    // First compaction of a session: no observed history, no parenthetical.
-    // The retired hardcoded `≈10–60s` window is gone — it never was right
-    // (live range observed 10s → 29 min).
-    assert_eq!(
-        compacting_flow_line(68.0, None),
-        "⏳ Compacting context — 68% full…"
-    );
+    assert_eq!(compacting_flow_line(68.0, None), "⏳ compact: 68% 🧠");
 }
 
 #[test]
 fn compacting_line_shows_observed_eta() {
     assert_eq!(
         compacting_flow_line(68.0, Some(Duration::from_secs(42))),
-        "⏳ Compacting context — 68% full (≈42s)…"
+        "⏳ compact: 68% 🧠"
     );
 }
 
 #[test]
 fn compacting_line_humanizes_minute_eta() {
-    // ≥60s rides the shared humanize_duration formatting ("2 min 12s"),
-    // same as the settled ✅ line.
     assert_eq!(
         compacting_flow_line(71.0, Some(Duration::from_secs(132))),
-        "⏳ Compacting context — 71% full (≈2 min 12s)…"
+        "⏳ compact: 71% 🧠"
     );
 }
 
 #[test]
 fn compacting_line_rounds_fill_level() {
-    // {:.0} rounding — the line carries a whole-number level, never a
-    // fractional one.
-    assert!(compacting_flow_line(67.7, None).contains("68% full"));
-    assert!(compacting_flow_line(99.4, None).contains("99% full"));
+    assert!(compacting_flow_line(67.7, None).contains("68% 🧠"));
+    assert!(compacting_flow_line(99.4, None).contains("99% 🧠"));
 }
 
 #[test]
@@ -128,7 +119,7 @@ fn compacting_rich_footer_suppresses_duplicate_status() {
 fn compacted_line_under_a_minute() {
     assert_eq!(
         compacted_flow_line(68.0, 26.0, 132_000, 51_000, Duration::from_secs(42)),
-        "✅ Compacted: 68% → 26% (132K → 51K tokens) in 42s"
+        "🧹 compact: 68% → 26% 🧠"
     );
 }
 
@@ -136,7 +127,7 @@ fn compacted_line_under_a_minute() {
 fn compacted_line_multi_minute() {
     assert_eq!(
         compacted_flow_line(71.0, 24.0, 94_559, 34_197, Duration::from_secs(132)),
-        "✅ Compacted: 71% → 24% (95K → 34K tokens) in 2 min 12s"
+        "🧹 compact: 71% → 24% 🧠"
     );
 }
 
@@ -146,7 +137,7 @@ fn compacted_line_floors_subsecond_elapsed_to_1s() {
     // would look like the line was printed before the work happened.
     assert_eq!(
         compacted_flow_line(66.0, 30.0, 90_000, 40_000, Duration::from_millis(300)),
-        "✅ Compacted: 66% → 30% (90K → 40K tokens) in 1s"
+        "🧹 compact: 66% → 30% 🧠"
     );
 }
 
