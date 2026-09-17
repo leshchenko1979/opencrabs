@@ -158,11 +158,12 @@ impl AgentService {
     /// Augment the user message for LLM context:
     /// 1. Temporal grounding: inject [Current time: YYYY-MM-DD HH:MM:SS UTC (user: ...)] (#153).
     /// 2. Active plan reminder.
-    /// 3. Memory recall.
+    /// 3. Memory & directive passive recall (#799, #285).
     pub(crate) async fn augment_user_message(
         session_id: Uuid,
         user_message: &str,
         brain_dir: Option<&std::path::Path>,
+        working_dir: Option<&std::path::Path>,
     ) -> String {
         // Temporal grounding (#153): inject context-only time marker at turn start.
         let now = chrono::Utc::now();
@@ -183,15 +184,12 @@ impl AgentService {
             out.push_str(&reminder);
         }
 
-        // Ride relevant memory along with the message (#799). MEMORY.md was
-        // written constantly and read almost never; #800 made reading cheap,
-        // but a cheap read still has to be chosen, and the model cannot decide
-        // to recall a correction it has forgotten exists.
-        if let Some(recall) = crate::brain::memory_recall::recall_for(user_message).await {
-            tracing::info!(
-                "Recalled {} chars from MEMORY.md for session {session_id}",
-                recall.len()
-            );
+        // Ride relevant memory, active skills, and project directives along with the message (#799, #285).
+        if let Some(recall) =
+            crate::brain::memory_recall::recall_for_session(session_id, working_dir, user_message)
+                .await
+        {
+            tracing::info!("Recalled {} chars for session {session_id}", recall.len());
             out.push_str("\n\n");
             out.push_str(&recall);
         }
@@ -291,8 +289,14 @@ impl AgentService {
         // mid-plan (discussion #177). Regenerated each turn from the plan file;
         // the DB only ever stores the clean user message, so it never piles up.
         let brain_dir = self.brain_workspace_path();
-        let context_user_message =
-            Self::augment_user_message(session_id, &user_message, brain_dir.as_deref()).await;
+        let working_directory = self.get_working_directory_for_session(session_id);
+        let context_user_message = Self::augment_user_message(
+            session_id,
+            &user_message,
+            brain_dir.as_deref(),
+            Some(&working_directory),
+        )
+        .await;
         let user_msg = Message::user(context_user_message);
         context.add_message(user_msg);
 

@@ -1430,8 +1430,14 @@ impl AgentService {
         // directly), so the reminder is context-only and never piles up (#571
         // follow-up).
         let brain_dir = self.brain_workspace_path();
-        let mut context_user_message =
-            Self::augment_user_message(session_id, &user_message, brain_dir.as_deref()).await;
+        let working_directory = self.get_working_directory_for_session(session_id);
+        let mut context_user_message = Self::augment_user_message(
+            session_id,
+            &user_message,
+            brain_dir.as_deref(),
+            Some(&working_directory),
+        )
+        .await;
         if !skill_update_hints.is_empty() {
             let hints_joined = skill_update_hints.join("\n");
             context_user_message = format!("{hints_joined}\n\n{context_user_message}");
