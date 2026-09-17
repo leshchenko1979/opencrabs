@@ -613,8 +613,10 @@ fn details_populated_flow_keeps_chrome_outside_the_details() {
     );
     // Chrome is an always-visible <p> block BEFORE the collapsed log, with a
     // kept spacer, not inside the summary.
+    // The telemetry line carries the 🎯 goal marker too (#250, Option 2): a goal
+    // is present here, so the line leads with 🎯 before the state icon.
     assert!(out.starts_with(
-        "<p><b>🎯</b> finish the audit (0/20 turns)</p><p>&nbsp;</p><p>⚙ • 0:08 ⏱</p><details><summary><sub>⛏ grep todo</sub>"
+        "<p><b>🎯</b> finish the audit (0/20 turns)</p><p>&nbsp;</p><p>🎯 • ⚙ • 0:08 ⏱</p><details><summary><sub>⛏ grep todo</sub>"
     ));
     assert!(out.ends_with("</details>"));
     assert!(out.contains("0:08 ⏱"));
