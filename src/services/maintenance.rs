@@ -90,7 +90,7 @@ impl MaintenanceService {
             };
 
             match vac_res {
-                Ok(()) => report.memory_vacuumed = true,
+                Ok(vacuumed) => report.memory_vacuumed = vacuumed,
                 Err(e) => tracing::warn!("Maintenance: memory vacuum failed: {e:#}"),
             }
         }
@@ -98,7 +98,7 @@ impl MaintenanceService {
         // 3. Database Vacuum
         let db = crate::db::Database::new_with_pool(self.context.pool());
         match db.vacuum_database().await {
-            Ok(()) => report.database_vacuumed = true,
+            Ok(vacuumed) => report.database_vacuumed = vacuumed,
             Err(e) => tracing::warn!("Maintenance: database vacuum failed: {e:#}"),
         }
 
@@ -116,8 +116,8 @@ impl MaintenanceService {
     pub fn spawn_periodic(context: ServiceContext, interval: Duration) {
         tokio::spawn(async move {
             let svc = MaintenanceService::new(context);
-            // Initial post-boot warmup delay so startup is not bottlenecked
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            // Initial post-boot warmup delay (30 mins) so startup and tool execution are not bottlenecked (#273)
+            tokio::time::sleep(Duration::from_secs(1800)).await;
 
             loop {
                 if let Err(e) = svc.run_maintenance().await {
