@@ -465,7 +465,7 @@ impl AgentService {
     /// re-injecting them after compaction would just burn tokens on context the
     /// task may not need. A one-line pointer below reminds the agent to fetch
     /// them when relevant.
-    fn build_recovered_brain_context() -> String {
+    fn build_recovered_brain_context_for(context: &AgentContext) -> String {
         use std::path::PathBuf;
 
         let full_files = [
@@ -476,6 +476,13 @@ impl AgentService {
 
         let opencrabs_home = crate::config::opencrabs_home();
         let mut files_block = String::new();
+
+        if context.system_brain.as_ref().map_or(false, |b| {
+            b.contains("--- TELEGRAM CHANNEL CAPABILITIES ---")
+        }) {
+            files_block.push_str(crate::brain::prompt_builder::TELEGRAM_CHANNEL_CAPABILITIES);
+            files_block.push_str("\n\n");
+        }
 
         for (filename, label) in full_files {
             let path: PathBuf = opencrabs_home.join(filename);
@@ -1330,7 +1337,7 @@ impl AgentService {
         // the marker and re-billed it on every subsequent compaction (#1649).
         // The raw tail a background compaction keeps
         // (`apply_compaction_summary_after`) covers continuation mechanically.
-        let brain_context = Self::build_recovered_brain_context();
+        let brain_context = Self::build_recovered_brain_context_for(context);
         let summary_with_context = format!("{}\n\n{}", brain_context, summary);
 
         match scope {
