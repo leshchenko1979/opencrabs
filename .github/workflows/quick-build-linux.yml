@@ -96,8 +96,8 @@ jobs:
           repository: ${{ inputs.source_repository }}
           ref: ${{ inputs.source_ref }}
 
-      - name: Install system deps (alsa for local-stt/local-tts)
-        run: sudo apt-get update -y && sudo apt-get install -y pkg-config libasound2-dev
+      - name: Install system deps (alsa for local-stt/local-tts, mold+clang for fast link)
+        run: sudo apt-get update -y && sudo apt-get install -y pkg-config libasound2-dev mold clang
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -107,7 +107,15 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Run sccache-action
+        uses: mozilla-actions/sccache-action@v0.0.8
+
       - name: Build ([profile.ci], no tests)
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
         run: cargo build --locked --profile ci --no-default-features --features "${{ inputs.features }}"
 
       - name: Strip
