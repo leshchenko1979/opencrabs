@@ -688,11 +688,9 @@ pub(crate) fn is_empty_scaffold_line(line: &str) -> bool {
         .or_else(|| t.strip_prefix("* "))
         .unwrap_or(t);
     // Empty `**Label:**` field (the colon sits inside the bold markers).
-    if body.starts_with("**") {
-        if let Some(idx) = body.find(":**") {
-            if body[idx + 3..].trim().is_empty() {
-                return true;
-            }
+    if let Some(rest) = body.strip_prefix("**") {
+        if let Some(idx) = rest.find(":**") {
+            return rest[idx + 3..].trim().is_empty();
         }
     }
     // Empty `Done when:` criteria bullet (the scaffold's per-step placeholder).
@@ -700,12 +698,10 @@ pub(crate) fn is_empty_scaffold_line(line: &str) -> bool {
         return true;
     }
     // Empty `N.` numbered step.
-    let digits: String = body.chars().take_while(char::is_ascii_digit).collect();
-    if !digits.is_empty() {
-        if let Some(after) = body[digits.len()..].trim_start().strip_prefix('.') {
-            if after.trim().is_empty() {
-                return true;
-            }
+    let digits_len = body.chars().take_while(char::is_ascii_digit).count();
+    if digits_len > 0 {
+        if let Some(after) = body[digits_len..].trim_start().strip_prefix('.') {
+            return after.trim().is_empty();
         }
     }
     false
