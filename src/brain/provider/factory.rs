@@ -444,39 +444,62 @@ pub async fn create_provider_with_warning(
     let mut failed_name: Option<&str> = None;
     let mut warning: Option<String> = None;
 
-    // Try enabled providers in priority order
-    for (i, reg) in REGISTRATIONS.iter().enumerate() {
-        if !provider_enabled(config, i) {
-            continue;
-        }
-
-        match (reg.factory)(config).await {
-            Ok(Some(provider)) => {
-                if let Some(failed) = failed_name {
+    // Check config.agent.default_provider before scanning enabled registrations
+    if let Some(default_name) = config.agent.default_provider.as_deref() {
+        if !default_name.trim().is_empty() {
+            match create_provider_by_name(config, default_name).await {
+                Ok(provider) => {
+                    tracing::info!("Using configured default provider: {}", default_name);
+                    primary = Some(provider);
+                }
+                Err(e) => {
                     let msg = format!(
-                        "{} failed to initialize — fell back to {}. Run /onboard:provider to reconfigure.",
-                        failed, reg.display_name
+                        "Configured default provider '{}' failed to initialize ({}) — falling back to enabled providers.",
+                        default_name, e
                     );
                     tracing::warn!("{}", msg);
                     warning = Some(msg);
-                }
-                tracing::info!("Using enabled provider: {}", reg.display_name);
-                primary = Some(provider);
-                break;
-            }
-            Ok(None) => {
-                tracing::debug!(
-                    "{} enabled but has no API key — skipping (not actionable, expected on fresh installs with config stubs)",
-                    reg.display_name
-                );
-                if failed_name.is_none() {
-                    failed_name = Some(reg.display_name);
+                    failed_name = Some(default_name);
                 }
             }
-            Err(e) => {
-                tracing::error!("{} provider error: {}", reg.display_name, e);
-                if failed_name.is_none() {
-                    failed_name = Some(reg.display_name);
+        }
+    }
+
+    // Try enabled providers in priority order if no default provider resolved
+    if primary.is_none() {
+        for (i, reg) in REGISTRATIONS.iter().enumerate() {
+            if !provider_enabled(config, i) {
+                continue;
+            }
+
+            match (reg.factory)(config).await {
+                Ok(Some(provider)) => {
+                    if let Some(failed) = failed_name {
+                        let msg = format!(
+                            "{} failed to initialize — fell back to {}. Run /onboard:provider to reconfigure.",
+                            failed, reg.display_name
+                        );
+                        tracing::warn!("{}", msg);
+                        warning = Some(msg);
+                    }
+                    tracing::info!("Using enabled provider: {}", reg.display_name);
+                    primary = Some(provider);
+                    break;
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        "{} enabled but has no API key — skipping (not actionable, expected on fresh installs with config stubs)",
+                        reg.display_name
+                    );
+                    if failed_name.is_none() {
+                        failed_name = Some(reg.display_name);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("{} provider error: {}", reg.display_name, e);
+                    if failed_name.is_none() {
+                        failed_name = Some(reg.display_name);
+                    }
                 }
             }
         }
