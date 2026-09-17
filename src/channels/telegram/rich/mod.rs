@@ -48,5 +48,6 @@ pub(crate) use render_html::{
 #[cfg(test)]
 pub(crate) use table::{
     balance_code_fences, infer_missing_table_separators, shield_bare_leading_hashes,
+    shield_unresolvable_markdown_images,
 };
 pub(crate) use table::{normalize_rich_markdown, normalize_tables, reflow_collapsed_tables};
