@@ -337,9 +337,9 @@ fn tool_plus_text_folds_into_one_blockquote() {
         ],
         None,
     );
-    // ADR 0005 F1: tool + text fold into one blockquote body; the latest tool
-    // preview (Option A summary header) rides on the block.
-    assert!(out.contains("<blockquote expandable><b>⛏ read_file handler.rs</b>\n\n"));
+    // ADR 0005 F1: tool + text fold into one blockquote body; the latest intermediary
+    // thought (#291) precedes tool calls and rides as the unexpanded summary header.
+    assert!(out.contains("<blockquote expandable><b>Checked the tree, all clean.</b>\n\n"));
     let top_line = out.lines().next().unwrap();
     assert_eq!(top_line, "⚙ • 0:00 ⏱");
     assert!(out.contains("<b>✅ bash</b> <code>git status</code>"));
@@ -352,9 +352,9 @@ fn tool_plus_text_folds_into_one_blockquote() {
 fn text_only_flow_uses_processing_log_header() {
     let out = render_flow_html(&[FlowLine::Text("Switching provider…".to_string())], None);
     // Text-only flow (0 tools) still has an entry, so it renders a block; the
-    // summary header shows the activity with a cog and no `N tool calls`.
+    // summary header shows the intermediary thought (#291).
     assert!(out.contains(
-        "<blockquote expandable><b>⛏ Switching provider…</b>\n\nSwitching provider…</blockquote>"
+        "<blockquote expandable><b>Switching provider…</b>\n\nSwitching provider…</blockquote>"
     ));
     let top_line = out.lines().next().unwrap();
     assert_eq!(top_line, "⚙ • 0:00 ⏱");
