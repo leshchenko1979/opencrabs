@@ -46,7 +46,6 @@ async fn main() {
         model: Some(producer_model.clone()),
         provider: Some(producer.name().to_string()),
         working_directory: None,
-        channel: None,
     };
     let system_brain = loader.build_core_brain(Some(&rt));
     let sys = Some(system_brain.as_str());
