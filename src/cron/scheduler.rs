@@ -618,8 +618,16 @@ pub(crate) async fn resolve_or_create_cron_session(
         return Ok(existing.id);
     }
     let config = Config::load()?;
-    let provider = config.cron.default_provider.clone();
-    let model = config.cron.default_model.clone();
+    let provider = config
+        .cron
+        .default_provider
+        .clone()
+        .or_else(|| config.agent.default_provider.clone());
+    let model = config
+        .cron
+        .default_model
+        .clone()
+        .or_else(|| config.agent.default_model.clone());
     let session = session_svc
         .create_session_with_provider(Some(title), provider, model, None)
         .await?;
@@ -713,11 +721,13 @@ async fn execute_job(
     let effective_provider = job
         .provider
         .clone()
-        .or_else(|| config.cron.default_provider.clone());
+        .or_else(|| config.cron.default_provider.clone())
+        .or_else(|| config.agent.default_provider.clone());
     let effective_model = job
         .model
         .clone()
-        .or_else(|| config.cron.default_model.clone());
+        .or_else(|| config.cron.default_model.clone())
+        .or_else(|| config.agent.default_model.clone());
 
     // Pre-validate the {provider, model} pair before spawning the agent.
     // A reversed cron config (e.g. model="zhipu", provider="glm-5.1") or a
