@@ -499,6 +499,7 @@ pub mod read_output_budget_test;
 pub mod read_resume_offset_test;
 pub mod rebuild_notify_test;
 pub mod recent_paths_test;
+pub mod bash_loop_nudge_test;
 pub mod redact_scope_test;
 pub mod sanitize_code_edit_block_test;
 pub mod sanitize_quoted_secret_test;
