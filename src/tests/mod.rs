@@ -938,6 +938,7 @@ pub mod telegram_rich_api_test;
 pub mod telegram_rich_edit_dedup_test;
 pub mod telegram_rich_inline_test;
 pub mod telegram_rich_json_test;
+pub mod telegram_rich_markdown_normalize_test;
 pub mod telegram_rich_mermaid_test;
 pub mod telegram_rich_parse_test;
 pub mod telegram_rich_test;
