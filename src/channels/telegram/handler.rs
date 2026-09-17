@@ -323,10 +323,19 @@ async fn persist_group_message(
     msg: &Message,
     user: &teloxide::types::User,
 ) {
-    if let Some(cm) = build_group_history_record(msg, user)
-        && let Err(e) = repo.insert(&cm).await
-    {
-        tracing::warn!("Telegram: failed to persist group message to history (#685): {e}");
+    if let Some(mut cm) = build_group_history_record(msg, user) {
+        if cm.topic_name.is_none()
+            && let Some(tid) = &cm.thread_id
+        {
+            cm.topic_name = repo
+                .latest_topic_name(&cm.channel, &cm.channel_chat_id, tid)
+                .await
+                .ok()
+                .flatten();
+        }
+        if let Err(e) = repo.insert(&cm).await {
+            tracing::warn!("Telegram: failed to persist group message to history (#685): {e}");
+        }
     }
 }
 
@@ -876,26 +885,21 @@ pub(crate) async fn handle_message(
             let chat_id_num = msg.chat.id.0;
             let msg_id_num = msg.id.0 as i64;
             let thread_id = msg.thread_id.map(|t| t.0.to_string());
-            // Capture the topic name from one of two sources:
-            //   1. `forum_topic_created` service message — the topic
-            //      creation itself; only fires once per topic.
-            //   2. `reply_to_message().forum_topic_created()` — for every
-            //      REGULAR message inside a topic, Telegram includes the
-            //      topic-creation service message as the reply target. So
-            //      we learn the topic name from every message in that
-            //      topic, not just the one-time creation event. Critical
-            //      for the `list_topics` mapping (issue #130 follow-up
-            //      by leshchenko1979) because the agent needs to map
-            //      user-typed names like "#announcements" back to numeric
-            //      thread_ids it can pass to telegram_send.
-            let topic_name = msg
-                .forum_topic_created()
-                .map(|t| t.name.clone())
-                .or_else(|| {
-                    msg.reply_to_message()
-                        .and_then(|r| r.forum_topic_created())
-                        .map(|t| t.name.clone())
-                });
+            // Capture the topic name from one of three sources:
+            //   1. `topic_name` resolved earlier in this turn (includes live
+            //      `forum_topic_edited`, `forum_topic_created`, reply chain,
+            //      or DB `latest_topic_name`).
+            //   2. `forum_topic_created` service message.
+            //   3. `reply_to_message().forum_topic_created()`.
+            let topic_name = topic_name.clone().or_else(|| {
+                msg.forum_topic_created()
+                    .map(|t| t.name.clone())
+                    .or_else(|| {
+                        msg.reply_to_message()
+                            .and_then(|r| r.forum_topic_created())
+                            .map(|t| t.name.clone())
+                    })
+            });
             async move {
                 // If file data provided, write to disk and store path in content
                 let content = if let Some((bytes, filename)) = file_data {
