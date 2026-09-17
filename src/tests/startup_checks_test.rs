@@ -153,3 +153,32 @@ fn an_unrelated_name_is_reported_without_a_guess() {
         .expect("the dangling entry must still be reported");
     assert!(!hit.contains("did you mean"), "must not guess, got {hit}");
 }
+
+#[test]
+fn agent_default_provider_in_custom_dotted_form_is_not_flagged() {
+    let mut custom = std::collections::BTreeMap::new();
+    custom.insert(
+        "llm-gateway".to_string(),
+        crate::config::ProviderConfig {
+            enabled: true,
+            base_url: Some("https://example.invalid/v1".to_string()),
+            api_key: Some("secret".to_string()),
+            default_model: Some("auto".to_string()),
+            models: vec!["auto".to_string()],
+            ..Default::default()
+        },
+    );
+    let mut cfg = crate::config::Config {
+        providers: crate::config::ProviderConfigs {
+            custom: Some(custom),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    cfg.agent.default_provider = Some("custom.llm_gateway".to_string());
+    let warns = startup_warnings(&cfg, None);
+    assert!(
+        !warns.iter().any(|w| w.contains("agent.default_provider")),
+        "valid custom dotted form should not warn, got {warns:?}"
+    );
+}

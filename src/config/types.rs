@@ -2264,7 +2264,7 @@ impl ProviderConfigs {
     /// at one that is not currently active, so requiring `enabled` would break
     /// the case the prefix exists for.
     pub fn is_declared(&self, name: &str) -> bool {
-        let bare = name.strip_prefix("custom:").unwrap_or(name);
+        let bare = crate::config::strip_custom_prefix(name).map_or(name, |(_, rest)| rest);
         if self
             .custom
             .as_ref()
@@ -2291,7 +2291,7 @@ impl ProviderConfigs {
     pub fn is_healthy(&self, name: &str) -> bool {
         // Custom providers: the factory refuses them without a real key
         // ("requests will fail authentication"), so keyless ≠ healthy.
-        let bare = name.strip_prefix("custom:").unwrap_or(name);
+        let bare = crate::config::strip_custom_prefix(name).map_or(name, |(_, rest)| rest);
         if let Some(customs) = self.custom.as_ref()
             && let Some(cfg) = customs
                 .get(bare)

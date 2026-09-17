@@ -26,6 +26,12 @@ impl ProviderKey {
         provider: "self_improvement_provider",
         model: "self_improvement_model",
     };
+    /// `[agent] default_provider` / `default_model` — the pair every session and
+    /// every cron job inherits when nothing more specific is configured.
+    pub const AGENT: Self = Self {
+        provider: "default_provider",
+        model: "default_model",
+    };
     pub const SUBAGENT: Self = Self {
         provider: "subagent_provider",
         model: "subagent_model",
@@ -62,11 +68,6 @@ pub struct ProviderPair {
     pub note: Option<String>,
 }
 
-/// Prefixes that spell the `[providers.custom.*]` table path rather than the
-/// provider's name. The factory tolerates the first two; the third is how a
-/// path reads to someone thinking in `<provider>/<model>` terms.
-const CUSTOM_PREFIXES: [&str; 3] = ["custom:", "custom.", "custom/"];
-
 /// Normalise `spec` (the raw `<key>_provider` value) with `model_key` (the raw
 /// `<key>_model` value).
 ///
@@ -91,15 +92,12 @@ pub fn normalize(
     let mut notes: Vec<String> = Vec::new();
 
     let mut name = raw;
-    for prefix in CUSTOM_PREFIXES {
-        if let Some(rest) = name.strip_prefix(prefix) {
-            name = rest.trim();
-            notes.push(format!(
-                "dropped the '{prefix}' prefix: the provider name is the \
-                 [providers.custom.<name>] section name, so write \"{name}\""
-            ));
-            break;
-        }
+    if let Some((prefix, rest)) = crate::config::strip_custom_prefix(name) {
+        name = rest.trim();
+        notes.push(format!(
+            "dropped the '{prefix}' prefix: the provider name is the \
+             [providers.custom.<name>] section name, so write \"{name}\""
+        ));
     }
 
     let mut model_from_spec: Option<String> = None;
@@ -145,7 +143,7 @@ pub fn normalize_in(
     spec: &str,
     model_key: Option<&str>,
 ) -> ProviderPair {
-    normalize(
+    let mut pair = normalize(
         key,
         spec,
         model_key,
@@ -157,5 +155,32 @@ pub fn normalize_in(
                 .is_some_and(|m| m.contains_key(name))
         },
         |name| config.providers.is_declared(name),
-    )
+    );
+    pair.provider = canonical_provider_name(config, &pair.provider);
+    pair
+}
+
+/// The name a resolved provider actually has: when `name` (in any accepted
+/// spelling) names a `[providers.custom.<name>]` entry, the key that entry is
+/// stored under; otherwise `name` unchanged.
+///
+/// The custom map is keyed by `normalize_toml_key`, so
+/// `default_provider = "custom.llm_gateway"` against
+/// `[providers.custom.llm-gateway]` resolves through `custom_provider_key` to
+/// an entry stored as `llm-gateway`. Returning the user's spelling instead
+/// would construct the provider — and stamp the session row — under a name no
+/// config section carries, leaving the two to meet only through the same
+/// fallback lookup.
+pub fn canonical_provider_name(config: &Config, name: &str) -> String {
+    let canonical = crate::config::custom_provider_key(name);
+    if config
+        .providers
+        .custom
+        .as_ref()
+        .is_some_and(|m| m.contains_key(&canonical))
+    {
+        canonical
+    } else {
+        name.to_string()
+    }
 }
