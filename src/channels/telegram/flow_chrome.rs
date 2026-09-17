@@ -483,7 +483,7 @@ pub(crate) fn summary_header(parts: &FooterParts, markup: HeaderMarkup) -> Strin
         let trimmed = thought.trim();
         if !trimmed.is_empty() {
             let truncated = if trimmed.chars().count() > 80 {
-                let s: String = trimmed.chars().take(77).collect();
+                let s: String = trimmed.chars().take(79).collect();
                 format!("{}…", s.trim_end())
             } else {
                 trimmed.to_string()
