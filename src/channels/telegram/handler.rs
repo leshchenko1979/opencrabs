@@ -8,7 +8,7 @@ use super::session_resolve;
 use crate::brain::agent::{AgentService, ProgressCallback};
 use crate::channels::group_history;
 use crate::config::{Config, RespondTo};
-use crate::db::{BindingOrigin, ChannelMessageRepository, MessageRepository, SessionBindingRepository};
+use crate::db::{BindingOrigin, ChannelMessageRepository, SessionBindingRepository};
 use crate::db::models::ChannelMessage as DbChannelMessage;
 use crate::services::SessionService;
 use crate::utils::sanitize::redact_secrets;
