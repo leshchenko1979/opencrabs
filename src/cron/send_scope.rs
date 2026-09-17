@@ -96,6 +96,46 @@ pub fn may_send_to(chat_id: i64) -> bool {
     may_send("telegram", &chat_id.to_string())
 }
 
+/// Parse a job's configured `deliver_to` string into a list of permitted channel targets.
+///
+/// Returns `None` if `deliver_to` is `None` (unscoped / no delivery config).
+/// Returns `Some(vec![])` if `deliver_to` is present but contains no channel targets
+/// (e.g. empty, or targeting a session only).
+pub fn parse_permitted_targets(deliver_to: Option<&str>) -> Option<Vec<PermittedTarget>> {
+    deliver_to.map(|targets| {
+        targets
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .filter_map(|t| {
+                if let Some(rest) = t.strip_prefix("telegram:") {
+                    crate::cron::scheduler::parse_telegram_target(rest).map(|(chat_id, _)| {
+                        PermittedTarget {
+                            channel: "telegram",
+                            target_id: chat_id.to_string(),
+                        }
+                    })
+                } else if let Some(rest) = t.strip_prefix("discord:") {
+                    Some(PermittedTarget {
+                        channel: "discord",
+                        target_id: rest.to_string(),
+                    })
+                } else if let Some(rest) = t.strip_prefix("slack:") {
+                    Some(PermittedTarget {
+                        channel: "slack",
+                        target_id: rest.to_string(),
+                    })
+                } else {
+                    t.strip_prefix("whatsapp:").map(|rest| PermittedTarget {
+                        channel: "whatsapp",
+                        target_id: rest.to_string(),
+                    })
+                }
+            })
+            .collect()
+    })
+}
+
 /// Why a send was refused, for the tool result the model reads.
 pub fn refusal_for(channel: &str, target_id: &str) -> String {
     match permission() {
@@ -117,6 +157,48 @@ pub fn refusal_for(channel: &str, target_id: &str) -> String {
              (attempted {channel}:{target_id}). Its output stays in its own session. Set \
              deliver_to on the job if it should report to a channel."
         ),
+    }
+}
+
+/// Extract the cron job UUID from a session title containing `[cron-job:<uuid>]`.
+pub fn extract_cron_job_id_from_session_title(title: &str) -> Option<uuid::Uuid> {
+    let start = title.find("[cron-job:")? + "[cron-job:".len();
+    let rest = &title[start..];
+    let end = rest.find(']')?;
+    uuid::Uuid::parse_str(&rest[..end]).ok()
+}
+
+/// Resolve the permitted targets for a resumed session turn.
+///
+/// Returns `Some(targets)` (or `Some(vec![])` / Nowhere) if this session is
+/// a cron session, ensuring it runs under the appropriate send_scope guard.
+/// Returns `None` (Unscoped) if this is an ordinary non-cron session.
+pub async fn resolve_cron_session_scope(
+    pool: &crate::db::Pool,
+    session: Option<&crate::db::models::Session>,
+    channel: &str,
+) -> Option<Vec<PermittedTarget>> {
+    let job_id = session
+        .and_then(|s| s.title.as_deref())
+        .and_then(extract_cron_job_id_from_session_title);
+
+    if let Some(id) = job_id {
+        let repo = crate::db::CronJobRepository::new(pool.clone());
+        match repo.find_by_id(&id.to_string()).await {
+            Ok(Some(job)) => {
+                parse_permitted_targets(job.deliver_to.as_deref()).or(Some(Vec::new()))
+            }
+            Ok(None) | Err(_) => {
+                // Cron job not found in DB or query error: fail closed to Nowhere
+                Some(Vec::new())
+            }
+        }
+    } else if channel == "cron" {
+        // Channel is explicitly "cron" but no job id could be extracted: fail closed to Nowhere
+        Some(Vec::new())
+    } else {
+        // Not a cron session
+        None
     }
 }
 
