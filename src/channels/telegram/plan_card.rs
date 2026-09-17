@@ -471,10 +471,6 @@ pub(crate) fn plan_review_was_cancelled(
 /// session — the delta is the only thing the owner is shown.
 const PLAN_REVIEW_DELTA_CAP: usize = 200;
 
-/// Marker the review brief asks the worker to end its report with, so the
-/// card delta is the worker's own summary rather than a scraped prose line.
-const PLAN_REVIEW_DELTA_MARKER: &str = "DELTA:";
-
 /// The keyboard a plan card should show, given whether a review is running
 /// (#155). Only the Editing keyboard grays out — a running review must not
 /// invent a keyboard for the checklist or absent states.
@@ -788,8 +784,8 @@ impl PlanReviewReport {
 /// Clean markdown headings (`### `, `## `), bold/italic (`**`, `__`), and leading list markers to extract clean section key/rest.
 fn parse_section_header<'a>(trimmed: &'a str, marker: &str) -> Option<&'a str> {
     // Strip leading markdown heading tokens '#', bullets, asterisks, underscores, spaces
-    let mut candidate = trimmed
-        .trim_start_matches(|c: char| c == '#' || c == '*' || c == '_' || c == '-' || c == ' ')
+    let candidate = trimmed
+        .trim_start_matches(['#', '*', '_', '-', ' '])
         .trim();
 
     // Check if candidate starts with the marker (case-insensitive)
