@@ -11,7 +11,9 @@
 //!
 //! Fixtures are synthetic and carry no user identifiers.
 
-use crate::brain::memory_recall::recall_from;
+use crate::brain::memory_recall::{
+    recall_for_session, recall_from, recall_from_active_skills, recall_from_project_directives,
+};
 
 const MEMORY: &str = "\
 # Memory
@@ -182,4 +184,66 @@ async fn repeated_recall_is_stable_across_the_cache() {
         first, second,
         "recall must be identical across calls, the cache cannot change the answer"
     );
+}
+
+// --- active skills & project directives recall (#285) ----------------------
+
+#[tokio::test]
+async fn recall_from_project_directives_matches_claude_md() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let claude_md = temp.path().join("CLAUDE.md");
+    tokio::fs::write(
+        &claude_md,
+        "# Project Directives\n\n## Python Coding Standards\n\nAlways use pytest and ruff for formatting.\n",
+    )
+    .await
+    .unwrap();
+
+    let recalled =
+        recall_from_project_directives(temp.path(), "what are the python coding standards?")
+            .await
+            .expect("should recall from CLAUDE.md");
+
+    assert!(recalled.contains("from project directive CLAUDE.md"));
+    assert!(recalled.contains("pytest and ruff"));
+}
+
+#[test]
+fn recall_from_active_skills_matches_active_skill() {
+    let mut active = std::collections::HashSet::new();
+    active.insert("coding-process".to_string());
+
+    let recalled = recall_from_active_skills(
+        &active,
+        "explain python coding process and architecture decision records",
+    )
+    .expect("should recall from active coding-process skill");
+
+    assert!(recalled.contains("from active skill coding-process"));
+}
+
+#[tokio::test]
+async fn recall_for_session_aggregates_sources() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let session_id = uuid::Uuid::new_v4();
+
+    // Directives
+    let agents_md = temp.path().join("AGENTS.md");
+    tokio::fs::write(
+        &agents_md,
+        "# Process Law\n\n## Gatus Recovery Procedure\n\nCheck endpoint health using host-diag.\n",
+    )
+    .await
+    .unwrap();
+
+    let recalled = recall_for_session(
+        session_id,
+        Some(temp.path()),
+        "how to run gatus recovery procedure?",
+    )
+    .await
+    .expect("should recall from directives");
+
+    assert!(recalled.contains("from project directive AGENTS.md"));
+    assert!(recalled.contains("host-diag"));
 }

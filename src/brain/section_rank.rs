@@ -218,6 +218,53 @@ impl Ranked {
             .sum()
     }
 
+    /// Section indices whose length-normalized BM25 score clears `min_score`, best
+    /// first, bounded by section count and total characters.
+    pub fn find_relevant_indices(
+        &self,
+        query: &str,
+        max_sections: usize,
+        max_chars: usize,
+        min_score: f64,
+    ) -> Vec<usize> {
+        let terms = query_terms(query);
+        if terms.is_empty() {
+            return Vec::new();
+        }
+        let norm = terms.len() as f64;
+
+        let mut scored: Vec<(f64, usize)> = (0..self.sections.len())
+            .filter_map(|i| {
+                let score = self.score(&terms, i) / norm;
+                (score >= min_score).then_some((score, i))
+            })
+            .collect();
+
+        // Best first; file order breaks ties so repeated calls agree.
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.1.cmp(&b.1))
+        });
+
+        let mut indices = Vec::new();
+        let mut chars = 0usize;
+        for (_, i) in scored {
+            if indices.len() >= max_sections {
+                break;
+            }
+            let section = &self.sections[i];
+            let len = section.render().chars().count();
+            if chars + len > max_chars && !indices.is_empty() {
+                break;
+            }
+            chars += len;
+            indices.push(i);
+        }
+
+        indices
+    }
+
     /// Sections whose length-normalized BM25 score clears `min_score`, best
     /// first, bounded by section count and total characters.
     ///
@@ -239,37 +286,17 @@ impl Ranked {
         }
         let norm = terms.len() as f64;
 
-        let mut scored: Vec<(f64, usize)> = (0..self.sections.len())
-            .filter_map(|i| {
-                let score = self.score(&terms, i) / norm;
-                (score >= min_score).then_some((score, i))
-            })
-            .collect();
+        let total = (0..self.sections.len())
+            .filter(|&i| (self.score(&terms, i) / norm) >= min_score)
+            .count();
 
-        // Best first; file order breaks ties so repeated calls agree.
-        scored.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.1.cmp(&b.1))
-        });
+        let indices = self.find_relevant_indices(query, max_sections, max_chars, min_score);
+        let sections = indices
+            .into_iter()
+            .map(|i| self.sections[i].clone())
+            .collect::<Vec<_>>();
 
-        let total = scored.len();
-        let mut sections = Vec::new();
-        let mut chars = 0usize;
-        for (_, i) in scored {
-            if sections.len() >= max_sections {
-                break;
-            }
-            let section = &self.sections[i];
-            let len = section.render().chars().count();
-            if chars + len > max_chars && !sections.is_empty() {
-                break;
-            }
-            chars += len;
-            sections.push(section.clone());
-        }
-
-        let omitted = total - sections.len();
+        let omitted = total.saturating_sub(sections.len());
         Matches { sections, omitted }
     }
 }
