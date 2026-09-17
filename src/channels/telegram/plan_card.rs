@@ -785,6 +785,28 @@ impl PlanReviewReport {
     }
 }
 
+/// Clean markdown headings (`### `, `## `), bold/italic (`**`, `__`), and leading list markers to extract clean section key/rest.
+fn parse_section_header<'a>(trimmed: &'a str, marker: &str) -> Option<&'a str> {
+    // Strip leading markdown heading tokens '#', bullets, asterisks, underscores, spaces
+    let mut candidate = trimmed
+        .trim_start_matches(|c: char| c == '#' || c == '*' || c == '_' || c == '-' || c == ' ')
+        .trim();
+
+    // Check if candidate starts with the marker (case-insensitive)
+    if candidate.len() >= marker.len()
+        && candidate[..marker.len()].eq_ignore_ascii_case(marker)
+    {
+        let mut rest = candidate[marker.len()..].trim();
+        // Strip leading colon if marker didn't include it or if trailing
+        rest = rest.trim_start_matches(':').trim();
+        // Strip trailing markdown bold/italic tags like '**' or '__'
+        rest = rest.trim_end_matches(['*', '_', ' ']).trim();
+        Some(rest)
+    } else {
+        None
+    }
+}
+
 /// Parse a review worker's full output into card delta, full summary, and open questions.
 pub(crate) fn parse_plan_review_report(report: Option<&str>) -> PlanReviewReport {
     let Some(report) = report else {
@@ -799,30 +821,33 @@ pub(crate) fn parse_plan_review_report(report: Option<&str>) -> PlanReviewReport
 
     for line in report.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with(PLAN_REVIEW_DELTA_MARKER) {
-            let d = trimmed
-                .strip_prefix(PLAN_REVIEW_DELTA_MARKER)
-                .unwrap()
-                .trim();
+
+        if let Some(d) = parse_section_header(trimmed, "DELTA") {
+            in_summary = false;
+            in_open_questions = false;
             if !d.is_empty() {
                 delta_line = Some(d.to_string());
             }
-        } else if trimmed.starts_with("OPEN_QUESTIONS:") {
+        } else if let Some(rest) = parse_section_header(trimmed, "OPEN_QUESTIONS")
+            .or_else(|| parse_section_header(trimmed, "OPEN QUESTIONS"))
+        {
             in_open_questions = true;
             in_summary = false;
-            let rest = trimmed.strip_prefix("OPEN_QUESTIONS:").unwrap().trim();
             if !rest.is_empty() {
                 open_questions.push(rest.to_string());
             }
-        } else if trimmed.starts_with("SUMMARY:") {
+        } else if let Some(rest) = parse_section_header(trimmed, "SUMMARY") {
             in_summary = true;
             in_open_questions = false;
-            let rest = trimmed.strip_prefix("SUMMARY:").unwrap().trim();
             if !rest.is_empty() {
                 summary_lines.push(rest.to_string());
             }
         } else if in_open_questions {
-            if trimmed.starts_with('#') || trimmed.starts_with("DELTA:") {
+            // Check if we hit another markdown section header
+            if parse_section_header(trimmed, "DELTA").is_some()
+                || parse_section_header(trimmed, "SUMMARY").is_some()
+                || (trimmed.starts_with('#') && !trimmed.starts_with("### ?"))
+            {
                 in_open_questions = false;
             } else if trimmed.starts_with('-')
                 || trimmed.starts_with('*')
@@ -843,9 +868,10 @@ pub(crate) fn parse_plan_review_report(report: Option<&str>) -> PlanReviewReport
                 }
             }
         } else if in_summary {
-            if trimmed.starts_with('#')
-                || trimmed.starts_with("DELTA:")
-                || trimmed.starts_with("OPEN_QUESTIONS:")
+            if parse_section_header(trimmed, "DELTA").is_some()
+                || parse_section_header(trimmed, "OPEN_QUESTIONS").is_some()
+                || parse_section_header(trimmed, "OPEN QUESTIONS").is_some()
+                || trimmed.starts_with('#')
             {
                 in_summary = false;
             } else if !trimmed.is_empty() {
