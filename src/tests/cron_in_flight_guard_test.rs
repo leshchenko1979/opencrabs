@@ -19,32 +19,27 @@ async fn test_db() -> (crate::db::Pool, CronJobRepository, CronJobRunRepository)
     (pool, job_repo, run_repo)
 }
 
+fn make_test_job(name: &str, cron: &str) -> CronJob {
+    CronJob::new(
+        name.to_string(),
+        cron.to_string(),
+        "UTC".to_string(),
+        "Test prompt".to_string(),
+        None,
+        None,
+        "off".to_string(),
+        true,
+        None,
+        None,
+    )
+}
+
 #[tokio::test]
 async fn test_has_running_job_detects_in_flight_status() {
     let (_pool, job_repo, run_repo) = test_db().await;
-    let job_id = Uuid::new_v4();
-
-    let job = CronJob {
-        id: job_id,
-        name: "test-in-flight-guard".to_string(),
-        cron_expr: "*/5 * * * *".to_string(),
-        timezone: "UTC".to_string(),
-        prompt: "echo test".to_string(),
-        thinking: "off".to_string(),
-        auto_approve: true,
-        enabled: true,
-        next_run_at: None,
-        last_run: None,
-        profile_name: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        deliver_to: None,
-        deliver_api_key: None,
-        trigger_cmd: None,
-        trigger_on: None,
-        trigger_timeout_secs: None,
-    };
-    job_repo.create(&job).await.unwrap();
+    let job = make_test_job("test-in-flight-guard", "*/5 * * * *");
+    let job_id = job.id;
+    job_repo.insert(&job).await.unwrap();
 
     // Initially no runs exist
     assert!(
@@ -94,30 +89,11 @@ async fn test_has_running_job_detects_in_flight_status() {
 #[tokio::test]
 async fn test_cron_scheduler_skips_in_flight_job_and_advances_next_run() {
     let (_pool, job_repo, run_repo) = test_db().await;
-    let job_id = Uuid::new_v4();
-
+    let mut job = make_test_job("test-overrunning-job", "* * * * *");
     let past_boundary = Utc::now() - chrono::Duration::minutes(10);
-    let job = CronJob {
-        id: job_id,
-        name: "test-overrunning-job".to_string(),
-        cron_expr: "* * * * *".to_string(), // every minute
-        timezone: "UTC".to_string(),
-        prompt: "echo long-running".to_string(),
-        thinking: "off".to_string(),
-        auto_approve: true,
-        enabled: true,
-        next_run_at: Some(past_boundary),
-        last_run: None,
-        profile_name: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        deliver_to: None,
-        deliver_api_key: None,
-        trigger_cmd: None,
-        trigger_on: None,
-        trigger_timeout_secs: None,
-    };
-    job_repo.create(&job).await.unwrap();
+    job.next_run_at = Some(past_boundary);
+    let job_id = job.id;
+    job_repo.insert(&job).await.unwrap();
 
     // Mark an in-flight run
     let run = CronJobRun {
@@ -155,7 +131,11 @@ async fn test_cron_scheduler_skips_in_flight_job_and_advances_next_run() {
         .await
         .unwrap();
 
-    let updated_job = job_repo.get(&job_id.to_string()).await.unwrap().unwrap();
+    let updated_job = job_repo
+        .find_by_id(&job_id.to_string())
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         updated_job.next_run_at.unwrap() > now,
         "next_run_at must advance into the future when skipped due to in-flight execution"
