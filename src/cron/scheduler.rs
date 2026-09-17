@@ -563,6 +563,47 @@ pub(crate) fn cron_session_title_suffix(job: &CronJob) -> String {
     format!("[cron-job:{}]", job.id)
 }
 
+/// The `{provider, model}` pair a cron job runs on: the job's own pin, then
+/// the `[cron]` defaults, then the `[agent]` defaults.
+///
+/// The pair is taken from ONE rung, never assembled across rungs, because a
+/// model id is only meaningful to the provider it was configured with.
+/// Pairing `[cron] default_provider` with `[agent] default_model` would hand
+/// provider A a model belonging to provider B, and `execute_job`'s
+/// pre-validation would then SKIP the job as "model not supported by
+/// provider".
+pub(crate) fn resolve_cron_provider_pair(
+    job: &CronJob,
+    config: &Config,
+) -> (Option<String>, Option<String>) {
+    let mut provider = job
+        .provider
+        .clone()
+        .or_else(|| config.cron.default_provider.clone());
+    let mut model = job
+        .model
+        .clone()
+        .or_else(|| config.cron.default_model.clone());
+
+    if provider.is_none()
+        && let Some(raw) = config.agent.default_provider.as_deref().map(str::trim)
+        && !raw.is_empty()
+    {
+        let pair = crate::brain::provider_spec::normalize_in(
+            config,
+            crate::brain::provider_spec::ProviderKey::AGENT,
+            raw,
+            config.agent.default_model.as_deref(),
+        );
+        if let Some(note) = pair.note.as_deref() {
+            tracing::warn!("[agent] default_provider = \"{raw}\" corrected: {note}");
+        }
+        provider = Some(pair.provider);
+        model = pair.model.or(model);
+    }
+    (provider, model)
+}
+
 /// Resolve the session a cron job runs in — ONE SESSION PER JOB (#149).
 ///
 /// Legacy behavior (pre-#149) resolved a single shared "Cron" session for
@@ -618,16 +659,7 @@ pub(crate) async fn resolve_or_create_cron_session(
         return Ok(existing.id);
     }
     let config = Config::load()?;
-    let provider = config
-        .cron
-        .default_provider
-        .clone()
-        .or_else(|| config.agent.default_provider.clone());
-    let model = config
-        .cron
-        .default_model
-        .clone()
-        .or_else(|| config.agent.default_model.clone());
+    let (provider, model) = resolve_cron_provider_pair(job, &config);
     let session = session_svc
         .create_session_with_provider(Some(title), provider, model, None)
         .await?;
@@ -718,16 +750,7 @@ async fn execute_job(
     // non-active profile (shared-DB case, #182) runs under its own profile's
     // config + brain, not the process profile's.
     let (config, agent) = resolve_job_agent(job, factory, ctx).await?;
-    let effective_provider = job
-        .provider
-        .clone()
-        .or_else(|| config.cron.default_provider.clone())
-        .or_else(|| config.agent.default_provider.clone());
-    let effective_model = job
-        .model
-        .clone()
-        .or_else(|| config.cron.default_model.clone())
-        .or_else(|| config.agent.default_model.clone());
+    let (effective_provider, effective_model) = resolve_cron_provider_pair(job, &config);
 
     // Pre-validate the {provider, model} pair before spawning the agent.
     // A reversed cron config (e.g. model="zhipu", provider="glm-5.1") or a
@@ -812,11 +835,10 @@ async fn execute_job(
                     job.name,
                     provider_name
                 );
-                agent.swap_provider_for_session(
-                    cron_session_id,
-                    provider.clone(),
-                    provider.default_model().to_string(),
-                );
+                let model = effective_model
+                    .clone()
+                    .unwrap_or_else(|| provider.default_model().to_string());
+                agent.swap_provider_for_session(cron_session_id, provider.clone(), model);
             }
             Err(e) => {
                 tracing::warn!(

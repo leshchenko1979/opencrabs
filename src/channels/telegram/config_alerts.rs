@@ -95,19 +95,6 @@ pub struct ConfigProblem {
     pub remediation: String,
 }
 
-/// Helper to strip custom provider prefix variations (`custom/`, `custom.`, `custom:`).
-fn strip_custom_prefix(name: &str) -> Option<&str> {
-    if let Some(rest) = name.strip_prefix("custom/") {
-        Some(rest)
-    } else if let Some(rest) = name.strip_prefix("custom.") {
-        Some(rest)
-    } else if let Some(rest) = name.strip_prefix("custom:") {
-        Some(rest)
-    } else {
-        None
-    }
-}
-
 /// Audit configuration and credentials, returning all detected problems.
 pub fn audit_config_problems(
     config: &Config,
@@ -207,7 +194,7 @@ pub fn audit_config_problems(
         .map(str::trim)
         .filter(|s| !s.is_empty() && *s != "none")
     {
-        let is_valid = if let Some(custom_name) = strip_custom_prefix(dp) {
+        let is_valid = if let Some((_, custom_name)) = crate::config::strip_custom_prefix(dp) {
             config
                 .providers
                 .custom_by_name(custom_name)
@@ -291,49 +278,50 @@ pub fn audit_config_problems(
         && fb.enabled
     {
         for p_name in &fb.providers {
-            let is_valid = if let Some(custom_name) = strip_custom_prefix(p_name) {
-                config
-                    .providers
-                    .custom_by_name(custom_name)
-                    .is_some_and(|p| {
-                        p.enabled && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
-                    })
-            } else {
-                match p_name.as_str() {
-                    "anthropic" => config.providers.anthropic.as_ref().is_some_and(|p| {
-                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                    }),
-                    "openai" => config.providers.openai.as_ref().is_some_and(|p| {
-                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                    }),
-                    "gemini" => config.providers.gemini.as_ref().is_some_and(|p| {
-                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                    }),
-                    "openrouter" => config.providers.openrouter.as_ref().is_some_and(|p| {
-                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                    }),
-                    "minimax" => config.providers.minimax.as_ref().is_some_and(|p| {
-                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                    }),
-                    "zai" => config.providers.zai.as_ref().is_some_and(|p| {
-                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                    }),
-                    "moonshot" => config.providers.moonshot.as_ref().is_some_and(|p| {
-                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                    }),
-                    "xiaomi" => config.providers.xiaomi.as_ref().is_some_and(|p| {
-                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                    }),
-                    "qwen" => config.providers.qwen.as_ref().is_some_and(|p| {
-                        p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                    }),
-                    "github" => config.providers.github.as_ref().is_some_and(|p| p.enabled),
-                    "ollama" => config.providers.ollama.as_ref().is_some_and(|p| p.enabled),
-                    _ => config.providers.custom_by_name(p_name).is_some_and(|p| {
-                        p.enabled && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
-                    }),
-                }
-            };
+            let is_valid =
+                if let Some((_, custom_name)) = crate::config::strip_custom_prefix(p_name) {
+                    config
+                        .providers
+                        .custom_by_name(custom_name)
+                        .is_some_and(|p| {
+                            p.enabled && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
+                        })
+                } else {
+                    match p_name.as_str() {
+                        "anthropic" => config.providers.anthropic.as_ref().is_some_and(|p| {
+                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                        }),
+                        "openai" => config.providers.openai.as_ref().is_some_and(|p| {
+                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                        }),
+                        "gemini" => config.providers.gemini.as_ref().is_some_and(|p| {
+                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                        }),
+                        "openrouter" => config.providers.openrouter.as_ref().is_some_and(|p| {
+                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                        }),
+                        "minimax" => config.providers.minimax.as_ref().is_some_and(|p| {
+                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                        }),
+                        "zai" => config.providers.zai.as_ref().is_some_and(|p| {
+                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                        }),
+                        "moonshot" => config.providers.moonshot.as_ref().is_some_and(|p| {
+                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                        }),
+                        "xiaomi" => config.providers.xiaomi.as_ref().is_some_and(|p| {
+                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                        }),
+                        "qwen" => config.providers.qwen.as_ref().is_some_and(|p| {
+                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
+                        }),
+                        "github" => config.providers.github.as_ref().is_some_and(|p| p.enabled),
+                        "ollama" => config.providers.ollama.as_ref().is_some_and(|p| p.enabled),
+                        _ => config.providers.custom_by_name(p_name).is_some_and(|p| {
+                            p.enabled && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
+                        }),
+                    }
+                };
 
             if !is_valid {
                 problems.push(ConfigProblem {
