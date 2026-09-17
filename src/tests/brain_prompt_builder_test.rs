@@ -306,6 +306,7 @@ fn test_runtime_info_included_in_core_brain() {
         model: Some("claude-sonnet-4-6".to_string()),
         provider: Some("anthropic".to_string()),
         working_directory: Some("/home/user/project".to_string()),
+        channel: None,
     };
     let brain = loader(&dir).build_core_brain(Some(&info));
     assert!(brain.contains("claude-sonnet-4-6"));
@@ -467,6 +468,7 @@ fn test_build_prompt_with_runtime_info() {
         model: Some("claude-sonnet-4-20250514".to_string()),
         provider: Some("anthropic".to_string()),
         working_directory: Some("/home/user/project".to_string()),
+        channel: None,
     };
     let prompt = loader.build_system_brain(Some(&info));
 

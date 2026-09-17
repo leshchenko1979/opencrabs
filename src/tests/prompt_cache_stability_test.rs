@@ -30,6 +30,7 @@ fn runtime_info() -> RuntimeInfo {
         model: Some("test-model".to_string()),
         provider: Some("test-provider".to_string()),
         working_directory: Some("~/srv/rs/opencrabs".to_string()),
+        channel: None,
     }
 }
 
