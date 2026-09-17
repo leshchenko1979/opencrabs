@@ -616,6 +616,35 @@ fn structured_report_parses_bold_and_space_variants() {
 }
 
 #[test]
+fn structured_report_parses_blockquoted_delta_and_multiline_headings() {
+    let report = "### Analysis\n\
+                  Audited deployment topology.\n\
+                  \n\
+                  ### SUMMARY:\n\
+                  - Verified PostgreSQL 16 on traefik-public.\n\
+                  - Audited candidate route ranking.\n\
+                  \n\
+                  ### OPEN_QUESTIONS:\n\
+                  - None.\n\
+                  \n\
+                  ### DELTA:\n\
+                  > Upgraded the New-API migration plan in-place with exact PostgreSQL 16 connection specs";
+
+    let parsed = crate::channels::telegram::plan_card::parse_plan_review_report(Some(report));
+    assert_eq!(
+        parsed.card_delta,
+        "✨ Review: Upgraded the New-API migration plan in-place with exact PostgreSQL 16 connection specs"
+    );
+    assert_eq!(parsed.open_questions.len(), 1);
+    assert_eq!(parsed.open_questions[0], "None.");
+    assert!(parsed.full_summary.is_some());
+    assert!(parsed
+        .full_summary
+        .unwrap()
+        .contains("Verified PostgreSQL 16 on traefik-public."));
+}
+
+#[test]
 fn delta_is_the_last_marked_line_when_several_are_present() {
     let report = "DELTA: first guess\n\
                   some analysis\n\
