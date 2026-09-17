@@ -238,7 +238,7 @@ async fn telegram_send_bind_topic_persists_binding_and_records_thread_evidence()
 
 #[tokio::test]
 async fn record_topic_created_local_only_updates_stale_mapping() {
-    let db = SqliteDatabase::new_in_memory().await.expect("in-memory db");
+    let db = Database::connect_in_memory().await.expect("in-memory db");
     db.run_migrations().await.expect("migrations");
     let pool = db.pool().clone();
 
