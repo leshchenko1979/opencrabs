@@ -233,3 +233,31 @@ async fn find_recent_by_session_returns_chronological_tail() {
         .unwrap();
     assert!(none.is_empty());
 }
+
+/// #278: pruning messages older than cutoff removes expired messages and child rows
+#[tokio::test]
+async fn test_prune_older_than_removes_expired_messages() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let session_repo = SessionRepository::new(db.pool().clone());
+    let repo = MessageRepository::new(db.pool().clone());
+
+    let session = Session::new(Some("t".to_string()), Some("m".to_string()), None);
+    session_repo.create(&session).await.unwrap();
+
+    let mut old_msg = Message::new(session.id, "user".into(), "old message".into(), 1);
+    old_msg.created_at = chrono::Utc::now() - chrono::Duration::days(100);
+    repo.create(&old_msg).await.unwrap();
+
+    let mut recent_msg = Message::new(session.id, "user".into(), "recent message".into(), 2);
+    recent_msg.created_at = chrono::Utc::now() - chrono::Duration::days(10);
+    repo.create(&recent_msg).await.unwrap();
+
+    let cutoff = (chrono::Utc::now() - chrono::Duration::days(90)).timestamp();
+    let pruned = repo.prune_older_than(cutoff).await.unwrap();
+    assert_eq!(pruned, 1);
+
+    let remaining = repo.list_by_session(session.id).await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].content, "recent message");
+}

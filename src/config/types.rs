@@ -1394,6 +1394,13 @@ pub struct AgentConfig {
     #[serde(default = "default_subagent_session_ttl_days")]
     pub subagent_session_ttl_days: u32,
 
+    /// Days to retain historical messages in the session database before
+    /// pruning them during maintenance sweeps (#278).
+    /// Default: `0` (disabled / retain forever). Setting e.g. `90` prunes
+    /// messages older than 90 days.
+    #[serde(default = "default_message_retention_days")]
+    pub message_retention_days: u32,
+
     /// Override provider for autonomous RSI self-improvement cycles (e.g. "zhipu", "minimax").
     /// RSI runs on its own provider chain so it never competes with chat or sub-agents for quota.
     /// When set, RSI jobs use this provider instead of the session's active one.
@@ -1646,6 +1653,10 @@ fn default_subagent_session_ttl_days() -> u32 {
     7
 }
 
+fn default_message_retention_days() -> u32 {
+    0
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -1667,6 +1678,7 @@ impl Default for AgentConfig {
             auto_update: default_auto_update(),
             evolve_allow_root: default_evolve_allow_root(),
             subagent_session_ttl_days: default_subagent_session_ttl_days(),
+            message_retention_days: default_message_retention_days(),
             self_improvement_provider: None,
             rsi_enabled: None,
             self_improvement_model: None,
