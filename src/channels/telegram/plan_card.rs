@@ -372,19 +372,55 @@ pub(crate) async fn render_plan_card_markdown(
 }
 
 /// Result of a plan card edit attempt.
-enum EditOutcome {
+pub(crate) enum EditOutcome {
     /// Card saved successfully (or content unchanged).
     Saved,
     /// Rate-limited: card writes suppressed for a duration.
     Suppressed,
     /// Card gone/unusable: caller should try creating fresh.
     Gone,
+    /// Non-fatal failure (formatting rejection, transient API error): the
+    /// tracked message still exists, so the caller must NOT drop it nor post a
+    /// duplicate card. The message ID stays tracked (#290).
+    Preserved,
+}
+
+/// True when a Telegram edit error means the tracked message is genuinely
+/// unusable — deleted, uneditable, or its thread/chat is gone. Only these
+/// justify dropping the tracked card ID and posting a fresh message; every
+/// other error (entity/photo rejection, transient 5xx, network timeout) is
+/// recoverable in place and must not cascade into a duplicate card (#290).
+///
+/// Deliberately NOT the same predicate as [`super::governor::is_permanent_edit_error`]:
+/// that one also treats "message is not modified" as permanent (for a queued
+/// final the content is already there, so there is nothing left to do), while a
+/// plan-card refresh reads it as a silent success. Merging the two would flip
+/// that case for one of the callers.
+pub(crate) fn is_message_gone_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    const GONE_MARKERS: [&str; 7] = [
+        "message to edit not found",
+        "message can't be edited",
+        "message_id_invalid",
+        "chat not found",
+        "topic_closed",
+        "message thread not found",
+        "thread not found",
+    ];
+    for marker in GONE_MARKERS {
+        if lower.contains(marker) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Classify a plan card edit failure and take the appropriate state action.
-/// Handles "message is not modified" (silent success) and rate-limiting
-/// (suppress future writes). Returns `Gone` when the card needs recreating.
-async fn handle_edit_failure(
+/// Handles "message is not modified" (silent success), rate-limiting (suppress
+/// future writes), and message-gone errors (drop the tracked ID so the caller
+/// recreates). Any other error returns `Preserved`: the tracked card ID is
+/// kept so the caller can retry in place instead of posting a duplicate (#290).
+pub(crate) async fn handle_edit_failure(
     error: &str,
     state: &TelegramState,
     session_id: Uuid,
@@ -410,9 +446,77 @@ async fn handle_edit_failure(
             .await;
         return EditOutcome::Suppressed;
     }
-    tracing::debug!("Telegram plan card edit failed ({mid:?}): {error} — recreating");
-    state.take_plan_card(session_id).await;
-    EditOutcome::Gone
+    if is_message_gone_error(error) {
+        tracing::debug!("Telegram plan card edit failed ({mid:?}): {error} — recreating");
+        state.take_plan_card(session_id).await;
+        return EditOutcome::Gone;
+    }
+    tracing::warn!("Telegram plan card edit failed ({mid:?}): {error} — preserving tracked card");
+    EditOutcome::Preserved
+}
+
+/// Retry a failed plan-card update IN PLACE using the classic HTML dialect
+/// (#290). Called when a rich-media edit failed for a non-fatal reason: the
+/// tracked message is still there, so the card is edited again as HTML rather
+/// than dropping the id and posting a duplicate. Returns `true` when the card
+/// was handled (edited, or the failure was recoverable and the tracked id is
+/// kept), `false` only when the message is genuinely gone and the caller must
+/// recreate it.
+#[allow(clippy::too_many_arguments)]
+async fn edit_plan_card_html_in_place(
+    bot: &Bot,
+    chat: ChatId,
+    thread_id: Option<ThreadId>,
+    state: &Arc<TelegramState>,
+    session_id: Uuid,
+    title: Option<&str>,
+    checklist: Option<&[String]>,
+    prose: Option<&[ProseSection]>,
+    goal: Option<&GoalSection>,
+    footer_note: Option<&str>,
+    plan_kb: PlanKb,
+    mid: MessageId,
+) -> bool {
+    let Some(html) = render_plan_card_html(title, checklist, prose, goal).await else {
+        tracing::warn!(
+            "Telegram plan card fallback HTML unavailable for mid={mid:?} — preserving tracked card"
+        );
+        return true;
+    };
+    let html = plan_card_with_footer(html, footer_note, false);
+    let kb = plan_kb.keyboard();
+    let html_sig = format!("{html}\u{1}{plan_kb:?}");
+    let mut req = bot
+        .edit_message_text(chat, mid, html)
+        .parse_mode(ParseMode::Html);
+    if let Some(ref k) = kb {
+        req = req.reply_markup(k.clone());
+    }
+    match req.await {
+        Ok(_) => {
+            state
+                .set_plan_card(session_id, chat, thread_id, mid, html_sig)
+                .await;
+            true
+        }
+        Err(e) => {
+            let err = e.to_string();
+            let outcome =
+                handle_edit_failure(&err, state, session_id, chat, thread_id, &html_sig, mid).await;
+            match outcome {
+                EditOutcome::Saved | EditOutcome::Suppressed => true,
+                // Only a genuinely gone message lets the caller recreate.
+                EditOutcome::Gone => false,
+                EditOutcome::Preserved => {
+                    tracing::warn!(
+                        "Telegram plan card in-place HTML fallback failed ({mid:?}): {err} — \
+                         preserving tracked card"
+                    );
+                    true
+                }
+            }
+        }
+    }
 }
 
 /// Classify a plan card create failure. Suppresses future writes on rate-limit,
@@ -1121,6 +1225,31 @@ pub(crate) async fn refresh_plan_card(
                     match outcome {
                         EditOutcome::Saved | EditOutcome::Suppressed => return true,
                         EditOutcome::Gone => { /* fall through to create */ }
+                        EditOutcome::Preserved => {
+                            // The message still exists — retry it in place with
+                            // the classic HTML dialect instead of dropping the
+                            // tracked id and posting a duplicate card (#290).
+                            if edit_plan_card_html_in_place(
+                                bot,
+                                chat,
+                                thread_id,
+                                state,
+                                session_id,
+                                title.as_deref(),
+                                checklist.as_deref(),
+                                prose.as_deref(),
+                                goal.as_ref(),
+                                footer_note.as_deref(),
+                                plan_kb,
+                                mid,
+                            )
+                            .await
+                            {
+                                return true;
+                            }
+                            // In-place edit reported the message genuinely gone:
+                            // recreate via the rich API below.
+                        }
                     }
                 }
             }
@@ -1230,7 +1359,12 @@ pub(crate) async fn refresh_plan_card(
                 )
                 .await;
                 match outcome {
-                    EditOutcome::Saved | EditOutcome::Suppressed => return true,
+                    // Preserved: the message is still there but the edit was
+                    // rejected for a non-fatal reason — keep tracking it and
+                    // skip the fresh post so no duplicate card appears (#290).
+                    EditOutcome::Saved | EditOutcome::Suppressed | EditOutcome::Preserved => {
+                        return true;
+                    }
                     EditOutcome::Gone => { /* fall through to create */ }
                 }
             }
