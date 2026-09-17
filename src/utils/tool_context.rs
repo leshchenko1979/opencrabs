@@ -32,8 +32,76 @@ pub fn tool_context_hint(name: &str, input: &serde_json::Value) -> String {
             .map(String::from),
         "ls" => safe.get("path").and_then(|v| v.as_str()).map(String::from),
         "http_request" | "web_fetch" => safe.get("url").and_then(|v| v.as_str()).map(String::from),
-        "brave_search" | "exa_search" | "web_search" | "memory_search" | "session_search" => {
+        "brave_search" | "exa_search" | "web_search" | "memory_search" => {
             safe.get("query").and_then(|v| v.as_str()).map(String::from)
+        }
+        "session_search" => {
+            if let Some(q) = safe
+                .get("query")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+            {
+                Some(q.trim().to_string())
+            } else if let Some(title) = safe
+                .get("title_contains")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+            {
+                Some(format!("title: {}", title.trim()))
+            } else if let Some(op) = safe
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+            {
+                if let Some(status) = safe
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty() && *s != "all")
+                {
+                    Some(format!("{} ({})", op.trim(), status.trim()))
+                } else {
+                    Some(op.trim().to_string())
+                }
+            } else {
+                None
+            }
+        }
+        "session_notify" => {
+            let action = safe
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("send");
+            if action == "status" {
+                let id = safe
+                    .get("notify_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if id.is_empty() {
+                    Some("status".to_string())
+                } else {
+                    Some(format!("status {}", id))
+                }
+            } else {
+                let msg = safe
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if !msg.is_empty() {
+                    let first_line = msg
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or(msg)
+                        .trim();
+                    Some(first_line.to_string())
+                } else {
+                    safe.get("target_session")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|target| format!("to {}", target.trim()))
+                }
+            }
         }
         "telegram_send" | "discord_send" | "slack_send" | "trello_send" => safe
             .get("action")
