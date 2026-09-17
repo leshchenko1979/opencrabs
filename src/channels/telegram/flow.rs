@@ -153,7 +153,8 @@ pub(crate) fn clean_tool_entry(
         | "browser_close"
         | "pg_query"
         | "n8n_api"
-        | "cron_manage" => {
+        | "cron_manage"
+        | "suggest_options" => {
             if context.trim().is_empty() {
                 (format!("{icon} {name}"), context.to_string())
             } else {
@@ -950,38 +951,20 @@ pub(crate) const COMPACTING_HEADER_TEXT: &str = "⏳ Compacting context…";
 /// so a session with no compaction history renders no parenthetical at all.
 pub(crate) fn compacting_flow_line(
     usage_pct: f64,
-    predicted: Option<std::time::Duration>,
+    _predicted: Option<std::time::Duration>,
 ) -> String {
-    match predicted {
-        Some(d) => format!(
-            "⏳ Compacting context — {:.0}% full (≈{})…",
-            usage_pct,
-            humanize_duration(d.as_secs().max(1))
-        ),
-        None => format!("⏳ Compacting context — {:.0}% full…", usage_pct),
-    }
+    format!("⏳ compact: {:.0}% 🧠", usage_pct)
 }
 
-/// Flow-block body line posted when compaction finishes (#29). Doubles as
-/// the definitive completion signal: arrival means the silent window is
-/// over, so a FAILED compaction never emits one (no false ✅). Absolute
-/// token counts added alongside the percentages (#135): the owner reads
-/// "94,559 → 34,197 tokens", not just "94% → 34%".
+/// Flow-block body line posted when compaction finishes (#29).
 pub(crate) fn compacted_flow_line(
     before_pct: f64,
     after_pct: f64,
-    before_tokens: usize,
-    after_tokens: usize,
-    elapsed: std::time::Duration,
+    _before_tokens: usize,
+    _after_tokens: usize,
+    _elapsed: std::time::Duration,
 ) -> String {
-    format!(
-        "✅ Compacted: {:.0}% → {:.0}% ({} → {} tokens) in {}",
-        before_pct,
-        after_pct,
-        crate::utils::format_token_count(u32::try_from(before_tokens).unwrap_or(u32::MAX)),
-        crate::utils::format_token_count(u32::try_from(after_tokens).unwrap_or(u32::MAX)),
-        humanize_duration(elapsed.as_secs().max(1))
-    )
+    format!("🧹 compact: {:.0}% → {:.0}% 🧠", before_pct, after_pct)
 }
 
 /// Terminal state of a turn, shown in the settled flow-block header (#480).
@@ -1246,6 +1229,8 @@ pub enum ToolClass {
     Brain,
     Web,
     Cron,
+    Agent,
+    Suggest,
     Other,
 }
 
@@ -1258,10 +1243,13 @@ impl ToolClass {
             | "hashline_edit"
             | "write_opencrabs_file"
             | "notebook_edit" => ToolClass::FileEdit,
-            "grep" | "glob" | "ls" | "memory_search" | "exa_search" | "web_search"
-            | "brave_search" | "channel_search" | "session_search" | "grep_docs" => {
-                ToolClass::Search
-            }
+            "grep" | "glob" | "ls" | "grep_docs" => ToolClass::Search,
+            "memory_search" | "session_search" | "channel_search" | "load_brain_file"
+            | "feedback_record" | "feedback_analyze" | "self_improve" => ToolClass::Brain,
+            "web_search" | "exa_search" | "brave_search" | "http_request" | "web_scrape"
+            | "browser_navigate" | "browser_click" | "browser_type" | "browser_eval"
+            | "browser_content" | "browser_screenshot" | "browser_wait" | "browser_find"
+            | "browser_close" | "pg_query" | "n8n_api" => ToolClass::Web,
             "bash" | "execute_code" => ToolClass::Shell,
             "plan" | "goal_manage" | "session_context" | "tasks_list" => ToolClass::Plan,
             "session_notify" | "telegram_send" | "a2a_send" | "discord_send" | "slack_send"
@@ -1270,14 +1258,9 @@ impl ToolClass {
                 ToolClass::Config
             }
             "cron_manage" => ToolClass::Cron,
-            "load_brain_file" | "feedback_record" | "feedback_analyze" | "self_improve" => {
-                ToolClass::Brain
-            }
-            "http_request" | "web_scrape" | "browser_navigate" | "browser_click"
-            | "browser_type" | "browser_eval" | "browser_content" | "browser_screenshot"
-            | "browser_wait" | "browser_find" | "browser_close" | "pg_query" | "n8n_api" => {
-                ToolClass::Web
-            }
+            "spawn_agent" | "wait_agent" | "send_input" | "close_agent" | "resume_agent"
+            | "team_create" | "team_delete" | "team_broadcast" => ToolClass::Agent,
+            "suggest_options" => ToolClass::Suggest,
             _ => ToolClass::Other,
         }
     }
@@ -1295,6 +1278,8 @@ impl ToolClass {
             ToolClass::Brain => "🧠",
             ToolClass::Web => "🌐",
             ToolClass::Cron => "⏰",
+            ToolClass::Agent => "🤖",
+            ToolClass::Suggest => "💡",
             ToolClass::Other => "⛏",
         }
     }
@@ -1961,10 +1946,12 @@ pub(crate) fn progress_key(text: &str) -> Option<&'static str> {
     let t = text.trim_start_matches(|c: char| !c.is_alphanumeric());
     if t.starts_with("Model reasoned without answering") {
         Some("empty-answer-nudge")
-    } else if t.starts_with("Trying fallback") {
+    } else if t.starts_with("Trying fallback") || t.starts_with("fallback:") {
         Some("fallback-attempt")
-    } else if t.starts_with("Retry ") {
+    } else if t.starts_with("Retry ") || t.starts_with("retry:") {
         Some("provider-retry")
+    } else if t.starts_with("guard:") {
+        Some("self-heal-guard")
     } else if t.starts_with("Mermaid render failed") {
         // The regen-nudge counter (#37): 1/3 → 2/3 → 3/3 supersedes in
         // place like the empty-answer nudge counter.

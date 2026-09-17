@@ -133,10 +133,25 @@ pub(crate) fn build_progress_cb(
                     // and the IntermediateText arm below).
                 }
             }
-            ProgressEvent::QueuedUserMessage { .. } => {
-                // The user's own message is already visible in the chat;
-                // the block just has to stop growing above it (#404).
+            ProgressEvent::QueuedUserMessage { text } => {
                 detach_flow_for_followup(&st);
+                if let Ok(mut s) = st.lock() {
+                    let preview = text.lines().next().unwrap_or("").trim();
+                    let preview = if preview.len() > 30 {
+                        format!(
+                            "{}…",
+                            &preview[..preview
+                                .char_indices()
+                                .map(|(i, _)| i)
+                                .nth(30)
+                                .unwrap_or(preview.len())]
+                        )
+                    } else {
+                        preview.to_string()
+                    };
+                    s.display_queue
+                        .push(DisplayItem::System(format!("📥 in: user \"{}\"", preview)));
+                }
             }
             ProgressEvent::IntermediateText { text, reasoning: _ } => {
                 if let Ok(mut s) = st.lock() {
@@ -163,7 +178,7 @@ pub(crate) fn build_progress_cb(
             ProgressEvent::SelfHealingAlert { message } => {
                 if let Ok(mut s) = st.lock() {
                     s.display_queue
-                        .push(DisplayItem::System(format!("🔧 {}", message)));
+                        .push(DisplayItem::System(format!("🛡️ guard: {}", message)));
                 }
             }
             ProgressEvent::RetryAttempt {
@@ -173,19 +188,24 @@ pub(crate) fn build_progress_cb(
             } => {
                 if let Ok(mut s) = st.lock() {
                     s.display_queue.push(DisplayItem::System(format!(
-                        "⏳ Retry {}/{} — {}",
+                        "🔄 retry: {}/{} ({})",
                         attempt, max, reason
                     )));
                 }
             }
             ProgressEvent::ProviderSwitched {
-                to_name, to_model, ..
+                from_name,
+                to_name,
+                to_model,
+                ..
             } => {
                 if let Ok(mut s) = st.lock() {
-                    s.display_queue.push(DisplayItem::System(format!(
-                        "🔄 Now using {}/{}",
-                        to_name, to_model
-                    )));
+                    let text = if !from_name.is_empty() {
+                        format!("🔀 fallback: {} → {}/{}", from_name, to_name, to_model)
+                    } else {
+                        format!("🔀 fallback: {}/{}", to_name, to_model)
+                    };
+                    s.display_queue.push(DisplayItem::System(text));
                 }
             }
             // Optional follow-up suggestions (#597): post tap-to-send
