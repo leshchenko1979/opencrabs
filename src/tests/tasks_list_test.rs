@@ -66,7 +66,7 @@ fn advertised_status_file_is_the_file_the_writer_creates() {
     use crate::brain::agent::service::work_status;
 
     let dir = TempDir::new().unwrap();
-    test_override::set(dir.path().join("detached"));
+    work_status::test_override::set(dir.path().join("detached"));
 
     let id = Uuid::new_v4();
     let session_id = Uuid::new_v4();
@@ -93,7 +93,7 @@ fn advertised_status_file_is_the_file_the_writer_creates() {
         "advertised path {advertised} must not live under the retired {retired}"
     );
 
-    test_override::clear();
+    work_status::test_override::clear();
 }
 
 /// Gap 2: a detached command's status file exists mid-run with spawn data,

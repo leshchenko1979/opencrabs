@@ -37,9 +37,6 @@ const STALE_ROW_SECS: i64 = 24 * 60 * 60;
 /// and only after the current boot has made its own offer.
 pub(crate) const MAX_ROW_AGE_SECS: i64 = 3 * STALE_ROW_SECS; // 72h (259,200s)
 
-fn now_unix() -> i64 {
-    chrono::Utc::now().timestamp()
-}
 fn repo() -> Option<NotifyQueueRepository> {
     crate::db::global_pool().map(|p| NotifyQueueRepository::new(p.clone()))
 }
