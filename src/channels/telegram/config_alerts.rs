@@ -30,7 +30,7 @@ pub enum ConfigProblemKind {
     EmbeddingKeyMissing { provider: String },
     IgnoredOrTypoConfigKeys(Vec<String>),
     NoValidBotOwnerConfigured,
-    CommandCatalogOverflow { count: usize, raw_chars: usize },
+    CommandCatalogOverflow { count: usize },
 }
 
 impl ConfigProblemKind {
@@ -47,7 +47,7 @@ impl ConfigProblemKind {
             Self::EmbeddingKeyMissing { .. } => "Memory Embedding API Key Missing",
             Self::IgnoredOrTypoConfigKeys(_) => "Unrecognized / Typo Config Keys",
             Self::NoValidBotOwnerConfigured => "No Valid Telegram bot_owner Configured",
-            Self::CommandCatalogOverflow { .. } => "Command & Skill Catalog Overflow",
+            Self::CommandCatalogOverflow { .. } => "Too Many Commands / Skills",
         }
     }
 
@@ -78,9 +78,9 @@ impl ConfigProblemKind {
             Self::NoValidBotOwnerConfigured => {
                 "No numeric Telegram user ID was found in channels.telegram.bot_owner or allowed_users.".into()
             }
-            Self::CommandCatalogOverflow { count, raw_chars } => {
+            Self::CommandCatalogOverflow { count } => {
                 format!(
-                    "Command & skill catalog has {count} commands ({raw_chars} total raw characters), exceeding safe Telegram menu limits (100 cmds / 4800 chars). Descriptions are being adaptively truncated."
+                    "Command & skill catalog has {count} commands, exceeding Telegram's hard limit of 100 commands per scope."
                 )
             }
         }
@@ -93,6 +93,19 @@ pub struct ConfigProblem {
     pub kind: ConfigProblemKind,
     pub severity: Severity,
     pub remediation: String,
+}
+
+/// Helper to strip custom provider prefix variations (`custom/`, `custom.`, `custom:`).
+fn strip_custom_prefix(name: &str) -> Option<&str> {
+    if let Some(rest) = name.strip_prefix("custom/") {
+        Some(rest)
+    } else if let Some(rest) = name.strip_prefix("custom.") {
+        Some(rest)
+    } else if let Some(rest) = name.strip_prefix("custom:") {
+        Some(rest)
+    } else {
+        None
+    }
 }
 
 /// Audit configuration and credentials, returning all detected problems.
@@ -194,7 +207,7 @@ pub fn audit_config_problems(
         .map(str::trim)
         .filter(|s| !s.is_empty() && *s != "none")
     {
-        let is_valid = if let Some(custom_name) = dp.strip_prefix("custom/") {
+        let is_valid = if let Some(custom_name) = strip_custom_prefix(dp) {
             config
                 .providers
                 .custom_by_name(custom_name)
@@ -278,7 +291,7 @@ pub fn audit_config_problems(
         && fb.enabled
     {
         for p_name in &fb.providers {
-            let is_valid = if let Some(custom_name) = p_name.strip_prefix("custom/") {
+            let is_valid = if let Some(custom_name) = strip_custom_prefix(p_name) {
                 config
                     .providers
                     .custom_by_name(custom_name)
@@ -382,7 +395,7 @@ pub fn audit_config_problems(
         }
     }
 
-    // 9. Audit Command & Skill catalog payload limits
+    // 9. Audit Command & Skill catalog count limit (Telegram max 100 commands per scope)
     if config.channels.telegram.enabled {
         let skills = crate::brain::skills::load_all_skills();
         let brain_path = crate::brain::BrainLoader::resolve_path();
@@ -391,24 +404,14 @@ pub fn audit_config_problems(
 
         // Built-ins (21 base commands) + user commands + skills
         let total_count = 21 + user_commands.len() + skills.len();
-        let raw_chars: usize = user_commands
-            .iter()
-            .map(|c| c.name.len() + c.description.len())
-            .sum::<usize>()
-            + skills
-                .iter()
-                .map(|s| s.name.len() + s.description.len())
-                .sum::<usize>()
-            + 641; // Built-in names + descriptions char count
 
-        if total_count > 100 || raw_chars > 4800 {
+        if total_count > 100 {
             problems.push(ConfigProblem {
                 kind: ConfigProblemKind::CommandCatalogOverflow {
                     count: total_count,
-                    raw_chars,
                 },
                 severity: Severity::Warning,
-                remediation: "Review skill and custom command descriptions, keeping them concise to fit Telegram's menu payload limits.".into(),
+                remediation: "Reduce the number of loaded skills or user commands to 100 or fewer to fit Telegram's menu limit.".into(),
             });
         }
     }

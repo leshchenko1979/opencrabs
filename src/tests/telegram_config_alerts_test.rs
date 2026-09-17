@@ -196,19 +196,68 @@ fn test_alert_formatting_and_length_truncation() {
 #[test]
 fn test_command_catalog_overflow_alert_formatting() {
     let problem = ConfigProblem {
-        kind: ConfigProblemKind::CommandCatalogOverflow {
-            count: 65,
-            raw_chars: 5200,
-        },
+        kind: ConfigProblemKind::CommandCatalogOverflow { count: 105 },
         severity: Severity::Warning,
         remediation: "Keep skill descriptions concise".into(),
     };
 
     let alert = format_config_alert(&[problem], Some("ops"));
-    assert!(alert.contains("Command & Skill Catalog Overflow"));
-    assert!(alert.contains("65 commands"));
-    assert!(alert.contains("5200 total raw characters"));
-    assert!(alert.contains("Keep skill descriptions concise"));
+    assert!(alert.contains("Too Many Commands / Skills"));
+    assert!(alert.contains("105 commands"));
+    assert!(alert.contains("exceeding Telegram's hard limit of 100 commands"));
+}
+
+#[test]
+fn test_custom_provider_prefix_variations() {
+    let mut config = Config::default();
+    let mut custom = std::collections::BTreeMap::new();
+    custom.insert(
+        "llm-gateway".to_string(),
+        crate::config::ProviderConfig {
+            enabled: true,
+            base_url: Some("http://localhost:8000/v1".into()),
+            api_key: Some("test-key".into()),
+            ..Default::default()
+        },
+    );
+    config.providers.custom = Some(custom);
+
+    // Test default_provider with "custom.", "custom:", "custom/", and bare "llm-gateway"
+    for prefix in &["custom.", "custom:", "custom/", ""] {
+        config.agent.default_provider = Some(format!("{prefix}llm-gateway"));
+        let problems = audit_config_problems(&config, "", Some(""));
+        let missing = problems.iter().find(|p| {
+            matches!(
+                &p.kind,
+                ConfigProblemKind::DefaultProviderDisabledOrMissing { .. }
+            )
+        });
+        assert!(
+            missing.is_none(),
+            "Expected default_provider with prefix '{prefix}' to resolve cleanly to custom.llm-gateway"
+        );
+    }
+
+    // Test fallback providers with custom prefixes
+    config.agent.default_provider = None;
+    config.providers.fallback = Some(crate::config::types::FallbackProviderConfig {
+        enabled: true,
+        providers: vec![
+            "custom.llm-gateway".into(),
+            "custom:llm-gateway".into(),
+            "custom/llm-gateway".into(),
+        ],
+        ..Default::default()
+    });
+
+    let problems = audit_config_problems(&config, "", Some(""));
+    let invalid_fb = problems
+        .iter()
+        .find(|p| matches!(&p.kind, ConfigProblemKind::InvalidFallbackProvider { .. }));
+    assert!(
+        invalid_fb.is_none(),
+        "Expected all custom prefix variations in fallback.providers to resolve cleanly"
+    );
 }
 
 #[test]
