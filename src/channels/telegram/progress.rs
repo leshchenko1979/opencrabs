@@ -133,7 +133,7 @@ pub(crate) fn build_progress_cb(
                     // and the IntermediateText arm below).
                 }
             }
-            ProgressEvent::QueuedUserMessage { text } => {
+            ProgressEvent::QueuedUserMessage { text, origin } => {
                 detach_flow_for_followup(&st);
                 if let Ok(mut s) = st.lock() {
                     let preview = text.lines().next().unwrap_or("").trim();
@@ -149,8 +149,11 @@ pub(crate) fn build_progress_cb(
                     } else {
                         preview.to_string()
                     };
-                    s.display_queue
-                        .push(DisplayItem::System(format!("📥 in: user \"{}\"", preview)));
+                    s.display_queue.push(DisplayItem::System(format!(
+                        "📥 in: {} \"{}\"",
+                        origin.tag(),
+                        preview
+                    )));
                 }
             }
             ProgressEvent::IntermediateText { text, reasoning: _ } => {

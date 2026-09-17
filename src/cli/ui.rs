@@ -752,7 +752,7 @@ async fn cmd_chat_inner(
                     });
                     progress_sender.send(TuiEvent::ReasoningChunk { session_id, text })
                 }
-                ProgressEvent::QueuedUserMessage { text } => {
+                ProgressEvent::QueuedUserMessage { text, .. } => {
                     progress_sender.send(TuiEvent::QueuedUserMessage { session_id, text })
                 }
                 ProgressEvent::SelfHealingAlert { message } => {

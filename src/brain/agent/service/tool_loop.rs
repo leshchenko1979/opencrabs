@@ -5031,6 +5031,7 @@ impl AgentService {
                             session_id,
                             ProgressEvent::QueuedUserMessage {
                                 text: queued_msg.display_text.clone(),
+                                origin: queued_msg.origin,
                             },
                         );
                     }
@@ -7802,6 +7803,7 @@ impl AgentService {
                         session_id,
                         ProgressEvent::QueuedUserMessage {
                             text: queued_msg.display_text.clone(),
+                            origin: queued_msg.origin,
                         },
                     );
                 }
