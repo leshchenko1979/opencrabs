@@ -411,6 +411,7 @@ pub mod session_project_autolink_test;
 pub mod session_search_query_test;
 pub mod session_search_tail_test;
 pub mod shutdown_recovery_row_test;
+pub mod sqlite_maintenance_test;
 #[cfg(feature = "telegram")]
 #[cfg(feature = "telegram")]
 pub mod start_gate_allowed_user_test;

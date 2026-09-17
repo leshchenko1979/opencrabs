@@ -76,8 +76,9 @@ fn test_memory_gc_orphans() {
     assert_eq!(report2.orphaned_embeddings_pruned, 0);
     assert_eq!(report2.unreferenced_content_pruned, 0);
 
-    // Test vacuum_memory
-    store.vacuum_memory().expect("vacuum_memory");
+    // Test vacuum_memory: in-memory or empty freelist skips vacuum gracefully and returns Ok(false)
+    let vacuumed = store.vacuum_memory().expect("vacuum_memory");
+    assert!(!vacuumed);
 }
 
 #[test]

@@ -1067,11 +1067,9 @@ impl Store {
         Ok(report)
     }
 
-    /// Reclaim unused disk space by running SQLite VACUUM (#241).
-    pub fn vacuum_memory(&self) -> Result<(), String> {
-        self.conn
-            .execute_batch("VACUUM;")
-            .map_err(|e| format!("vacuum_memory: {e}"))?;
-        Ok(())
+    /// Run safe memory store maintenance (optimize, passive checkpoint, and conditional vacuum) (#273).
+    pub fn vacuum_memory(&self) -> Result<bool, String> {
+        crate::db::execute_safe_maintenance(&self.conn, "memory.db", 1024)
+            .map_err(|e| format!("vacuum_memory: {e}"))
     }
 }
