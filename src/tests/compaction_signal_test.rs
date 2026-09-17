@@ -208,7 +208,6 @@ fn live_header_drops_gear_before_icon_status() {
         "⛏ <b>Reading logs</b> • <i>3 tool calls</i> • <i>0:12</i>"
     );
 }
-
 #[test]
 fn live_footer_drops_gear_before_icon_activity() {
     // In-flight activity strips tool outcome glyphs (✅/❌) so unsettled turns
@@ -224,6 +223,7 @@ fn live_footer_drops_gear_before_icon_activity() {
             ctx: Some("ctx: 8K/200K 4%"),
             elapsed_secs: 0,
             bg: None,
+            has_goal: false,
         },
         HeaderMarkup::Markdown,
     );
@@ -239,6 +239,7 @@ fn live_footer_drops_gear_before_icon_activity() {
             ctx: None,
             elapsed_secs: 0,
             bg: None,
+            has_goal: false,
         },
         HeaderMarkup::Markdown,
     );
@@ -254,6 +255,7 @@ fn live_footer_drops_gear_before_icon_activity() {
             ctx: None,
             elapsed_secs: 0,
             bg: None,
+            has_goal: false,
         },
         HeaderMarkup::Markdown,
     );
@@ -269,6 +271,7 @@ fn live_footer_drops_gear_before_icon_activity() {
             ctx: Some("ctx: 10K/200K 5%"),
             elapsed_secs: 30,
             bg: None,
+            has_goal: false,
         },
         HeaderMarkup::Markdown,
     );
@@ -284,6 +287,7 @@ fn live_footer_drops_gear_before_icon_activity() {
             ctx: Some("ctx: 20K/200K 10%"),
             elapsed_secs: 75,
             bg: None,
+            has_goal: false,
         },
         HeaderMarkup::Markdown,
     );
@@ -305,6 +309,7 @@ fn icon_led_segment_retires_the_bare_cog_fallback() {
             ctx: None,
             elapsed_secs: 65,
             bg: None,
+            has_goal: false,
         },
         HeaderMarkup::Markdown,
     );
