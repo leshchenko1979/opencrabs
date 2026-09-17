@@ -4,12 +4,12 @@
 //! in one outer expandable; only the processing log collapses.
 
 use crate::channels::telegram::flow::{
-    render_flow_details_chrome, render_flow_details_chrome_pref, render_flow_html_chrome,
-    render_flow_html_chrome_pref, settled_icon_verb, subagent_waiting_phrase, FlowHeader, FlowLine,
-    FlowOutcome, SubagentCounts,
+    FlowHeader, FlowLine, FlowOutcome, SubagentCounts, render_flow_details_chrome,
+    render_flow_details_chrome_pref, render_flow_html_chrome, render_flow_html_chrome_pref,
+    settled_icon_verb, subagent_waiting_phrase,
 };
 use crate::channels::telegram::flow_chrome::{
-    clock_glyph, split_plan_prose, FlowSections, GoalSection, ProseSection, TelemetryMetrics,
+    FlowSections, GoalSection, ProseSection, TelemetryMetrics, clock_glyph, split_plan_prose,
 };
 
 fn sections(title: Option<&str>, checklist: Option<Vec<&str>>, goal: Option<&str>) -> FlowSections {
@@ -1066,7 +1066,7 @@ fn rich_edit_429_retries_rich_never_falls_back_to_html() {
     // retry rich next tick), NOT Fallback — the HTML path's 4096-char cap would
     // freeze and split a large block that fits the rich 32K limit (#580). Uses
     // the exact error string the rich API surfaced in the wild.
-    use crate::channels::telegram::flow::{classify_rich_edit_error, RichEditError};
+    use crate::channels::telegram::flow::{RichEditError, classify_rich_edit_error};
 
     let real = "Telegram rich API error (429 Too Many Requests): Too Many Requests: retry after 33";
     assert_eq!(classify_rich_edit_error(real), RichEditError::RateLimited);
@@ -1368,8 +1368,13 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
         subagents: 2,
         queued_messages: 3,
     };
+    // Goal presence check
     assert_eq!(
-        all_present.format_line(),
-        "⚙ • 0:30 ⏱ • 4 ⛏ • 1 ⏏️ • 2 🤖 • 3 ✉️"
+        all_present.format_telemetry_line("⚙", Some("12%"), true),
+        "🎯 • ⚙ • 0:30 ⏱ • 12% 🧠 • 4 ⛏ • 1 ⏏️ • 2 🤖 • 3 ✉️"
+    );
+    assert_eq!(
+        all_present.format_telemetry_line("⚙", Some("12%"), false),
+        "⚙ • 0:30 ⏱ • 12% 🧠 • 4 ⛏ • 1 ⏏️ • 2 🤖 • 3 ✉️"
     );
 }
