@@ -135,7 +135,9 @@ fn classic_host_body_keeps_answer_and_pick() {
 }
 
 #[test]
-fn rich_host_body_keeps_answer_and_pick() {
+fn rich_host_body_keeps_answer_and_omits_verbal_pick() {
+    // #282: rich merged hosts omit the verbal choice text because the
+    // visual button state provides the sole receipt.
     let rewrite = pick_rewrite(
         Some(("<b>the answer</b>", true, None)),
         &picked_block(CHOICE, None),
@@ -145,11 +147,8 @@ fn rich_host_body_keeps_answer_and_pick() {
     let PickRewrite::RichHost(body) = rewrite else {
         panic!("a rich host must stay rich: {rewrite:?}")
     };
-    assert!(
-        body.starts_with("<b>the answer</b>"),
-        "answer html first: {body}"
-    );
-    assert!(body.contains(CHOICE), "pick record survives: {body}");
+    assert_eq!(body, "<b>the answer</b>");
+    assert!(!body.contains(CHOICE), "verbal pick omitted: {body}");
 }
 
 #[test]
@@ -162,22 +161,20 @@ fn standalone_body_is_the_pick_record_alone() {
 }
 
 #[test]
-fn the_rich_flag_decides_the_transport_not_the_body() {
-    // Same host html, same pick — only the rich flag flips, so the two
-    // bodies must match byte for byte; only the variant differs.
+fn the_rich_flag_splits_classic_verbal_pick_and_rich_clean_body() {
+    // #282: classic hosts append the verbal pick record (no embedded buttons
+    // in bubble); rich hosts omit the verbal text and keep the clean body.
     let picked = picked_block(CHOICE, None);
     let classic = pick_rewrite(Some(("host", false, None)), &picked, &picked, 0);
     let rich = pick_rewrite(Some(("host", true, None)), &picked, &picked, 0);
-    fn body_of(r: &PickRewrite) -> &str {
-        match r {
-            PickRewrite::RichHost(b)
-            | PickRewrite::RichMarkdownHost(b)
-            | PickRewrite::ClassicHost(b)
-            | PickRewrite::Standalone(b) => b.as_str(),
-        }
-    }
-    assert_eq!(body_of(&classic), body_of(&rich));
-    assert_ne!(classic, rich, "the variant must flip with the flag");
+    let PickRewrite::ClassicHost(classic_body) = classic else {
+        panic!("must be classic: {classic:?}")
+    };
+    let PickRewrite::RichHost(rich_body) = rich else {
+        panic!("must be rich: {rich:?}")
+    };
+    assert_eq!(classic_body, format!("host\n\n{picked}"));
+    assert_eq!(rich_body, "host");
 }
 
 // ---- #59: stale-shell taps must know the host shape after a #597 clear ----
@@ -341,9 +338,9 @@ fn html_without_buttons_is_identity() {
 }
 
 #[test]
-fn tap_redraw_rich_host_body_has_marked_rows_and_record() {
-    // End-to-end through pick_rewrite: rows rewritten to the picked state,
-    // record appended, #39 order preserved (answer/rows first, record last).
+fn tap_redraw_rich_host_body_has_marked_rows_without_verbal_record() {
+    // #282: rows rewritten to the picked state, verbal record omitted to
+    // eliminate redundant message bubble clutter.
     let host = format!("<b>the answer</b>\n{}", shared_row_html());
     let rewrite = pick_rewrite(
         Some((&host, true, None)),
@@ -363,10 +360,9 @@ fn tap_redraw_rich_host_body_has_marked_rows_and_record() {
         !body.contains("style=\"primary\"\">Approve"),
         "the picked label must be check-prefixed"
     );
-    assert!(body.contains(CHOICE), "pick record survives: {body}");
     assert!(
-        body.rfind(CHOICE).unwrap() > body.rfind("</tg-button-row>").unwrap(),
-        "record rides after the rows (#39)"
+        !body.contains(CHOICE),
+        "verbal pick record omitted on rich host (#282): {body}"
     );
 }
 
@@ -377,6 +373,7 @@ fn markdown_host_redraws_in_the_markdown_plane() {
     // #96: AND the redraw body must be built from the MARKDOWN column, not
     // the html strip-source — posting `<p>`/`<b>` html into the rich-markdown
     // endpoint renders every tag literally (the tag-soup bug).
+    // #282: verbal pick record is omitted.
     let html = "<p>answer</p>\n<p>para two</p>";
     let md = "answer line\n\nplain paragraph";
     let rewrite = pick_rewrite(
@@ -388,12 +385,12 @@ fn markdown_host_redraws_in_the_markdown_plane() {
     let PickRewrite::RichMarkdownHost(body) = rewrite else {
         panic!("markdown host must ride the markdown plane: {rewrite:?}")
     };
-    assert!(
-        body.starts_with("answer line"),
-        "body built from the MARKDOWN column: {body}"
-    );
+    assert_eq!(body, md, "body built from the MARKDOWN column: {body}");
     assert!(!body.contains("<p>"), "no html strip-source leaks: {body}");
-    assert!(body.contains(CHOICE), "pick record survives: {body}");
+    assert!(
+        !body.contains(CHOICE),
+        "verbal pick record omitted (#282): {body}"
+    );
 }
 
 #[test]
@@ -401,6 +398,7 @@ fn markdown_host_pick_rows_are_rewritten_not_stripped() {
     // #96 end-to-end on the md plane: the markdown column carries the raw
     // `<tg-button>` rows (suggestion_rows_rich_html is appended to the md
     // payload), so the byte-level rewrite must mark them there too.
+    // #282: verbal pick record is omitted.
     let rows = shared_row_html();
     let md = format!("answer line\n{rows}");
     let rewrite = pick_rewrite(
@@ -421,12 +419,15 @@ fn markdown_host_pick_rows_are_rewritten_not_stripped() {
         !body.contains("style=\"primary\"\">Approve"),
         "the picked label must be check-prefixed"
     );
+    assert!(
+        !body.contains(CHOICE),
+        "verbal pick record omitted on md plane (#282): {body}"
+    );
 }
 
 #[test]
-fn md_plane_appends_plain_markdown_pick_record() {
-    // #96: the pick record appended to an md-plane redraw is the plain
-    // markdown pick line — never the html-escaped one.
+fn md_plane_omits_verbal_pick_record() {
+    // #282: rich markdown host omits verbal pick record entirely to avoid clutter.
     let record = picked_block(CHOICE, None);
     let md = "answer line";
     let rewrite = pick_rewrite(
@@ -438,10 +439,14 @@ fn md_plane_appends_plain_markdown_pick_record() {
     let PickRewrite::RichMarkdownHost(body) = rewrite else {
         panic!("markdown host must ride the markdown plane: {rewrite:?}")
     };
-    assert!(body.ends_with(&record), "plain md record last: {body}");
+    assert_eq!(body, md, "plain md without verbal record: {body}");
     assert!(
         !body.contains("<p>escaped</p>"),
         "html record must not ride the md plane: {body}"
+    );
+    assert!(
+        !body.contains(&record),
+        "verbal record omitted on md plane (#282): {body}"
     );
 }
 
