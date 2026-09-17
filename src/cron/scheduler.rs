@@ -347,7 +347,6 @@ impl CronScheduler {
                                 None => None,
                             },
                         };
-                        let next_run_str = next_run.map(|dt| dt.to_rfc3339());
                         if let Err(e) = self
                             .repo
                             .update_fields(
