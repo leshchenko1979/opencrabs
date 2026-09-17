@@ -122,12 +122,12 @@ async fn agent_default_provider_wins_over_registrations() {
 }
 
 /// Unset keeps the pre-#269 behaviour: nothing is pinned, so the priority
-/// list decides (and here finds nothing configured, hence the placeholder).
+/// list decides (finding the enabled custom provider).
 #[tokio::test]
 async fn agent_default_provider_unset_keeps_the_old_behaviour() {
     let config = config_with_custom();
     let provider = create_provider(&config).await.unwrap();
-    assert_eq!(provider.name(), "none");
+    assert_eq!(provider.name(), "llm-gateway");
 }
 
 /// A key that names no provider must be reported, not swallowed — and the
