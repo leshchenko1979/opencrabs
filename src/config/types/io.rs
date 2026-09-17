@@ -311,6 +311,30 @@ pub fn normalize_toml_key(key: &str) -> String {
         .to_string()
 }
 
+/// Prefixes that spell the `[providers.custom.<name>]` table path rather than
+/// the provider's own name: the dot form is the canonical TOML path, the
+/// slash form is what the /models picker writes, the colon form is the
+/// historical spelling. Every site that resolves a custom provider name
+/// accepts all three.
+pub const CUSTOM_PREFIXES: [&str; 3] = ["custom:", "custom.", "custom/"];
+
+/// Split a prefixed name into the prefix that was dropped and the provider
+/// name that remains. `None` when `name` carries no prefix.
+pub fn strip_custom_prefix(name: &str) -> Option<(&'static str, &str)> {
+    CUSTOM_PREFIXES
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix).map(|rest| (*prefix, rest)))
+}
+
+/// The key `name` is stored under in `[providers.custom]`, whatever spelling
+/// the user wrote: `custom.llm_gateway`, `custom/llm-gateway` and
+/// `llm-gateway` all yield `llm-gateway` — the key the loader stores, because
+/// `deserialize_custom_providers` normalises every key with
+/// `normalize_toml_key`.
+pub fn custom_provider_key(name: &str) -> String {
+    normalize_toml_key(strip_custom_prefix(name).map_or(name, |(_, rest)| rest))
+}
+
 /// # Example
 /// ```no_run
 /// # fn main() -> anyhow::Result<()> {

@@ -232,8 +232,11 @@ static REGISTRATIONS: LazyLock<Vec<ProviderRegistration>> = LazyLock::new(|| {
 /// `custom:` prefix). Used by non-interactive switch surfaces (#461 family)
 /// to reject typos before touching session rows.
 pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a ProviderConfig> {
-    let lookup = name.strip_prefix("custom:").unwrap_or(name);
-    if let Some(cfg) = config.providers.custom.as_ref().and_then(|m| m.get(lookup)) {
+    let lookup = crate::config::strip_custom_prefix(name).map_or(name, |(_, rest)| rest);
+    if let Some(cfg) = config.providers.custom.as_ref().and_then(|m| {
+        m.get(lookup)
+            .or_else(|| m.get(&crate::config::custom_provider_key(lookup)))
+    }) {
         return Some(cfg);
     }
     REGISTRATIONS
@@ -243,13 +246,10 @@ pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a
 }
 
 pub fn is_known_provider_name(config: &Config, name: &str) -> bool {
-    let lookup = name.strip_prefix("custom:").unwrap_or(name);
-    if config
-        .providers
-        .custom
-        .as_ref()
-        .is_some_and(|m| m.contains_key(lookup))
-    {
+    let lookup = crate::config::strip_custom_prefix(name).map_or(name, |(_, rest)| rest);
+    if config.providers.custom.as_ref().is_some_and(|m| {
+        m.contains_key(lookup) || m.contains_key(&crate::config::custom_provider_key(lookup))
+    }) {
         return true;
     }
     REGISTRATIONS
@@ -444,23 +444,38 @@ pub async fn create_provider_with_warning(
     let mut failed_name: Option<&str> = None;
     let mut warning: Option<String> = None;
 
-    // Check config.agent.default_provider before scanning enabled registrations
-    if let Some(default_name) = config.agent.default_provider.as_deref()
-        && !default_name.trim().is_empty()
-    {
-        match create_provider_by_name(config, default_name).await {
-            Ok(provider) => {
-                tracing::info!("Using configured default provider: {}", default_name);
-                primary = Some(provider);
+    // `[agent] default_provider` is the user's stated choice: it wins over the
+    // enabled-provider priority list. The value is normalised through the same
+    // helper the other `[agent] *_provider` keys use (#1314), so
+    // "custom.llm_gateway" resolves the `[providers.custom.llm-gateway]`
+    // section instead of missing it and silently landing on `opencode`.
+    if let Some(raw) = config.agent.default_provider.as_deref() {
+        let raw = raw.trim();
+        if !raw.is_empty() {
+            let pair = crate::brain::provider_spec::normalize_in(
+                config,
+                crate::brain::provider_spec::ProviderKey::AGENT,
+                raw,
+                config.agent.default_model.as_deref(),
+            );
+            if let Some(note) = pair.note.as_deref() {
+                tracing::warn!("[agent] default_provider = \"{raw}\" corrected: {note}");
             }
-            Err(e) => {
-                let msg = format!(
-                    "Configured default provider '{}' failed to initialize ({}) — falling back to enabled providers.",
-                    default_name, e
-                );
-                tracing::warn!("{}", msg);
-                warning = Some(msg);
-                failed_name = Some(default_name);
+            match create_provider_by_name(config, &pair.provider).await {
+                Ok(provider) => {
+                    tracing::info!("Using [agent] default_provider: {}", provider.name());
+                    primary = Some(provider);
+                }
+                Err(e) => {
+                    let msg = format!(
+                        "Configured default provider '{}' failed to initialize ({e}) — falling \
+                         back to the enabled-provider priority list. Run /onboard:provider to \
+                         reconfigure.",
+                        pair.provider
+                    );
+                    tracing::warn!("{}", msg);
+                    warning = Some(msg);
+                }
             }
         }
     }
@@ -480,7 +495,9 @@ pub async fn create_provider_with_warning(
                             failed, reg.display_name
                         );
                         tracing::warn!("{}", msg);
-                        warning = Some(msg);
+                        if warning.is_none() {
+                            warning = Some(msg);
+                        }
                     }
                     tracing::info!("Using enabled provider: {}", reg.display_name);
                     primary = Some(provider);
@@ -757,7 +774,10 @@ fn try_create_custom_by_name(config: &Config, name: &str) -> Result<Option<Arc<d
         None => return Ok(None),
     };
 
-    let custom_config = match customs.get(name) {
+    let custom_config = match customs
+        .get(name)
+        .or_else(|| customs.get(&crate::config::custom_provider_key(name)))
+    {
         Some(cfg) => cfg.clone(),
         None => {
             tracing::warn!("Custom provider '{}' not found in config", name);
