@@ -76,6 +76,11 @@ on:
         required: false
         default: false
         type: boolean
+      no_cancel:
+        description: "true = never cancel an in-flight run on this ref (immutable-sha gates: merge cutover + swap mode)"
+        required: false
+        default: false
+        type: boolean
 
 # Owner-approved 2026-08-30 (fix batch, a87b66dc; group KEY corrected same
 # day, owner "Fix it" 02:32Z on the cancel-storm finding): every
@@ -88,9 +93,22 @@ on:
 # gated ref) — so distinct refs run in PARALLEL and only a re-dispatch of the
 # SAME ref (head moved) cancels its superseded run. cancel-in-progress keeps
 # that owner-mandated supersede behavior per-ref.
+#
+# Owner GO 2026-09-17 22:59Z (no_cancel variable): the group key is the gated
+# ref, which makes the supersede rule correct for a PR-lane BRANCH (the head
+# moved, so the old verdict is worthless) but WRONG for an IMMUTABLE 40-hex sha
+# (merge/sync cutover, swap mode) — there a same-ref re-dispatch is a DUPLICATE,
+# not a supersede, and cancelling it SIGTERMs an in-flight cargo test suite
+# (receipt: run 35279942039, Run tests step conclusion "cancelled", our own
+# same-sha re-dispatch of 48c6f14bb). So the supersede is now a VARIABLE:
+# oc-prchecks passes -f no_cancel=true when the resolved ref is a full sha.
+# Default false => every existing caller is byte-for-byte unchanged in behavior.
+# A second workflow was rejected: it would duplicate the whole gate body and
+# fork the triad flags that editor-upstream-pr.md §PR-GATE-STANDING pins
+# VERBATIM to this one file.
 concurrency:
   group: prchecks-${{ inputs.ref || github.ref_name }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !inputs.no_cancel }}
 
 permissions:
   contents: read
