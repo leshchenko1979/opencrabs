@@ -445,22 +445,22 @@ pub async fn create_provider_with_warning(
     let mut warning: Option<String> = None;
 
     // Check config.agent.default_provider before scanning enabled registrations
-    if let Some(default_name) = config.agent.default_provider.as_deref() {
-        if !default_name.trim().is_empty() {
-            match create_provider_by_name(config, default_name).await {
-                Ok(provider) => {
-                    tracing::info!("Using configured default provider: {}", default_name);
-                    primary = Some(provider);
-                }
-                Err(e) => {
-                    let msg = format!(
-                        "Configured default provider '{}' failed to initialize ({}) — falling back to enabled providers.",
-                        default_name, e
-                    );
-                    tracing::warn!("{}", msg);
-                    warning = Some(msg);
-                    failed_name = Some(default_name);
-                }
+    if let Some(default_name) = config.agent.default_provider.as_deref()
+        && !default_name.trim().is_empty()
+    {
+        match create_provider_by_name(config, default_name).await {
+            Ok(provider) => {
+                tracing::info!("Using configured default provider: {}", default_name);
+                primary = Some(provider);
+            }
+            Err(e) => {
+                let msg = format!(
+                    "Configured default provider '{}' failed to initialize ({}) — falling back to enabled providers.",
+                    default_name, e
+                );
+                tracing::warn!("{}", msg);
+                warning = Some(msg);
+                failed_name = Some(default_name);
             }
         }
     }
