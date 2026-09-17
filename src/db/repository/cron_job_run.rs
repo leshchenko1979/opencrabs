@@ -168,4 +168,23 @@ impl CronJobRunRepository {
             .map_err(interact_err)?
             .context("Failed to list recent cron job runs")
     }
+
+    /// Check if a job currently has an in-flight execution (status = 'running').
+    pub async fn has_running_job(&self, job_id: &str) -> Result<bool> {
+        let job_id = job_id.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| -> rusqlite::Result<bool> {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT 1 FROM cron_job_runs WHERE job_id = ?1 AND status = 'running' LIMIT 1",
+                )?;
+                let mut rows = stmt.query(params![job_id])?;
+                Ok(rows.next()?.is_some())
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to check if cron job is running")
+    }
 }

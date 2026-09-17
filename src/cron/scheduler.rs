@@ -333,6 +333,52 @@ impl CronScheduler {
 
         for job in &jobs {
             if self.is_due(job, now) {
+                // In-flight guard (#277): check if a previous run of this exact job is still executing.
+                match self.run_repo.has_running_job(&job.id.to_string()).await {
+                    Ok(true) => {
+                        tracing::info!(
+                            "Cron job '{}' ({}) is due but previous run is still in-flight — skipping this tick",
+                            job.name,
+                            job.id
+                        );
+                        // Advance next_run_at so the scheduler does not spin on the same boundary on every tick.
+                        let next_run = match job.next_run_at {
+                            Some(_) => self.next_run_after(job, now),
+                            None => match super::next_run_utc(&job.cron_expr, job_tz(job), now) {
+                                Some(boundary) => self.next_run_after(job, boundary),
+                                None => None,
+                            },
+                        };
+                        let next_run_str = next_run.map(|dt| dt.to_rfc3339());
+                        if let Err(e) = self
+                            .repo
+                            .update_fields(
+                                &job.id.to_string(),
+                                crate::db::repository::CronJobPatch {
+                                    next_run_at: Some(next_run),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                job_id = %job.id,
+                                "Failed to advance next_run_at for in-flight cron job"
+                            );
+                        }
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            job_id = %job.id,
+                            "Failed to check in-flight status for cron job — proceeding with execution"
+                        );
+                    }
+                }
+
                 tracing::info!("Cron job '{}' ({}) is due — executing", job.name, job.id);
 
                 // Calculate next run time before executing (so we don't re-trigger).
