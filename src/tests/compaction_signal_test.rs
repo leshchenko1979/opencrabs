@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use crate::brain::agent::service::nudge::{in_pressure_warning_band, should_emit_pressure_warning};
 use crate::channels::telegram::flow::{
-    compacted_flow_line, compacting_flow_line, flow_header_text, render_flow_html_chrome_pref,
-    render_flow_rich, starts_with_icon, FlowHeader, FlowLine, HeaderMarkup, COMPACTING_HEADER_TEXT,
+    COMPACTING_HEADER_TEXT, FlowHeader, FlowLine, HeaderMarkup, compacted_flow_line,
+    compacting_flow_line, flow_header_text, render_flow_html_chrome_pref, render_flow_rich,
+    starts_with_icon,
 };
-use crate::channels::telegram::flow_chrome::{merged_footer, FlowSections, FooterParts};
+use crate::channels::telegram::flow_chrome::{FlowSections, FooterParts, merged_footer};
 
 #[test]
 fn compacting_line_without_prediction() {
