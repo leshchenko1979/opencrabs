@@ -235,6 +235,7 @@ async fn telegram_send_bind_topic_persists_binding_and_records_thread_evidence()
     assert_eq!(bound[0].session_id, session_id.to_string());
     assert_eq!(bound[0].chat_id, "-1001234567890");
     assert_eq!(bound[0].thread_id, Some(42));
+}
 
 #[tokio::test]
 async fn record_topic_created_local_only_updates_stale_mapping() {
