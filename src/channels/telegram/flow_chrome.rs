@@ -8,9 +8,10 @@
 //! read live data as-is: the session plan JSON for title and checklist, and
 //! `GoalManager` for the active goal one-liner. Empty sections are omitted.
 
+pub(crate) use super::flow::HeaderMarkup;
 use super::flow::{
-    COMPACTING_HEADER_TEXT, HeaderMarkup, StreamingState, humanize_duration, open_flow,
-    refresh_flow, starts_with_icon, strip_leading_tool_status_icons,
+    COMPACTING_HEADER_TEXT, StreamingState, humanize_duration, open_flow, refresh_flow,
+    starts_with_icon, strip_leading_tool_status_icons,
 };
 use super::handler::escape_html;
 use crate::brain::agent::AgentService;
@@ -416,6 +417,7 @@ impl TelemetryMetrics {
 /// decomposes its `FlowHeader` / lines / sections into these primitives so the
 /// footer join lives in one place and both the classic and rich paths agree.
 /// Structure follows: `<state_icon> • <time> ⏱ • <pct>% 🧠` (plus `⛏ <tool>` when active).
+#[derive(Default)]
 pub(crate) struct FooterParts<'a> {
     /// Settled outcome `(icon, verb)` (e.g. `("✅", "Finished")`) once the turn
     /// ends; `None` while live. Drives segment 1 and drops the in-flight cog.
