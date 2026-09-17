@@ -810,6 +810,24 @@ impl AgentService {
         } else {
             brain
         };
+
+        // Inject Telegram channel formatting capabilities if session belongs to Telegram (#295).
+        #[cfg(feature = "telegram")]
+        let is_telegram = if let Some(mgr) = self.channel_manager.as_ref() {
+            mgr.telegram().channel_ownership_of(session_id)
+                != crate::brain::agent::service::session_routes::ChannelOwnership::Unknown
+        } else {
+            false
+        };
+        #[cfg(not(feature = "telegram"))]
+        let is_telegram = false;
+
+        let brain = if is_telegram {
+            crate::brain::prompt_builder::inject_telegram_channel_capabilities(&brain)
+        } else {
+            brain
+        };
+
         Some(brain)
     }
 
