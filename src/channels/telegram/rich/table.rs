@@ -213,9 +213,10 @@ fn parse_alignment(sep: &str, cols: usize) -> Vec<Align> {
 ///
 /// Pipeline:
 /// 1. Decode named HTML entities (e.g. `&rarr;` -> `→`, `&bull;` -> `•`, `&mdash;` -> `—`, #258).
-/// 2. Balance code fences (#240), shield bare leading hashes (#193, #243), reflow
-///    collapsed one-line tables (#132, #690), infer missing table separators (#239),
-///    and ensure blank line padding before tables (#95) via [`normalize_tables`].
+/// 2. Balance code fences (#240), shield unresolvable markdown images (#289),
+///    shield bare leading hashes (#193, #243), reflow collapsed one-line tables
+///    (#132, #690), infer missing table separators (#239), and ensure blank line
+///    padding before tables (#95) via [`normalize_tables`].
 /// 3. Enforce button layout fit constraints for interactive buttons ([`enforce_button_fit`]).
 ///
 /// Idempotent and fence-safe.
@@ -235,11 +236,14 @@ pub(crate) fn normalize_rich_markdown(text: &str) -> String {
 /// #1085 whack-a-mole retired). All passes are idempotent and fence-safe;
 /// pipe-free input returns unchanged.
 ///
-/// Also shields bare leading hashes (e.g. `#174`) so Telegram's rich parser
-/// doesn't promote them into headings without CommonMark's required trailing space (#193).
+/// Also shields unresolvable markdown images (`![alt](path)`) so Telegram's rich parser
+/// doesn't reject the whole message with `RICH_MESSAGE_PHOTO_URL_INVALID` (#289),
+/// and shields bare leading hashes (e.g. `#174`) so Telegram's rich parser doesn't
+/// promote them into headings without CommonMark's required trailing space (#193).
 pub(crate) fn normalize_tables(text: &str) -> String {
     let balanced = balance_code_fences(text);
-    let shielded = shield_bare_leading_hashes(&balanced);
+    let images_shielded = shield_unresolvable_markdown_images(&balanced);
+    let shielded = shield_bare_leading_hashes(&images_shielded);
     let reflowed = reflow_collapsed_tables(&shielded);
     let inferred = infer_missing_table_separators(&reflowed);
     ensure_blank_line_before_tables(&inferred)
@@ -549,4 +553,193 @@ fn strip_ordered_list_prefix(s: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// Neutralize unresolvable Markdown image references (e.g. `![alt](path)`)
+/// where target URL is not a valid HTTP(S) link, `tg://photo?id=`, or `attach://` (#289).
+///
+/// Telegram's rich message API parses `![alt](url)` into a media attachment entity.
+/// If the URL is a local filesystem path (e.g. `/tmp/fig.png` or `docs/img.png`) or an
+/// arbitrary string not resolvable by Telegram, the entire send/edit is rejected with:
+/// `(400 Bad Request): Bad Request: RICH_MESSAGE_PHOTO_URL_INVALID`.
+///
+/// Escaping the leading `!` to `\!` neutralizes Telegram's photo entity parsing while
+/// preserving the text as a readable markdown link `\![alt](path)` (or plain text).
+/// Valid remote image URLs (`http://`, `https://`), Telegram media refs (`tg://photo?id=`),
+/// and multipart attachments (`attach://`) are preserved.
+///
+/// Fence-safe: leaves code fences (``` and ~~~) and inline code spans untouched.
+pub(crate) fn shield_unresolvable_markdown_images(text: &str) -> String {
+    if !text.contains("![") {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut in_fence = false;
+    let mut fence_char = ' ';
+    let mut fence_len = 0;
+
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+
+        let trimmed = line.trim_start();
+
+        // Check for code fence start/end
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            let ch = trimmed.chars().next().unwrap();
+            let count = trimmed.chars().take_while(|&c| c == ch).count();
+            if !in_fence {
+                in_fence = true;
+                fence_char = ch;
+                fence_len = count;
+                out.push_str(line);
+                continue;
+            } else if ch == fence_char && count >= fence_len {
+                in_fence = false;
+                out.push_str(line);
+                continue;
+            }
+        }
+
+        if in_fence || !line.contains("![") {
+            out.push_str(line);
+            continue;
+        }
+
+        // Process line outside code fences
+        shield_line_unresolvable_images(line, &mut out);
+    }
+
+    out
+}
+
+/// Scan a single line for `![alt](target)` constructs outside inline code spans
+/// and escape `!` if target is not a valid photo URL.
+fn shield_line_unresolvable_images(line: &str, out: &mut String) {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        // Skip inline code spans: `...`
+        if bytes[i] == b'`' {
+            let code_start = i;
+            let code_delim_len = bytes[i..].iter().take_while(|&&b| b == b'`').count();
+            let delim = &line[code_start..code_start + code_delim_len];
+            let after_open = code_start + code_delim_len;
+            if let Some(close_idx) = line[after_open..].find(delim) {
+                let code_end = after_open + close_idx + code_delim_len;
+                out.push_str(&line[code_start..code_end]);
+                i = code_end;
+                continue;
+            } else {
+                // Unclosed backtick - output rest
+                out.push_str(&line[code_start..]);
+                break;
+            }
+        }
+
+        // Check if `![` starts here
+        if bytes[i] == b'!' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            // Check if already escaped: preceded by `\` (and not `\\`)
+            let is_escaped = i > 0 && bytes[i - 1] == b'\\' && (i < 2 || bytes[i - 2] != b'\\');
+            if is_escaped {
+                out.push('!');
+                i += 1;
+                continue;
+            }
+
+            // Look for matching `](target)`
+            if let Some((target, match_end)) = parse_markdown_image_at(line, i) {
+                if is_valid_telegram_photo_url(target) {
+                    // Valid URL - keep as is
+                    out.push_str(&line[i..match_end]);
+                } else {
+                    // Unresolvable URL - escape leading `!` to `\!`
+                    out.push('\\');
+                    out.push_str(&line[i..match_end]);
+                }
+                i = match_end;
+                continue;
+            }
+        }
+
+        // Normal character - find next special char (` or !)
+        let next_special = line[i..]
+            .find(|c| c == '`' || c == '!')
+            .unwrap_or(line[i..].len());
+        if next_special == 0 {
+            // Current char is ` or ! handled above; advance single char
+            if let Some(ch) = line[i..].chars().next() {
+                out.push(ch);
+                i += ch.len_utf8();
+            } else {
+                break;
+            }
+        } else {
+            out.push_str(&line[i..i + next_special]);
+            i += next_special;
+        }
+    }
+}
+
+/// Try parsing `![alt](target)` starting at offset `start` where `line[start..start+2] == "!["`.
+/// Returns `Some((target_url, byte_end_offset))` on valid image syntax.
+fn parse_markdown_image_at(line: &str, start: usize) -> Option<(&str, usize)> {
+    let after_bang = start + 1; // points to `[`
+    let rest = &line[after_bang..];
+    if !rest.starts_with('[') {
+        return None;
+    }
+
+    // Find matching `]` for alt text (handling nested brackets or simple scan)
+    let mut bracket_depth = 0;
+    let mut close_bracket_pos = None;
+    for (idx, ch) in rest.char_indices() {
+        if ch == '[' {
+            bracket_depth += 1;
+        } else if ch == ']' {
+            bracket_depth -= 1;
+            if bracket_depth == 0 {
+                close_bracket_pos = Some(idx);
+                break;
+            }
+        }
+    }
+
+    let close_bracket = close_bracket_pos?;
+    let after_bracket = after_bang + close_bracket + 1;
+    if after_bracket >= line.len() || !line[after_bracket..].starts_with('(') {
+        return None;
+    }
+
+    let target_start = after_bracket + 1;
+    // Find matching `)` for target URL (simple scan until `)`)
+    let close_paren = line[target_start..].find(')')?;
+    let target = line[target_start..target_start + close_paren].trim();
+    let match_end = target_start + close_paren + 1;
+
+    Some((target, match_end))
+}
+
+/// Check whether `target` is a valid Telegram photo URL/ref.
+/// Valid schemes:
+/// - `http://`
+/// - `https://`
+/// - `tg://photo?id=`
+/// - `attach://`
+fn is_valid_telegram_photo_url(target: &str) -> bool {
+    let trimmed = target.trim();
+    // Strip optional enclosing `<...>`
+    let url = if trimmed.starts_with('<') && trimmed.ends_with('>') && trimmed.len() >= 2 {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+
+    url.starts_with("http://")
+        || url.starts_with("https://")
+        || url.starts_with("tg://photo?id=")
+        || url.starts_with("attach://")
 }
