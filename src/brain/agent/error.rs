@@ -95,7 +95,23 @@ pub fn format_user_error(err: &AgentError) -> String {
                 switch to a different model via `/models`."
             .to_string();
     }
-    if raw.contains("Repetition detected") {
+    if raw.contains("file-modification loop")
+        || raw.contains("repeated-bash loop")
+        || raw.contains("identical-call loop")
+        || raw.contains("near-identical tool-call loop")
+        || raw.contains("modification-tool loop")
+    {
+        return "I stopped the turn: I got stuck repeating the same tool \
+                call with identical or near-identical arguments, and the \
+                loop detector ended the turn to prevent infinite execution. \
+                Rephrasing your request or switching models via `/models` \
+                can help avoid this loop."
+            .to_string();
+    }
+    if raw.contains("announcements repeated")
+        || raw.contains("announcement loop")
+        || raw.contains("Announcement loop")
+    {
         // Name what actually ended the turn (#1023). This is OUR loop
         // detector, not the provider: the model kept announcing an action
         // without emitting the call, and the turn was stopped rather than
@@ -126,6 +142,13 @@ pub fn format_user_error(err: &AgentError) -> String {
              rephrasing the request, or switching models via `/models`, \
              normally clears it.{counts}"
         );
+    }
+    if raw.contains("Repetition detected") {
+        return "I stopped the turn: a repetitive text loop was detected in \
+                the model's response stream or reasoning output. Rephrasing \
+                the request, or switching models via `/models`, normally \
+                clears it."
+            .to_string();
     }
     if let AgentError::ContextTooLarge { current, limit } = err {
         return format!(
