@@ -108,7 +108,7 @@ pub(crate) enum PickRewrite {
 pub(crate) fn pick_rewrite(
     host: Option<(&str, bool, Option<&str>)>,
     picked_html: &str,
-    picked_md: &str,
+    _picked_md: &str,
     picked_idx: usize,
 ) -> PickRewrite {
     match host {
@@ -126,19 +126,17 @@ pub(crate) fn pick_rewrite(
                 // raw widget markup (the only html the rich-markdown renderer
                 // accepts); rewriting the `full` HTML strip-source instead
                 // posts `<p>`/`<b>` tags into the markdown field — Telegram
-                // renders them literally (tag soup). Markdown hosts get
-                // `mark_picked_button(markdown)` + the pick line as plain
-                // markdown; html hosts keep the html rewrite.
+                // renders them literally (tag soup).
+                //
+                // #282: for rich merged hosts (both markdown and html planes),
+                // the rewritten button state (`✓ Option` in green style="success"
+                // with sibling buttons disabled) serves as the visual receipt.
+                // We omit appending `\n\n{picked_md}` / `\n\n{picked_html}` to
+                // eliminate redundant message body clutter.
                 if let Some(md) = markdown {
-                    PickRewrite::RichMarkdownHost(format!(
-                        "{}\n\n{picked_md}",
-                        mark_picked_button(md, picked_idx)
-                    ))
+                    PickRewrite::RichMarkdownHost(mark_picked_button(md, picked_idx))
                 } else {
-                    PickRewrite::RichHost(format!(
-                        "{}\n\n{picked_html}",
-                        mark_picked_button(full, picked_idx)
-                    ))
+                    PickRewrite::RichHost(mark_picked_button(full, picked_idx))
                 }
             } else {
                 // Classic hosts keep their buttons as reply markup (not in
