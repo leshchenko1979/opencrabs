@@ -1351,7 +1351,8 @@ async fn cmd_chat_inner(
                         // different WDs can race — resolving that needs
                         // per-session WD threading through the request pipeline
                         // and is out of scope here.
-                        if let Ok(Some(s)) = session_repo.find_by_id(session_id).await
+                        let session_opt = session_repo.find_by_id(session_id).await.ok().flatten();
+                        if let Some(ref s) = session_opt
                             && let Some(ref dir_str) = s.working_directory
                         {
                             let p = std::path::PathBuf::from(dir_str);
@@ -1362,6 +1363,13 @@ async fn cmd_chat_inner(
                                 agent.set_working_directory_for_session(session_id, p);
                             }
                         }
+                        let permitted_targets =
+                            crate::cron::send_scope::resolve_cron_session_scope(
+                                db.pool(),
+                                session_opt.as_ref(),
+                                &req.channel,
+                            )
+                            .await;
                         let agent = agent.clone();
                         let ev_tx = resume_event_sender.clone();
                         let channel = req.channel.clone();
@@ -1419,250 +1427,264 @@ async fn cmd_chat_inner(
                             let agent = agent.clone();
                             let tg = tg.clone();
                             let boot_parked_tg = boot_parked.clone();
+                            let permitted_targets = permitted_targets.clone();
                             tokio::spawn(async move {
-                                // This path always knew the bot might not be
-                                // up yet and waited for it. The bg-resume
-                                // paths did not, and dropped the wake instead
-                                // (#1242). One definition now, so the two
-                                // startup flush paths cannot drift back into
-                                // disagreeing about what "ready" means.
-                                // Gate only: the re-delivery below goes through
-                                // deliver_or_park, which does not need the bot
-                                // handle — the await exists so a boot window
-                                // that never opens is counted, not silent.
-                                let Some(_bot) = crate::channels::transport_ready::await_transport(
-                                    "telegram",
-                                    session_id,
-                                    || tg.bot(),
+                                crate::cron::send_scope::with_permitted_targets(
+                                    permitted_targets,
+                                    async move {
+                                        // This path always knew the bot might not be
+                                        // up yet and waited for it. The bg-resume
+                                        // paths did not, and dropped the wake instead
+                                        // (#1242). One definition now, so the two
+                                        // startup flush paths cannot drift back into
+                                        // disagreeing about what "ready" means.
+                                        // Gate only: the re-delivery below goes through
+                                        // deliver_or_park, which does not need the bot
+                                        // handle — the await exists so a boot window
+                                        // that never opens is counted, not silent.
+                                        let Some(_bot) = crate::channels::transport_ready::await_transport(
+                                            "telegram",
+                                            session_id,
+                                            || tg.bot(),
+                                        )
+                                        .await
+                                        else {
+                                            // The channel never came up inside the
+                                            // grace window: this wake is not slow,
+                                            // it is gone (#1242). Count it so the
+                                            // boot summary names the session that
+                                            // never resumed instead of silence.
+                                            boot_report::record_failed();
+                                            return;
+                                        };
+                                        let prompt = "[System: A restart just occurred while you were \
+                                                processing a request. Read the conversation context and continue \
+                                                where you left off naturally. Do not mention the restart or \
+                                                any interruption — just pick up seamlessly.]"
+                                                .to_string();
+                                        // Wait up to READY_WAIT_SECS for the bot to authenticate.
+                                        // #1242: this used to give up silently — the pending rows
+                                        // were already cleared above, so that was permanent loss.
+                                        // Past the bound the prompt is PARKED: it rides
+                                        // deliver_or_park until the #1224 route restore claims the
+                                        // session; the enqueue callback then runs it through the
+                                        // same full streaming pipeline.
+                                        let Some(bot) = crate::channels::bg_resume::wait_ready(
+                                            || tg.bot(),
+                                            "startup resume: telegram bot",
+                                        )
+                                        .await
+                                        else {
+                                            boot_parked_tg
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            crate::brain::agent::service::restart_recovery::deliver_or_park(
+                                                session_id,
+                                                crate::brain::agent::QueuedUserMessage {
+                                                    context_text: prompt,
+                                                    display_text: format!(
+                                                        "🔁 Startup replay parked until its route \
+                                                         claim (#1242): session {}",
+                                                        &session_id.simple().to_string()[..8]
+                                                    ),
+                                                    origin: crate::brain::agent::PushOrigin::Recovery,
+                                                    bg_meta: None,
+                                                },
+                                            );
+                                            return;
+                                        };
+                                        // Resumed turns must land in the originating
+                                        // forum topic, not the group's General channel
+                                        // (issue #130 proactive path). Prefer the
+                                        // topic bound to THIS session; the chat-wide
+                                        // "most recent message" lookup is only a
+                                        // fallback, because in a forum it resolves to
+                                        // whichever topic spoke last (#1200).
+                                        //
+                                        // At startup the in-memory binding is usually
+                                        // still empty, so this mostly falls back here.
+                                        // That is today's behaviour, not a regression:
+                                        // it can only improve once a topic is bound.
+                                        let thread_id = match tg.session_topic(session_id).await {
+                                            // Through the delivery boundary: a
+                                            // General-bound session has no thread,
+                                            // not thread 1 (#1319).
+                                            Some(topic) => {
+                                                crate::channels::telegram::session_resolve::delivery_thread_id(
+                                                    Some(topic),
+                                                )
+                                            }
+                                            None => {
+                                                crate::channels::telegram::send::latest_thread_id_for_chat(
+                                                    chat.0,
+                                                )
+                                                .await
+                                            }
+                                        };
+                                        match crate::channels::telegram::handler::resume_session(
+                                            bot, chat, thread_id, session_id, prompt, agent, tg,
+                                            None, // boot replay of an EXISTING row: resume-of-resume must stay untracked (#729/#12)
+                                        )
+                                        .await
+                                        {
+                                            Ok(()) => boot_report::record_delivered(),
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    "Telegram resume failed for session {}: {}",
+                                                    session_id,
+                                                    e
+                                                );
+                                                boot_report::record_failed();
+                                            }
+                                        }
+                                    },
                                 )
-                                .await
-                                else {
-                                    // The channel never came up inside the
-                                    // grace window: this wake is not slow,
-                                    // it is gone (#1242). Count it so the
-                                    // boot summary names the session that
-                                    // never resumed instead of silence.
-                                    boot_report::record_failed();
-                                    return;
-                                };
-                                let prompt = "[System: A restart just occurred while you were \
+                                .await;
+                            });
+                            continue;
+                        }
+                        let permitted_targets = permitted_targets.clone();
+                        tokio::spawn(async move {
+                            crate::cron::send_scope::with_permitted_targets(
+                                permitted_targets,
+                                async move {
+                                    // Do NOT swap the shared agent's provider here.
+                                    // The agent_service is shared across all sessions —
+                                    // swapping it for one session's saved provider
+                                    // contaminates every other session. The FallbackProvider
+                                    // handles model remapping automatically.
+
+                                    let prompt = "[System: A restart just occurred while you were \
                                         processing a request. Read the conversation context and continue \
                                         where you left off naturally. Do not mention the restart or \
                                         any interruption — just pick up seamlessly.]"
                                         .to_string();
-                                // Wait up to READY_WAIT_SECS for the bot to authenticate.
-                                // #1242: this used to give up silently — the pending rows
-                                // were already cleared above, so that was permanent loss.
-                                // Past the bound the prompt is PARKED: it rides
-                                // deliver_or_park until the #1224 route restore claims the
-                                // session; the enqueue callback then runs it through the
-                                // same full streaming pipeline.
-                                let Some(bot) = crate::channels::bg_resume::wait_ready(
-                                    || tg.bot(),
-                                    "startup resume: telegram bot",
-                                )
-                                .await
-                                else {
-                                    boot_parked_tg
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    crate::brain::agent::service::restart_recovery::deliver_or_park(
-                                        session_id,
-                                        crate::brain::agent::QueuedUserMessage {
-                                            context_text: prompt,
-                                            display_text: format!(
-                                                "🔁 Startup replay parked until its route \
-                                                 claim (#1242): session {}",
-                                                &session_id.simple().to_string()[..8]
-                                            ),
-                                            origin: crate::brain::agent::PushOrigin::Recovery,
-                                            bg_meta: None,
-                                        },
-                                    );
-                                    return;
-                                };
-                                // Resumed turns must land in the originating
-                                // forum topic, not the group's General channel
-                                // (issue #130 proactive path). Prefer the
-                                // topic bound to THIS session; the chat-wide
-                                // "most recent message" lookup is only a
-                                // fallback, because in a forum it resolves to
-                                // whichever topic spoke last (#1200).
-                                //
-                                // At startup the in-memory binding is usually
-                                // still empty, so this mostly falls back here.
-                                // That is today's behaviour, not a regression:
-                                // it can only improve once a topic is bound.
-                                let thread_id = match tg.session_topic(session_id).await {
-                                    // Through the delivery boundary: a
-                                    // General-bound session has no thread,
-                                    // not thread 1 (#1319).
-                                    Some(topic) => {
-                                        crate::channels::telegram::session_resolve::delivery_thread_id(
-                                            Some(topic),
-                                        )
-                                    }
-                                    None => {
-                                        crate::channels::telegram::send::latest_thread_id_for_chat(
-                                            chat.0,
+                                    match agent
+                                        .resume_interrupted_turn(
+                                            session_id,
+                                            prompt,
+                                            None,
+                                            Some(token),
+                                            None,
+                                            None,
+                                            &channel,
+                                            channel_chat_id.as_deref(),
                                         )
                                         .await
-                                    }
-                                };
-                                match crate::channels::telegram::handler::resume_session(
-                                    bot, chat, thread_id, session_id, prompt, agent, tg,
-                                    None, // boot replay of an EXISTING row: resume-of-resume must stay untracked (#729/#12)
-                                )
-                                .await
-                                {
-                                    Ok(()) => boot_report::record_delivered(),
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "Telegram resume failed for session {}: {}",
-                                            session_id,
-                                            e
-                                        );
-                                        boot_report::record_failed();
-                                    }
-                                }
-                            });
-                            continue;
-                        }
-                        tokio::spawn(async move {
-                            // Do NOT swap the shared agent's provider here.
-                            // The agent_service is shared across all sessions —
-                            // swapping it for one session's saved provider
-                            // contaminates every other session. The FallbackProvider
-                            // handles model remapping automatically.
-
-                            let prompt = "[System: A restart just occurred while you were \
-                                processing a request. Read the conversation context and continue \
-                                where you left off naturally. Do not mention the restart or \
-                                any interruption — just pick up seamlessly.]"
-                                .to_string();
-                            match agent
-                                .resume_interrupted_turn(
-                                    session_id,
-                                    prompt,
-                                    None,
-                                    Some(token),
-                                    None,
-                                    None,
-                                    &channel,
-                                    channel_chat_id.as_deref(),
-                                )
-                                .await
-                            {
-                                Ok(response) => {
-                                    tracing::info!(
-                                        "Resume completed for session {} ({}): {} chars",
-                                        session_id,
-                                        channel,
-                                        response.content.len()
-                                    );
-                                    boot_report::record_delivered();
-                                    // A revived sub-agent session (#110): its
-                                    // result belongs to the session that spawned
-                                    // it, not to the surface-less default — route
-                                    // it to the parent, finalize the status file,
-                                    // and skip the surface event nobody reads.
-                                    if let Some(mut agent_status) = crate::brain::agent::service::work_status::WorkStatus::find_agent_by_session(&session_id.to_string()) {
-                                        crate::brain::agent::service::restart_recovery::deliver_revived_agent_outcome(&mut agent_status, Ok(&response.content)).await;
-                                        return;
-                                    }
-                                    match channel.as_str() {
-                                        "tui" => {
-                                            let _ = ev_tx.send(
-                                                crate::tui::events::TuiEvent::ResponseComplete {
+                                    {
+                                        Ok(response) => {
+                                            tracing::info!(
+                                                "Resume completed for session {} ({}): {} chars",
+                                                session_id,
+                                                channel,
+                                                response.content.len()
+                                            );
+                                            boot_report::record_delivered();
+                                            // A revived sub-agent session (#110): its
+                                            // result belongs to the session that spawned
+                                            // it, not to the surface-less default — route
+                                            // it to the parent, finalize the status file,
+                                            // and skip the surface event nobody reads.
+                                            if let Some(mut agent_status) = crate::brain::agent::service::work_status::WorkStatus::find_agent_by_session(&session_id.to_string()) {
+                                                crate::brain::agent::service::restart_recovery::deliver_revived_agent_outcome(&mut agent_status, Ok(&response.content)).await;
+                                                return;
+                                            }
+                                            match channel.as_str() {
+                                                "tui" => {
+                                                    let _ = ev_tx.send(
+                                                        crate::tui::events::TuiEvent::ResponseComplete {
+                                                            session_id,
+                                                            response,
+                                                        },
+                                                    );
+                                                }
+                                                #[cfg(feature = "discord")]
+                                                "discord" => {
+                                                    if let Some(ref cid) = channel_chat_id
+                                                        && let Ok(ch_id) = cid.parse::<u64>()
+                                                        && let Some(http) = dc.http().await
+                                                    {
+                                                        let channel =
+                                                            serenity::model::id::ChannelId::new(ch_id);
+                                                        if let Err(e) =
+                                                            channel.say(&http, &response.content).await
+                                                        {
+                                                            tracing::warn!(error = %e, "failed to send Discord response");
+                                                        }
+                                                    }
+                                                }
+                                                #[cfg(feature = "whatsapp")]
+                                                "whatsapp" => {
+                                                    if let Some(ref cid) = channel_chat_id
+                                                        && let Some(client) = wa.client().await
+                                                        && let Ok(jid) =
+                                                            cid.parse::<wacore_binary::jid::Jid>()
+                                                    {
+                                                        let msg = waproto::whatsapp::Message {
+                                                            conversation: Some(response.content.clone()),
+                                                            ..Default::default()
+                                                        };
+                                                        if let Err(e) = client.send_message(jid, msg).await
+                                                        {
+                                                            tracing::warn!(error = %e, "failed to send WhatsApp response");
+                                                        }
+                                                    }
+                                                }
+                                                #[cfg(feature = "slack")]
+                                                "slack" => {
+                                                    if let Some(ref cid) = channel_chat_id
+                                                        && let (Some(token_val), Some(client)) =
+                                                            (sk.bot_token().await, sk.client().await)
+                                                    {
+                                                        let api_token = slack_morphism::prelude::SlackApiToken::new(
+                                                            slack_morphism::prelude::SlackApiTokenValue::from(token_val),
+                                                        );
+                                                        let session = client.open_session(&api_token);
+                                                        let req = slack_morphism::prelude::SlackApiChatPostMessageRequest::new(
+                                                            cid.clone().into(),
+                                                            slack_morphism::prelude::SlackMessageContent::new()
+                                                                .with_text(response.content.clone()),
+                                                        );
+                                                        if let Err(e) =
+                                                            session.chat_post_message(&req).await
+                                                        {
+                                                            tracing::warn!(error = %e, "failed to send Slack response");
+                                                        }
+                                                    }
+                                                }
+                                                other => {
+                                                    tracing::warn!(
+                                                        "No recovery routing for channel '{}' — response saved to DB only",
+                                                        other
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Resume failed for session {}: {}",
+                                                session_id,
+                                                e
+                                            );
+                                            boot_report::record_failed();
+                                            // A revived sub-agent session whose resume
+                                            // failed (#110): the parent is waiting on
+                                            // this outcome either way — report and
+                                            // finalize instead of dropping it.
+                                            if let Some(mut agent_status) = crate::brain::agent::service::work_status::WorkStatus::find_agent_by_session(&session_id.to_string()) {
+                                                crate::brain::agent::service::restart_recovery::deliver_revived_agent_outcome(&mut agent_status, Err(&e.to_string())).await;
+                                                return;
+                                            }
+                                            if channel == "tui" {
+                                                let _ = ev_tx.send(crate::tui::events::TuiEvent::Error {
                                                     session_id,
-                                                    response,
-                                                },
-                                            );
-                                        }
-                                        #[cfg(feature = "discord")]
-                                        "discord" => {
-                                            if let Some(ref cid) = channel_chat_id
-                                                && let Ok(ch_id) = cid.parse::<u64>()
-                                                && let Some(http) = dc.http().await
-                                            {
-                                                let channel =
-                                                    serenity::model::id::ChannelId::new(ch_id);
-                                                if let Err(e) =
-                                                    channel.say(&http, &response.content).await
-                                                {
-                                                    tracing::warn!(error = %e, "failed to send Discord response");
-                                                }
+                                                    message: e.to_string(),
+                                                });
                                             }
                                         }
-                                        #[cfg(feature = "whatsapp")]
-                                        "whatsapp" => {
-                                            if let Some(ref cid) = channel_chat_id
-                                                && let Some(client) = wa.client().await
-                                                && let Ok(jid) =
-                                                    cid.parse::<wacore_binary::jid::Jid>()
-                                            {
-                                                let msg = waproto::whatsapp::Message {
-                                                    conversation: Some(response.content.clone()),
-                                                    ..Default::default()
-                                                };
-                                                if let Err(e) = client.send_message(jid, msg).await
-                                                {
-                                                    tracing::warn!(error = %e, "failed to send WhatsApp response");
-                                                }
-                                            }
-                                        }
-                                        #[cfg(feature = "slack")]
-                                        "slack" => {
-                                            if let Some(ref cid) = channel_chat_id
-                                                && let (Some(token_val), Some(client)) =
-                                                    (sk.bot_token().await, sk.client().await)
-                                            {
-                                                let api_token = slack_morphism::prelude::SlackApiToken::new(
-                                                    slack_morphism::prelude::SlackApiTokenValue::from(token_val),
-                                                );
-                                                let session = client.open_session(&api_token);
-                                                let req = slack_morphism::prelude::SlackApiChatPostMessageRequest::new(
-                                                    cid.clone().into(),
-                                                    slack_morphism::prelude::SlackMessageContent::new()
-                                                        .with_text(response.content.clone()),
-                                                );
-                                                if let Err(e) =
-                                                    session.chat_post_message(&req).await
-                                                {
-                                                    tracing::warn!(error = %e, "failed to send Slack response");
-                                                }
-                                            }
-                                        }
-                                        other => {
-                                            tracing::warn!(
-                                                "No recovery routing for channel '{}' — response saved to DB only",
-                                                other
-                                            );
-                                        }
                                     }
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        "Resume failed for session {}: {}",
-                                        session_id,
-                                        e
-                                    );
-                                    boot_report::record_failed();
-                                    // A revived sub-agent session whose resume
-                                    // failed (#110): the parent is waiting on
-                                    // this outcome either way — report and
-                                    // finalize instead of dropping it.
-                                    if let Some(mut agent_status) = crate::brain::agent::service::work_status::WorkStatus::find_agent_by_session(&session_id.to_string()) {
-                                        crate::brain::agent::service::restart_recovery::deliver_revived_agent_outcome(&mut agent_status, Err(&e.to_string())).await;
-                                        return;
-                                    }
-                                    if channel == "tui" {
-                                        let _ = ev_tx.send(crate::tui::events::TuiEvent::Error {
-                                            session_id,
-                                            message: e.to_string(),
-                                        });
-                                    }
-                                }
-                            }
+                                },
+                            )
+                            .await;
                         });
                     }
                 }
