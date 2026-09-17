@@ -546,7 +546,6 @@ async fn cmd_chat_inner(
         working_directory: Some(crate::brain::tools::error::collapse_home(
             &working_directory,
         )),
-        channel: None,
     };
 
     // The feedback/performance digest is a maintenance WARNING surface — it

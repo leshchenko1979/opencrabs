@@ -370,11 +370,6 @@ impl BrainLoader {
         prompt.push_str(BRAIN_PREAMBLE);
         prompt.push_str("\n\n");
 
-        if runtime_info.and_then(|info| info.channel.as_deref()) == Some("telegram") {
-            prompt.push_str(TELEGRAM_CHANNEL_CAPABILITIES);
-            prompt.push_str("\n\n");
-        }
-
         // 2-7. Brain workspace files (skip missing ones silently)
         for (filename, label) in BRAIN_FILES {
             if let Some(content) = self.load_file(filename) {
@@ -451,10 +446,6 @@ impl BrainLoader {
         prompt.push_str("\n\n");
 
         // 2. Core files only (USER.md; SOUL.md injected last)
-        if runtime_info.and_then(|info| info.channel.as_deref()) == Some("telegram") {
-            prompt.push_str(TELEGRAM_CHANNEL_CAPABILITIES);
-            prompt.push_str("\n\n");
-        }
         for (filename, label) in CORE_BRAIN_FILES {
             if let Some(content) = self.load_file(filename) {
                 let trimmed = content.trim();
@@ -768,13 +759,29 @@ pub fn strip_followup_suggestions(brain: &str) -> String {
     out
 }
 
-/// Telegram channel formatting capabilities preamble injected for Telegram-bound sessions (#295).
-pub const TELEGRAM_CHANNEL_CAPABILITIES: &str = "\
---- TELEGRAM CHANNEL CAPABILITIES ---
+/// Marker line identifying the Telegram channel capabilities block (#295).
+///
+/// Also the first line of [`telegram_channel_capabilities`]; use
+/// [`has_telegram_channel_capabilities`] to test a rendered brain for it.
+pub const TELEGRAM_CHANNEL_CAPABILITIES_MARKER: &str = "--- TELEGRAM CHANNEL CAPABILITIES ---";
+
+/// Body of the Telegram capabilities block (everything after the marker line).
+const TELEGRAM_CHANNEL_CAPABILITIES_BODY: &str = "\
 - Mermaid diagrams: native vertical rendering (```mermaid vertical flowchart TD, sequenceDiagram, node styling, numbered steps, icons).
 - Markdown tables: GFM tables rendered natively as rich Telegram tables (header on own line, blank line before, delimiter row).
 - HTML glyphs / formatting: rich HTML entities, blockquotes (<blockquote>), code, and emoji styling.
 - Image includes: Markdown syntax (![alt](path/or/url)) for local/remote image rendering.";
+
+/// The Telegram channel capabilities preamble injected into the system brain of
+/// a session bound to the Telegram channel (#295).
+pub fn telegram_channel_capabilities() -> String {
+    format!("{TELEGRAM_CHANNEL_CAPABILITIES_MARKER}\n{TELEGRAM_CHANNEL_CAPABILITIES_BODY}")
+}
+
+/// True when `brain` already carries the Telegram capabilities block.
+pub fn has_telegram_channel_capabilities(brain: &str) -> bool {
+    brain.contains(TELEGRAM_CHANNEL_CAPABILITIES_MARKER)
+}
 
 /// Runtime information injected into the system brain.
 #[derive(Debug, Clone, Default)]
@@ -786,8 +793,6 @@ pub struct RuntimeInfo {
     /// of every prompt's cache key. Callers MUST call `collapse_home`
     /// before stuffing a real path here.
     pub working_directory: Option<String>,
-    /// Bound messaging channel (e.g. `"telegram"`, `"discord"`, etc.) if known (#295).
-    pub channel: Option<String>,
 }
 
 /// Rewrite the `Model:` and `Provider:` lines inside the `--- Runtime Info ---`
@@ -870,26 +875,27 @@ pub fn override_runtime_working_directory(brain: &str, wd: &str) -> String {
 /// (or at the end if Runtime Info is not present). If the block is already
 /// present, returns the brain unchanged.
 pub fn inject_telegram_channel_capabilities(brain: &str) -> String {
-    if brain.contains("--- TELEGRAM CHANNEL CAPABILITIES ---") {
+    if has_telegram_channel_capabilities(brain) {
         return brain.to_string();
     }
+    let block = telegram_channel_capabilities();
     const MARKER: &str = "--- Runtime Info ---";
     if let Some(pos) = brain.find(MARKER) {
-        let mut out = String::with_capacity(brain.len() + TELEGRAM_CHANNEL_CAPABILITIES.len() + 2);
+        let mut out = String::with_capacity(brain.len() + block.len() + 2);
         out.push_str(brain[..pos].trim_end());
         out.push_str("\n\n");
-        out.push_str(TELEGRAM_CHANNEL_CAPABILITIES);
+        out.push_str(&block);
         out.push_str("\n\n");
         out.push_str(&brain[pos..]);
         out
     } else {
-        let mut out = String::with_capacity(brain.len() + TELEGRAM_CHANNEL_CAPABILITIES.len() + 2);
+        let mut out = String::with_capacity(brain.len() + block.len() + 2);
         let trimmed = brain.trim_end();
         out.push_str(trimmed);
         if !trimmed.is_empty() {
             out.push_str("\n\n");
         }
-        out.push_str(TELEGRAM_CHANNEL_CAPABILITIES);
+        out.push_str(&block);
         out.push('\n');
         out
     }
@@ -917,9 +923,6 @@ fn push_runtime_info(prompt: &mut String, runtime_info: Option<&RuntimeInfo>) {
     if let Some(ref wd) = info.working_directory {
         prompt.push_str(&format!("Working directory: {}\n", wd));
         push_home_anchor_and_expansion_rule(prompt);
-    }
-    if let Some(ref ch) = info.channel {
-        prompt.push_str(&format!("Channel: {}\n", ch));
     }
     // Compile-time version so the agent has ground truth for "what version are
     // you?" instead of hallucinating (#183).

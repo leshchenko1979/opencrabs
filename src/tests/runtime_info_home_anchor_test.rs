@@ -28,7 +28,6 @@ fn runtime_info_with_collapsed_wd() -> RuntimeInfo {
         // Pre-collapsed form — that's what the CLI sites pass after
         // running `collapse_home` on the absolute working directory.
         working_directory: Some("~/srv/rs/opencrabs".to_string()),
-        channel: None,
     }
 }
 
@@ -102,7 +101,6 @@ fn no_anchor_when_working_directory_is_none() {
         model: Some("test-model".to_string()),
         provider: None,
         working_directory: None,
-        channel: None,
     };
     let prompt = loader.build_system_brain(Some(&info));
 

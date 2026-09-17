@@ -722,7 +722,6 @@ pub(crate) async fn cmd_run(
         working_directory: Some(crate::brain::tools::error::collapse_home(
             &crate::utils::cwd::launch_cwd(),
         )),
-        channel: None,
     };
     // Feedback/performance digest stays out of the LLM context — it's a
     // maintenance warning in ~/.opencrabs/rsi/digest.md, not conversation input.
@@ -854,7 +853,6 @@ pub(crate) async fn cmd_acp(config: &crate::config::Config, model: Option<String
         working_directory: Some(crate::brain::tools::error::collapse_home(
             &crate::utils::cwd::launch_cwd(),
         )),
-        channel: None,
     };
     let mut system_brain = brain_loader.build_system_brain(Some(&runtime_info));
     if config.agent.lazy_tools {
@@ -1079,7 +1077,6 @@ pub(crate) async fn cmd_agent_interactive(
         working_directory: Some(crate::brain::tools::error::collapse_home(
             &crate::utils::cwd::launch_cwd(),
         )),
-        channel: None,
     };
     // Feedback/performance digest stays out of the LLM context — it's a
     // maintenance warning in ~/.opencrabs/rsi/digest.md, not conversation input.

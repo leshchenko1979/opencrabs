@@ -809,18 +809,22 @@ impl AgentService {
             brain
         };
 
-        // Inject Telegram channel formatting capabilities if session belongs to Telegram (#295).
+        // Inject the Telegram channel formatting capabilities block when this
+        // session is bound to the Telegram channel (#295). The channel manager
+        // holds the session -> chat/topic ownership map, so the check is per
+        // session: one process serves Telegram, Discord, Slack and cron alike,
+        // and only Telegram-bound sessions get the block.
         #[cfg(feature = "telegram")]
-        let is_telegram = if let Some(mgr) = self.channel_manager.as_ref() {
-            mgr.telegram().channel_ownership_of(session_id)
-                != crate::brain::agent::service::session_routes::ChannelOwnership::Unknown
-        } else {
-            false
-        };
+        let telegram_bound = self.channel_manager.as_ref().is_some_and(|mgr| {
+            !matches!(
+                mgr.telegram().channel_ownership_of(session_id),
+                super::session_routes::ChannelOwnership::Unknown
+            )
+        });
         #[cfg(not(feature = "telegram"))]
-        let is_telegram = false;
+        let telegram_bound = false;
 
-        let brain = if is_telegram {
+        let brain = if telegram_bound {
             crate::brain::prompt_builder::inject_telegram_channel_capabilities(&brain)
         } else {
             brain
