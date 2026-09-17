@@ -666,9 +666,7 @@ fn shield_line_unresolvable_images(line: &str, out: &mut String) {
         }
 
         // Normal character - find next special char (` or !)
-        let next_special = line[i..]
-            .find(|c| c == '`' || c == '!')
-            .unwrap_or(line[i..].len());
+        let next_special = line[i..].find(['`', '!']).unwrap_or(line[i..].len());
         if next_special == 0 {
             // Current char is ` or ! handled above; advance single char
             if let Some(ch) = line[i..].chars().next() {
