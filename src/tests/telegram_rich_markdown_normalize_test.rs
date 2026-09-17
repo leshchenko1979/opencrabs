@@ -1,0 +1,101 @@
+//! Tests verifying canonical rich markdown normalization (#280).
+//!
+//! Confirms that named entities (&rarr;, &bull;, etc.) are decoded to Unicode glyphs,
+//! code fences are balanced, tables are reflowed with proper separators and blank lines,
+//! bare leading hashes are shielded, and button layout fits across all rich builders:
+//! `build_body_target`, `build_body_markdown_media_target`, `build_body_markdown_media_edit`,
+//! and `normalize_rich_markdown`.
+
+use crate::channels::telegram::rich::api::{
+    build_body_markdown_media_edit, build_body_markdown_media_target, build_body_target,
+};
+use crate::channels::telegram::rich::mermaid::MediaEntry;
+use crate::channels::telegram::rich::normalize_rich_markdown;
+use teloxide::types::{MessageId, ThreadId};
+
+#[test]
+fn test_normalize_rich_markdown_named_entities() {
+    let input = "Latency: 120ms &rarr; 45ms &bull; Status: OK &mdash; Verified";
+    let output = normalize_rich_markdown(input);
+    assert_eq!(output, "Latency: 120ms → 45ms • Status: OK — Verified");
+}
+
+#[test]
+fn test_normalize_rich_markdown_table_reflow_and_entities() {
+    let input = "Summary: | Metric | Value |\n| Latency | 50ms &rarr; 20ms |";
+    let output = normalize_rich_markdown(input);
+
+    // Entity decoded
+    assert!(output.contains("50ms → 20ms"));
+    // Table has blank line preceding it and inferred separator
+    assert!(output.contains("Summary:\n\n| Metric | Value |"));
+    assert!(output.contains("|---|---|"));
+}
+
+#[test]
+fn test_normalize_rich_markdown_fence_balance_and_shield_hashes() {
+    let input = "```\n# Bare heading inside code fence\n```\n#174 Bare issue outside fence";
+    let output = normalize_rich_markdown(input);
+
+    assert!(output.contains("```\n# Bare heading inside code fence\n```"));
+    assert!(output.contains("\\#174 Bare issue outside fence"));
+}
+
+#[test]
+fn test_normalize_rich_markdown_button_fit() {
+    // 5 buttons in one row with length 10 exceeds the shared row budget (38)
+    // so enforce_button_fit collapses them into numbered text + pick button.
+    let input = "<tg-button-row>\
+<tg-button data=\"b1\">One 123456</tg-button>\
+<tg-button data=\"b2\">Two 123456</tg-button>\
+<tg-button data=\"b3\">Three 1234</tg-button>\
+<tg-button data=\"b4\">Four 12345</tg-button>\
+<tg-button data=\"b5\">Five 12345</tg-button>\
+</tg-button-row>";
+    let output = normalize_rich_markdown(input);
+    assert!(output.contains("1. One 123456"));
+    assert!(output.contains("2. Two 123456"));
+}
+
+#[test]
+fn test_build_body_target_normalizes_markdown() {
+    let raw_md = "Status: &bull; #280 &rarr; Complete\n| A | B |\n| 1 | 2 |";
+    let body = build_body_target(12345, Some(ThreadId(MessageId(99))), Some(42), raw_md);
+
+    assert_eq!(body["chat_id"], 12345);
+    assert_eq!(body["message_thread_id"], 99);
+    assert_eq!(body["reply_parameters"]["message_id"], 42);
+
+    let md = body["rich_message"]["markdown"].as_str().unwrap();
+    assert!(md.contains("• \\#280 → Complete"));
+    assert!(md.contains("|---|---|"));
+}
+
+#[test]
+fn test_build_body_markdown_media_target_normalizes_markdown() {
+    let raw_md = "Result &rarr; Success\n| X | Y |\n| a | b |";
+    let media = vec![MediaEntry {
+        id: "diag1".to_string(),
+        url: Some("https://example.com/diag.png".to_string()),
+        bytes: None,
+    }];
+    let body = build_body_markdown_media_target(54321, None, None, raw_md, &media, None);
+
+    assert_eq!(body["chat_id"], 54321);
+    let md = body["rich_message"]["markdown"].as_str().unwrap();
+    assert!(md.contains("Result → Success"));
+    assert!(md.contains("|---|---|"));
+    assert_eq!(body["rich_message"]["media"][0]["id"], "diag1");
+}
+
+#[test]
+fn test_build_body_markdown_media_edit_normalizes_markdown() {
+    let raw_md = "Edited &bull; #280 &rarr; Done";
+    let media = vec![];
+    let body = build_body_markdown_media_edit(98765, 555, raw_md, &media);
+
+    assert_eq!(body["chat_id"], 98765);
+    assert_eq!(body["message_id"], 555);
+    let md = body["rich_message"]["markdown"].as_str().unwrap();
+    assert_eq!(md, "Edited • \\#280 → Done");
+}
