@@ -1699,20 +1699,71 @@ impl TelegramAgent {
                             // Grayed Review button while a review runs (#155):
                             // ack only, so a second tap can never start a
                             // concurrent rewrite of the same plan.
-                            if data == "plan:noop" {
-                                if let Err(e) = bot
-                                    .answer_callback_query(query.id.clone())
-                                    .text("⏳ Plan review is already running…")
-                                    .await
-                                {
-                                    tracing::warn!("Telegram: callback UI update failed: {e}");
+                            if data == "plan:noop" || data == "plan:noop_impl" {
+                                let caller_is_owner = config_rx
+                                    .borrow()
+                                    .channels
+                                    .telegram
+                                    .is_owner(&query.from.id.0.to_string());
+                                if !caller_is_owner {
+                                    if let Err(e) = bot
+                                        .answer_callback_query(query.id.clone())
+                                        .text("🔒 Owner only")
+                                        .show_alert(true)
+                                        .await
+                                    {
+                                        tracing::warn!("Telegram: callback UI update failed: {e}");
+                                    }
+                                    return ResponseResult::Ok(());
                                 }
-                                return ResponseResult::Ok(());
-                            }
-                            if data == "plan:noop_impl" {
+                                let Some(session_id) =
+                                    resolve_callback_session(&query, &state, &shared_session).await
+                                else {
+                                    if let Err(e) = bot
+                                        .answer_callback_query(query.id.clone())
+                                        .text("No session for this chat.")
+                                        .await
+                                    {
+                                        tracing::warn!("Telegram: callback UI update failed: {e}");
+                                    }
+                                    return ResponseResult::Ok(());
+                                };
+
+                                if state.is_plan_reviewing(session_id).await {
+                                    let text = if data == "plan:noop_impl" {
+                                        "⏳ Implementation review is already running…"
+                                    } else {
+                                        "⏳ Plan review is already running…"
+                                    };
+                                    if let Err(e) = bot
+                                        .answer_callback_query(query.id.clone())
+                                        .text(text)
+                                        .await
+                                    {
+                                        tracing::warn!("Telegram: callback UI update failed: {e}");
+                                    }
+                                    return ResponseResult::Ok(());
+                                }
+
+                                // Review is not actually active in memory (e.g. subagent was interrupted by
+                                // daemon restart/swap or failed before resetting markup).
+                                // Self-heal: restore interactive markup on the card message.
+                                let kb = if data == "plan:noop_impl" {
+                                    crate::channels::telegram::flow_chrome::PlanKb::CompletedReview
+                                } else {
+                                    crate::channels::telegram::flow_chrome::PlanKb::ApproveDiscard
+                                };
+                                if let (Some(msg), Some(markup)) =
+                                    (query.message.as_ref(), kb.keyboard())
+                                {
+                                    let _ = bot
+                                        .edit_message_reply_markup(msg.chat().id, msg.id())
+                                        .reply_markup(markup)
+                                        .await;
+                                }
                                 if let Err(e) = bot
                                     .answer_callback_query(query.id.clone())
-                                    .text("⏳ Implementation review is already running…")
+                                    .text("🔄 Review was interrupted — button restored.")
                                     .await
                                 {
                                     tracing::warn!("Telegram: callback UI update failed: {e}");
