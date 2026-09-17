@@ -10,8 +10,8 @@
 
 pub(crate) use super::flow::HeaderMarkup;
 use super::flow::{
-    humanize_duration, open_flow, refresh_flow, starts_with_icon, strip_leading_tool_status_icons,
-    StreamingState, COMPACTING_HEADER_TEXT,
+    COMPACTING_HEADER_TEXT, StreamingState, humanize_duration, open_flow, refresh_flow,
+    starts_with_icon, strip_leading_tool_status_icons,
 };
 use super::handler::escape_html;
 use crate::brain::agent::AgentService;
@@ -688,10 +688,15 @@ pub(crate) fn is_empty_scaffold_line(line: &str) -> bool {
         .or_else(|| t.strip_prefix("* "))
         .unwrap_or(t);
     // Empty `**Label:**` field (the colon sits inside the bold markers).
-    if let Some(rest) = body.strip_prefix("**") {
-        if let Some(idx) = rest.find(":**") {
-            return rest[idx + 3..].trim().is_empty();
-        }
+    let empty_bold_field = body
+        .strip_prefix("**")
+        .and_then(|rest| {
+            rest.find(":**")
+                .map(|idx| rest[idx + 3..].trim().is_empty())
+        })
+        .unwrap_or(false);
+    if empty_bold_field {
+        return true;
     }
     // Empty `Done when:` criteria bullet (the scaffold's per-step placeholder).
     if body == "Done when:" {
@@ -699,10 +704,17 @@ pub(crate) fn is_empty_scaffold_line(line: &str) -> bool {
     }
     // Empty `N.` numbered step.
     let digits_len = body.chars().take_while(char::is_ascii_digit).count();
-    if digits_len > 0 {
-        if let Some(after) = body[digits_len..].trim_start().strip_prefix('.') {
-            return after.trim().is_empty();
-        }
+    let empty_numbered_step = if digits_len > 0 {
+        body[digits_len..]
+            .trim_start()
+            .strip_prefix('.')
+            .map(|after| after.trim().is_empty())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    if empty_numbered_step {
+        return true;
     }
     false
 }
@@ -799,7 +811,7 @@ pub(crate) async fn load_plan_state_section(
     session_id: Uuid,
     turn_active: bool,
 ) -> (Option<String>, PlanKb) {
-    use crate::utils::plan_files::{plan_mode_state, PlanModeState};
+    use crate::utils::plan_files::{PlanModeState, plan_mode_state};
     let mode = plan_mode_state(session_id).await;
     // in_seed_window only matters (and only does IO) for the Active state.
     let in_seed_window = matches!(mode, PlanModeState::Active)
@@ -823,7 +835,7 @@ pub(crate) async fn refresh_sections(
     agent: &AgentService,
     session_id: Uuid,
 ) -> bool {
-    use crate::utils::plan_files::{plan_mode_state, PlanModeState};
+    use crate::utils::plan_files::{PlanModeState, plan_mode_state};
     // Plan title, prose, and checklist now live on the persistent plan card,
     // not in the per-turn flow block (#580, #621). The card reads them itself
     // via load_plan_sections / load_plan_prose, so they are not populated on
