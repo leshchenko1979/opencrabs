@@ -777,20 +777,21 @@ impl PlanReviewReport {
 
 /// Clean markdown headings (`### `, `## `), bold/italic (`**`, `__`), and leading list markers to extract clean section key/rest.
 fn parse_section_header<'a>(trimmed: &'a str, marker: &str) -> Option<&'a str> {
-    // Strip leading markdown heading tokens '#', bullets, asterisks, underscores, spaces
+    // Strip leading markdown heading tokens '#', bullets, asterisks, underscores, spaces, blockquotes
     let candidate = trimmed
-        .trim_start_matches(['#', '*', '_', '-', ' '])
+        .trim_start_matches(['#', '*', '_', '-', ' ', '>'])
         .trim();
 
     // Check if candidate starts with the marker (case-insensitive)
     if candidate.len() >= marker.len()
         && candidate[..marker.len()].eq_ignore_ascii_case(marker)
+        && match candidate.as_bytes().get(marker.len()) {
+            None => true,
+            Some(b) => matches!(b, b':' | b'*' | b'_' | b' ' | b'-' | b'#'),
+        }
     {
-        let mut rest = candidate[marker.len()..].trim();
-        // Strip leading colon if marker didn't include it or if trailing
-        rest = rest.trim_start_matches(':').trim();
-        // Strip trailing markdown bold/italic tags like '**' or '__'
-        rest = rest.trim_end_matches(['*', '_', ' ']).trim();
+        let rest = candidate[marker.len()..].trim();
+        let rest = rest.trim_matches(['*', '_', ':', ' ']).trim();
         Some(rest)
     } else {
         None
@@ -808,6 +809,7 @@ pub(crate) fn parse_plan_review_report(report: Option<&str>) -> PlanReviewReport
     let mut summary_lines = Vec::new();
     let mut in_summary = false;
     let mut delta_line = None;
+    let mut in_delta = false;
 
     for line in report.lines() {
         let trimmed = line.trim();
@@ -815,22 +817,44 @@ pub(crate) fn parse_plan_review_report(report: Option<&str>) -> PlanReviewReport
         if let Some(d) = parse_section_header(trimmed, "DELTA") {
             in_summary = false;
             in_open_questions = false;
-            if !d.is_empty() {
-                delta_line = Some(d.to_string());
+            let clean = d.trim_start_matches(['>', '-', '*', '•', ' ']).trim();
+            let clean = clean.trim_matches(['*', '_', ' ']).trim();
+            if !clean.is_empty() {
+                delta_line = Some(clean.to_string());
+                in_delta = false;
+            } else {
+                in_delta = true;
             }
         } else if let Some(rest) = parse_section_header(trimmed, "OPEN_QUESTIONS")
             .or_else(|| parse_section_header(trimmed, "OPEN QUESTIONS"))
         {
             in_open_questions = true;
             in_summary = false;
+            in_delta = false;
             if !rest.is_empty() {
                 open_questions.push(rest.to_string());
             }
         } else if let Some(rest) = parse_section_header(trimmed, "SUMMARY") {
             in_summary = true;
             in_open_questions = false;
+            in_delta = false;
             if !rest.is_empty() {
                 summary_lines.push(rest.to_string());
+            }
+        } else if in_delta {
+            if parse_section_header(trimmed, "SUMMARY").is_some()
+                || parse_section_header(trimmed, "OPEN_QUESTIONS").is_some()
+                || parse_section_header(trimmed, "OPEN QUESTIONS").is_some()
+                || (trimmed.starts_with('#') && !trimmed.starts_with("### ?"))
+            {
+                in_delta = false;
+            } else if !trimmed.is_empty() {
+                let clean = trimmed.trim_start_matches(['>', '-', '*', '•', ' ']).trim();
+                let clean = clean.trim_matches(['*', '_', ' ']).trim();
+                if !clean.is_empty() {
+                    delta_line = Some(clean.to_string());
+                    in_delta = false;
+                }
             }
         } else if in_open_questions {
             // Check if we hit another markdown section header
