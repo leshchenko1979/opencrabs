@@ -469,9 +469,11 @@ impl AgentService {
         let opencrabs_home = crate::config::opencrabs_home();
         let mut files_block = String::new();
 
-        if context.system_brain.as_ref().map_or(false, |b| {
-            b.contains("--- TELEGRAM CHANNEL CAPABILITIES ---")
-        }) {
+        if context
+            .system_brain
+            .as_ref()
+            .is_some_and(|b| b.contains("--- TELEGRAM CHANNEL CAPABILITIES ---"))
+        {
             files_block.push_str(crate::brain::prompt_builder::TELEGRAM_CHANNEL_CAPABILITIES);
             files_block.push_str("\n\n");
         }

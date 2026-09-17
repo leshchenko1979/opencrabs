@@ -42,16 +42,20 @@ fn test_runtime_info_channel_field_and_brain_loader() {
     let temp_dir = TempDir::new().unwrap();
     let loader = BrainLoader::new(temp_dir.path().to_path_buf());
 
-    let mut info_telegram = RuntimeInfo::default();
-    info_telegram.channel = Some("telegram".to_string());
-    info_telegram.model = Some("test-model".to_string());
+    let info_telegram = RuntimeInfo {
+        channel: Some("telegram".to_string()),
+        model: Some("test-model".to_string()),
+        ..Default::default()
+    };
 
     let brain_tg = loader.build_core_brain(Some(&info_telegram));
     assert!(brain_tg.contains("--- TELEGRAM CHANNEL CAPABILITIES ---"));
     assert!(brain_tg.contains("Channel: telegram"));
 
-    let mut info_discord = RuntimeInfo::default();
-    info_discord.channel = Some("discord".to_string());
+    let info_discord = RuntimeInfo {
+        channel: Some("discord".to_string()),
+        ..Default::default()
+    };
     let brain_discord = loader.build_core_brain(Some(&info_discord));
     assert!(!brain_discord.contains("--- TELEGRAM CHANNEL CAPABILITIES ---"));
     assert!(brain_discord.contains("Channel: discord"));
