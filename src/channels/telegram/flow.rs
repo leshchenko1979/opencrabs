@@ -154,7 +154,8 @@ pub(crate) fn clean_tool_entry(
         | "pg_query"
         | "n8n_api"
         | "cron_manage"
-        | "suggest_options" => {
+        | "suggest_options"
+        | "session_notify" => {
             let ctx = context.trim();
             if ctx.is_empty() {
                 // If there is no argument context (e.g. `ls` with default cwd), keep tool name so it doesn't render as a bare icon.

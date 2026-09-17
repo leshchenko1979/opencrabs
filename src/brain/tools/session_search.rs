@@ -209,7 +209,11 @@ impl Tool for SessionSearchTool {
                     .get("title_contains")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty());
-                let updated_since = match input.get("updated_since").and_then(|v| v.as_str()) {
+                let updated_since = match input
+                    .get("updated_since")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
                     Some(raw) => match parse_updated_since(raw) {
                         Ok(dt) => Some(dt),
                         Err(e) => return Ok(ToolResult::error(e)),

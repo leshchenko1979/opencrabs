@@ -1048,4 +1048,72 @@ fn test_tool_class_icons() {
         crate::channels::telegram::flow::clean_tool_entry("cron_manage", Some(true), "");
     assert_eq!(cron_empty_label, "⏰ cron_manage");
     assert_eq!(cron_empty_target, "");
+
+    let (notify_icon, notify_target) = crate::channels::telegram::flow::clean_tool_entry(
+        "session_notify",
+        Some(true),
+        "[ISSUE DISPATCH: #273]",
+    );
+    assert_eq!(notify_icon, "✉️");
+    assert_eq!(notify_target, "[ISSUE DISPATCH: #273]");
+
+    let (notify_empty_label, notify_empty_target) =
+        crate::channels::telegram::flow::clean_tool_entry("session_notify", Some(true), "");
+    assert_eq!(notify_empty_label, "✉️ session_notify");
+    assert_eq!(notify_empty_target, "");
+
+    // Context hint extraction tests for session_notify and session_search
+    let notify_input = serde_json::json!({
+        "action": "send",
+        "message": "[ISSUE DISPATCH: #273]\nTarget: #273",
+        "target_session": "530c29ec-596e-43a4-9c7e-1b6dfc3cd870"
+    });
+    assert_eq!(
+        crate::utils::tool_context_hint("session_notify", &notify_input),
+        "[ISSUE DISPATCH: #273]"
+    );
+
+    let notify_target_only = serde_json::json!({
+        "target_session": "530c29ec-596e-43a4-9c7e-1b6dfc3cd870"
+    });
+    assert_eq!(
+        crate::utils::tool_context_hint("session_notify", &notify_target_only),
+        "to 530c29ec-596e-43a4-9c7e-1b6dfc3cd870"
+    );
+
+    let notify_status = serde_json::json!({
+        "action": "status",
+        "notify_id": "notif_123"
+    });
+    assert_eq!(
+        crate::utils::tool_context_hint("session_notify", &notify_status),
+        "status notif_123"
+    );
+
+    let search_list = serde_json::json!({
+        "operation": "list",
+        "status": "all"
+    });
+    assert_eq!(
+        crate::utils::tool_context_hint("session_search", &search_list),
+        "list"
+    );
+
+    let search_list_active = serde_json::json!({
+        "operation": "list",
+        "status": "active"
+    });
+    assert_eq!(
+        crate::utils::tool_context_hint("session_search", &search_list_active),
+        "list (active)"
+    );
+
+    let search_title = serde_json::json!({
+        "operation": "query",
+        "title_contains": "HQ"
+    });
+    assert_eq!(
+        crate::utils::tool_context_hint("session_search", &search_title),
+        "title: HQ"
+    );
 }
