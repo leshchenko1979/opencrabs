@@ -327,6 +327,26 @@ pub(crate) enum RepeatLoopAction {
     Break,
 }
 
+/// Pure classifier checking if a tool call signature belongs to a file modification tool.
+/// Matches prefixes: `write_file:`, `edit_file:`, `hashline_edit:`, `write_opencrabs_file:`,
+/// `write:`, and `edit:`.
+pub(crate) fn is_file_mod_call_signature(signature: &str) -> bool {
+    signature.split(',').any(|sig| {
+        sig.starts_with("write_file:")
+            || sig.starts_with("edit_file:")
+            || sig.starts_with("hashline_edit:")
+            || sig.starts_with("write_opencrabs_file:")
+            || sig.starts_with("write:")
+            || sig.starts_with("edit:")
+    })
+}
+
+/// Pure classifier checking if a tool call signature belongs to a bash command tool.
+/// Matches prefix `bash:`.
+pub(crate) fn is_bash_call_signature(signature: &str) -> bool {
+    signature.split(',').any(|sig| sig.starts_with("bash:"))
+}
+
 /// Decide how to handle a possibly-looping non-modification tool call.
 ///
 /// Counts how many of the recent call signatures (a bounded window ending at
@@ -1673,6 +1693,10 @@ impl AgentService {
         // (identical name+args) dominates the recent window, nudge the model to
         // stop instead of cutting the turn silently (#507).
         let mut identical_call_loop_nudged: bool = false;
+        // Fires at most once per turn: the first time a bash command repeats
+        // 3 consecutive times with identical arguments, nudge the model to use
+        // background: true instead of an inline poll loop (#294).
+        let mut bash_loop_nudged: bool = false;
         // Fires at most once per turn: the first time near-identical calls
         // (any tool except `read_file`, differing only in counters, numbers,
         // or whitespace) dominate the normalized window, nudge the model to
@@ -6146,35 +6170,99 @@ impl AgentService {
             // Check for repeated patterns with tool-specific thresholds.
             // Only triggers for truly identical calls (same tool + same arguments).
 
-            let is_modification_tool = current_call_signature.starts_with("write:")
-                || current_call_signature.starts_with("edit:")
-                || current_call_signature.starts_with("bash:");
+            let is_file_mod = is_file_mod_call_signature(&current_call_signature);
+            let is_bash = is_bash_call_signature(&current_call_signature);
 
-            // Modification tools are dangerous to loop (a bad write/edit/bash
-            // must not repeat), so they keep the strict strictly-consecutive
-            // hard-break with no nudge: 4 identical calls in a row and we stop.
-            const MOD_CONSECUTIVE_BREAK: usize = 4;
-            if is_modification_tool && recent_tool_calls.len() >= MOD_CONSECUTIVE_BREAK {
-                let last_n = &recent_tool_calls[recent_tool_calls.len() - MOD_CONSECUTIVE_BREAK..];
+            // File modification tools (write_file, edit_file, hashline_edit, etc.)
+            // are dangerous to loop (a bad write/edit must not repeat blindly), so
+            // they keep the strict strictly-consecutive hard-break with no nudge:
+            // 4 identical calls in a row and we stop.
+            const FILE_MOD_CONSECUTIVE_BREAK: usize = 4;
+            if is_file_mod && recent_tool_calls.len() >= FILE_MOD_CONSECUTIVE_BREAK {
+                let last_n =
+                    &recent_tool_calls[recent_tool_calls.len() - FILE_MOD_CONSECUTIVE_BREAK..];
                 if last_n.iter().all(|call| call == &current_call_signature) {
                     // Hand the turn to the next provider instead of ending
                     // it (#1397): the pending call is named so the log and
                     // the user can see what did not run.
                     let pending = super::loop_break::describe_pending_calls(&tool_uses);
                     tracing::warn!(
-                        "⚠️ Modification tool loop: '{}' repeated {} times with identical \
+                        "⚠️ File modification tool loop: '{}' repeated {} times with identical \
                          arguments, dropping the pending call and rotating the chain: {}",
                         current_call_signature,
-                        MOD_CONSECUTIVE_BREAK,
+                        FILE_MOD_CONSECUTIVE_BREAK,
                         pending,
                     );
                     return Err(super::loop_break::loop_break_error(
-                        "modification-tool loop",
+                        "file-modification loop",
                         current_call_signature.split(':').next().unwrap_or("tool"),
-                        MOD_CONSECUTIVE_BREAK,
-                        MOD_CONSECUTIVE_BREAK,
+                        FILE_MOD_CONSECUTIVE_BREAK,
+                        FILE_MOD_CONSECUTIVE_BREAK,
                         &pending,
                     ));
+                }
+            }
+
+            // Bash command tools: repeated identical bash commands (e.g. inline
+            // polling loops like `sleep 20 && gh run view`) get a 2-stage policy
+            // (#294): at 3 consecutive identical calls we nudge the agent to run
+            // with `background: true` (or detach); at 5 consecutive identical calls
+            // we break the loop and rotate the chain.
+            const BASH_CONSECUTIVE_NUDGE: usize = 3;
+            const BASH_CONSECUTIVE_BREAK: usize = 5;
+            if is_bash {
+                let consecutive_bash_count = recent_tool_calls
+                    .iter()
+                    .rev()
+                    .take_while(|call| *call == &current_call_signature)
+                    .count();
+
+                if consecutive_bash_count >= BASH_CONSECUTIVE_BREAK {
+                    let pending = super::loop_break::describe_pending_calls(&tool_uses);
+                    tracing::warn!(
+                        "⚠️ Repeated bash command loop persisted after nudge: '{}' repeated {} \
+                         times with identical arguments, dropping the pending call and rotating \
+                         the chain: {}",
+                        current_call_signature,
+                        consecutive_bash_count,
+                        pending,
+                    );
+                    return Err(super::loop_break::loop_break_error(
+                        "repeated-bash loop",
+                        "bash",
+                        consecutive_bash_count,
+                        consecutive_bash_count,
+                        &pending,
+                    ));
+                } else if consecutive_bash_count >= BASH_CONSECUTIVE_NUDGE && !bash_loop_nudged {
+                    tracing::warn!(
+                        "Repeated bash command poll loop: '{}' repeated {}x, nudging agent to \
+                         detach with background: true.",
+                        current_call_signature,
+                        consecutive_bash_count,
+                    );
+                    if let Some(ref cb) = progress_callback {
+                        cb(
+                            session_id,
+                            ProgressEvent::SelfHealingAlert {
+                                message: format!(
+                                    "Repeated bash command poll loop ({}x) — nudging the agent \
+                                     to detach with background: true",
+                                    consecutive_bash_count,
+                                ),
+                            },
+                        );
+                    }
+                    context.add_message(Message::user(
+                        "[System: You have executed the identical bash command 3 times in a row. \
+                         If you are waiting on or polling a long-running process (e.g. CI checks, \
+                         build, tests, server startup), set `background: true` on the `bash` tool \
+                         call so it runs detached without blocking your turn. Do not run this \
+                         identical polling command inline again.]"
+                            .to_string(),
+                    ));
+                    bash_loop_nudged = true;
+                    continue;
                 }
             }
 
@@ -6294,7 +6382,7 @@ impl AgentService {
             // other round). Nudge once (consistent with the browser-loop
             // nudge, so a stuck read/grep/list loop is never cut silently),
             // then break if the model ignores the nudge and keeps repeating.
-            if !is_modification_tool {
+            if !is_file_mod && !is_bash {
                 const REPEAT_WINDOW: usize = 8;
                 // Nudge/break earlier so a single turn poisons the history with
                 // far fewer identical rounds before the loop is broken (#740).
