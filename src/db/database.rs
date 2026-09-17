@@ -239,6 +239,97 @@ fn apply_pragmas_in_memory(
     )
 }
 
+/// Execute safe maintenance on a SQLite connection (#273).
+///
+/// Steps:
+/// 1. Run `PRAGMA optimize;` to update SQLite query planner index statistics.
+/// 2. Run `PRAGMA wal_checkpoint(PASSIVE);` to checkpoint WAL pages without blocking active readers/writers.
+/// 3. Inspect `PRAGMA freelist_count`: if free pages >= `min_freelist_pages`, attempt `VACUUM;`.
+/// 4. Catches `SQLITE_BUSY` (code 5) / `SQLITE_LOCKED` on vacuum to yield gracefully to high-priority queries.
+pub fn execute_safe_maintenance(
+    conn: &rusqlite::Connection,
+    db_name: &str,
+    min_freelist_pages: i64,
+) -> rusqlite::Result<bool> {
+    // 1. Optimize query planner statistics
+    if let Err(e) = conn.execute_batch("PRAGMA optimize;") {
+        tracing::debug!("PRAGMA optimize on {db_name} failed: {e}");
+    }
+
+    // 2. Passive WAL checkpoint (does not block readers or writers)
+    if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);") {
+        tracing::debug!("PRAGMA wal_checkpoint(PASSIVE) on {db_name} failed: {e}");
+    }
+
+    // 3. Freelist count check
+    let freelist_count: i64 = conn
+        .query_row("PRAGMA freelist_count;", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    if freelist_count < min_freelist_pages {
+        tracing::debug!(
+            freelist_count,
+            min_freelist_pages,
+            db = db_name,
+            "Skipping VACUUM: free page count below reclamation threshold"
+        );
+        return Ok(false);
+    }
+
+    tracing::info!(
+        freelist_count,
+        db = db_name,
+        "Freelist threshold met; attempting VACUUM"
+    );
+
+    // 4. Temporary short busy timeout during VACUUM to yield fast on contention
+    let _ = conn.execute_batch("PRAGMA busy_timeout = 2000;");
+
+    let vacuum_res = conn.execute_batch("VACUUM;");
+
+    // Restore standard 30s busy timeout
+    let _ = conn.execute_batch("PRAGMA busy_timeout = 30000;");
+
+    match vacuum_res {
+        Ok(()) => {
+            tracing::info!(db = db_name, "VACUUM completed successfully");
+            Ok(true)
+        }
+        Err(e) => {
+            if is_busy_or_locked(&e) {
+                tracing::warn!(
+                    db = db_name,
+                    error = %e,
+                    "VACUUM encountered database lock or busy contention; yielding gracefully until next maintenance cycle (#273)"
+                );
+                Ok(false)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Helper to check if a rusqlite error is SQLITE_BUSY or SQLITE_LOCKED.
+fn is_busy_or_locked(err: &rusqlite::Error) -> bool {
+    match err {
+        rusqlite::Error::SqliteFailure(err_code, _) => {
+            // SQLITE_BUSY (code 5) or SQLITE_LOCKED (code 6)
+            err_code.extended_code == 5
+                || err_code.extended_code == 6
+                || err_code.extended_code == 261 // SQLITE_BUSY_RECOVERY
+                || err_code.extended_code == 517 // SQLITE_BUSY_SNAPSHOT
+                || err_code.extended_code == 262 // SQLITE_LOCKED_SHAREDCACHE
+        }
+        _ => {
+            let msg = err.to_string();
+            msg.contains("database is locked")
+                || msg.contains("database table is locked")
+                || msg.contains("busy")
+        }
+    }
+}
+
 impl Database {
     /// Create a Database instance wrapping an existing connection pool.
     pub fn new_with_pool(pool: Pool) -> Self {
@@ -340,18 +431,25 @@ impl Database {
         self.pool.status().size > 0 || self.pool.status().max_size > 0
     }
 
-    /// Reclaim unused disk space by running SQLite VACUUM (#241).
-    pub async fn vacuum_database(&self) -> Result<()> {
+    /// Run safe database maintenance (optimize, passive checkpoint, and conditional vacuum).
+    ///
+    /// Unlike raw `VACUUM;`, this:
+    /// 1. Runs `PRAGMA optimize;` to update SQLite query planner statistics.
+    /// 2. Runs `PRAGMA wal_checkpoint(PASSIVE);` without blocking active readers/writers.
+    /// 3. Checks `PRAGMA freelist_count`: only executes `VACUUM;` if unused pages >= threshold.
+    /// 4. Catches `SQLITE_BUSY` (code 5) / `SQLITE_LOCKED` on vacuum to yield gracefully
+    ///    to high-priority foreground queries (#273).
+    pub async fn vacuum_database(&self) -> Result<bool> {
         let conn = self
             .pool
             .get()
             .await
             .context("Failed to get connection for vacuum")?;
-        conn.interact(|conn| conn.execute_batch("VACUUM;"))
+        let vacuumed = conn
+            .interact(|conn| execute_safe_maintenance(conn, "opencrabs.db", 1024))
             .await
-            .map_err(|e| anyhow::anyhow!("vacuum_database interact error: {e}"))?
-            .context("Failed to execute VACUUM on database")?;
-        Ok(())
+            .map_err(|e| anyhow::anyhow!("vacuum_database interact error: {e}"))??;
+        Ok(vacuumed)
     }
 
     /// Total number of migrations, derived from `MIGRATION_SQL` so it can
