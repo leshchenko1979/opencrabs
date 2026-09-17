@@ -96,3 +96,31 @@ fn test_build_body_markdown_media_edit_normalizes_markdown() {
     let md = body["rich_message"]["markdown"].as_str().unwrap();
     assert_eq!(md, "Edited • #280 → Done");
 }
+
+#[test]
+fn test_shield_unresolvable_markdown_images() {
+    // Unresolvable local/relative paths -> shielded
+    let input = "Here is an image: ![Visual Diagram](tmp/plot.png) and ![Ref](/root/arch.svg)";
+    let output = normalize_rich_markdown(input);
+    assert_eq!(
+        output,
+        "Here is an image: \\![Visual Diagram](tmp/plot.png) and \\![Ref](/root/arch.svg)"
+    );
+
+    // Valid http, https, tg://photo?id=, attach:// -> preserved
+    let valid_input = "Remote: ![Web](https://example.com/pic.png) and ![HTTP](http://test.org/a.jpg)\n\
+                       Telegram: ![Diag](tg://photo?id=diag0) and ![Attach](attach://photo1)";
+    let valid_output = normalize_rich_markdown(valid_input);
+    assert_eq!(valid_output, valid_input);
+
+    // Code blocks & inline code -> untouched
+    let code_input =
+        "```markdown\n![Visual Diagram](tmp/plot.png)\n```\nInline: `![Alt](path.png)`";
+    let code_output = normalize_rich_markdown(code_input);
+    assert_eq!(code_output, code_input);
+
+    // Already escaped -> not double-escaped
+    let escaped_input = "Already: \\![Manual](local/file.png)";
+    let escaped_output = normalize_rich_markdown(escaped_input);
+    assert_eq!(escaped_output, escaped_input);
+}
