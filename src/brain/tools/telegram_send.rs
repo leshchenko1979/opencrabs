@@ -395,12 +395,16 @@ impl Tool for TelegramSendTool {
                         the numeric thread_id passed to `send` / `reply` via `thread_id`. For exhaustive \
                         MTProto forum enumeration, use MTProto client tools (e.g. fast-mcp-telegram tg_get_chat_info). \
                         `create_topic` creates a new forum topic (requires `name`, 1-128 chars). Optionally accepts `bind: true` to bind the calling session immediately. \
-                        `rename_topic` renames an existing forum topic (requires `thread_id` and `name`, 1-128 chars). \
+                        `rename_topic` renames an existing forum topic (requires `thread_id` and `name`, 1-128 chars; optional `local_only: true` updates local DB mapping without calling Telegram API). \
                         `bind_topic` binds the calling session to a forum topic (requires `thread_id`, optional `chat_id`)."
                 },
                 "name": {
                     "type": "string",
                     "description": "Topic name (1–128 characters) for create_topic and rename_topic"
+                },
+                "local_only": {
+                    "type": "boolean",
+                    "description": "Optional flag for rename_topic: if true, updates the local DB topic mapping only without calling Telegram's editForumTopic API (useful for refreshing out-of-band renames or when bot lacks edit permissions)."
                 },
                 "bind": {
                     "type": "boolean",
@@ -1747,6 +1751,8 @@ impl TelegramSendTool {
     }
 
     /// `rename_topic` — rename an existing forum topic in a supergroup.
+    /// If `local_only: true` is passed (or if bot lacks admin rights / out-of-band rename refresh),
+    /// updates the local DB topic mapping without invoking the Telegram Bot API editForumTopic endpoint.
     async fn action_rename_topic(
         &self,
         bot: &teloxide::Bot,
@@ -1761,6 +1767,45 @@ impl TelegramSendTool {
             return Ok(ToolResult::error(
                 "Parameter 'name' must be between 1 and 128 characters.".to_string(),
             ));
+        }
+
+        let local_only = input
+            .get("local_only")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if local_only {
+            self.telegram_state
+                .note_thread_evidence(chat_id, Some(thread_id_raw as i32))
+                .await;
+            crate::channels::telegram::record_topic_created(
+                None,
+                chat_id,
+                thread_id_raw as i32,
+                name,
+                true,
+            )
+            .await;
+            log_send_success(
+                "tool",
+                "rename_topic",
+                "rename_topic",
+                &context.session_id.to_string(),
+                "action",
+                chat_id,
+                Some(thread_id_raw as i32),
+                0,
+                name.len(),
+                "-",
+            );
+            let res = serde_json::json!({
+                "status": "success",
+                "chat_id": chat_id,
+                "thread_id": thread_id_raw,
+                "name": name,
+                "local_only": true
+            });
+            return Ok(ToolResult::success(res.to_string()));
         }
 
         let thread_id = ThreadId(MessageId(thread_id_raw as i32));

@@ -254,10 +254,58 @@ async fn topics_for_chat_message_count_includes_all_rows_after_rename() {
     );
 }
 
+#[tokio::test]
+async fn record_outgoing_resolves_and_populates_topic_name() {
+    use crate::channels::telegram::send::record_outgoing;
+    use teloxide::types::{MessageId, ThreadId};
+
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let repo = ChannelMessageRepository::new(db.pool().clone());
+    let chat = -1004428873948i64;
+    let thread = ThreadId(MessageId(249));
+
+    // Seed topic name via prior message
+    repo.insert(&msg(
+        &chat.to_string(),
+        "seed1",
+        Some("249"),
+        Some("Design Discussion"),
+    ))
+    .await
+    .unwrap();
+
+    // Now bot records an outgoing message with thread_id = 249 and topic_name = None.
+    // record_outgoing should resolve the topic name and store it.
+    record_outgoing(
+        Some(db.pool().clone()),
+        chat,
+        Some(thread),
+        None,
+        &[(999, "bot reply".to_string())],
+    )
+    .await;
+
+    let rows = repo
+        .recent(Some("telegram"), &chat.to_string(), 10, None, None)
+        .await
+        .unwrap();
+    let bot_row = rows
+        .iter()
+        .find(|r| r.platform_message_id.as_deref() == Some("999"))
+        .expect("bot row present");
+    assert_eq!(bot_row.thread_id.as_deref(), Some("249"));
+    assert_eq!(
+        bot_row.topic_name.as_deref(),
+        Some("Design Discussion"),
+        "outgoing message should inherit resolved topic name"
+    );
+}
+
 #[test]
 fn telegram_send_tool_schema_describes_bot_observed_scope_for_list_topics() {
-    use crate::brain::tools::telegram_send::TelegramSendTool;
     use crate::brain::tools::Tool;
+    use crate::brain::tools::telegram_send::TelegramSendTool;
     use std::sync::Arc;
 
     let tool = TelegramSendTool::new(Arc::default());

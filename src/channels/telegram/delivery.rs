@@ -556,6 +556,14 @@ pub(crate) async fn deliver_final_response(
                                 .map(|u| format!("@{}", u))
                                 .unwrap_or_else(|| "OpenCrabs".to_string());
                             let thread_id_str = thread_id.map(|t| t.0.to_string());
+                            let resolved_topic_name = match &thread_id_str {
+                                Some(tid) => channel_msg_repo
+                                    .latest_topic_name("telegram", &chat_id.0.to_string(), tid)
+                                    .await
+                                    .ok()
+                                    .flatten(),
+                                None => None,
+                            };
                             let cm = DbChannelMessage::new(
                                 "telegram".to_string(),
                                 chat_id.0.to_string(),
@@ -566,7 +574,7 @@ pub(crate) async fn deliver_final_response(
                                 "text".to_string(),
                                 Some(rich_msg_id.to_string()),
                             )
-                            .with_thread(thread_id_str, None);
+                            .with_thread(thread_id_str, resolved_topic_name);
                             if let Err(e) = channel_msg_repo.insert(&cm).await {
                                 tracing::warn!(
                                     "Telegram: rich fallback: failed to record bot reply: {}",
@@ -1031,7 +1039,15 @@ pub(crate) async fn deliver_final_response(
                     .await
                     .map(|u| format!("@{}", u))
                     .unwrap_or_else(|| "OpenCrabs".to_string());
-                let thread_id = thread_id.map(|t| t.0.to_string());
+                let thread_id_str = thread_id.map(|t| t.0.to_string());
+                let resolved_topic_name = match &thread_id_str {
+                    Some(tid) => channel_msg_repo
+                        .latest_topic_name("telegram", &chat_id.0.to_string(), tid)
+                        .await
+                        .ok()
+                        .flatten(),
+                    None => None,
+                };
                 let cm = DbChannelMessage::new(
                     "telegram".to_string(),
                     chat_id.0.to_string(),
@@ -1042,7 +1058,7 @@ pub(crate) async fn deliver_final_response(
                     "text".to_string(),
                     pmid.clone(),
                 )
-                .with_thread(thread_id, None);
+                .with_thread(thread_id_str, resolved_topic_name);
                 if let Err(e) = channel_msg_repo.insert(&cm).await {
                     tracing::warn!(
                         "Telegram: failed to record bot reply in channel_messages: {}",

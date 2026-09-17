@@ -158,3 +158,41 @@ async fn record_topic_created_and_edited_persists_to_repository() {
     assert_eq!(topics_after[0].thread_id, "42");
     assert_eq!(topics_after[0].topic_name.as_deref(), Some("Announcements"));
 }
+
+#[tokio::test]
+async fn record_topic_created_local_only_updates_stale_mapping() {
+    let db = SqliteDatabase::new_in_memory().await.expect("in-memory db");
+    db.run_migrations().await.expect("migrations");
+    let pool = db.pool().clone();
+
+    crate::channels::telegram::record_topic_created(
+        Some(pool.clone()),
+        -1004379632866,
+        2,
+        "Auditor",
+        false,
+    )
+    .await;
+
+    let repo = ChannelMessageRepository::new(pool.clone());
+    let topics = repo
+        .topics_for_chat("telegram", "-1004379632866")
+        .await
+        .expect("topics");
+    assert_eq!(topics[0].topic_name.as_deref(), Some("Auditor"));
+
+    crate::channels::telegram::record_topic_created(
+        Some(pool.clone()),
+        -1004379632866,
+        2,
+        "HQ",
+        true,
+    )
+    .await;
+
+    let refreshed = repo
+        .topics_for_chat("telegram", "-1004379632866")
+        .await
+        .expect("topics");
+    assert_eq!(refreshed[0].topic_name.as_deref(), Some("HQ"));
+}
