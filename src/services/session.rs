@@ -398,4 +398,18 @@ impl SessionService {
         }
         Ok(pruned)
     }
+
+    /// Prune messages older than `retention_days` (#278).
+    ///
+    /// When `retention_days` is 0, pruning is disabled and returns `Ok(0)`.
+    pub async fn prune_expired_messages(&self, retention_days: u32) -> Result<usize> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = Utc::now().timestamp() - (retention_days as i64) * 86_400;
+        let repo = crate::db::repository::message::MessageRepository::new(self.context.pool());
+        repo.prune_older_than(cutoff)
+            .await
+            .context("Failed to prune expired messages")
+    }
 }

@@ -20,6 +20,8 @@ static RUNNING_MAINTENANCE: AtomicBool = AtomicBool::new(false);
 pub struct MaintenanceReport {
     /// Number of expired sub-agent sessions pruned.
     pub subagents_pruned: usize,
+    /// Number of expired messages pruned (#278).
+    pub messages_pruned: usize,
     /// Memory GC report (if memory store is available).
     pub memory_gc: Option<crate::memory::MemoryGcReport>,
     /// Whether `opencrabs.db` was vacuumed.
@@ -60,6 +62,13 @@ impl MaintenanceService {
         match session_svc.prune_expired_subagent_sessions(ttl_days).await {
             Ok(pruned) => report.subagents_pruned = pruned,
             Err(e) => tracing::warn!("Maintenance: failed to prune subagent sessions: {e:#}"),
+        }
+
+        // 1b. Prune expired messages (#278)
+        let msg_retention_days = config.agent.message_retention_days;
+        match session_svc.prune_expired_messages(msg_retention_days).await {
+            Ok(pruned) => report.messages_pruned = pruned,
+            Err(e) => tracing::warn!("Maintenance: failed to prune expired messages: {e:#}"),
         }
 
         // 2. Memory Store GC & Vacuum
@@ -104,6 +113,7 @@ impl MaintenanceService {
 
         tracing::info!(
             subagents_pruned = report.subagents_pruned,
+            messages_pruned = report.messages_pruned,
             database_vacuumed = report.database_vacuumed,
             memory_vacuumed = report.memory_vacuumed,
             "Maintenance sweep completed"

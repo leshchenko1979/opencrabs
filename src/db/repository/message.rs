@@ -581,6 +581,45 @@ impl MessageRepository {
         tracing::debug!("Deleted all messages for session: {}", session_id);
         Ok(())
     }
+
+    /// Prune messages older than `cutoff_unix` timestamp (#278).
+    ///
+    /// Also cleans up any associated child records (such as `attachments` or `tool_executions`
+    /// referencing the deleted messages) to maintain database hygiene.
+    /// Returns the number of pruned message rows.
+    pub async fn prune_older_than(&self, cutoff_unix: i64) -> Result<usize> {
+        let pruned = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let tx = conn.transaction()?;
+                // Clean up any child rows referencing messages to be deleted (in case FK cascades aren't active)
+                let _ = tx.execute(
+                    "DELETE FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE created_at < ?1)",
+                    params![cutoff_unix],
+                );
+                let _ = tx.execute(
+                    "DELETE FROM tool_executions WHERE message_id IN (SELECT id FROM messages WHERE created_at < ?1)",
+                    params![cutoff_unix],
+                );
+                let count = tx.execute(
+                    "DELETE FROM messages WHERE created_at < ?1",
+                    params![cutoff_unix],
+                )?;
+                tx.commit()?;
+                Ok::<_, rusqlite::Error>(count)
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to prune expired messages")?;
+
+        if pruned > 0 {
+            tracing::info!("Pruned {pruned} message(s) older than timestamp {cutoff_unix}");
+        }
+        Ok(pruned)
+    }
 }
 
 /// Extension trait for rusqlite to add `.optional()` to query results
