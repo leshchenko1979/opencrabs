@@ -210,16 +210,36 @@ async fn recall_from_project_directives_matches_claude_md() {
 
 #[test]
 fn recall_from_active_skills_matches_active_skill() {
-    let mut active = std::collections::HashSet::new();
-    active.insert("coding-process".to_string());
+    use crate::config::profile::with_home_override;
 
-    let recalled = recall_from_active_skills(
-        &active,
-        "explain python coding process and architecture decision records",
+    // `recall_from_active_skills` resolves skills through `load_all_skills`,
+    // which reads the user overlay at `<home>/skills`. Without an override the
+    // test borrowed whatever the developer happened to have installed: it
+    // passed on a box carrying a `coding-process` skill and panicked on a bare
+    // CI home with "should recall from active coding-process skill" (#297).
+    // Supply the skill the test asserts on instead of borrowing one.
+    let temp = tempfile::TempDir::new().unwrap();
+    let home = temp.path().to_path_buf();
+    let skill_dir = home.join("skills").join("coding-process");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: coding-process\ndescription: Python coding process with architecture decision records\n---\n\n# Python Coding Process\n\nEvery change starts with an architecture decision record and a failing test.\n",
     )
-    .expect("should recall from active coding-process skill");
+    .unwrap();
 
-    assert!(recalled.contains("from active skill coding-process"));
+    with_home_override(home, || {
+        let mut active = std::collections::HashSet::new();
+        active.insert("coding-process".to_string());
+
+        let recalled = recall_from_active_skills(
+            &active,
+            "explain python coding process and architecture decision records",
+        )
+        .expect("should recall from active coding-process skill");
+
+        assert!(recalled.contains("from active skill coding-process"));
+    });
 }
 
 #[tokio::test]
