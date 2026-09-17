@@ -628,6 +628,7 @@ pub mod prompt_cache_stability_test;
 pub mod prompt_compiled_features_test;
 pub mod prompt_inline_edit_directive_test;
 pub mod prompt_known_paths_test;
+pub mod provider_agent_default_test;
 pub mod provider_by_name_restore_test;
 pub mod provider_config_regression_test;
 pub mod provider_context_window_override_test;
