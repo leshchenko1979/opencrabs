@@ -471,10 +471,10 @@ impl AgentService {
 
         if context
             .system_brain
-            .as_ref()
-            .is_some_and(|b| b.contains("--- TELEGRAM CHANNEL CAPABILITIES ---"))
+            .as_deref()
+            .is_some_and(crate::brain::prompt_builder::has_telegram_channel_capabilities)
         {
-            files_block.push_str(crate::brain::prompt_builder::TELEGRAM_CHANNEL_CAPABILITIES);
+            files_block.push_str(&crate::brain::prompt_builder::telegram_channel_capabilities());
             files_block.push_str("\n\n");
         }
 
