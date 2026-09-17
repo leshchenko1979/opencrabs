@@ -18,7 +18,7 @@ async fn empty_sent_list_writes_nothing() {
     let db = Database::connect_in_memory().await.unwrap();
     db.run_migrations().await.unwrap();
     let repo = ChannelMessageRepository::new(db.pool().clone());
-    record_outgoing(Some(db.pool().clone()), -100123, None, &[]).await;
+    record_outgoing(Some(db.pool().clone()), -100123, None, None, &[]).await;
     // No rows, no panic — the early return held.
     let rows = repo
         .recent(Some("telegram"), "-100123", 10, None, None)
@@ -38,6 +38,7 @@ async fn stamps_thread_and_message_id_for_reply_recovery() {
         Some(db.pool().clone()),
         chat,
         Some(thread),
+        None,
         &[(4242, "cron body".to_string())],
     )
     .await;
@@ -66,6 +67,7 @@ async fn skips_blank_chunks_and_persists_the_rest() {
     record_outgoing(
         Some(db.pool().clone()),
         chat,
+        None,
         None,
         &[
             (1, "part one".to_string()),
@@ -97,6 +99,6 @@ async fn falls_back_to_global_pool_when_none_passed() {
     // function must no-op with a warning instead of panicking. We can't
     // install a global pool here (process-wide OnceLock), so the absent
     // case is what this exercises.
-    record_outgoing(None, 111, None, &[(9, "x".to_string())]).await;
+    record_outgoing(None, 111, None, None, &[(9, "x".to_string())]).await;
     // Reaching here without panic is the contract.
 }

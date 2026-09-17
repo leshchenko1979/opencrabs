@@ -14,6 +14,7 @@
 //! you'd get from `bot.send_message(chat_id, text)` directly. Safe to use
 //! everywhere even in non-topic chats.
 
+use teloxide::Bot;
 use teloxide::payloads::ForwardMessageSetters;
 use teloxide::payloads::SendChatActionSetters;
 use teloxide::payloads::SendDocumentSetters;
@@ -24,7 +25,6 @@ use teloxide::payloads::SendPollSetters;
 use teloxide::prelude::Requester;
 use teloxide::requests::JsonRequest;
 use teloxide::types::{ChatAction, ChatId, InlineKeyboardMarkup, InputFile, MessageId, ThreadId};
-use teloxide::Bot;
 
 /// Look up the thread_id of the most recent Telegram message stored for
 /// `chat_id` in `channel_messages`. Returns `None` when no row exists,
@@ -235,7 +235,7 @@ pub async fn fire_chat_action<C>(
     C: Into<ChatId>,
 {
     let chat = chat_id.into();
-    if !super::governor::admit_chat_action(chat, thread_id.map(|t| t.0 .0)).await {
+    if !super::governor::admit_chat_action(chat, thread_id.map(|t| t.0.0)).await {
         return;
     }
     if let Err(e) = chat_action_in_thread(bot, chat, thread_id, action)
@@ -283,7 +283,7 @@ pub async fn best_effort_note<C>(
             "note",
             why,
             chat.0,
-            thread_id.map(|t| t.0 .0),
+            thread_id.map(|t| t.0.0),
             m.id.0,
             len,
             &hash8,
@@ -352,7 +352,7 @@ impl OutboxSent {
     /// Persist delivered outbox messages for reply recovery using the effective
     /// thread ID resolved during transmission (#169).
     pub(crate) async fn record_outgoing(&self, pool: Option<crate::db::Pool>, chat_id: i64) {
-        record_outgoing(pool, chat_id, self.effective_thread_id, &self.sent).await;
+        record_outgoing(pool, chat_id, self.effective_thread_id, None, &self.sent).await;
     }
 }
 
@@ -401,7 +401,7 @@ pub(crate) async fn send_markdown_outbox(
                 return Ok(OutboxSent {
                     sent: vec![(id, markdown.to_string())],
                     effective_thread_id: thread_id,
-                })
+                });
             }
             Err(e) => {
                 // Stale-topic auto-route (#116): a remembered topic that was
@@ -414,7 +414,7 @@ pub(crate) async fn send_markdown_outbox(
                 // HTML ladder with the thread intact.
                 if e.to_string().contains("message thread not found") && thread_id.is_some() {
                     if let Some(tid) = thread_id {
-                        let evicted = evict_dead_topic(chat_id.0, tid.0 .0).await;
+                        let evicted = evict_dead_topic(chat_id.0, tid.0.0).await;
                         tracing::warn!(
                             "{origin}/{origin_detail}: remembered topic {} is gone \
                              (message thread not found) — evicted {evicted} rows, retrying unthreaded",
@@ -438,7 +438,7 @@ pub(crate) async fn send_markdown_outbox(
                             return Ok(OutboxSent {
                                 sent: vec![(id, markdown.to_string())],
                                 effective_thread_id: None,
-                            })
+                            });
                         }
                         Err(e2) => {
                             tracing::warn!(
@@ -460,7 +460,7 @@ pub(crate) async fn send_markdown_outbox(
     // stale-topic eviction above fired, `thread_id` is now None — the
     // ladder (and its plain-text fallback, the #116 poisoning leg) is
     // re-addressed to General/DM instead of the dead topic.
-    let thread = thread_id.map(|t| t.0 .0);
+    let thread = thread_id.map(|t| t.0.0);
     let html = super::handler::markdown_to_telegram_html(markdown);
     let chunks = super::handler::split_message(&html, 4096);
     let total = chunks.len();
@@ -497,11 +497,11 @@ pub(crate) async fn send_markdown_outbox(
                 let es = e.to_string();
                 if es.contains("message thread not found") && thread_id.is_some() {
                     if let Some(tid) = thread_id {
-                        let evicted = evict_dead_topic(chat_id.0, tid.0 .0).await;
+                        let evicted = evict_dead_topic(chat_id.0, tid.0.0).await;
                         tracing::warn!(
                             "{origin}/{origin_detail}: HTML ladder hit dead topic {} \
                              — evicted {evicted} rows, retrying chunk unthreaded",
-                            tid.0 .0
+                            tid.0.0
                         );
                     }
                     thread_id = None;
@@ -591,6 +591,7 @@ pub(crate) async fn record_outgoing(
     pool: Option<crate::db::Pool>,
     chat_id: i64,
     thread_id: Option<ThreadId>,
+    topic_name: Option<String>,
     sent: &[(i32, String)],
 ) {
     if sent.is_empty() {
@@ -600,9 +601,23 @@ pub(crate) async fn record_outgoing(
         tracing::warn!("telegram outbox: no DB pool — outgoing messages not persisted");
         return;
     };
-    let repo = crate::db::ChannelMessageRepository::new(pool);
+    let repo = crate::db::ChannelMessageRepository::new(pool.clone());
     let chat_id_str = chat_id.to_string();
-    let thread = thread_id.map(|t| t.0 .0.to_string());
+    let (thread_id_str, resolved_topic_name) = match thread_id {
+        Some(tid) => {
+            let tid_str = tid.0.0.to_string();
+            let name = match topic_name {
+                Some(n) => Some(n),
+                None => repo
+                    .latest_topic_name("telegram", &chat_id_str, &tid_str)
+                    .await
+                    .ok()
+                    .flatten(),
+            };
+            (Some(tid_str), name)
+        }
+        None => (None, None),
+    };
     for (mid, content) in sent {
         if content.trim().is_empty() {
             continue;
@@ -617,7 +632,7 @@ pub(crate) async fn record_outgoing(
             "text".to_string(),
             Some(mid.to_string()),
         )
-        .with_thread(thread.clone(), None);
+        .with_thread(thread_id_str.clone(), resolved_topic_name.clone());
         if let Err(e) = repo.insert(&cm).await {
             tracing::warn!(
                 "telegram outbox: failed to persist message {mid} for reply-recovery: {e}"
@@ -652,7 +667,7 @@ pub(crate) async fn send_buttons_raw(
         "reply_markup": keyboard,
     });
     if let Some(t) = thread_id {
-        payload["message_thread_id"] = serde_json::json!(t.0 .0);
+        payload["message_thread_id"] = serde_json::json!(t.0.0);
     }
     // #118 wire evidence: log the EXACT payload leaving the process — body bytes
     // (len+hash8) and the serialized keyboard row count. This is the logging gap
@@ -669,7 +684,7 @@ pub(crate) async fn send_buttons_raw(
             .map(|s| s.len())
             .unwrap_or(0),
         chat_id,
-        thread_id.map(|t| t.0 .0),
+        thread_id.map(|t| t.0.0),
     );
     if kb_rows == 0 {
         return Err(
