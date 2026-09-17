@@ -398,10 +398,11 @@ pub(crate) fn latest_activity_preview(lines: &[FlowLine]) -> Option<String> {
                 context,
             } => {
                 // If it's a bash tool with line-start `#` comments, prefer those comments
-                if is_bash_tool(label) {
-                    if let Some(comments) = extract_status_from_text(raw_context) {
-                        return Some(comments);
-                    }
+                if let Some(comments) = is_bash_tool(label)
+                    .then(|| extract_status_from_text(raw_context))
+                    .flatten()
+                {
+                    return Some(comments);
                 }
                 return Some(if context.is_empty() {
                     label.clone()
@@ -568,7 +569,7 @@ pub(crate) fn render_flow_html_chrome(
 /// inputs (ADR 0005 Decision 12), shared by the classic and rich paths so the
 /// footer join can never drift between surfaces.
 #[allow(clippy::too_many_arguments)] // one primitive per footer input; the
-// decomposition IS the point (ADR 0005 Decision 12)
+                                     // decomposition IS the point (ADR 0005 Decision 12)
 fn footer_parts<'a>(
     header: &'a FlowHeader,
     fallback_status: Option<&'a str>,
