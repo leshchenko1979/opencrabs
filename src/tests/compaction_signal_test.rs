@@ -6,11 +6,10 @@ use std::time::Duration;
 
 use crate::brain::agent::service::nudge::{in_pressure_warning_band, should_emit_pressure_warning};
 use crate::channels::telegram::flow::{
-    COMPACTING_HEADER_TEXT, FlowHeader, FlowLine, HeaderMarkup, compacted_flow_line,
-    compacting_flow_line, flow_header_text, render_flow_html_chrome_pref, render_flow_rich,
-    starts_with_icon,
+    compacted_flow_line, compacting_flow_line, flow_header_text, render_flow_html_chrome_pref,
+    render_flow_rich, starts_with_icon, FlowHeader, FlowLine, HeaderMarkup, COMPACTING_HEADER_TEXT,
 };
-use crate::channels::telegram::flow_chrome::{FlowSections, FooterParts, merged_footer};
+use crate::channels::telegram::flow_chrome::{merged_footer, FlowSections, FooterParts};
 
 #[test]
 fn compacting_line_without_prediction() {
@@ -217,6 +216,7 @@ fn live_footer_drops_gear_before_icon_activity() {
             outcome: None,
             plan_state: None,
             working_on: None,
+            thought: None,
             activity: Some("✅ bash git status"),
             tool_count: 1,
             has_log: true,
@@ -233,6 +233,7 @@ fn live_footer_drops_gear_before_icon_activity() {
             outcome: None,
             plan_state: None,
             working_on: None,
+            thought: None,
             activity: Some("⏳ Compacting context…"),
             tool_count: 1,
             has_log: true,
@@ -249,6 +250,7 @@ fn live_footer_drops_gear_before_icon_activity() {
             outcome: None,
             plan_state: None,
             working_on: None,
+            thought: None,
             activity: Some("Reading the handler."),
             tool_count: 2,
             has_log: true,
@@ -265,6 +267,7 @@ fn live_footer_drops_gear_before_icon_activity() {
             outcome: None,
             plan_state: Some("✍️ Editing session plan"),
             working_on: None,
+            thought: None,
             activity: None,
             tool_count: 0,
             has_log: false,
@@ -281,6 +284,7 @@ fn live_footer_drops_gear_before_icon_activity() {
             outcome: Some(("✅", "Finished")),
             plan_state: None,
             working_on: None,
+            thought: None,
             activity: None,
             tool_count: 5,
             has_log: true,
@@ -303,6 +307,7 @@ fn icon_led_segment_retires_the_bare_cog_fallback() {
             outcome: None,
             plan_state: None,
             working_on: Some(COMPACTING_HEADER_TEXT),
+            thought: None,
             activity: None,
             tool_count: 0,
             has_log: true,

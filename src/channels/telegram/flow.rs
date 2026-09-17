@@ -398,10 +398,10 @@ pub(crate) fn latest_activity_preview(lines: &[FlowLine]) -> Option<String> {
                 context,
             } => {
                 // If it's a bash tool with line-start `#` comments, prefer those comments
-                if is_bash_tool(label)
-                    && let Some(comments) = extract_status_from_text(raw_context)
-                {
-                    return Some(comments);
+                if is_bash_tool(label) {
+                    if let Some(comments) = extract_status_from_text(raw_context) {
+                        return Some(comments);
+                    }
                 }
                 return Some(if context.is_empty() {
                     label.clone()
@@ -422,14 +422,10 @@ pub(crate) fn latest_activity_preview(lines: &[FlowLine]) -> Option<String> {
 /// Extract the latest human-readable intermediary thought / prose entry preceding
 /// active or recent tool calls (#291).
 pub(crate) fn latest_intermediary_thought(lines: &[FlowLine]) -> Option<String> {
-    for line in lines.iter().rev() {
-        if let FlowLine::Text(t) = line {
-            if let Some(text) = human_readable_preview(t) {
-                return Some(text);
-            }
-        }
-    }
-    None
+    lines.iter().rev().find_map(|line| match line {
+        FlowLine::Text(t) => human_readable_preview(t),
+        _ => None,
+    })
 }
 
 /// A flow tool line is a bash call when its name (the last word of the
@@ -572,7 +568,7 @@ pub(crate) fn render_flow_html_chrome(
 /// inputs (ADR 0005 Decision 12), shared by the classic and rich paths so the
 /// footer join can never drift between surfaces.
 #[allow(clippy::too_many_arguments)] // one primitive per footer input; the
-// decomposition IS the point (ADR 0005 Decision 12)
+                                     // decomposition IS the point (ADR 0005 Decision 12)
 fn footer_parts<'a>(
     header: &'a FlowHeader,
     fallback_status: Option<&'a str>,
@@ -635,11 +631,14 @@ fn flow_body_entries(lines: &[FlowLine], narration_cap: usize) -> (Vec<String>, 
                     )
                 };
 
-                if let Some(last) = runs.last_mut()
-                    && last.rendered == rendered
-                {
-                    last.count += 1;
-                } else {
+                let matched_last = match runs.last_mut() {
+                    Some(last) if last.rendered == rendered => {
+                        last.count += 1;
+                        true
+                    }
+                    _ => false,
+                };
+                if !matched_last {
                     runs.push(Run {
                         rendered,
                         count: 1,
