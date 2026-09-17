@@ -426,6 +426,9 @@ pub(crate) struct FooterParts<'a> {
     /// Non-plan "Working on …" / thinking preview; live-turn fallback for the
     /// reasoning segment (#1052: after the activity, not before it).
     pub(crate) working_on: Option<&'a str>,
+    /// Latest intermediary thought / prose entry (preceding recent tool calls).
+    /// Preferred as the unexpanded blockquote header (#291).
+    pub(crate) thought: Option<&'a str>,
     /// Latest-activity preview; LEADS the live footer (#1052). Shown only
     /// while live and only when a log exists.
     pub(crate) activity: Option<&'a str>,
@@ -466,13 +469,26 @@ pub(crate) fn format_brain_ctx(ctx: Option<&str>) -> Option<String> {
 }
 
 /// Build the tool roll summary header (the preview on the collapsible block).
-/// Strictly tool activity (e.g. `⛏ tool_name args` or `⏳ Compacting context…`).
-/// Zero telemetry metrics and zero status prose (no "Finished", "Editing plan", "Waiting...").
+/// Prefers the latest intermediary thought / prose entry (#291), gracefully truncated.
+/// Falls back to tool activity (e.g. `⛏ tool_name args` or `⏳ Compacting context…`),
+/// and lastly `⛏ Processing log`.
 pub(crate) fn summary_header(parts: &FooterParts, markup: HeaderMarkup) -> String {
     let esc = |s: &str| match markup {
         HeaderMarkup::Html => escape_html(s),
         HeaderMarkup::Markdown => s.to_string(),
     };
+    if let Some(thought) = parts.thought {
+        let trimmed = thought.trim();
+        if !trimmed.is_empty() {
+            let truncated = if trimmed.chars().count() > 80 {
+                let s: String = trimmed.chars().take(77).collect();
+                format!("{}…", s.trim_end())
+            } else {
+                trimmed.to_string()
+            };
+            return esc(&truncated);
+        }
+    }
     if let Some(act) = parts.activity {
         let act = strip_leading_tool_status_icons(act);
         if !act.is_empty() {
