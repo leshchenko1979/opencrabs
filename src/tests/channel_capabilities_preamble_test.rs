@@ -40,7 +40,7 @@ fn test_inject_telegram_channel_capabilities_without_runtime_info() {
 #[test]
 fn test_runtime_info_channel_field_and_brain_loader() {
     let temp_dir = TempDir::new().unwrap();
-    let loader = BrainLoader::new(temp_dir.path());
+    let loader = BrainLoader::new(temp_dir.path().to_path_buf());
 
     let mut info_telegram = RuntimeInfo::default();
     info_telegram.channel = Some("telegram".to_string());
@@ -63,13 +63,13 @@ fn test_runtime_info_channel_field_and_brain_loader() {
 
 #[test]
 fn test_compaction_recovers_telegram_capabilities_if_in_brain() {
-    let mut context = AgentContext::new(Uuid::new_v4(), "test-model".to_string(), 100_000);
+    let mut context = AgentContext::new(Uuid::new_v4(), 100_000);
     context.system_brain = Some(format!(
         "You are OpenCrabs.\n\n{}\n\n--- Runtime Info ---\n",
         TELEGRAM_CHANNEL_CAPABILITIES
     ));
 
-    AgentService::apply_compaction_summary(&mut context, "Summary of previous tasks.");
+    AgentService::apply_compaction_summary_after(&mut context, "Summary of previous tasks.", 0);
 
     let first_msg = context.messages.first().expect("summary message present");
     let text = match &first_msg.content[0] {
