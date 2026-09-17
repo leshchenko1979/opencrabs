@@ -375,8 +375,16 @@ impl TelemetryMetrics {
     /// Format the telemetry bar line (Option A) with zero-suppression.
     /// Format: `<state_icon> • <time> ⏱ • <pct>% 🧠 • <tool_count> ⛏ • <detached> ⏏️ • <subagents> 🤖 • <queued> ✉️`
     /// Numbers strictly lead icons with spaces.
-    pub(crate) fn format_telemetry_line(&self, state_icon: &str, ctx: Option<&str>) -> String {
+    pub(crate) fn format_telemetry_line(
+        &self,
+        state_icon: &str,
+        ctx: Option<&str>,
+        has_goal: bool,
+    ) -> String {
         let mut segs: Vec<String> = Vec::new();
+        if has_goal {
+            segs.push("🎯".to_string());
+        }
         segs.push(state_icon.to_string());
         segs.push(clock_glyph(self.elapsed_secs));
         if let Some(brain_ctx) = format_brain_ctx(ctx) {
@@ -400,7 +408,7 @@ impl TelemetryMetrics {
     /// Legacy / standalone format helper.
     #[allow(dead_code)]
     pub(crate) fn format_line(&self) -> String {
-        self.format_telemetry_line("⚙", None)
+        self.format_telemetry_line("⚙", None, false)
     }
 }
 
@@ -431,6 +439,8 @@ pub(crate) struct FooterParts<'a> {
     pub(crate) ctx: Option<&'a str>,
     /// Elapsed wall-clock seconds for the segment-4 clock glyph.
     pub(crate) elapsed_secs: u64,
+    /// Whether an active/retained goal is set for this session/turn.
+    pub(crate) has_goal: bool,
     /// Background-work indicator (#1054): `Some(label)` when detached tasks
     /// are still running at settle time. Renders as the final footer segment
     /// `🔧 <label> running` (or `🔧 N tasks running`) after the clock.
@@ -506,10 +516,13 @@ pub(crate) fn standalone_telemetry_line(
     };
 
     if let Some(telem) = telemetry {
-        let line = telem.format_telemetry_line(state_icon, parts.ctx);
+        let line = telem.format_telemetry_line(state_icon, parts.ctx, parts.has_goal);
         esc(&line)
     } else {
         let mut segs: Vec<String> = Vec::new();
+        if parts.has_goal {
+            segs.push("🎯".to_string());
+        }
         segs.push(state_icon.to_string());
         segs.push(clock_glyph(parts.elapsed_secs));
         if let Some(brain_ctx) = format_brain_ctx(parts.ctx) {
