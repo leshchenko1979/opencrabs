@@ -889,3 +889,37 @@ fn plan_review_brief_contains_memory_search_and_custom_instructions() {
     assert!(brief.contains("### STEP 4: REWRITE THE PLAN IN PLACE"));
     assert!(brief.contains("### STEP 5: STRUCTURED REPORT"));
 }
+
+/// #287 — Stuck reviewing buttons (`plan:noop` and `plan:noop_impl`) map to interactive keyboards
+/// (`PlanKb::ApproveDiscard` and `PlanKb::CompletedReview`) when review is not running.
+#[test]
+fn interrupted_review_restores_interactive_markup() {
+    // 1. plan:noop_impl -> PlanKb::CompletedReview carries "plan:review_impl"
+    let completed = rows(PlanKb::CompletedReview);
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0][0].1, "plan:review_impl");
+
+    // 2. plan:noop -> PlanKb::ApproveDiscard carries "plan:ok", "plan:review", "plan:no"
+    let editing = rows(PlanKb::ApproveDiscard);
+    assert_eq!(editing.len(), 2);
+    assert_eq!(editing[0][0].1, "plan:ok");
+    assert_eq!(editing[1][0].1, "plan:review");
+    assert_eq!(editing[1][1].1, "plan:no");
+}
+
+#[tokio::test]
+async fn is_plan_reviewing_defaults_false_and_cleans_up_across_interruption() {
+    let state = TelegramState::new();
+    let session = Uuid::new_v4();
+
+    // Default across boot / restart is false
+    assert!(!state.is_plan_reviewing(session).await);
+
+    // Setting true simulates in-flight review
+    state.set_plan_reviewing(session, true).await;
+    assert!(state.is_plan_reviewing(session).await);
+
+    // Resetting false simulates completion or recovery cleanup
+    state.set_plan_reviewing(session, false).await;
+    assert!(!state.is_plan_reviewing(session).await);
+}
