@@ -54,7 +54,7 @@ pub(crate) fn build_progress_cb(
                     s.compacting = true;
                     s.header_preview = Some(COMPACTING_HEADER_TEXT.to_string());
                     s.display_queue
-                        .push(DisplayItem::Intermediate(compacting_flow_line(
+                        .push(DisplayItem::System(compacting_flow_line(
                             usage_pct, predicted,
                         )));
                 }
@@ -238,7 +238,7 @@ pub(crate) fn build_progress_cb(
                     s.compacting = false;
                     s.header_preview = None;
                     s.display_queue
-                        .push(DisplayItem::Intermediate(compacted_flow_line(
+                        .push(DisplayItem::System(compacted_flow_line(
                             before_pct,
                             after_pct,
                             before_tokens,

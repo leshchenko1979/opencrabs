@@ -18,7 +18,8 @@
 //! preserve.
 
 use crate::channels::telegram::flow::{
-    FlowEntry, last_folded_text, pop_trailing_folded_texts, push_or_supersede,
+    FlowEntry, compacted_flow_line, compacting_flow_line, last_folded_text,
+    pop_trailing_folded_texts, progress_key, push_or_supersede,
 };
 
 /// The incident, reduced: chrome is the only trailing entry.
@@ -159,4 +160,60 @@ fn supersession_collapses_a_counter_within_one_kind_only() {
     // Ordinary narration has no progress key and always appends.
     push_or_supersede(&mut entries, "here is what I found", false);
     assert_eq!(entries.len(), 3);
+}
+
+#[test]
+fn compact_system_flow_entry_stays_folded_and_is_never_reclaimed_as_answer() {
+    let start_line = compacting_flow_line(85.0, None);
+    let done_line = compacted_flow_line(
+        85.0,
+        32.0,
+        100_000,
+        38_000,
+        std::time::Duration::from_secs(5),
+    );
+
+    let mut entries = vec![
+        FlowEntry::Tool(0),
+        FlowEntry::System(start_line),
+        FlowEntry::System(done_line),
+    ];
+
+    let (host, trailer) = pop_trailing_folded_texts(&mut entries, false);
+    assert!(
+        host.is_none() && trailer.is_none(),
+        "compaction system lines must stay in the folded flow and never be popped as answer text"
+    );
+    assert_eq!(entries.len(), 3);
+    assert!(matches!(entries[0], FlowEntry::Tool(0)));
+    assert!(matches!(&entries[1], FlowEntry::System(s) if s.contains("compact: 85%")));
+    assert!(matches!(&entries[2], FlowEntry::System(s) if s.contains("compact: 85% → 32%")));
+}
+
+#[test]
+fn compaction_lines_supersede_in_place_under_compaction_progress_key() {
+    let start_line = compacting_flow_line(88.0, None);
+    let done_line = compacted_flow_line(
+        88.0,
+        40.0,
+        120_000,
+        50_000,
+        std::time::Duration::from_secs(8),
+    );
+
+    assert_eq!(progress_key(&start_line), Some("compaction"));
+    assert_eq!(progress_key(&done_line), Some("compaction"));
+
+    let mut entries: Vec<FlowEntry> = Vec::new();
+    push_or_supersede(&mut entries, &start_line, true);
+    assert_eq!(entries.len(), 1);
+    assert!(matches!(&entries[0], FlowEntry::System(s) if s.contains("compact: 88%")));
+
+    push_or_supersede(&mut entries, &done_line, true);
+    assert_eq!(
+        entries.len(),
+        1,
+        "compacted line supersedes compacting line in place (#281)"
+    );
+    assert!(matches!(&entries[0], FlowEntry::System(s) if s.contains("compact: 88% → 40%")));
 }
