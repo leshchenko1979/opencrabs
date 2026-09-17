@@ -272,7 +272,7 @@ pdfium = ["dep:pdfium-render"]
 code-graph = ["tree-sitter", "tree-sitter-rust"]
 [profile.dev]
 opt-level = 0
-debug = true
+debug = "line-tables-only"
 split-debuginfo = "unpacked"
 
 # Optimise dependencies at full speed while keeping our own code at
@@ -304,6 +304,8 @@ strip = true
 inherits = "release"
 lto = "thin"
 codegen-units = 16
+debug = "line-tables-only"
+strip = "none"
 
 [[bin]]
 name = "opencrabs"
