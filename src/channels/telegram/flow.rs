@@ -1958,6 +1958,8 @@ pub(crate) fn progress_key(text: &str) -> Option<&'static str> {
         Some("provider-retry")
     } else if t.starts_with("guard:") {
         Some("self-heal-guard")
+    } else if t.starts_with("compact:") {
+        Some("compaction")
     } else if t.starts_with("Mermaid render failed") {
         // The regen-nudge counter (#37): 1/3 → 2/3 → 3/3 supersedes in
         // place like the empty-answer nudge counter.
