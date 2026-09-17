@@ -161,7 +161,7 @@ async fn record_topic_created_and_edited_persists_to_repository() {
 
 #[tokio::test]
 async fn record_topic_created_local_only_updates_stale_mapping() {
-    let db = SqliteDatabase::new_in_memory().await.expect("in-memory db");
+    let db = Database::connect_in_memory().await.expect("in-memory db");
     db.run_migrations().await.expect("migrations");
     let pool = db.pool().clone();
 
