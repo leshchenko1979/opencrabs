@@ -16,7 +16,8 @@ async fn subagent_or_worker_turn_ingress_carries_time_marker() {
 
     let session_id = Uuid::new_v4();
     let prompt = "Examine repo health and run diagnostics";
-    let augmented = AgentService::augment_user_message(session_id, prompt, Some(dir.path())).await;
+    let augmented =
+        AgentService::augment_user_message(session_id, prompt, Some(dir.path()), None).await;
 
     // Must prepend the temporal marker with dual or UTC time
     assert!(augmented.starts_with("[Current time: "));

@@ -25,7 +25,7 @@ async fn augment_user_message_injects_time_marker() {
     // checks below only hold against a clean home. Isolate per the #1399 rule.
     let augmented = with_home_override_async(
         dir.path().to_path_buf(),
-        AgentService::augment_user_message(session_id, "hello world", Some(dir.path())),
+        AgentService::augment_user_message(session_id, "hello world", Some(dir.path()), None),
     )
     .await;
     assert!(augmented.contains("[Current time:"));
@@ -41,7 +41,7 @@ async fn augment_user_message_falls_back_to_utc() {
     let session_id = Uuid::new_v4();
     let augmented = with_home_override_async(
         dir.path().to_path_buf(),
-        AgentService::augment_user_message(session_id, "test message", None),
+        AgentService::augment_user_message(session_id, "test message", None, None),
     )
     .await;
     assert!(augmented.contains("[Current time:"));
