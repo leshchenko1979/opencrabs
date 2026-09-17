@@ -553,6 +553,69 @@ fn structured_report_parses_summary_open_questions_and_delta() {
 }
 
 #[test]
+fn structured_report_parses_markdown_heading_prefixes() {
+    let report = "### Analysis\n\
+                  Verified codebase ground truth.\n\
+                  \n\
+                  ### SUMMARY:\n\
+                  - Verified src/channels/telegram/flow_chrome.rs carries PlanKb.\n\
+                  - Resolved concurrency lock in TelegramState.\n\
+                  \n\
+                  ### OPEN_QUESTIONS:\n\
+                  1. Should we support custom timeouts for long review runs?\n\
+                  2. Do we need a dedicated log topic for review audits?\n\
+                  \n\
+                  ### DELTA:\n\
+                  Hardened concurrency locks and added 2-row layout";
+
+    let parsed = crate::channels::telegram::plan_card::parse_plan_review_report(Some(report));
+    assert_eq!(
+        parsed.card_delta,
+        "✨ Review: Hardened concurrency locks and added 2-row layout"
+    );
+    assert_eq!(parsed.open_questions.len(), 2);
+    assert_eq!(
+        parsed.open_questions[0],
+        "Should we support custom timeouts for long review runs?"
+    );
+    assert_eq!(
+        parsed.open_questions[1],
+        "Do we need a dedicated log topic for review audits?"
+    );
+    assert!(parsed.full_summary.is_some());
+    assert!(parsed
+        .full_summary
+        .unwrap()
+        .contains("Verified src/channels/telegram/flow_chrome.rs"));
+}
+
+#[test]
+fn structured_report_parses_bold_and_space_variants() {
+    let report = "**SUMMARY**\n\
+                  * Pinned fallback candidates.\n\
+                  * Synchronized channel names.\n\
+                  \n\
+                  **OPEN QUESTIONS:**\n\
+                  - What is the default quota ratio?\n\
+                  \n\
+                  **DELTA:**\n\
+                  Updated plan with diverse fallbacks";
+
+    let parsed = crate::channels::telegram::plan_card::parse_plan_review_report(Some(report));
+    assert_eq!(
+        parsed.card_delta,
+        "✨ Review: Updated plan with diverse fallbacks"
+    );
+    assert_eq!(parsed.open_questions.len(), 1);
+    assert_eq!(parsed.open_questions[0], "What is the default quota ratio?");
+    assert!(parsed.full_summary.is_some());
+    assert!(parsed
+        .full_summary
+        .unwrap()
+        .contains("Pinned fallback candidates."));
+}
+
+#[test]
 fn delta_is_the_last_marked_line_when_several_are_present() {
     let report = "DELTA: first guess\n\
                   some analysis\n\
