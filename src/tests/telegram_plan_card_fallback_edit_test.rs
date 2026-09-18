@@ -295,9 +295,13 @@ async fn a_rejected_rich_edit_falls_back_in_place_without_a_duplicate() {
 
         // 2. The fallback must be an in-place classic HTML edit of the SAME
         //    message. `parse_mode` is what distinguishes this body from the
-        //    rich one — both travel to the same endpoint.
+        //    rich one. NOTE the path CASE: the rich leg is a hand-rolled
+        //    reqwest call in rich/api.rs (lowercase `editMessageText`), while
+        //    the fallback goes through teloxide's `edit_message_text`, whose
+        //    method name capitalises to `EditMessageText`. mockito path
+        //    matching is case-sensitive, so the two legs need two paths.
         let html_edit = server
-            .mock("POST", "/botTESTTOKEN/editMessageText")
+            .mock("POST", "/botTESTTOKEN/EditMessageText")
             .match_body(mockito::Matcher::Regex("parse_mode".to_string()))
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -409,9 +413,11 @@ async fn a_gone_message_is_recreated_and_not_edited_in_place() {
             .create_async()
             .await;
 
-        // A genuinely gone message must NOT be retried in place.
+        // A genuinely gone message must NOT be retried in place. Guard the
+        // path teloxide actually uses (`EditMessageText`): an expect(0) on the
+        // lowercase rich path would pass even if the code wrongly retried.
         let no_in_place = server
-            .mock("POST", "/botTESTTOKEN/editMessageText")
+            .mock("POST", "/botTESTTOKEN/EditMessageText")
             .match_body(mockito::Matcher::Regex("parse_mode".to_string()))
             .with_status(200)
             .with_header("content-type", "application/json")
