@@ -255,21 +255,60 @@ async fn fully_resolved_active_plan_reports_nothing_open() {
 
 /// An Editing plan is a draft awaiting approval, not outstanding work, so it
 /// must not appear as evidence.
+///
+/// The fixture carries `pre_init_editing`, which is the shape a real draft has:
+/// `load_plan_from_path` normalizes a bare Editing plan that already has tasks
+/// and no design `.md` into Active, so without the flag this would not be
+/// testing the draft case at all.
 #[tokio::test]
 async fn editing_plan_is_not_evidence() {
     in_temp_home(async {
         let sid = Uuid::new_v4();
-        let plan = plan_with(
+        let mut plan = plan_with(
             sid,
             PlanStatus::Editing,
             &[("draft task", TaskStatus::Pending)],
         );
+        plan.pre_init_editing = true;
         save_plan(&plan).await.expect("plan saved");
 
         let evidence = build_goal_evidence(None, sid).await;
         assert!(
             evidence.unresolved_tasks.is_empty(),
             "an unapproved draft is not outstanding work"
+        );
+    })
+    .await;
+}
+
+/// The reminder's gate and the evidence pack's gate are the SAME predicate
+/// (#299). `format_plan_reminder` refuses a pre-init plan, so the pack must too
+/// — otherwise the goal is held open by a plan the reminder deliberately
+/// ignores, and the two consumers disagree about whether work is outstanding.
+#[tokio::test]
+async fn evidence_agrees_with_the_reminder_on_a_pre_init_plan() {
+    in_temp_home(async {
+        let sid = Uuid::new_v4();
+        let mut plan = plan_with(
+            sid,
+            PlanStatus::Active,
+            &[("never started", TaskStatus::Pending)],
+        );
+        plan.pre_init_editing = true;
+        save_plan(&plan).await.expect("plan saved");
+
+        let loaded = crate::utils::plan_files::load_plan(sid)
+            .await
+            .expect("plan loads");
+        assert!(
+            format_plan_reminder(&loaded).is_none(),
+            "the reminder stays silent on a pre-init plan"
+        );
+
+        let evidence = build_goal_evidence(None, sid).await;
+        assert!(
+            evidence.unresolved_tasks.is_empty(),
+            "the pack must agree with the reminder, not contradict it"
         );
     })
     .await;
