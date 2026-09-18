@@ -761,6 +761,11 @@ pub struct GoalState {
     /// verdict at `UNCERTAIN` — with nothing to prove, "done" is never
     /// `VERIFIED`.
     pub criteria: Option<String>,
+    /// JSON array of the judge's most recent per-criterion evaluations
+    /// (#299), as `{id, criterion, status, evidence}` entries. Written on
+    /// every verdict so `goal_manage status` can report each criterion's
+    /// outcome without re-invoking the model.
+    pub criterion_evaluations: Option<String>,
     pub judge_verdict: Option<String>,
     pub judge_reason: Option<String>,
     pub channel: Option<String>,
@@ -781,6 +786,7 @@ impl GoalState {
             consecutive_parse_failures: row.get("consecutive_parse_failures")?,
             consecutive_uncertain: row.get("consecutive_uncertain")?,
             criteria: row.get("criteria")?,
+            criterion_evaluations: row.get("criterion_evaluations")?,
             judge_verdict: row.get("judge_verdict")?,
             judge_reason: row.get("judge_reason")?,
             channel: row.get("channel")?,
@@ -808,6 +814,7 @@ impl GoalState {
             consecutive_parse_failures: 0,
             consecutive_uncertain: 0,
             criteria: None,
+            criterion_evaluations: None,
             judge_verdict: None,
             judge_reason: None,
             channel,
