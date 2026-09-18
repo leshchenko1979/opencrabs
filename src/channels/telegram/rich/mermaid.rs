@@ -783,36 +783,94 @@ pub(crate) fn neutralize_prose_media_html(text: &str) -> String {
     out
 }
 
-/// Rewrite `tg://photo?id=<X>` references in an already-resolved rich body
-/// whose `<X>` has no matching [`MediaEntry`] into the non-triggering
-/// `tg:photo?id=<X>` form (probe-verified 200, 2026-09-11). Telegram rejects
-/// the WHOLE message with `RICH_MESSAGE_PHOTO_INVALID` when a photo reference
-/// cannot be resolved, and prose can carry such a reference as an example of
-/// the construct. Sibling of [`neutralize_prose_media_html`], which closes the
-/// HTML-tag hole.
+/// Scheme prefixes that make Telegram try to RESOLVE a media reference, paired with
+/// the non-triggering form each is rewritten to when its id is absent from `media`.
+/// The rewrite drops the `//` after the scheme name, which no trigger prefix contains —
+/// so a second pass is a no-op (idempotent) and the text stays readable.
+const ORPHAN_MEDIA_SCHEMES: [(&str, &str); 4] = [
+    ("tg://photo?id=", "tg:photo?id="),
+    ("tg://video?id=", "tg:video?id="),
+    ("tg://audio?id=", "tg:audio?id="),
+    ("attach://", "attach:"),
+];
+
+/// Rewrite a media reference in an already-resolved rich body whose id has no
+/// matching [`MediaEntry`] into its non-triggering form (probe-verified 200,
+/// 2026-09-11) — see [`ORPHAN_MEDIA_SCHEMES`] for the four forms covered. Telegram
+/// rejects the WHOLE message with `RICH_MESSAGE_PHOTO_INVALID` /
+/// `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND` when a reference cannot be resolved, and prose
+/// can carry such a reference as an example of the construct. `media` is the array of
+/// the request this text belongs to; a reference naming an entry in it is left alone.
+/// Sibling of [`neutralize_prose_media_html`], which closes the HTML-tag hole.
 pub(crate) fn neutralize_orphan_photo_refs(text: &str, media: &[MediaEntry]) -> String {
-    const PREFIX: &str = "tg://photo?id=";
-    if !text.contains(PREFIX) {
+    if !ORPHAN_MEDIA_SCHEMES
+        .iter()
+        .any(|(prefix, _)| text.contains(prefix))
+    {
         return text.to_string();
     }
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(pos) = rest.find(PREFIX) {
+    loop {
+        // The EARLIEST match across all schemes wins, so text is always emitted in
+        // order and a later scheme can never be rewritten ahead of an earlier one.
+        let hit = ORPHAN_MEDIA_SCHEMES
+            .iter()
+            .filter_map(|(prefix, replacement)| {
+                rest.find(prefix).map(|pos| (pos, *prefix, *replacement))
+            })
+            .min_by_key(|(pos, _, _)| *pos);
+        let Some((pos, prefix, replacement)) = hit else {
+            break;
+        };
         out.push_str(&rest[..pos]);
-        let after = &rest[pos + PREFIX.len()..];
+        let after = &rest[pos + prefix.len()..];
         let id_len = after
             .bytes()
             .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
             .count();
         let id = &after[..id_len];
         if !id.is_empty() && media.iter().any(|m| m.id == id) {
-            out.push_str(PREFIX);
+            out.push_str(prefix);
         } else {
-            out.push_str("tg:photo?id=");
+            out.push_str(replacement);
         }
         rest = after;
     }
     out.push_str(rest);
+    out
+}
+
+/// Every media reference in `text` whose id has no matching entry in `media` —
+/// the references a rich rejection is about (#334, H4). Shares
+/// [`ORPHAN_MEDIA_SCHEMES`] with [`neutralize_orphan_photo_refs`], so the
+/// extractor and the neutralizer can never disagree about what a media reference
+/// is. Sorted and deduped so a log line is stable across runs.
+pub(crate) fn unresolved_media_refs(text: &str, media: &[MediaEntry]) -> Vec<String> {
+    unresolved_media_refs_by(text, |id| media.iter().any(|m| m.id == id))
+}
+
+/// [`unresolved_media_refs`] against a bare id set, for callers that hold the ids
+/// parsed out of a request body rather than a [`MediaEntry`] slice.
+pub(crate) fn unresolved_media_refs_by(text: &str, is_known: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (prefix, _) in ORPHAN_MEDIA_SCHEMES {
+        let mut rest = text;
+        while let Some(pos) = rest.find(prefix) {
+            let after = &rest[pos + prefix.len()..];
+            let id_len = after
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+                .count();
+            let id = &after[..id_len];
+            if id.is_empty() || !is_known(id) {
+                out.push(format!("{prefix}{id}"));
+            }
+            rest = after;
+        }
+    }
+    out.sort();
+    out.dedup();
     out
 }
 

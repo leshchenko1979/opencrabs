@@ -19,8 +19,9 @@ use crate::channels::telegram::rich::mermaid::{
     has_mermaid_fence, image_html, ink_url, ink_url_svg, is_diagram_capped, is_image_response,
     looks_like_mermaid_source, markdown_failure_block, markdown_failure_block_with_link,
     neutralize_orphan_photo_refs, neutralize_prose_media_html, replacement_for, resolve_blocks,
-    resolve_markdown_media, svg_link_md,
+    resolve_markdown_media, svg_link_md, unresolved_media_refs, unresolved_media_refs_by,
 };
+use crate::channels::telegram::rich::normalize_rich_markdown_with_media;
 
 // ---------------------------------------------------------------------------
 // base64url
@@ -974,5 +975,119 @@ fn orphan_photo_refs_are_neutralised_but_resolved_ones_survive() {
     assert_eq!(
         neutralize_orphan_photo_refs("nothing here", &media),
         "nothing here"
+    );
+}
+
+/// #334 (H2): the orphan neutralizer covers all four media schemes, `attach://`
+/// included — it was previously only reached by the markdown image shield, so a
+/// BARE prose `attach://X` in a rich body still took the whole message down.
+#[test]
+fn attach_and_tg_refs_are_neutralised_by_media_presence() {
+    let media = vec![MediaEntry {
+        id: "diag1".to_string(),
+        url: None,
+        bytes: Some(vec![1, 2, 3]),
+    }];
+
+    // Matching entry -> the reference keeps resolving.
+    assert_eq!(
+        neutralize_orphan_photo_refs("see attach://diag1 here", &media),
+        "see attach://diag1 here",
+        "an attach ref naming a live media entry must survive"
+    );
+
+    // Orphan -> the `//` its trigger requires is dropped, so it cannot be resolved.
+    assert_eq!(
+        neutralize_orphan_photo_refs("see attach://absent here", &media),
+        "see attach:absent here",
+        "an orphan attach ref must lose its scheme"
+    );
+    assert_eq!(
+        neutralize_orphan_photo_refs("see attach://absent here", &[]),
+        "see attach:absent here"
+    );
+
+    // Every scheme in the register behaves the same way.
+    for (orphan, rewritten) in [
+        ("tg://photo?id=N", "tg:photo?id=N"),
+        ("tg://video?id=N", "tg:video?id=N"),
+        ("tg://audio?id=N", "tg:audio?id=N"),
+        ("attach://N", "attach:N"),
+    ] {
+        assert_eq!(
+            neutralize_orphan_photo_refs(orphan, &media),
+            rewritten,
+            "{orphan} must be neutralised"
+        );
+        assert_eq!(
+            neutralize_orphan_photo_refs(orphan, &media).as_str(),
+            neutralize_orphan_photo_refs(&neutralize_orphan_photo_refs(orphan, &media), &media),
+            "{orphan}: a second pass must be a no-op"
+        );
+    }
+}
+
+/// #334 (H6): BOTH orphan guards run from the shared rich entry, on the markdown
+/// path too — not only on the plan card's HTML path. Both are idempotent: each
+/// rewrite drops the `//` its trigger needs, and `&lt;` carries no `<`.
+#[test]
+fn orphan_guards_run_on_the_rich_markdown_path_and_are_idempotent() {
+    // A prose `<img>` tag with no media entry: Telegram fails the WHOLE message
+    // (RICH_MESSAGE_PHOTO_INVALID), so the shared entry must escape it.
+    let prose_tag = r#"Look: <img src="https://example.invalid/x.png"> done"#;
+    let once = normalize_rich_markdown_with_media(prose_tag, &[]);
+    assert_eq!(
+        once, r#"Look: &lt;img src="https://example.invalid/x.png"> done"#,
+        "a model-authored prose media tag must be neutralised on the markdown rich path"
+    );
+
+    // A bare prose media reference with no matching entry: same class, same guard.
+    let prose_ref = "Ref: tg://photo?id=absent and attach://absent";
+    let ref_once = normalize_rich_markdown_with_media(prose_ref, &[]);
+    assert_eq!(ref_once, "Ref: tg:photo?id=absent and attach:absent");
+
+    // Idempotence: a second application is byte-identical for BOTH guards.
+    for input in [prose_tag, prose_ref, "<video src=v> and tg://video?id=X"] {
+        let first = normalize_rich_markdown_with_media(input, &[]);
+        let second = normalize_rich_markdown_with_media(&first, &[]);
+        assert_eq!(
+            first, second,
+            "a second pass over {input:?} must be a no-op"
+        );
+    }
+}
+
+/// #334 (H4): a rich 400 names the references it is about, so the class can be
+/// proven closed rather than merely watched to stop. The extractor is the SAME
+/// one the neutralizer uses, so log and rewrite can never disagree.
+#[test]
+fn rich_body_offenders_name_the_unresolved_refs() {
+    let body = serde_json::json!({
+        "rich_message": {
+            "markdown": "Diag ![d](tg://photo?id=absent) and attach://gone",
+            "media": [{"id": "diag1", "media": {"type": "photo"}}]
+        }
+    });
+    let offenders = crate::channels::telegram::rich::api::rich_body_offenders(&body)
+        .expect("two orphan refs must be named");
+    assert_eq!(offenders, vec!["attach://gone", "tg://photo?id=absent"]);
+
+    // A body whose refs ALL resolve reports nothing — an ordinary failure keeps
+    // the metadata-only log shape, so body content never rides a 200.
+    let clean = serde_json::json!({
+        "rich_message": {
+            "markdown": "Diag ![d](tg://photo?id=diag1)",
+            "media": [{"id": "diag1", "media": {"type": "photo"}}]
+        }
+    });
+    assert_eq!(
+        crate::channels::telegram::rich::api::rich_body_offenders(&clean),
+        None
+    );
+
+    // No text at all -> nothing to attribute.
+    assert_eq!(
+        crate::channels::telegram::rich::api::rich_body_offenders(&serde_json::json!({})),
+        None
     );
 }

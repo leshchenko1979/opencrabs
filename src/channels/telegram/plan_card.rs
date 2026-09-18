@@ -1137,12 +1137,12 @@ pub(crate) async fn refresh_plan_card(
         .await
     {
         let (rich_md, media) = super::rich::mermaid::resolve_markdown_media(&md).await;
-        // A `tg://photo?id=X` reference with no matching media entry is a
-        // whole-message 400 (`RICH_MESSAGE_PHOTO_INVALID`); prose can carry
-        // one as an example. Neutralise orphans AFTER resolution so the refs
-        // the resolver just created keep resolving.
-        let rich_md = super::rich::mermaid::neutralize_orphan_photo_refs(&rich_md, &media);
-        let rich_md = super::rich::normalize_tables(&rich_md);
+        // Route through the SHARED media-aware entry (#334): it runs the image
+        // shield against THIS card's resolved media, so the `tg://photo?id=diagN`
+        // refs the resolver just created keep resolving while genuine orphans are
+        // neutralized. The hand-rolled neutralize+normalize pair that used to sit
+        // here collapsed into the shared entry (single implementation).
+        let rich_md = super::rich::normalize_rich_markdown_with_media(&rich_md, &media);
         // #155 footer rides the body, so it lands inside the signature below —
         // a footer-only change (review started, or a new delta) must re-render.
         let rich_md = plan_card_with_footer(rich_md, footer_note.as_deref(), true);
