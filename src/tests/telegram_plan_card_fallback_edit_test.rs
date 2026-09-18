@@ -320,8 +320,14 @@ async fn a_rejected_rich_edit_falls_back_in_place_without_a_duplicate() {
             .expect(0)
             .create_async()
             .await;
+        // A classic-HTML fresh post travels via teloxide's `send_message`,
+        // whose method name is `Payload::NAME` — `stringify!` of the method
+        // type, i.e. PascalCase `/SendMessage`. The lowercase `sendMessage` is
+        // the hand-rolled reqwest helpers' spelling, and mockito path matching
+        // is case-sensitive, so an expect(0) on the lowercase name can never
+        // fire and would not catch the duplicate it guards against.
         let no_html_post = server
-            .mock("POST", "/botTESTTOKEN/sendMessage")
+            .mock("POST", "/botTESTTOKEN/SendMessage")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(message_envelope(9998, CHAT))
