@@ -343,6 +343,10 @@ pub enum LocalImageFailureReason {
     /// A remote reference is not a usable image URL (`data:` payload that is
     /// not base64, a base64 body that is not an image, an unparsable URL).
     BadUrl,
+    /// The image was extracted and validated, but the channel refused to send
+    /// it (API error, media-type rejection, platform size ceiling). Distinct
+    /// from every other reason: the reference is not the problem.
+    DeliveryFailed,
 }
 
 impl LocalImageFailureReason {
@@ -360,6 +364,7 @@ impl LocalImageFailureReason {
             Self::TooLarge => "larger than the per-image size limit",
             Self::TooMany => "too many remote images in one reply (per-reply limit reached)",
             Self::BadUrl => "not a usable image URL",
+            Self::DeliveryFailed => "the channel could not deliver the image",
         }
     }
 }
@@ -546,7 +551,7 @@ fn parse_markdown_image(text: &str, start: usize) -> Option<(usize, String)> {
     if !text[paren..].starts_with('(') {
         return None;
     }
-    let mut cursor = skip_whitespace(text, paren + 1);
+    let cursor = skip_whitespace(text, paren + 1);
     let (target, mut after_target) = if text[cursor..].starts_with('<') {
         let close = text[cursor + 1..].find('>')?;
         let target = text[cursor + 1..cursor + 1 + close].to_string();
