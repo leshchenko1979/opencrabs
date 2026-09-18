@@ -34,6 +34,10 @@
 
 **Cron job** — a scheduled task in the `cron_jobs` table, polled by the scheduler and executed in the user's active session. Defined by prompt + schedule; delivery goes through a configured channel. See `src/cron/`. **Not:** "timer", "task" (a task is a plan checklist row).
 
+### Channels & delivery
+
+**Local image attachment** — an image on the local filesystem that a reply references and OpenCrabs delivers as native channel media, instead of leaving the reference in the message body as dead text. Two reference forms resolve to it: the **marker form** `<<IMG:/abs/path.png>>` and the **markdown form** `![alt](path)` (absolute, `~/…`, or relative to the session working directory). A remote `http(s)://` or `data:` target is fetched and delivered by the same path but is not a local file. Extraction is single-homed in `src/utils/image.rs` (`extract_local_images`; `strip_image_references` is the strip-only variant for surfaces that never send media; remote targets are resolved by `src/utils/image_fetch.rs`). **Not:** "image marker" as a name for the markdown form (a marker is the `<<IMG:…>>` form only), "attachment" alone (that names the channel-side artifact, not the reference).
+
 ### Brain & directives
 
 **Directive** — any information that shapes agent behavior: rules, tool definitions, skills, commands, config, project knowledge. → brain slice (`BRAIN_CONSTITUTION.md`).
