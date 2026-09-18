@@ -128,6 +128,9 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // goal-dispatch flag. ALTER TABLE ADD COLUMN, so appended last per the
     // list invariant above.
     include_str!("../migrations/20260915000001_add_cron_trigger_pipeline.sql"),
+    // FORK (#299): evidence-backed goal judge — declared criteria + the
+    // consecutive-Uncertain counter that parks a non-converging goal.
+    include_str!("../migrations/20260918000001_add_goal_criteria.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
