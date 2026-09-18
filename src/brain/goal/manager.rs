@@ -161,7 +161,7 @@ impl GoalManager {
                 let mut stmt = conn.prepare(
                     "SELECT id, session_id, goal_text, state, turns_used, max_turns, \
                      consecutive_parse_failures, consecutive_uncertain, criteria, \
-                     judge_verdict, judge_reason, \
+                     criterion_evaluations, judge_verdict, judge_reason, \
                      channel, channel_chat_id, created_at, updated_at \
                      FROM goal_state WHERE session_id = ?1 LIMIT 1",
                 )?;
