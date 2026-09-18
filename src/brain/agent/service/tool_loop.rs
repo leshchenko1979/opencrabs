@@ -1861,6 +1861,15 @@ impl AgentService {
         // ladder.
         #[cfg_attr(not(feature = "telegram"), allow(unused))]
         let mut mermaid_regen_retries: u32 = 0;
+        // Local image regen budget (#286): how many preflight nudges a reply
+        // gets when a referenced image cannot be attached. Owner dial: 2.
+        const LOCAL_IMAGE_REGEN_MAX_NUDGES: u32 = 2;
+        // Local image regen attempts spent (#286): each spend echoes the reply
+        // that carried the broken reference as an assistant message and injects
+        // the rejection reason as a user-role [System: ...] nudge — the mermaid
+        // ladder's shape, for the same reason: a deterministic preflight failure
+        // is worth one repair round before the user sees a missing picture.
+        let mut local_image_regen_retries: u32 = 0;
         // Tool-text leak (leshchenko1979/opencrabs#66, ex-upstream
         // adolfousier/opencrabs#1260): the provider stripped unrecoverable
         // tool-call JSON and set tool_text_leak. One corrective retry with a
@@ -6110,6 +6119,60 @@ impl AgentService {
                             &parse_errors,
                             attempt,
                             MERMAID_REGEN_MAX_NUDGES,
+                        );
+                        context.add_message(Message::assistant(iteration_text));
+                        context.add_message(Message::user(nudge));
+                        continue;
+                    }
+                }
+
+                // Local image preflight nudge (#286): a reply that references
+                // an image which cannot be resolved, read, or decoded would
+                // reach the user with the picture silently missing. The
+                // extraction layer is deterministic and runs again on the
+                // delivery path, so hand the model the exact rejection reason
+                // before the reply goes final and let it repair the reference —
+                // same shape as the mermaid ladder: echo the reply as an
+                // assistant message, inject the reason as a user-role
+                // [System: ...] nudge, re-run the iteration. Gated to channel
+                // sessions: the CLI has no attachment delivery, so there is
+                // nothing to repair there. Remote candidates are NOT nudged
+                // here — they fail only after a network fetch, which belongs
+                // to the delivery path's own ladder, not to a preflight pass.
+                if local_image_regen_retries < LOCAL_IMAGE_REGEN_MAX_NUDGES
+                    && !is_cli_provider
+                    && progress_callback.is_some()
+                {
+                    let cwd = self.get_working_directory_for_session(session_id);
+                    let scan = crate::utils::image::extract_local_images(
+                        &iteration_text,
+                        Some(cwd.as_path()),
+                    );
+                    if !scan.failures.is_empty() {
+                        local_image_regen_retries += 1;
+                        let attempt = local_image_regen_retries;
+                        tracing::warn!(
+                            images_broken = scan.failures.len(),
+                            attempt,
+                            budget = LOCAL_IMAGE_REGEN_MAX_NUDGES,
+                            "local image references failed validation; nudging regen"
+                        );
+                        if let Some(ref cb) = progress_callback {
+                            cb(
+                                session_id,
+                                ProgressEvent::SelfHealingAlert {
+                                    message: format!(
+                                        "Image attachment failed — regen \
+                                         {attempt}/{LOCAL_IMAGE_REGEN_MAX_NUDGES}"
+                                    ),
+                                },
+                            );
+                        }
+                        let nudge = crate::brain::agent::service::nudge::local_image_regen_nudge(
+                            &scan.failures,
+                            Some(cwd.as_path()),
+                            attempt,
+                            LOCAL_IMAGE_REGEN_MAX_NUDGES,
                         );
                         context.add_message(Message::assistant(iteration_text));
                         context.add_message(Message::user(nudge));
