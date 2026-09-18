@@ -203,13 +203,32 @@ jobs:
           free -m || true
           echo "--- disk ---"
           df -h / || true; df -h "$GITHUB_WORKSPACE" || true
-          echo "--- cgroup v2 memory ---"
-          for f in memory.max memory.high memory.current memory.peak memory.swap.max; do
-            [ -r "/sys/fs/cgroup/$f" ] && echo "$f = $(cat "/sys/fs/cgroup/$f")" || true
+          echo "--- meminfo anchor (kB) ---"
+          grep -E '^(MemTotal|MemAvailable|SwapTotal):' /proc/meminfo || true
+          echo "--- cgroup layout ---"
+          cat /proc/self/cgroup 2>/dev/null || true
+          ls -la /sys/fs/cgroup 2>/dev/null | head -25 || true
+          mount 2>/dev/null | grep -i cgroup || true
+          echo "--- cgroup memory limits (resolved path, then ancestors) ---"
+          # The 2026-09-18 baseline run showed /sys/fs/cgroup/memory.max as
+          # UNREADABLE (the loop printed nothing), so the ceiling could not be
+          # read from the fixed path. Resolve the runner's OWN cgroup from
+          # /proc/self/cgroup and walk up, labelling every hit with its full
+          # path so an absent reading is distinguishable from a real "max".
+          CG=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)
+          for base in /sys/fs/cgroup "${CG:+/sys/fs/cgroup$CG}"; do
+            [ -d "$base" ] || continue
+            d="$base"
+            while [ -n "$d" ] && [ "$d" != "/" ] && [ "$d" != "/sys" ] && [ "$d" != "/sys/fs" ]; do
+              for f in memory.max memory.peak memory.current memory.high memory.swap.max; do
+                if [ -r "$d/$f" ]; then echo "$d/$f = $(cat "$d/$f")"; fi
+              done
+              d=$(dirname "$d")
+            done
           done
           echo "--- cgroup v1 memory (fallback) ---"
           for f in memory.limit_in_bytes memory.max_usage_in_bytes; do
-            [ -r "/sys/fs/cgroup/memory/$f" ] && echo "$f = $(cat "/sys/fs/cgroup/memory/$f")" || true
+            [ -r "/sys/fs/cgroup/memory/$f" ] && echo "/sys/fs/cgroup/memory/$f = $(cat "/sys/fs/cgroup/memory/$f")" || true
           done
           echo "--- cache sizes ---"
           du -sh target 2>/dev/null || true
@@ -253,12 +272,20 @@ jobs:
           free -m || true
           echo "--- disk ---"
           df -h / || true
-          echo "--- cgroup v2 memory ---"
-          for f in memory.max memory.current memory.peak memory.events; do
-            [ -r "/sys/fs/cgroup/$f" ] && echo "$f = $(cat "/sys/fs/cgroup/$f")" || true
+          echo "--- meminfo anchor (kB) ---"
+          grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo || true
+          echo "--- cgroup memory (resolved path, then ancestors) ---"
+          CG=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)
+          for base in /sys/fs/cgroup "${CG:+/sys/fs/cgroup$CG}"; do
+            [ -d "$base" ] || continue
+            d="$base"
+            while [ -n "$d" ] && [ "$d" != "/" ] && [ "$d" != "/sys" ] && [ "$d" != "/sys/fs" ]; do
+              for f in memory.max memory.peak memory.current memory.high memory.events; do
+                if [ -r "$d/$f" ]; then echo "$d/$f = $(cat "$d/$f")"; fi
+              done
+              d=$(dirname "$d")
+            done
           done
-          echo "--- oom counters (cgroup v2) ---"
-          [ -r /sys/fs/cgroup/memory.events ] && cat /sys/fs/cgroup/memory.events || true
           echo "--- kernel oom / kill evidence ---"
           dmesg 2>/dev/null | grep -iE 'oom|killed process|out of memory' | tail -20 || echo "(dmesg unreadable)"
           echo "--- cache sizes ---"
