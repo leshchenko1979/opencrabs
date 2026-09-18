@@ -42,7 +42,12 @@ impl JudgeDecision {
                     "Goal judge returned unparseable JSON: {} — \
                      defaulting to CONTINUE (fail-open). Raw: {}",
                     e,
-                    &raw[..raw.len().min(200)]
+                    // Byte-offset slicing panics when the cut lands inside a
+                    // multi-byte codepoint, and an unparseable judge reply is
+                    // exactly where non-ASCII arrives. `truncate_str` snaps the
+                    // cut back to a char boundary (same helper the channel
+                    // handlers use for previews).
+                    crate::utils::truncate_str(raw, 200)
                 );
                 JudgeDecision {
                     verdict: GoalVerdict::Continue,
