@@ -17,7 +17,9 @@ pub(crate) mod context_rows;
 pub(crate) mod detached_status;
 pub(crate) mod work_status;
 #[allow(unused_imports)] // only used in test code
-pub(crate) use context::{format_editing_reminder, format_plan_reminder, plan_state_block};
+pub(crate) use context::{
+    format_editing_reminder, format_plan_reminder, plan_state_block, unresolved_tasks,
+};
 pub(crate) mod fallback_suggest;
 pub(crate) mod feedback;
 pub(crate) mod fenced_command;

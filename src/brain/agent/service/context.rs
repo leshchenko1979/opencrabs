@@ -1564,22 +1564,16 @@ pub(crate) fn format_plan_reminder(plan: &crate::tui::plan::PlanDocument) -> Opt
         return None;
     }
     let total = plan.tasks.len();
-    if total == 0 {
-        return None;
-    }
     let done = plan
         .tasks
         .iter()
         .filter(|t| matches!(t.status, TaskStatus::Completed))
         .count();
     // Skipped tasks are intentionally resolved; once every task is done or
-    // skipped there's nothing left to nag about.
-    let resolved = plan
-        .tasks
-        .iter()
-        .filter(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Skipped))
-        .count();
-    if resolved == total {
+    // skipped there's nothing left to nag about — and nothing left to report
+    // as open work. `unresolved_tasks` is the single definition of that
+    // predicate; the goal evidence pack reads it too (#299).
+    if unresolved_tasks(plan).is_empty() {
         return None;
     }
 
@@ -1652,4 +1646,27 @@ pub(crate) fn format_plan_reminder(plan: &crate::tui::plan::PlanDocument) -> Opt
         }
     }
     Some(out)
+}
+
+/// The plan's unresolved tasks, as `"<order>. <title>"`, in plan order.
+///
+/// A task is unresolved unless it is `Completed` or `Skipped`: `Pending`,
+/// `InProgress`, `Failed` and `Blocked` are all still outstanding work. This is
+/// the ONE definition of that predicate — the plan reminder uses it to decide
+/// whether to nag at all, and the goal evidence pack (#299) uses it to tell the
+/// judge what is still open, so the two can never disagree about whether a plan
+/// is finished.
+pub(crate) fn unresolved_tasks(plan: &crate::tui::plan::PlanDocument) -> Vec<String> {
+    use crate::tui::plan::TaskStatus;
+
+    let mut tasks: Vec<&crate::tui::plan::PlanTask> = plan
+        .tasks
+        .iter()
+        .filter(|t| !matches!(t.status, TaskStatus::Completed | TaskStatus::Skipped))
+        .collect();
+    tasks.sort_by_key(|t| t.order);
+    tasks
+        .into_iter()
+        .map(|t| format!("{}. {} ({})", t.order, t.title, t.status))
+        .collect()
 }
