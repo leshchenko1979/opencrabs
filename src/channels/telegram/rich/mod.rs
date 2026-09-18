@@ -49,4 +49,7 @@ pub(crate) use render_html::{
 pub(crate) use table::{
     balance_code_fences, infer_missing_table_separators, shield_bare_leading_hashes,
 };
-pub(crate) use table::{normalize_rich_markdown, normalize_tables, reflow_collapsed_tables};
+pub(crate) use table::{
+    normalize_rich_markdown, normalize_rich_markdown_with_media, normalize_tables,
+    reflow_collapsed_tables,
+};

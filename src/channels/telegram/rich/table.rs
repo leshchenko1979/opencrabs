@@ -6,6 +6,7 @@
 
 use super::ast::{Align, Inline, Table};
 use super::inline::parse_inlines;
+use super::mermaid::MediaEntry;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -221,9 +222,27 @@ fn parse_alignment(sep: &str, cols: usize) -> Vec<Align> {
 ///
 /// Idempotent and fence-safe.
 pub(crate) fn normalize_rich_markdown(text: &str) -> String {
+    normalize_rich_markdown_with_media(text, &[])
+}
+
+/// Media-aware twin of [`normalize_rich_markdown`] (#334): the same pipeline, with
+/// THIS request's `media` array threaded down to the image shield so a
+/// `tg://photo?id=<X>` / `attach://<X>` reference is judged against the entries the
+/// request actually carries. Callers that own a media array MUST use this entry —
+/// the media-free form reads every `tg`/`attach` ref as an orphan, because a request
+/// carrying no media genuinely cannot resolve one.
+pub(crate) fn normalize_rich_markdown_with_media(text: &str, media: &[MediaEntry]) -> String {
     let decoded = crate::channels::telegram::markdown::decode_named_entities(text);
-    let normalized = normalize_tables(&decoded);
-    crate::channels::telegram::suggest_options::enforce_button_fit(&normalized)
+    let normalized = normalize_tables_with_media(&decoded, media);
+    // Both orphan guards run on EVERY rich path from here (#334, H6) — not just on the
+    // plan card's HTML path. The image shield above covers markdown image syntax; these
+    // cover a reference written as bare prose text (`tg://photo?id=X`, `attach://X`) and
+    // a model-authored `<img>` / `<video>` / `<audio>` tag. Telegram fails the WHOLE
+    // message when any of them cannot be resolved (#134, #334). Both are idempotent:
+    // each rewrite drops the `//` its trigger requires, and `&lt;` contains no `<`.
+    let neutralized = super::mermaid::neutralize_orphan_photo_refs(&normalized, media);
+    let prose_shielded = super::mermaid::neutralize_prose_media_html(&neutralized);
+    crate::channels::telegram::suggest_options::enforce_button_fit(&prose_shielded)
 }
 
 /// Single canonical table-normalization entry for the rich plane (#132):
@@ -241,8 +260,16 @@ pub(crate) fn normalize_rich_markdown(text: &str) -> String {
 /// and shields bare leading hashes (e.g. `#174`) so Telegram's rich parser doesn't
 /// promote them into headings without CommonMark's required trailing space (#193).
 pub(crate) fn normalize_tables(text: &str) -> String {
+    normalize_tables_with_media(text, &[])
+}
+
+/// Media-aware twin of [`normalize_tables`] (#334). Identical pass order, with
+/// `media` reaching the image shield so `tg`/`attach` references are judged against
+/// the media array of the request this text belongs to. A caller with no media array
+/// uses [`normalize_tables`], which is this function with an empty slice.
+pub(crate) fn normalize_tables_with_media(text: &str, media: &[MediaEntry]) -> String {
     let balanced = balance_code_fences(text);
-    let images_shielded = shield_unresolvable_markdown_images(&balanced);
+    let images_shielded = shield_unresolvable_markdown_images(&balanced, media);
     let shielded = shield_bare_leading_hashes(&images_shielded);
     let reflowed = reflow_collapsed_tables(&shielded);
     let inferred = infer_missing_table_separators(&reflowed);
@@ -565,11 +592,16 @@ fn strip_ordered_list_prefix(s: &str) -> Option<&str> {
 ///
 /// Escaping the leading `!` to `\!` neutralizes Telegram's photo entity parsing while
 /// preserving the text as a readable markdown link `\![alt](path)` (or plain text).
-/// Valid remote image URLs (`http://`, `https://`), Telegram media refs (`tg://photo?id=`),
-/// and multipart attachments (`attach://`) are preserved.
+/// Valid remote image URLs (`http://`, `https://`) are preserved by SCHEME alone —
+/// Telegram fetches those itself. A Telegram media reference (`tg://photo?id=<X>`,
+/// `tg://video?id=<X>`, `tg://audio?id=<X>`, `attach://<X>`) is preserved only when
+/// `<X>` names an entry in THIS request's `media` array: that array is the sole
+/// authority for whether such a reference resolves (#334). A reference judged valid
+/// by scheme alone is rejected server-side with `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND`,
+/// taking the whole message down (live: 4 events on 2026-09-18, all plan-card paths).
 ///
 /// Fence-safe: leaves code fences (``` and ~~~) and inline code spans untouched.
-pub(crate) fn shield_unresolvable_markdown_images(text: &str) -> String {
+pub(crate) fn shield_unresolvable_markdown_images(text: &str, media: &[MediaEntry]) -> String {
     if !text.contains("![") {
         return text.to_string();
     }
@@ -609,15 +641,18 @@ pub(crate) fn shield_unresolvable_markdown_images(text: &str) -> String {
         }
 
         // Process line outside code fences
-        shield_line_unresolvable_images(line, &mut out);
+        shield_line_unresolvable_images(line, &mut out, media);
     }
 
     out
 }
 
 /// Scan a single line for `![alt](target)` constructs outside inline code spans
-/// and escape `!` if target is not a valid photo URL.
-fn shield_line_unresolvable_images(line: &str, out: &mut String) {
+/// and escape `!` if the target is not a resolvable photo reference. `media` is
+/// the media array of the SAME request, so a `tg`/`attach` reference is judged
+/// against the entries that request actually carries — see
+/// [`is_valid_telegram_photo_url`].
+fn shield_line_unresolvable_images(line: &str, out: &mut String, media: &[MediaEntry]) {
     let bytes = line.as_bytes();
     let mut i = 0;
 
@@ -652,7 +687,7 @@ fn shield_line_unresolvable_images(line: &str, out: &mut String) {
 
             // Look for matching `](target)`
             if let Some((target, match_end)) = parse_markdown_image_at(line, i) {
-                if is_valid_telegram_photo_url(target) {
+                if is_valid_telegram_photo_url(target, media) {
                     // Valid URL - keep as is
                     out.push_str(&line[i..match_end]);
                 } else {
@@ -721,13 +756,19 @@ fn parse_markdown_image_at(line: &str, start: usize) -> Option<(&str, usize)> {
     Some((target, match_end))
 }
 
-/// Check whether `target` is a valid Telegram photo URL/ref.
-/// Valid schemes:
-/// - `http://`
-/// - `https://`
-/// - `tg://photo?id=`
-/// - `attach://`
-fn is_valid_telegram_photo_url(target: &str) -> bool {
+/// Check whether `target` is a valid Telegram photo URL/ref **for this request**.
+///
+/// - `http://` / `https://` — valid by scheme; Telegram fetches the URL itself.
+/// - `tg://photo?id=<X>` / `tg://video?id=<X>` / `tg://audio?id=<X>` / `attach://<X>` —
+///   valid **iff** `<X>` names an entry in `media`, the media array of the very request
+///   this body belongs to. Scheme alone is NOT sufficient: a reference with no matching
+///   entry is rejected with `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND`, which fails the whole
+///   message rather than that one image (#334).
+/// - anything else — invalid (a local path, a bare string).
+///
+/// An empty `media` therefore means every `tg`/`attach` reference is an orphan, which is
+/// the correct reading for the builders that carry no media array at all.
+fn is_valid_telegram_photo_url(target: &str, media: &[MediaEntry]) -> bool {
     let trimmed = target.trim();
     // Strip optional enclosing `<...>`
     let url = if trimmed.starts_with('<') && trimmed.ends_with('>') && trimmed.len() >= 2 {
@@ -736,8 +777,37 @@ fn is_valid_telegram_photo_url(target: &str) -> bool {
         trimmed
     };
 
-    url.starts_with("http://")
-        || url.starts_with("https://")
-        || url.starts_with("tg://photo?id=")
-        || url.starts_with("attach://")
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return true;
+    }
+
+    // `attach://<X>` — the id is everything after the scheme.
+    if let Some(id) = url.strip_prefix("attach://") {
+        return media_id_present(id, media);
+    }
+
+    // `tg://photo?id=<X>` and siblings (`tg://video?id=`, `tg://audio?id=`).
+    if let Some(id) = telegram_media_id(url) {
+        return media_id_present(id, media);
+    }
+
+    false
+}
+
+/// Extract `<X>` from a `tg://<kind>?id=<X>` media reference, or `None` when
+/// `url` is not one. The id runs to the first `&` (Telegram media refs carry a
+/// single `id` param in practice; a trailing query fragment is not part of it).
+fn telegram_media_id(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("tg://")?;
+    let (kind, query) = rest.split_once('?')?;
+    if !matches!(kind, "photo" | "video" | "audio") {
+        return None;
+    }
+    let id = query.strip_prefix("id=")?;
+    Some(id.split('&').next().unwrap_or(id))
+}
+
+/// Whether `id` names an entry in this request's media array.
+fn media_id_present(id: &str, media: &[MediaEntry]) -> bool {
+    !id.is_empty() && media.iter().any(|m| m.id == id)
 }

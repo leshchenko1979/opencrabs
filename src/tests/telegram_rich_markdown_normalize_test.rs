@@ -11,6 +11,7 @@ use crate::channels::telegram::rich::api::{
 };
 use crate::channels::telegram::rich::mermaid::MediaEntry;
 use crate::channels::telegram::rich::normalize_rich_markdown;
+use crate::channels::telegram::rich::table::shield_unresolvable_markdown_images;
 use teloxide::types::{MessageId, ThreadId};
 
 #[test]
@@ -107,9 +108,9 @@ fn test_shield_unresolvable_markdown_images() {
         "Here is an image: \\![Visual Diagram](tmp/plot.png) and \\![Ref](/root/arch.svg)"
     );
 
-    // Valid http, https, tg://photo?id=, attach:// -> preserved
-    let valid_input = "Remote: ![Web](https://example.com/pic.png) and ![HTTP](http://test.org/a.jpg)\n\
-                       Telegram: ![Diag](tg://photo?id=diag0) and ![Attach](attach://photo1)";
+    // Remote URLs are valid by scheme alone -> preserved
+    let valid_input =
+        "Remote: ![Web](https://example.com/pic.png) and ![HTTP](http://test.org/a.jpg)";
     let valid_output = normalize_rich_markdown(valid_input);
     assert_eq!(valid_output, valid_input);
 
@@ -123,4 +124,90 @@ fn test_shield_unresolvable_markdown_images() {
     let escaped_input = "Already: \\![Manual](local/file.png)";
     let escaped_output = normalize_rich_markdown(escaped_input);
     assert_eq!(escaped_output, escaped_input);
+}
+
+/// #334 (H1): a `tg://` / `attach://` reference is judged against THIS request's
+/// media array, never by scheme alone. `normalize_rich_markdown` is the media-free
+/// entry, so every such reference there is an orphan by construction — which is
+/// exactly the `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND` class this closes.
+#[test]
+fn test_shield_tg_and_attach_refs_are_media_aware() {
+    // No media array at all -> the ref cannot resolve -> escaped.
+    let orphan_input = "Diag: ![diagram](tg://photo?id=diag0) and ![a](attach://photo1)";
+    let orphan_output = normalize_rich_markdown(orphan_input);
+    assert_eq!(
+        orphan_output, "Diag: \\![diagram](tg://photo?id=diag0) and \\![a](attach://photo1)",
+        "with an empty media array every tg/attach ref is an orphan"
+    );
+
+    // Non-matching media array -> still an orphan.
+    let other_media = vec![MediaEntry {
+        id: "diag9".to_string(),
+        url: None,
+        bytes: Some(vec![1, 2, 3]),
+    }];
+    assert_eq!(
+        shield_unresolvable_markdown_images("![d](tg://photo?id=diag0)", &other_media),
+        "\\![d](tg://photo?id=diag0)",
+        "a ref naming an id absent from media must be escaped"
+    );
+
+    // Matching media array -> preserved, so a real diagram still renders.
+    let matching_media = vec![MediaEntry {
+        id: "diag1".to_string(),
+        url: None,
+        bytes: Some(vec![1, 2, 3]),
+    }];
+    assert_eq!(
+        shield_unresolvable_markdown_images("![d](tg://photo?id=diag1)", &matching_media),
+        "![d](tg://photo?id=diag1)",
+        "a ref whose id IS in media must keep resolving"
+    );
+    assert_eq!(
+        shield_unresolvable_markdown_images("![d](attach://diag1)", &matching_media),
+        "![d](attach://diag1)",
+        "attach:// resolves through the same media array"
+    );
+
+    // Scheme alone never carries a tg/attach ref — the id decides.
+    assert_eq!(
+        shield_unresolvable_markdown_images("![d](tg://photo?id=diag1)", &[]),
+        "\\![d](tg://photo?id=diag1)"
+    );
+}
+
+/// #334 (step 9): the markdown image shield is fence- and code-span-safe. A
+/// fenced or backticked reference is a LITERAL region — escaping the `!` there
+/// would rewrite text the user asked to see verbatim — so those regions pass
+/// through byte-identically while the same ref in prose is escaped.
+#[test]
+fn test_shield_is_fence_and_code_span_safe_for_media_refs() {
+    let prose = "![d](tg://photo?id=absent)";
+    assert_eq!(
+        shield_unresolvable_markdown_images(prose, &[]),
+        "\\![d](tg://photo?id=absent)",
+        "an orphan ref in prose is escaped"
+    );
+
+    let fenced = "```text\n![d](tg://photo?id=absent)\n```";
+    assert_eq!(
+        shield_unresolvable_markdown_images(fenced, &[]),
+        fenced,
+        "a fenced ref is literal text and must survive byte-identically"
+    );
+
+    let span = "Inline: `![d](tg://photo?id=absent)`";
+    assert_eq!(
+        shield_unresolvable_markdown_images(span, &[]),
+        span,
+        "an inline code span is literal text and must survive byte-identically"
+    );
+
+    // A matching entry keeps the ref live even in prose.
+    let matching = vec![MediaEntry {
+        id: "absent".to_string(),
+        url: None,
+        bytes: Some(vec![1, 2, 3]),
+    }];
+    assert_eq!(shield_unresolvable_markdown_images(prose, &matching), prose);
 }

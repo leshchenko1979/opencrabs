@@ -63,7 +63,7 @@ pub(crate) async fn edit_rich_markdown(
     let mut body = serde_json::json!({
         "chat_id": chat_id,
         "message_id": message_id,
-        "rich_message": { "markdown": super::normalize_rich_markdown(markdown) },
+        "rich_message": { "markdown": super::normalize_rich_markdown_with_media(markdown, &[]) },
     });
     if let Some(kb) = reply_markup {
         body["reply_markup"] = kb.clone();
@@ -158,7 +158,7 @@ pub(crate) fn build_body_markdown_media_edit(
     serde_json::json!({
         "chat_id": chat_id,
         "message_id": message_id,
-        "rich_message": { "markdown": super::normalize_rich_markdown(markdown), "media": media_arr },
+        "rich_message": { "markdown": super::normalize_rich_markdown_with_media(markdown, media), "media": media_arr },
     })
 }
 
@@ -268,6 +268,36 @@ fn rich_send_fields<'a>(
         text.len(),
         crate::channels::telegram::telemetry::content_hash8(text),
     )
+}
+
+/// Media references in a rich body that the body's OWN `media` array cannot
+/// resolve — the offenders a rich rejection is about (#334, H4). Returns `None`
+/// when the body carries no such reference, so an ordinary failure keeps the
+/// metadata-only log shape and only a media-attributable rejection gains detail.
+///
+/// The extractor is shared with the neutralizer
+/// ([`super::mermaid::unresolved_media_refs_by`]), so the log and the rewrite can
+/// never disagree about what counts as an orphan reference.
+pub(crate) fn rich_body_offenders(body: &serde_json::Value) -> Option<Vec<String>> {
+    let text = body
+        .pointer("/rich_message/markdown")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            body.pointer("/rich_message/html")
+                .and_then(serde_json::Value::as_str)
+        })?;
+    let ids: Vec<String> = body
+        .pointer("/rich_message/media")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let refs = super::mermaid::unresolved_media_refs_by(text, |id| ids.iter().any(|k| k == id));
+    (!refs.is_empty()).then_some(refs)
 }
 
 async fn post_rich(
@@ -391,9 +421,12 @@ async fn post_rich(
         }
         {
             // Correlation telemetry (#1085 P1a): a failed rich send must
-            // carry the same fields a successful one does.
+            // carry the same fields a successful one does. A rich rejection is
+            // unattributable without the media refs it is about (#334, H4), so
+            // they ride this error path — and only this one.
             let (method, chat_id, thread, len, hash8) = rich_send_fields(url, body);
-            crate::channels::telegram::telemetry::log_send_failure(
+            let offenders = rich_body_offenders(body);
+            crate::channels::telegram::telemetry::log_send_failure_with_offenders(
                 origin,
                 origin_detail,
                 "-",
@@ -404,6 +437,7 @@ async fn post_rich(
                 len,
                 &hash8,
                 &format!("({status}): {desc}"),
+                offenders.as_deref(),
             );
         }
         anyhow::bail!("Telegram rich API error ({status}): {desc}")
@@ -444,7 +478,9 @@ pub(crate) fn build_body_target(
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
         "chat_id": chat_id,
-        "rich_message": { "markdown": super::normalize_rich_markdown(markdown) },
+        // No media array rides this body (#334): a `tg`/`attach` ref here can never
+        // resolve, so the shield is told so explicitly rather than judging by scheme.
+        "rich_message": { "markdown": super::normalize_rich_markdown_with_media(markdown, &[]) },
     });
     if let Some(t) = thread_id {
         // ThreadId wraps a MessageId(i32).
@@ -672,7 +708,8 @@ async fn post_rich_multipart(
         }
         {
             let (method, chat_id, thread, len, hash8) = rich_send_fields(url, body);
-            crate::channels::telegram::telemetry::log_send_failure(
+            let offenders = rich_body_offenders(body);
+            crate::channels::telegram::telemetry::log_send_failure_with_offenders(
                 origin,
                 origin_detail,
                 "-",
@@ -683,6 +720,7 @@ async fn post_rich_multipart(
                 len,
                 &hash8,
                 &format!("({status}): {desc}"),
+                offenders.as_deref(),
             );
         }
         anyhow::bail!("Telegram rich API error ({status}): {desc}")
@@ -720,7 +758,7 @@ pub(crate) fn build_body_markdown_media_target(
         .collect();
     let mut body = serde_json::json!({
         "chat_id": chat_id,
-        "rich_message": { "markdown": super::normalize_rich_markdown(markdown), "media": media_arr },
+        "rich_message": { "markdown": super::normalize_rich_markdown_with_media(markdown, media), "media": media_arr },
     });
     if let Some(t) = thread_id {
         body["message_thread_id"] = serde_json::json!(t.0.0);
