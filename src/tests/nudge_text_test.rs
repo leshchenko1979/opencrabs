@@ -131,3 +131,77 @@ fn mermaid_regen_nudge_quotes_renderer_errors_and_counts_attempts() {
     assert!(nudge.starts_with("[System:"), "{nudge}");
     assert!(nudge.ends_with(']'), "{nudge}");
 }
+
+// ── Local image nudges (#286) ──
+
+#[test]
+fn local_image_regen_nudge_quotes_each_reference_and_the_base_dir() {
+    use crate::brain::agent::service::nudge::local_image_regen_nudge;
+    use crate::utils::image::{LocalImageFailure, LocalImageFailureReason};
+    use std::path::PathBuf;
+
+    let failures = vec![
+        LocalImageFailure {
+            raw: "chart.png".to_string(),
+            resolved: Some(PathBuf::from("/srv/work/chart.png")),
+            reason: LocalImageFailureReason::NotFound,
+        },
+        LocalImageFailure {
+            raw: "https://example.com/gone.png".to_string(),
+            resolved: None,
+            reason: LocalImageFailureReason::DownloadFailed,
+        },
+    ];
+    let nudge = local_image_regen_nudge(&failures, Some(std::path::Path::new("/srv/work")), 1, 2);
+    assert!(nudge.starts_with("[System:"), "{nudge}");
+    assert!(nudge.ends_with(']'), "{nudge}");
+    assert!(nudge.contains("chart.png (file not found)"), "{nudge}");
+    assert!(
+        nudge.contains("https://example.com/gone.png (could not be downloaded"),
+        "{nudge}"
+    );
+    assert!(
+        nudge.contains("/srv/work"),
+        "must name the base dir: {nudge}"
+    );
+    assert!(nudge.contains("Regen attempt 1/2"), "{nudge}");
+}
+
+#[test]
+fn local_image_regen_nudge_without_a_base_dir_says_to_use_an_absolute_path() {
+    use crate::brain::agent::service::nudge::local_image_regen_nudge;
+    use crate::utils::image::{LocalImageFailure, LocalImageFailureReason};
+
+    let failures = vec![LocalImageFailure {
+        raw: "rel.png".to_string(),
+        resolved: None,
+        reason: LocalImageFailureReason::NotFound,
+    }];
+    let nudge = local_image_regen_nudge(&failures, None, 2, 2);
+    assert!(nudge.contains("absolute path"), "{nudge}");
+    assert!(nudge.contains("Regen attempt 2/2"), "{nudge}");
+}
+
+#[test]
+fn local_image_delivery_failure_nudge_forbids_re_emitting_the_reference() {
+    use crate::brain::agent::service::nudge::local_image_delivery_failure_nudge;
+    use crate::utils::image::{LocalImageFailure, LocalImageFailureReason};
+    use std::path::PathBuf;
+
+    let failures = vec![LocalImageFailure {
+        raw: "/srv/work/big.png".to_string(),
+        resolved: Some(PathBuf::from("/srv/work/big.png")),
+        reason: LocalImageFailureReason::DeliveryFailed,
+    }];
+    let nudge = local_image_delivery_failure_nudge(&failures);
+    assert!(nudge.starts_with("[System:"), "{nudge}");
+    assert!(nudge.ends_with(']'), "{nudge}");
+    assert!(
+        nudge.contains("/srv/work/big.png (the channel could not deliver the image)"),
+        "{nudge}"
+    );
+    assert!(
+        nudge.contains("do not re-emit it"),
+        "a delivery failure is not fixed by rewriting the reference: {nudge}"
+    );
+}

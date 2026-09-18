@@ -180,6 +180,60 @@ pub(crate) fn mermaid_regen_nudge(errors: &[String], attempt: u32, max: u32) -> 
     )
 }
 
+// ── Local image nudges (#286) ──
+//
+// Two ladders share one shape with the mermaid nudge above: an in-loop
+// correction before the reply goes final, and a post-delivery correction when
+// the channel itself refuses an image that was already extracted. They stay
+// apart because the model's fix differs — a rejected candidate has a reference
+// to repair, a refused delivery does not.
+
+/// In-loop correction for a reply whose image references could not become
+/// attachments (#286). Quotes each reference with the reason it was rejected
+/// and names the directory a relative reference resolves against, so a model
+/// that guessed a path corrects it instead of repeating it.
+pub(crate) fn local_image_regen_nudge(
+    failures: &[crate::utils::image::LocalImageFailure],
+    base_dir: Option<&std::path::Path>,
+    attempt: u32,
+    max: u32,
+) -> String {
+    let listed = failures
+        .iter()
+        .map(|failure| format!("- {}", failure.describe()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let base = match base_dir {
+        Some(dir) => format!("A relative reference resolves against {}.", dir.display()),
+        None => "There is no session working directory here, so use an absolute path.".to_string(),
+    };
+    format!(
+        "[System: The images your reply referenced could not be attached:\n{listed}\n\
+         {base} Fix the reference or drop it, then re-emit your COMPLETE reply — keep everything \
+         else you wrote. Regen attempt {attempt}/{max}.]"
+    )
+}
+
+/// Post-delivery correction for images that passed extraction but that the
+/// channel refused to send (#286). The file exists and is a valid image, so
+/// rewriting the reference cannot help: the model is asked to tell the user
+/// plainly which picture is missing rather than let it vanish silently.
+pub(crate) fn local_image_delivery_failure_nudge(
+    failures: &[crate::utils::image::LocalImageFailure],
+) -> String {
+    let listed = failures
+        .iter()
+        .map(|failure| format!("- {}", failure.describe()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "[System: These images were extracted and validated, but the channel could not deliver \
+         them:\n{listed}\n\
+         The reference is not the problem, so do not re-emit it. Tell the user plainly which \
+         image is missing and that the file itself is intact, then finish the reply.]"
+    )
+}
+
 // ── Shared variation directive (#32) ──
 //
 // Born from the 2026-08-29 incident: a ship call recurred through the
