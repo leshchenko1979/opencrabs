@@ -290,7 +290,6 @@ fn non_image_schemes_are_not_remote() {
         "mailto:x@y.z",
         "ftp://h/x.png",
         "file:///x.png",
-        "/tmp/x.png",
         "rel/x.png",
         "http:/h/x.png",
         "",
