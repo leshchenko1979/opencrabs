@@ -134,7 +134,9 @@ pub(crate) async fn handle_reaction_add(
         }
     };
 
-    let (text_only, _imgs) = crate::utils::extract_img_markers(&response.content);
+    // Strip-only: a reaction turn posts no attachments, so a remote link stays
+    // in the text (#286).
+    let text_only = crate::utils::strip_image_references(&response.content, None).text;
     let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
     let (text_only, react_emoji) = crate::utils::extract_react_marker(&text_only);
     if let Some(em) = react_emoji {

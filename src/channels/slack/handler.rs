@@ -1891,7 +1891,9 @@ async fn handle_message(
                     // would no longer hash-match a prior clean intermediate,
                     // breaking dedup against the final post (same root cause
                     // as the Telegram fix at 37d9f69a).
-                    let (text_clean, _img_paths) = crate::utils::extract_img_markers(&text);
+                    // Strip-only: this mid-stream body has no fetch step, so a
+                    // remote link stays in the text (#286).
+                    let text_clean = crate::utils::strip_image_references(&text, None).text;
                     // Same reasoning for <<VID:>> markers — strip so a
                     // mid-stream emit doesn't leak the raw token AND
                     // doesn't break hash-match against the final.
@@ -2027,7 +2029,18 @@ async fn handle_message(
             // re-attach the source video to Slack). Stripping VID here so
             // the final hash matches the intermediate hash (which also
             // strips VID), preserving dedup.
-            let (text_only, img_paths) = crate::utils::extract_img_markers(&response.content);
+            // Image references: markers, local markdown links, and REMOTE
+            // links — remote targets are fetched here so a link the model
+            // wrote ships as a real Slack file, not a dead URL (#286).
+            let image_cwd = state.agent.get_working_directory_for_session(session_id);
+            let image_scan = crate::utils::resolve_remote_images(
+                crate::utils::extract_local_images(&response.content, Some(image_cwd.as_path())),
+            )
+            .await;
+            let (text_only, img_paths) = (image_scan.text, image_scan.attachments);
+            // References that never became attachments, named in the reply
+            // below when the upload fails (#286).
+            let mut image_failures = image_scan.failures;
             let (text_only, _vid_paths) = crate::utils::extract_vid_markers(&text_only);
             let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
             // React-back (#372): the marker used to leak into Slack text.
@@ -2264,13 +2277,27 @@ async fn handle_message(
                         .await
                         {
                             tracing::error!("Slack: failed to upload generated image: {e}");
+                            image_failures.push(crate::utils::LocalImageFailure {
+                                raw: fname.clone(),
+                                resolved: Some(img_path.clone()),
+                                reason: crate::utils::LocalImageFailureReason::DeliveryFailed,
+                            });
                         }
                     }
                     Err(e) => {
                         tracing::error!("Slack: failed to read image {}: {}", img_path, e);
+                        image_failures.push(crate::utils::LocalImageFailure {
+                            raw: img_path.display().to_string(),
+                            resolved: Some(img_path.clone()),
+                            reason: crate::utils::LocalImageFailureReason::Unreadable,
+                        });
                     }
                 }
             }
+
+            // An image the reply announced must not vanish silently: name the
+            // ones that could not be attached (#286).
+            let text_only = crate::utils::append_failure_notice(&text_only, &image_failures);
 
             let chunks: Vec<String> = split_message(&text_only, 3000)
                 .into_iter()

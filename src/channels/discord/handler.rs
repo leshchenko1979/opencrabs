@@ -1088,7 +1088,9 @@ pub(crate) async fn handle_message(
                     // the same way the final-response path does.
                     let clean = crate::utils::sanitize::strip_llm_artifacts(&text);
                     let clean = redact_secrets(&clean);
-                    let (clean, _) = crate::utils::extract_img_markers(&clean);
+                    // Strip-only: this intermediate has no fetch step, so a
+                    // remote link stays in the text (#286).
+                    let clean = crate::utils::strip_image_references(&clean, None).text;
                     let (clean, _) = crate::utils::extract_vid_markers(&clean);
                     // Same table conversion as the final path — keys must
                     // match for the dedup below.
@@ -1255,7 +1257,18 @@ pub(crate) async fn handle_message(
                     tracing::warn!("Discord: react-back {em} failed: {e}");
                 }
             }
-            let (text_only, img_paths) = crate::utils::extract_img_markers(&response_content);
+            // Collect the reply's image references — markers, local markdown
+            // links, and REMOTE links — fetching remote targets so a link the
+            // model wrote ships as a real Discord attachment (#286).
+            let image_cwd = agent.get_working_directory_for_session(session_id);
+            let image_scan = crate::utils::resolve_remote_images(
+                crate::utils::extract_local_images(&response_content, Some(image_cwd.as_path())),
+            )
+            .await;
+            let (text_only, img_paths) = (image_scan.text, image_scan.attachments);
+            // References that never became attachments, reported in the reply
+            // below when the send fails (#286).
+            let mut image_failures = image_scan.failures;
             let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
             let text_only = redact_secrets(&text_only);
             // Discord has no table markup — convert before dedup so both
@@ -1344,6 +1357,10 @@ pub(crate) async fn handle_message(
             // remainder rolls into follow-up batches) instead of one
             // message per file.
             let mut attachments: Vec<CreateAttachment> = Vec::new();
+            // Discord's media gallery sends in batches of 10; remember which
+            // paths rode which batch so a rejected batch can be attributed back
+            // to the images it carried (#286).
+            let mut batch_paths: Vec<Vec<std::path::PathBuf>> = Vec::new();
             for img_path in &img_paths {
                 match tokio::fs::read(img_path).await {
                     Ok(bytes) => {
@@ -1352,32 +1369,64 @@ pub(crate) async fn handle_message(
                             .and_then(|n| n.to_str())
                             .unwrap_or("image.png")
                             .to_string();
+                        if attachments.len() % 10 == 0 {
+                            batch_paths.push(Vec::new());
+                        }
+                        batch_paths
+                            .last_mut()
+                            .expect("a batch was pushed for this attachment")
+                            .push(img_path.clone());
                         attachments.push(CreateAttachment::bytes(bytes, fname));
                     }
                     Err(e) => {
                         tracing::error!("Discord: failed to read image {}: {}", img_path, e);
+                        image_failures.push(crate::utils::LocalImageFailure {
+                            raw: img_path.display().to_string(),
+                            resolved: Some(img_path.clone()),
+                            reason: crate::utils::LocalImageFailureReason::Unreadable,
+                        });
                     }
                 }
             }
-            for batch in attachments.chunks(10) {
+            for (batch_index, batch) in attachments.chunks(10).enumerate() {
                 let mut message = CreateMessage::new();
                 for file in batch {
                     message = message.add_file(file.clone());
                 }
                 if let Err(e) = target.send_message(&ctx.http, message).await {
                     tracing::error!("Discord: failed to send media gallery batch: {}", e);
+                    for path in batch_paths.get(batch_index).into_iter().flatten() {
+                        image_failures.push(crate::utils::LocalImageFailure {
+                            raw: path.display().to_string(),
+                            resolved: Some(path.clone()),
+                            reason: crate::utils::LocalImageFailureReason::DeliveryFailed,
+                        });
+                    }
                 }
             }
+
+            // An image the reply announced must not vanish silently: name the
+            // ones that could not be attached (#286). Computed before the
+            // delivery-shape branch because both shapes must carry it — the
+            // kept-intermediate path edits its last chunk, not a fresh post.
+            let image_notice = crate::utils::failure_notice(&image_failures);
+            let text_only = match image_notice.as_deref() {
+                Some(notice) => format!("{text_only}\n\n{notice}"),
+                None => text_only,
+            };
 
             if skip_final_post {
                 // Answer already visible via the kept intermediate: append the
                 // ctx footer to its last chunk (edit, not a new message) so the
                 // completion marker still shows exactly once.
                 if let Some((id, last_chunk)) = footer_edit_target {
-                    let content = if footer.is_empty() {
-                        last_chunk
-                    } else {
-                        format!("{last_chunk}\n\n{footer}")
+                    let content = match (image_notice.as_deref(), footer.is_empty()) {
+                        (Some(notice), true) => format!("{last_chunk}\n\n{notice}"),
+                        (Some(notice), false) => {
+                            format!("{last_chunk}\n\n{footer}\n\n{notice}")
+                        }
+                        (None, true) => last_chunk,
+                        (None, false) => format!("{last_chunk}\n\n{footer}"),
                     };
                     let edit = serenity::builder::EditMessage::new().content(content);
                     if let Err(e) = target.edit_message(&ctx.http, id, edit).await {

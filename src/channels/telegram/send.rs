@@ -110,6 +110,30 @@ where
     }
 }
 
+/// Telegram's upload ceiling for `sendPhoto` is 10 MB — a larger file is
+/// rejected outright, while `sendDocument` carries it up to 50 MB. The kind is
+/// therefore a property of the byte length, not of the file: the same picture
+/// is a photo at 9 MB and a document at 11 MB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelegramMediaKind {
+    /// `sendPhoto` — inline preview, subject to the photo ceiling.
+    Photo,
+    /// `sendDocument` — no inline preview, but it actually arrives.
+    Document,
+}
+
+/// `sendPhoto` upload ceiling in bytes (Telegram Bot API).
+pub const TELEGRAM_PHOTO_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Which send method an image of `len` bytes needs.
+pub fn telegram_media_kind(len: u64) -> TelegramMediaKind {
+    if len <= TELEGRAM_PHOTO_MAX_BYTES {
+        TelegramMediaKind::Photo
+    } else {
+        TelegramMediaKind::Document
+    }
+}
+
 /// `bot.send_location(chat_id, lat, lng)` with optional `message_thread_id` (#1079).
 pub fn location_in_thread<C>(
     bot: &Bot,

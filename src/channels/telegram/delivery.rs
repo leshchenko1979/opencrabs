@@ -12,11 +12,15 @@ use super::flow::{
 use super::handler::{fire_reaction, map_to_allowed_reaction};
 use super::intermediates::send_html_or_plain;
 use super::markdown::{markdown_to_telegram_html, split_message};
-use super::send::{best_effort_delete, message_in_thread, photo_in_thread};
+use super::send::{
+    TelegramMediaKind, best_effort_delete, document_in_thread, message_in_thread, photo_in_thread,
+    telegram_media_kind,
+};
 use crate::brain::agent::AgentService;
 use crate::db::ChannelMessageRepository;
 use crate::db::models::ChannelMessage as DbChannelMessage;
 use crate::utils::sanitize::redact_secrets;
+use crate::utils::{LocalImageFailure, LocalImageFailureReason};
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{InputFile, MessageId, ParseMode};
@@ -159,8 +163,21 @@ pub(crate) async fn deliver_final_response(
             // response (classic HTML edit/send, or table-free rich message).
             // render_suggestions attaches its keyboard to THIS bubble when Some.
             let mut final_bubble: Option<super::state::MergeBubble> = None;
-            // Extract <<IMG:path>> markers — send each as a Telegram photo.
-            let (text_only, img_paths) = crate::utils::extract_img_markers(&response.content);
+            // Collect the reply's image references — `<<IMG:path>>` markers,
+            // local markdown links, and REMOTE links — into one attachment
+            // list. Remote targets are fetched here, so a link the model wrote
+            // ships as native media instead of arriving as bare markdown
+            // (#286).
+            let image_cwd = agent.get_working_directory_for_session(session_id);
+            let image_scan = crate::utils::resolve_remote_images(
+                crate::utils::extract_local_images(&response.content, Some(image_cwd.as_path())),
+            )
+            .await;
+            let (text_only, img_paths) = (image_scan.text, image_scan.attachments);
+            // References that never became attachments: rejected local paths,
+            // failed downloads, and — appended to below — images the channel
+            // itself refused. Drives the honest notice and the regen nudge.
+            let mut image_failures: Vec<LocalImageFailure> = image_scan.failures;
             // Strip LLM-hallucinated artifacts (<!-- tools-v2 -->, XML tool blocks)
             let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
             let text_only = redact_secrets(&text_only);
@@ -246,7 +263,9 @@ pub(crate) async fn deliver_final_response(
             // the main reclaim below can tell "nothing left to reclaim" from
             // "the reclaim found nothing that was ever there" in its K warn.
             let mut pre_reclaimed = false;
-            let text_only = if text_only.trim().is_empty() {
+            // `mut` so the image-delivery notice below can append to the final
+            // text once the sends have actually been attempted (#286).
+            let mut text_only = if text_only.trim().is_empty() {
                 if suppressed_final {
                     let (discarded, discarded_trailer) =
                         take_folded_final(bot, chat_id, streaming, options_pending(streaming))
@@ -496,20 +515,62 @@ pub(crate) async fn deliver_final_response(
                 s.sections.ctx = (!footer.is_empty()).then(|| footer.clone());
             }
 
-            for img_path in img_paths {
-                match tokio::fs::read(&img_path).await {
-                    Ok(bytes) => {
-                        if let Err(e) =
-                            photo_in_thread(bot, chat_id, thread_id, InputFile::memory(bytes)).await
-                        {
-                            tracing::error!("Telegram: failed to send generated image: {}", e);
-                        }
-                    }
+            // Send each attachment. A picture above the 10 MB photo ceiling
+            // would be rejected by `sendPhoto`, so it ships as a document
+            // instead — an un-previewable image beats a missing one (#286).
+            for img_path in &img_paths {
+                let bytes = match tokio::fs::read(img_path).await {
+                    Ok(bytes) => bytes,
                     Err(e) => {
-                        tracing::error!("Telegram: failed to read image {}: {}", img_path, e);
+                        tracing::error!(
+                            "Telegram: failed to read image {}: {}",
+                            img_path.display(),
+                            e
+                        );
+                        image_failures.push(LocalImageFailure {
+                            raw: img_path.display().to_string(),
+                            resolved: Some(img_path.clone()),
+                            reason: LocalImageFailureReason::Unreadable,
+                        });
+                        continue;
                     }
+                };
+                let kind = telegram_media_kind(bytes.len() as u64);
+                let sent = match kind {
+                    TelegramMediaKind::Photo => {
+                        photo_in_thread(bot, chat_id, thread_id, InputFile::memory(bytes))
+                            .await
+                            .map(|_| ())
+                    }
+                    TelegramMediaKind::Document => {
+                        document_in_thread(bot, chat_id, thread_id, InputFile::memory(bytes))
+                            .await
+                            .map(|_| ())
+                    }
+                };
+                if let Err(e) = sent {
+                    tracing::error!(
+                        "Telegram: failed to send image {} as {}: {}",
+                        img_path.display(),
+                        match kind {
+                            TelegramMediaKind::Photo => "photo",
+                            TelegramMediaKind::Document => "document",
+                        },
+                        e
+                    );
+                    image_failures.push(LocalImageFailure {
+                        raw: img_path.display().to_string(),
+                        resolved: Some(img_path.clone()),
+                        reason: LocalImageFailureReason::DeliveryFailed,
+                    });
                 }
             }
+
+            // An image the reply announced must not vanish silently when the
+            // send fails: the reply says plainly which one is missing. This is
+            // the honest floor — the post-delivery re-entry ladder (#286) may
+            // replace it with a model-authored line where a budget is available.
+            text_only = crate::utils::append_failure_notice(&text_only, &image_failures);
 
             // Rich fallback: when all content was sent as HTML intermediates
             // during streaming, the dedup step strips text_only to empty. If
@@ -1191,7 +1252,10 @@ pub(crate) async fn drain_remaining_display(
                 tool_buffer.clear();
                 let text = crate::utils::sanitize::strip_llm_artifacts(&text);
                 let text = redact_secrets(&text);
-                let (text, _img_paths) = crate::utils::extract_img_markers(&text);
+                // Strip-only: this is an intermediate bubble, not the delivery
+                // path, so a remote link is left in the text rather than
+                // deleted by a scan that will never fetch it (#286).
+                let text = crate::utils::strip_image_references(&text, None).text;
                 let (text, react_emoji) = crate::utils::extract_react_marker(&text);
                 if let (Some(target), Some(emoji)) = (react_target, react_emoji.as_deref()) {
                     fire_reaction(bot, chat, target, emoji).await;
