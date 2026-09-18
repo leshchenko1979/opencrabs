@@ -81,7 +81,24 @@ on:
         required: false
         default: false
         type: boolean
+      diagnose:
+        description: "true = print the runner's real resource envelope (cpu/ram/disk/cgroup/sccache) around the test leg; diagnostic only, never fails the run"
+        required: false
+        default: false
+        type: boolean
 
+# Owner GO 2026-09-18 01:2xZ (diagnose variable, CI-143 investigation): the
+# 2026-09-17 SIGTERM storm (16/17 `Run tests` runs, exit 143, post-steps
+# skipped => runner teardown) was resolved by removing RUSTC_WRAPPER=sccache
+# from THIS leg, but the ENVELOPE it exhausted was never measured — H3 (cgroup
+# memory ceiling) and H4 (thin-LTO link memory cliff) were argued against the
+# published 16 GB / 4 vCPU spec, not against a reading. `diagnose=true` prints
+# nproc, free -m, df -h, cgroup v2 memory.max/current/peak (v1 fallback),
+# cache sizes and `sccache --show-stats` BOTH before and after the test leg,
+# so a future kill can be attributed from the run's own log. Default false =>
+# every existing caller is byte-for-byte unchanged in behavior. Diagnostics are
+# `|| true`-guarded: a probe that fails the gate it is measuring is worthless.
+#
 # Owner-approved 2026-08-30 (fix batch, a87b66dc; group KEY corrected same
 # day, owner "Fix it" 02:32Z on the cancel-storm finding): every
 # workflow_dispatch lands on this carrier branch, so github.ref_name is
@@ -174,7 +191,36 @@ jobs:
           RUSTC_WRAPPER: "sccache"
         run: cargo clippy --locked --lib --bins --tests --all-features -- -D warnings
 
+      - name: "Diagnose: resource envelope BEFORE test leg"
+        if: ${{ inputs.diagnose && !inputs.fix && !inputs.lockregen && !inputs.fast }}
+        # Input-gated diagnostic (default false). Every probe is `|| true`:
+        # a measurement that can fail the gate it measures is worthless.
+        run: |
+          echo "===== DIAG pre-test $(date -u +%FT%TZ) ====="
+          echo "--- cpu ---"
+          nproc; grep -m1 'model name' /proc/cpuinfo || true
+          echo "--- mem (MiB) ---"
+          free -m || true
+          echo "--- disk ---"
+          df -h / || true; df -h "$GITHUB_WORKSPACE" || true
+          echo "--- cgroup v2 memory ---"
+          for f in memory.max memory.high memory.current memory.peak memory.swap.max; do
+            [ -r "/sys/fs/cgroup/$f" ] && echo "$f = $(cat "/sys/fs/cgroup/$f")" || true
+          done
+          echo "--- cgroup v1 memory (fallback) ---"
+          for f in memory.limit_in_bytes memory.max_usage_in_bytes; do
+            [ -r "/sys/fs/cgroup/memory/$f" ] && echo "$f = $(cat "/sys/fs/cgroup/memory/$f")" || true
+          done
+          echo "--- cache sizes ---"
+          du -sh target 2>/dev/null || true
+          du -sh "$HOME/.cache/sccache" 2>/dev/null || true
+          du -sh "$HOME/.cargo/registry" 2>/dev/null || true
+          echo "--- sccache stats ---"
+          sccache --show-stats 2>/dev/null || echo "(sccache not on PATH)"
+          echo "===== DIAG pre-test END ====="
+
       - name: Run tests
+        id: tests
         if: ${{ !inputs.fix && !inputs.lockregen && !inputs.fast }}
         # v0.4.23 law: the all-features test gate. Flags mirror upstream's
         # `test` job exactly (profile ci + mold linker).
@@ -192,6 +238,35 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
         run: cargo test --locked --profile ci --all-features --verbose
+
+      - name: "Diagnose: resource envelope AFTER test leg"
+        if: ${{ always() && inputs.diagnose && !inputs.fix && !inputs.lockregen && !inputs.fast }}
+        # `always()` is load-bearing: the value of this leg is the CONTRAST.
+        # On an ordinary test failure GitHub still runs it (and post-steps) and
+        # the envelope is captured; on a runner teardown it never runs at all,
+        # which is itself the signature (see the 2026-09-17 143 post-step
+        # evidence: post-steps skipped on 16/16 kills, ran on 6/6 controls).
+        run: |
+          echo "===== DIAG post-test $(date -u +%FT%TZ) ====="
+          echo "test-leg outcome: ${{ steps.tests.outcome }}"
+          echo "--- mem (MiB) ---"
+          free -m || true
+          echo "--- disk ---"
+          df -h / || true
+          echo "--- cgroup v2 memory ---"
+          for f in memory.max memory.current memory.peak memory.events; do
+            [ -r "/sys/fs/cgroup/$f" ] && echo "$f = $(cat "/sys/fs/cgroup/$f")" || true
+          done
+          echo "--- oom counters (cgroup v2) ---"
+          [ -r /sys/fs/cgroup/memory.events ] && cat /sys/fs/cgroup/memory.events || true
+          echo "--- kernel oom / kill evidence ---"
+          dmesg 2>/dev/null | grep -iE 'oom|killed process|out of memory' | tail -20 || echo "(dmesg unreadable)"
+          echo "--- cache sizes ---"
+          du -sh target 2>/dev/null || true
+          du -sh "$HOME/.cache/sccache" 2>/dev/null || true
+          echo "--- sccache stats ---"
+          sccache --show-stats 2>/dev/null || echo "(sccache not on PATH)"
+          echo "===== DIAG post-test END ====="
 
       - name: Apply cargo fmt (fix mode)
         if: ${{ inputs.fix }}
