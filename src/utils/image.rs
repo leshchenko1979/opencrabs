@@ -591,6 +591,24 @@ fn skip_whitespace(text: &str, from: usize) -> usize {
     cursor
 }
 
+/// What a scan does with a REMOTE image reference (`http(s)://`, `data:`).
+///
+/// The two call-site families want opposite things, and getting it wrong is
+/// silent: a delivery-bound scan must remove the reference because it is about
+/// to ship the image itself, while a strip-only scan has no fetch step and
+/// would delete the link outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteRefs {
+    /// Collect the URL and remove the reference from the text. The delivery
+    /// layer fetches it and ships it as native media; leaving it in place would
+    /// show the user the same picture twice.
+    Fetch,
+    /// Leave the reference in the text and collect nothing. Used by strip-only
+    /// call sites, which have nothing to fetch with — deleting a link there
+    /// would lose it, and recording it as "awaiting a fetch" would be a lie.
+    KeepInText,
+}
+
 /// File one parsed image reference into the scan accumulators. Returns `true`
 /// when the reference was consumed and must leave the reply text.
 ///
@@ -598,10 +616,14 @@ fn skip_whitespace(text: &str, from: usize) -> usize {
 /// leaves the text, because a marker is never prose; a markdown reference whose
 /// relative target has no base directory to resolve against stays verbatim, as
 /// it may be ordinary prose that merely looks like a reference.
+///
+/// A marker's remote target always leaves the text whatever `remote` says — a
+/// marker is machine syntax, never prose, so there is no link to preserve.
 fn record_candidate(
     raw: String,
     base_dir: Option<&Path>,
     strip_unresolved: bool,
+    remote: RemoteRefs,
     scan: &mut LocalImageScan,
 ) -> bool {
     match classify_image_target(&raw, base_dir) {
@@ -617,8 +639,15 @@ fn record_candidate(
             true
         }
         ImageTarget::Remote(url) => {
-            scan.remote.push(url);
-            true
+            // Only a delivery scan has a fetch step, and `LocalImageScan::remote`
+            // means "awaiting a fetch" — so a strip-only scan records nothing and
+            // removal falls back to the marker/markdown distinction.
+            if remote == RemoteRefs::Fetch {
+                scan.remote.push(url);
+                true
+            } else {
+                strip_unresolved
+            }
         }
         ImageTarget::Unresolved => {
             if strip_unresolved {
@@ -648,7 +677,28 @@ fn record_candidate(
 /// drives the self-healing nudge). Remote targets and anything inside a code
 /// span are collected as [`LocalImageScan::remote`] rather than left as bare
 /// markdown — the delivery layer fetches them so they ship as native media.
+///
+/// For a call site with no fetch step, use [`strip_image_references`]: it keeps
+/// a remote reference in the text instead of deleting a link nobody will
+/// replace.
 pub fn extract_local_images(text: &str, base_dir: Option<&Path>) -> LocalImageScan {
+    scan_image_references(text, base_dir, RemoteRefs::Fetch)
+}
+
+/// Strip-only variant of [`extract_local_images`] for call sites that sanitise
+/// text without delivering anything (intermediate bubbles, command detection,
+/// reaction prompts). Local markers and validated paths still leave the text —
+/// the delivery path re-runs extraction on the final reply — but a remote
+/// reference stays in place, because nothing downstream will fetch it.
+pub fn strip_image_references(text: &str, base_dir: Option<&Path>) -> LocalImageScan {
+    scan_image_references(text, base_dir, RemoteRefs::KeepInText)
+}
+
+fn scan_image_references(
+    text: &str,
+    base_dir: Option<&Path>,
+    remote: RemoteRefs,
+) -> LocalImageScan {
     let regions = code_regions(text);
     let mut scan = LocalImageScan {
         text: String::with_capacity(text.len()),
@@ -661,7 +711,7 @@ pub fn extract_local_images(text: &str, base_dir: Option<&Path>) -> LocalImageSc
             && let Some((end, raw)) = parse_marker_at(text, i, IMG_PREFIX)
         {
             if !raw.is_empty() {
-                record_candidate(raw, base_dir, true, &mut scan);
+                record_candidate(raw, base_dir, true, remote, &mut scan);
             }
             i = end;
             continue;
@@ -669,7 +719,7 @@ pub fn extract_local_images(text: &str, base_dir: Option<&Path>) -> LocalImageSc
         if !regions[i]
             && text[i..].starts_with("![")
             && let Some((end, raw)) = parse_markdown_image(text, i)
-            && record_candidate(raw, base_dir, false, &mut scan)
+            && record_candidate(raw, base_dir, false, remote, &mut scan)
         {
             i = end;
             continue;
@@ -698,4 +748,25 @@ pub fn failure_notice(failures: &[LocalImageFailure]) -> Option<String> {
         notice.push_str(&failure.describe());
     }
     Some(notice)
+}
+
+/// Append [`failure_notice`] to a reply body, separated by a blank line.
+///
+/// Every channel's delivery site uses this shape, and the empty-body case is
+/// why it lives here rather than being spelled out at each site: a reply whose
+/// ONLY content was a broken image reference leaves an empty body, and
+/// `format!("{body}\n\n{notice}")` would then deliver the notice as a
+/// blank-line-prefixed message (or, worse, be skipped by a downstream
+/// emptiness check and say nothing at all). An empty body becomes the notice.
+pub fn append_failure_notice(body: &str, failures: &[LocalImageFailure]) -> String {
+    match failure_notice(failures) {
+        None => body.to_string(),
+        Some(notice) => {
+            if body.trim().is_empty() {
+                notice
+            } else {
+                format!("{}\n\n{notice}", body.trim_end())
+            }
+        }
+    }
 }

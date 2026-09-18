@@ -1548,7 +1548,9 @@ pub(crate) async fn handle_message(
         // the send-or-edit choice it has to pace.
         Arc::new(move |session_id, event| match event {
             ProgressEvent::IntermediateText { text, .. } => {
-                let (clean, _) = crate::utils::extract_img_markers(&text);
+                // Strip-only: the streamed bubble has no fetch step, so a
+                // remote link stays in the text (#286).
+                let clean = crate::utils::strip_image_references(&text, None).text;
                 let clean = redact_secrets(&clean);
                 let clean = crate::utils::sanitize::strip_llm_artifacts(&clean);
                 let clean = crate::utils::slack_fmt::markdown_to_mrkdwn(&clean);
@@ -1889,8 +1891,18 @@ pub(crate) async fn handle_message(
             // `reply_target` above.
             let reply_jid = reply_target.clone();
 
-            // Extract <<IMG:path>> markers — send each as a real WhatsApp image message.
-            let (text_content, img_paths) = crate::utils::extract_img_markers(&response.content);
+            // Image references: markers, local markdown links, and REMOTE
+            // links — remote targets are fetched here so a link the model
+            // wrote ships as a real WhatsApp image (#286).
+            let image_cwd = agent.get_working_directory_for_session(session_id);
+            let image_scan = crate::utils::resolve_remote_images(
+                crate::utils::extract_local_images(&response.content, Some(image_cwd.as_path())),
+            )
+            .await;
+            let (text_content, img_paths) = (image_scan.text, image_scan.attachments);
+            // References that never became attachments, named in the reply
+            // below when the send fails (#286).
+            let mut image_failures = image_scan.failures;
             let text_content = crate::utils::sanitize::strip_llm_artifacts(&text_content);
             let text_content = redact_secrets(&text_content);
             let text_content = crate::utils::slack_fmt::markdown_to_mrkdwn(&text_content);
@@ -1944,6 +1956,12 @@ pub(crate) async fn handle_message(
                                         "WhatsApp: failed to send generated image: {}",
                                         e
                                     );
+                                    image_failures.push(crate::utils::LocalImageFailure {
+                                        raw: img_path.display().to_string(),
+                                        resolved: Some(img_path.clone()),
+                                        reason:
+                                            crate::utils::LocalImageFailureReason::DeliveryFailed,
+                                    });
                                 }
                             }
                             Err(e) => {
@@ -1952,14 +1970,30 @@ pub(crate) async fn handle_message(
                                     img_path,
                                     e
                                 );
+                                image_failures.push(crate::utils::LocalImageFailure {
+                                    raw: img_path.display().to_string(),
+                                    resolved: Some(img_path.clone()),
+                                    reason: crate::utils::LocalImageFailureReason::DeliveryFailed,
+                                });
                             }
                         }
                     }
                     Err(e) => {
                         tracing::error!("WhatsApp: failed to read image {}: {}", img_path, e);
+                        image_failures.push(crate::utils::LocalImageFailure {
+                            raw: img_path.display().to_string(),
+                            resolved: Some(img_path.clone()),
+                            reason: crate::utils::LocalImageFailureReason::Unreadable,
+                        });
                     }
                 }
             }
+
+            // An image the reply announced must not vanish silently: name the
+            // ones that could not be attached. Appended before the delivery
+            // branches so a reply whose only content was a broken image
+            // reference still sends something (#286).
+            let text_content = crate::utils::append_failure_notice(&text_content, &image_failures);
 
             // Send text response (markers stripped).
             // Skip if already delivered progressively via the intermediate-text callback
@@ -2279,7 +2313,9 @@ pub(crate) async fn send_connection_greeting(
 
     match result {
         Ok(response) => {
-            let (text_content, _imgs) = crate::utils::extract_img_markers(&response.content);
+            // Strip-only: this onboarding greeting posts no attachments, so a
+            // remote link stays in the text (#286).
+            let text_content = crate::utils::strip_image_references(&response.content, None).text;
             let text_content = crate::utils::sanitize::strip_llm_artifacts(&text_content);
             let text_content = redact_secrets(&text_content);
             let text_content = crate::utils::slack_fmt::markdown_to_mrkdwn(&text_content);

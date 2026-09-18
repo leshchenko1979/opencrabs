@@ -3065,7 +3065,10 @@ pub(crate) async fn handle_reaction(
     // visible text and firing no reaction). When a marker is found and the
     // incoming reaction is not a stop signal (the react-only default), drop any
     // surrounding leaked text: it is the model's reasoning, not a real reply.
-    let (text_only, _img_paths) = crate::utils::extract_img_markers(&response.content);
+    // Strip-only: this turn's expected output is a bare reaction marker, and the
+    // final response handler owns image delivery — a remote link must survive
+    // here rather than be deleted by a scan with no fetch step (#286).
+    let text_only = crate::utils::strip_image_references(&response.content, None).text;
     let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
     let text_only = redact_secrets(&text_only);
     let (text_only, react_emoji) = crate::utils::extract_react_marker_lenient(&text_only);

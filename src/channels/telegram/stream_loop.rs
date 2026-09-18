@@ -166,14 +166,16 @@ pub(crate) fn spawn_edit_loop(
 
                                     // Sanitize exactly as before folding:
                                     // strip LLM artifacts, redact secrets, strip
-                                    // <<IMG:>> markers (the final-response
+                                    // image references (the final-response
                                     // handler sends the image), and extract +
                                     // fire <<react:>> now so a mid-turn reaction
                                     // acknowledges the user immediately (#261).
+                                    // Strip-only: a remote link stays in the
+                                    // text — nothing here fetches it (#286).
                                     let text = crate::utils::sanitize::strip_llm_artifacts(text);
                                     let text = crate::utils::redact_secrets_scoped(&text, is_dm);
-                                    let (text, _img_paths) =
-                                        crate::utils::extract_img_markers(&text);
+                                    let text =
+                                        crate::utils::strip_image_references(&text, None).text;
                                     let (text, react_emoji) =
                                         crate::utils::extract_react_marker(&text);
                                     // A resumed turn has no inbound message to
