@@ -2285,7 +2285,11 @@ async fn handle_message(
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Slack: failed to read image {}: {}", img_path, e);
+                        tracing::error!(
+                            "Slack: failed to read image {}: {}",
+                            img_path.display(),
+                            e
+                        );
                         image_failures.push(crate::utils::LocalImageFailure {
                             raw: img_path.display().to_string(),
                             resolved: Some(img_path.clone()),
