@@ -275,7 +275,7 @@ impl CronManageTool {
         if let Some(Err(reason)) = deliver_to.as_deref().map(validate_delivery_target) {
             return Ok(ToolResult::error(format!(
                 "Cannot create job: delivery target would silently fail — {reason} \
-                 Fix the channel credential in keys.toml (or omit deliver_to) and retry."
+                 Fix the channel credential (config.toml or keys.toml) or omit deliver_to, then retry."
             )));
         }
 
@@ -506,7 +506,7 @@ impl CronManageTool {
                             if let Err(reason) = validate_delivery_target(&v) {
                                 return Ok(ToolResult::error(format!(
                                     "Cannot update job: delivery target would silently fail — {reason} \
-                                     Fix the channel credential in keys.toml (or clear deliver_to) and retry."
+                                     Fix the channel credential (config.toml or keys.toml) or clear deliver_to, then retry."
                                 )));
                             }
                             patch.deliver_to = Some(Some(v));
@@ -1095,7 +1095,9 @@ pub(crate) fn validate_delivery_target(target: &str) -> std::result::Result<(), 
             {
                 if crate::cron::scheduler::read_channel_secret("telegram", "token").is_none() {
                     return Err(
-                        "no Telegram bot token in keys.toml (channels.telegram.token)".to_string(),
+                        "no Telegram bot token configured (channels.telegram.token — set it in \
+                         config.toml or keys.toml)"
+                            .to_string(),
                     );
                 }
             }
@@ -1106,7 +1108,9 @@ pub(crate) fn validate_delivery_target(target: &str) -> std::result::Result<(), 
             {
                 if crate::cron::scheduler::read_channel_secret("discord", "token").is_none() {
                     return Err(
-                        "no Discord bot token in keys.toml (channels.discord.token)".to_string()
+                        "no Discord bot token configured (channels.discord.token — set it in \
+                         config.toml or keys.toml)"
+                            .to_string(),
                     );
                 }
             }
@@ -1117,7 +1121,9 @@ pub(crate) fn validate_delivery_target(target: &str) -> std::result::Result<(), 
             {
                 if crate::cron::scheduler::read_channel_secret("slack", "token").is_none() {
                     return Err(
-                        "no Slack bot token in keys.toml (channels.slack.token)".to_string()
+                        "no Slack bot token configured (channels.slack.token — set it in \
+                         config.toml or keys.toml)"
+                            .to_string(),
                     );
                 }
             }
