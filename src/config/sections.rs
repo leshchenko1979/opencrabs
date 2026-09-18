@@ -133,10 +133,49 @@ pub fn ignored_key_paths(content: &str) -> Result<Vec<String>, String> {
 /// Ignored TOP-LEVEL sections in `content` (single-segment ignored paths) —
 /// what the loader's typo warning reports at load time.
 pub fn unknown_top_level_sections(content: &str) -> Result<Vec<String>, String> {
-    Ok(ignored_key_paths(content)?
-        .into_iter()
-        .filter(|p| !p.contains('.'))
-        .collect())
+    let (legacy, other) = classify_unknown_top_level_sections(content)?;
+    Ok(legacy.into_iter().chain(other).collect())
+}
+
+/// Single-segment ignored paths in `content`, split into the legacy channel
+/// spellings and everything else (#341).
+///
+/// A top-level `[telegram]` is not a typo: channel settings MOVED under
+/// `[channels]`, so the table parses cleanly, `Config` discards it, and
+/// whatever credential it carries is simply not in effect. The two cases
+/// need different words — one names the correct path and the consequence,
+/// the other names a likely typo — so the caller can say which it is
+/// instead of reporting both as "possible typos".
+///
+/// Returns `(legacy_channel_sections, other_unknown_sections)`, each in
+/// document order.
+pub fn classify_unknown_top_level_sections(
+    content: &str,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut legacy = Vec::new();
+    let mut other = Vec::new();
+    for path in ignored_key_paths(content)? {
+        if path.contains('.') {
+            continue;
+        }
+        if is_legacy_channel_section(&path) {
+            legacy.push(path);
+        } else {
+            other.push(path);
+        }
+    }
+    Ok((legacy, other))
+}
+
+/// Is `name` a top-level spelling of a section that now lives under
+/// `[channels]`?
+///
+/// Derived from [`SECTION_PARENTS`], so a channel added there is covered
+/// here with no second list to keep in step.
+pub fn is_legacy_channel_section(name: &str) -> bool {
+    SECTION_PARENTS
+        .iter()
+        .any(|(child, parent)| *child == name && *parent == "channels")
 }
 
 /// Can a WRITE address `section`/`key` in the candidate document?

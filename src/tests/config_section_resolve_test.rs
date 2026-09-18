@@ -110,3 +110,83 @@ fn an_unknown_section_still_fails() {
         assert_eq!(resolve_section(bad), None, "wrongly accepted {bad:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// #341: a section that MOVED is not a typo, and the loader has to say so.
+//
+// A top-level `[telegram]` parses cleanly, `Config` discards it, and any
+// credential inside is silently not in effect — the live channel keeps
+// answering from config.toml while every cron delivery to that channel dies.
+// Reported as a generic "possible typo" it is indistinguishable from a
+// misspelling, which is how the state stayed invisible for nine days.
+// ---------------------------------------------------------------------------
+
+use crate::config::sections::{classify_unknown_top_level_sections, is_legacy_channel_section};
+
+#[test]
+fn a_legacy_top_level_channel_section_is_classified_as_legacy() {
+    // The exact shape from the issue: a token in a section nothing reads.
+    let (legacy, other) =
+        classify_unknown_top_level_sections("[telegram]\ntoken = \"123:abc\"\n").expect("parse");
+    assert_eq!(legacy, vec!["telegram".to_string()]);
+    assert!(
+        other.is_empty(),
+        "legacy section leaked into typos: {other:?}"
+    );
+}
+
+#[test]
+fn a_misspelt_section_is_not_called_legacy() {
+    // `agentt` is a typo, `telegram` is a move — the two must not be merged,
+    // or the actionable one gets buried in the noise again.
+    let (legacy, other) =
+        classify_unknown_top_level_sections("[agentt]\nfoo = 1\n").expect("parse");
+    assert!(legacy.is_empty(), "typo read as legacy: {legacy:?}");
+    assert_eq!(other, vec!["agentt".to_string()]);
+}
+
+#[test]
+fn both_kinds_are_reported_in_their_own_bucket() {
+    let (legacy, other) = classify_unknown_top_level_sections(
+        "[telegram]\ntoken = \"x\"\n\n[agentt]\nfoo = 1\n\n[slack]\ntoken = \"y\"\n",
+    )
+    .expect("parse");
+    assert_eq!(legacy, vec!["telegram".to_string(), "slack".to_string()]);
+    assert_eq!(other, vec!["agentt".to_string()]);
+}
+
+#[test]
+fn a_valid_config_produces_no_warnings() {
+    // No false positives: the canonical layout is silent.
+    let (legacy, other) =
+        classify_unknown_top_level_sections("[channels.telegram]\ntoken = \"123:abc\"\n")
+            .expect("parse");
+    assert!(legacy.is_empty(), "false legacy: {legacy:?}");
+    assert!(other.is_empty(), "false typo: {other:?}");
+}
+
+#[test]
+fn nested_unknown_keys_are_not_top_level() {
+    // Only single-segment paths are section-level findings; a stray key
+    // inside a known section is the write guard's business, not this one's.
+    let (legacy, other) =
+        classify_unknown_top_level_sections("[channels.telegram]\nnonsense = 1\n").expect("parse");
+    assert!(legacy.is_empty(), "nested key read as legacy: {legacy:?}");
+    assert!(other.is_empty(), "nested key read as top-level: {other:?}");
+}
+
+#[test]
+fn legacy_membership_follows_the_channels_children() {
+    // Derived from SECTION_PARENTS, so a channel added there is covered with
+    // no second list to keep in step — and a non-channel child of another
+    // parent is NOT legacy here (`stt` resolves to `providers`).
+    for child in ["telegram", "discord", "slack", "whatsapp", "trello"] {
+        assert!(is_legacy_channel_section(child), "missed {child}");
+    }
+    for not_child in ["channels", "providers", "stt", "agent", "agentt", ""] {
+        assert!(
+            !is_legacy_channel_section(not_child),
+            "wrongly claimed {not_child}"
+        );
+    }
+}
