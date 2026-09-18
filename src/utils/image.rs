@@ -291,14 +291,11 @@ fn is_reaction_emoji(payload: &str) -> bool {
 fn extract_markers_with_prefix(text: &str, prefix: &str) -> (String, Vec<String>) {
     let mut out = text.to_string();
     let mut paths = Vec::new();
-    let prefix_len = prefix.len();
 
     while let Some(start) = out.find(prefix) {
-        let Some(rel_end) = out[start..].find(">>") else {
+        let Some((end, path)) = parse_marker_at(&out, start, prefix) else {
             break;
         };
-        let end = start + rel_end + 2; // past ">>"
-        let path = out[start + prefix_len..start + rel_end].trim().to_string();
         if !path.is_empty() {
             paths.push(path);
         }
@@ -306,4 +303,394 @@ fn extract_markers_with_prefix(text: &str, prefix: &str) -> (String, Vec<String>
     }
 
     (out.trim().to_string(), paths)
+}
+
+// ── Local image extraction (#286) ─────────────────────────────────────────
+//
+// A channel reply can carry an image in two forms: the proprietary marker
+// `<<IMG:path>>` and the standard markdown reference `![alt](path)`. Models
+// emit the markdown form by default, and a chat platform cannot read a host
+// path — so the reference must be recognized, resolved against the session
+// working directory, validated, and handed to the channel as real media.
+// This section is that ONE place: every channel calls
+// [`extract_local_images`] instead of parsing the text itself.
+
+use std::path::{Path, PathBuf};
+
+/// Marker prefix for the proprietary image form.
+const IMG_PREFIX: &str = "<<IMG:";
+
+/// Why a local image candidate could not become an attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalImageFailureReason {
+    /// No filesystem entry at the resolved path.
+    NotFound,
+    /// The path exists but is not a regular file (directory, socket, …).
+    NotAFile,
+    /// The file exists and is regular but holds zero bytes.
+    Empty,
+    /// The leading bytes match no supported image format.
+    UnsupportedFormat,
+    /// The file exists but could not be opened or read.
+    Unreadable,
+    /// A remote reference could not be fetched (connect error, timeout, or a
+    /// non-success HTTP status).
+    DownloadFailed,
+    /// A remote reference resolved to more bytes than the per-image limit.
+    TooLarge,
+    /// The reply referenced more remote images than the per-reply budget.
+    TooMany,
+    /// A remote reference is not a usable image URL (`data:` payload that is
+    /// not base64, a base64 body that is not an image, an unparsable URL).
+    BadUrl,
+}
+
+impl LocalImageFailureReason {
+    /// Short human- and model-facing phrase used in nudges and notices.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "file not found",
+            Self::NotAFile => "not a regular file",
+            Self::Empty => "file is empty (0 bytes)",
+            Self::UnsupportedFormat => "not a supported image format (png/jpeg/gif/webp/bmp)",
+            Self::Unreadable => "file could not be read",
+            Self::DownloadFailed => {
+                "could not be downloaded (unreachable, timed out, or HTTP error)"
+            }
+            Self::TooLarge => "larger than the per-image size limit",
+            Self::TooMany => "too many remote images in one reply (per-reply limit reached)",
+            Self::BadUrl => "not a usable image URL",
+        }
+    }
+}
+
+/// One local image reference that was removed from the reply but could not be
+/// delivered, with the reason the model needs in order to fix it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalImageFailure {
+    /// The reference exactly as it appeared in the reply text.
+    pub raw: String,
+    /// The path the reference resolved to, when resolution succeeded.
+    pub resolved: Option<PathBuf>,
+    /// Why the candidate was rejected.
+    pub reason: LocalImageFailureReason,
+}
+
+impl LocalImageFailure {
+    /// `raw (reason)` — the phrase quoted back to the model in a nudge.
+    pub fn describe(&self) -> String {
+        format!("{} ({})", self.raw, self.reason.as_str())
+    }
+}
+
+/// Result of scanning a reply for image references.
+#[derive(Debug, Clone, Default)]
+pub struct LocalImageScan {
+    /// Reply text with every local image reference removed. Remote targets and
+    /// references inside code spans are left untouched.
+    pub text: String,
+    /// Resolved and validated local images, in order of appearance.
+    pub attachments: Vec<PathBuf>,
+    /// Remote image URLs awaiting a fetch, in order of appearance.
+    pub remote: Vec<String>,
+    /// Rejected local candidates, in order of appearance.
+    pub failures: Vec<LocalImageFailure>,
+}
+
+/// Where an image reference points.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageTarget {
+    /// A network URL (`http://`, `https://`, `data:`) — the delivery layer
+    /// fetches it so it ships as a native attachment like a local file.
+    Remote(String),
+    /// A local path, resolved to an absolute one.
+    Local(PathBuf),
+    /// A relative path with no base directory to resolve it against.
+    Unresolved,
+}
+
+/// Per-byte predicate: `regions[i]` is true when byte `i` of `text` sits
+/// inside a code span or fenced block. A backtick toggles the state, so a
+/// fenced block (three backticks) and an inline span (one) both open and
+/// close with the same rule — one home for "is this inside code", shared by
+/// the markdown image scanner and the reaction-marker scanner.
+pub fn code_regions(text: &str) -> Vec<bool> {
+    let mut regions = vec![false; text.len()];
+    let mut in_code = false;
+    for (i, byte) in text.bytes().enumerate() {
+        regions[i] = in_code;
+        if byte == b'`' {
+            in_code = !in_code;
+        }
+    }
+    regions
+}
+
+/// Classify an image reference target and resolve local paths to absolute
+/// ones: `~/…` through the shared tilde expander, absolute paths as-is, and
+/// relative paths joined to `base_dir` (the session working directory).
+pub fn classify_image_target(raw: &str, base_dir: Option<&Path>) -> ImageTarget {
+    let trimmed = raw.trim();
+    if is_remote_url(trimmed) {
+        return ImageTarget::Remote(trimmed.to_string());
+    }
+    let expanded = crate::brain::tools::error::expand_tilde(trimmed);
+    if expanded.is_absolute() {
+        return ImageTarget::Local(expanded);
+    }
+    match base_dir {
+        Some(dir) => ImageTarget::Local(dir.join(expanded)),
+        None => ImageTarget::Unresolved,
+    }
+}
+
+/// True when the reference is a fetchable network URL rather than a local path.
+/// `mailto:` and `ftp://` are deliberately absent: neither can yield image
+/// bytes, so a reference carrying one is left in the text as written.
+pub(crate) fn is_remote_url(raw: &str) -> bool {
+    const SCHEMES: [&str; 3] = ["http://", "https://", "data:"];
+    let lower = raw.to_ascii_lowercase();
+    SCHEMES.iter().any(|scheme| lower.starts_with(scheme))
+}
+
+/// Validate a resolved local image candidate: it must exist, be a regular
+/// file, hold at least one byte, and start with a supported image signature.
+pub fn validate_local_image(path: &Path) -> Result<(), LocalImageFailureReason> {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LocalImageFailureReason::NotFound);
+        }
+        Err(_) => return Err(LocalImageFailureReason::Unreadable),
+    };
+    if !meta.is_file() {
+        return Err(LocalImageFailureReason::NotAFile);
+    }
+    if meta.len() == 0 {
+        return Err(LocalImageFailureReason::Empty);
+    }
+    let mut head = [0u8; 12];
+    let mut file = std::fs::File::open(path).map_err(|_| LocalImageFailureReason::Unreadable)?;
+    let read = std::io::Read::read(&mut file, &mut head)
+        .map_err(|_| LocalImageFailureReason::Unreadable)?;
+    if is_supported_image(&head[..read]) {
+        Ok(())
+    } else {
+        Err(LocalImageFailureReason::UnsupportedFormat)
+    }
+}
+
+/// Magic-byte check for the formats chat platforms accept as native images.
+/// Minimum header lengths are enforced so short text that happens to start
+/// with the same two ASCII letters (`BMW …`) is not read as an image.
+pub(crate) fn is_supported_image(head: &[u8]) -> bool {
+    const SIGNATURES: [&[u8]; 4] = [b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a"];
+    if SIGNATURES.iter().any(|sig| head.starts_with(sig)) {
+        return true;
+    }
+    if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP" {
+        return true;
+    }
+    head.len() >= 14 && head.starts_with(b"BM")
+}
+
+/// The file extension for an image whose leading bytes are `head`, so a fetched
+/// remote image lands on disk with a name channels and users recognise. Only
+/// call with bytes [`is_supported_image`] has accepted.
+pub(crate) fn image_extension(head: &[u8]) -> &'static str {
+    if head.starts_with(b"\x89PNG") {
+        "png"
+    } else if head.starts_with(b"\xff\xd8\xff") {
+        "jpg"
+    } else if head.starts_with(b"GIF") {
+        "gif"
+    } else if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP" {
+        "webp"
+    } else {
+        "bmp"
+    }
+}
+
+/// Parse a `<<PREFIX:path>>` marker starting at `start`, which must lie on a
+/// char boundary and begin `prefix`. Returns `(end_byte_exclusive, raw_path)`
+/// with the payload trimmed, or `None` when no `>>` closes the marker before
+/// the end of the text. The single marker-parsing rule: both the streaming
+/// scanner below and [`extract_markers_with_prefix`] go through it.
+fn parse_marker_at(text: &str, start: usize, prefix: &str) -> Option<(usize, String)> {
+    debug_assert!(text[start..].starts_with(prefix));
+    let rel_end = text[start..].find(">>")?;
+    let payload_start = start + prefix.len();
+    let payload_end = start + rel_end;
+    if payload_start > payload_end {
+        return None;
+    }
+    Some((
+        payload_end + 2,
+        text[payload_start..payload_end].trim().to_string(),
+    ))
+}
+
+/// Parse a markdown image reference starting at `start` (a char boundary where
+/// the text begins with `![`). Accepts `![alt](target)`, the angle-bracket form
+/// `![alt](<target>)` that markdown requires when the path holds spaces, and an
+/// optional `"title"` / `'title'` after the target. Returns
+/// `(end_byte_exclusive, raw_target)`.
+fn parse_markdown_image(text: &str, start: usize) -> Option<(usize, String)> {
+    debug_assert!(text[start..].starts_with("!["));
+    // `\![alt](path)` is escaped literal text, not a reference.
+    if start > 0 && text[..start].ends_with('\\') {
+        return None;
+    }
+    let alt_end = text[start + 2..].find(']')?;
+    let paren = start + 2 + alt_end + 1;
+    if !text[paren..].starts_with('(') {
+        return None;
+    }
+    let mut cursor = skip_whitespace(text, paren + 1);
+    let (target, mut after_target) = if text[cursor..].starts_with('<') {
+        let close = text[cursor + 1..].find('>')?;
+        let target = text[cursor + 1..cursor + 1 + close].to_string();
+        (target, cursor + 1 + close + 1)
+    } else {
+        let mut end = cursor;
+        while let Some(ch) = text[end..].chars().next() {
+            if ch.is_whitespace() || ch == ')' {
+                break;
+            }
+            end += ch.len_utf8();
+        }
+        (text[cursor..end].to_string(), end)
+    };
+    after_target = skip_whitespace(text, after_target);
+    if let Some(quote) = text[after_target..].chars().next()
+        && (quote == '"' || quote == '\'')
+    {
+        let close = text[after_target + 1..].find(quote)?;
+        after_target = skip_whitespace(text, after_target + 1 + close + 1);
+    }
+    if !text[after_target..].starts_with(')') || target.trim().is_empty() {
+        return None;
+    }
+    Some((after_target + 1, target))
+}
+
+/// Byte offset of the first non-whitespace char at or after `from`.
+fn skip_whitespace(text: &str, from: usize) -> usize {
+    let mut cursor = from;
+    while let Some(ch) = text[cursor..].chars().next() {
+        if !ch.is_whitespace() {
+            break;
+        }
+        cursor += ch.len_utf8();
+    }
+    cursor
+}
+
+/// File one parsed image reference into the scan accumulators. Returns `true`
+/// when the reference was consumed and must leave the reply text.
+///
+/// `strip_unresolved` separates the two forms: a marker (`<<IMG:…>>`) always
+/// leaves the text, because a marker is never prose; a markdown reference whose
+/// relative target has no base directory to resolve against stays verbatim, as
+/// it may be ordinary prose that merely looks like a reference.
+fn record_candidate(
+    raw: String,
+    base_dir: Option<&Path>,
+    strip_unresolved: bool,
+    scan: &mut LocalImageScan,
+) -> bool {
+    match classify_image_target(&raw, base_dir) {
+        ImageTarget::Local(path) => {
+            match validate_local_image(&path) {
+                Ok(()) => scan.attachments.push(path),
+                Err(reason) => scan.failures.push(LocalImageFailure {
+                    raw,
+                    resolved: Some(path),
+                    reason,
+                }),
+            }
+            true
+        }
+        ImageTarget::Remote(url) => {
+            scan.remote.push(url);
+            true
+        }
+        ImageTarget::Unresolved => {
+            if strip_unresolved {
+                scan.failures.push(LocalImageFailure {
+                    raw,
+                    resolved: None,
+                    reason: LocalImageFailureReason::NotFound,
+                });
+            }
+            strip_unresolved
+        }
+    }
+}
+
+/// Scan a reply for image references in both forms and hand back the text
+/// without them, the validated local attachments, the remote URLs awaiting a
+/// fetch, and the rejected candidates.
+///
+/// `base_dir` is the session working directory: a relative path resolves
+/// against it. With no base directory (a strip-only call site that has no
+/// session handle) a relative markdown target stays verbatim in the text,
+/// while `~`-prefixed and absolute targets still resolve and deliver.
+///
+/// Removal semantics: a validated image leaves the text and becomes an
+/// attachment; a rejected local candidate leaves the text and becomes a
+/// failure (dead markdown never reaches the user, and the failure is what
+/// drives the self-healing nudge). Remote targets and anything inside a code
+/// span are collected as [`LocalImageScan::remote`] rather than left as bare
+/// markdown — the delivery layer fetches them so they ship as native media.
+pub fn extract_local_images(text: &str, base_dir: Option<&Path>) -> LocalImageScan {
+    let regions = code_regions(text);
+    let mut scan = LocalImageScan {
+        text: String::with_capacity(text.len()),
+        ..LocalImageScan::default()
+    };
+    let mut i = 0;
+
+    while i < text.len() {
+        if text[i..].starts_with(IMG_PREFIX)
+            && let Some((end, raw)) = parse_marker_at(text, i, IMG_PREFIX)
+        {
+            if !raw.is_empty() {
+                record_candidate(raw, base_dir, true, &mut scan);
+            }
+            i = end;
+            continue;
+        }
+        if !regions[i]
+            && text[i..].starts_with("![")
+            && let Some((end, raw)) = parse_markdown_image(text, i)
+            && record_candidate(raw, base_dir, false, &mut scan)
+        {
+            i = end;
+            continue;
+        }
+        let ch = text[i..].chars().next().expect("i lies on a char boundary");
+        scan.text.push(ch);
+        i += ch.len_utf8();
+    }
+
+    scan.text = scan.text.trim().to_string();
+    scan
+}
+
+/// The honest user-visible line for images that could not be delivered, used
+/// when the self-healing nudge budget is exhausted. `None` when there is
+/// nothing to report.
+pub fn failure_notice(failures: &[LocalImageFailure]) -> Option<String> {
+    if failures.is_empty() {
+        return None;
+    }
+    let mut notice = String::from(
+        "⚠️ Image not attached — the reply referenced an image that could not be delivered:",
+    );
+    for failure in failures {
+        notice.push_str("\n- ");
+        notice.push_str(&failure.describe());
+    }
+    Some(notice)
 }
