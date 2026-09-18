@@ -43,9 +43,16 @@ pub async fn judge_goal(
     last_response: &str,
 ) -> JudgeDecision {
     // Truncate last_response to avoid blowing the judge's context window.
-    // The last 4k chars is usually enough to determine completion.
+    // The last 4k bytes is usually enough to determine completion.
+    //
+    // The cut MUST land on a UTF-8 char boundary. `len()` is bytes, and the
+    // accumulated assistant text routinely carries 3-4 byte codepoints
+    // (emoji, `→`, Cyrillic), so a raw byte offset panics with
+    // "byte index N is not a char boundary". `ceil_char_boundary` snaps the
+    // start FORWARD to the next boundary (std; total — clamps at `len`), the
+    // same treatment `utils::sanitize` applies to its redaction cursor.
     let truncated_response = if last_response.len() > 4000 {
-        &last_response[last_response.len() - 4000..]
+        &last_response[last_response.ceil_char_boundary(last_response.len() - 4000)..]
     } else {
         last_response
     };
