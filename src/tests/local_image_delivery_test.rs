@@ -267,3 +267,68 @@ fn a_remote_link_inside_a_code_span_is_left_alone() {
         assert!(scan.attachments.is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Post-delivery re-entry latch (#286)
+// ---------------------------------------------------------------------------
+//
+// The correction turn the delivery site queues runs a full tool loop and
+// delivers through the SAME path, so a failure in that turn would re-arm the
+// re-entry and chain synthetic turns forever. These pin the bound: one
+// re-entry per user exchange, re-armed by the user's next message.
+
+#[cfg(feature = "telegram")]
+mod reentry_latch {
+    use super::*;
+    use crate::channels::telegram::TelegramState;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    #[test]
+    fn the_latch_admits_exactly_one_reentry_per_exchange() {
+        let state = Arc::new(TelegramState::new());
+        let sid = Uuid::new_v4();
+
+        assert!(
+            state.try_spend_image_reentry(sid),
+            "the first delivery failure must buy a correction turn"
+        );
+        for _ in 0..3 {
+            assert!(
+                !state.try_spend_image_reentry(sid),
+                "a second failure inside the same exchange must not re-arm the \
+                 re-entry — the correction turn would chain forever"
+            );
+        }
+    }
+
+    #[test]
+    fn clearing_the_latch_re_arms_it_for_the_next_exchange() {
+        let state = Arc::new(TelegramState::new());
+        let sid = Uuid::new_v4();
+
+        assert!(state.try_spend_image_reentry(sid));
+        assert!(!state.try_spend_image_reentry(sid));
+
+        // The user's next message ends the exchange: a genuine failure in the
+        // turn it triggers deserves its own correction turn.
+        state.clear_image_reentry(sid);
+        assert!(
+            state.try_spend_image_reentry(sid),
+            "a later exchange must heal too, not be starved by an earlier failure"
+        );
+    }
+
+    #[test]
+    fn the_latch_is_per_session() {
+        let state = Arc::new(TelegramState::new());
+        let spent = Uuid::new_v4();
+        let fresh = Uuid::new_v4();
+
+        assert!(state.try_spend_image_reentry(spent));
+        assert!(
+            state.try_spend_image_reentry(fresh),
+            "one session's spent re-entry must not silence another's"
+        );
+    }
+}
