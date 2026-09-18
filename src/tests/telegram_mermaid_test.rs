@@ -1091,3 +1091,33 @@ fn rich_body_offenders_name_the_unresolved_refs() {
         None
     );
 }
+
+/// #334 (H4): the two extractor forms — one over a `MediaEntry` slice, one over a
+/// bare id set — are the SAME predicate, so the rewrite guard and the rejection
+/// log can never disagree about what an orphan reference is. The live caller
+/// (`rich_body_offenders`) holds ids from a request body and uses the `_by` form;
+/// the media-slice form is its reference twin.
+#[test]
+fn unresolved_ref_extractors_agree_across_both_forms() {
+    let media = vec![MediaEntry {
+        id: "diag1".to_string(),
+        url: None,
+        bytes: Some(vec![1, 2, 3]),
+    }];
+    let text = "a ![x](tg://photo?id=absent) b attach://gone c tg://photo?id=diag1";
+
+    let by_media = unresolved_media_refs(text, &media);
+    let by_ids = unresolved_media_refs_by(text, |id| id == "diag1");
+
+    // Sorted + deduped, so a log line is stable run to run.
+    assert_eq!(by_media, vec!["attach://gone", "tg://photo?id=absent"]);
+    assert_eq!(by_media, by_ids, "both extractor forms must agree");
+
+    // A resolving reference is never an offender; with no media at all, every
+    // reference is one.
+    assert!(unresolved_media_refs("![d](tg://photo?id=diag1)", &media).is_empty());
+    assert_eq!(
+        unresolved_media_refs("![d](tg://photo?id=diag1)", &[]),
+        vec!["tg://photo?id=diag1"]
+    );
+}

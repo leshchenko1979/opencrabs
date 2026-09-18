@@ -221,6 +221,12 @@ fn parse_alignment(sep: &str, cols: usize) -> Vec<Align> {
 /// 3. Enforce button layout fit constraints for interactive buttons ([`enforce_button_fit`]).
 ///
 /// Idempotent and fence-safe.
+///
+/// Test-only since #334: every production caller owns a media array and goes
+/// through [`normalize_rich_markdown_with_media`], so the media-free form would
+/// be dead code in a lib build. Kept compiled for tests so the media-free
+/// semantics stay covered by the normalize suite.
+#[cfg(test)]
 pub(crate) fn normalize_rich_markdown(text: &str) -> String {
     normalize_rich_markdown_with_media(text, &[])
 }
