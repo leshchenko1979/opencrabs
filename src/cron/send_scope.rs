@@ -136,6 +136,22 @@ pub fn parse_permitted_targets(deliver_to: Option<&str>) -> Option<Vec<Permitted
     })
 }
 
+/// The send scope a cron job runs under, derived from its own `deliver_to`.
+///
+/// This is the cron-entry-point shape of [`parse_permitted_targets`], and the
+/// two differ on exactly one input. The parser answers "what did the job
+/// configure?" — `None` there means the field is absent. A cron turn instead
+/// asks "what may this job reach?", and a job that configured nothing may
+/// reach nothing: an absent field maps to an empty scope, never to `None`
+/// (Unscoped, "not a cron turn"), which would hand the turn every channel the
+/// bot can reach (#317).
+///
+/// Callers that are not cron execution — a resumed ordinary session — want
+/// `None` and must not come through here.
+pub fn cron_job_scope(deliver_to: Option<&str>) -> Vec<PermittedTarget> {
+    parse_permitted_targets(deliver_to).unwrap_or_default()
+}
+
 /// Why a send was refused, for the tool result the model reads.
 pub fn refusal_for(channel: &str, target_id: &str) -> String {
     match permission() {
@@ -185,9 +201,7 @@ pub async fn resolve_cron_session_scope(
     if let Some(id) = job_id {
         let repo = crate::db::CronJobRepository::new(pool.clone());
         match repo.find_by_id(&id.to_string()).await {
-            Ok(Some(job)) => {
-                parse_permitted_targets(job.deliver_to.as_deref()).or(Some(Vec::new()))
-            }
+            Ok(Some(job)) => Some(cron_job_scope(job.deliver_to.as_deref())),
             Ok(None) | Err(_) => {
                 // Cron job not found in DB or query error: fail closed to Nowhere
                 Some(Vec::new())

@@ -43,6 +43,27 @@ async fn cron_with_no_targets_sends_nowhere_across_all_authorities() {
 }
 
 #[tokio::test]
+async fn a_targetless_job_runs_nowhere_not_unscoped() {
+    // #317: the cron entry point feeds this scope. An absent `deliver_to` used
+    // to arrive here as `None` — "not a cron turn" — which left `may_send` true
+    // for every channel the bot can reach. The job's own scope is derived
+    // through `cron_job_scope`, which never yields `None`.
+    let scope = crate::cron::send_scope::cron_job_scope(None);
+    assert!(scope.is_empty());
+
+    with_permitted_targets(Some(scope), async {
+        assert_eq!(permission(), SendPermission::Nowhere);
+        assert!(!may_send("telegram", "-100123"));
+        assert!(!may_send("discord", "123456789"));
+        assert!(!may_send_to(-100123));
+
+        let r = refusal_for("telegram", "-100123");
+        assert!(r.contains("no deliver_to"), "{r}");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn telegram_authority_scope_pin() {
     let targets = vec![PermittedTarget {
         channel: "telegram",
