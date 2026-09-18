@@ -400,7 +400,7 @@ pub async fn handle_command(
     // NotACommand). The markers are machine context, not part of the typed
     // command, so drop them for detection; the image still reaches the agent
     // via the handler's own text when the message is genuinely not a command.
-    let (text_no_media, _imgs) = crate::utils::extract_img_markers(text);
+    let text_no_media = crate::utils::strip_image_references(text, None).text;
     let (text_no_media, _vids) = crate::utils::extract_vid_markers(&text_no_media);
     // Strip @botname from the command token — defense-in-depth: handler.rs
     // already strips this bot's own handle, but if bot_username() returns

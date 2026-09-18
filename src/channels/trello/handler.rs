@@ -234,8 +234,19 @@ pub async fn process_comment(
         return;
     }
 
-    // Extract <<IMG:path>> markers — upload each as a card attachment and embed inline.
-    let (text_only, img_paths) = crate::utils::extract_img_markers(&reply);
+    // Collect the reply's image references — markers, local markdown links, and
+    // REMOTE links — into one attachment list; remote targets are fetched here
+    // so a link the model wrote becomes a real card attachment (#286).
+    let image_cwd = agent.get_working_directory_for_session(session_id);
+    let image_scan = crate::utils::resolve_remote_images(crate::utils::extract_local_images(
+        &reply,
+        Some(image_cwd.as_path()),
+    ))
+    .await;
+    let (text_only, img_paths) = (image_scan.text, image_scan.attachments);
+    // References that never became attachments. Trello reports them in the
+    // comment rather than nudging — the poll loop has no regen round (#286).
+    let mut image_failures = image_scan.failures;
     let mut image_embeds: Vec<String> = Vec::new();
     for img_path in img_paths {
         match tokio::fs::read(&img_path).await {
@@ -254,21 +265,43 @@ pub async fn process_comment(
                     }
                     Err(e) => {
                         tracing::warn!("Trello: failed to upload image '{}': {}", filename, e);
+                        image_failures.push(crate::utils::LocalImageFailure {
+                            raw: filename.clone(),
+                            resolved: Some(img_path.clone()),
+                            reason: crate::utils::LocalImageFailureReason::DeliveryFailed,
+                        });
                     }
                 }
             }
             Err(e) => {
                 tracing::warn!("Trello: failed to read image file '{}': {}", img_path, e);
+                image_failures.push(crate::utils::LocalImageFailure {
+                    raw: img_path.display().to_string(),
+                    resolved: Some(img_path.clone()),
+                    reason: crate::utils::LocalImageFailureReason::Unreadable,
+                });
             }
         }
     }
 
-    let final_reply = match (text_only.trim().is_empty(), image_embeds.is_empty()) {
-        (true, true) => return,
+    // An image the reply announced must not vanish silently: the comment names
+    // the ones that could not be attached. Computed BEFORE the emptiness gate
+    // below, so a reply whose only content was a broken image reference still
+    // says something instead of returning without a comment (#286).
+    let mut body = match (text_only.trim().is_empty(), image_embeds.is_empty()) {
+        (true, true) => String::new(),
         (true, false) => image_embeds.join("\n"),
         (false, true) => text_only.trim().to_string(),
         (false, false) => format!("{}\n\n{}", text_only.trim(), image_embeds.join("\n")),
     };
+    body = crate::utils::append_failure_notice(&body, &image_failures);
+    // Nothing to say: no prose, no attachment, and no failure to report. A
+    // turn that DID reference an image always leaves a failure here, so this
+    // gate no longer swallows the very case #286 exists for.
+    if body.is_empty() {
+        return;
+    }
+    let final_reply = body;
 
     // Split at ~4000 chars on newlines (Trello limit is ~16 384 chars per comment,
     // but we keep chunks short so they read well in the card activity feed).
