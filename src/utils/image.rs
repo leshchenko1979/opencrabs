@@ -412,6 +412,12 @@ pub enum ImageTarget {
     Local(PathBuf),
     /// A relative path with no base directory to resolve it against.
     Unresolved,
+    /// A Telegram media reference (`tg://photo?id=…`, `tg://video|audio?id=…`,
+    /// `attach://…`) — resolved SERVER-side against the rich request's `media`
+    /// array, never against the filesystem (#334). Classifying one as a local
+    /// path joined it to the session cwd, so the in-loop regen nudge quoted a
+    /// nonsense `<cwd>/tg://photo?id=…` back to the model as actionable advice.
+    MediaRef(String),
 }
 
 /// Per-byte predicate: `regions[i]` is true when byte `i` of `text` sits
@@ -439,6 +445,9 @@ pub fn classify_image_target(raw: &str, base_dir: Option<&Path>) -> ImageTarget 
     if is_remote_url(trimmed) {
         return ImageTarget::Remote(trimmed.to_string());
     }
+    if is_telegram_media_ref(trimmed) {
+        return ImageTarget::MediaRef(trimmed.to_string());
+    }
     let expanded = crate::brain::tools::error::expand_tilde(trimmed);
     if expanded.is_absolute() {
         return ImageTarget::Local(expanded);
@@ -447,6 +456,14 @@ pub fn classify_image_target(raw: &str, base_dir: Option<&Path>) -> ImageTarget 
         Some(dir) => ImageTarget::Local(dir.join(expanded)),
         None => ImageTarget::Unresolved,
     }
+}
+
+/// True when the reference is a Telegram media reference rather than a path.
+/// These are resolved by Telegram against the `media` array of the rich request
+/// that carries them, so a caller must never join one to the session cwd (#334).
+pub(crate) fn is_telegram_media_ref(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    lower.starts_with("tg://") || lower.starts_with("attach://")
 }
 
 /// True when the reference is a fetchable network URL rather than a local path.
@@ -648,6 +665,13 @@ fn record_candidate(
             } else {
                 strip_unresolved
             }
+        }
+        ImageTarget::MediaRef(_) => {
+            // Not a file and not fetchable by us: Telegram resolves it against the
+            // `media` array of the rich request that carries it (#334). Recording it
+            // as a local failure is what produced the cwd-joined nonsense nudge.
+            // Nothing to attach, nothing to fetch — leave the text as written.
+            strip_unresolved
         }
         ImageTarget::Unresolved => {
             if strip_unresolved {
