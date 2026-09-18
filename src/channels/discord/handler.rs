@@ -1379,7 +1379,11 @@ pub(crate) async fn handle_message(
                         attachments.push(CreateAttachment::bytes(bytes, fname));
                     }
                     Err(e) => {
-                        tracing::error!("Discord: failed to read image {}: {}", img_path, e);
+                        tracing::error!(
+                            "Discord: failed to read image {}: {}",
+                            img_path.display(),
+                            e
+                        );
                         image_failures.push(crate::utils::LocalImageFailure {
                             raw: img_path.display().to_string(),
                             resolved: Some(img_path.clone()),

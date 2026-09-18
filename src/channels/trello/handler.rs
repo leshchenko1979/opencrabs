@@ -274,7 +274,11 @@ pub async fn process_comment(
                 }
             }
             Err(e) => {
-                tracing::warn!("Trello: failed to read image file '{}': {}", img_path, e);
+                tracing::warn!(
+                    "Trello: failed to read image file '{}': {}",
+                    img_path.display(),
+                    e
+                );
                 image_failures.push(crate::utils::LocalImageFailure {
                     raw: img_path.display().to_string(),
                     resolved: Some(img_path.clone()),
