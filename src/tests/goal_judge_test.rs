@@ -1,7 +1,7 @@
 //! Tests for goal judge retry logic and max_tokens configuration.
 
 use crate::brain::goal::judge::judge_goal;
-use crate::brain::goal::types::GoalVerdict;
+use crate::brain::goal::types::{GoalVerdict, JudgeDecision};
 use crate::brain::provider::error::ProviderError;
 use crate::brain::provider::{
     ContentBlock, LLMRequest, LLMResponse, Provider, ProviderStream, StopReason, TokenUsage,
@@ -303,4 +303,60 @@ async fn long_response_truncated() {
         "prompt should be truncated, got len={}",
         prompt_text.len()
     );
+}
+
+/// A response whose 4000-byte-from-end cut lands INSIDE a multi-byte codepoint
+/// must not panic (#300). Emoji are 4 bytes, so `len() - 4000` routinely falls
+/// mid-codepoint in real assistant text.
+#[tokio::test]
+async fn long_response_truncation_is_char_boundary_safe() {
+    let provider = MockProvider::new(vec![Ok(make_response(
+        &done_json("ok"),
+        StopReason::EndTurn,
+    ))]);
+
+    // 100 ASCII bytes, then a 4-byte emoji at bytes 100..104, then 3998 ASCII
+    // bytes → len = 4102, so `len - 4000` = 102, INSIDE the emoji.
+    let mut response = "A".repeat(100);
+    response.push('🔺');
+    response.push_str(&"B".repeat(3998));
+    assert_eq!(response.len(), 4102);
+    assert!(
+        !response.is_char_boundary(102),
+        "fixture must land mid-codepoint"
+    );
+
+    // Panicked before #300's fix; must return normally now.
+    judge_goal(&provider, "mock-model", "goal", &response).await;
+
+    let requests = provider.captured_requests();
+    let prompt_text = match &requests[0].messages[0].content[0] {
+        ContentBlock::Text { text } => text.as_str(),
+        _ => panic!("expected text block"),
+    };
+    let tail = "B".repeat(3998);
+    assert!(
+        prompt_text.ends_with(&tail),
+        "truncated prompt should keep the ASCII tail"
+    );
+}
+
+/// The fail-open warn path truncates the raw reply to 200 bytes for logging.
+/// A non-ASCII reply whose 200-byte cut lands mid-codepoint must not panic
+/// (#300).
+#[test]
+fn parse_or_continue_truncates_non_ascii_without_panicking() {
+    // 199 ASCII bytes, then a 3-byte arrow at bytes 199..202, then junk that
+    // fails JSON parsing → the warn path runs and slices at byte 200.
+    let mut raw = "X".repeat(199);
+    raw.push('→');
+    raw.push_str("not json");
+    assert_eq!(raw.len(), 210);
+    assert!(
+        !raw.is_char_boundary(200),
+        "fixture must land mid-codepoint"
+    );
+
+    let decision = JudgeDecision::parse_or_continue(&raw);
+    assert_eq!(decision.verdict, GoalVerdict::Continue);
 }
