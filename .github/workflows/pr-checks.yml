@@ -245,14 +245,45 @@ jobs:
         # `test` job exactly (profile ci + mold linker).
         #
         # sccache REMOVED from THIS leg 2026-09-17 (HQ; owner escalation on
-        # "a lot of recent jobs have concurrency problems"). Evidence: after
-        # carrier a023cf49f (20:43:44Z) added RUSTC_WRAPPER=sccache here, EVERY
-        # `Run tests` run died with SIGTERM exit 143 mid-link (post-steps
-        # skipped, zero compiler/test errors) — while the 11 runs before that
-        # commit had zero 143s. The all-features thin-LTO test link under
-        # sccache exhausts the hosted runner. sccache STAYS on the Clippy leg
-        # (check-only; never died). Do NOT re-add here without a 143-free GREEN
-        # gate on this exact ref.
+        # "a lot of recent jobs have concurrency problems"). Mechanism settled
+        # 2026-09-18 by a controlled A/B on ONE frozen sha and re-measured;
+        # every claim below carries its run-id receipt. The 2026-09-17 wording
+        # ("EVERY run died", "exhausts the hosted runner") was NOT what was
+        # measured and is superseded here.
+        #
+        # ASSOCIATION (Stage 3, frozen sha 917276229f, branches ci143-arm-a/b):
+        # sccache ON this leg => 3/3 killed (35311940193, 35311954158,
+        # 35311969301; exit 143, post-steps skipped); sccache OFF => 0/5
+        # (35311932972, 35311947218, 35311961750, 35311976997, 35311984779).
+        # Fisher exact one-tailed p = 0.01786. Re-measured on the same sha
+        # (Stage 5): OFF => 0/6 (35315974178, 35315980857, 35315988724,
+        # 35315997163, 35316005299, 35316013097), p = 0.01190 vs the ON arm,
+        # p = 0.00007 vs the 2026-09-17 census (16/17 = 94.1%).
+        #
+        # NOT "EVERY": run 35278837497 is an sccache-era survivor (OK, 28m27s),
+        # so that era's rate is 16/17, not 17/17.
+        #
+        # MECHANISM — capacity was MEASURED, not argued from the spec (Stage 2,
+        # run 35302713809): 4 vCPU, MemTotal 15.61 GiB, cgroup v2 memory.max =
+        # max on the runner AND its system.slice parent, memory.events oom /
+        # oom_kill = 0, dmesg empty, disk 75G free (49%). The kill is therefore
+        # NOT a cgroup-limit OOM, NOT the kernel OOM killer and NOT disk
+        # pressure — the sender is the runner agent's SIGTERM. What IS real: the
+        # job runs at 93.7% -> 95.4% of physical RAM and ends with 0.72 GiB of
+        # headroom, so the margin scheduling jitter must cover is under 1 GiB.
+        # That cliff is measured; its LINK to sccache is the association above.
+        # The exhaust mechanism itself is NOT instrumented (Stage 4 skipped).
+        #
+        # CAVEAT (Stage 5, 2026-09-18) — on a COLD cargo cache this leg sits at
+        # the 45-min job ceiling: Arm A ran cold ("No cache found.") at 31.82-
+        # 44.68 min, tightest margin 0.32 min, and 1/6 cold dispatches exceeded
+        # the ceiling (35311993052, 45.53 min, cancelled — not a 143 kill).
+        # Warm re-dispatch is 17.13-25.13 min. Removing sccache does NOT
+        # address that exposure.
+        #
+        # sccache STAYS on the Clippy leg (check-only; never died). Do NOT
+        # re-add here without a 143-free GREEN gate on this exact ref.
+        # Full evidence: /root/ci143-evidence/FINDINGS.md (Stages 0-5).
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
