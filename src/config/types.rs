@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 pub(crate) static FIRST_LOAD_STATUS: std::sync::OnceLock<ConfigLoadStatus> =
     std::sync::OnceLock::new();
 
-/// Unknown top-level keys found in config.toml (possible typos).
+/// User-facing config warnings collected during load: unknown top-level keys
+/// (possible typos) and the legacy channel layout, each rendered as a
+/// self-describing sentence so one list can carry both (#341).
 static CONFIG_TYPO_WARNINGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// Mutex protecting read-modify-write cycles on config.toml / keys.toml.

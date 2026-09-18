@@ -428,20 +428,17 @@ impl Config {
         // Expand tilde in database path (TOML doesn't expand ~)
         config.database.path = expand_tilde(&config.database.path);
 
-        // Warn about unknown top-level keys in config.toml
-        if let Some(path) = Self::system_config_path()
-            && path.exists()
-        {
-            Self::warn_unknown_keys(&path);
-        }
+        // Warn about top-level sections the config documents discard:
+        // unknown keys (possible typos) and the legacy channel layout (#341).
+        Self::warn_unknown_keys();
 
         tracing::trace!("Configuration loaded successfully");
         Ok(config)
     }
 
-    /// Check for unknown top-level keys and log warnings.
-    /// Only collects warnings once — subsequent calls are no-ops.
-    fn warn_unknown_keys(path: &Path) {
+    /// Check for unknown top-level sections in config.toml and keys.toml and
+    /// log warnings. Only collects warnings once — subsequent calls are no-ops.
+    fn warn_unknown_keys() {
         use std::sync::atomic::{AtomicBool, Ordering};
         static CHECKED: AtomicBool = AtomicBool::new(false);
         if CHECKED.swap(true, Ordering::Relaxed) {
@@ -453,25 +450,80 @@ impl Config {
         // never drift (its predecessor, the hand-maintained
         // `KNOWN_TOP_LEVEL_KEYS` list, was missing `doctor`, so a live
         // [doctor] section warned as a possible typo).
-        let Ok(raw) = std::fs::read_to_string(path) else {
+        if let Some(path) = Self::system_config_path()
+            && let Ok(raw) = std::fs::read_to_string(&path)
+        {
+            Self::report_unknown_sections("config.toml", &raw);
+        }
+
+        // #341: keys.toml had NO serde_ignored pass at all, so a legacy
+        // top-level `[telegram]` in it was entirely silent — which is the
+        // exact shape of the nine-day outage: a stale token sat in a section
+        // nothing reads while the live channel kept answering from
+        // config.toml and every cron delivery died.
+        if let Ok(raw) = std::fs::read_to_string(keys_path()) {
+            Self::report_unknown_sections("keys.toml", &raw);
+        }
+    }
+
+    /// Report the top-level sections the document in `content` discards.
+    ///
+    /// A legacy channel spelling (`[telegram]`) gets its own line at WARN
+    /// naming the correct path and the consequence: the table parses and is
+    /// then thrown away, so a credential inside it is silently NOT in
+    /// effect — the live channel keeps answering from `config.toml` while
+    /// every cron delivery to that channel fails (#341). The generic
+    /// "possible typos" line is what buried that: a moved section and a
+    /// misspelt one read identically, so the state looked healthy for nine
+    /// days.
+    fn report_unknown_sections(label: &str, content: &str) {
+        let Ok((legacy, other)) =
+            crate::config::sections::classify_unknown_top_level_sections(content)
+        else {
             return;
         };
-        let Ok(unknown) = crate::config::sections::unknown_top_level_sections(&raw) else {
-            return;
-        };
-        if !unknown.is_empty() {
+
+        if !legacy.is_empty() {
+            let as_written = legacy
+                .iter()
+                .map(|s| format!("[{s}]"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let correct = legacy
+                .iter()
+                .map(|s| format!("[channels.{s}]"))
+                .collect::<Vec<_>>()
+                .join(", ");
             tracing::warn!(
-                "Unknown top-level keys in config.toml (possible typos): {}",
-                unknown.join(", ")
+                "{label}: top-level {as_written} is the LEGACY channel layout — it \
+                 is parsed and then DISCARDED, so any credential in it is not in \
+                 effect. Move it under [channels]: {correct}"
             );
             CONFIG_TYPO_WARNINGS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .extend(unknown);
+                .push(format!(
+                    "{as_written} is IGNORED (legacy layout) — move it to {correct}"
+                ));
+        }
+
+        if !other.is_empty() {
+            tracing::warn!(
+                "Unknown top-level keys in {label} (possible typos): {}",
+                other.join(", ")
+            );
+            CONFIG_TYPO_WARNINGS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(other.iter().map(|k| format!("unknown key `{k}`")));
         }
     }
 
-    /// Returns any config typo warnings collected during load (drains the list).
+    /// Returns the config warnings collected during load (drains the list).
+    ///
+    /// Each entry is a self-describing sentence — an unknown key or the
+    /// legacy channel layout — so callers render the list under a neutral
+    /// heading rather than labelling every entry a typo (#341).
     pub fn take_typo_warnings() -> Vec<String> {
         CONFIG_TYPO_WARNINGS
             .lock()
