@@ -116,7 +116,10 @@ pub(crate) async fn process_tool_results_capping(
                         }
                     })
                     .collect();
-                let file_path = format!("{}/session_{}_{}.log", TOOL_OUTPUT_DIR, session_id, sanitized_id);
+                let file_path = format!(
+                    "{}/session_{}_{}.log",
+                    TOOL_OUTPUT_DIR, session_id, sanitized_id
+                );
 
                 // Write full raw content to disk
                 if let Err(e) = tokio::fs::create_dir_all(TOOL_OUTPUT_DIR).await {
@@ -1367,17 +1370,22 @@ impl AgentService {
             // Replaces fleet-wide fanout notifications with JIT turn-start hints.
             for slug in &active_skills {
                 if let Some(mtime) = crate::brain::skills::skill_file_mtime(slug) {
-                    let recorded = crate::brain::tools::seen_skills::get_skill_loaded_mtime(session_id, slug);
+                    let recorded =
+                        crate::brain::tools::seen_skills::get_skill_loaded_mtime(session_id, slug);
                     match recorded {
                         Some(prev_mtime) if mtime > prev_mtime => {
                             skill_update_hints.push(format!(
                                 "[SYSTEM HINT: Active skill '{slug}' was updated on disk since your last turn. Review changed directives before executing work.]"
                             ));
-                            crate::brain::tools::seen_skills::record_skill_loaded_mtime(session_id, slug, mtime);
+                            crate::brain::tools::seen_skills::record_skill_loaded_mtime(
+                                session_id, slug, mtime,
+                            );
                         }
                         None => {
                             // First time seeing this active skill file mtime: record baseline
-                            crate::brain::tools::seen_skills::record_skill_loaded_mtime(session_id, slug, mtime);
+                            crate::brain::tools::seen_skills::record_skill_loaded_mtime(
+                                session_id, slug, mtime,
+                            );
                         }
                         _ => {}
                     }
@@ -6287,14 +6295,23 @@ impl AgentService {
                 // the goal is satisfied by the last response. If the
                 // judge says CONTINUE and the turn budget has room,
                 // inject a continuation prompt and re-enter the loop.
+                //
+                // The evidence pack (#299) is collected BEFORE the judge so
+                // the mechanical facts outrank the assistant's own prose: a
+                // running detached command or an open plan task short-circuits
+                // the judge entirely inside `evaluate_after_turn`.
                 {
                     use crate::brain::goal::GoalManager;
+                    use crate::brain::goal::evidence::build_goal_evidence;
                     let goal_mgr = GoalManager::new(self.context.clone());
+                    let evidence =
+                        build_goal_evidence(self.background_manager.as_deref(), session_id).await;
                     match goal_mgr
                         .evaluate_after_turn(
                             self.provider_for_session(session_id).as_ref(),
                             &model_name,
                             session_id,
+                            &evidence,
                             &accumulated_text,
                         )
                         .await
