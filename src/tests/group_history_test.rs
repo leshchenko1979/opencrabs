@@ -90,14 +90,14 @@ fn history_lines_render_oldest_first() {
     // model the wrong order of events.
     let newest_first = vec![msg("Carlos", "second", 14, 3), msg("Adi", "first", 14, 2)];
     assert_eq!(
-        render_history_lines(&newest_first),
+        render_history_lines(&newest_first, None),
         "[14:02] Adi: first\n[14:03] Carlos: second"
     );
 }
 
 #[test]
 fn history_lines_are_empty_for_no_messages() {
-    assert_eq!(render_history_lines(&[]), "");
+    assert_eq!(render_history_lines(&[], None), "");
 }
 
 #[test]

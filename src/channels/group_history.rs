@@ -79,12 +79,20 @@ pub(crate) fn current_sender_label(
 ///
 /// `recent()` returns newest-first, so this reverses; a history block read
 /// backwards teaches the model the wrong order of events.
-pub(crate) fn render_history_lines(messages: &[DbChannelMessage]) -> String {
+///
+/// If `tz_info` is provided, the timestamp is formatted in the user's timezone;
+/// otherwise, it is formatted in UTC.
+pub(crate) fn render_history_lines(messages: &[DbChannelMessage], tz_info: Option<&TzInfo>) -> String {
     messages
         .iter()
         .rev()
         .map(|m| {
-            let ts = m.created_at.format("%H:%M");
+            let ts = if let Some(info) = tz_info {
+                let local = m.created_at.with_timezone(&info.tz);
+                local.format("%H:%M")
+            } else {
+                m.created_at.format("%H:%M")
+            };
             format!("[{}] {}: {}", ts, m.sender_name, m.content)
         })
         .collect::<Vec<_>>()
@@ -124,6 +132,7 @@ pub(crate) async fn build_preamble(
     messages: Vec<DbChannelMessage>,
     noun: &str,
     label: &str,
+    tz_info: Option<&TzInfo>,
 ) -> Option<String> {
     if messages.is_empty() {
         return None;
@@ -147,6 +156,6 @@ pub(crate) async fn build_preamble(
         "{label}: injecting {} uncompacted {noun} history messages (filtered from {total_fetched})",
         filtered.len()
     );
-    let lines = render_history_lines(&filtered);
+    let lines = render_history_lines(&filtered, tz_info);
     Some(frame_history(&lines, filtered.len(), noun))
 }
