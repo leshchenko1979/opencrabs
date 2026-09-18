@@ -8,6 +8,7 @@
 //! every future run's result before a job ever goes live.
 
 use crate::brain::tools::cron_manage::validate_delivery_target;
+use crate::config::profile::with_home_override_async;
 use crate::db::Database;
 use rusqlite::params;
 use uuid::Uuid;
@@ -227,24 +228,161 @@ async fn test_cron_set_goal_requires_session() {
     );
 }
 
-#[test]
-fn delivery_target_validation_checks_channel_credential() {
-    // In a test env keys.toml has no channel credentials — the telegram arm
-    // must refuse exactly the way runtime would (feature-gated compile line
-    // mirrors the scheduler's own cfg gate).
-    #[cfg(feature = "telegram")]
-    {
-        let result = validate_delivery_target("telegram:12345");
-        // Either the credential exists (Ok) or it doesn't (Err with reason) —
-        // but it must agree with read_channel_secret, the same lookup the
-        // delivery path uses.
-        let secret = crate::cron::scheduler::read_channel_secret("telegram", "token");
-        match (secret.is_some(), result.is_ok()) {
-            (true, true) | (false, false) => {} // agreement
-            (true, false) => panic!("validator refused a resolvable credential"),
-            (false, true) => {
-                panic!("validator accepted an unresolvable credential — silent drop (#107)")
-            }
+#[tokio::test]
+async fn delivery_target_validation_checks_channel_credential() {
+    // Hermetic (#341): a throwaway home carrying NO channel credential in
+    // either file. The telegram arm must refuse exactly the way runtime
+    // would (feature-gated compile line mirrors the scheduler's own cfg
+    // gate). This used to run against the live profile, which made the
+    // outcome depend on whatever credential happened to be on the box —
+    // the assertion is about AGREEMENT between validator and resolver, so
+    // the home must be one the test controls.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join(".opencrabs");
+    std::fs::create_dir_all(&home).expect("create home");
+    std::fs::write(home.join("config.toml"), "").expect("write config");
+    std::fs::write(home.join("keys.toml"), "").expect("write keys");
+
+    with_home_override_async(home, async {
+        #[cfg(feature = "telegram")]
+        {
+            // Guard: the home must be LOADABLE. `read_channel_secret` maps a
+            // failed load to None via `.ok()?`, so without this the test
+            // would pass for the wrong reason — a broken config load would
+            // look identical to an absent credential.
+            assert!(
+                crate::config::Config::load().is_ok(),
+                "temp home must load cleanly, else the None below proves nothing"
+            );
+            let result = validate_delivery_target("telegram:12345");
+            // The same lookup the delivery path uses, so the two can never
+            // disagree about whether this target is deliverable.
+            let secret = crate::cron::scheduler::read_channel_secret("telegram", "token");
+            assert!(
+                secret.is_none(),
+                "an empty home must resolve no credential, got {secret:?}"
+            );
+            assert!(
+                result.is_err(),
+                "validator accepted an unresolvable credential — silent drop (#107)"
+            );
         }
-    }
+    })
+    .await;
+}
+
+/// A placeholder must never be handed to a delivery client as a credential.
+///
+/// Premise correction: the issue text calls this a "stored: marker", but no
+/// such string exists in the codebase (`grep -rn '"stored:' src/` → 0 hits).
+/// The real sentinel is [`crate::config::stored_key::EXISTING_KEY_SENTINEL`]
+/// (`__EXISTING_KEY__`), the placeholder a secret input shows when a key is
+/// already on disk. That value is never a credential, so it must resolve to
+/// `None` — and a sentinel left glued to a real key (the #1075 shape) must
+/// resolve to the SANITISED key, never the marker-prefixed string.
+#[cfg(feature = "telegram")]
+#[tokio::test]
+async fn channel_credential_rejects_placeholders() {
+    use crate::config::stored_key::EXISTING_KEY_SENTINEL;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join(".opencrabs");
+    std::fs::create_dir_all(&home).expect("create home");
+
+    // Empty token in config.toml, nothing in keys.toml.
+    std::fs::write(
+        home.join("config.toml"),
+        "[channels.telegram]\ntoken = \"\"\n",
+    )
+    .expect("write config");
+    std::fs::write(home.join("keys.toml"), "").expect("write keys");
+    with_home_override_async(home.clone(), async {
+        assert!(
+            crate::config::Config::load().is_ok(),
+            "temp home must load cleanly, else the None below proves nothing"
+        );
+        assert_eq!(
+            crate::cron::scheduler::read_channel_secret("telegram", "token"),
+            None,
+            "an empty token is not a credential"
+        );
+        assert!(
+            validate_delivery_target("telegram:12345").is_err(),
+            "validator must refuse a target whose credential is empty"
+        );
+    })
+    .await;
+
+    // Bare sentinel in config.toml — "a key is set" is a DISPLAY state, not a
+    // credential.
+    std::fs::write(
+        home.join("config.toml"),
+        format!("[channels.telegram]\ntoken = \"{EXISTING_KEY_SENTINEL}\"\n"),
+    )
+    .expect("write config");
+    with_home_override_async(home.clone(), async {
+        assert_eq!(
+            crate::cron::scheduler::read_channel_secret("telegram", "token"),
+            None,
+            "the existing-key marker is never a credential"
+        );
+    })
+    .await;
+
+    // Sentinel glued to a real key (#1075 shape): the SANITISED key is
+    // returned, never the marker-prefixed string — handing the marker to a
+    // delivery client would be the exact bug stored_key exists to close.
+    std::fs::write(
+        home.join("config.toml"),
+        format!("[channels.telegram]\ntoken = \"{EXISTING_KEY_SENTINEL}123456789:AAreal\"\n"),
+    )
+    .expect("write config");
+    with_home_override_async(home, async {
+        assert_eq!(
+            crate::cron::scheduler::read_channel_secret("telegram", "token").as_deref(),
+            Some("123456789:AAreal"),
+            "a sentinel-prefixed real key must resolve SANITISED (#1075)"
+        );
+    })
+    .await;
+}
+
+/// The #341 regression, exactly: the token lives in `config.toml` ONLY.
+///
+/// Before the fix `read_channel_secret` parsed keys.toml directly and
+/// returned `None` here, so every cron delivery died silently
+/// (`delivery_failed`, job still reading healthy) while the live channel —
+/// which reads the merged config — answered in chats normally. 27 such rows
+/// over nine days on profile `default`.
+#[cfg(feature = "telegram")]
+#[tokio::test]
+async fn channel_credential_resolves_from_config_toml_only() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join(".opencrabs");
+    std::fs::create_dir_all(&home).expect("create home");
+    // config.toml carries the token; keys.toml exists but is EMPTY — the
+    // layout that produced the outage. keys.toml is written (rather than
+    // omitted) because that is what the affected box actually looked like.
+    std::fs::write(
+        home.join("config.toml"),
+        "[channels.telegram]\ntoken = \"123456789:AAconfigonly\"\n",
+    )
+    .expect("write config");
+    std::fs::write(home.join("keys.toml"), "").expect("write keys");
+
+    with_home_override_async(home, async {
+        let resolved = crate::cron::scheduler::read_channel_secret("telegram", "token");
+        assert_eq!(
+            resolved.as_deref(),
+            Some("123456789:AAconfigonly"),
+            "a token present in config.toml ONLY must resolve — this is the #341 regression"
+        );
+        // The validator consumes the same lookup, so it must accept the
+        // target now instead of refusing a working credential.
+        assert!(
+            validate_delivery_target("telegram:12345").is_ok(),
+            "validator must accept the target when the credential resolves"
+        );
+    })
+    .await;
 }
