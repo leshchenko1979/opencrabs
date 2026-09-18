@@ -34,7 +34,6 @@ fn write_fixture(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
 
 #[cfg(feature = "telegram")]
 mod telegram_media_kind {
-    use super::*;
     use crate::channels::telegram::send::{
         TELEGRAM_PHOTO_MAX_BYTES, TelegramMediaKind, telegram_media_kind,
     };
@@ -279,7 +278,6 @@ fn a_remote_link_inside_a_code_span_is_left_alone() {
 
 #[cfg(feature = "telegram")]
 mod reentry_latch {
-    use super::*;
     use crate::channels::telegram::TelegramState;
     use std::sync::Arc;
     use uuid::Uuid;

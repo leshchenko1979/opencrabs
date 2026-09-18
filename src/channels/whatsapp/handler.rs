@@ -1967,7 +1967,7 @@ pub(crate) async fn handle_message(
                             Err(e) => {
                                 tracing::error!(
                                     "WhatsApp: image upload failed for {}: {}",
-                                    img_path,
+                                    img_path.display(),
                                     e
                                 );
                                 image_failures.push(crate::utils::LocalImageFailure {
@@ -1979,7 +1979,11 @@ pub(crate) async fn handle_message(
                         }
                     }
                     Err(e) => {
-                        tracing::error!("WhatsApp: failed to read image {}: {}", img_path, e);
+                        tracing::error!(
+                            "WhatsApp: failed to read image {}: {}",
+                            img_path.display(),
+                            e
+                        );
                         image_failures.push(crate::utils::LocalImageFailure {
                             raw: img_path.display().to_string(),
                             resolved: Some(img_path.clone()),
