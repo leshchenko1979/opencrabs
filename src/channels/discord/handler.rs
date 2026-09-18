@@ -1369,7 +1369,7 @@ pub(crate) async fn handle_message(
                             .and_then(|n| n.to_str())
                             .unwrap_or("image.png")
                             .to_string();
-                        if attachments.len() % 10 == 0 {
+                        if attachments.len().is_multiple_of(10) {
                             batch_paths.push(Vec::new());
                         }
                         batch_paths
