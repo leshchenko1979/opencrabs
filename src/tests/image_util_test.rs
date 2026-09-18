@@ -3,7 +3,7 @@
 use crate::utils::image::{
     ImageTarget, LocalImageFailure, LocalImageFailureReason, LocalImageScan, classify_image_target,
     code_regions, extract_img_markers, extract_local_images, failure_notice, image_extension,
-    is_remote_url, is_supported_image, validate_local_image,
+    is_remote_url, is_supported_image, is_telegram_media_ref, validate_local_image,
 };
 use crate::utils::image_fetch::{
     MAX_REMOTE_IMAGES_PER_REPLY, fetch_remote_image, resolve_remote_images,
@@ -331,6 +331,56 @@ fn relative_paths_resolve_against_the_base_dir_or_report_unresolved() {
     assert_eq!(
         classify_image_target("rel/x.png", None),
         ImageTarget::Unresolved
+    );
+}
+
+/// #334 (H5): a Telegram media reference is resolved server-side against the
+/// rich request's `media` array — it is never a filesystem path. Before this,
+/// `tg://photo?id=X` fell through to the cwd-join branch, so the in-loop regen
+/// nudge told the model its media ref was a missing local file at
+/// `<cwd>/tg://photo?id=X` — advice it could not act on.
+#[test]
+fn telegram_media_refs_are_never_joined_to_the_cwd() {
+    for raw in [
+        "tg://photo?id=diag0",
+        "tg://video?id=v1",
+        "tg://audio?id=a1",
+        "attach://photo1",
+        "TG://PHOTO?id=diag0",
+    ] {
+        assert_eq!(
+            classify_image_target(raw, Some(Path::new("/base"))),
+            ImageTarget::MediaRef(raw.to_string()),
+            "{raw} must not be classified as a local path"
+        );
+        assert!(is_telegram_media_ref(raw), "{raw}");
+        // The regression this pins: no verdict may carry a cwd-joined path.
+        assert!(
+            !matches!(
+                classify_image_target(raw, Some(Path::new("/base"))),
+                ImageTarget::Local(_)
+            ),
+            "{raw} must never produce a Local verdict"
+        );
+    }
+    // An empty base_dir must not change the verdict either.
+    assert_eq!(
+        classify_image_target("tg://photo?id=diag0", None),
+        ImageTarget::MediaRef("tg://photo?id=diag0".to_string())
+    );
+    // A bare scheme with no id is still a media ref, not a path.
+    assert_eq!(
+        classify_image_target("attach://", None),
+        ImageTarget::MediaRef("attach://".to_string())
+    );
+    // Remote and local verdicts are untouched by the new branch.
+    assert_eq!(
+        classify_image_target("https://h/x.png", Some(Path::new("/base"))),
+        ImageTarget::Remote("https://h/x.png".to_string())
+    );
+    assert_eq!(
+        classify_image_target("/abs/x.png", Some(Path::new("/base"))),
+        ImageTarget::Local(PathBuf::from("/abs/x.png"))
     );
 }
 
