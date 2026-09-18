@@ -1366,23 +1366,37 @@ async fn deliver_http(url: &str, job_name: &str, content: &str, api_key: Option<
     }
 }
 
-/// Read `channels.<channel>.<field>` (e.g. a bot token) from the active
-/// workspace's `keys.toml`. Cron delivery runs outside any channel's live
-/// connection, so it reads the credential straight off disk. Also used by
-/// cron_manage's fail-fast delivery validation (#107).
+/// Read `channels.<channel>.<field>` (e.g. a bot token) for cron delivery.
+///
+/// Resolves through the **merged** config (`Config::load()`), which is the
+/// same token view the live channel uses: the load applies the
+/// keys.toml-over-config.toml precedence via `merge_channel_keys`, so the two
+/// read one source instead of two that can drift (#341).
+/// A credential present in *either* file is found; a placeholder (empty
+/// string, `__EXISTING_KEY__` marker) is rejected through
+/// `stored_key::real_key`, which also returns the sanitised value — the
+/// merge does not sanitise the channel tokens it copies, so a placeholder
+/// reaching this point would otherwise be used as a bearer token.
+/// Residual, deliberately NOT widened here: the live channel additionally
+/// applies a per-channel SHAPE check before it starts
+/// (`channels::manager`'s `has_valid_token` — telegram wants a numeric bot
+/// id and a >=30-char secret), so for a malformed-but-non-empty token cron
+/// still attempts delivery and fails loudly rather than refusing at the
+/// boundary. That is a different predicate from "is there a credential at
+/// all", and unifying it is not this fix.
+/// Also used by cron_manage's fail-fast delivery validation (#107, #341).
 #[cfg(any(feature = "telegram", feature = "discord", feature = "slack"))]
 pub(crate) fn read_channel_secret(channel: &str, field: &str) -> Option<String> {
-    let keys_path = crate::brain::BrainLoader::resolve_path().join("keys.toml");
-    let content = std::fs::read_to_string(&keys_path).ok()?;
-    content.parse::<toml::Table>().ok().and_then(|t| {
-        t.get("channels")?
-            .as_table()?
-            .get(channel)?
-            .as_table()?
-            .get(field)?
-            .as_str()
-            .map(String::from)
-    })
+    let config = crate::config::Config::load().ok()?;
+    let channels = &config.channels;
+    let value = match (channel, field) {
+        ("telegram", "token") => channels.telegram.token.as_deref(),
+        ("discord", "token") => channels.discord.token.as_deref(),
+        ("slack", "token") => channels.slack.token.as_deref(),
+        ("slack", "app_token") => channels.slack.app_token.as_deref(),
+        _ => None,
+    }?;
+    crate::config::stored_key::real_key(value).map(str::to_string)
 }
 
 /// Split `text` into `<= max_len` byte chunks, breaking on a newline near the
@@ -1431,7 +1445,8 @@ async fn deliver_telegram(
     run_id: Option<String>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let Some(token) = read_channel_secret("telegram", "token") else {
-        let reason = "No Telegram bot token in keys.toml — delivery NOT performed (#107)";
+        let reason = "No Telegram bot token configured (channels.telegram.token in \
+                      config.toml or keys.toml) — delivery NOT performed (#107)";
         tracing::warn!("{reason} (job '{job_name}')");
         record_delivery_failure(pool, run_id, reason).await;
         return None;
@@ -1557,7 +1572,10 @@ fn is_forum_chat(chat: &teloxide::types::ChatFullInfo) -> bool {
 #[cfg(feature = "discord")]
 async fn deliver_discord(channel_id: &str, message: &str) {
     let Some(token) = read_channel_secret("discord", "token") else {
-        tracing::warn!("No Discord bot token found in keys.toml — cannot deliver cron result");
+        tracing::warn!(
+            "No Discord bot token configured (channels.discord.token in config.toml or keys.toml) \
+             — cannot deliver cron result"
+        );
         return;
     };
 
@@ -1599,7 +1617,10 @@ async fn deliver_discord(channel_id: &str, message: &str) {
 #[cfg(feature = "slack")]
 async fn deliver_slack(channel_id: &str, message: &str) {
     let Some(token) = read_channel_secret("slack", "token") else {
-        tracing::warn!("No Slack bot token found in keys.toml — cannot deliver cron result");
+        tracing::warn!(
+            "No Slack bot token configured (channels.slack.token in config.toml or keys.toml) \
+             — cannot deliver cron result"
+        );
         return;
     };
 
