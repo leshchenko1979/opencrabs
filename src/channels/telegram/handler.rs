@@ -13,8 +13,6 @@ use crate::db::models::ChannelMessage as DbChannelMessage;
 use crate::services::SessionService;
 use crate::utils::sanitize::redact_secrets;
 use crate::utils::truncate_str;
-use crate::config::profile::{active_profile, base_opencrabs_dir};
-use crate::brain::timezone::{GLOBAL_TZ_CACHE, TzInfo};
 use std::collections::HashSet;
 use std::sync::Arc;
 use teloxide::prelude::*;
@@ -2311,10 +2309,7 @@ pub(crate) async fn handle_message(
             }
         }
         .unwrap_or_default();
-        let brain_dir = active_profile()
-            .map(|name| base_opencrabs_dir().join("profiles").join(name))
-            .as_deref();
-        let tz_info = brain_dir.and_then(|dir| GLOBAL_TZ_CACHE.resolve_from_brain_dir(dir));
+        let tz_info = crate::brain::timezone::resolve_active_tz();
         match group_history::build_preamble(
             session_svc.pool(),
             session_id,
