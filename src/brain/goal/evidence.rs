@@ -104,8 +104,12 @@ pub async fn build_goal_evidence(
         })
         .unwrap_or_default();
 
+    // The gate here MIRRORS `format_plan_reminder` exactly (#299): the reminder
+    // refuses to nag an Editing plan and one that is still pre-init, and the
+    // evidence pack must agree — a draft awaiting approval is not outstanding
+    // work, and a pack that counted it would hold the goal open forever.
     let unresolved_tasks = match crate::utils::plan_files::load_plan(session_id).await {
-        Some(plan) if plan.status == PlanStatus::Active => {
+        Some(plan) if plan.status == PlanStatus::Active && !plan.pre_init_editing => {
             crate::brain::agent::service::unresolved_tasks(&plan)
         }
         _ => Vec::new(),
