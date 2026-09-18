@@ -3098,9 +3098,9 @@ impl AgentService {
                                 session_id,
                                 ProgressEvent::SelfHealingAlert {
                                     message: format!(
-                                        "Continuation request to '{}/{}' failed after 3 retries: {}. \
+                                        "Continuation request to '{}/{}' failed after {} retries: {}. \
                                          Leaving the previous response truncated.",
-                                        active_name, model_name, err_snippet,
+                                        active_name, model_name, MAX_STREAM_RETRIES, err_snippet,
                                     ),
                                 },
                             );
@@ -3130,9 +3130,10 @@ impl AgentService {
                                 session_id,
                                 ProgressEvent::SelfHealingAlert {
                                     message: format!(
-                                        "Stream error on '{}/{}' after 3 retries: {}. {}",
+                                        "Stream error on '{}/{}' after {} retries: {}. {}",
                                         active_name,
                                         model_name,
+                                        MAX_STREAM_RETRIES,
                                         err_snippet,
                                         if self.has_fallback_provider() {
                                             "Switching to fallback provider..."
@@ -3199,7 +3200,7 @@ impl AgentService {
                             // Tell the user which fallback we're attempting —
                             // the earlier "Switching to fallback provider..."
                             // banner named the origin but not the destination,
-                            // so after 3 retries users saw a provider swap
+                            // so after the full retry budget users saw a provider swap
                             // with no hint what they're now talking to.
                             if let Some(ref cb) = progress_callback {
                                 cb(
@@ -3517,9 +3518,10 @@ impl AgentService {
                                 session_id,
                                 ProgressEvent::SelfHealingAlert {
                                     message: format!(
-                                        "5xx error on '{}/{}' after 3 retries. {}",
+                                        "5xx error on '{}/{}' after {} retries. {}",
                                         active_name,
                                         model_name,
+                                        MAX_STREAM_RETRIES,
                                         if self.has_fallback_provider() {
                                             "Switching to fallback provider..."
                                         } else {
