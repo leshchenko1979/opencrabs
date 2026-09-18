@@ -38,12 +38,16 @@ async fn store_evaluation(
     sid: Uuid,
     verdict: &str,
     reason: &str,
-    evaluations: serde_json::Value,
+    evaluations: &str,
 ) {
+    // `connect_in_memory` caps the pool at ONE connection, so this guard must be
+    // released before the caller's next pool user runs -- holding it across a
+    // later tool call deadlocks that call on `pool.get()`. Routing every raw
+    // write through this helper is what keeps that invariant structural.
     let pool = db.pool().clone();
     let conn = pool.get().await.unwrap();
     let sid_s = sid.to_string();
-    let evals = evaluations.to_string();
+    let evals = evaluations.to_owned();
     let v = verdict.to_string();
     let r = reason.to_string();
     conn.interact(move |conn| {
@@ -190,7 +194,7 @@ async fn status_reports_the_criteria_and_the_last_per_criterion_statuses() {
         sid,
         "UNCERTAIN",
         "gate still running",
-        serde_json::json!([
+        &serde_json::json!([
             {
                 "id": "c1",
                 "criterion": "CI gate green on the head",
@@ -203,7 +207,8 @@ async fn status_reports_the_criteria_and_the_last_per_criterion_statuses() {
                 "status": "NO_EVIDENCE",
                 "evidence": ""
             }
-        ]),
+        ])
+        .to_string(),
     )
     .await;
 
@@ -280,18 +285,14 @@ async fn status_survives_a_garbled_evaluation_column() {
         .await
         .unwrap();
 
-    let pool = db.pool().clone();
-    let conn = pool.get().await.unwrap();
-    let sid_s = sid.to_string();
-    conn.interact(move |conn| {
-        conn.execute(
-            "UPDATE goal_state SET criterion_evaluations = ?1 WHERE session_id = ?2",
-            rusqlite::params!["{not json at all", sid_s],
-        )
-    })
-    .await
-    .unwrap()
-    .unwrap();
+    store_evaluation(
+        &db,
+        sid,
+        "UNCERTAIN",
+        "garbled evaluation column",
+        "{not json at all",
+    )
+    .await;
 
     let result = GoalManageTool
         .execute(serde_json::json!({"action": "status"}), &ctx)
