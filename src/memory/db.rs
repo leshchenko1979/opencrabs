@@ -1069,7 +1069,12 @@ impl Store {
 
     /// Run safe memory store maintenance (optimize, passive checkpoint, and conditional vacuum) (#273).
     pub fn vacuum_memory(&self) -> Result<bool, String> {
-        crate::db::execute_safe_maintenance(&self.conn, "memory.db", 1024)
-            .map_err(|e| format!("vacuum_memory: {e}"))
+        crate::db::execute_safe_maintenance(
+            &self.conn,
+            "memory.db",
+            1024,
+            crate::db::WAL_TRUNCATE_MIN_BYTES,
+        )
+        .map_err(|e| format!("vacuum_memory: {e}"))
     }
 }

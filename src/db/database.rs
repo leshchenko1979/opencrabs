@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use deadpool_sqlite::{Config, Hook, InteractError, Pool as DeadPool, Runtime};
 use rusqlite_migration::{M, Migrations};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 
@@ -245,29 +245,113 @@ fn apply_pragmas_in_memory(
     )
 }
 
-/// Execute safe maintenance on a SQLite connection (#273).
+/// Minimum `-wal` sidecar size (bytes) before a `TRUNCATE` checkpoint is attempted (#298).
 ///
-/// Steps:
-/// 1. Run `PRAGMA optimize;` to update SQLite query planner index statistics.
-/// 2. Run `PRAGMA wal_checkpoint(PASSIVE);` to checkpoint WAL pages without blocking active readers/writers.
-/// 3. Inspect `PRAGMA freelist_count`: if free pages >= `min_freelist_pages`, attempt `VACUUM;`.
-/// 4. Catches `SQLITE_BUSY` (code 5) / `SQLITE_LOCKED` on vacuum to yield gracefully to high-priority queries.
-pub fn execute_safe_maintenance(
+/// A `PASSIVE` checkpoint resets the WAL write position but never shrinks the
+/// file, so its size stays at the all-time high-water mark. A `VACUUM` pushes
+/// every page through the WAL, which raises that mark to roughly the database
+/// size — permanently, since nothing in the maintenance path ever lowered it.
+/// `TRUNCATE` reclaims the space but blocks briefly, so it is attempted only
+/// once the sidecar has actually grown past this threshold.
+pub const WAL_TRUNCATE_MIN_BYTES: u64 = 64 * 1024 * 1024;
+
+/// True when `conn` is journaling in WAL mode, i.e. a `-wal` sidecar exists.
+fn is_wal_mode(conn: &rusqlite::Connection) -> bool {
+    conn.query_row("PRAGMA journal_mode;", [], |row| row.get::<_, String>(0))
+        .map(|mode| mode.eq_ignore_ascii_case("wal"))
+        .unwrap_or(false)
+}
+
+/// Size in bytes of the `-wal` sidecar for `conn`, or 0 when there is none.
+fn wal_size_bytes(conn: &rusqlite::Connection) -> u64 {
+    if !is_wal_mode(conn) {
+        return 0;
+    }
+    conn.path()
+        .map(|p| PathBuf::from(format!("{p}-wal")))
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+/// Final maintenance step: shrink the `-wal` sidecar when it has grown past
+/// `min_bytes`, returning whether it was truncated (#298).
+///
+/// `TRUNCATE` waits for readers to drain, so a busy checkpoint is reported and
+/// deferred to the next maintenance cycle rather than treated as an error.
+fn truncate_wal_if_large(conn: &rusqlite::Connection, db_name: &str, min_bytes: u64) -> bool {
+    let before = wal_size_bytes(conn);
+
+    if before < min_bytes {
+        tracing::debug!(
+            wal_bytes = before,
+            min_bytes,
+            db = db_name,
+            "Skipping WAL truncate: sidecar below reclamation threshold"
+        );
+        return false;
+    }
+
+    let checkpoint = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE);", [], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    });
+
+    match checkpoint {
+        Ok((0, log_pages, checkpointed)) => {
+            tracing::info!(
+                db = db_name,
+                wal_bytes_before = before,
+                wal_bytes_after = wal_size_bytes(conn),
+                log_pages,
+                checkpointed,
+                "WAL truncated after maintenance (#298)"
+            );
+            true
+        }
+        Ok((busy, log_pages, checkpointed)) => {
+            tracing::warn!(
+                db = db_name,
+                wal_bytes = before,
+                busy,
+                log_pages,
+                checkpointed,
+                "WAL TRUNCATE checkpoint blocked by an active reader; deferring to the next maintenance cycle (#298)"
+            );
+            false
+        }
+        Err(e) if is_busy_or_locked(&e) => {
+            tracing::warn!(
+                db = db_name,
+                wal_bytes = before,
+                error = %e,
+                "WAL TRUNCATE checkpoint hit lock contention; yielding gracefully until the next maintenance cycle (#298)"
+            );
+            false
+        }
+        Err(e) => {
+            tracing::debug!(
+                db = db_name,
+                error = %e,
+                "WAL TRUNCATE checkpoint failed"
+            );
+            false
+        }
+    }
+}
+
+/// Conditional `VACUUM` guarded by the freelist threshold (#273).
+///
+/// Catches `SQLITE_BUSY` (code 5) / `SQLITE_LOCKED` (code 6) to yield
+/// gracefully to high-priority foreground queries.
+fn vacuum_if_fragmented(
     conn: &rusqlite::Connection,
     db_name: &str,
     min_freelist_pages: i64,
 ) -> rusqlite::Result<bool> {
-    // 1. Optimize query planner statistics
-    if let Err(e) = conn.execute_batch("PRAGMA optimize;") {
-        tracing::debug!("PRAGMA optimize on {db_name} failed: {e}");
-    }
-
-    // 2. Passive WAL checkpoint (does not block readers or writers)
-    if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);") {
-        tracing::debug!("PRAGMA wal_checkpoint(PASSIVE) on {db_name} failed: {e}");
-    }
-
-    // 3. Freelist count check
     let freelist_count: i64 = conn
         .query_row("PRAGMA freelist_count;", [], |row| row.get(0))
         .unwrap_or(0);
@@ -288,7 +372,7 @@ pub fn execute_safe_maintenance(
         "Freelist threshold met; attempting VACUUM"
     );
 
-    // 4. Temporary short busy timeout during VACUUM to yield fast on contention
+    // Temporary short busy timeout during VACUUM to yield fast on contention
     let _ = conn.execute_batch("PRAGMA busy_timeout = 2000;");
 
     let vacuum_res = conn.execute_batch("VACUUM;");
@@ -314,6 +398,44 @@ pub fn execute_safe_maintenance(
             }
         }
     }
+}
+
+/// Execute safe maintenance on a SQLite connection (#273, #298).
+///
+/// Steps:
+/// 1. Run `PRAGMA optimize;` to update SQLite query planner index statistics.
+/// 2. Run `PRAGMA wal_checkpoint(PASSIVE);` to checkpoint WAL pages without blocking active readers/writers.
+/// 3. Inspect `PRAGMA freelist_count`: if free pages >= `min_freelist_pages`, attempt `VACUUM;`.
+/// 4. If the `-wal` sidecar exceeds `wal_truncate_min_bytes`, run
+///    `PRAGMA wal_checkpoint(TRUNCATE);` to return the reclaimed space to disk (#298).
+/// 5. Catches `SQLITE_BUSY` (code 5) / `SQLITE_LOCKED` on vacuum to yield gracefully to high-priority queries.
+///
+/// Returns whether a `VACUUM` was performed.
+pub fn execute_safe_maintenance(
+    conn: &rusqlite::Connection,
+    db_name: &str,
+    min_freelist_pages: i64,
+    wal_truncate_min_bytes: u64,
+) -> rusqlite::Result<bool> {
+    // 1. Optimize query planner statistics
+    if let Err(e) = conn.execute_batch("PRAGMA optimize;") {
+        tracing::debug!("PRAGMA optimize on {db_name} failed: {e}");
+    }
+
+    // 2. Passive WAL checkpoint (does not block readers or writers)
+    if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);") {
+        tracing::debug!("PRAGMA wal_checkpoint(PASSIVE) on {db_name} failed: {e}");
+    }
+
+    // 3. Conditional VACUUM
+    let vacuumed = vacuum_if_fragmented(conn, db_name, min_freelist_pages)?;
+
+    // 4. Reclaim the WAL sidecar. Runs on every sweep regardless of whether
+    //    VACUUM ran: a WAL can reach its high-water mark without one, and the
+    //    VACUUM path is the case that pushes it to the database size (#298).
+    truncate_wal_if_large(conn, db_name, wal_truncate_min_bytes);
+
+    Ok(vacuumed)
 }
 
 /// Helper to check if a rusqlite error is SQLITE_BUSY or SQLITE_LOCKED.
@@ -437,13 +559,15 @@ impl Database {
         self.pool.status().size > 0 || self.pool.status().max_size > 0
     }
 
-    /// Run safe database maintenance (optimize, passive checkpoint, and conditional vacuum).
+    /// Run safe database maintenance (optimize, passive checkpoint, conditional vacuum, WAL truncate).
     ///
     /// Unlike raw `VACUUM;`, this:
     /// 1. Runs `PRAGMA optimize;` to update SQLite query planner statistics.
     /// 2. Runs `PRAGMA wal_checkpoint(PASSIVE);` without blocking active readers/writers.
     /// 3. Checks `PRAGMA freelist_count`: only executes `VACUUM;` if unused pages >= threshold.
-    /// 4. Catches `SQLITE_BUSY` (code 5) / `SQLITE_LOCKED` on vacuum to yield gracefully
+    /// 4. Runs `PRAGMA wal_checkpoint(TRUNCATE);` when the `-wal` sidecar has grown
+    ///    past [`WAL_TRUNCATE_MIN_BYTES`], returning the space to disk (#298).
+    /// 5. Catches `SQLITE_BUSY` (code 5) / `SQLITE_LOCKED` on vacuum to yield gracefully
     ///    to high-priority foreground queries (#273).
     pub async fn vacuum_database(&self) -> Result<bool> {
         let conn = self
@@ -452,7 +576,9 @@ impl Database {
             .await
             .context("Failed to get connection for vacuum")?;
         let vacuumed = conn
-            .interact(|conn| execute_safe_maintenance(conn, "opencrabs.db", 1024))
+            .interact(|conn| {
+                execute_safe_maintenance(conn, "opencrabs.db", 1024, WAL_TRUNCATE_MIN_BYTES)
+            })
             .await
             .map_err(|e| anyhow::anyhow!("vacuum_database interact error: {e}"))??;
         Ok(vacuumed)

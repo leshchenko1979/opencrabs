@@ -9,8 +9,8 @@ pub mod repository;
 pub mod retry;
 
 pub use database::{
-    Database, Pool, PoolExt, db_integrity_failed, execute_safe_maintenance, global_pool,
-    interact_err,
+    Database, Pool, PoolExt, WAL_TRUNCATE_MIN_BYTES, db_integrity_failed, execute_safe_maintenance,
+    global_pool, interact_err,
 };
 pub use models::*;
 pub use repository::*;
