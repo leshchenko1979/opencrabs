@@ -1,18 +1,25 @@
 //! Tests for the goal judge (#299).
 //!
-//! Two halves: the retry/fail-open plumbing of `judge_goal`, and the #299
-//! contract itself — the hardened prompt and the authoritative per-criterion
-//! aggregate that overrules the model's own holistic verdict.
+//! Three parts: the retry/fail-open plumbing of `judge_goal`, the #299 contract
+//! itself — the hardened prompt and the authoritative per-criterion aggregate
+//! that overrules the model's own holistic verdict — and the manager's judge
+//! loop, which gates the judge behind mechanical evidence and parks a goal
+//! whose verdicts stay UNCERTAIN.
 
+use crate::brain::goal::GoalManager;
+use crate::brain::goal::evidence::GoalEvidence;
 use crate::brain::goal::judge::{JudgeOutcome, judge_goal};
-use crate::brain::goal::types::{GoalVerdict, JudgeDecision};
+use crate::brain::goal::types::{GoalDecision, GoalVerdict, JudgeDecision};
 use crate::brain::provider::error::ProviderError;
 use crate::brain::provider::{
     ContentBlock, LLMRequest, LLMResponse, Provider, ProviderStream, StopReason, TokenUsage,
 };
+use crate::db::Database;
+use crate::services::ServiceContext;
 use async_trait::async_trait;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Mock provider
@@ -427,4 +434,255 @@ fn parse_or_continue_truncates_non_ascii_without_panicking() {
 
     let decision = JudgeDecision::parse_or_continue(&raw);
     assert_eq!(decision.verdict, GoalVerdict::Uncertain);
+}
+
+// ---------------------------------------------------------------------------
+// The manager's judge loop (#299)
+//
+// `evaluate_after_turn` owns two decisions the judge never sees: whether the
+// harness already holds evidence of unfinished work (a running background task
+// or an open plan task), and how many UNCERTAIN verdicts in a row are too many.
+// ---------------------------------------------------------------------------
+
+/// A background task the harness can still see running is unfinished work, so
+/// the judge is never asked — the mechanical gate outranks any status report.
+#[tokio::test]
+async fn running_task_short_circuits_the_judge() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let goal_mgr = GoalManager::new(ServiceContext::new(db.pool().clone()));
+    let sid = Uuid::new_v4();
+
+    goal_mgr
+        .set_goal(sid, "ship the feature".to_string(), None, None, None)
+        .await
+        .expect("set_goal should succeed");
+
+    // No scripted responses at all: if the judge were consulted it would error
+    // out, so a zero call count is the proof that the gate held.
+    let provider = MockProvider::new(vec![]);
+
+    let evidence = GoalEvidence {
+        running_tasks: vec!["cargo test --all-features (pid 4242)".to_string()],
+        ..Default::default()
+    };
+
+    let decision = goal_mgr
+        .evaluate_after_turn(
+            &provider,
+            "mock-model",
+            sid,
+            &evidence,
+            "Status report: implementation complete, waiting on CI.",
+        )
+        .await;
+
+    match decision {
+        GoalDecision::Continue {
+            continuation_prompt,
+            ..
+        } => {
+            assert!(
+                continuation_prompt.contains("Mechanical gate:"),
+                "prompt must name the mechanical gate, got: {continuation_prompt}"
+            );
+            assert!(
+                continuation_prompt.contains("background task(s) still running"),
+                "prompt must name the hold reason, got: {continuation_prompt}"
+            );
+            assert!(
+                continuation_prompt.contains("cargo test --all-features"),
+                "prompt must name the running task, got: {continuation_prompt}"
+            );
+        }
+        other => panic!("expected GoalDecision::Continue, got: {other:?}"),
+    }
+
+    assert_eq!(
+        provider.call_count(),
+        0,
+        "the mechanical gate must skip the judge entirely"
+    );
+
+    // The turn still counts against the budget, and the goal stays live.
+    let after = goal_mgr.get_goal(sid).await.unwrap().unwrap();
+    assert_eq!(after.turns_used, 1);
+    assert_eq!(after.state, "active");
+}
+
+/// An open plan task is the same class of evidence as a running process.
+#[tokio::test]
+async fn open_plan_task_short_circuits_the_judge() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let goal_mgr = GoalManager::new(ServiceContext::new(db.pool().clone()));
+    let sid = Uuid::new_v4();
+
+    goal_mgr
+        .set_goal(sid, "ship the feature".to_string(), None, None, None)
+        .await
+        .expect("set_goal should succeed");
+
+    let provider = MockProvider::new(vec![]);
+    let evidence = GoalEvidence {
+        unresolved_tasks: vec!["3. Run the gate [InProgress]".to_string()],
+        ..Default::default()
+    };
+
+    let decision = goal_mgr
+        .evaluate_after_turn(&provider, "mock-model", sid, &evidence, "all done here")
+        .await;
+
+    match decision {
+        GoalDecision::Continue {
+            continuation_prompt,
+            ..
+        } => assert!(
+            continuation_prompt.contains("plan task(s) still open"),
+            "prompt must name the open plan tasks, got: {continuation_prompt}"
+        ),
+        other => panic!("expected GoalDecision::Continue, got: {other:?}"),
+    }
+
+    assert_eq!(
+        provider.call_count(),
+        0,
+        "open plan tasks skip the judge too"
+    );
+}
+
+/// Three consecutive UNCERTAIN verdicts park the goal: a loop that keeps
+/// returning "no evidence either way" is not converging, it is burning turns.
+#[tokio::test]
+async fn three_uncertain_verdicts_pause_the_goal() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let goal_mgr = GoalManager::new(ServiceContext::new(db.pool().clone()));
+    let sid = Uuid::new_v4();
+
+    // Criteria declared up front, so no derivation call is spent and the judge
+    // is the only consumer of the scripted responses.
+    goal_mgr
+        .set_goal_with_criteria(
+            sid,
+            "ship the feature".to_string(),
+            Some(vec!["the feature ships".to_string()]),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("set_goal_with_criteria should succeed");
+
+    let uncertain = reply(&[("c1", "NO_EVIDENCE")], "UNCERTAIN", "no receipt yet");
+    let provider = MockProvider::new(vec![ok(&uncertain), ok(&uncertain), ok(&uncertain)]);
+
+    // Empty evidence: nothing mechanical holds the goal back, so the judge runs.
+    let evidence = GoalEvidence::default();
+
+    for turn in 1..=3 {
+        let decision = goal_mgr
+            .evaluate_after_turn(&provider, "mock-model", sid, &evidence, "still working")
+            .await;
+
+        let state = goal_mgr.get_goal(sid).await.unwrap().unwrap();
+        assert_eq!(
+            state.consecutive_uncertain, turn,
+            "turn {turn} must record a streak of {turn}"
+        );
+
+        if turn < 3 {
+            assert!(
+                matches!(decision, GoalDecision::Continue { .. }),
+                "turn {turn} should continue, got: {decision:?}"
+            );
+            assert_eq!(state.state, "active", "turn {turn} must stay active");
+        } else {
+            match decision {
+                GoalDecision::Paused { reason } => {
+                    assert!(
+                        reason.contains("Evidence budget exhausted"),
+                        "pause must name the exhausted budget, got: {reason}"
+                    );
+                    assert!(
+                        reason.contains("3 consecutive UNCERTAIN"),
+                        "pause must name the streak, got: {reason}"
+                    );
+                    assert!(
+                        reason.contains("3/20"),
+                        "pause must name the turns used, got: {reason}"
+                    );
+                }
+                other => panic!("expected GoalDecision::Paused on turn 3, got: {other:?}"),
+            }
+        }
+    }
+
+    let after = goal_mgr.get_goal(sid).await.unwrap().unwrap();
+    assert_eq!(
+        after.state, "paused",
+        "three consecutive UNCERTAIN verdicts must park the goal"
+    );
+    assert_eq!(after.consecutive_uncertain, 3);
+    assert_eq!(
+        provider.call_count(),
+        3,
+        "one judge call per turn — the cap must not add calls"
+    );
+}
+
+/// A VERIFIED verdict resets the streak, so the cap only fires on a run.
+#[tokio::test]
+async fn a_verified_verdict_resets_the_uncertain_streak() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let goal_mgr = GoalManager::new(ServiceContext::new(db.pool().clone()));
+    let sid = Uuid::new_v4();
+
+    goal_mgr
+        .set_goal_with_criteria(
+            sid,
+            "ship the feature".to_string(),
+            Some(vec!["the feature ships".to_string()]),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("set_goal_with_criteria should succeed");
+
+    let uncertain = reply(&[("c1", "NO_EVIDENCE")], "UNCERTAIN", "no receipt yet");
+    let verified = reply(&[("c1", "MET")], "VERIFIED", "the receipt is there");
+
+    // Two UNCERTAINs, then a VERIFIED — the streak must not reach three.
+    let provider = MockProvider::new(vec![ok(&uncertain), ok(&uncertain), ok(&verified)]);
+    let evidence = GoalEvidence::default();
+
+    for _ in 0..2 {
+        let decision = goal_mgr
+            .evaluate_after_turn(&provider, "mock-model", sid, &evidence, "still working")
+            .await;
+        assert!(
+            matches!(decision, GoalDecision::Continue { .. }),
+            "expected Continue, got: {decision:?}"
+        );
+    }
+
+    let decision = goal_mgr
+        .evaluate_after_turn(
+            &provider,
+            "mock-model",
+            sid,
+            &evidence,
+            "here is the receipt",
+        )
+        .await;
+    assert!(
+        matches!(decision, GoalDecision::Done { .. }),
+        "a fully-proven goal must complete, got: {decision:?}"
+    );
+
+    let after = goal_mgr.get_goal(sid).await.unwrap().unwrap();
+    assert_eq!(after.state, "completed");
+    assert_eq!(after.consecutive_uncertain, 0, "VERIFIED resets the streak");
 }
