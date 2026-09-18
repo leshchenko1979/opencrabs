@@ -1,6 +1,7 @@
 //! Tests for goal turn budget config, creation, and exhaustion (#190).
 
 use crate::brain::goal::GoalManager;
+use crate::brain::goal::evidence::GoalEvidence;
 use crate::brain::goal::types::{DEFAULT_MAX_TURNS, GoalDecision};
 use crate::brain::provider::Provider;
 use crate::brain::tools::goal_manage::GoalManageTool;
@@ -124,7 +125,13 @@ async fn goal_turn_exhaustion_pauses_and_updates_db_state() {
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let decision = goal_mgr
-        .evaluate_after_turn(provider.as_ref(), "mock-model", sid, "done with work")
+        .evaluate_after_turn(
+            provider.as_ref(),
+            "mock-model",
+            sid,
+            &GoalEvidence::default(),
+            "done with work",
+        )
         .await;
 
     match decision {
