@@ -11,6 +11,7 @@ pub mod fd_suppress;
 pub mod file_extract;
 pub mod git_branch;
 pub mod image;
+pub mod image_fetch;
 pub mod install;
 pub mod long_command;
 pub mod model_match;
@@ -34,8 +35,11 @@ pub use approval::{
 };
 pub use file_extract::{FileContent, classify_file, inject_file_content, process_file_with_vision};
 pub use image::{
-    extract_img_markers, extract_react_marker, extract_react_marker_lenient, extract_vid_markers,
+    ImageTarget, LocalImageFailure, LocalImageFailureReason, LocalImageScan, extract_img_markers,
+    extract_local_images, extract_react_marker, extract_react_marker_lenient, extract_vid_markers,
+    failure_notice,
 };
+pub use image_fetch::resolve_remote_images;
 pub use prompt_analyzer::PromptAnalyzer;
 pub use retry::{RetryConfig, RetryableError, retry, retry_with_check};
 pub use sanitize::{redact_secrets, redact_secrets_scoped, redact_tool_input};

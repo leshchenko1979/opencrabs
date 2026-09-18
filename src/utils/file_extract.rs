@@ -200,8 +200,10 @@ pub(crate) fn is_video_vision_available(config: &Config) -> bool {
             .is_some_and(|k| !k.is_empty())
 }
 
-/// Write file bytes to a temp path under `~/.opencrabs/tmp/files/` and return the path.
-fn save_to_temp(bytes: &[u8], filename: &str) -> Result<PathBuf, String> {
+/// Write file bytes to a temp path under `~/.opencrabs/tmp/files/` and return
+/// the path. Shared by file extraction and remote-image fetch — one home for
+/// "materialise these bytes as a local file a channel can attach".
+pub(crate) fn save_to_temp(bytes: &[u8], filename: &str) -> Result<PathBuf, String> {
     let tmp_dir = crate::config::opencrabs_home().join("tmp").join("files");
     fs::create_dir_all(&tmp_dir).map_err(|e| format!("Failed to create temp dir: {e}"))?;
 
