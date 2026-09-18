@@ -846,6 +846,11 @@ pub(crate) fn neutralize_orphan_photo_refs(text: &str, media: &[MediaEntry]) -> 
 /// [`ORPHAN_MEDIA_SCHEMES`] with [`neutralize_orphan_photo_refs`], so the
 /// extractor and the neutralizer can never disagree about what a media reference
 /// is. Sorted and deduped so a log line is stable across runs.
+///
+/// Test-only since #334: the live caller ([`super::api::rich_body_offenders`])
+/// holds ids parsed out of a request body, so it uses [`unresolved_media_refs_by`].
+/// Kept compiled for tests so both forms stay covered and provably agree.
+#[cfg(test)]
 pub(crate) fn unresolved_media_refs(text: &str, media: &[MediaEntry]) -> Vec<String> {
     unresolved_media_refs_by(text, |id| media.iter().any(|m| m.id == id))
 }
