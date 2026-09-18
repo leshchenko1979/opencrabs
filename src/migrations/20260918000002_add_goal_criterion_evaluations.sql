@@ -1,0 +1,12 @@
+-- FORK (#299): persist the judge's last per-criterion evaluation.
+--
+-- `criterion_evaluations` — JSON array of `{id, criterion, status, evidence}`
+--   entries from the most recent judge call (nullable). Written on every
+--   verdict so `goal_manage status` can report how each declared criterion
+--   fared without re-invoking the model: the evaluation is a record of what
+--   the judge already decided, not something to recompute on read.
+--
+-- Kept in its own migration rather than folded into 20260918000001: migrations
+-- are applied by index, so editing an already-shipped one would leave the
+-- column missing on any database that had applied it.
+ALTER TABLE goal_state ADD COLUMN criterion_evaluations TEXT;

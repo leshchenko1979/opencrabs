@@ -129,6 +129,9 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // FORK (#299): evidence-backed goal judge — declared criteria + the
     // consecutive-Uncertain counter that parks a non-converging goal.
     include_str!("../migrations/20260918000001_add_goal_criteria.sql"),
+    // FORK (#299): the judge's last per-criterion evaluation, so `status` can
+    // report it without re-invoking the model.
+    include_str!("../migrations/20260918000002_add_goal_criterion_evaluations.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

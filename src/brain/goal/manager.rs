@@ -247,6 +247,7 @@ impl GoalManager {
         session_id: Uuid,
         verdict: &GoalVerdict,
         reason: &str,
+        criteria: &[CriterionEvaluation],
     ) -> Result<(), String> {
         let pool = self.ctx.pool();
         let conn = pool
@@ -256,13 +257,19 @@ impl GoalManager {
         let sid = session_id.to_string();
         let v = verdict.as_str().to_string();
         let r = reason.to_string();
+        // The per-criterion detail rides along with the verdict so `status` can
+        // report how each criterion fared without re-running the judge. A
+        // serialization failure must not sink the verdict write, so the column
+        // degrades to NULL and the verdict still lands.
+        let evals = serde_json::to_string(criteria).ok();
         let now = Utc::now().to_rfc3339();
 
         conn.interact(move |conn| {
             conn.execute(
-                "UPDATE goal_state SET judge_verdict = ?1, judge_reason = ?2, updated_at = ?3 \
-                 WHERE session_id = ?4",
-                rusqlite::params![v, r, now, sid],
+                "UPDATE goal_state SET judge_verdict = ?1, judge_reason = ?2, \
+                 criterion_evaluations = ?3, updated_at = ?4 \
+                 WHERE session_id = ?5",
+                rusqlite::params![v, r, evals, now, sid],
             )
         })
         .await
@@ -486,7 +493,12 @@ impl GoalManager {
         .await;
 
         let _ = self
-            .record_verdict(session_id, &outcome.verdict, &outcome.reason)
+            .record_verdict(
+                session_id,
+                &outcome.verdict,
+                &outcome.reason,
+                &outcome.criteria,
+            )
             .await;
 
         if let Err(e) = self.increment_turns(session_id, outcome.parse_failed).await {
