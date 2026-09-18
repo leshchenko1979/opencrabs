@@ -1503,12 +1503,17 @@ impl App {
             ));
         }
 
-        // Notify user about unknown config keys (possible typos)
-        let typo_warnings = crate::config::Config::take_typo_warnings();
-        if !typo_warnings.is_empty() {
+        // Notify the user about config sections the loader discarded: unknown
+        // keys (possible typos) and the legacy channel layout, which leaves a
+        // credential in a section nothing reads — the live channel keeps
+        // answering while cron delivery to that channel dies (#341). Entries
+        // are self-describing sentences, so the heading stays neutral and the
+        // separator is one that cannot be confused with a list of key names.
+        let config_warnings = crate::config::Config::take_typo_warnings();
+        if !config_warnings.is_empty() {
             self.push_system_message(format!(
-                "⚠️ Unknown keys in config.toml (possible typos): {}",
-                typo_warnings.join(", ")
+                "⚠️ Config warnings: {}",
+                config_warnings.join("; ")
             ));
         }
 
