@@ -75,9 +75,52 @@ pub(crate) fn log_send_failure(
     hash8: &str,
     error: &str,
 ) {
-    tracing::warn!(
-        "Telegram send failed: origin={origin} detail={origin_detail} session={session} \
-         kind={kind} path={path} chat={chat_id} thread={thread_id:?} len={len} hash8={hash8} \
-         error={error}"
+    log_send_failure_with_offenders(
+        origin,
+        origin_detail,
+        session,
+        kind,
+        path,
+        chat_id,
+        thread_id,
+        len,
+        hash8,
+        error,
+        None,
     );
+}
+
+/// [`log_send_failure`] carrying the media references a rich rejection is about
+/// (#334, H4). Without them a rich 400 is unattributable: the metadata-only P1a
+/// shape records `len` / `hash8` / `error`, so four rejections of the same body
+/// are indistinguishable and the class can only be watched to stop, never proven
+/// closed. `offenders` is populated on ERROR paths only — a successful send keeps
+/// the metadata-only shape, so body content never rides a 200.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn log_send_failure_with_offenders(
+    origin: &str,
+    origin_detail: &str,
+    session: &str,
+    kind: &str,
+    path: &str,
+    chat_id: i64,
+    thread_id: Option<i32>,
+    len: usize,
+    hash8: &str,
+    error: &str,
+    offenders: Option<&[String]>,
+) {
+    match offenders.filter(|list| !list.is_empty()) {
+        Some(list) => tracing::warn!(
+            "Telegram send failed: origin={origin} detail={origin_detail} session={session} \
+             kind={kind} path={path} chat={chat_id} thread={thread_id:?} len={len} hash8={hash8} \
+             error={error} offenders={}",
+            list.join(",")
+        ),
+        None => tracing::warn!(
+            "Telegram send failed: origin={origin} detail={origin_detail} session={session} \
+             kind={kind} path={path} chat={chat_id} thread={thread_id:?} len={len} hash8={hash8} \
+             error={error}"
+        ),
+    }
 }
