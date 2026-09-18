@@ -3052,12 +3052,21 @@ impl AgentService {
                             .await
                         {
                             Ok(resp) => {
-                                tracing::info!("Stream retry {}/3 succeeded", attempt);
+                                tracing::info!(
+                                    "Stream retry {}/{} succeeded",
+                                    attempt,
+                                    MAX_STREAM_RETRIES
+                                );
                                 succeeded = Some(resp);
                                 break;
                             }
                             Err(retry_err) => {
-                                tracing::warn!("Stream retry {}/3 failed: {}", attempt, retry_err);
+                                tracing::warn!(
+                                    "Stream retry {}/{} failed: {}",
+                                    attempt,
+                                    MAX_STREAM_RETRIES,
+                                    retry_err
+                                );
                                 last_err = retry_err;
                             }
                         }
@@ -3076,9 +3085,10 @@ impl AgentService {
                         // to abort the continue and leave the visibly cut-off
                         // response than fabricate a Frankenstein answer.
                         tracing::warn!(
-                            "All 3 stream retries failed during a truncation-continue — \
+                            "All {} stream retries failed during a truncation-continue — \
                              aborting continuation rather than falling back to a different \
-                             provider (would cause format drift)."
+                             provider (would cause format drift).",
+                            MAX_STREAM_RETRIES
                         );
                         if let Some(ref cb) = progress_callback {
                             let active_name = self.provider_name_for_session(session_id);
@@ -3088,9 +3098,9 @@ impl AgentService {
                                 session_id,
                                 ProgressEvent::SelfHealingAlert {
                                     message: format!(
-                                        "Continuation request to '{}/{}' failed after 3 retries: {}. \
+                                        "Continuation request to '{}/{}' failed after {} retries: {}. \
                                          Leaving the previous response truncated.",
-                                        active_name, model_name, err_snippet,
+                                        active_name, model_name, MAX_STREAM_RETRIES, err_snippet,
                                     ),
                                 },
                             );
@@ -3104,7 +3114,8 @@ impl AgentService {
                     } else {
                         // All retries failed — try fallback provider
                         tracing::warn!(
-                            "All 3 stream retries failed — checking for fallback provider"
+                            "All {} stream retries failed — checking for fallback provider",
+                            MAX_STREAM_RETRIES
                         );
 
                         if let Some(ref cb) = progress_callback {
@@ -3119,9 +3130,10 @@ impl AgentService {
                                 session_id,
                                 ProgressEvent::SelfHealingAlert {
                                     message: format!(
-                                        "Stream error on '{}/{}' after 3 retries: {}. {}",
+                                        "Stream error on '{}/{}' after {} retries: {}. {}",
                                         active_name,
                                         model_name,
+                                        MAX_STREAM_RETRIES,
                                         err_snippet,
                                         if self.has_fallback_provider() {
                                             "Switching to fallback provider..."
@@ -3188,7 +3200,7 @@ impl AgentService {
                             // Tell the user which fallback we're attempting —
                             // the earlier "Switching to fallback provider..."
                             // banner named the origin but not the destination,
-                            // so after 3 retries users saw a provider swap
+                            // so after the full retry budget users saw a provider swap
                             // with no hint what they're now talking to.
                             if let Some(ref cb) = progress_callback {
                                 cb(
@@ -3472,12 +3484,21 @@ impl AgentService {
                             .await
                         {
                             Ok(resp) => {
-                                tracing::info!("5xx retry {}/3 succeeded", attempt);
+                                tracing::info!(
+                                    "5xx retry {}/{} succeeded",
+                                    attempt,
+                                    MAX_STREAM_RETRIES
+                                );
                                 succeeded = Some(resp);
                                 break;
                             }
                             Err(retry_err) => {
-                                tracing::warn!("5xx retry {}/3 failed: {}", attempt, retry_err);
+                                tracing::warn!(
+                                    "5xx retry {}/{} failed: {}",
+                                    attempt,
+                                    MAX_STREAM_RETRIES,
+                                    retry_err
+                                );
                                 last_err = retry_err;
                             }
                         }
@@ -3486,7 +3507,10 @@ impl AgentService {
                     if let Some(resp) = succeeded {
                         resp
                     } else {
-                        tracing::warn!("All 3 5xx retries failed — checking for fallback provider");
+                        tracing::warn!(
+                            "All {} 5xx retries failed — checking for fallback provider",
+                            MAX_STREAM_RETRIES
+                        );
 
                         if let Some(ref cb) = progress_callback {
                             let active_name = self.provider_name_for_session(session_id);
@@ -3494,9 +3518,10 @@ impl AgentService {
                                 session_id,
                                 ProgressEvent::SelfHealingAlert {
                                     message: format!(
-                                        "5xx error on '{}/{}' after 3 retries. {}",
+                                        "5xx error on '{}/{}' after {} retries. {}",
                                         active_name,
                                         model_name,
+                                        MAX_STREAM_RETRIES,
                                         if self.has_fallback_provider() {
                                             "Switching to fallback provider..."
                                         } else {
