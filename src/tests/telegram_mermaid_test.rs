@@ -577,6 +577,37 @@ fn build_body_markdown_media_target_bytes_entry_uses_attach_reference() {
     assert_eq!(arr[0]["media"]["media"], "attach://diag1");
 }
 
+/// #334 (H3): every body builder routes through the media-aware entry, so an
+/// orphan reference can never reach Telegram inside a BUILT request body — not
+/// merely inside the normalizer. The ref naming a live media entry survives; the
+/// one with no entry is neutralised before the body is assembled.
+#[test]
+fn build_body_markdown_media_target_neutralises_orphan_refs() {
+    let media = vec![MediaEntry {
+        id: "diag1".into(),
+        url: None,
+        bytes: Some(vec![0x89, b'P']),
+    }];
+    let raw = "kept ![d](tg://photo?id=diag1) dropped ![x](tg://photo?id=absent)";
+    let body = build_body_markdown_media_target(-100, None, None, raw, &media, None);
+    let md = body["rich_message"]["markdown"]
+        .as_str()
+        .expect("rich markdown");
+
+    assert!(
+        md.contains("tg://photo?id=diag1"),
+        "a ref naming a live media entry must survive into the body: {md}"
+    );
+    assert!(
+        !md.contains("tg://photo?id=absent"),
+        "an orphan ref must not reach the wire: {md}"
+    );
+    assert!(
+        md.contains("tg:photo?id=absent"),
+        "the orphan ref must be neutralised in place: {md}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // build_body_markdown_media_edit (#98 — same media convention on the edit path)
 // ---------------------------------------------------------------------------
