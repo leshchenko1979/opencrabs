@@ -752,6 +752,15 @@ pub struct GoalState {
     pub turns_used: i32,
     pub max_turns: i32,
     pub consecutive_parse_failures: i32,
+    /// Consecutive `UNCERTAIN` verdicts (#299). At
+    /// `MAX_CONSECUTIVE_UNCERTAIN` the goal parks as `paused` naming the
+    /// exhausted evidence budget, instead of burning the whole turn budget.
+    pub consecutive_uncertain: i32,
+    /// JSON array of the goal's declared, checkable criteria (#299).
+    /// `None`/empty means no criteria were declared, which caps the aggregate
+    /// verdict at `UNCERTAIN` — with nothing to prove, "done" is never
+    /// `VERIFIED`.
+    pub criteria: Option<String>,
     pub judge_verdict: Option<String>,
     pub judge_reason: Option<String>,
     pub channel: Option<String>,
@@ -770,6 +779,8 @@ impl GoalState {
             turns_used: row.get("turns_used")?,
             max_turns: row.get("max_turns")?,
             consecutive_parse_failures: row.get("consecutive_parse_failures")?,
+            consecutive_uncertain: row.get("consecutive_uncertain")?,
+            criteria: row.get("criteria")?,
             judge_verdict: row.get("judge_verdict")?,
             judge_reason: row.get("judge_reason")?,
             channel: row.get("channel")?,
@@ -795,6 +806,8 @@ impl GoalState {
             turns_used: 0,
             max_turns: max_turns.unwrap_or(20) as i32,
             consecutive_parse_failures: 0,
+            consecutive_uncertain: 0,
+            criteria: None,
             judge_verdict: None,
             judge_reason: None,
             channel,
