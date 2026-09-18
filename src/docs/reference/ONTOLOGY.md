@@ -76,6 +76,22 @@
 
 **ADR** — Architecture Decision Record: a numbered doc capturing one decision cluster with phases and done criteria (used by the plan-mode slices). → `plans/plan-mode/README.md`.
 
+### Goals & the judge
+
+**Goal** — a session's declared objective that the agent works toward across turns, stored in the `goal_state` table keyed by `session_id` and bounded by a turn budget. Set by the `/goal` command or the `goal_manage` tool. **Not:** "task" (a task is a plan checklist row), "intent", "mission".
+
+**Criterion** — one declared, checkable condition a goal is judged against; a goal carries a list of them, identified `c1`, `c2`, … . Supplied at `set` time or derived once from the goal text. **Not:** "acceptance criteria" (that is the plan-task field).
+
+**Criterion status** — how one criterion fared against the evidence: `MET`, `UNMET`, or `NO_EVIDENCE`. `NO_EVIDENCE` is what any absent, blank, or garbled status degrades to — the one status that cannot verify a goal.
+
+**Goal verdict** — the aggregate outcome of a judge call, computed deterministically in Rust from the per-criterion statuses: `VERIFIED` (every criterion `MET`), `REJECTED` (any `UNMET`), `UNCERTAIN` (otherwise, including a goal that declares no criteria). Only `VERIFIED` ends a goal. **Not:** `DONE` / `CONTINUE` as verdict names — those name loop decisions (`GoalDecision`), not verdicts; a legacy `DONE` row reads as `VERIFIED`.
+
+**Evidence pack** — the mechanical facts the runtime supplies to the judge: running background tasks, unresolved plan tasks, and the turn budget used/max. **Not:** "context" (the judge is given no session history, tool results, or plan text).
+
+**Mechanical gate** — the pre-judge short-circuit: while a background task is still running or a plan task is unresolved, the goal loop continues **without** consulting the model. Both are machine-readable signs of unfinished work that the agent's own prose cannot make untrue.
+
+**Uncertain streak** — consecutive `UNCERTAIN` verdicts on a goal. At `MAX_CONSECUTIVE_UNCERTAIN` (3) the goal parks as `paused`, naming the exhausted evidence budget; a `VERIFIED` or `REJECTED` verdict resets the streak.
+
 ### Fleet & process terms
 
 These live with the ops skill outside this repo (`fleet-directives.md` §Glossary: carrier, fan-out, lane, roster, CI gate, ORDER gates, single-flight, GREEN/RED, S2/S3). They are listed here by NAME ONLY so repo readers know the terms exist and where they are defined — this file does not copy them (single-writer law).
