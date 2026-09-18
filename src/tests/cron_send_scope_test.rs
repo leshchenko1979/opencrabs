@@ -8,7 +8,7 @@
 //! whose members had asked for nothing.
 
 use crate::cron::send_scope::{
-    may_send_to, permission, with_send_target, PermittedTarget, SendPermission,
+    PermittedTarget, SendPermission, may_send_to, permission, with_send_target,
 };
 
 const CONFIGURED: i64 = -1004252074515;
@@ -109,6 +109,34 @@ fn test_parse_permitted_targets() {
 }
 
 #[test]
+fn test_cron_job_scope_is_fail_closed_for_a_targetless_job() {
+    use crate::cron::send_scope::{cron_job_scope, parse_permitted_targets};
+
+    // The parser keeps the two meanings apart — absent field vs. present but
+    // channel-less. #317 is the reason the cron entry point may not consume it
+    // directly: the parser's `None` reads downstream as "not a cron turn".
+    assert_eq!(parse_permitted_targets(None), None);
+
+    // Every way a job can name no channel collapses onto the SAME scope:
+    // empty, and never `None`.
+    assert_eq!(cron_job_scope(None), vec![]);
+    assert_eq!(cron_job_scope(Some("")), vec![]);
+    assert_eq!(
+        cron_job_scope(Some("oc://session/12345678-1234-1234-1234-123456789abc")),
+        vec![]
+    );
+
+    // A configured channel target still comes through untouched.
+    assert_eq!(
+        cron_job_scope(Some("telegram:-100123456")),
+        vec![PermittedTarget {
+            channel: "telegram",
+            target_id: "-100123456".to_string(),
+        }]
+    );
+}
+
+#[test]
 fn test_extract_cron_job_id_from_session_title() {
     use crate::cron::send_scope::extract_cron_job_id_from_session_title;
     use uuid::Uuid;
@@ -129,9 +157,9 @@ fn test_extract_cron_job_id_from_session_title() {
 
 #[tokio::test]
 async fn test_resolve_cron_session_scope() {
-    use crate::cron::send_scope::{resolve_cron_session_scope, PermittedTarget};
-    use crate::db::models::Session;
+    use crate::cron::send_scope::{PermittedTarget, resolve_cron_session_scope};
     use crate::db::Database;
+    use crate::db::models::Session;
     use uuid::Uuid;
 
     let db = Database::connect_in_memory().await.unwrap();
@@ -226,5 +254,70 @@ async fn test_resolve_cron_session_scope() {
     assert_eq!(
         resolve_cron_session_scope(&pool, Some(&unknown_cron_session), "cron").await,
         Some(vec![])
+    );
+}
+
+#[tokio::test]
+async fn test_resolve_cron_session_scope_targetless_job_is_nowhere() {
+    // #317: the resume path and the scheduler path must agree. Both now derive
+    // the scope through `cron_job_scope`, so a job with no `deliver_to` resumes
+    // Nowhere rather than Unscoped.
+    use crate::cron::send_scope::resolve_cron_session_scope;
+    use crate::db::Database;
+    use crate::db::models::Session;
+    use uuid::Uuid;
+
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let pool = db.pool().clone();
+    let job_id = Uuid::new_v4();
+
+    let job = crate::db::models::CronJob {
+        id: job_id,
+        name: "Targetless Job".to_string(),
+        cron_expr: "0 * * * *".to_string(),
+        timezone: "UTC".to_string(),
+        prompt: "echo".to_string(),
+        provider: None,
+        model: None,
+        thinking: "low".to_string(),
+        auto_approve: true,
+        deliver_to: None,
+        deliver_api_key: None,
+        enabled: true,
+        last_run_at: None,
+        next_run_at: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        profile_name: None,
+        trigger_cmd: None,
+        trigger_on: None,
+        set_goal: false,
+        goal_template: None,
+    };
+    crate::db::CronJobRepository::new(pool.clone())
+        .insert(&job)
+        .await
+        .unwrap();
+
+    let cron_session = Session {
+        id: Uuid::new_v4(),
+        title: Some(format!("Cron: Targetless Job [cron-job:{job_id}]")),
+        model: None,
+        provider_name: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        archived_at: None,
+        token_count: 0,
+        total_cost: 0.0,
+        working_directory: None,
+        auto_title_attempted: false,
+        project_id: None,
+    };
+
+    assert_eq!(
+        resolve_cron_session_scope(&pool, Some(&cron_session), "cron").await,
+        Some(vec![]),
+        "a job with no deliver_to must resume Nowhere, not Unscoped"
     );
 }
