@@ -132,11 +132,16 @@ fn test_shield_unresolvable_markdown_images() {
 /// exactly the `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND` class this closes.
 #[test]
 fn test_shield_tg_and_attach_refs_are_media_aware() {
-    // No media array at all -> the ref cannot resolve -> escaped.
+    // No media array at all -> neither ref can resolve. This runs the FULL shared
+    // entry, so BOTH guards fire: the shield escapes the `!` (so the image cannot
+    // render) and the orphan neutralizer drops the `//` (so Telegram cannot try to
+    // resolve it). That is why the expected string carries `tg:photo?id=` and
+    // `attach:photo1` rather than the raw schemes — asserting the pre-neutralizer
+    // form here would pin a mid-pipeline state and fail on the real output.
     let orphan_input = "Diag: ![diagram](tg://photo?id=diag0) and ![a](attach://photo1)";
     let orphan_output = normalize_rich_markdown(orphan_input);
     assert_eq!(
-        orphan_output, "Diag: \\![diagram](tg://photo?id=diag0) and \\![a](attach://photo1)",
+        orphan_output, "Diag: \\![diagram](tg:photo?id=diag0) and \\![a](attach:photo1)",
         "with an empty media array every tg/attach ref is an orphan"
     );
 
