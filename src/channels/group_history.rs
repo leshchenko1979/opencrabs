@@ -16,6 +16,7 @@
 //!    senders rather than as the message being replied to.
 
 use crate::brain::agent::AgentService;
+use crate::brain::timezone::TzInfo;
 use crate::db::MessageRepository;
 use crate::db::models::ChannelMessage as DbChannelMessage;
 
