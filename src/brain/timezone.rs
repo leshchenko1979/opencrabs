@@ -286,3 +286,19 @@ impl UserTimezoneCache {
 
 /// Process-wide singleton cache for user timezone.
 pub static GLOBAL_TZ_CACHE: Lazy<UserTimezoneCache> = Lazy::new(UserTimezoneCache::new);
+
+/// Resolve the ACTIVE profile's timezone from its brain directory (#349).
+///
+/// Single entry point for channel surfaces that need the user's timezone. It
+/// owns the profile-directory join so callers cannot leak a borrow of a
+/// temporary into the cache lookup, and returns `None` when no profile is
+/// active.
+pub fn resolve_active_tz() -> Option<TzInfo> {
+    crate::config::profile::active_profile()
+        .map(|name| {
+            crate::config::profile::base_opencrabs_dir()
+                .join("profiles")
+                .join(name)
+        })
+        .and_then(|dir| GLOBAL_TZ_CACHE.resolve_from_brain_dir(&dir))
+}
