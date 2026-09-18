@@ -294,6 +294,7 @@ pub mod goal_criteria_derivation_test;
 pub mod goal_criteria_test;
 pub mod goal_evidence_test;
 pub mod goal_judge_test;
+pub mod goal_manage_criteria_test;
 pub mod goal_manage_test;
 pub mod group_history_test;
 pub mod headless_tool_surface_test;
