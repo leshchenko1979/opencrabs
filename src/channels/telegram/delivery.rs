@@ -1173,6 +1173,58 @@ pub(crate) async fn deliver_final_response(
                     }
                 }
             }
+
+            // ── Post-delivery image re-entry (#286) ──────────────────────────
+            // Extraction can succeed and the CHANNEL still refuse the image:
+            // the file vanished between validation and send, the upload
+            // failed, or Telegram rejected the payload. None of that is
+            // visible to the model — the reply it wrote announces a picture
+            // that never arrived. Hand it ONE synthetic correction turn
+            // through the detached-work queue (the #227 machinery, which
+            // resumes the turn WITH the tool registry) so it can tell the user
+            // plainly which image is missing.
+            //
+            // The latch is what keeps this finite: the correction turn
+            // delivers through this same path, so an unlatched re-entry would
+            // re-arm on its own failure and chain turns forever.
+            // `try_spend_image_reentry` returns false once spent, and the
+            // latch re-arms when the user sends their NEXT message
+            // (handler.rs), so a genuine failure in a later turn still heals.
+            //
+            // The guard line is deliberately NOT latched: the user is told
+            // about every failed attachment, however many turns it takes to
+            // get there.
+            if !image_failures.is_empty() {
+                let alert = format!(
+                    "{} image attachment(s) could not be delivered",
+                    image_failures.len()
+                );
+                let guard_line = format!("🛡️ guard: {alert}");
+                append_system_to_flow(bot, chat_id, thread_id, streaming, &guard_line).await;
+                if telegram_state.try_spend_image_reentry(session_id) {
+                    let nudge =
+                        crate::brain::agent::service::nudge::local_image_delivery_failure_nudge(
+                            &image_failures,
+                        );
+                    tracing::info!(
+                        "Telegram: post-delivery image re-entry queued for session {session_id} \
+                         ({} failure(s))",
+                        image_failures.len()
+                    );
+                    telegram_state.enqueue_detached_result(
+                        session_id,
+                        crate::brain::agent::QueuedUserMessage::system(
+                            nudge,
+                            format!("🖼️ {alert} — asking the model to report them"),
+                        ),
+                    );
+                } else {
+                    tracing::info!(
+                        "Telegram: post-delivery image re-entry latch already spent for session \
+                         {session_id}; notice only"
+                    );
+                }
+            }
         }
         Err(ref e) if matches!(e, crate::brain::agent::AgentError::Cancelled) => {
             tracing::info!("Telegram: agent call cancelled for session {}", session_id);

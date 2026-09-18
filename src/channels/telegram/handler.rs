@@ -2397,6 +2397,9 @@ pub(crate) async fn handle_message(
     // the previous turn are stale now (#597). Drop the stash so a later tap on
     // them can't inject an out-of-context turn.
     telegram_state.clear_pending_followups(session_id).await;
+    // Same reasoning for the #286 post-delivery image re-entry: the previous
+    // exchange is over, so this new one may spend its own correction turn.
+    telegram_state.clear_image_reentry(session_id);
 
     let turn_guard = match telegram_state.try_begin_turn(session_id) {
         Some(guard) => guard,

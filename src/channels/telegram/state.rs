@@ -323,6 +323,14 @@ pub struct TelegramState {
     /// Maintained via [`ActiveTurnGuard`] so a crashed turn can't leave a
     /// session looking permanently busy.
     active_turns: std::sync::Mutex<std::collections::HashSet<Uuid>>,
+    /// #286: sessions that already spent their ONE post-delivery image
+    /// re-entry. A reply whose image the channel refused to send queues a
+    /// synthetic correction turn; without a bound, that correction turn's own
+    /// delivery failure would queue another, forever. Set when the re-entry is
+    /// enqueued and cleared when the user sends their NEXT message — so the
+    /// bound covers one user exchange (the turn plus any resumed turns it
+    /// spawns) and a genuine failure in a later turn still heals.
+    image_reentry_spent: std::sync::Mutex<std::collections::HashSet<Uuid>>,
     /// #61: sessions with a LIVE flow roll on screen — the in-flight
     /// `StreamingState` plus the chat coordinates its block renders in.
     /// The push-echo path consults this to decide that a session notify
@@ -479,6 +487,7 @@ impl TelegramState {
             pending_file_saves: Mutex::new(HashMap::new()),
             pending_reactions: std::sync::Mutex::new(HashMap::new()),
             active_turns: std::sync::Mutex::new(std::collections::HashSet::new()),
+            image_reentry_spent: std::sync::Mutex::new(std::collections::HashSet::new()),
             live_flows: std::sync::Mutex::new(HashMap::new()),
             notify_fold_dedup: std::sync::Mutex::new(HashMap::new()),
             chat_newest_msg_id: std::sync::Mutex::new(HashMap::new()),
@@ -1756,6 +1765,43 @@ impl TelegramState {
         msg: crate::brain::agent::QueuedUserMessage,
     ) {
         self.enqueue_item(session_id, QueuedOrigin::DetachedWork, msg);
+    }
+
+    /// #286: claim this session's ONE post-delivery image re-entry.
+    ///
+    /// Returns `true` the first time a session asks (and marks it spent),
+    /// `false` afterwards. The bound is what keeps the re-entry finite: the
+    /// queued correction turn runs a full tool loop and delivers through the
+    /// same path, so an unlatched re-entry would re-arm on its own failure.
+    /// [`Self::clear_image_reentry`] re-arms it for the user's next message.
+    pub(crate) fn try_spend_image_reentry(&self, session_id: Uuid) -> bool {
+        match self.image_reentry_spent.lock() {
+            Ok(mut set) => set.insert(session_id),
+            Err(e) => {
+                // Poisoned: the safe answer is to refuse the re-entry rather
+                // than risk an unbounded chain of synthetic turns.
+                tracing::error!(
+                    "Telegram: image re-entry latch unreadable for session {session_id}: {e}"
+                );
+                false
+            }
+        }
+    }
+
+    /// #286: re-arm the post-delivery image re-entry for `session_id`.
+    ///
+    /// Called when the user sends their own next message: the previous
+    /// exchange is over, so a delivery failure in the new one is a fresh
+    /// failure and deserves its own correction turn.
+    pub(crate) fn clear_image_reentry(&self, session_id: Uuid) {
+        match self.image_reentry_spent.lock() {
+            Ok(mut set) => {
+                set.remove(&session_id);
+            }
+            Err(e) => tracing::error!(
+                "Telegram: could not re-arm the image re-entry latch for session {session_id}: {e}"
+            ),
+        }
     }
 
     fn enqueue_item(
