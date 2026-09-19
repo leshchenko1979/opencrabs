@@ -3,7 +3,11 @@
 //! Stuck cron rows clear, fresh ones survive; stale pre-init markers go,
 //! fresh ones stay; permissions tighten only where loose.
 
-use crate::cli::doctor_fix::{clear_stale_preinit_markers, clear_stuck_cron_runs};
+use crate::cli::doctor_fix::{
+    clear_stale_preinit_markers, clear_stuck_cron_runs, clear_stuck_cron_runs_with_owner,
+    ClearPolicy, STUCK_CRON_MAX_AGE_SECS,
+};
+use crate::config::profile::InstanceOwner;
 use crate::db::Database;
 use rusqlite::params;
 use std::path::PathBuf;
@@ -47,6 +51,40 @@ async fn seed_run(pool: &crate::db::Pool, id: &str, started_at: chrono::DateTime
         .unwrap();
 }
 
+/// Status of one seeded run row.
+async fn run_status(pool: &crate::db::Pool, id: &str) -> String {
+    let id = id.to_string();
+    pool.get()
+        .await
+        .unwrap()
+        .interact(move |conn| {
+            conn.query_row("SELECT status FROM cron_job_runs WHERE id = ?1", params![id], |r| {
+                r.get::<_, String>(0)
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// Error text of one seeded run row (the audit trail of WHY it was closed).
+async fn run_error(pool: &crate::db::Pool, id: &str) -> String {
+    let id = id.to_string();
+    pool.get()
+        .await
+        .unwrap()
+        .interact(move |conn| {
+            conn.query_row(
+                "SELECT error FROM cron_job_runs WHERE id = ?1",
+                params![id],
+                |r| r.get::<_, String>(0),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap()
+}
+
 #[tokio::test]
 async fn test_clear_stuck_cron_runs_marks_interrupted() {
     let pool = test_db().await;
@@ -55,49 +93,26 @@ async fn test_clear_stuck_cron_runs_marks_interrupted() {
     seed_run(&pool, &old, chrono::Utc::now() - chrono::Duration::hours(3)).await;
     seed_run(&pool, &fresh, chrono::Utc::now()).await;
 
-    let n = clear_stuck_cron_runs(&pool, 3600).await.unwrap();
-    assert_eq!(n, 1, "exactly the stale row should clear");
-
-    let (old_status, old_error, fresh_status): (String, String, String) = pool
-        .get()
-        .await
-        .unwrap()
-        .interact(move |conn| {
-            let mut stmt = conn
-                .prepare("SELECT id, status, error FROM cron_job_runs ORDER BY id")
-                .unwrap();
-            let rows: Vec<(String, String, Option<String>)> = stmt
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                    ))
-                })
-                .unwrap()
-                .flatten()
-                .collect();
-            let get = |id: &str| {
-                rows.iter()
-                    .find(|(i, _, _)| i == id)
-                    .map(|(_, s, e)| (s.clone(), e.clone().unwrap_or_default()))
-                    .unwrap()
-            };
-            let (old_s, old_e) = get(&old);
-            let (fresh_s, _) = get(&fresh);
-            (old_s, old_e, fresh_s)
-        })
+    // The PUBLIC entry point, driven with the startup policy: at startup every
+    // running row is an orphan, so this verdict does not depend on which lock
+    // the host happens to hold. The core's owner is injected in the tests
+    // below, which is where the policy branches are pinned.
+    let n = clear_stuck_cron_runs(&pool, ClearPolicy::OrphanedAtStartup, STUCK_CRON_MAX_AGE_SECS)
         .await
         .unwrap();
-    assert_eq!(
-        old_status, "interrupted",
-        "stuck row must be closed as interrupted"
+    assert_eq!(n, 2, "startup clears every running row, however fresh");
+
+    assert_eq!(run_status(&pool, &old).await, "interrupted");
+    assert_eq!(run_status(&pool, &fresh).await, "interrupted");
+    let err = run_error(&pool, &old).await;
+    assert!(
+        err.contains("interrupted: cleared by doctor --fix"),
+        "error message must reflect doctor fix interruption: {err}"
     );
     assert!(
-        old_error.contains("interrupted: cleared by doctor --fix"),
-        "error message must reflect doctor fix interruption"
+        err.contains("orphaned"),
+        "the reason must say WHY the row is dead (no live owner): {err}"
     );
-    assert_eq!(fresh_status, "running", "live row must stay untouched");
 }
 
 fn make_marker(dir: &PathBuf, age: Option<Duration>) -> PathBuf {
@@ -268,4 +283,132 @@ fn instance_owner_answers_only_for_the_named_profile() {
     // A lock for another profile says nothing about this one: the probe must
     // never adopt a sibling's owner.
     assert_eq!(instance_owner_in(&dir, "family"), InstanceOwner::None);
+}
+
+// ---------------------------------------------------------------------------
+// #332 · Step 5 — the clear policy: orphanhood decides, age is only a backstop
+//
+// `clear_stuck_cron_runs_with_owner` is the owner-injectable core of
+// `clear_stuck_cron_runs`; these drive it directly, so no test writes or reads
+// the live `~/.opencrabs/locks/instance/<profile>.lock`.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn startup_policy_clears_a_fresh_row_under_a_live_owner() {
+    let pool = test_db().await;
+    let fresh = Uuid::new_v4().to_string();
+    seed_run(&pool, &fresh, chrono::Utc::now()).await;
+
+    // Startup consults neither the owner nor the age: a process that has just
+    // taken the instance lock cannot own a pre-existing row (#332, D4).
+    let n = clear_stuck_cron_runs_with_owner(
+        &pool,
+        ClearPolicy::OrphanedAtStartup,
+        InstanceOwner::Other(1),
+        STUCK_CRON_MAX_AGE_SECS,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(n, 1, "a fresh row is an orphan at startup");
+    assert_eq!(run_status(&pool, &fresh).await, "interrupted");
+}
+
+#[tokio::test]
+async fn conservative_policy_leaves_a_fresh_row_alone_under_a_live_owner() {
+    let pool = test_db().await;
+    let fresh = Uuid::new_v4().to_string();
+    // 3h is inside the 4h backstop but PAST the old 1h one, so this row is
+    // exactly the live work the age-only sweep used to kill.
+    let long_run = Uuid::new_v4().to_string();
+    seed_run(&pool, &fresh, chrono::Utc::now()).await;
+    seed_run(
+        &pool,
+        &long_run,
+        chrono::Utc::now() - chrono::Duration::hours(3),
+    )
+    .await;
+
+    let n = clear_stuck_cron_runs_with_owner(
+        &pool,
+        ClearPolicy::Conservative,
+        InstanceOwner::Other(1),
+        STUCK_CRON_MAX_AGE_SECS,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(STUCK_CRON_MAX_AGE_SECS, 14400, "backstop is 4h");
+    assert_eq!(n, 0, "a live owner means neither row is provably dead");
+    assert_eq!(run_status(&pool, &fresh).await, "running");
+    assert_eq!(run_status(&pool, &long_run).await, "running");
+}
+
+#[tokio::test]
+async fn conservative_policy_still_clears_a_row_past_the_backstop() {
+    let pool = test_db().await;
+    let residue = Uuid::new_v4().to_string();
+    let fresh = Uuid::new_v4().to_string();
+    seed_run(
+        &pool,
+        &residue,
+        chrono::Utc::now() - chrono::Duration::hours(5),
+    )
+    .await;
+    seed_run(&pool, &fresh, chrono::Utc::now()).await;
+
+    let n = clear_stuck_cron_runs_with_owner(
+        &pool,
+        ClearPolicy::Conservative,
+        InstanceOwner::Other(1),
+        STUCK_CRON_MAX_AGE_SECS,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(n, 1, "past the backstop, even a live box reclaims the row");
+    assert_eq!(run_status(&pool, &residue).await, "interrupted");
+    assert_eq!(run_status(&pool, &fresh).await, "running");
+    assert!(
+        run_error(&pool, &residue).await.contains("max age"),
+        "the aged leg must say it was AGE, not orphanhood"
+    );
+}
+
+#[tokio::test]
+async fn conservative_policy_clears_fresh_rows_when_no_instance_owns_the_profile() {
+    let pool = test_db().await;
+    let fresh = Uuid::new_v4().to_string();
+    seed_run(&pool, &fresh, chrono::Utc::now()).await;
+
+    let n = clear_stuck_cron_runs_with_owner(
+        &pool,
+        ClearPolicy::Conservative,
+        InstanceOwner::None,
+        STUCK_CRON_MAX_AGE_SECS,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(n, 1, "nobody owns the profile, so nothing can be running");
+    assert_eq!(run_status(&pool, &fresh).await, "interrupted");
+}
+
+#[tokio::test]
+async fn conservative_policy_counts_our_own_lock_as_a_live_owner() {
+    let pool = test_db().await;
+    let fresh = Uuid::new_v4().to_string();
+    seed_run(&pool, &fresh, chrono::Utc::now()).await;
+
+    let n = clear_stuck_cron_runs_with_owner(
+        &pool,
+        ClearPolicy::Conservative,
+        InstanceOwner::Self_,
+        STUCK_CRON_MAX_AGE_SECS,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(n, 0, "our own lock is a live owner: the row may be ours");
+    assert_eq!(run_status(&pool, &fresh).await, "running");
 }
