@@ -7,6 +7,21 @@
 //! - Exponential backoff for lock contention
 //! - Configurable retry attempts
 //! - Logging for debugging lock issues
+//!
+//! ## #321 — retryability is decided by TYPE, not by rendered text
+//!
+//! `anyhow::Error`'s `Display` renders ONLY the outermost `.context(..)`
+//! frame. A substring test for `"locked"` on that string therefore can never
+//! see a `rusqlite::Error::SqliteFailure(DatabaseBusy)` buried one frame
+//! down: it returned `false`, and the operation was reported as
+//! non-retryable without a single retry. Every entry point below now decides
+//! retryability through an explicit predicate instead:
+//!
+//! | error type | predicate | sees through `.context(..)`? |
+//! |---|---|---|
+//! | `rusqlite::Error` | [`is_database_locked`] | n/a — already typed |
+//! | `anyhow::Error` | [`is_busy_anyhow`] | yes — walks `Error::chain()` |
+//! | anything else | [`display_says_locked`] | no — text is all it has |
 
 use anyhow::{Context, Result};
 use std::future::Future;
@@ -88,9 +103,96 @@ pub(crate) fn is_database_locked(err: &rusqlite::Error) -> bool {
     )
 }
 
-/// Retry a database operation with exponential backoff
-pub async fn retry_db_operation<F, Fut, T, E>(
+/// Chain-aware retryability test for `anyhow::Error`.
+///
+/// Walks [`anyhow::Error::chain`] and classifies the first typed
+/// `rusqlite::Error` with [`is_database_locked`]. This is what makes a SQLite
+/// lock buried under one or more `.context(..)` frames visible to the retry
+/// loop (#321 Part B) — the textual test it replaces could not.
+pub(crate) fn is_busy_anyhow(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .is_some_and(is_database_locked)
+    })
+}
+
+/// Textual retryability test, for error types that carry nothing but text.
+///
+/// ⚠️ Chain-blind by construction: it sees only the outermost `Display`
+/// frame. Correct for a plain `String`- or `io::Error`-shaped error; WRONG for
+/// `anyhow::Error`, which must use [`is_busy_anyhow`] instead.
+pub(crate) fn display_says_locked<E: std::fmt::Display>(err: &E) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("locked") || msg.contains("busy")
+}
+
+/// The shared retry loop.
+///
+/// `is_retryable` is the ONLY part that differs between the public entry
+/// points, so the backoff, the attempt accounting and the log lines have
+/// exactly one home.
+pub(crate) async fn retry_db_with<F, Fut, T, E, P>(
     mut operation: F,
+    config: &DbRetryConfig,
+    is_retryable: P,
+) -> std::result::Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = std::result::Result<T, E>>,
+    E: std::fmt::Display,
+    P: Fn(&E) -> bool,
+{
+    let mut attempt = 0;
+
+    loop {
+        match operation().await {
+            Ok(result) => {
+                if attempt > 0 {
+                    tracing::info!("Database operation succeeded after {} retries", attempt);
+                }
+                return Ok(result);
+            }
+            Err(err) => {
+                if !is_retryable(&err) {
+                    // `{:#}` so an anyhow chain reports its cause, not just
+                    // the outermost context frame (#321 Part C).
+                    tracing::debug!("Database error is not retryable: {:#}", err);
+                    return Err(err);
+                }
+
+                if attempt >= config.max_attempts {
+                    tracing::warn!(
+                        "Max database retry attempts ({}) exceeded for lock error",
+                        config.max_attempts
+                    );
+                    return Err(err);
+                }
+
+                let delay = config.calculate_delay(attempt);
+
+                tracing::info!(
+                    "Database locked (attempt {}/{}), retrying after {}ms",
+                    attempt + 1,
+                    config.max_attempts,
+                    delay.as_millis()
+                );
+
+                sleep(delay).await;
+
+                attempt += 1;
+            }
+        }
+    }
+}
+
+/// Retry a database operation with exponential backoff.
+///
+/// Retryability is decided textually ([`display_says_locked`]) — the right
+/// call for an error type whose `Display` genuinely carries the signal. An
+/// `anyhow::Error` does not: use [`retry_db_anyhow`].
+pub async fn retry_db_operation<F, Fut, T, E>(
+    operation: F,
     config: &DbRetryConfig,
 ) -> std::result::Result<T, E>
 where
@@ -98,116 +200,33 @@ where
     Fut: Future<Output = std::result::Result<T, E>>,
     E: std::fmt::Display,
 {
-    let mut attempt = 0;
-    let mut last_error;
-
-    loop {
-        match operation().await {
-            Ok(result) => {
-                if attempt > 0 {
-                    tracing::info!("Database operation succeeded after {} retries", attempt);
-                }
-                return Ok(result);
-            }
-            Err(err) => {
-                let error_msg = err.to_string();
-                last_error = err;
-
-                let is_locked = error_msg.to_lowercase().contains("locked")
-                    || error_msg.to_lowercase().contains("busy");
-
-                if !is_locked {
-                    tracing::debug!("Database error is not retryable: {}", error_msg);
-                    return Err(last_error);
-                }
-
-                if attempt >= config.max_attempts {
-                    tracing::warn!(
-                        "Max database retry attempts ({}) exceeded for lock error",
-                        config.max_attempts
-                    );
-                    return Err(last_error);
-                }
-
-                let delay = config.calculate_delay(attempt);
-
-                tracing::info!(
-                    "Database locked (attempt {}/{}), retrying after {}ms",
-                    attempt + 1,
-                    config.max_attempts,
-                    delay.as_millis()
-                );
-
-                sleep(delay).await;
-
-                attempt += 1;
-            }
-        }
-    }
+    retry_db_with(operation, config, display_says_locked::<E>).await
 }
 
 /// Retry a database operation that returns anyhow::Result
+///
+/// Retryability is decided by [`is_busy_anyhow`], which walks the error
+/// chain. The `Display`-based test this previously inherited saw only the
+/// outermost `.context(..)` frame and therefore never fired on a wrapped
+/// SQLite lock (#321 Part B).
 pub async fn retry_db_anyhow<F, Fut, T>(operation: F, config: &DbRetryConfig) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
-    retry_db_operation(operation, config)
+    retry_db_with(operation, config, is_busy_anyhow)
         .await
         .context("Database operation failed after retries")
 }
 
 /// Retry a database operation that returns rusqlite::Result
 pub async fn retry_db_rusqlite<F, Fut, T>(
-    mut operation: F,
+    operation: F,
     config: &DbRetryConfig,
 ) -> std::result::Result<T, rusqlite::Error>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = std::result::Result<T, rusqlite::Error>>,
 {
-    let mut attempt = 0;
-    let mut last_error;
-
-    loop {
-        match operation().await {
-            Ok(result) => {
-                if attempt > 0 {
-                    tracing::info!("Database operation succeeded after {} retries", attempt);
-                }
-                return Ok(result);
-            }
-            Err(err) => {
-                let is_locked = is_database_locked(&err);
-
-                if !is_locked {
-                    tracing::debug!("Database error is not retryable: {}", err);
-                    return Err(err);
-                }
-
-                last_error = err;
-
-                if attempt >= config.max_attempts {
-                    tracing::warn!(
-                        "Max database retry attempts ({}) exceeded for lock error",
-                        config.max_attempts
-                    );
-                    return Err(last_error);
-                }
-
-                let delay = config.calculate_delay(attempt);
-
-                tracing::info!(
-                    "Database locked (attempt {}/{}), retrying after {}ms",
-                    attempt + 1,
-                    config.max_attempts,
-                    delay.as_millis()
-                );
-
-                sleep(delay).await;
-
-                attempt += 1;
-            }
-        }
-    }
+    retry_db_with(operation, config, is_database_locked).await
 }
