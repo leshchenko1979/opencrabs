@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::db::ChannelMessageRepository;
 use crate::db::SessionBindingRepository;
 use crate::services::{ServiceContext, SessionService};
+use crate::utils::mermaid::MermaidProbe;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +17,25 @@ use teloxide::prelude::*;
 use teloxide::types::MessageId;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+/// Render probe that answers the channel-agnostic seam
+/// (`crate::utils::mermaid`) with this channel's own render path: the config
+/// gate (`should_render_mermaid`) followed by the mermaid.ink parse preflight.
+/// Behaviour is unchanged from the pre-#326 inline two-step — the seam just
+/// expresses it once instead of at seven call sites.
+struct TelegramMermaidProbe;
+
+impl MermaidProbe for TelegramMermaidProbe {
+    fn validate<'a>(&'a self, text: &'a str) -> futures::future::BoxFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            if super::rich::mermaid::should_render_mermaid(text) {
+                super::rich::mermaid::preflight_parse_errors(text).await
+            } else {
+                Vec::new()
+            }
+        })
+    }
+}
 
 /// Telegram bot that forwards messages to the agent
 pub struct TelegramAgent {
@@ -39,6 +59,11 @@ impl TelegramAgent {
         channel_msg_repo: ChannelMessageRepository,
         session_binding_repo: SessionBindingRepository,
     ) -> Self {
+        // #326: hand the channel-agnostic validation seam this channel's render
+        // probe. First install wins (`OnceLock`), so a second construction is a
+        // no-op — and a build without this channel keeps the seam as a
+        // documented no-op instead of losing validation to a `#[cfg]` gate.
+        crate::utils::mermaid::install_probe(Box::new(TelegramMermaidProbe));
         Self {
             agent_service,
             session_service: SessionService::new(service_context),

@@ -15,6 +15,7 @@ pub mod image;
 pub mod image_fetch;
 pub mod install;
 pub mod long_command;
+pub mod mermaid;
 pub mod model_match;
 pub mod pdf_vision;
 pub mod plan_files;

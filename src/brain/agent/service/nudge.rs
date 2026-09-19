@@ -168,10 +168,11 @@ pub fn should_emit_pressure_warning(usage_pct: f64, already_emitted: bool) -> Op
 /// regen budget so the model knows how many attempts remain. Same shape as
 /// the other nudges: a `[System: …]` bracket the loop injects as a user
 /// message after echoing the assistant's broken text.
-#[cfg(feature = "telegram")]
+// #326: the rules are channel-agnostic, so this nudge is no longer gated to
+// the telegram feature — a telegram-less build keeps its self-healing regen.
 pub(crate) fn mermaid_regen_nudge(errors: &[String], attempt: u32, max: u32) -> String {
     let quoted = errors.join("\n");
-    let rules = crate::channels::telegram::rich::mermaid::unified_mermaid_rules();
+    let rules = crate::utils::mermaid::unified_mermaid_rules();
     format!(
         "[System: Your mermaid diagram failed to render — mermaid.ink returned:\n{quoted}\n\
          {rules}\n\

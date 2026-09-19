@@ -210,9 +210,10 @@ fn requires_checkable_criteria(task_type: &TaskType) -> bool {
     )
 }
 
-#[cfg(feature = "telegram")]
+// #326: the error formatter is channel-agnostic; the plan tool refuses bad
+// diagrams in every build, not just a telegram-feature one.
 fn format_mermaid_plan_error(context: &str, errors: &[String]) -> String {
-    let err = crate::channels::telegram::rich::mermaid::format_mermaid_error(context, errors);
+    let err = crate::utils::mermaid::format_mermaid_error(context, errors);
     format!(
         "PLAN TASK REFUSED: {err}\n\nPlease fix the Mermaid diagram syntax in the task description and try again."
     )
@@ -2049,24 +2050,16 @@ impl Tool for PlanTool {
                         .map(|c| c.verification.criteria_policy)
                         .unwrap_or_default();
 
-                    #[cfg(feature = "telegram")]
                     for it in &tasks {
-                        if !it.description.is_empty()
-                            && crate::channels::telegram::rich::mermaid::should_render_mermaid(
-                                &it.description,
-                            )
-                        {
-                            let parse_errors =
-                                crate::channels::telegram::rich::mermaid::preflight_parse_errors(
-                                    &it.description,
-                                )
-                                .await;
-                            if !parse_errors.is_empty() {
-                                return Ok(ToolResult::error(format_mermaid_plan_error(
-                                    &format!("task description ('{}')", it.title),
-                                    &parse_errors,
-                                )));
-                            }
+                        if it.description.is_empty() {
+                            continue;
+                        }
+                        let parse_errors = crate::utils::mermaid::validate(&it.description).await;
+                        if !parse_errors.is_empty() {
+                            return Ok(ToolResult::error(format_mermaid_plan_error(
+                                &format!("task description ('{}')", it.title),
+                                &parse_errors,
+                            )));
                         }
                     }
 
@@ -2190,24 +2183,16 @@ impl Tool for PlanTool {
                     .map(|c| c.verification.criteria_policy)
                     .unwrap_or_default();
 
-                #[cfg(feature = "telegram")]
                 for it in &tasks {
-                    if !it.description.is_empty()
-                        && crate::channels::telegram::rich::mermaid::should_render_mermaid(
-                            &it.description,
-                        )
-                    {
-                        let parse_errors =
-                            crate::channels::telegram::rich::mermaid::preflight_parse_errors(
-                                &it.description,
-                            )
-                            .await;
-                        if !parse_errors.is_empty() {
-                            return Ok(ToolResult::error(format_mermaid_plan_error(
-                                &format!("task description ('{}')", it.title),
-                                &parse_errors,
-                            )));
-                        }
+                    if it.description.is_empty() {
+                        continue;
+                    }
+                    let parse_errors = crate::utils::mermaid::validate(&it.description).await;
+                    if !parse_errors.is_empty() {
+                        return Ok(ToolResult::error(format_mermaid_plan_error(
+                            &format!("task description ('{}')", it.title),
+                            &parse_errors,
+                        )));
                     }
                 }
 
@@ -2282,15 +2267,8 @@ impl Tool for PlanTool {
                     .map(|c| c.verification.criteria_policy)
                     .unwrap_or_default();
 
-                #[cfg(feature = "telegram")]
-                if !description.is_empty()
-                    && crate::channels::telegram::rich::mermaid::should_render_mermaid(&description)
-                {
-                    let parse_errors =
-                        crate::channels::telegram::rich::mermaid::preflight_parse_errors(
-                            &description,
-                        )
-                        .await;
+                if !description.is_empty() {
+                    let parse_errors = crate::utils::mermaid::validate(&description).await;
                     if !parse_errors.is_empty() {
                         return Ok(ToolResult::error(format_mermaid_plan_error(
                             &format!("task description ('{title}')"),

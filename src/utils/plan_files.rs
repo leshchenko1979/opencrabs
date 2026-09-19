@@ -865,22 +865,17 @@ pub async fn sync_md_to_json(session_id: Uuid) -> Result<(), String> {
         ));
     }
 
-    #[cfg(feature = "telegram")]
-    if crate::channels::telegram::rich::mermaid::should_render_mermaid(&body) {
-        let parse_errors =
-            crate::channels::telegram::rich::mermaid::preflight_parse_errors(&body).await;
-        if !parse_errors.is_empty() {
-            if let Err(e) = std::fs::write(&md, &plan.description) {
-                tracing::warn!("Failed to restore refused plan .md write: {e}");
-            }
-            let err = crate::channels::telegram::rich::mermaid::format_mermaid_error(
-                "plan markdown",
-                &parse_errors,
-            );
-            return Err(format!(
-                "PLAN WRITE REFUSED: {err}\n\nPlease fix the Mermaid diagram syntax in the plan design and try again."
-            ));
+    // #326: validation goes through the channel-agnostic seam — it returns the
+    // installed renderer's verdict, or nothing when no renderer is present.
+    let parse_errors = crate::utils::mermaid::validate(&body).await;
+    if !parse_errors.is_empty() {
+        if let Err(e) = std::fs::write(&md, &plan.description) {
+            tracing::warn!("Failed to restore refused plan .md write: {e}");
         }
+        let err = crate::utils::mermaid::format_mermaid_error("plan markdown", &parse_errors);
+        return Err(format!(
+            "PLAN WRITE REFUSED: {err}\n\nPlease fix the Mermaid diagram syntax in the plan design and try again."
+        ));
     }
 
     plan.description = body;

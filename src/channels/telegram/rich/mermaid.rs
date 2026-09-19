@@ -24,6 +24,16 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+// ── Channel-agnostic Mermaid vocabulary (#326) ──
+//
+// The pure fence parser lives in `crate::utils::mermaid` so core can validate
+// model output without depending on this channel. Re-exported here so the
+// channel's own callers and the test files importing from `rich::mermaid` keep
+// one import path per name (house style, see `rich/mod.rs`).
+pub(crate) use crate::utils::mermaid::{
+    find_mermaid_fences, has_mermaid_fence, looks_like_mermaid_source,
+};
+
 /// Base URL of the mermaid.ink image renderer. The diagram source is
 /// base64url-appended. NOTE: this sends the diagram text to a third party.
 const MERMAID_INK_BASE: &str = "https://mermaid.ink/img/";
@@ -88,143 +98,11 @@ pub(crate) struct MediaEntry {
     pub(crate) bytes: Option<Vec<u8>>,
 }
 
-/// A located ```mermaid fence in the source markdown. `start` is the byte
-/// offset of the opening fence line's first byte; `end` is the byte offset
-/// just past the closing fence line (including its terminator). Replacing
-/// `text[start..end]` swaps the fence without touching the rest.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct MermaidFence {
-    pub(crate) start: usize,
-    pub(crate) end: usize,
-    pub(crate) source: String,
-}
-
 /// Encode `input` as base64url (RFC 4648 §5, no padding), the alphabet
 /// mermaid.ink requires. Standard base64 (`+`, `/`) returns 404 there.
 pub(crate) fn base64url(input: &str) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(input.as_bytes())
-}
-
-/// Whether a fence body (the text between opening and closing ``` lines)
-/// starts like a mermaid diagram. Used to classify *untagged* fences, whose
-/// info string is empty: models frequently emit diagrams as ```graph TD ...
-/// without the `mermaid` tag. The first non-blank, non-comment (`%%`) line
-/// must start with a known diagram opener; `graph` additionally requires a
-/// direction word (`TD`/`TB`/`BT`/`LR`/`RL`) so DOT-style `graph G {` and
-/// similar foreign notations are not misclassified.
-pub(crate) fn looks_like_mermaid_source(source: &str) -> bool {
-    for raw in source.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with("%%") {
-            continue;
-        }
-        let mut words = line.split_whitespace();
-        let head = words.next().unwrap_or("").to_ascii_lowercase();
-        return match head.as_str() {
-            "graph" => words.next().is_some_and(|d| {
-                matches!(
-                    d.to_ascii_lowercase().as_str(),
-                    "td" | "tb" | "bt" | "lr" | "rl"
-                )
-            }),
-            "flowchart" | "sequencediagram" | "classdiagram" | "classdiagram-v2"
-            | "statediagram" | "statediagram-v2" | "erdiagram" | "journey" | "gantt" | "pie"
-            | "quadrantchart" | "requirementdiagram" | "gitgraph" | "mindmap" | "timeline"
-            | "zenuml" | "sankey-beta" | "xychart-beta" | "block-beta" | "packet-beta"
-            | "architecture-beta" => true,
-            _ => false,
-        };
-    }
-    false
-}
-
-/// Whether `text` contains a fence that should render as a mermaid diagram:
-/// either tagged ```mermaid, or untagged with mermaid-shaped content
-/// ([`looks_like_mermaid_source`]). A fast line-scan used to gate the richer
-/// (async) render path.
-pub(crate) fn has_mermaid_fence(text: &str) -> bool {
-    let mut in_fence = false;
-    let mut tagged_mermaid = false;
-    // Whether the OPENING fence carried no info string. Content
-    // classification applies to bare fences only, so the opening tag is what
-    // decides it — the closing line is bare almost every time and says
-    // nothing about the block.
-    let mut untagged = false;
-    let mut body_start = 0usize;
-    let mut pos = 0usize;
-    for line in text.split_inclusive('\n') {
-        let line_end = pos + line.len();
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("```") {
-            // Tolerant pairing (14:23Z bug class): an info-carrying fence
-            // line is ALWAYS an opener — it implicitly closes any open
-            // block. Only a BARE fence line closes cleanly. A stray bare
-            // fence before ```mermaid used to pair with the tagged opener,
-            // desyncing the machine so the real diagram never located and
-            // raw fences shipped.
-            let info = rest.trim();
-            if in_fence {
-                let body = text[body_start..pos].trim_end_matches('\n');
-                if tagged_mermaid || (untagged && looks_like_mermaid_source(body)) {
-                    return true;
-                }
-            }
-            in_fence = true;
-            tagged_mermaid = info.eq_ignore_ascii_case("mermaid");
-            untagged = info.is_empty();
-            body_start = line_end;
-        }
-        pos = line_end;
-    }
-    false
-}
-
-/// Locate every mermaid fence in `text`, returning byte ranges and the
-/// diagram source between the fences. Consistent with [`has_mermaid_fence`]:
-/// a fence qualifies when its info string trims to `mermaid`
-/// (case-insensitive), or is empty and the body starts like a diagram
-/// ([`looks_like_mermaid_source`]); either way it is closed by the next
-/// bare ``` line.
-pub(crate) fn find_mermaid_fences(text: &str) -> Vec<MermaidFence> {
-    let mut fences = Vec::new();
-    let mut in_fence = false;
-    let mut is_mermaid = false;
-    // See `has_mermaid_fence`: classification keys off the OPENING info
-    // string, never the closing line's.
-    let mut untagged = false;
-    let mut block_start = 0usize;
-    let mut source_start = 0usize;
-    let mut pos = 0usize;
-
-    for line in text.split_inclusive('\n') {
-        let line_end = pos + line.len();
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("```") {
-            // Tolerant pairing — see `has_mermaid_fence`: info-carrying
-            // lines always open (implicitly closing the previous block, at
-            // THIS line's start so the opener is never swallowed); only a
-            // bare fence closes, and its own line is part of the range.
-            let info = rest.trim();
-            if in_fence {
-                let source = &text[source_start..pos];
-                if is_mermaid || (untagged && looks_like_mermaid_source(source)) {
-                    fences.push(MermaidFence {
-                        start: block_start,
-                        end: if info.is_empty() { line_end } else { pos },
-                        source: source.to_string(),
-                    });
-                }
-            }
-            block_start = pos;
-            source_start = line_end;
-            is_mermaid = info.eq_ignore_ascii_case("mermaid");
-            untagged = info.is_empty();
-            in_fence = true;
-        }
-        pos = line_end;
-    }
-    fences
 }
 
 /// Whether `text` should be routed through the mermaid render path:
@@ -1005,33 +883,4 @@ pub(crate) fn failure_html(err: &str, source: &str) -> String {
         escape_html(err),
         escape_html(source)
     )
-}
-
-/// Canonical correction rules for Mermaid diagrams shared across the codebase.
-pub fn unified_mermaid_rules() -> &'static str {
-    "Correction rules:\n\
-     1. Syntax & Notes: Fix the exact token or line reported by the renderer. For sequence diagrams, \
-     'Note over A,B:' supports at most two participants spanning the range — do not list three or more comma-separated actors. \
-     Do not use backticks or HTML tags in labels (only '<br/>' is allowed for line breaks).\n\
-     2. Mobile Layout & Aspect Ratio: Always use top-down vertical layouts ('flowchart TD' or 'direction TB'). \
-     Never use wide 'LR' layouts or unconstrained horizontal subgraphs that shrink illegibly on mobile screens."
-}
-
-/// Format a unified Mermaid syntax error message with context and diagnostic errors.
-pub fn format_mermaid_error(context: &str, errors: &[String]) -> String {
-    let quoted = errors.join("\n");
-    let rules = unified_mermaid_rules();
-    if context.is_empty() {
-        format!(
-            "Mermaid diagram syntax error.\n\n\
-             Renderer diagnostic:\n{quoted}\n\n\
-             {rules}"
-        )
-    } else {
-        format!(
-            "Mermaid diagram syntax error in {context}.\n\n\
-             Renderer diagnostic:\n{quoted}\n\n\
-             {rules}"
-        )
-    }
 }
