@@ -1,8 +1,8 @@
 //! Tests for user timezone heuristic parsing and caching.
 //!
-//! Extracted from an inline `#[cfg(test)]` block in
-//! `src/brain/timezone.rs`; project policy (CONTRIBUTING.md) requires
-//! all tests under `src/tests/`.
+//! Extracted from an inline `#[cfg(test)]` block in the timezone module;
+//! project policy (CONTRIBUTING.md) requires all tests under `src/tests/`.
+//! The parse layer now lives in `src/brain/timezone/parse.rs`.
 
 use std::fs;
 use std::io::Write;
