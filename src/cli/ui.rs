@@ -1747,53 +1747,83 @@ async fn cmd_chat_inner(
             &resumed_session_ids,
         )
         .await;
-        let rescue_count = recovery.interrupted.len();
-        for (sid, chat_id, thread_raw) in recovery.interrupted {
-            let agent = app.agent_service().clone();
-            let tg = telegram_state.clone();
-            let thread_id =
-                thread_raw.map(|t| teloxide::types::ThreadId(teloxide::types::MessageId(t as i32)));
-            let prompt = "[System: A restart just occurred while you were \
-                processing a request. Read the conversation context and continue \
-                where you left off naturally. Do not mention the restart or \
-                any interruption — just pick up seamlessly.]"
-                .to_string();
-            tokio::spawn(async move {
-                // The bot may not be authenticated yet at boot — wait for it
-                // exactly like the pending-requests resume path above.
-                let Some(bot) = crate::channels::bg_resume::wait_ready(
-                    || tg.bot(),
-                    "boot classifier: telegram bot",
-                )
-                .await
-                else {
-                    tracing::warn!(
-                        "Boot classifier (#33): bot never became ready — session {sid} stays comatose"
-                    );
-                    return;
-                };
-                // Boot replay of an EXISTING user turn: resume-of-resume must
-                // stay untracked (#729/#12) — same contract as the pending-
-                // requests loop above.
-                if let Err(e) = crate::channels::telegram::handler::resume_session(
-                    bot,
-                    teloxide::types::ChatId(chat_id),
-                    thread_id,
-                    sid,
-                    prompt,
-                    agent,
-                    tg,
-                    None,
-                )
-                .await
-                {
-                    tracing::error!("Boot classifier resume failed for session {sid}: {e}");
+
+        // #33 interrupted and #344 awaiting are the two resumable buckets, and
+        // they differ ONLY in the prompt that frames the wake — so they share
+        // one spawn path. The wait-for-bot and untracked-resume contract below
+        // must not be able to drift between them.
+        let spawn_boot_resumes =
+            |triples: crate::channels::telegram::resume::ResumeTargets, prompt: &'static str| {
+                for (sid, chat_id, thread_raw) in triples {
+                    let agent = app.agent_service().clone();
+                    let tg = telegram_state.clone();
+                    let thread_id = thread_raw.map(|t| {
+                        teloxide::types::ThreadId(teloxide::types::MessageId(t as i32))
+                    });
+                    tokio::spawn(async move {
+                        // The bot may not be authenticated yet at boot — wait for it
+                        // exactly like the pending-requests resume path above.
+                        let Some(bot) = crate::channels::bg_resume::wait_ready(
+                            || tg.bot(),
+                            "boot classifier: telegram bot",
+                        )
+                        .await
+                        else {
+                            tracing::warn!(
+                                "Boot classifier (#33): bot never became ready — session {sid} stays comatose"
+                            );
+                            return;
+                        };
+                        // Boot replay of an EXISTING turn: resume-of-resume must
+                        // stay untracked (#729/#12) — same contract as the pending-
+                        // requests loop above.
+                        if let Err(e) = crate::channels::telegram::handler::resume_session(
+                            bot,
+                            teloxide::types::ChatId(chat_id),
+                            thread_id,
+                            sid,
+                            prompt.to_string(),
+                            agent,
+                            tg,
+                            None,
+                        )
+                        .await
+                        {
+                            tracing::error!("Boot classifier resume failed for session {sid}: {e}");
+                        }
+                    });
                 }
-            });
-        }
+            };
+
+        let rescue_count = recovery.interrupted.len();
+        spawn_boot_resumes(
+            recovery.interrupted,
+            "[System: A restart just occurred while you were \
+             processing a request. Read the conversation context and continue \
+             where you left off naturally. Do not mention the restart or \
+             any interruption — just pick up seamlessly.]",
+        );
+
+        // #344: an awaiting lane was woken by its durable await record rather
+        // than by the freshness gate, so its framing names the dependency
+        // instead of an interrupted turn.
+        let awaiting_count = recovery.awaiting.len();
+        spawn_boot_resumes(
+            recovery.awaiting,
+            "[System: You were waiting on an external completion — a run, a \
+             peer lane, or an owner decision. A restart occurred. Re-check \
+             whether that completion has landed and continue from where you \
+             left off. Do not mention the restart.]",
+        );
+
         if rescue_count > 0 {
             tracing::info!(
                 "Boot classifier (#33): spawned {rescue_count} interrupted-turn continuation(s)"
+            );
+        }
+        if awaiting_count > 0 {
+            tracing::info!(
+                "Boot classifier (#344): spawned {awaiting_count} awaiting-lane continuation(s)"
             );
         }
     }
