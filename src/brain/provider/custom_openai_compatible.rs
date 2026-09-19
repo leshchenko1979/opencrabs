@@ -9,6 +9,7 @@
 
 use super::error::{ProviderError, Result};
 use super::rate_limiter::RateLimiter;
+use super::retry_policy::RetryOverrides;
 use super::r#trait::{Provider, ProviderStream};
 use super::types::*;
 use crate::brain::tokenizer::{count_message_tokens, count_tokens};
@@ -2210,6 +2211,12 @@ pub struct OpenAIProvider {
     /// `retry_config()`. Used by `RotatingQwenProvider` to disable
     /// retry-on-rate-limit for sub-providers (rotation handles 429).
     retry_config_override: Option<crate::utils::retry::RetryConfig>,
+    /// Operator retry tuning merged from the global `[retry]` block and
+    /// this provider's own `retry_*` keys (#346). Installed by
+    /// `configure_openai_compatible` and layered on top of the family
+    /// preset per request — unlike `retry_config_override`, which REPLACES
+    /// the policy outright.
+    retry_overrides: RetryOverrides,
     /// OpenRouter response caching — when true, adds `X-OpenRouter-Cache: true`.
     cache_enabled: bool,
     /// OpenRouter cache TTL in seconds (1-86400, default 300).
@@ -2235,11 +2242,6 @@ pub struct OpenAIProvider {
 }
 
 impl OpenAIProvider {
-    /// Returns true if this provider targets OpenRouter (detected by base_url).
-    fn is_openrouter(&self) -> bool {
-        self.base_url.to_lowercase().contains("openrouter")
-    }
-
     /// Pick a retry config tuned for this (provider, model) pair.
     ///
     /// - Qwen OAuth matches qwen-cli's DEFAULT_RETRY_OPTIONS (retry 429s
@@ -2255,7 +2257,7 @@ impl OpenAIProvider {
     ///   the user on the free tier instead of silently burning paid credits
     ///   on the fallback chain.
     /// - All other providers keep the default (bail-to-fallback on 429).
-    fn retry_config(&self, model: &str) -> crate::utils::retry::RetryConfig {
+    pub(crate) fn retry_config(&self, model: &str) -> crate::utils::retry::RetryConfig {
         if let Some(ref ovr) = self.retry_config_override {
             return ovr.clone();
         }
@@ -2263,11 +2265,13 @@ impl OpenAIProvider {
         // OpenRouter upstream providers often have tight per-minute windows
         // that reopen within seconds — bailing to fallback on the first 429
         // is wasteful when a 3-retry backoff would get through.
-        if self.name == "qwen" || self.is_openrouter() || model.ends_with(":free") {
-            crate::utils::retry::RetryConfig::qwen_cli_match()
-        } else {
-            crate::utils::retry::RetryConfig::default()
-        }
+        // Family preset (qwen / OpenRouter / `:free`) with the operator's
+        // `retry_*` keys layered on top, per KEY — `retry_policy` owns both
+        // halves so the factory and the provider cannot drift apart (#346).
+        // A key the operator set does not freeze the preset's other values,
+        // and a `:free` model still selects the preset on the request that
+        // carries it.
+        super::retry_policy::resolve(&self.name, &self.base_url, model, &self.retry_overrides)
     }
 
     /// Create a new OpenAI provider with official API
@@ -2291,6 +2295,7 @@ impl OpenAIProvider {
             auth_refresh_fn: None,
             auth_invalidate_fn: None,
             retry_config_override: None,
+            retry_overrides: RetryOverrides::default(),
             cache_enabled: false,
             cache_ttl: None,
             reasoning_setting: None,
@@ -2322,6 +2327,7 @@ impl OpenAIProvider {
             auth_refresh_fn: None,
             auth_invalidate_fn: None,
             retry_config_override: None,
+            retry_overrides: RetryOverrides::default(),
             cache_enabled: false,
             cache_ttl: None,
             reasoning_setting: None,
@@ -2353,6 +2359,7 @@ impl OpenAIProvider {
             auth_refresh_fn: None,
             auth_invalidate_fn: None,
             retry_config_override: None,
+            retry_overrides: RetryOverrides::default(),
             cache_enabled: false,
             cache_ttl: None,
             reasoning_setting: None,
@@ -2470,6 +2477,16 @@ impl OpenAIProvider {
     /// rotate immediately instead of burning ~45s in backoff per account.
     pub fn with_retry_config(mut self, config: crate::utils::retry::RetryConfig) -> Self {
         self.retry_config_override = Some(config);
+        self
+    }
+
+    /// Install operator retry tuning (#346). Unlike [`Self::with_retry_config`],
+    /// which REPLACES the policy, these values are layered per KEY on top
+    /// of the family preset by `retry_config()`. Called by
+    /// `configure_openai_compatible` for every [OI]-compatible provider,
+    /// primary and fallback alike.
+    pub(crate) fn with_retry_overrides(mut self, overrides: RetryOverrides) -> Self {
+        self.retry_overrides = overrides;
         self
     }
 
@@ -5037,6 +5054,14 @@ impl Provider for OpenAIProvider {
         self.stream_idle_timeout
     }
 
+    fn retry_config(&self, model: &str) -> crate::utils::retry::RetryConfig {
+        // Delegate to the inherent resolver. `Self::retry_config` is
+        // ambiguous once both the inherent method and this trait method
+        // exist, so go through a free helper that names the inherent one
+        // unambiguously (same shape as `provider_error_is_retryable`).
+        oi_provider_retry_config(self, model)
+    }
+
     fn context_window(&self, model: &str) -> Option<u32> {
         // User-configured value takes priority over model-name heuristics
         if let Some(cw) = self.configured_context_window {
@@ -5083,6 +5108,16 @@ impl Provider for OpenAIProvider {
             .map(|cfg| cfg.calculate_cost(model, input_tokens, output_tokens))
             .unwrap_or(0.0)
     }
+}
+
+/// Name the inherent retry resolver unambiguously for the `Provider` trait
+/// impl (#346). `Self::retry_config` would be ambiguous with the trait
+/// method of the same name, so the delegation goes through this free helper.
+fn oi_provider_retry_config(
+    provider: &OpenAIProvider,
+    model: &str,
+) -> crate::utils::retry::RetryConfig {
+    provider.retry_config(model)
 }
 
 /// Returns true if this model requires `max_completion_tokens` instead of `max_tokens`.

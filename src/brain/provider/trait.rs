@@ -4,6 +4,7 @@
 
 use super::error::Result;
 use super::types::{LLMRequest, LLMResponse, StreamEvent};
+use crate::utils::retry::RetryConfig;
 use async_trait::async_trait;
 use futures::Stream;
 use std::pin::Pin;
@@ -113,6 +114,19 @@ pub trait Provider: Send + Sync {
     /// Returns `None` when standard default idle timeouts apply (20s remote, 3600s local/CLI).
     fn stream_idle_timeout(&self) -> Option<std::time::Duration> {
         None
+    }
+
+    /// Resolved retry policy for `model` (#346).
+    ///
+    /// Providers that carry operator retry tuning override this; the
+    /// default is the built-in `RetryConfig::default`, which is what a
+    /// provider that never went through `configure_openai_compatible`
+    /// uses. It lives on the trait rather than only on the concrete type
+    /// because the fallback chain hands callers a `dyn Provider` — without
+    /// it, the wiring that installs an operator's `retry_*` keys could not
+    /// be asserted through the fallback path at all.
+    fn retry_config(&self, _model: &str) -> RetryConfig {
+        RetryConfig::default()
     }
 
     /// Force the fallback wrapper to advance to the next provider.
