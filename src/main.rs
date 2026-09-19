@@ -62,11 +62,23 @@ async fn main() -> Result<()> {
         tracing::info!("🧹 Cleaned up {} old log file(s)", removed);
     }
 
-    // Clean up orphaned channel temp files (tg_photo_*, wa_img_*) older than 30 days.
-    // Never wipe on restart — files may be recoverable or still needed.
-    if let Ok(removed) = logging::cleanup_old_temp_files(30)
-        && removed > 0
-    {
+    // Clean up orphaned temp files — channel uploads (tg_photo_*, wa_img_*) and
+    // the tool-output spill dir — older than `agent.tool_output_retention_days`.
+    // Never wipe on restart: files may be recoverable or still needed. A window
+    // of `0` disables the purge; the sweep itself honours that.
+    let retention_days = match opencrabs::config::Config::load_for_cli(cli_args.config.as_deref()) {
+        Ok(config) => config.agent.tool_output_retention_days,
+        Err(e) => {
+            // A broken config is reported by the CLI path with full context,
+            // and that same failure stops this boot anyway. Skipping the purge
+            // is the conservative half: deleting files on the strength of a
+            // value we could not read is the worse failure.
+            tracing::warn!("temp-file purge skipped — config unavailable: {e}");
+            0
+        }
+    };
+    let removed = logging::cleanup_old_temp_files(u64::from(retention_days));
+    if removed > 0 {
         tracing::info!("🧹 Cleaned up {} orphaned temp file(s)", removed);
     }
 

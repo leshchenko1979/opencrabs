@@ -213,6 +213,26 @@ impl Config {
         Self::load_with_status().map(|(config, _)| config)
     }
 
+    /// Load the configuration a CLI entry point should use: from `config_path`
+    /// when `--config <path>` was passed, otherwise from the default locations.
+    ///
+    /// The read only — schema migration is a separate startup step
+    /// ([`Self::migrate_config_files`]) the CLI performs once before loading.
+    /// Shared so the CLI path and the pre-CLI startup work cannot drift apart
+    /// on which file they consider authoritative.
+    pub fn load_for_cli(config_path: Option<&str>) -> Result<Self> {
+        match config_path {
+            Some(path) => {
+                tracing::info!("Loading configuration from custom path: {}", path);
+                Self::load_from_path(path)
+            }
+            None => {
+                tracing::debug!("Loading default configuration");
+                Self::load()
+            }
+        }
+    }
+
     /// `load()`, plus what it had to do to succeed.
     ///
     /// Use this over `load()` + a global flag whenever the outcome of a
