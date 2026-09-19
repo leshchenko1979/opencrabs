@@ -1018,6 +1018,7 @@ impl Config {
             brain: overlay.brain,
             browser: overlay.browser,
             tui: overlay.tui,
+            retry: overlay.retry,
         }
     }
 
