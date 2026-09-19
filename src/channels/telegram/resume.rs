@@ -18,7 +18,21 @@ use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::ChatAction;
 use tokio_util::sync::CancellationToken;
+use tracing::info;
 use uuid::Uuid;
+
+/// Bound on the two non-delivery awaits in the resume tail (#402).
+///
+/// The post-loop tail used to await the cancel-token removal and the edit-loop
+/// join with NO bound. A 3 m 42 s stall was observed between loop end and the
+/// settle on the turn that filed #402, and because the settle never ran the
+/// flow block stayed on the `⚙` spinner forever. Abandoning either await is
+/// safe: the token removal is bookkeeping, and the edit loop is already
+/// cancelled before the join, so abandoning the join abandons no work.
+///
+/// The DELIVERY call is deliberately NOT bounded — a timeout there would drop
+/// the user's answer, which is strictly worse than a late one.
+const TAIL_AWAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Build the background-task enqueue producer for Telegram (#722).
 ///
@@ -995,13 +1009,57 @@ pub(crate) async fn resume_session_inner(
         }
     };
 
-    telegram_state.remove_cancel_token(session_id).await;
+    // #402 tail trace (stage 1/6): entry. `flow_open` records whether a flow
+    // block was opened this turn — when false the settle is a no-op, so a
+    // stranded-spinner report with flow_open = false points elsewhere.
+    let flow_open = streaming
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .open_group_msg_id
+        .is_some();
+    info!(
+        "Telegram resume tail: session {} — entry, flow_open = {} (stage 1/6)",
+        session_id, flow_open
+    );
+
+    // #402: bounded — bookkeeping must never hold the settle (TAIL_AWAIT_BUDGET).
+    match tokio::time::timeout(
+        TAIL_AWAIT_BUDGET,
+        telegram_state.remove_cancel_token(session_id),
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(_) => tracing::warn!(
+            "Telegram resume tail: session {} — remove_cancel_token exceeded {:?}; continuing (the settle must not be held)",
+            session_id,
+            TAIL_AWAIT_BUDGET
+        ),
+    }
+    info!(
+        "Telegram resume tail: session {} — cancel token removed (stage 2/6)",
+        session_id
+    );
     edit_cancel.cancel();
     // Await edit loop to prevent race where it sends a NEW message after
     // we grab streaming_msg_id (causes duplicate completion).
-    if let Err(e) = edit_loop_handle.await {
-        tracing::warn!(error = %e, "Telegram resume edit loop task panicked");
+    // #402: bounded — the loop is already cancelled above, so abandoning this
+    // join abandons no work. An unbounded join here is what held the settle.
+    match tokio::time::timeout(TAIL_AWAIT_BUDGET, edit_loop_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "Telegram resume edit loop task panicked");
+        }
+        Err(_) => tracing::warn!(
+            "Telegram resume tail: session {} — edit-loop join exceeded {:?}; continuing (the settle must not be held)",
+            session_id,
+            TAIL_AWAIT_BUDGET
+        ),
     }
+    info!(
+        "Telegram resume tail: session {} — edit loop joined (stage 3/6)",
+        session_id
+    );
 
     // ── Final delivery ─────────────────────────────────────────────────────
     let (streaming_msg_id, remaining_display) = {
@@ -1021,6 +1079,11 @@ pub(crate) async fn resume_session_inner(
         if let Some(mid) = streaming_msg_id {
             best_effort_delete(&bot, chat_id, mid, "streaming teardown").await;
         }
+        // #402: DELIBERATE EARLY RETURN — the CANCEL GUARD. A cancelled turn is
+        // a teardown, not a delivery: there is no answer to settle and the guard
+        // is already released, so skipping the settle tail here is correct.
+        // Left as-is on purpose — unlike the delivery-gated return #402 removed
+        // below, this one is not conditional on a delivery outcome.
         return Ok(());
     }
 
@@ -1063,61 +1126,79 @@ pub(crate) async fn resume_session_inner(
             }
         }
     };
-    if !super::handler::deliver_final_response(
-        &bot,
-        chat_id,
-        None,
-        thread_id,
-        &streaming,
-        session_id,
-        &agent,
-        &telegram_state,
-        &channel_msg_repo,
-        &voice_config,
-        false,
-        is_dm,
-        "unknown",
-        streaming_msg_id,
-        result,
-    )
-    .await?
-    {
-        return Ok(());
-    }
-
-    // Resume parity with the main handler: settle the flow header once the
-    // final delivery has left the block in its final shape.
-    {
-        let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
-        s.flow_outcome = Some(flow_outcome);
-        let (bg_indicator, bg_count) = super::handler::bg_indicator_for(&agent, session_id);
-        s.bg_indicator = bg_indicator;
-        s.bg_count = bg_count;
-        // Sub-agent counts ride the same settle stamp as the crash-resume
-        // path's background tasks (#1183 parity with handle_message).
-        s.subagent_counts = super::handler::subagent_counts_for(&agent, session_id);
-        s.queued_count = telegram_state.queued_items_count(session_id);
-    }
-    // Recompute sections at settle so the plan Approve/Discard keyboard, which
-    // attaches only at turn end (#571), materializes on the final render — the
-    // main handler does the same right after stamping the outcome.
-    super::flow_chrome::refresh_sections(&streaming, &agent, session_id).await;
-    // Crash-resume settle render (#1211 G2 Final): queued, never dropped.
-    refresh_flow(&bot, chat_id, &streaming, super::governor::EditClass::Final).await;
-    // #1377: if a flow card survived to settle, register its state handle so
-    // later background-task completions fold their acks into THIS card
-    // instead of spraying standalone bubbles. Overwritten by the next
-    // settle; cleared on teardown (delivery.rs).
-    if streaming
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .open_group_msg_id
-        .is_some()
-    {
-        telegram_state
-            .register_flow_state(session_id, Arc::clone(&streaming))
+    info!(
+        "Telegram resume tail: session {} — pre-delivery (stage 4/6)",
+        session_id
+    );
+    // #402: delivery and settle ride the ONE shared tail helper — run_tail —
+    // which runs the settle UNCONDITIONALLY and returns the delivery result
+    // unchanged. The old `if !delivered { return Ok(()) }` gate is gone: a
+    // `false` or `Err` used to skip the settle and strand the block on `⚙`.
+    //
+    // `delivered_ok` is written by the delivery leg and read by the settle leg
+    // so stage 5 can report the outcome BETWEEN the two — without it a stall
+    // after stage 4 could not be attributed to delivery vs settle.
+    let delivered_ok = std::sync::atomic::AtomicBool::new(false);
+    let delivered = super::turn_settle::run_tail(
+        async {
+            let r = super::handler::deliver_final_response(
+                &bot,
+                chat_id,
+                None,
+                thread_id,
+                &streaming,
+                session_id,
+                &agent,
+                &telegram_state,
+                &channel_msg_repo,
+                &voice_config,
+                false,
+                is_dm,
+                "unknown",
+                streaming_msg_id,
+                result,
+            )
             .await;
-    }
+            delivered_ok.store(
+                matches!(r, Ok(true)),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            r
+        },
+        async {
+            // Stage 5/6: delivery returned (the value above), settle about to
+            // run. `delivered_ok` is false for both the `false` reaction-only
+            // shape and any `Err` — exactly the cases that used to skip this.
+            info!(
+                "Telegram resume tail: session {} — post-delivery, delivered_ok = {} (stage 5/6)",
+                session_id,
+                delivered_ok.load(std::sync::atomic::Ordering::SeqCst)
+            );
+            // Resume parity with the main handler (#402): the settle tail is
+            // SHARED — super::turn_settle::settle_turn_block — so the two paths
+            // cannot drift.
+            super::turn_settle::settle_turn_block(
+                &bot,
+                chat_id,
+                &streaming,
+                &agent,
+                &telegram_state,
+                session_id,
+                flow_outcome,
+                streaming_msg_id,
+            )
+            .await;
+        },
+    )
+    .await;
+
+    // #402: the settle has run UNCONDITIONALLY — the block is off the spinner
+    // whatever delivery returned. Only now does the result propagate.
+    info!(
+        "Telegram resume tail: session {} — settled (stage 6/6)",
+        session_id
+    );
+    delivered?;
     // Settle the plan card too (#580): final checklist state + the Approve/
     // Discard keyboard, which is now gated to turn end on the card.
     let plan_kb = {
