@@ -101,6 +101,46 @@ pub struct Config {
     /// Optional — defaults preserve current (crab-dark) rendering.
     #[serde(default)]
     pub tui: TuiConfig,
+
+    /// Retry tuning for provider requests (#346). An absent section — or an
+    /// absent key inside it — falls back to the built-in defaults, i.e.
+    /// exactly the pre-#346 behaviour.
+    #[serde(default)]
+    pub retry: RetrySection,
+}
+
+/// Global retry tuning for provider requests (#346).
+///
+/// Every field is optional. Resolution order for a given provider is
+/// per-provider `retry_*` override → this section → the built-in family
+/// preset → [`crate::utils::retry::RetryConfig::default`], so an existing
+/// `config.toml` keeps its behaviour byte-for-byte.
+///
+/// ```toml
+/// [retry]
+/// max_attempts       = 4
+/// initial_delay_secs = 1.0
+/// max_delay_secs     = 30.0
+/// backoff_multiplier = 2.0
+/// jitter             = 0.1
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RetrySection {
+    /// Maximum in-place retry attempts. `0` disables retries entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+    /// Seconds to wait before the first retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_delay_secs: Option<f64>,
+    /// Ceiling for the exponential backoff, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_delay_secs: Option<f64>,
+    /// Backoff multiplier (2.0 = classic doubling).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff_multiplier: Option<f64>,
+    /// Random jitter fraction applied to each delay (0.0 = none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<f64>,
 }
 
 /// TUI (terminal UI) configuration.
@@ -2799,6 +2839,44 @@ pub struct ProviderConfig {
     /// Overrides the default 20s idle timeout for remote streams (or 3600s for local/CLI).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_idle_timeout_secs: Option<u64>,
+
+    // ---- retry overrides (#346) -------------------------------------------
+    // Each key left unset falls through to the global `[retry]` section,
+    // then to the built-in family preset / default.
+    /// Maximum in-place retry attempts for this provider. `0` disables
+    /// retries entirely. Overrides `[retry].max_attempts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_max_attempts: Option<u32>,
+
+    /// Seconds before the first retry. Overrides `[retry].initial_delay_secs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_initial_delay_secs: Option<f64>,
+
+    /// Ceiling for the exponential backoff, in seconds.
+    /// Overrides `[retry].max_delay_secs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_max_delay_secs: Option<f64>,
+
+    /// Backoff multiplier. Overrides `[retry].backoff_multiplier`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_backoff_multiplier: Option<f64>,
+
+    /// Jitter fraction. Overrides `[retry].jitter`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_jitter: Option<f64>,
+
+    /// Aggregator opt-in (#346). When true, a HARD quota / billing 429 —
+    /// normally non-retryable so the request rolls straight to the fallback
+    /// chain (#952) — gets a small BOUNDED number of in-place attempts
+    /// first.
+    ///
+    /// Set this only on a provider that fronts several upstream accounts
+    /// (an aggregator / relay): the cap behind the 429 belongs to ONE
+    /// upstream key, and the same request may be served by another seconds
+    /// later. On a direct provider the cap is terminal and retrying only
+    /// burns the budget against a wall. Default false = #952 behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_quota_exhausted: Option<bool>,
 }
 
 fn default_enabled() -> bool {
@@ -2883,6 +2961,7 @@ impl Default for Config {
             brain: BrainConfig::default(),
             browser: BrowserConfig::default(),
             doctor: DoctorConfig::default(),
+            retry: RetrySection::default(),
         }
     }
 }
