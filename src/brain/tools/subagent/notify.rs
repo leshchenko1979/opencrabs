@@ -129,8 +129,9 @@ impl Tool for SessionNotifyTool {
     fn description(&self) -> &str {
         "Push a message to another session's queue in this process. The target \
          drains it at its next tool-loop boundary, or wakes immediately if idle. \
-         Refuses while the target is mid-turn unless interrupt=true — do not \
-         derail a working session by default. When the target no longer \
+         Against a mid-turn target it QUEUES for the next tool-loop boundary \
+         instead of refusing, so it never derails the running turn (#373). \
+         When the target no longer \
          owns its channel (a newer session replaced it on its \
          chat/topic), the message is REDIRECTED to the occupying session \
          with provenance framing, and delivery reports the redirect; \
