@@ -168,31 +168,30 @@ fn tz_alias_lookup(s: &str) -> Option<Tz> {
 
 /// Parse a timezone value string into TzInfo.
 fn parse_tz_value(val: &str) -> Option<TzInfo> {
-    // Check for "UTC+3 (MSK)" or "UTC-5 (EST)"
-    if let Some((utc_part, rest)) = val.split_once('(') {
-        let label = rest.trim_end_matches(')').trim().to_string();
-        let tz_candidate = utc_part.trim();
-        if let Some(tz) = parse_utc_offset_or_iana(tz_candidate) {
-            return Some(TzInfo::new(
-                tz,
-                if label.is_empty() { None } else { Some(label) },
-            ));
+    let val = val.trim();
+
+    if let Some((outer, inner)) = split_parenthetical(val) {
+        // Precedence is regression-critical. An EXPLICIT zone form — IANA name
+        // or UTC offset — wins its slot over a city alias, in either position,
+        // so `Москва (UTC+3)` keeps resolving to the offset with the label
+        // "Москва" (pinned by parse_russian_timezone_format). Aliases are only
+        // consulted once BOTH explicit slots are ruled out, which is what makes
+        // `Москва (МСК)` resolve without disturbing the offset form.
+        if let Some(tz) = parse_utc_offset_or_iana(outer) {
+            return Some(TzInfo::new(tz, label_of(inner)));
         }
-        // Maybe format is "Москва (UTC+3)"
-        let inner = rest.trim_end_matches(')').trim();
         if let Some(tz) = parse_utc_offset_or_iana(inner) {
-            let outer_label = utc_part.trim().to_string();
-            return Some(TzInfo::new(
-                tz,
-                if outer_label.is_empty() {
-                    None
-                } else {
-                    Some(outer_label)
-                },
-            ));
+            return Some(TzInfo::new(tz, label_of(outer)));
+        }
+        if let Some(tz) = tz_alias_lookup(outer) {
+            return Some(TzInfo::new(tz, label_of(inner)));
+        }
+        if let Some(tz) = tz_alias_lookup(inner) {
+            return Some(TzInfo::new(tz, label_of(outer)));
         }
     }
 
+    // No parenthetical, or nothing in it resolved.
     // Direct IANA parse, e.g. "Europe/Paris"
     if let Ok(tz) = val.parse::<Tz>() {
         return Some(TzInfo::new(tz, None));
@@ -203,7 +202,29 @@ fn parse_tz_value(val: &str) -> Option<TzInfo> {
         return Some(TzInfo::new(tz, None));
     }
 
+    // Bare city name or abbreviation, e.g. "Москва" or "MSK". The alias is its
+    // own label: the user's own word is what should appear in the marker.
+    if let Some(tz) = tz_alias_lookup(val) {
+        return Some(TzInfo::new(tz, label_of(val)));
+    }
+
     None
+}
+
+/// Split `outer (inner)` into its two trimmed parts.
+fn split_parenthetical(val: &str) -> Option<(&str, &str)> {
+    let (outer, rest) = val.split_once('(')?;
+    Some((outer.trim(), rest.trim_end_matches(')').trim()))
+}
+
+/// Label taken from one declaration slot, or `None` when the slot is empty.
+fn label_of(slot: &str) -> Option<String> {
+    let slot = slot.trim();
+    if slot.is_empty() {
+        None
+    } else {
+        Some(slot.to_string())
+    }
 }
 
 /// Parse UTC offset (e.g. "UTC+3", "UTC-5", "UTC+03:00", "+03") or direct IANA string.

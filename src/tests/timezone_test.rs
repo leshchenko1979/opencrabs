@@ -114,3 +114,27 @@ My timezone: is a personal matter, ask me instead.
 ";
     assert!(parse_timezone_heuristic(user_md).is_none());
 }
+
+#[test]
+fn parse_moscow_city_with_abbreviation_label() {
+    // Alias in the OUTER slot: the explicit-zone arms must be ruled out first,
+    // then the alias resolves and the parenthetical becomes the label.
+    let user_md = "\
+# Профиль
+- **Часовой пояс:** Москва (МСК)
+";
+    let info = parse_timezone_heuristic(user_md).expect("should parse");
+    assert_eq!(info.tz, Tz::Europe__Moscow);
+    assert_eq!(info.label.as_deref(), Some("МСК"));
+}
+
+#[test]
+fn parse_bare_moscow_abbreviation() {
+    let user_md = "\
+# Профиль
+**Часовой пояс:** МСК
+";
+    let info = parse_timezone_heuristic(user_md).expect("should parse");
+    assert_eq!(info.tz, Tz::Europe__Moscow);
+    assert_eq!(info.label.as_deref(), Some("МСК"));
+}
