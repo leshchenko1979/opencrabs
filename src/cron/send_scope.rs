@@ -15,6 +15,14 @@
 //!
 //! #148 extends this across all channel authorities (telegram, discord,
 //! slack, whatsapp), matching the central resolver's authority grammar.
+//!
+//! #332 makes the scope binding-aware in two ways. A `session:` target is a
+//! real destination — the chat its session is BOUND to — so it expands into
+//! that channel target instead of collapsing the scope to Nowhere; and the
+//! scope is a [`SendScope`], not a bare list, so a refusal can say whether the
+//! job declared nothing or declared something no channel could be resolved
+//! from. A bare empty list cannot tell those apart, and the old text asserted
+//! the first in both cases.
 
 /// A permitted delivery destination for a cron turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,21 +31,91 @@ pub struct PermittedTarget {
     pub target_id: String,
 }
 
-tokio::task_local! {
-    /// The permitted channel targets for this cron turn. `None` in the task
-    /// local means not a cron turn (unscoped); an empty `Vec` means a cron
-    /// turn whose job named no `deliver_to` (sends nowhere).
-    static CRON_PERMITTED_TARGETS: Option<Vec<PermittedTarget>>;
+/// A cron turn's send scope: what it may reach, or why it may reach nothing.
+///
+/// The two Nowhere states are NOT the same fact and must not read as one. A
+/// job with no `deliver_to` genuinely declared no destination; a job whose
+/// `deliver_to` names a session with no channel binding DID declare one, and a
+/// refusal claiming otherwise sends the model looking for a field that is
+/// already set (#332). The variant carries which case this is, so the text the
+/// model reads is true in both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendScope {
+    /// This turn may reach these channel targets. Never empty — a scope with
+    /// nothing to reach is a [`SendScope::Nowhere`], so a permitted scope
+    /// always has at least one target to name in a refusal.
+    Permitted(Vec<PermittedTarget>),
+    /// This turn may reach nothing, for this reason.
+    Nowhere(NoTargetReason),
 }
 
-/// Run `fut` with cron send scoping active, permitting only `targets`.
+/// Why a cron turn may reach nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoTargetReason {
+    /// The job declared no `deliver_to` at all — it never had a destination.
+    Undeclared,
+    /// The job DID declare `deliver_to`, but no channel target could be
+    /// resolved from it: a `session:` target whose session carries no channel
+    /// binding (unbound, archived, or bound to a non-channel surface), or a
+    /// segment in a grammar the scope cannot address.
+    Unresolvable { declared: String },
+    /// The job's own row could not be read, so what it declared is unknown.
+    JobUnknown,
+}
+
+impl SendScope {
+    /// The scope for a job, given the channel targets resolved from its
+    /// `deliver_to`.
+    ///
+    /// This is the ONE place the "nothing resolvable" case is classified, so
+    /// the firing path and the resume path cannot disagree about why a turn is
+    /// scoped to Nowhere. An empty target list is classified by the declared
+    /// field: a blank or absent `deliver_to` is [`NoTargetReason::Undeclared`],
+    /// anything else is [`NoTargetReason::Unresolvable`].
+    pub fn from_job(deliver_to: Option<&str>, targets: Vec<PermittedTarget>) -> Self {
+        if !targets.is_empty() {
+            return Self::Permitted(targets);
+        }
+        match deliver_to.map(str::trim) {
+            Some(declared) if !declared.is_empty() => Self::Nowhere(NoTargetReason::Unresolvable {
+                declared: declared.to_string(),
+            }),
+            _ => Self::Nowhere(NoTargetReason::Undeclared),
+        }
+    }
+}
+
+tokio::task_local! {
+    /// The send scope for this cron turn. `None` in the task local means not a
+    /// cron turn (unscoped); `Some(Nowhere(_))` means a cron turn that may
+    /// reach nothing, carrying WHY so the refusal can say which case it is.
+    static CRON_PERMITTED_TARGETS: Option<SendScope>;
+}
+
+/// Run `fut` with cron send scoping active, under `scope`.
 /// Task-local, so it covers every await inside the turn and never reaches
 /// a sibling job on the scheduler.
+pub async fn with_send_scope<F, T>(scope: Option<SendScope>, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    CRON_PERMITTED_TARGETS.scope(scope, fut).await
+}
+
+/// Run `fut` under a scope built from a bare target list.
+///
+/// A caller that holds a resolved target list rather than a job's `deliver_to`
+/// string installs it here. There is no declared field to read, so an empty
+/// list is [`NoTargetReason::Undeclared`] — which is true of this form: the
+/// caller declared no destination. A caller that DOES hold the job string goes
+/// through [`with_send_scope`] with a scope from
+/// [`cron_job_scope_async`], so the two Nowhere states stay distinguishable.
 pub async fn with_permitted_targets<F, T>(targets: Option<Vec<PermittedTarget>>, fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    CRON_PERMITTED_TARGETS.scope(targets, fut).await
+    let scope = targets.map(|targets| SendScope::from_job(None, targets));
+    with_send_scope(scope, fut).await
 }
 
 /// Compatibility wrapper for the Telegram-only single-chat form.
@@ -45,14 +123,14 @@ pub async fn with_send_target<F, T>(target: Option<i64>, fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    let targets = match target {
-        Some(chat) => Some(vec![PermittedTarget {
+    let scope = Some(match target {
+        Some(chat) => SendScope::Permitted(vec![PermittedTarget {
             channel: "telegram",
             target_id: chat.to_string(),
         }]),
-        None => Some(Vec::new()),
-    };
-    with_permitted_targets(targets, fut).await
+        None => SendScope::Nowhere(NoTargetReason::Undeclared),
+    });
+    with_send_scope(scope, fut).await
 }
 
 /// What this turn may do with a proactive send.
@@ -62,19 +140,27 @@ pub enum SendPermission {
     Unscoped,
     /// A cron turn with explicit permitted targets.
     Permitted(Vec<PermittedTarget>),
-    /// A cron turn whose job named no target.
+    /// A cron turn that may reach nothing.
     Nowhere,
+}
+
+/// The send scope in force for the current task.
+///
+/// `None` means not a cron turn. Every other reader in this module —
+/// [`permission`], [`may_send`], [`refusal_for`] — is derived from this one
+/// read, so a turn's permission and the reason given for refusing it can never
+/// come from two different views of the same task local.
+pub fn scope() -> Option<SendScope> {
+    CRON_PERMITTED_TARGETS.try_with(|scope| scope.clone()).ok().flatten()
 }
 
 /// The permission in force for the current task.
 pub fn permission() -> SendPermission {
-    CRON_PERMITTED_TARGETS
-        .try_with(|targets| match targets {
-            Some(list) if list.is_empty() => SendPermission::Nowhere,
-            Some(list) => SendPermission::Permitted(list.clone()),
-            None => SendPermission::Unscoped,
-        })
-        .unwrap_or(SendPermission::Unscoped)
+    match scope() {
+        None => SendPermission::Unscoped,
+        Some(SendScope::Permitted(list)) => SendPermission::Permitted(list),
+        Some(SendScope::Nowhere(_)) => SendPermission::Nowhere,
+    }
 }
 
 /// May the current task send to `(channel, target_id)`?
@@ -230,30 +316,40 @@ pub async fn expand_session_targets(
     expanded
 }
 
-/// The full permitted set for a job: its concrete channel targets plus the
-/// channel targets its `session:` segments resolve to, deduplicated.
+/// The full scope for a job: its concrete channel targets plus the channel
+/// targets its `session:` segments resolve to, deduplicated.
 ///
 /// The two legs are complementary rather than overlapping in practice, but a
 /// job may name both a channel and a session bound to that same channel — and
 /// a duplicated entry reads as noise in [`refusal_for`]'s "may only send to
 /// [...]" list. Order is preserved: concrete targets first, then expansions.
-pub async fn cron_job_scope_async(
-    pool: &crate::db::Pool,
-    deliver_to: Option<&str>,
-) -> Vec<PermittedTarget> {
+///
+/// Returns a [`SendScope`], not a bare list, because an empty list is not
+/// self-describing: the refusal text has to say whether the job declared
+/// nothing or declared something unresolvable, and only this call site holds
+/// the declared string to tell them apart (#332).
+pub async fn cron_job_scope_async(pool: &crate::db::Pool, deliver_to: Option<&str>) -> SendScope {
     let mut targets = cron_job_scope(deliver_to);
     for extra in expand_session_targets(pool, deliver_to).await {
         if !targets.contains(&extra) {
             targets.push(extra);
         }
     }
-    targets
+    SendScope::from_job(deliver_to, targets)
 }
 
 /// Why a send was refused, for the tool result the model reads.
+///
+/// The Nowhere arm is split by [`NoTargetReason`] rather than folded into one
+/// message (#332). "This job has no deliver_to" is TRUE for a targetless job
+/// and FALSE for a job whose `deliver_to` names an unbound session — telling a
+/// model the field is missing when it is set sends it looking for a
+/// configuration error that is not there, while the real one (a session target
+/// reaches a channel only through that session's own binding) goes unstated.
 pub fn refusal_for(channel: &str, target_id: &str) -> String {
-    match permission() {
-        SendPermission::Permitted(list) => {
+    let attempted = format!("{channel}:{target_id}");
+    match scope() {
+        Some(SendScope::Permitted(list)) => {
             let allowed_str = list
                 .iter()
                 .map(|p| format!("{}:{}", p.channel, p.target_id))
@@ -261,15 +357,35 @@ pub fn refusal_for(channel: &str, target_id: &str) -> String {
                 .join(", ");
             format!(
                 "Refused: this scheduled job may only send to [{allowed_str}], and this send \
-                 targeted {channel}:{target_id}. If the report belongs in another channel, \
+                 targeted {attempted}. If the report belongs in another channel, \
                  change the job's deliver_to; an address found in memory or in earlier context \
                  is not permission to post there."
             )
         }
-        _ => format!(
+        Some(SendScope::Nowhere(NoTargetReason::Unresolvable { declared })) => format!(
+            "Refused: this scheduled job's deliver_to is [{declared}], but no channel target \
+             could be resolved from it (attempted {attempted}). A session target reaches a \
+             channel only through that session's own binding, so an unbound or archived \
+             session, or one bound to a non-channel surface, permits nothing. Point deliver_to \
+             at a channel directly, or at a session currently bound to one. Its output stays in \
+             its own session."
+        ),
+        Some(SendScope::Nowhere(NoTargetReason::JobUnknown)) => format!(
+            "Refused: this scheduled job's own configuration could not be read, so the \
+             destinations it was created with are unknown — and an unknown target is not \
+             permission to post anywhere (attempted {attempted}). Its output stays in its own \
+             session."
+        ),
+        Some(SendScope::Nowhere(NoTargetReason::Undeclared)) => format!(
             "Refused: this scheduled job has no deliver_to, so it may not send to any channel \
-             (attempted {channel}:{target_id}). Its output stays in its own session. Set \
+             (attempted {attempted}). Its output stays in its own session. Set \
              deliver_to on the job if it should report to a channel."
+        ),
+        // Unreachable through the send guards, which only call this once
+        // `may_send` has already refused — and an unscoped turn permits
+        // everything. Kept truthful rather than a panic in a tool result.
+        None => format!(
+            "Refused: no destination is in scope for this turn (attempted {attempted})."
         ),
     }
 }
@@ -282,21 +398,22 @@ pub fn extract_cron_job_id_from_session_title(title: &str) -> Option<uuid::Uuid>
     uuid::Uuid::parse_str(&rest[..end]).ok()
 }
 
-/// Resolve the permitted targets for a resumed session turn.
+/// Resolve the send scope for a resumed session turn.
 ///
-/// Returns `Some(targets)` (or `Some(vec![])` / Nowhere) if this session is
-/// a cron session, ensuring it runs under the appropriate send_scope guard.
+/// Returns `Some(scope)` (a [`SendScope::Permitted`] set, or a
+/// [`SendScope::Nowhere`] carrying the reason) if this session is a cron
+/// session, ensuring it runs under the appropriate send_scope guard.
 /// Returns `None` (Unscoped) if this is an ordinary non-cron session.
 ///
-/// The targets are the job's full scope — concrete channel targets plus the
+/// The scope is the job's full scope — concrete channel targets plus the
 /// channel targets its `session:` segments expand to via their sessions'
 /// bindings (#332) — so a resumed cron turn is scoped exactly like the firing
-/// turn that created it.
+/// turn that created it, and refuses a send with the same true reason.
 pub async fn resolve_cron_session_scope(
     pool: &crate::db::Pool,
     session: Option<&crate::db::models::Session>,
     channel: &str,
-) -> Option<Vec<PermittedTarget>> {
+) -> Option<SendScope> {
     let job_id = session
         .and_then(|s| s.title.as_deref())
         .and_then(extract_cron_job_id_from_session_title);
@@ -305,14 +422,16 @@ pub async fn resolve_cron_session_scope(
         let repo = crate::db::CronJobRepository::new(pool.clone());
         match repo.find_by_id(&id.to_string()).await {
             Ok(Some(job)) => Some(cron_job_scope_async(pool, job.deliver_to.as_deref()).await),
-            Ok(None) | Err(_) => {
-                // Cron job not found in DB or query error: fail closed to Nowhere
-                Some(Vec::new())
-            }
+            // The job this session was minted for is gone, or the read failed.
+            // Fail closed to Nowhere, and say WHICH — the session title still
+            // names a job, so "this job has no deliver_to" would be a guess.
+            Ok(None) | Err(_) => Some(SendScope::Nowhere(NoTargetReason::JobUnknown)),
         }
     } else if channel == "cron" {
-        // Channel is explicitly "cron" but no job id could be extracted: fail closed to Nowhere
-        Some(Vec::new())
+        // Channel is explicitly "cron" but no job id could be extracted: fail
+        // closed to Nowhere. Nothing identifies the job, so its declared target
+        // is unknowable from here.
+        Some(SendScope::Nowhere(NoTargetReason::JobUnknown))
     } else {
         // Not a cron session
         None
