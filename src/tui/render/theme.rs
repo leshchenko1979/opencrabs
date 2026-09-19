@@ -556,3 +556,47 @@ pub fn background() -> Option<Color> {
 pub fn generation() -> u64 {
     GENERATION.load(Ordering::Relaxed)
 }
+
+/// The single built-in-or-user theme lookup chain: shipped presets first
+/// (hand-built statics + the embedded pack), then the user presets loaded
+/// from the profile's `themes/` directory. Both legs are case-insensitive.
+///
+/// This is the ONE place that chain lives. `/theme set`, the TUI boot
+/// apply, and mermaid styling all resolve through it, so a name that works
+/// in one surface works in every other (#318 DRY).
+pub fn by_name_any(name: &str) -> Option<&'static Theme> {
+    let name = configured_name(name);
+    if name.is_empty() {
+        return None;
+    }
+    super::presets::by_name(name).or_else(|| super::user_themes::find(name))
+}
+
+/// Resolve a configured theme NAME to a theme. `None`, empty, and unknown
+/// names all fall back to [`active`] — which is crab-dark until [`set`]
+/// runs, so the byte-identical default is preserved by construction.
+///
+/// This is the boot/`/theme set` entry point; it is also what a NON-TUI
+/// consumer (e.g. the Telegram mermaid renderer, which needs the active
+/// theme's surface colour as a hex) calls to get the same theme the UI is
+/// showing.
+pub fn resolve(configured: Option<&str>) -> &'static Theme {
+    configured
+        .map(configured_name)
+        .filter(|s| !s.is_empty())
+        .and_then(by_name_any)
+        .unwrap_or_else(active)
+}
+
+/// The `#rrggbb` form of an RGB colour, or `None` when the colour carries
+/// no hex. `Color::Rgb` is the only variant with one: `Color::Reset` and
+/// every index/named variant are resolved by the TERMINAL's palette, so
+/// there is no portable hex to hand out. Callers that need a hex must
+/// therefore treat `None` as "fall back to your own default" rather than
+/// guessing — the mermaid renderer (#318) does exactly that.
+pub fn hex_of(color: Color) -> Option<String> {
+    match color {
+        Color::Rgb(r, g, b) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
+        _ => None,
+    }
+}
