@@ -103,6 +103,13 @@ impl RetryOverrides {
         if let Some(v) = self.jitter {
             base.jitter = v;
         }
+        // The aggregator opt-in is a flag, not a number: when set it grants
+        // the hard-quota path a small FIXED budget (#346). Left false, the
+        // field keeps whatever the preset/default gave it — `0`, i.e. #952's
+        // bail-straight-to-fallback behaviour.
+        if self.quota_exhausted {
+            base.retry_quota_attempts = QUOTA_RETRY_ATTEMPTS;
+        }
     }
 }
 
