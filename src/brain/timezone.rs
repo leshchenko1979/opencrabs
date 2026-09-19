@@ -50,31 +50,16 @@ pub fn format_utc_time(dt: &DateTime<Utc>) -> String {
 /// - `Timezone: America/New_York`
 pub fn parse_timezone_heuristic(text: &str) -> Option<TzInfo> {
     for line in text.lines() {
-        let line_clean = line.trim().trim_start_matches(['-', '*', '#']).trim();
-        let lower = line_clean.to_lowercase();
+        let Some((key, val)) = normalize_declaration(line) else {
+            continue;
+        };
 
-        let is_tz_line = lower.starts_with("timezone:")
-            || lower.starts_with("timezone :")
-            || lower.starts_with("часовой пояс:")
-            || lower.starts_with("часовой пояс :");
-
-        if !is_tz_line
-            && !line_clean.starts_with("**Timezone:**")
-            && !line_clean.starts_with("**Часовой пояс:**")
-        {
+        let key_lower = key.to_lowercase();
+        if key_lower != "timezone" && key_lower != "часовой пояс" {
             continue;
         }
 
-        // Extract the value after colon
-        let Some((_, val_part)) = line_clean.split_once(':') else {
-            continue;
-        };
-        let val = val_part
-            .trim()
-            .trim_matches(|c| c == '*' || c == '`' || c == '"' || c == '\'')
-            .trim();
-
-        if let Some(info) = parse_tz_value(val) {
+        if let Some(info) = parse_tz_value(&val) {
             return Some(info);
         }
     }
@@ -96,6 +81,53 @@ pub fn parse_timezone_heuristic(text: &str) -> Option<TzInfo> {
     }
 
     None
+}
+
+/// Normalise a `USER.md` declaration line into a `(key, value)` pair.
+///
+/// Handles the plain form (`Key: value`), markdown table rows
+/// (`| Key | value |`), list markers (`- Key: value`), and bold/backtick/quote
+/// wrappers around either side. Returns `None` when the line carries no
+/// separator, so callers skip it without guessing.
+///
+/// Order matters: the table frame is stripped BEFORE the split. Splitting a row
+/// like `| **Timezone** | UTC+3 (MSK) |` on its leading pipe yields an empty key
+/// — that ordering is the defect this function exists to avoid.
+fn normalize_declaration(line: &str) -> Option<(String, String)> {
+    let mut s = line.trim();
+
+    // Strip a markdown table frame: one leading and one trailing pipe.
+    if let Some(rest) = s.strip_prefix('|') {
+        s = rest.trim();
+    }
+    if let Some(rest) = s.strip_suffix('|') {
+        s = rest.trim();
+    }
+
+    // Strip list markers (`- `, `* `, `# `) and blockquote markers.
+    s = s.trim_start_matches(['-', '*', '#', '>', ' ']).trim();
+
+    // Split on the FIRST `:` or `|`, whichever comes first.
+    let sep = s.find(|c| c == ':' || c == '|')?;
+    let key = unwrap_declaration_wrappers(&s[..sep]);
+    let value = unwrap_declaration_wrappers(&s[sep + 1..]);
+
+    if key.is_empty() || value.is_empty() {
+        return None;
+    }
+
+    Some((key, value))
+}
+
+/// Strip emphasis/code/quote wrappers and surrounding whitespace from one side
+/// of a declaration, so `**Timezone**` and `Timezone` compare equal.
+fn unwrap_declaration_wrappers(s: &str) -> String {
+    s.trim()
+        .trim_matches(|c| {
+            c == '*' || c == '_' || c == '`' || c == '"' || c == '\'' || c == '|'
+        })
+        .trim()
+        .to_string()
 }
 
 /// Parse a timezone value string into TzInfo.
