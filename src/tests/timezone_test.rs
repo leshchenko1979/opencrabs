@@ -40,6 +40,34 @@ fn parse_russian_timezone_format() {
     assert_eq!(formatted, "2026-01-15 10:00:00 UTC (user: 13:00:00 Москва)");
 }
 
+/// A line whose declaration key is NOT a timezone key, and which carries no
+/// separator at all, resolves only through the secondary IANA scan. That arm
+/// must carry the declared parenthetical through: before task 5 it returned a
+/// bare zone, so the user's own label was silently dropped.
+#[test]
+fn fallback_scan_carries_declared_label() {
+    let user_md = "\
+# Notes
+Working hours — Europe/Moscow (МСК)
+";
+    let info = parse_timezone_heuristic(user_md).expect("fallback scan should resolve");
+    assert_eq!(info.tz, Tz::Europe__Moscow);
+    assert_eq!(info.label.as_deref(), Some("МСК"));
+}
+
+/// The parenthetical is a label only when it is NOT itself a zone form:
+/// `(UTC+3)` declares an offset, not a name, so it must never become the label.
+#[test]
+fn fallback_scan_ignores_zone_form_parenthetical() {
+    let user_md = "\
+# Notes
+Standup — Europe/Moscow (UTC+3)
+";
+    let info = parse_timezone_heuristic(user_md).expect("fallback scan should resolve");
+    assert_eq!(info.tz, Tz::Europe__Moscow);
+    assert_eq!(info.label, None);
+}
+
 #[test]
 fn parse_iana_timezone_with_dst_transitions() {
     let user_md = "\
