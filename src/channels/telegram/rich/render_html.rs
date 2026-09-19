@@ -16,7 +16,7 @@ use crate::channels::telegram::markdown::escape_html;
 /// their breathing room (the source markdown's paragraph breaks); list items
 /// themselves stay single-spaced.
 pub(super) fn render_html(blocks: &[Block]) -> String {
-    render_html_inner(blocks, false)
+    render_html_inner(blocks, false, &mermaid::MermaidStyle::from_config())
 }
 
 /// Like [`render_html`] but wraps every paragraph in `<p>` tags and drops the
@@ -24,21 +24,21 @@ pub(super) fn render_html(blocks: &[Block]) -> String {
 /// chrome_rich path where Telegram's HTML renderer expects native paragraph
 /// elements inside `<details>` blocks.
 pub(super) fn render_html_p(blocks: &[Block]) -> String {
-    render_html_inner(blocks, true)
+    render_html_inner(blocks, true, &mermaid::MermaidStyle::from_config())
 }
 
-fn render_html_inner(blocks: &[Block], wrap_p: bool) -> String {
+fn render_html_inner(blocks: &[Block], wrap_p: bool, style: &mermaid::MermaidStyle) -> String {
     let sep = if wrap_p { "" } else { "\n\n" };
     blocks
         .iter()
-        .map(|b| render_block(b, wrap_p))
+        .map(|b| render_block(b, wrap_p, style))
         .collect::<Vec<_>>()
         .join(sep)
         .trim()
         .to_string()
 }
 
-fn render_block(block: &Block, wrap_p: bool) -> String {
+fn render_block(block: &Block, wrap_p: bool, style: &mermaid::MermaidStyle) -> String {
     match block {
         Block::Heading { level, content } => {
             // No heading tags in Telegram HTML: bold, and italicize deeper
@@ -65,7 +65,7 @@ fn render_block(block: &Block, wrap_p: bool) -> String {
                 inner
             }
         }
-        Block::List(list) => render_list(list, 0, wrap_p),
+        Block::List(list) => render_list(list, 0, wrap_p, style),
         Block::Table(table) => render_table(table),
         Block::Code { lang, text } => match lang {
             Some(l) => format!(
@@ -91,20 +91,21 @@ fn render_block(block: &Block, wrap_p: bool) -> String {
                 super::mermaid::rendered_image_note(
                     "open the svg link for the full-size vector",
                     source,
-                ) + &super::mermaid::svg_link_html(source)
+                ) + &super::mermaid::svg_link_html(style, source)
             }
             // #189: same split as the markdown path — a transient failure
             // offers the svg hatch (the response had already passed the
             // image check, so the render may exist server-side), while a
             // deterministic parse rejection does not.
             MermaidResult::Failed(err) => {
-                super::mermaid::failure_html(err, source) + &super::mermaid::svg_link_html(source)
+                super::mermaid::failure_html(err, source)
+                    + &super::mermaid::svg_link_html(style, source)
             }
             MermaidResult::ParseError(err) => super::mermaid::failure_html(err, source),
         },
         Block::Quote(inner) => format!(
             "<blockquote>{}</blockquote>",
-            render_html_inner(inner, wrap_p)
+            render_html_inner(inner, wrap_p, style)
         ),
         Block::Math(expr) => format!("<pre>{}</pre>", escape_html(expr)),
         Block::Divider => "──────────".to_string(),
@@ -116,7 +117,7 @@ fn render_block(block: &Block, wrap_p: bool) -> String {
             open: _,
         } => {
             let summary_html = render_inlines(summary, wrap_p);
-            let body = render_html_inner(blocks, wrap_p);
+            let body = render_html_inner(blocks, wrap_p, style);
             format!(
                 "<b>▸ {summary_html}</b>\n{}",
                 body.lines()
@@ -133,7 +134,7 @@ fn render_block(block: &Block, wrap_p: bool) -> String {
 /// `sendRichMessage` dialect, where a bare newline is just whitespace), every
 /// line instead gets its own `<p>` so items keep their line breaks, and child
 /// blocks are rendered in the same dialect.
-fn render_list(list: &List, depth: usize, wrap_p: bool) -> String {
+fn render_list(list: &List, depth: usize, wrap_p: bool, style: &mermaid::MermaidStyle) -> String {
     let pad = "  ".repeat(depth);
     let mut lines = Vec::new();
     for (idx, item) in list.items.iter().enumerate() {
@@ -151,9 +152,9 @@ fn render_list(list: &List, depth: usize, wrap_p: bool) -> String {
         });
         for child in &item.children {
             match child {
-                Block::List(inner) => lines.push(render_list(inner, depth + 1, wrap_p)),
-                other if wrap_p => lines.push(render_block(other, true)),
-                other => lines.push(format!("{pad}  {}", render_block(other, false))),
+                Block::List(inner) => lines.push(render_list(inner, depth + 1, wrap_p, style)),
+                other if wrap_p => lines.push(render_block(other, true, style)),
+                other => lines.push(format!("{pad}  {}", render_block(other, false, style))),
             }
         }
     }

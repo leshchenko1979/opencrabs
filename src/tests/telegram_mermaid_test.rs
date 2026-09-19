@@ -14,14 +14,23 @@ use crate::channels::telegram::rich::api::{
 use crate::channels::telegram::rich::ast::{Block, Inline, MermaidResult};
 use crate::channels::telegram::rich::markdown_to_html_mermaid;
 use crate::channels::telegram::rich::mermaid::{
-    MediaEntry, PREVALIDATE_CONNECT_TIMEOUT_SECS, PREVALIDATE_TIMEOUT_SECS, base64url, cache_get,
-    cache_put, classify_render_failure, error_note, failure_html, find_mermaid_fences,
+    MediaEntry, MermaidStyle, PREVALIDATE_CONNECT_TIMEOUT_SECS, PREVALIDATE_TIMEOUT_SECS, base64url,
+    cache_get, cache_put, classify_render_failure, error_note, failure_html, find_mermaid_fences,
     has_mermaid_fence, image_html, ink_url, ink_url_svg, is_diagram_capped, is_image_response,
     looks_like_mermaid_source, markdown_failure_block, markdown_failure_block_with_link,
     neutralize_orphan_photo_refs, neutralize_prose_media_html, replacement_for, resolve_blocks,
     resolve_markdown_media, svg_link_md, unresolved_media_refs, unresolved_media_refs_by,
 };
 use crate::channels::telegram::rich::normalize_rich_markdown_with_media;
+
+/// The render style every test in this module threads through the mermaid
+/// URL and cache builders. `auto`/`auto` resolves against the ACTIVE theme,
+/// which is `crab-dark` until a test calls `theme::set` — so these tests stay
+/// deterministic without touching the process-global config, and they pin the
+/// defaults a stock install ships.
+fn style() -> MermaidStyle {
+    MermaidStyle::from_values("auto", "auto")
+}
 
 // ---------------------------------------------------------------------------
 // base64url
@@ -260,7 +269,7 @@ fn find_mermaid_fences_ignores_non_mermaid_and_unclosed() {
 #[test]
 fn replacement_for_image_emits_media_reference_and_entry() {
     let outcome = MermaidResult::Image("https://mermaid.ink/img/xyz".into());
-    let (md, entry) = replacement_for(&outcome, 0, "graph TD;");
+    let (md, entry) = replacement_for(&outcome, 0, "graph TD;", &style());
     assert!(md.starts_with("![diagram](tg://photo?id=diag0)"));
     assert!(md.contains("[Open SVG vector](https://mermaid.ink/svg/"));
     let e = entry.expect("image outcome must carry a media entry");
@@ -272,7 +281,7 @@ fn replacement_for_image_emits_media_reference_and_entry() {
 #[test]
 fn replacement_for_image_uses_fence_index_in_id() {
     let outcome = MermaidResult::Image("u".into());
-    let (md, entry) = replacement_for(&outcome, 3, "src");
+    let (md, entry) = replacement_for(&outcome, 3, "src", &style());
     assert!(md.starts_with("![diagram](tg://photo?id=diag3)"));
     assert_eq!(entry.unwrap().id, "diag3");
 }
@@ -280,7 +289,7 @@ fn replacement_for_image_uses_fence_index_in_id() {
 #[test]
 fn replacement_for_image_bytes_carries_png_and_no_url() {
     let outcome = MermaidResult::ImageBytes(vec![0x89, b'P', b'N', b'G', 0, 0, 0, 0]);
-    let (md, entry) = replacement_for(&outcome, 1, "graph TD;");
+    let (md, entry) = replacement_for(&outcome, 1, "graph TD;", &style());
     // Dimensions not parseable from dummy 8-byte slice -> not capped -> no link
     assert_eq!(md, "![diagram](tg://photo?id=diag1)");
     let e = entry.expect("bytes outcome must carry a media entry");
@@ -307,7 +316,7 @@ fn replacement_for_image_bytes_appends_svg_link_when_capped() {
     png.extend_from_slice(&[0, 0, 0, 0]); // dummy CRC
 
     let outcome = MermaidResult::ImageBytes(png);
-    let (md, entry) = replacement_for(&outcome, 2, "flowchart TD\nA-->B");
+    let (md, entry) = replacement_for(&outcome, 2, "flowchart TD\nA-->B", &style());
     assert!(md.starts_with("![diagram](tg://photo?id=diag2)"));
     assert!(md.contains("\n[Open SVG vector](https://mermaid.ink/svg/"));
     assert!(
@@ -319,7 +328,7 @@ fn replacement_for_image_bytes_appends_svg_link_when_capped() {
 
 #[test]
 fn svg_link_md_is_padded_with_newlines() {
-    let link = svg_link_md("graph TD;\nA-->B;");
+    let link = svg_link_md(&style(), "graph TD;\nA-->B;");
     assert!(link.starts_with('\n'), "svg link should start on new line");
     assert!(
         link.ends_with('\n'),
@@ -349,7 +358,7 @@ fn is_diagram_capped_checks_dimensions_and_aspect_ratio() {
 #[test]
 fn replacement_for_failed_emits_failure_block_and_no_entry() {
     let outcome = MermaidResult::Failed("Parse error".into());
-    let (md, entry) = replacement_for(&outcome, 0, "graph TD;");
+    let (md, entry) = replacement_for(&outcome, 0, "graph TD;", &style());
     assert!(
         entry.is_none(),
         "failed outcome must not carry a media entry"
@@ -365,7 +374,7 @@ fn replacement_for_parse_error_matches_failed_block_shape() {
     // failure block as a transient failure — the regen nudge is a
     // loop-side concern, delivery treats both identically.
     let outcome = MermaidResult::ParseError("Parse error on line 2: X".into());
-    let (md, entry) = replacement_for(&outcome, 0, "graph TD;");
+    let (md, entry) = replacement_for(&outcome, 0, "graph TD;", &style());
     assert!(
         entry.is_none(),
         "parse-error outcome must not carry a media entry"
@@ -415,23 +424,24 @@ fn classify_render_failure_empty_body_names_status() {
 fn render_cache_hit_returns_cached_outcome() {
     let source = "graph TD\n    CacheHitProbe --> A";
     let outcome = MermaidResult::ParseError("Parse error on line 2".into());
-    cache_put(source, &outcome);
-    assert_eq!(cache_get(source), Some(outcome));
+    cache_put(&style(), source, &outcome);
+    assert_eq!(cache_get(&style(), source), Some(outcome));
 }
 
 #[test]
 fn render_cache_miss_on_unknown_source() {
-    assert_eq!(cache_get("graph TD\n    NeverCachedProbe --> Z"), None);
+    assert_eq!(cache_get(&style(), "graph TD\n    NeverCachedProbe --> Z"), None);
 }
 
 #[test]
 fn render_cache_never_stores_transient_failures() {
     let source = "graph TD\n    TransientProbe --> B";
     cache_put(
+        &style(),
         source,
         &MermaidResult::Failed("diagram renderer timed out".into()),
     );
-    assert_eq!(cache_get(source), None);
+    assert_eq!(cache_get(&style(), source), None);
 }
 
 // #100: the raw-markdown fence finder keeps the fence body's trailing
@@ -442,8 +452,8 @@ fn render_cache_key_ignores_trailing_newline() {
     let base = "graph TD\n    NewlineKeyProbe --> C";
     let with_newline = format!("{base}\n");
     let outcome = MermaidResult::ParseError("Parse error on line 1".into());
-    cache_put(with_newline.as_str(), &outcome);
-    assert_eq!(cache_get(base), Some(outcome));
+    cache_put(&style(), with_newline.as_str(), &outcome);
+    assert_eq!(cache_get(&style(), base), Some(outcome));
 }
 
 // ---------------------------------------------------------------------------
@@ -468,7 +478,11 @@ fn markdown_failure_block_with_link_appends_a_tappable_svg_hatch() {
     // #189 Leg 4: the transient-failure variant offers the vector render as a
     // markdown link, which `inline.rs` parses and `render_html.rs` emits as a
     // real <a href> anchor — tappable rather than raw text.
-    let md = markdown_failure_block_with_link("diagram renderer dropped the image", "flowchart TD");
+    let md = markdown_failure_block_with_link(
+        "diagram renderer dropped the image",
+        "flowchart TD",
+        &style(),
+    );
     assert!(md.contains("> ⚠️ **Mermaid diagram could not be rendered**"));
     assert!(md.contains("diagram renderer dropped the image"));
     assert!(md.contains("flowchart TD"));
@@ -488,6 +502,7 @@ fn replacement_for_failed_offers_the_hatch_but_parse_error_does_not() {
         &MermaidResult::Failed("diagram renderer dropped the image".into()),
         0,
         "flowchart TD",
+        &style(),
     );
     assert!(
         failed_md.contains("[svg](https://mermaid.ink/svg/"),
@@ -498,6 +513,7 @@ fn replacement_for_failed_offers_the_hatch_but_parse_error_does_not() {
         &MermaidResult::ParseError("Parse error on line 2".into()),
         0,
         "flowchart TD",
+        &style(),
     );
     assert!(
         !parse_md.contains("[svg]"),
@@ -812,11 +828,11 @@ fn test_bare_fence_with_diagram_body_is_still_classified() {
 
 #[test]
 fn ink_url_requests_natural_size_png() {
-    let url = ink_url("graph TD\n    A --> B");
+    let url = ink_url(&style(), "graph TD\n    A --> B");
     assert!(url.starts_with("https://mermaid.ink/img/"));
     assert!(
-        url.ends_with("?type=png"),
-        "expected natural-size params: {url}"
+        url.ends_with("?type=png&bgColor=282d37"),
+        "expected the opaque crab-dark surface and no size override: {url}"
     );
     assert!(!url.contains("scale=") && !url.contains("width="));
 }
@@ -825,7 +841,7 @@ fn ink_url_requests_natural_size_png() {
 fn ink_url_payload_is_base64url_without_padding() {
     // The payload segment must be exactly what base64url() produces:
     // URL-safe alphabet, no '=' padding (mermaid.ink 404s on standard b64).
-    let url = ink_url("pie\n    \"a\": 1");
+    let url = ink_url(&style(), "pie\n    \"a\": 1");
     let payload = url
         .trim_start_matches("https://mermaid.ink/img/")
         .split('?')
@@ -843,7 +859,7 @@ fn ink_url_payload_is_base64url_without_padding() {
 
 #[test]
 fn ink_url_svg_points_at_the_dedicated_vector_endpoint() {
-    let url = ink_url_svg("graph TD\n    A --> B");
+    let url = ink_url_svg(&style(), "graph TD\n    A --> B");
     assert!(
         url.starts_with("https://mermaid.ink/svg/"),
         "expected the /svg/ endpoint: {url}"
@@ -859,14 +875,18 @@ fn ink_url_svg_payload_matches_ink_url_payload() {
     // Same diagram → same base64url payload on both endpoints; only the
     // base differs.
     let src = "pie\n    \"a\": 1";
-    let png_payload = ink_url(src)
+    let png_payload = ink_url(&style(), src)
         .trim_start_matches("https://mermaid.ink/img/")
         .split('?')
         .next()
         .unwrap()
         .to_string();
-    let svg_url = ink_url_svg(src);
-    let svg_payload = svg_url.trim_start_matches("https://mermaid.ink/svg/");
+    let svg_url = ink_url_svg(&style(), src);
+    let svg_payload = svg_url
+        .trim_start_matches("https://mermaid.ink/svg/")
+        .split('?')
+        .next()
+        .unwrap();
     assert_eq!(png_payload, svg_payload);
 }
 
