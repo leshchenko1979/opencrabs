@@ -307,6 +307,52 @@ impl SessionBindingRepository {
         Ok(mapped)
     }
 
+    /// The binding recorded for ONE session, or `None` when that session has no
+    /// binding row (or its `sessions` row is gone).
+    ///
+    /// This is the accessor the cron send-scope leg reads (#332). A job whose
+    /// `deliver_to` names a session has to derive its permitted channel target
+    /// from that session's OWN binding; without it a `session:` target matches
+    /// no channel prefix, the permitted set comes out empty, and every send in
+    /// the turn is refused with a reason that claims the job declared no
+    /// `deliver_to` at all. Resolving through this read means the scope leg and
+    /// the delivery leg derive the target from one table, so they cannot
+    /// disagree about where a report belongs.
+    ///
+    /// `session_id` is the table's primary key, so at most one row can match.
+    /// The INNER JOIN against `sessions` matches [`Self::all_for_channel`]
+    /// (#1224): a binding whose session was deleted never revives a dead route.
+    ///
+    /// Archiving deliberately does NOT filter the row out here. Whether an
+    /// archived session may still be addressed is the CALLER's policy — it
+    /// belongs to the session-listing tier, which owns the one
+    /// `include_archived` rule — not to this single-row read.
+    pub async fn by_session(&self, session_id: &str) -> Result<Option<SessionBinding>> {
+        let sid = session_id.to_string();
+        let sql = format!(
+            "SELECT {BINDING_COLUMNS} \
+             FROM session_bindings b \
+             JOIN sessions s ON s.id = b.session_id \
+             WHERE b.session_id = ?1"
+        );
+        let mapped = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let mut rows = conn.prepare(&sql)?.query_map(params![sid], map_binding)?;
+                match rows.next() {
+                    Some(bound) => Ok(Some(bound?)),
+                    None => Ok(None),
+                }
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to read session binding")?;
+        Ok(mapped)
+    }
+
     /// Every binding recorded for one channel, least-recently-changed first.
     /// INNER JOIN against sessions drops bindings whose session was deleted,
     /// so connect-time re-registration never revives dead routes (#1224).
