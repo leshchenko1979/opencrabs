@@ -287,6 +287,31 @@ pub(crate) fn escape_html(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Decode the HTML entities [`escape_html`] emits, restoring the display text.
+///
+/// This is the exact inverse of [`escape_html`]: for every input `s`,
+/// `unescape_html(escape_html(s)) == s`.
+///
+/// **Scope is deliberately narrow** — only the three entities `escape_html`
+/// actually produces (`&lt;`, `&gt;`, `&amp;`). Decoding anything else would
+/// break the round trip on labels that legitimately contain entity-looking
+/// text (e.g. `&#65;`, `&quot;`) and would silently rewrite hand-authored
+/// button labels written by other lanes.
+///
+/// **Order is load-bearing: `&amp;` MUST be decoded LAST.** `escape_html`
+/// escapes `&` first, so a literal `&lt;` in the source is stored as
+/// `&amp;lt;`. Decoding `&amp;` before `&lt;` would turn that back into `<`
+/// instead of the literal `&lt;` the author wrote.
+///
+/// Callers measuring a label's display width must measure THIS text, not the
+/// escaped form: entities inflate the character count (`&` costs 5, `<` and
+/// `>` cost 4), so measuring escaped text rejects labels that fit.
+pub(crate) fn unescape_html(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
 /// Decode standard named HTML entities to their direct Unicode representations
 /// before Markdown / Rich AST parsing (#258).
 ///
