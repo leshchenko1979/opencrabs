@@ -124,7 +124,9 @@ fn signal_names_cover_the_installed_set() {
 
 /// The record is written from a fixed stack buffer, so a short buffer must
 /// truncate rather than panic or overrun. Every prefix length is exercised, and
-/// each truncated render must be a genuine prefix of the full one.
+/// each truncated render must be a genuine prefix of the full one, filling the
+/// buffer to capacity — a crash log that stops early for no reason is bytes the
+/// next debugger never gets.
 #[test]
 fn header_render_truncates_safely_on_any_buffer_length() {
     let facts = bus_objerr();
@@ -135,6 +137,7 @@ fn header_render_truncates_safely_on_any_buffer_length() {
         let mut small = vec![0u8; cap];
         let n = render_header(&facts, &mut small);
         assert!(n <= cap, "wrote {n} bytes into a {cap}-byte buffer");
+        assert_eq!(n, cap, "truncated render left {n} of {cap} bytes unwritten");
         assert_eq!(
             &small[..n],
             &full[..n],

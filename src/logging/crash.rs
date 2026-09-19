@@ -173,6 +173,12 @@ fn generic_si_code_name(si_code: i32) -> &'static str {
 ///
 /// Every push is bounds-checked and silently stops at the end of the buffer:
 /// a truncated record is acceptable, a panic inside a signal handler is not.
+///
+/// A push that does not fit fills the remaining space and stops there, so the
+/// bytes written are always a genuine prefix of the full record — never a
+/// fragment of a later field grafted onto an earlier truncation point. That
+/// matters when the buffer is the last thing the process will ever write: a
+/// partial `si_addr=0x7f` is readable, `si_addr=0x7fpid=` is a lie.
 struct Cursor<'a> {
     buf: &'a mut [u8],
     len: usize,
@@ -183,8 +189,14 @@ impl Cursor<'_> {
         Cursor { buf, len: 0 }
     }
 
+    /// Copy as much of `bytes` as fits, then seal: a partial copy fills the
+    /// buffer to capacity, so every later push fails its bounds check and the
+    /// record ends exactly at the truncation point.
     fn push_bytes(&mut self, bytes: &[u8]) -> bool {
-        if self.len + bytes.len() > self.buf.len() {
+        let room = self.buf.len() - self.len;
+        if bytes.len() > room {
+            self.buf[self.len..].copy_from_slice(&bytes[..room]);
+            self.len = self.buf.len();
             return false;
         }
         self.buf[self.len..self.len + bytes.len()].copy_from_slice(bytes);
