@@ -14,6 +14,7 @@
 use crate::brain::agent::{BgTaskMeta, PushOrigin};
 use crate::db::Pool;
 use crate::db::database::interact_err;
+use crate::db::retry::{write_retry_config, write_with_retry};
 use anyhow::{Context, Result};
 use rusqlite::params;
 use uuid::Uuid;
@@ -80,21 +81,16 @@ impl NotifyQueueRepository {
         let bg_meta = bg_meta
             .map(|m| serde_json::to_string(m).context("encode notify bg_meta"))
             .transpose()?;
-        self.pool
-            .get()
-            .await
-            .context("Failed to get connection")?
-            .interact(move |conn| {
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
                 conn.execute(
                     "INSERT INTO notify_queue \
                      (id, session_id, context_text, display_text, origin, bg_meta, created_at) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now'))",
                     params![id, session_id, context_text, display_text, origin, bg_meta],
                 )
-            })
-            .await
-            .map_err(interact_err)?
-            .context("Failed to record notify queue row")?;
+        })
+        .await
+        .context("Failed to record notify queue row")?;
         Ok(())
     }
 

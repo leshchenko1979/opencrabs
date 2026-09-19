@@ -14,4 +14,7 @@ pub use database::{
 };
 pub use models::*;
 pub use repository::*;
-pub use retry::{DbRetryConfig, retry_db_anyhow, retry_db_operation, retry_db_rusqlite};
+pub use retry::{
+    DbRetryConfig, retry_db_anyhow, retry_db_operation, retry_db_rusqlite, write_retry_config,
+    write_with_retry,
+};
