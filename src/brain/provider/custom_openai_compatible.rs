@@ -5409,6 +5409,10 @@ struct OpenAICompletionTokensDetails {
 
 #[derive(Debug, Clone, Deserialize)]
 struct OpenAIStreamChunk {
+    /// The provider's trailing usage-only frame omits this (#421). An empty id
+    /// is skipped by the MessageStart guard in the stream loop, exactly as the
+    /// failed parse was, so defaulting it is behaviour-preserving.
+    #[serde(default)]
     id: String,
     model: Option<String>,
     choices: Vec<OpenAIStreamChoice>,
@@ -5644,5 +5648,34 @@ impl Utf8Carry {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #421 — the provider's trailing usage-only frame omits `id`, so the strict
+    /// deserializer rejected it and logged a STREAM_PARSE warning for every
+    /// stream. With `#[serde(default)]` on `id` the frame parses and the id is
+    /// empty, which the MessageStart guard already skips — behaviour-preserving.
+    #[test]
+    fn usage_only_chunk_without_id_deserializes() {
+        let raw = r#"{"choices":[],"object":"chat.completion.chunk","usage":{"completion_tokens":999,"cost":0.00002093322,"prompt_tokens":72742,"prompt_tokens_details":{"cached_tokens":71168},"total_tokens":73741}}"#;
+        let chunk: OpenAIStreamChunk =
+            serde_json::from_str(raw).expect("usage-only frame must deserialize");
+        assert!(chunk.id.is_empty(), "missing id must default to empty");
+        assert!(chunk.choices.is_empty(), "usage-only frame carries no choices");
+        assert!(chunk.usage.is_some(), "usage must still be parsed");
+    }
+
+    /// Regression guard: a content-bearing chunk still carries its id, so the
+    /// MessageStart path and its provider-side correlation log are unaffected.
+    #[test]
+    fn content_chunk_keeps_id() {
+        let raw = r#"{"id":"chatcmpl-abc","model":"m","choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#;
+        let chunk: OpenAIStreamChunk =
+            serde_json::from_str(raw).expect("content frame must deserialize");
+        assert_eq!(chunk.id, "chatcmpl-abc");
     }
 }
