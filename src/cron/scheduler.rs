@@ -1178,7 +1178,58 @@ pub(crate) async fn deliver_result(
             let delivery = crate::brain::agent::service::session_routes::deliver_to_session(
                 session_id, queued, true,
             );
-            tracing::info!("Cron '{job_name}' session delivery verdict: {delivery:?}");
+            // #437: the verdict is the only signal that the result landed. A
+            // target that RESOLVES but has nowhere to land reports NoRoute —
+            // nothing can receive it and nothing is holding it — so logging it
+            // at INFO and returning left the run row reading success, the same
+            // #107 conflation as #435 reached by the other path.
+            // Exhaustive arms, deliberately: this defect exists because a new
+            // outcome appeared and the caller kept reading success. A catch-all
+            // here would reproduce exactly that hole — the NEXT variant would
+            // fall through to a silent green instead of breaking the build at
+            // this decision site.
+            match delivery {
+                crate::brain::agent::service::session_routes::Delivery::NoRoute => {
+                    let reason = format!(
+                        "Session deliver_to target '{target_id}' for job '{job_name}' resolved to \
+                         session {session_id} but no route could receive the result (#107)"
+                    );
+                    tracing::error!("{reason}");
+                    record_delivery_failure(pool, run_id, &reason).await;
+                }
+                // Green, and TERMINAL-green: the park is held durably
+                // (notify_queue::persist, #111) and replayed at boot, and no
+                // later event flips this run row — QueuedUserMessage carries no
+                // run_id and notify_queue has zero run_id refs, so a parked row
+                // has no back-reference to reach the cron run that produced it.
+                // The module's one genuine loss path (reap_stale_after_redelivery,
+                // past MAX_ROW_AGE_SECS) is logged loudly but updates no cron
+                // row; wiring that linkage needs a run_id column of its own.
+                crate::brain::agent::service::session_routes::Delivery::Parked => {
+                    tracing::info!(
+                        "Cron '{job_name}' result parked for session {session_id} — held, not lost"
+                    );
+                }
+                // A redirect IS a delivery, to the occupant that owns the
+                // channel now.
+                crate::brain::agent::service::session_routes::Delivery::Redirected { to } => {
+                    tracing::info!("Cron '{job_name}' result redirected to session {to}");
+                }
+                crate::brain::agent::service::session_routes::Delivery::Delivered => {
+                    tracing::info!("Cron '{job_name}' result delivered to session {session_id}");
+                }
+                // Unreachable from cron: the mid-turn gate is `if !interrupt && …`
+                // and this call passes interrupt=true. Kept as an arm so the
+                // match stays exhaustive over the enum.
+                crate::brain::agent::service::session_routes::Delivery::RefusedInFlight {
+                    redirected_to,
+                } => {
+                    tracing::warn!(
+                        "Cron '{job_name}' delivery refused in flight \
+                         (redirected_to={redirected_to:?}) — unexpected from cron"
+                    );
+                }
+            }
             return None;
         }
         "telegram" => {
