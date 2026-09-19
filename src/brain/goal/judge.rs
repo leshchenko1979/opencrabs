@@ -27,12 +27,12 @@ use crate::brain::provider::{LLMRequest, Message, Provider};
 /// explicitly not evidence, and the per-criterion array is required *before*
 /// the aggregate verdict so the model cannot rationalise a verdict it has
 /// already committed to.
-const JUDGE_SYSTEM: &str = r#"You are a goal-evaluation judge. You evaluate DECLARED CRITERIA against EVIDENCE. You do not decide whether the work "feels" done.
+pub(crate) const JUDGE_SYSTEM: &str = r#"You are a goal-evaluation judge. You evaluate DECLARED CRITERIA against EVIDENCE. You do not decide whether the work "feels" done.
 
 You will receive:
 - The GOAL: what the user wants accomplished
 - The CRITERIA: the numbered, checkable criteria the goal must satisfy
-- The EVIDENCE: mechanical facts collected from the session (tool results, background task states, plan task states, files touched)
+- The EVIDENCE: mechanical facts collected from the session, in five sections — RUNNING BACKGROUND TASKS, OPEN PLAN TASKS, TOOL RECEIPTS (one line per tool call this turn, marked "ok" or "FAILED"), FILES TOUCHED, and TURN BUDGET. The pack covers THIS TURN ONLY: an absent receipt is not evidence the work never happened, and it is never a licence to guess MET.
 - The LAST RESPONSE: the assistant's most recent output
 
 Respond with ONLY a JSON object (no markdown, no code fences, no extra text):
