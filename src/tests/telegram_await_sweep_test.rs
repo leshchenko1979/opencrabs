@@ -18,7 +18,9 @@ use crate::channels::telegram::await_sweep::{
 };
 use crate::channels::telegram::resume::ResumeTargets;
 use crate::config::TelegramConfig;
-use crate::db::{BindingOrigin, Database, Session, SessionBinding, SessionBindingRepository, SessionRepository};
+use crate::db::{
+    BindingOrigin, Database, Session, SessionBinding, SessionBindingRepository, SessionRepository,
+};
 use uuid::Uuid;
 
 /// The single-flight flag is process-global, so two passes running in parallel
