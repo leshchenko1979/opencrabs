@@ -15,6 +15,20 @@ pub trait RetryableError: std::fmt::Display {
     fn retry_after(&self) -> Option<Duration> {
         None
     }
+
+    /// Optional: is this a HARD quota / billing limit rather than a
+    /// transient throttle? (#346)
+    ///
+    /// Defaults to `false`, i.e. "treat it as an ordinary retryable error".
+    /// The retry engine consults this to swap in the config's separate,
+    /// deliberately tiny quota budget, so an aggregator that opted in
+    /// ([`RetryConfig::with_quota_attempts`]) gets a bounded number of
+    /// in-place attempts before rolling to the fallback chain, while every
+    /// other error keeps the full patient backoff. Errors that do not
+    /// distinguish the two never override it and are unaffected.
+    fn is_quota_exhausted(&self) -> bool {
+        false
+    }
 }
 
 /// Universal retry configuration
@@ -22,6 +36,18 @@ pub trait RetryableError: std::fmt::Display {
 pub struct RetryConfig {
     /// Maximum number of retry attempts (0 means no retries)
     pub max_attempts: u32,
+    /// In-place attempts granted to a HARD quota / billing error (#346).
+    ///
+    /// `0` — the default — means a quota error is never retried in place:
+    /// it bails straight to the fallback chain, which is the #952 guarantee
+    /// and stays true for every provider that did not opt in. A provider
+    /// that opted in via `retry_quota_exhausted = true` raises this to a
+    /// small bounded value, which is only meaningful for a provider fronting
+    /// SEVERAL upstream accounts (an aggregator / relay), where the cap
+    /// behind the 429 belongs to one upstream key and the same request may
+    /// be served by another seconds later. On a direct provider the cap is
+    /// terminal and retrying only burns budget against a wall.
+    pub retry_quota_attempts: u32,
     /// Initial delay before first retry
     pub initial_delay: Duration,
     /// Maximum delay between retries
@@ -46,6 +72,10 @@ impl Default for RetryConfig {
             max_delay: Duration::from_secs(30),
             backoff_multiplier: 2.0,
             jitter: 0.1,
+            // No in-place retries for a hard quota / billing error (#346).
+            // #952's guarantee: the request rolls to the fallback chain
+            // rather than burning the backoff budget against a wall.
+            retry_quota_attempts: 0,
         }
     }
 }
@@ -111,6 +141,34 @@ impl RetryConfig {
         }
     }
 
+    /// Grant a HARD quota / billing error a bounded number of in-place
+    /// attempts before the request rolls to the fallback chain (#346).
+    ///
+    /// `attempts == 0` (the default) is #952's behaviour and needs no call.
+    /// A non-zero value only makes sense on a provider fronting several
+    /// upstream accounts — see [`Self::retry_quota_attempts`]. The delay
+    /// schedule for these attempts is [`Self::initial_delay`], deliberately
+    /// NOT the exponential ramp: the point is to let the aggregator re-route
+    /// to another upstream key, not to wait out a billing window.
+    pub fn with_quota_attempts(mut self, attempts: u32) -> Self {
+        self.retry_quota_attempts = attempts;
+        self
+    }
+
+    /// The in-place attempt budget that applies to `err`.
+    ///
+    /// A hard quota / billing error gets [`Self::retry_quota_attempts`]
+    /// (usually `0`, i.e. bail straight to the fallback chain); everything
+    /// else gets the full [`Self::max_attempts`]. One place decides this so
+    /// the two retry loops cannot drift apart (#346).
+    pub fn attempt_budget_for<E: RetryableError + ?Sized>(&self, err: &E) -> u32 {
+        if err.is_quota_exhausted() {
+            self.retry_quota_attempts
+        } else {
+            self.max_attempts
+        }
+    }
+
     /// Calculate delay for a given attempt with optional jitter
     pub fn calculate_delay(&self, attempt: u32) -> Duration {
         let base_delay_ms = self.initial_delay.as_millis() as f64;
@@ -158,7 +216,13 @@ where
                 return Ok(result);
             }
             Err(err) => {
-                if config.max_attempts == 0 || !err.is_retryable() {
+                // A hard quota / billing error draws on its own, usually
+                // zero, in-place budget — see `attempt_budget_for` (#346).
+                // The guard accepts either signal: a quota error is NOT
+                // `is_retryable()` by design (#952), so testing that alone
+                // would make an opt-in budget unreachable.
+                let budget = config.attempt_budget_for(&err);
+                if budget == 0 || !(err.is_retryable() || err.is_quota_exhausted()) {
                     tracing::debug!("Error is not retryable: {}", err);
                     return Err(err);
                 }
@@ -170,8 +234,8 @@ where
                 // for a transient blip. A genuinely dead host is bounded by the
                 // fallback chain + sticky-fallback threshold instead — not by
                 // giving up on the very first request.
-                if attempt >= config.max_attempts {
-                    tracing::warn!("Max retry attempts ({}) exceeded", config.max_attempts);
+                if attempt >= budget {
+                    tracing::warn!("Max retry attempts ({}) exceeded", budget);
                     return Err(last_error.unwrap_or(err));
                 }
 
@@ -189,7 +253,7 @@ where
                 tracing::info!(
                     "Retry attempt {}/{} after {}ms for error: {}",
                     attempt + 1,
-                    config.max_attempts,
+                    budget,
                     delay.as_millis(),
                     err
                 );
@@ -234,7 +298,18 @@ where
                 return Ok(result);
             }
             Err(err) => {
-                if config.max_attempts == 0 || !err.is_retryable() {
+                // A hard quota / billing error draws on its own, usually
+                // zero, in-place budget: an aggregator that opted in
+                // (`retry_quota_exhausted = true`) gets a couple of quick
+                // attempts to re-route, while every other provider keeps
+                // #952's bail-straight-to-fallback behaviour (#346).
+                //
+                // The guard accepts EITHER signal on purpose. A quota error
+                // is deliberately NOT `is_retryable()` — that is what keeps
+                // #952's fallback walk working — so testing `is_retryable()`
+                // alone would make the opt-in budget unreachable.
+                let budget = config.attempt_budget_for(&err);
+                if budget == 0 || !(err.is_retryable() || err.is_quota_exhausted()) {
                     tracing::debug!("Error is not retryable: {}", err);
                     return Err(err);
                 }
@@ -245,8 +320,8 @@ where
                 // for a transient blip. A genuinely dead host is bounded by the
                 // fallback chain + sticky-fallback threshold instead — not by
                 // giving up on the very first request.
-                if attempt >= config.max_attempts {
-                    tracing::warn!("Max retry attempts ({}) exceeded", config.max_attempts);
+                if attempt >= budget {
+                    tracing::warn!("Max retry attempts ({}) exceeded", budget);
                     return Err(last_error.unwrap_or(err));
                 }
 
@@ -257,12 +332,12 @@ where
                 tracing::info!(
                     "Retry attempt {}/{} after {}ms for error: {}",
                     attempt + 1,
-                    config.max_attempts,
+                    budget,
                     delay.as_millis(),
                     err
                 );
                 // Surface the upcoming retry to the caller (UI, metrics, …).
-                on_retry(attempt + 1, config.max_attempts, &err);
+                on_retry(attempt + 1, budget, &err);
 
                 last_error = Some(err);
                 sleep(delay).await;

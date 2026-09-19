@@ -625,6 +625,14 @@ impl crate::utils::retry::RetryableError for ProviderError {
         provider_error_is_retryable(self)
     }
 
+    /// Delegate the hard-quota classification so the retry engine can draw
+    /// on the config's separate quota budget instead of the full attempt
+    /// count (#346). Routed through a free helper for the same
+    /// inherent-vs-trait ambiguity as `is_retryable` above.
+    fn is_quota_exhausted(&self) -> bool {
+        provider_error_is_quota_exhausted(self)
+    }
+
     fn retry_after(&self) -> Option<std::time::Duration> {
         // Parse a server Retry-After hint from rate-limit errors, clamped
         // to 30s so a pathological "retry after 300s" can't stall a turn.
@@ -645,6 +653,15 @@ impl crate::utils::retry::RetryableError for ProviderError {
 /// `ProviderError::is_retryable` without method-resolution ambiguity.
 fn provider_error_is_retryable(e: &ProviderError) -> bool {
     e.is_retryable()
+}
+
+/// Free wrapper for the same reason as [`provider_error_is_retryable`]:
+/// inside the trait impl a bare `self.is_quota_exhausted()` resolves to the
+/// trait method (the one being defined), not the inherent classifier, so
+/// the delegation must go through a scope where the inherent method wins
+/// the method-call lookup (#346).
+fn provider_error_is_quota_exhausted(e: &ProviderError) -> bool {
+    e.is_quota_exhausted()
 }
 
 /// Render a concise, SPECIFIC reason for a provider error, for the user-facing

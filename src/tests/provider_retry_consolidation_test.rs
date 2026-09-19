@@ -124,6 +124,7 @@ async fn every_retryable_error_uses_the_full_patient_budget() {
         max_delay: Duration::from_millis(2),
         backoff_multiplier: 2.0,
         jitter: 0.0,
+        ..Default::default()
     };
 
     let calls = Arc::new(AtomicU32::new(0));
@@ -165,6 +166,7 @@ async fn retry_with_notify_fires_per_attempt_for_surfacing() {
         max_delay: Duration::from_millis(2),
         backoff_multiplier: 2.0,
         jitter: 0.0,
+        ..Default::default()
     };
 
     // Always-failing transient error → exhausts all 4 retries.
@@ -210,6 +212,7 @@ async fn retry_with_notify_does_not_fire_on_success_or_non_retryable() {
         max_delay: Duration::from_millis(2),
         backoff_multiplier: 2.0,
         jitter: 0.0,
+        ..Default::default()
     };
 
     // Immediate success → no notices.
@@ -251,6 +254,7 @@ async fn provider_error_drives_generic_retry() {
         max_delay: Duration::from_millis(5),
         backoff_multiplier: 2.0,
         jitter: 0.0,
+        ..Default::default()
     };
 
     // Transient: fails twice then succeeds.
