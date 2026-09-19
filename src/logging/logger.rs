@@ -552,40 +552,97 @@ pub fn cleanup_old_logs(max_age_days: u64) -> Result<usize, Box<dyn std::error::
     Ok(removed)
 }
 
-/// Clean up orphaned temp files from ~/.opencrabs/tmp/files/ older than max_age_days.
-/// All channel image uploads (Telegram, WhatsApp, Slack, Trello) are saved here
-/// via process_file_with_vision. This single purge replaces per-channel cleanup spawns.
-pub fn cleanup_old_temp_files(max_age_days: u64) -> Result<usize, Box<dyn std::error::Error>> {
-    // Profile-aware: purge the active profile's tmp/files (where save_to_temp
-    // writes), not the default root — otherwise a profile's temp files never
-    // get cleaned.
-    let tmp_dir = crate::config::opencrabs_home().join("tmp").join("files");
-    if !tmp_dir.exists() {
-        return Ok(0);
-    }
+/// Remove the regular files in `dir` whose mtime is older than `max_age`.
+///
+/// Directories and symlinks are skipped, never recursed into: a subdirectory
+/// may have its own owner and its own sweep (`<home>/tmp/detached` is aged out
+/// by `work_status::cleanup_stale`), and this purge must not reach inside it.
+/// `file_type()` is lstat-based, so a symlink is skipped rather than followed
+/// to a target outside the directory.
+///
+/// A missing directory is normal (nothing to do); any other scan failure is
+/// warned about. A failed unlink is warned about and the sweep continues — one
+/// unremovable file must neither abort the purge nor vanish silently.
+fn sweep_aged_files(dir: &std::path::Path, max_age: std::time::Duration) -> usize {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(e) => {
+            tracing::warn!("Failed to scan {} for aged temp files: {e}", dir.display());
+            return 0;
+        }
+    };
 
-    let max_age = std::time::Duration::from_secs(max_age_days * 24 * 60 * 60);
     let now = std::time::SystemTime::now();
     let mut removed = 0;
 
-    for entry in std::fs::read_dir(&tmp_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        // Clean all files in our temp directory (images, PDFs, etc.)
-        if !path.is_file() {
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
             continue;
         }
 
-        if let Ok(metadata) = entry.metadata()
-            && let Ok(modified) = metadata.modified()
-            && let Ok(age) = now.duration_since(modified)
-            && age > max_age
-            && std::fs::remove_file(&path).is_ok()
-        {
-            removed += 1;
+        let aged = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > max_age);
+        if !aged {
+            continue;
+        }
+
+        let path = entry.path();
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => tracing::warn!("Failed to remove aged temp file {}: {e}", path.display()),
         }
     }
 
-    Ok(removed)
+    removed
+}
+
+/// Clean up orphaned temp files older than `max_age_days`, across every
+/// directory OpenCrabs writes throwaway files into:
+///
+/// - `<home>/tmp/files` — channel image uploads (Telegram, WhatsApp, Slack,
+///   Trello) saved via `process_file_with_vision`. This single purge replaces
+///   the per-channel cleanup spawns.
+/// - `<home>/tmp` — loose scratch files written beside those subdirectories,
+///   which a `files/`-only read left behind forever.
+/// - `/tmp/opencrabs/tool_output` — tool results spilled to disk when a result
+///   exceeds the inline budget. A fixed absolute path shared by every profile
+///   on the host, hence swept by path rather than by home.
+///
+/// `<home>/tmp/detached` is deliberately absent: it already has its own 7-day
+/// startup sweep (`work_status::cleanup_stale`). Subdirectories are never
+/// recursed into, so sweeping `<home>/tmp` cannot double-count them.
+///
+/// A window of `0` disables the purge. It cannot fall out of the comparison on
+/// its own: the test is `age > max_age`, which a zero window satisfies for
+/// every file that was not written this instant — so `0` would wipe the whole
+/// directory rather than spare it. The guard lives here rather than at the
+/// call site so the meaning of `0` is a property of the sweep, and every
+/// caller gets it.
+///
+/// Infallible by design: a startup purge must never be the reason startup
+/// fails, and every individual failure is warned about rather than swallowed.
+pub fn cleanup_old_temp_files(max_age_days: u64) -> usize {
+    if max_age_days == 0 {
+        return 0;
+    }
+
+    let max_age = std::time::Duration::from_secs(max_age_days * 24 * 60 * 60);
+
+    // Profile-aware: purge the active profile's tmp tree (where save_to_temp
+    // writes), not the default root — otherwise a profile's temp files never
+    // get cleaned.
+    let home_tmp = crate::config::opencrabs_home().join("tmp");
+    let mut removed = sweep_aged_files(&home_tmp.join("files"), max_age);
+    removed += sweep_aged_files(&home_tmp, max_age);
+    removed += sweep_aged_files(
+        std::path::Path::new(crate::brain::agent::service::tool_loop::TOOL_OUTPUT_DIR),
+        max_age,
+    );
+
+    removed
 }

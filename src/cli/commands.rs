@@ -460,17 +460,14 @@ pub(crate) async fn cmd_doctor(config: &crate::config::Config, fix: bool) -> Res
 pub(crate) async fn load_config(config_path: Option<&str>) -> Result<crate::config::Config> {
     use crate::config::Config;
 
-    let config = if let Some(path) = config_path {
-        tracing::info!("Loading configuration from custom path: {}", path);
-        Config::load_from_path(path)?
-    } else {
-        tracing::debug!("Loading default configuration");
-        // Schema migration is a startup step, not a side effect of reading
-        // config (#912). This is the one place every CLI entry point passes
-        // through, so it stays exactly as often as it used to run in practice.
+    // Schema migration is a startup step, not a side effect of reading config
+    // (#912). This is the one place every CLI entry point passes through, so it
+    // stays exactly as often as it used to run in practice.
+    if config_path.is_none() {
         Config::migrate_config_files();
-        Config::load()?
-    };
+    }
+
+    let config = Config::load_for_cli(config_path)?;
 
     // Validate configuration
     config.validate()?;

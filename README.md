@@ -2434,6 +2434,9 @@ plan_worker_allow_write = false  # default false: isolated plan workers run READ
                                  # or background tasks (their long bash runs attached). true lets them nest.
 subagent_session_ttl_days = 7    # days a spawned sub-agent's session is kept before pruning. Nothing revisits
                                  # them, so they accumulate with their messages, tool rows and plan files. 0 keeps forever
+tool_output_retention_days = 7   # days throwaway files survive before the startup purge removes them: the profile's
+                                 # tmp/ tree (channel image uploads, loose scratch files) and the tool-output spill dir
+                                 # /tmp/opencrabs/tool_output, where oversized tool results are written. 0 disables the purge
 
 # ── Runaway-reasoning guard ───────────────────────────────────────────────────
 thinking_loop_timeout_secs = 600 # kill a stream that runs this long with zero tool calls, then retry
