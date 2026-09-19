@@ -54,8 +54,7 @@ pub fn parse_timezone_heuristic(text: &str) -> Option<TzInfo> {
             continue;
         };
 
-        let key_lower = key.to_lowercase();
-        if key_lower != "timezone" && key_lower != "часовой пояс" {
+        if !is_tz_key(&key) {
             continue;
         }
 
@@ -128,6 +127,19 @@ fn unwrap_declaration_wrappers(s: &str) -> String {
         })
         .trim()
         .to_string()
+}
+
+/// Canonical `USER.md` keys that declare a timezone.
+///
+/// Matched case-insensitively against a key already normalised by
+/// [`normalize_declaration`], so `Timezone`, `**Timezone**`, `TimeZone` and
+/// `Часовой пояс` all resolve to the same declaration.
+const TZ_KEYS: [&str; 3] = ["timezone", "time zone", "часовой пояс"];
+
+/// Whether a normalised declaration key declares a timezone.
+fn is_tz_key(key: &str) -> bool {
+    let lower = key.trim().to_lowercase();
+    TZ_KEYS.contains(&lower.as_str())
 }
 
 /// Parse a timezone value string into TzInfo.
