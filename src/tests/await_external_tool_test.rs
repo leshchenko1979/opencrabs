@@ -150,9 +150,11 @@ async fn parking_never_requires_approval() {
 #[tokio::test]
 async fn declares_system_modification_capability() {
     let db = test_db().await;
-    assert!(tool_for(&db)
-        .capabilities()
-        .contains(&ToolCapability::SystemModification));
+    assert!(
+        tool_for(&db)
+            .capabilities()
+            .contains(&ToolCapability::SystemModification)
+    );
 }
 
 // ------------------------------------------- acceptance: set then read back
@@ -179,7 +181,11 @@ async fn set_makes_awaiting_for_channel_return_the_row() {
 
     // The reader — not the tool's own return value — is the criterion.
     let rows = awaiting(&db).await;
-    assert_eq!(rows, vec![sid], "set must make the row readable as awaiting");
+    assert_eq!(
+        rows,
+        vec![sid],
+        "set must make the row readable as awaiting"
+    );
 
     // And it carries what was declared, so the boot log can name the wait.
     let b = SessionBindingRepository::new(db.pool().clone())
@@ -204,7 +210,11 @@ async fn clear_makes_awaiting_for_channel_stop_returning_the_row() {
         serde_json::json!({"action": "set", "kind": "peer_lane", "ref": "HQ"}),
     )
     .await;
-    assert_eq!(awaiting(&db).await.len(), 1, "precondition: one parked lane");
+    assert_eq!(
+        awaiting(&db).await.len(),
+        1,
+        "precondition: one parked lane"
+    );
 
     let res = call(&db, session, serde_json::json!({"action": "clear"})).await;
     assert!(res.success, "clear must succeed: {:?}", res.error);
@@ -258,7 +268,10 @@ async fn set_on_a_session_with_no_binding_is_refused_not_silently_successful() {
     )
     .await;
 
-    assert!(!res.success, "an unrecordable await must not report success");
+    assert!(
+        !res.success,
+        "an unrecordable await must not report success"
+    );
     let err = res.error.unwrap_or_default();
     assert!(
         err.contains("NOT recorded"),
