@@ -161,3 +161,111 @@ fn loose_permissions_tightened_only() {
     let mode = std::fs::metadata(&loose).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
 }
+
+// ---------------------------------------------------------------------------
+// #332 · Step 4 — the instance-owner (orphanhood) probe
+//
+// `instance_owner` is what lets the stuck-run clear policy stop guessing from
+// AGE: a process that has just taken the instance lock cannot be executing a
+// `cron_job_runs` row written before it started, so a pre-existing running row
+// is an orphan however young it is (#332, D4).
+//
+// These drive the dir-injectable core against a TempDir — NOT
+// `with_home_override`: `base_opencrabs_dir()` resolves `dirs::home_dir()` and
+// never consults the override, so the override cannot point the PUBLIC probe at
+// a temp home. The core is exactly what that probe delegates to, one read and
+// one classification, and no live lock file is written either way.
+// ---------------------------------------------------------------------------
+
+fn write_lock(dir: &std::path::Path, profile: &str, contents: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join(format!("{profile}.lock")), contents).unwrap();
+}
+
+#[test]
+fn instance_owner_is_self_for_our_own_pid() {
+    use crate::config::profile::{InstanceOwner, instance_owner_in, instance_running_in};
+
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("locks/instance");
+    write_lock(&dir, "ops", &std::process::id().to_string());
+
+    assert_eq!(instance_owner_in(&dir, "ops"), InstanceOwner::Self_);
+    // The bool probe is the same read, so the two cannot drift apart.
+    assert!(instance_running_in(&dir, "ops"));
+}
+
+#[cfg(unix)]
+#[test]
+fn instance_owner_is_other_for_a_live_foreign_pid() {
+    use crate::config::profile::{InstanceOwner, instance_owner_in, instance_running_in};
+
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("locks/instance");
+    // PID 1 is the init process: always alive, never this test process.
+    assert_ne!(std::process::id(), 1);
+    write_lock(&dir, "ops", "1");
+
+    assert_eq!(instance_owner_in(&dir, "ops"), InstanceOwner::Other(1));
+    assert!(instance_running_in(&dir, "ops"));
+}
+
+#[test]
+fn instance_owner_is_none_for_a_missing_lock_file() {
+    use crate::config::profile::{InstanceOwner, instance_owner_in, instance_running_in};
+
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("locks/instance");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    assert_eq!(instance_owner_in(&dir, "ops"), InstanceOwner::None);
+    assert!(!instance_running_in(&dir, "ops"));
+}
+
+#[cfg(unix)]
+#[test]
+fn instance_owner_is_none_for_a_dead_pid() {
+    use crate::config::profile::{InstanceOwner, instance_owner_in};
+
+    // A reaped child's PID is a real PID that is genuinely no longer alive —
+    // unlike a made-up number like u32::MAX, which never was one.
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let dead = child.id();
+    child.wait().unwrap();
+
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("locks/instance");
+    write_lock(&dir, "ops", &dead.to_string());
+
+    assert_eq!(instance_owner_in(&dir, "ops"), InstanceOwner::None);
+}
+
+#[test]
+fn instance_owner_is_none_for_an_unparsable_or_impossible_stamp() {
+    use crate::config::profile::{InstanceOwner, instance_owner_in};
+
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("locks/instance");
+
+    for stamp in ["", "   ", "not-a-pid", "0"] {
+        write_lock(&dir, "ops", stamp);
+        assert_eq!(
+            instance_owner_in(&dir, "ops"),
+            InstanceOwner::None,
+            "stamp {stamp:?} names no live owner"
+        );
+    }
+}
+
+#[test]
+fn instance_owner_answers_only_for_the_named_profile() {
+    use crate::config::profile::{InstanceOwner, instance_owner_in};
+
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("locks/instance");
+    write_lock(&dir, "ops", &std::process::id().to_string());
+
+    // A lock for another profile says nothing about this one: the probe must
+    // never adopt a sibling's owner.
+    assert_eq!(instance_owner_in(&dir, "family"), InstanceOwner::None);
+}
