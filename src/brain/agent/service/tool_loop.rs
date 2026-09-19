@@ -4934,7 +4934,7 @@ impl AgentService {
                             .append_content(assistant_db_msg.id, &iter_content)
                             .await
                     {
-                        tracing::warn!("failed to append iteration content to DB: {e}");
+                        tracing::warn!("failed to append iteration content to DB: {e:#}");
                     }
                 }
             }
@@ -7080,7 +7080,7 @@ impl AgentService {
                                                     .await
                                                 {
                                                     tracing::error!(
-                                                        "[TOOL_EXEC] Failed to record tool execution: {}",
+                                                        "[TOOL_EXEC] Failed to record tool execution: {:#}",
                                                         e
                                                     );
                                                 }
@@ -7181,7 +7181,7 @@ impl AgentService {
                                                     .await
                                                 {
                                                     tracing::error!(
-                                                        "[TOOL_EXEC] Failed to record tool execution: {}",
+                                                        "[TOOL_EXEC] Failed to record tool execution: {:#}",
                                                         e
                                                     );
                                                 }
@@ -7389,7 +7389,7 @@ impl AgentService {
                                     .await
                                 {
                                     tracing::error!(
-                                        "[TOOL_EXEC] Failed to record tool execution: {}",
+                                        "[TOOL_EXEC] Failed to record tool execution: {:#}",
                                         e
                                     );
                                 }
@@ -7479,7 +7479,7 @@ impl AgentService {
                                     .await
                                 {
                                     tracing::error!(
-                                        "[TOOL_EXEC] Failed to record tool execution: {}",
+                                        "[TOOL_EXEC] Failed to record tool execution: {:#}",
                                         e
                                     );
                                 }
