@@ -1273,6 +1273,11 @@ async fn cmd_chat_inner(
     let boot_found = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let boot_parked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let boot_found_system = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // #344: lanes woken by their durable await record instead of by the
+    // pending-request journal. The boot-classifier pass below runs AFTER the
+    // summary task is spawned but well inside its grace sleep, so this is set
+    // by the time the line is written — same shared-atomic shape as `parked`.
+    let boot_awaiting_external = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     {
         use crate::brain::agent::service::boot_report;
         let pending_repo = crate::db::PendingRequestRepository::new(db.pool().clone());
@@ -1710,6 +1715,7 @@ async fn cmd_chat_inner(
         let found = boot_found.clone();
         let parked = boot_parked.clone();
         let found_system = boot_found_system.clone();
+        let awaiting_external = boot_awaiting_external.clone();
         let resumed: Vec<String> = resumed_session_ids
             .iter()
             .map(|id| id.simple().to_string()[..8].to_string())
@@ -1721,14 +1727,15 @@ async fn cmd_chat_inner(
             .await;
             tracing::info!(
                 target: "boot-resume",
-                "Boot resume summary (#1242/#12): interrupted={} (user={} system={}) resumed={} [{}] parked_awaiting_route={}",
+                "Boot resume summary (#1242/#12): interrupted={} (user={} system={}) resumed={} [{}] parked_awaiting_route={} awaiting_external={}",
                 found.load(std::sync::atomic::Ordering::Relaxed),
                 found.load(std::sync::atomic::Ordering::Relaxed)
                     - found_system.load(std::sync::atomic::Ordering::Relaxed),
                 found_system.load(std::sync::atomic::Ordering::Relaxed),
                 resumed.len(),
                 resumed.join(","),
-                parked.load(std::sync::atomic::Ordering::Relaxed)
+                parked.load(std::sync::atomic::Ordering::Relaxed),
+                awaiting_external.load(std::sync::atomic::Ordering::Relaxed)
             );
         });
     }
@@ -1808,6 +1815,9 @@ async fn cmd_chat_inner(
         // than by the freshness gate, so its framing names the dependency
         // instead of an interrupted turn.
         let awaiting_count = recovery.awaiting.len();
+        // Publish the count for the end-of-boot summary line, which is already
+        // sleeping in its spawned task and reads this at wake.
+        boot_awaiting_external.store(awaiting_count, std::sync::atomic::Ordering::Relaxed);
         spawn_boot_resumes(
             recovery.awaiting,
             "[System: You were waiting on an external completion — a run, a \
