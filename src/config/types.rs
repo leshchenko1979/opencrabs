@@ -569,6 +569,29 @@ pub struct TelegramConfig {
     /// in `allowed_users`. Accepts int or string arrays.
     #[serde(default, deserialize_with = "deser_users_compat")]
     pub bot_owner: Vec<String>,
+    /// Seconds between passes of the periodic await sweep (#344) — the runtime
+    /// backstop for a lane parked on an external completion that never
+    /// arrives. `0` disables the sweep entirely.
+    ///
+    /// Re-resolved on every tick, so editing this takes effect within one
+    /// period instead of at the next restart (same contract as the memory
+    /// backfill sweep).
+    ///
+    /// Default: 300 (five minutes).
+    #[serde(default = "default_await_sweep_interval_secs")]
+    pub await_sweep_interval_secs: u64,
+    /// How long a declared wait may stand before the sweep calls it stale and
+    /// wakes the lane anyway (#344) — the run that died, the peer lane that
+    /// never answered, the owner decision that is not coming.
+    ///
+    /// Must be comfortably LONGER than a healthy external completion, or the
+    /// sweep pre-empts waits that were about to resolve on their own. A lane
+    /// woken early is not damaged — it re-checks the dependency and re-parks —
+    /// but it burns a turn, so this is a patience knob, not a safety knob.
+    ///
+    /// Default: 3600 (one hour).
+    #[serde(default = "default_await_stale_secs")]
+    pub await_stale_secs: i64,
     /// Proactive per-peer flood governors (#1211), `[channels.telegram.
     /// rate_limiter]`. Three independent token buckets keyed by forum chat id
     /// — typing (~1 call / 3 s, burst 8, concurrent sessions coalesced per
@@ -611,10 +634,26 @@ impl Default for TelegramConfig {
             mermaid_bg: default_auto(),
             silence_group_start: true,
             bot_owner: Vec::new(),
+            await_sweep_interval_secs: default_await_sweep_interval_secs(),
+            await_stale_secs: default_await_stale_secs(),
             rate_limiter: RateLimiterConfig::default(),
             groups: std::collections::HashMap::new(),
         }
     }
+}
+
+/// Five minutes between await-sweep passes (#344). Fast enough that a lane
+/// whose dependency died is recovered inside the same working session, slow
+/// enough that the timer is invisible in the log.
+fn default_await_sweep_interval_secs() -> u64 {
+    300
+}
+
+/// One hour of patience before the await sweep treats a wait as stale (#344).
+/// Chosen to sit well clear of a normal CI run or peer-lane round trip, so the
+/// sweep only fires on a dependency that is genuinely not coming back.
+fn default_await_stale_secs() -> i64 {
+    3600
 }
 
 /// Per-group access control + behaviour override for one Telegram group.

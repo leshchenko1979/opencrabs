@@ -1757,58 +1757,18 @@ async fn cmd_chat_inner(
 
         // #33 interrupted and #344 awaiting are the two resumable buckets, and
         // they differ ONLY in the prompt that frames the wake — so they share
-        // one spawn path. The wait-for-bot and untracked-resume contract below
-        // must not be able to drift between them.
-        let spawn_boot_resumes =
-            |triples: crate::channels::telegram::resume::ResumeTargets, prompt: &'static str| {
-                for (sid, chat_id, thread_raw) in triples {
-                    let agent = app.agent_service().clone();
-                    let tg = telegram_state.clone();
-                    let thread_id = thread_raw.map(|t| {
-                        teloxide::types::ThreadId(teloxide::types::MessageId(t as i32))
-                    });
-                    tokio::spawn(async move {
-                        // The bot may not be authenticated yet at boot — wait for it
-                        // exactly like the pending-requests resume path above.
-                        let Some(bot) = crate::channels::bg_resume::wait_ready(
-                            || tg.bot(),
-                            "boot classifier: telegram bot",
-                        )
-                        .await
-                        else {
-                            tracing::warn!(
-                                "Boot classifier (#33): bot never became ready — session {sid} stays comatose"
-                            );
-                            return;
-                        };
-                        // Boot replay of an EXISTING turn: resume-of-resume must
-                        // stay untracked (#729/#12) — same contract as the pending-
-                        // requests loop above.
-                        if let Err(e) = crate::channels::telegram::handler::resume_session(
-                            bot,
-                            teloxide::types::ChatId(chat_id),
-                            thread_id,
-                            sid,
-                            prompt.to_string(),
-                            agent,
-                            tg,
-                            None,
-                        )
-                        .await
-                        {
-                            tracing::error!("Boot classifier resume failed for session {sid}: {e}");
-                        }
-                    });
-                }
-            };
-
+        // one spawn path with the runtime await sweep (#344):
+        // `resume::spawn_resumes`. The wait-for-bot and untracked-resume
+        // contract lives there once and cannot drift between the three callers.
         let rescue_count = recovery.interrupted.len();
-        spawn_boot_resumes(
+        crate::channels::telegram::resume::spawn_resumes(
             recovery.interrupted,
             "[System: A restart just occurred while you were \
              processing a request. Read the conversation context and continue \
              where you left off naturally. Do not mention the restart or \
              any interruption — just pick up seamlessly.]",
+            app.agent_service().clone(),
+            telegram_state.clone(),
         );
 
         // #344: an awaiting lane was woken by its durable await record rather
@@ -1818,12 +1778,14 @@ async fn cmd_chat_inner(
         // Publish the count for the end-of-boot summary line, which is already
         // sleeping in its spawned task and reads this at wake.
         boot_awaiting_external.store(awaiting_count, std::sync::atomic::Ordering::Relaxed);
-        spawn_boot_resumes(
+        crate::channels::telegram::resume::spawn_resumes(
             recovery.awaiting,
             "[System: You were waiting on an external completion — a run, a \
              peer lane, or an owner decision. A restart occurred. Re-check \
              whether that completion has landed and continue from where you \
              left off. Do not mention the restart.]",
+            app.agent_service().clone(),
+            telegram_state.clone(),
         );
 
         if rescue_count > 0 {
@@ -1837,6 +1799,19 @@ async fn cmd_chat_inner(
             );
         }
     }
+
+    // #344: the runtime backstop for a wait whose completion never arrives.
+    // The classifier above only ever runs on a RESTART; a lane parked on a run
+    // that dies inside a healthy daemon needs a clock, and this is it. Started
+    // AFTER the classifier so a lane recovered at boot is not also selected by
+    // the first tick, and before the channel manager so the sweep is live
+    // before any channel can route a wake to it.
+    #[cfg(feature = "telegram")]
+    crate::channels::telegram::await_sweep::spawn(
+        db.pool().clone(),
+        app.agent_service().clone(),
+        telegram_state.clone(),
+    );
 
     // Channel manager — handles dynamic spawn/stop of channel agents on config reload
     let channel_manager = Arc::new(crate::channels::ChannelManager::new(

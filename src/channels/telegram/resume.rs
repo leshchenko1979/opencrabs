@@ -1863,6 +1863,55 @@ pub struct BootWakeRecovery {
     pub unclassified: Vec<String>,
 }
 
+/// Spawn one resume continuation per target, one task per lane.
+///
+/// Shared by every wake source — the boot classifier's `interrupted` and
+/// `awaiting` buckets, and the runtime awaiting sweep — because they differ
+/// ONLY in the prompt that frames the wake. The wait-for-bot and
+/// untracked-resume contract lives here once so it cannot drift between them.
+pub(crate) fn spawn_resumes(
+    targets: ResumeTargets,
+    prompt: &'static str,
+    agent: Arc<AgentService>,
+    telegram_state: Arc<TelegramState>,
+) {
+    for (sid, chat_id, thread_raw) in targets {
+        let agent = agent.clone();
+        let tg = telegram_state.clone();
+        let thread_id =
+            thread_raw.map(|t| teloxide::types::ThreadId(teloxide::types::MessageId(t as i32)));
+        tokio::spawn(async move {
+            // The bot may not be authenticated yet at boot — wait for it
+            // exactly like the pending-requests resume path.
+            let Some(bot) =
+                crate::channels::bg_resume::wait_ready(|| tg.bot(), "resume wake: telegram bot")
+                    .await
+            else {
+                tracing::warn!(
+                    "Resume wake (#33/#344): bot never became ready — session {sid} stays comatose"
+                );
+                return;
+            };
+            // Replay of an EXISTING turn: resume-of-resume must stay untracked
+            // (#729/#12) — same contract as the pending-requests loop.
+            if let Err(e) = resume_session(
+                bot,
+                teloxide::types::ChatId(chat_id),
+                thread_id,
+                sid,
+                prompt.to_string(),
+                agent,
+                tg,
+                None,
+            )
+            .await
+            {
+                tracing::error!("Resume wake failed for session {sid}: {e}");
+            }
+        });
+    }
+}
+
 /// Check if a session has active autonomous work (goal #218 or active plan #244).
 ///
 /// Returns `Some("goal")` if an active unexhausted goal exists,
