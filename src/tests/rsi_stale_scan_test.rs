@@ -286,6 +286,12 @@ fn config_keys_verify_against_embedded_schema() {
     assert_eq!(verify_config_key("[database.path]"), Verdict::Ok);
     assert_eq!(verify_config_key("[logging.level]"), Verdict::Ok);
     assert_eq!(verify_config_key("[doctor]"), Verdict::Ok);
+    // `[retry]` (#346) — every field is Option + skip_serializing_if, so the
+    // leaves exist only because the witness patches in a sentinel.
+    assert_eq!(verify_config_key("[retry]"), Verdict::Ok);
+    assert_eq!(verify_config_key("[retry.max_attempts]"), Verdict::Ok);
+    assert_eq!(verify_config_key("[retry.backoff_multiplier]"), Verdict::Ok);
+    assert_eq!(verify_config_key("[retry.bogus_leaf]"), Verdict::Stale);
     // `gateway` is a serde alias of `a2a`.
     assert_eq!(verify_config_key("[gateway]"), Verdict::Ok);
     // Option<struct> mid-path is patched into the witness.

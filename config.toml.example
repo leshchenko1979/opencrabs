@@ -694,6 +694,45 @@ port = 18790            # A2A gateway port
 # api_key = "your-secret-key"
 
 # ========================================
+# Retry policy (#346)
+# ========================================
+# In-place retries for provider requests. Every key is optional: an absent
+# section — or an absent key inside it — keeps the built-in default, so an
+# existing config.toml is unaffected by upgrading. Resolution is per KEY:
+#
+#   per-provider retry_* key  ->  this [retry] block  ->  family preset  ->  default
+#
+# The family preset applies to qwen, OpenRouter, and any `:free` model:
+# 4 attempts, 3s initial delay, 30s cap, x2 backoff, 0.2 jitter.
+# Everything else uses the default: 4 attempts, 1s -> 2s -> 4s -> 8s, 0.1 jitter.
+#
+# [retry]
+# max_attempts       = 4       # 0 disables retries entirely
+# initial_delay_secs = 1.0
+# max_delay_secs     = 30.0
+# backoff_multiplier = 2.0
+# jitter             = 0.1     # 0.0 = no jitter
+#
+# Per-provider override — uncomment these inside a [providers.*] section.
+# A key set here wins over the [retry] block; the keys you leave alone keep
+# whatever the family preset or default gave them.
+#
+#   retry_max_attempts       = 6
+#   retry_initial_delay_secs = 0.5
+#   retry_max_delay_secs     = 60.0
+#   retry_backoff_multiplier = 1.5
+#   retry_jitter             = 0.0
+#
+# retry_quota_exhausted — aggregator opt-in. A hard quota / billing 429 is
+# normally NOT retried in place: the request rolls straight to the fallback
+# chain (#952). Set this true ONLY on a provider that fronts several upstream
+# accounts (an aggregator or relay), where the same request may be served by a
+# different upstream key seconds later. On a direct provider the cap is
+# terminal and retrying only burns budget against a wall.
+#
+#   retry_quota_exhausted = false
+
+# ========================================
 # Web Search Providers (default to free Duck Duck Go, no need additional web search provider)
 # ========================================
 
