@@ -216,3 +216,57 @@ async fn job_target_unknown_prefix_rejects() {
         None
     );
 }
+
+// ---------------------------------------------------------------------------
+// #434 — the delivery path hands the resolver an ALREADY-SPLIT bare id.
+//
+// `cron::scheduler` splits `deliver_to` on ':' and passes `target_id` on, so
+// demanding the `session:` prefix here rejected every legacy `session:<uuid>`
+// job at fire time ("no session matches") while the identical target resolved
+// fine through every other caller. These pin the bare grammar; both fail
+// against d32600eda.
+// ---------------------------------------------------------------------------
+
+/// A bare full uuid — the exact shape the scheduler hands over — resolves with
+/// no rows in the table (same fast path the prefixed form gets).
+#[tokio::test]
+async fn job_target_resolves_bare_full_uuid() {
+    let pool = test_db().await;
+    let id = Uuid::new_v4();
+    assert_eq!(
+        resolve_job_session_target(&pool, &id.to_string()).await,
+        Some(id)
+    );
+}
+
+/// A bare 8-char prefix — `session:` already stripped by the caller — resolves
+/// through the DB tier.
+#[tokio::test]
+async fn job_target_resolves_bare_prefix() {
+    let pool = test_db().await;
+    let repo = crate::db::repository::SessionRepository::new(pool.clone());
+    let id = Uuid::new_v4();
+    repo.create(&titled_session(id, "bare-prefix"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resolve_job_session_target(&pool, &id.to_string()[..8]).await,
+        Some(id)
+    );
+}
+
+/// An empty id is not a wildcard: `resolve_one_by_prefix` matches EVERY row
+/// against the empty prefix, so a blank target must stop before the listing
+/// rather than resolving to whichever session happens to be alone in the table.
+#[tokio::test]
+async fn job_target_empty_id_is_not_a_wildcard() {
+    let pool = test_db().await;
+    let repo = crate::db::repository::SessionRepository::new(pool.clone());
+    repo.create(&titled_session(Uuid::new_v4(), "only-row"))
+        .await
+        .unwrap();
+
+    assert_eq!(resolve_job_session_target(&pool, "session:").await, None);
+    assert_eq!(resolve_job_session_target(&pool, "").await, None);
+}

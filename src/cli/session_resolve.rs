@@ -100,6 +100,12 @@ pub(crate) async fn resolve_session_id_with_service(
 /// `oc://session/<uuid|prefix>` URL form, both through
 /// [`extract_session_target`](crate::channels::target_resolver::extract_session_target).
 ///
+/// It ALSO accepts a BARE id, because the delivery path splits `deliver_to` on
+/// ':' before it gets here — the `cron::scheduler` session arm hands over the
+/// already-split `target_id`. `extract_session_target` knows only the prefixed
+/// grammar and answers `None` for a bare uuid, so requiring it turned every
+/// legacy `session:<uuid>` job into a silent "no session matches" (#434).
+///
 /// Full UUIDs pass through without a DB hit (resolver parity). Anything else is
 /// matched as a case-insensitive prefix by [`resolve_one_by_prefix`]: `None`
 /// covers both "no match" and "ambiguous" — the caller owns the loud failure.
@@ -107,7 +113,15 @@ pub(crate) async fn resolve_job_session_target(
     pool: &crate::db::Pool,
     raw_target: &str,
 ) -> Option<Uuid> {
-    let raw = crate::channels::target_resolver::extract_session_target(raw_target)?;
+    // Both grammars, one place: the prefixed forms go through the extractor, a
+    // bare id falls back to the trimmed raw string (#434).
+    let raw = crate::channels::target_resolver::extract_session_target(raw_target)
+        .unwrap_or_else(|| raw_target.trim());
+    // An empty id is not a wildcard: `resolve_one_by_prefix` matches EVERY row
+    // against the empty prefix, so `session:` (or a blank target) stops here.
+    if raw.is_empty() {
+        return None;
+    }
     if let Ok(uuid) = Uuid::parse_str(raw) {
         return Some(uuid);
     }
