@@ -977,9 +977,7 @@ impl App {
                     "set" => {
                         if arg.is_empty() {
                             self.push_system_message("Usage: /theme set <name>".to_string());
-                        } else if let Some(t) = presets::by_name(arg)
-                            .or_else(|| crate::tui::render::user_themes::find(arg))
-                        {
+                        } else if let Some(t) = theme::by_name_any(arg) {
                             theme::set(t);
                             // Persist to config.toml; ConfigWatcher reload
                             // re-applies on next boot / config change.
