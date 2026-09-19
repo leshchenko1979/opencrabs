@@ -86,3 +86,70 @@ fn test_status_code() {
     let invalid_key = ProviderError::InvalidApiKey;
     assert_eq!(invalid_key.status_code(), None);
 }
+
+/// #346 / D3 — a 429 is retryable REGARDLESS of its body shape.
+///
+/// Before the fix, only a 429 that had parsed into the rate-limit envelope
+/// reached the retry engine. A bare `ApiError { status: 429 }` — an
+/// infrastructure HTML error page, an unparseable body, an unrelated JSON
+/// payload, or no body at all — fell through `is_retryable`'s catch-all
+/// `false` arm, so the request burned ZERO in-place retries and bounced
+/// straight to the fallback chain. The status code alone is the signal; the
+/// body only ever added detail.
+///
+/// The hard-quota exemption is checked first (see the sibling test), so this
+/// covers the genuine per-minute throttle in every one of its shapes.
+#[test]
+fn a_429_is_retryable_in_any_body_shape() {
+    for body in [
+        // The ordinary throttle message.
+        "Too many requests",
+        // An HTML error page from a CDN / load balancer — never parses into
+        // the JSON envelope, so this is the shape that used to be lost.
+        "<html><body>429 Too Many Requests</body></html>",
+        // A JSON body with no recognizable error schema.
+        r#"{"detail":"slow down"}"#,
+        // No body at all.
+        "",
+    ] {
+        let err = ProviderError::ApiError {
+            status: 429,
+            message: body.to_string(),
+            error_type: None,
+        };
+        assert!(
+            !err.is_quota_exhausted(),
+            "test body must not read as a hard quota limit: {body:?}"
+        );
+        assert!(
+            err.is_retryable(),
+            "a 429 must retry in place whatever its body shape: {body:?}"
+        );
+    }
+}
+
+/// #952 must survive #346 — the explicit 429 arm must NOT resurrect a hard
+/// quota / billing 429.
+///
+/// A monthly cap or an exhausted credit balance never lifts inside a retry
+/// window, so the request has to bail straight to the fallback chain instead
+/// of burning the whole backoff budget against a wall. `is_retryable` checks
+/// `is_quota_exhausted()` before the match, and that ordering is the entire
+/// guarantee.
+#[test]
+fn a_hard_quota_429_stays_non_retryable() {
+    let err = ProviderError::ApiError {
+        status: 429,
+        message: "You exceeded your current quota, please check your plan and billing details."
+            .to_string(),
+        error_type: Some("insufficient_quota".to_string()),
+    };
+    assert!(
+        err.is_quota_exhausted(),
+        "the body must classify as a hard quota limit"
+    );
+    assert!(
+        !err.is_retryable(),
+        "#952: a hard quota 429 must bail to the fallback chain, not retry in place"
+    );
+}

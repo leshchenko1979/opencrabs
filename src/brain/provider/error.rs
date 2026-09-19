@@ -261,6 +261,15 @@ impl ProviderError {
             // 404s are caught by `is_model_unsupported` and route to the
             // model-mismatch UX, staying permanent (#748).
             ProviderError::ApiError { status: 404, .. } if !self.is_model_unsupported() => true,
+            // A 429 that got past the quota check at the top of this function
+            // is a genuine rate limit, whatever shape its body arrived in
+            // (#346). Only an envelope-parsed 429 used to reach the retry
+            // engine: a bare status with no recognizable JSON envelope fell
+            // through to the catch-all `false` below, so the request burned
+            // ZERO in-place retries and bounced straight to the fallback
+            // chain. Hard quota / billing 429s are already excluded above, so
+            // this cannot re-open #952.
+            ProviderError::ApiError { status: 429, .. } => true,
             _ => false,
         }
     }
@@ -318,8 +327,9 @@ impl ProviderError {
     /// actionable configuration problem.
     pub fn is_temporarily_unavailable(&self) -> bool {
         match self {
-            // 429 and 5xx already route through RateLimitExceeded / the 5xx
-            // arm of is_retryable; classify only the ambiguous 4xx JSON case.
+            // 429 already routes through the explicit 429 arm of
+            // is_retryable, and 5xx through its 5xx arm; classify only the
+            // ambiguous 4xx JSON case here.
             ProviderError::ApiError {
                 status,
                 message,
