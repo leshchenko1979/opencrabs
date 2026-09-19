@@ -44,13 +44,7 @@ async fn bind(db: &Database, session: Uuid, chat: &str, thread: Option<i32>) -> 
         .expect("Failed to create session row");
     let sid = session.to_string();
     SessionBindingRepository::new(db.pool().clone())
-        .upsert(
-            sid.clone(),
-            "telegram",
-            chat,
-            thread,
-            BindingOrigin::Text,
-        )
+        .upsert(sid.clone(), "telegram", chat, thread, BindingOrigin::Text)
         .await
         .expect("Failed to upsert binding");
     sid
@@ -63,15 +57,10 @@ async fn raw_exec(db: &Database, sql: &str, session_id: &str, age_secs: i64) {
     let sid = session_id.to_string();
     let query = sql.to_string();
     let conn = pool.get().await.expect("Failed to get connection");
-    conn.interact(move |conn| {
-        conn.execute(
-            &query,
-            rusqlite::params![sid, age_secs],
-        )
-    })
-    .await
-    .expect("interact failed")
-    .expect("execute failed");
+    conn.interact(move |conn| conn.execute(&query, rusqlite::params![sid, age_secs]))
+        .await
+        .expect("interact failed")
+        .expect("execute failed");
 }
 
 /// THE acceptance criterion: a binding whose `updated_at` is older than
@@ -131,7 +120,11 @@ async fn awaiting_survives_the_freshness_gate_that_hides_the_binding() {
         awaiting[0].is_awaiting(),
         "is_awaiting must agree with await_at IS NOT NULL"
     );
-    assert_eq!(awaiting[0].thread_id, Some(344), "route must survive intact");
+    assert_eq!(
+        awaiting[0].thread_id,
+        Some(344),
+        "route must survive intact"
+    );
 }
 
 /// `set` makes the row visible to `awaiting_for_channel`, `clear` makes it not —
@@ -145,7 +138,10 @@ async fn set_then_clear_await_round_trip() {
 
     // Never awaited: absent, and `await_at` NULL.
     assert!(
-        repo.awaiting_for_channel("telegram").await.unwrap().is_empty(),
+        repo.awaiting_for_channel("telegram")
+            .await
+            .unwrap()
+            .is_empty(),
         "a binding with no await record must not be returned"
     );
 
@@ -157,7 +153,10 @@ async fn set_then_clear_await_round_trip() {
 
     repo.clear_await(&sid).await.expect("clear_await failed");
     assert!(
-        repo.awaiting_for_channel("telegram").await.unwrap().is_empty(),
+        repo.awaiting_for_channel("telegram")
+            .await
+            .unwrap()
+            .is_empty(),
         "clear must make the row invisible again"
     );
     let all = repo.all_for_channel("telegram").await.unwrap();
@@ -211,9 +210,15 @@ async fn upsert_never_clobbers_an_existing_await_record() {
     repo.set_await(&sid, "ci_run", Some("run-9")).await.unwrap();
 
     // The session moves to another topic — a routine re-bind.
-    repo.upsert(sid.clone(), "telegram", "-100349", Some(349), BindingOrigin::Callback)
-        .await
-        .expect("upsert failed");
+    repo.upsert(
+        sid.clone(),
+        "telegram",
+        "-100349",
+        Some(349),
+        BindingOrigin::Callback,
+    )
+    .await
+    .expect("upsert failed");
 
     let awaiting = repo.awaiting_for_channel("telegram").await.unwrap();
     assert_eq!(
@@ -276,8 +281,12 @@ async fn awaiting_is_ordered_oldest_wait_first() {
     let older = bind(&db, Uuid::new_v4(), "-100352", Some(352)).await;
     let repo = SessionBindingRepository::new(db.pool().clone());
 
-    repo.set_await(&newer, "ci_run", Some("run-new")).await.unwrap();
-    repo.set_await(&older, "ci_run", Some("run-old")).await.unwrap();
+    repo.set_await(&newer, "ci_run", Some("run-new"))
+        .await
+        .unwrap();
+    repo.set_await(&older, "ci_run", Some("run-old"))
+        .await
+        .unwrap();
     // Backdate `await_at` itself — strftime has 1 s resolution, so two sets in
     // the same second cannot be ordered reliably.
     raw_exec(
@@ -307,9 +316,15 @@ async fn awaiting_is_scoped_to_the_channel() {
 
     repo.set_await(&sid, "ci_run", Some("run-4")).await.unwrap();
 
-    assert_eq!(repo.awaiting_for_channel("telegram").await.unwrap().len(), 1);
+    assert_eq!(
+        repo.awaiting_for_channel("telegram").await.unwrap().len(),
+        1
+    );
     assert!(
-        repo.awaiting_for_channel("discord").await.unwrap().is_empty(),
+        repo.awaiting_for_channel("discord")
+            .await
+            .unwrap()
+            .is_empty(),
         "another channel must see nothing"
     );
 }
@@ -326,5 +341,10 @@ async fn clear_await_on_a_non_awaiting_binding_is_a_noop() {
     repo.clear_await("no-such-session")
         .await
         .expect("clear on a missing binding must not error");
-    assert!(repo.awaiting_for_channel("telegram").await.unwrap().is_empty());
+    assert!(
+        repo.awaiting_for_channel("telegram")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
