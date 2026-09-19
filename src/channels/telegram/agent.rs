@@ -29,7 +29,8 @@ impl MermaidProbe for TelegramMermaidProbe {
     fn validate<'a>(&'a self, text: &'a str) -> futures::future::BoxFuture<'a, Vec<String>> {
         Box::pin(async move {
             if super::rich::mermaid::should_render_mermaid(text) {
-                super::rich::mermaid::preflight_parse_errors(text).await
+                let style = super::rich::mermaid::MermaidStyle::from_config();
+                super::rich::mermaid::preflight_parse_errors(&style, text).await
             } else {
                 Vec::new()
             }
