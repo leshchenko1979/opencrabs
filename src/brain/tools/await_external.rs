@@ -149,14 +149,15 @@ impl Tool for AwaitExternalTool {
                     // turn, a sub-agent. Reporting success there would be the
                     // precise lie #344 exists to remove: the lane would believe
                     // it is parked while nothing can ever wake it.
-                    Ok(0) => Ok(ToolResult::error(format!(
+                    Ok(0) => Ok(ToolResult::error(
                         "Await NOT recorded: this session has no binding row, so nothing \
                          would ever wake it. A restart or the periodic sweep resumes a lane \
                          by its session binding, and this session has none (a CLI one-shot, \
                          a cron turn and a sub-agent have no topic to be resumed into). Do \
                          not end your turn expecting to be resumed — report the external \
                          dependency to whoever is waiting on you instead."
-                    ))),
+                            .into(),
+                    )),
                     Ok(_) => {
                         let what = match reference {
                             Some(r) => format!("{kind} '{r}'"),
