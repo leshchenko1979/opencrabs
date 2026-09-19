@@ -1331,7 +1331,18 @@ pub(crate) async fn cmd_channel(
 async fn apply_fixes(config: &crate::config::Config, pool: &crate::db::Pool) {
     println!("\n  🔧 Repairs (--fix):");
     let roots = marker_roots(pool).await;
-    match crate::cli::doctor_fix::run_all(pool, &roots, &crate::config::opencrabs_home()).await {
+    // #332: an explicit `--fix` may be racing a live daemon, so the sweep is
+    // conservative — only rows past the age backstop, or all of them when no
+    // live instance owns this profile.
+    let policy = crate::cli::doctor_fix::ClearPolicy::Conservative;
+    match crate::cli::doctor_fix::run_all(
+        pool,
+        &roots,
+        &crate::config::opencrabs_home(),
+        policy,
+    )
+    .await
+    {
         Ok(reports) if reports.is_empty() => println!("    ✅ Nothing to repair"),
         Ok(reports) => {
             for r in &reports {

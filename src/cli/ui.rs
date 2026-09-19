@@ -399,8 +399,16 @@ async fn cmd_chat_inner(
     // permissions; every action lands in the log as the audit trail.
     if config.doctor.auto_fix {
         let roots = crate::cli::commands::marker_roots(db.pool()).await;
-        match crate::cli::doctor_fix::run_all(db.pool(), &roots, &crate::config::opencrabs_home())
-            .await
+        // #332: the startup sweep has just taken this profile's instance lock,
+        // so no pre-existing `running` row can belong to a live run.
+        let policy = crate::cli::doctor_fix::ClearPolicy::OrphanedAtStartup;
+        match crate::cli::doctor_fix::run_all(
+            db.pool(),
+            &roots,
+            &crate::config::opencrabs_home(),
+            policy,
+        )
+        .await
         {
             Ok(reports) => {
                 for r in &reports {
