@@ -1403,6 +1403,17 @@ pub struct AgentConfig {
     #[serde(default = "default_message_retention_days")]
     pub message_retention_days: u32,
 
+    /// Days to retain throwaway files before the startup purge removes them
+    /// (#345). Covers the profile's `tmp/` tree (channel image uploads, loose
+    /// scratch files) and the tool-output spill dir
+    /// (`/tmp/opencrabs/tool_output`, where oversized tool results are written).
+    ///
+    /// Default: `7`. `0` disables the purge and keeps them forever — note that
+    /// a literal `0` passed to the purge would instead age out *every* file,
+    /// so the disable is honoured at the call site.
+    #[serde(default = "default_tool_output_retention_days")]
+    pub tool_output_retention_days: u32,
+
     /// Override provider for autonomous RSI self-improvement cycles (e.g. "zhipu", "minimax").
     /// RSI runs on its own provider chain so it never competes with chat or sub-agents for quota.
     /// When set, RSI jobs use this provider instead of the session's active one.
@@ -1659,6 +1670,10 @@ fn default_message_retention_days() -> u32 {
     0
 }
 
+fn default_tool_output_retention_days() -> u32 {
+    7
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -1681,6 +1696,7 @@ impl Default for AgentConfig {
             evolve_allow_root: default_evolve_allow_root(),
             subagent_session_ttl_days: default_subagent_session_ttl_days(),
             message_retention_days: default_message_retention_days(),
+            tool_output_retention_days: default_tool_output_retention_days(),
             self_improvement_provider: None,
             rsi_enabled: None,
             self_improvement_model: None,
