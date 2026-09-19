@@ -4,6 +4,7 @@
 
 use crate::db::Pool;
 use crate::db::database::interact_err;
+use crate::db::retry::{write_retry_config, write_with_retry};
 use crate::db::models::Message;
 use anyhow::{Context, Result};
 use rusqlite::params;
@@ -93,11 +94,7 @@ impl MessageRepository {
     /// Create a new message
     pub async fn create(&self, message: &Message) -> Result<()> {
         let m = message.clone();
-        self.pool
-            .get()
-            .await
-            .context("Failed to get connection")?
-            .interact(move |conn| {
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
                 conn.execute(
                     "INSERT INTO messages (id, session_id, role, content, sequence,
                                          created_at, token_count, cost, input_tokens,
@@ -126,10 +123,9 @@ impl MessageRepository {
                     "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
                     params![m.created_at.timestamp(), m.session_id.to_string()],
                 )
-            })
-            .await
-            .map_err(interact_err)?
-            .context("Failed to create message")?;
+        })
+        .await
+        .context("Failed to create message")?;
 
         tracing::debug!(
             "Created message: {} in session: {}",
@@ -142,11 +138,7 @@ impl MessageRepository {
     /// Update an existing message
     pub async fn update(&self, message: &Message) -> Result<()> {
         let m = message.clone();
-        self.pool
-            .get()
-            .await
-            .context("Failed to get connection")?
-            .interact(move |conn| {
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
                 conn.execute(
                     "UPDATE messages
                      SET content = ?1, token_count = ?2, cost = ?3, input_tokens = ?4,
@@ -165,10 +157,9 @@ impl MessageRepository {
                         m.id.to_string()
                     ],
                 )
-            })
-            .await
-            .map_err(interact_err)?
-            .context("Failed to update message")?;
+        })
+        .await
+        .context("Failed to update message")?;
 
         tracing::debug!("Updated message: {}", message.id);
         Ok(())
@@ -208,19 +199,14 @@ impl MessageRepository {
     pub async fn append_content(&self, id: Uuid, content_to_append: &str) -> Result<()> {
         let id_str = id.to_string();
         let content = content_to_append.to_string();
-        self.pool
-            .get()
-            .await
-            .context("Failed to get connection")?
-            .interact(move |conn| {
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
                 conn.execute(
                     "UPDATE messages SET content = content || ?1 WHERE id = ?2",
                     params![content, id_str],
                 )
-            })
-            .await
-            .map_err(interact_err)?
-            .context("Failed to append to message")?;
+        })
+        .await
+        .context("Failed to append to message")?;
 
         tracing::debug!("Appended content to message: {}", id);
         Ok(())
@@ -232,19 +218,14 @@ impl MessageRepository {
     pub async fn set_thinking(&self, id: Uuid, thinking: &str) -> Result<()> {
         let id_str = id.to_string();
         let thinking_val = thinking.to_string();
-        self.pool
-            .get()
-            .await
-            .context("Failed to get connection")?
-            .interact(move |conn| {
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
                 conn.execute(
                     "UPDATE messages SET thinking = ?1 WHERE id = ?2",
                     params![thinking_val, id_str],
                 )
-            })
-            .await
-            .map_err(interact_err)?
-            .context("Failed to set thinking on message")?;
+        })
+        .await
+        .context("Failed to set thinking on message")?;
 
         tracing::debug!("Set thinking ({} chars) on message: {}", thinking.len(), id);
         Ok(())
@@ -255,11 +236,7 @@ impl MessageRepository {
     pub async fn append_thinking(&self, id: Uuid, thinking_to_append: &str) -> Result<()> {
         let id_str = id.to_string();
         let thinking = thinking_to_append.to_string();
-        self.pool
-            .get()
-            .await
-            .context("Failed to get connection")?
-            .interact(move |conn| {
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
                 // If thinking is NULL, just set it; otherwise concatenate with separator
                 conn.execute(
                     "UPDATE messages SET thinking = CASE \
@@ -269,10 +246,9 @@ impl MessageRepository {
                      WHERE id = ?2",
                     params![thinking, id_str],
                 )
-            })
-            .await
-            .map_err(interact_err)?
-            .context("Failed to append thinking to message")?;
+        })
+        .await
+        .context("Failed to append thinking to message")?;
 
         tracing::debug!(
             "Appended thinking ({} chars) to message: {}",

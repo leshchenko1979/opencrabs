@@ -23,8 +23,10 @@
 //! | `anyhow::Error` | [`is_busy_anyhow`] | yes — walks `Error::chain()` |
 //! | anything else | [`display_says_locked`] | no — text is all it has |
 
+use crate::db::database::{Pool, interact_err};
 use anyhow::{Context, Result};
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -80,6 +82,48 @@ impl DbRetryConfig {
 
         let delay = exponential.min(max_delay_ms);
         Duration::from_millis(delay as u64)
+    }
+}
+
+/// Retry budget for the hot write paths (#321 Part B4).
+///
+/// Sized against the **bounded** hold Part A produces, not against the
+/// monolithic one. Measured live: a full `VACUUM` on `opencrabs.db` held the
+/// write lock for **119 800 ms**; one `PRAGMA incremental_vacuum(4096)` sweep
+/// moves 4096 pages and, at the **0.391 ms/page** the full vacuum implies, is
+/// bounded at about **1 600 ms**. Delays of 250/500/1000 ms therefore cover a
+/// single sweep with room to spare.
+///
+/// ## The invariant that fixes `max_attempts`
+///
+/// Every attempt can block for the connection's own `busy_timeout`
+/// (**30 000 ms**) *before* the backoff is consulted at all, so the attempt
+/// count — not the backoff — is what really bounds a write's worst case:
+///
+/// ```text
+/// 3 x 30 000 ms + 1 750 ms = 91 750 ms  <  119 800 ms (the monolithic hold)
+/// 4 x 30 000 ms + 3 750 ms = 123 750 ms >  119 800 ms  -- already broken
+/// ```
+///
+/// Three is the largest count that keeps a writer from hanging longer than the
+/// defect this change removes. Raise it and that invariant is the thing you
+/// break, not a knob you nudge.
+///
+/// ## B5 — what this is NOT
+///
+/// This is the net for *residual* contention, never the fix. The 1 750 ms of
+/// backoff is **0.0146x** the 119 800 ms hold: against an unbounded hold this
+/// budget loses the write exactly as before. Part A is the fix; this is what
+/// makes a bounded hold survivable.
+///
+/// `max_delay` does not bind at three attempts (the delays top out at 1 000 ms);
+/// it is a rail on a future increase, not a live limit.
+pub fn write_retry_config() -> DbRetryConfig {
+    DbRetryConfig {
+        max_attempts: 3,
+        initial_delay: Duration::from_millis(250),
+        max_delay: Duration::from_secs(4),
+        backoff_multiplier: 2.0,
     }
 }
 
@@ -229,4 +273,56 @@ where
     Fut: Future<Output = std::result::Result<T, rusqlite::Error>>,
 {
     retry_db_with(operation, config, is_database_locked).await
+}
+
+/// Run a write against `pool`, retrying it while the database is locked
+/// (#321 Part B3 — the single helper the hot write paths share).
+///
+/// ## Why the whole future is rebuilt
+///
+/// `deadpool`'s `interact` takes its closure **by value** (`FnOnce`), so it
+/// cannot be called twice: a retry cannot re-run the inner `conn.execute`, it
+/// has to rebuild the entire `pool.get().interact(..)` future. That is the
+/// reason this helper exists — without it every call site would carry its own
+/// copy of that rebuild, and the eight copies of a retry loop are exactly what
+/// this replaces.
+///
+/// `op` is *shared* across attempts rather than re-created, which is why it is
+/// `Fn` (not `FnMut`) behind an `Arc`: every call site wrapped here is a pure
+/// function of data it captured before the call, so sharing costs nothing.
+///
+/// ## Why retrying a write is safe
+///
+/// A SQLite statement is atomic. One that returns `SQLITE_BUSY` did not execute
+/// and did not commit, so re-running it cannot double-apply. Each wrapped call
+/// site is a single `INSERT` / `UPDATE` / `DELETE`.
+///
+/// ## Errors
+///
+/// The returned `anyhow::Error` keeps the typed [`rusqlite::Error`] in its
+/// chain, so [`is_busy_anyhow`] can classify it here and `{e:#}` at the log site
+/// can render the cause (#321 Part C). The `InteractError` from the pool and
+/// the `rusqlite::Error` from the statement are the two distinct failure
+/// sources and both survive.
+pub async fn write_with_retry<T, F>(pool: &Pool, config: &DbRetryConfig, op: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: Fn(&rusqlite::Connection) -> rusqlite::Result<T> + Send + Sync + 'static,
+{
+    let op = Arc::new(op);
+
+    retry_db_anyhow(
+        || {
+            let pool = pool.clone();
+            let op = Arc::clone(&op);
+            async move {
+                let object = pool.get().await.context("Failed to get connection")?;
+                let res: rusqlite::Result<T> =
+                    object.interact(move |conn| op(conn)).await.map_err(interact_err)?;
+                res.map_err(anyhow::Error::from)
+            }
+        },
+        config,
+    )
+    .await
 }
