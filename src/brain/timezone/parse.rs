@@ -62,7 +62,7 @@ pub fn parse_timezone_heuristic(text: &str) -> Option<TzInfo> {
 fn parenthetical_label(line: &str) -> Option<String> {
     let (_, rest) = line.split_once('(')?;
     let inner = rest
-        .trim_end_matches(|c| c == ')' || c == '|' || c == ' ' || c == '\t')
+        .trim_end_matches([')', '|', ' ', '\t'])
         .trim();
     if inner.is_empty() || inner.parse::<Tz>().is_ok() || parse_utc_offset_or_iana(inner).is_some() {
         return None;
@@ -95,7 +95,7 @@ fn normalize_declaration(line: &str) -> Option<(String, String)> {
     s = s.trim_start_matches(['-', '*', '#', '>', ' ']).trim();
 
     // Split on the FIRST `:` or `|`, whichever comes first.
-    let sep = s.find(|c| c == ':' || c == '|')?;
+    let sep = s.find([':', '|'])?;
     let key = unwrap_declaration_wrappers(&s[..sep]);
     let value = unwrap_declaration_wrappers(&s[sep + 1..]);
 
