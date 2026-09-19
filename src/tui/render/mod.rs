@@ -26,7 +26,8 @@ mod sessions;
 pub(crate) mod skills_dialog;
 pub(crate) mod theme;
 pub(crate) mod theme_picker;
-// Boot-apply in tui::runner references presets::by_name at startup.
+// Boot-apply in tui::runner goes through theme::resolve, which consults
+// this module and user_themes in turn — the single built-in-or-user chain.
 pub(crate) mod presets;
 mod title;
 mod tools;
