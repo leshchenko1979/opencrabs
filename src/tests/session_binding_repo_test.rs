@@ -164,15 +164,34 @@ async fn session_binding_by_session_drops_a_binding_whose_session_is_deleted() {
             bind(&db, sid, "-100555", Some(7), BindingOrigin::Text).await;
 
             let repo = SessionBindingRepository::new(db.pool().clone());
-            let sessions = SessionRepository::new(db.pool().clone());
 
-            sessions.delete(sid).await.expect("delete session row");
+            // Hard-delete the session row: `SessionRepository::delete` is a
+            // SOFT delete — it stamps `archived_at` and deliberately preserves
+            // the row ("preserved for usage") — so it cannot exercise the INNER
+            // JOIN. The JOIN hides a binding only once the `sessions` row is
+            // GONE, which is the #1224 state: a binding row outlives its
+            // session, and a connect-time re-registration must not revive a
+            // dead route off it.
+            let sid_str = sid.to_string();
+            db.pool()
+                .get()
+                .await
+                .expect("pool")
+                .interact(move |conn| {
+                    conn.execute(
+                        "DELETE FROM sessions WHERE id = ?1",
+                        rusqlite::params![sid_str],
+                    )
+                })
+                .await
+                .expect("interact")
+                .expect("hard-delete the session row");
             assert!(
                 repo.by_session(&sid.to_string())
                     .await
                     .expect("by_session read")
                     .is_none(),
-                "a deleted session must not revive a dead route"
+                "a session row that is GONE must not leave a live route behind"
             );
 
             // The binding row was never removed — only hidden by the JOIN.
