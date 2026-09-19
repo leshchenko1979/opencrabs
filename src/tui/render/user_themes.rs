@@ -421,28 +421,19 @@ pub(crate) fn parse_hex(s: &str) -> Option<Color> {
     Some(Color::Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
 }
 
-/// WCAG 2.x relative luminance.
-fn relative_luminance(c: Color) -> f64 {
-    let chan = |b: u8| -> f64 {
-        let x = f64::from(b) / 255.0;
-        if x <= 0.04045 {
-            x / 12.92
-        } else {
-            ((x + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    let (r, g, b) = match c {
-        Color::Rgb(r, g, b) => (chan(r), chan(g), chan(b)),
-        _ => return 0.0,
-    };
-    0.2126 * r + 0.7152 * g + 0.0722 * b
-}
-
 /// WCAG contrast ratio (1..=21), symmetric in its arguments.
 /// `pub(crate)` for the theme tests in `src/tests`, same reason as
 /// [`CONTRAST_PAIRS`].
+///
+/// The luminance maths itself lives in [`super::theme::relative_luminance`]
+/// — the ONE implementation, shared with the mermaid renderer's
+/// dark-surface test (#318) so the two cannot disagree about which surface
+/// is dark.
 pub(crate) fn contrast(a: Color, b: Color) -> f64 {
-    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    let (la, lb) = (
+        super::theme::relative_luminance(a),
+        super::theme::relative_luminance(b),
+    );
     let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
     (hi + 0.05) / (lo + 0.05)
 }
