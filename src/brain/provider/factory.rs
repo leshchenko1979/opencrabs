@@ -849,7 +849,7 @@ fn try_create_custom_by_name(config: &Config, name: &str) -> Result<Option<Arc<d
     };
     builder = builder.with_body_transform(combined_transform);
 
-    let provider = configure_openai_compatible(builder, &custom_config);
+    let provider = configure_openai_compatible(builder, config, &custom_config);
     Ok(Some(Arc::new(provider)))
 }
 
@@ -1335,6 +1335,7 @@ fn try_create_github(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
             .with_name("GitHub Copilot")
             .with_token_fn(token_fn)
             .with_extra_headers(copilot_extra_headers()),
+        config,
         github_config,
     );
     Ok(Some(Arc::new(provider)))
@@ -1390,7 +1391,7 @@ async fn try_create_qwen(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
         .with_body_transform(Arc::new(qwen_body_transform))
         .with_rate_limiter(qwen_limiter);
 
-    let provider = configure_openai_compatible(builder, qwen_config);
+    let provider = configure_openai_compatible(builder, config, qwen_config);
     Ok(Some(Arc::new(provider)))
 }
 
@@ -1435,6 +1436,7 @@ fn try_create_openrouter(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
                     "https://opencrabs.com".to_string(),
                 ),
             ]),
+        config,
         openrouter_config,
     );
 
@@ -1528,7 +1530,7 @@ fn try_create_xiaomi(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
     // via prompt_tokens_details) — there is no request-side cache parameter, so
     // we deliberately do NOT set cache_enabled (which would send an
     // OpenRouter/Anthropic-style cache_control Xiaomi doesn't accept).
-    let provider = configure_openai_compatible(builder, xiaomi_config);
+    let provider = configure_openai_compatible(builder, config, xiaomi_config);
     Ok(Some(Arc::new(provider)))
 }
 
@@ -1566,6 +1568,7 @@ fn try_create_minimax(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
     tracing::info!("Using Minimax at: {}", full_url);
     let mut provider = configure_openai_compatible(
         OpenAIProvider::with_base_url(api_key.clone(), full_url).with_name("minimax"),
+        config,
         minimax_config,
     );
 
@@ -1607,6 +1610,7 @@ fn try_create_zhipu(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
     );
     let provider = configure_openai_compatible(
         OpenAIProvider::with_base_url(api_key.clone(), base_url).with_name("zai"),
+        config,
         zhipu_config,
     );
     Ok(Some(Arc::new(provider)))
@@ -1650,6 +1654,7 @@ fn try_create_moonshot(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
     );
     let provider = configure_openai_compatible(
         OpenAIProvider::with_base_url(api_key.clone(), base_url).with_name("moonshot"),
+        config,
         moonshot_config,
     );
     Ok(Some(Arc::new(provider)))
@@ -1690,7 +1695,7 @@ fn try_create_ollama(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
         let enable = ollama_config.enable_thinking.unwrap_or(true);
         builder = builder.with_body_transform(local_thinking_body_transform(enable));
     }
-    let provider = configure_openai_compatible(builder, ollama_config);
+    let provider = configure_openai_compatible(builder, config, ollama_config);
     Ok(Some(Arc::new(provider)))
 }
 
@@ -1743,13 +1748,19 @@ fn try_create_custom(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
     };
     builder = builder.with_body_transform(combined_transform);
 
-    let provider = configure_openai_compatible(builder, &custom_config);
+    let provider = configure_openai_compatible(builder, config, &custom_config);
     Ok(Some(Arc::new(provider)))
 }
 
-/// Configure OpenAI-compatible provider with custom model
-fn configure_openai_compatible(
+/// Configure OpenAI-compatible provider with custom model.
+///
+/// `global` is the whole configuration, consulted for the `[retry]` block
+/// (#346); `config` is this provider's own section. Both are needed because
+/// retry resolution merges the per-provider `retry_*` keys over the global
+/// section, then layers the family preset underneath.
+pub(crate) fn configure_openai_compatible(
     mut provider: OpenAIProvider,
+    global: &Config,
     config: &ProviderConfig,
 ) -> OpenAIProvider {
     tracing::debug!(
@@ -1816,6 +1827,20 @@ fn configure_openai_compatible(
         provider = provider.with_stream_idle_timeout(std::time::Duration::from_secs(secs));
         tracing::info!("Configured stream idle timeout: {}s", secs);
     }
+    // Retry policy (#346): this provider's own `retry_*` keys merged over
+    // the global `[retry]` block. Installed as OVERRIDES, never as a
+    // replacement policy — `retry_config()` still picks the family preset
+    // per request and layers these values on top, so a key the operator
+    // left unset keeps its preset value instead of a zero.
+    let retry_overrides = super::retry_policy::RetryOverrides::from_config(config, &global.retry);
+    if !retry_overrides.is_empty() {
+        tracing::info!(
+            "Configured retry overrides (max_attempts={:?}, quota_exhausted={})",
+            retry_overrides.max_attempts,
+            retry_overrides.quota_exhausted
+        );
+        provider = provider.with_retry_overrides(retry_overrides);
+    }
     provider
 }
 
@@ -1836,7 +1861,7 @@ fn try_create_openai(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
             let enable = openai_config.enable_thinking.unwrap_or(true);
             builder = builder.with_body_transform(local_thinking_body_transform(enable));
         }
-        let provider = configure_openai_compatible(builder, openai_config);
+        let provider = configure_openai_compatible(builder, config, openai_config);
         return Ok(Some(Arc::new(provider)));
     }
 
@@ -1845,6 +1870,7 @@ fn try_create_openai(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
         tracing::info!("Using OpenAI provider");
         let provider = configure_openai_compatible(
             OpenAIProvider::new(api_key.clone()).with_name("openai"),
+            config,
             openai_config,
         );
         return Ok(Some(Arc::new(provider)));
@@ -2036,6 +2062,7 @@ async fn try_create_opencode(config: &Config) -> Result<Option<Arc<dyn Provider>
         OpenAIProvider::with_base_url(api_key.clone(), base_url)
             .with_name("opencode")
             .with_default_model(model.clone()),
+        config,
         opencode_config,
     );
 

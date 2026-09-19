@@ -780,6 +780,7 @@ pub mod path_lock_test;
 pub mod profile_test;
 pub mod retry_notice_drain_test;
 pub mod retry_policy_config_test;
+pub mod retry_policy_wiring_test;
 pub mod rsi_command_patterns_test;
 pub mod rsi_enabled_gate_test;
 pub mod rsi_fallback_wrap_test;
