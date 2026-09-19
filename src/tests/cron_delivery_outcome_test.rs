@@ -443,3 +443,71 @@ async fn unresolvable_session_target_records_delivery_failed() {
         "the reason names the cause: {error}"
     );
 }
+
+/// #437: a session target that RESOLVES but has no receiving route must record
+/// `delivery_failed` rather than masquerading as success.
+///
+/// Sibling of `unresolvable_session_target_records_delivery_failed` (#435):
+/// that one pins the RESOLUTION failure ("no session matches"); this one pins
+/// the DELIVERY failure on a target that resolves fine but whose verdict is
+/// `Delivery::NoRoute`. Unlike the sibling this one walks the session
+/// machinery, so it takes the route-table test lock — `test_guard()` in
+/// `restart_recovery`, the single lock every route-touching suite already
+/// holds (#1206) — and starts from a cleared route; otherwise a sibling test's
+/// leftover route would flip the verdict to `Delivered`.
+#[tokio::test]
+// The guard serializes every route-touching suite (#1206) and must span the
+// awaited `deliver_result` call: the region under test must not interleave
+// with another test's route table. Holding it across awaits is the point.
+#[allow(clippy::await_holding_lock)]
+async fn session_target_with_no_route_records_delivery_failed() {
+    let _guard = crate::brain::agent::service::restart_recovery::test_guard();
+    crate::brain::agent::service::session_routes::clear_local_route();
+
+    let pool = test_db().await;
+    let session_id = Uuid::new_v4();
+    let run_id = format!("{}-437", Uuid::new_v4());
+    seed_run(&pool, &run_id, chrono::Utc::now()).await;
+
+    // A well-formed full UUID: `resolve_job_session_target` passes it through
+    // with no rows in the table (pinned by
+    // `job_target_full_uuid_passthrough_without_rows`), so resolution SUCCEEDS
+    // and the failure can only come from the delivery verdict.
+    let target = format!("session:{session_id}");
+    let out = crate::cron::scheduler::deliver_result(
+        &target,
+        "437-no-route-test",
+        "body",
+        None,
+        Some(pool.clone()),
+        Some(run_id.clone()),
+    )
+    .await;
+    assert!(out.is_none(), "the session arm never hands back a task handle");
+
+    let run_id_owned = run_id.clone();
+    let (status, error) = pool
+        .get()
+        .await
+        .unwrap()
+        .interact(move |conn| {
+            conn.query_row(
+                "SELECT status, error FROM cron_job_runs WHERE id = ?1",
+                params![run_id_owned],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        status, "delivery_failed",
+        "a session target that resolves with no route must record delivery_failed (#437)"
+    );
+    let error = error.expect("a delivery_failed row carries its reason");
+    assert!(
+        error.contains("no route could receive the result"),
+        "the reason names the cause: {error}"
+    );
+}

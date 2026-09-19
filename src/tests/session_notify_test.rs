@@ -105,6 +105,7 @@ fn test_a_parked_delivery_is_not_a_missing_route() {
 #[test]
 fn test_headless_parking_fallback_reports_parked_not_delivered() {
     let _guard = test_guard();
+    crate::brain::agent::service::session_routes::clear_local_route();
     let session = Uuid::new_v4();
     crate::brain::agent::service::session_routes::register_headless_parking_route(
         crate::brain::agent::service::restart_recovery::parking_route(),
@@ -114,11 +115,13 @@ fn test_headless_parking_fallback_reports_parked_not_delivered() {
         Delivery::Parked,
         "#88: falling back to parking in headless mode must return Delivery::Parked, not Delivered"
     );
+    crate::brain::agent::service::session_routes::clear_local_route();
 }
 
 #[test]
 fn test_interactive_local_fallback_reports_delivered() {
     let _guard = test_guard();
+    crate::brain::agent::service::session_routes::clear_local_route();
     let session = Uuid::new_v4();
     let delivered_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let dc = delivered_count.clone();
@@ -133,6 +136,7 @@ fn test_interactive_local_fallback_reports_delivered() {
         "Interactive TUI local route returns Delivered"
     );
     assert_eq!(delivered_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    crate::brain::agent::service::session_routes::clear_local_route();
 }
 
 // ── In-flight gate (fork #13) ────────────────────────────────────────────

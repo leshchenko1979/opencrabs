@@ -98,6 +98,22 @@ enum LocalRouteDestination {
 
 static LOCAL_ROUTE: Mutex<Option<LocalRouteDestination>> = Mutex::new(None);
 
+/// Test-only reset for the process-global [`LOCAL_ROUTE`].
+///
+/// The routing tests register a route and never clear it, and every
+/// `src/tests/*_test.rs` shares one test binary, so a test asserting a
+/// `Delivery::NoRoute` verdict would race them and flake on test order (#437).
+///
+/// Callers must hold the route-table test lock — `test_guard()` in
+/// `restart_recovery` — rather than a lock of their own: it is the single
+/// domain every route-touching suite already takes, and it also clears the
+/// channel-owned set, so a suite with its own lock would neither serialize
+/// against it nor start from a clean owner (#1206).
+#[cfg(test)]
+pub fn clear_local_route() {
+    *LOCAL_ROUTE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// Record the booting surface as the fallback destination. Called once per
 /// process start; re-registering replaces it.
 pub fn register_local_route(enqueue: MessageEnqueueCallback) {
