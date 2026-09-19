@@ -48,6 +48,16 @@ pub struct RetryConfig {
     /// be served by another seconds later. On a direct provider the cap is
     /// terminal and retrying only burns budget against a wall.
     pub retry_quota_attempts: u32,
+    /// Delay between the bounded in-place attempts granted to a HARD quota /
+    /// billing error (#346).
+    ///
+    /// FLAT, not the exponential ramp, and deliberately short: the point of
+    /// the quota budget is to let an aggregator re-route to another upstream
+    /// key, not to sit out a billing window. Kept independent of
+    /// [`Self::initial_delay`] so an operator who raises the ordinary backoff
+    /// for a flaky gateway does not accidentally make the quota path slow.
+    /// Only consulted when [`Self::retry_quota_attempts`] is non-zero.
+    pub retry_quota_delay: Duration,
     /// Initial delay before first retry
     pub initial_delay: Duration,
     /// Maximum delay between retries
@@ -62,11 +72,14 @@ impl Default for RetryConfig {
     fn default() -> Self {
         Self {
             // Network/API default: 4 retries over ~15s (1s → 2s → 4s → 8s).
-            // Kept in lockstep with `brain::provider::retry::RetryConfig`
-            // default — the old 100ms initial was too aggressive to ride
-            // out a transient blip and hammered rate-limited endpoints.
+            // The old 100ms initial was too aggressive to ride out a
+            // transient blip and hammered rate-limited endpoints.
             // DB lock-contention retries use the `database()` preset
             // (50ms) instead, which is correct for local SQLite.
+            //
+            // This is the only retry implementation: the near-duplicate
+            // `brain::provider::retry` module was deleted in the retry
+            // consolidation, so there is no second default to track.
             max_attempts: 4,
             initial_delay: Duration::from_secs(1),
             max_delay: Duration::from_secs(30),
@@ -76,6 +89,9 @@ impl Default for RetryConfig {
             // #952's guarantee: the request rolls to the fallback chain
             // rather than burning the backoff budget against a wall.
             retry_quota_attempts: 0,
+            // Flat and short, and unused while `retry_quota_attempts` is 0 —
+            // the value only matters once a provider opts in (#346).
+            retry_quota_delay: Duration::from_secs(2),
         }
     }
 }
@@ -89,6 +105,7 @@ impl RetryConfig {
             max_delay: Duration::from_secs(5),
             backoff_multiplier: 2.0,
             jitter: 0.0, // Deterministic for database locks
+            ..Default::default()
         }
     }
 
@@ -100,6 +117,7 @@ impl RetryConfig {
             max_delay: Duration::from_secs(10),
             backoff_multiplier: 1.5,
             jitter: 0.0,
+            ..Default::default()
         }
     }
 
@@ -116,6 +134,7 @@ impl RetryConfig {
             max_delay: Duration::from_secs(60),
             backoff_multiplier: 2.0,
             jitter: 0.2,
+            ..Default::default()
         }
     }
 
@@ -138,6 +157,7 @@ impl RetryConfig {
             max_delay: Duration::from_secs(30),
             backoff_multiplier: 2.0,
             jitter: 0.2,
+            ..Default::default()
         }
     }
 
@@ -147,9 +167,10 @@ impl RetryConfig {
     /// `attempts == 0` (the default) is #952's behaviour and needs no call.
     /// A non-zero value only makes sense on a provider fronting several
     /// upstream accounts — see [`Self::retry_quota_attempts`]. The delay
-    /// schedule for these attempts is [`Self::initial_delay`], deliberately
-    /// NOT the exponential ramp: the point is to let the aggregator re-route
-    /// to another upstream key, not to wait out a billing window.
+    /// between these attempts is the flat [`Self::retry_quota_delay`],
+    /// deliberately NOT the exponential ramp: the point is to let the
+    /// aggregator re-route to another upstream key, not to wait out a
+    /// billing window.
     pub fn with_quota_attempts(mut self, attempts: u32) -> Self {
         self.retry_quota_attempts = attempts;
         self
@@ -167,6 +188,34 @@ impl RetryConfig {
         } else {
             self.max_attempts
         }
+    }
+
+    /// The delay to wait before the next attempt at `err`.
+    ///
+    /// A hard quota / billing error waits the flat, deliberately short
+    /// [`Self::retry_quota_delay`], and does so even when the upstream sent a
+    /// `Retry-After` hint: that hint describes the cap on ONE upstream key,
+    /// and the whole point of the quota budget is to try another key quickly
+    /// rather than sit out that key's billing window.
+    ///
+    /// Every other error keeps the existing precedence — the upstream's
+    /// `Retry-After` when it sent one, otherwise the exponential backoff.
+    ///
+    /// One place decides this so the two retry loops cannot drift apart
+    /// (#346); before this they each spelled out the `Retry-After`-or-ramp
+    /// choice separately.
+    pub fn delay_for<E: RetryableError + ?Sized>(&self, attempt: u32, err: &E) -> Duration {
+        if err.is_quota_exhausted() {
+            return self.retry_quota_delay;
+        }
+        if let Some(retry_after) = err.retry_after() {
+            tracing::info!(
+                "Error provided retry_after hint: {}ms",
+                retry_after.as_millis()
+            );
+            return retry_after;
+        }
+        self.calculate_delay(attempt)
     }
 
     /// Calculate delay for a given attempt with optional jitter
@@ -239,16 +288,10 @@ where
                     return Err(last_error.unwrap_or(err));
                 }
 
-                // Check for Retry-After hint from the error
-                let delay = if let Some(retry_after) = err.retry_after() {
-                    tracing::info!(
-                        "Error provided retry_after hint: {}ms",
-                        retry_after.as_millis()
-                    );
-                    retry_after
-                } else {
-                    config.calculate_delay(attempt)
-                };
+                // Retry-After hint, the flat quota delay, or the exponential
+                // ramp — one helper decides so the two loops cannot drift
+                // apart (#346).
+                let delay = config.delay_for(attempt, &err);
 
                 tracing::info!(
                     "Retry attempt {}/{} after {}ms for error: {}",
@@ -325,9 +368,8 @@ where
                     return Err(last_error.unwrap_or(err));
                 }
 
-                let delay = err
-                    .retry_after()
-                    .unwrap_or_else(|| config.calculate_delay(attempt));
+                // Same single decision point as `retry` above (#346).
+                let delay = config.delay_for(attempt, &err);
 
                 tracing::info!(
                     "Retry attempt {}/{} after {}ms for error: {}",
