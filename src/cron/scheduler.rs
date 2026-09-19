@@ -1085,17 +1085,6 @@ pub(crate) async fn parse_session_target(
     crate::cli::session_resolve::resolve_job_session_target(&pool, target).await
 }
 
-/// Pure resolution over a session set — the testable core. Full UUIDs are
-/// already consumed by the fast path in [`parse_session_target`], so
-/// everything reaching here is a prefix: the shared resolver's rules apply
-/// verbatim (0 matches and ambiguity are both `None`; the caller logs loudly).
-pub(crate) fn resolve_session_target(
-    sessions: &[crate::db::models::Session],
-    target: &str,
-) -> Option<Uuid> {
-    crate::cli::session_resolve::resolve_session_id(sessions, target).ok()
-}
-
 /// Deliver a cron job result to the specified channel.
 /// Format: "telegram:chat_id", "telegram:chat_id:thread_id" (opt-in forum
 /// topic), "discord:channel_id", "slack:channel_id", "session:<id|prefix>"
