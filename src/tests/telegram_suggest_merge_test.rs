@@ -483,15 +483,21 @@ fn test_owner_label_with_ampersand_survives_the_rich_funnel() {
     // feeders now measure the same unit (the label's display text), so a row
     // the emitter approved ships through the funnel untouched.
     let label = "Acknowledge & stamp gap closed";
-    assert_eq!(label.chars().count(), 30, "the solo budget is 30 display units");
+    let raw_units = label.chars().count();
+    let escaped_units = crate::channels::telegram::markdown::escape_html(label).chars().count();
+    assert_eq!(raw_units, 30, "the solo budget is 30 display units");
     assert_eq!(
-        crate::channels::telegram::markdown::escape_html(label).chars().count(),
-        34,
+        escaped_units, 34,
         "the escaped form is what the enforcer used to measure"
     );
+    // Compare MEASURED values, never two literals: a condition whose operands
+    // are both compile-time constants is resolved before the test runs, proves
+    // nothing, and is rejected by clippy::assertions_on_constants under
+    // `-D warnings`. The property under test is the MISMATCH — the raw label
+    // fits the solo budget while its escaped form does not.
     assert!(
-        34 > SINGLE_BUTTON_MAX_UNITS,
-        "the overcount is what tripped the fold: 34 > {SINGLE_BUTTON_MAX_UNITS}"
+        escaped_units > SINGLE_BUTTON_MAX_UNITS && raw_units <= SINGLE_BUTTON_MAX_UNITS,
+        "the overcount tripped the fold: {escaped_units} > {SINGLE_BUTTON_MAX_UNITS} >= {raw_units}"
     );
 
     let token = "ab12cd34";
