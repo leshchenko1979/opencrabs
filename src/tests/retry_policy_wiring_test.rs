@@ -15,7 +15,7 @@
 //!      `dyn Provider`, so it can only be inspected through the trait.
 
 use crate::brain::provider::factory::{configure_openai_compatible, create_provider_by_name};
-use crate::brain::provider::{Provider, OpenAIProvider};
+use crate::brain::provider::OpenAIProvider;
 use crate::config::{Config, ProviderConfig};
 use crate::utils::retry::RetryConfig;
 
