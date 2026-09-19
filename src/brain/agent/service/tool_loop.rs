@@ -1723,6 +1723,15 @@ impl AgentService {
         // checked against what actually ran rather than inferred from its
         // wording (#789).
         let mut turn_tool_input: Vec<String> = Vec::new();
+        // One receipt per tool call this turn, for the goal judge's evidence
+        // pack (#364). Turn-scoped like the two above, but unlike them this one
+        // is not a fabrication check — it is the judge's only mechanical record
+        // that a tool actually ran, and whether it succeeded. It survives the
+        // per-iteration `tool_descriptions`/`tool_outputs` clear below, which is
+        // what makes the receipts reachable at the judge hook later in the turn.
+        let mut turn_tool_receipts: Vec<String> = Vec::new();
+        // Paths written or edited this turn, deduped in call order (#364).
+        let mut turn_tool_files: Vec<String> = Vec::new();
         // One-shot nudge budget for the empty-analysis case: model ran
         // tool calls (e.g. `gh pr view`) on a user request whose verb
         // signals analysis ("audit the PR") but ended with
@@ -6336,8 +6345,13 @@ impl AgentService {
                     use crate::brain::goal::GoalManager;
                     use crate::brain::goal::evidence::build_goal_evidence;
                     let goal_mgr = GoalManager::new(self.context.clone());
-                    let evidence =
-                        build_goal_evidence(self.background_manager.as_deref(), session_id).await;
+                    let evidence = build_goal_evidence(
+                        self.background_manager.as_deref(),
+                        session_id,
+                        turn_tool_receipts.clone(),
+                        turn_tool_files.clone(),
+                    )
+                    .await;
                     match goal_mgr
                         .evaluate_after_turn(
                             self.provider_for_session(session_id).as_ref(),
@@ -7565,6 +7579,24 @@ impl AgentService {
                         serde_json::json!({"d": desc, "s": success, "o": output})
                     })
                     .collect();
+
+                // The judge's receipt legs (#364). Collected HERE because this
+                // is the one site both the parallel and sequential paths funnel
+                // through, and because the two source vectors are cleared a few
+                // lines below — after that the turn's tool work is unrecoverable
+                // in memory, and the judge runs later in the same turn.
+                turn_tool_receipts.extend(
+                    tool_descriptions
+                        .iter()
+                        .zip(tool_outputs.iter())
+                        .map(|(desc, (success, _))| {
+                            crate::brain::goal::evidence::receipt_line(desc, *success)
+                        }),
+                );
+                crate::brain::goal::evidence::merge_files_touched(
+                    &mut turn_tool_files,
+                    &tool_descriptions,
+                );
                 accumulated_text.push_str(&format!(
                     "<!-- tools-v2: {} -->",
                     serde_json::to_string(&entries).unwrap_or_default()

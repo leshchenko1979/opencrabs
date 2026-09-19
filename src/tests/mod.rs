@@ -301,6 +301,7 @@ pub mod goal_command_test;
 pub mod goal_criteria_derivation_test;
 pub mod goal_criteria_test;
 pub mod goal_evidence_test;
+pub mod goal_evidence_receipts_test;
 pub mod goal_judge_test;
 pub mod goal_manage_criteria_test;
 pub mod goal_manage_test;
