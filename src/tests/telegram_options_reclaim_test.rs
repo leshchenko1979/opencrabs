@@ -24,6 +24,8 @@ use crate::channels::telegram::flow::{
     FlowEntry, MAX_TRAILER_CHARS, pop_trailing_folded_texts, settle_options_reclaim,
     trailer_promotes_to_answer,
 };
+use crate::channels::telegram::turn_settle::run_tail;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[test]
 fn options_pending_reclaims_answer_before_trailing_tool() {
@@ -331,5 +333,65 @@ fn settle_demoted_host_trips_guard_concatenates_into_answer() {
     assert_eq!(
         trailer, None,
         "trailer slot dies — both texts ride the answer render path"
+    );
+}
+
+// ── #402: the settle must run whatever delivery returned ────────────────────
+//
+// The defect: both delivery paths ran the settle tail ONLY when
+// `deliver_final_response` returned `Ok(true)` (`if !… { return Ok(()); }`).
+// A `false` (reaction-only ack, cleanup-only shape) or an `Err` skipped the
+// settle entirely, so the flow block never left the `⚙` spinner — observed
+// live for ~6 h on the turn that filed the issue.
+//
+// These tests drive `run_tail`, the PRODUCTION helper both paths now call, so
+// reintroducing the shortcut inside it fails both.
+
+#[tokio::test]
+async fn settle_runs_when_delivery_returns_false() {
+    // `Ok(false)` is the reaction-only / cleanup-only delivery shape — the
+    // exact case the old `if !delivered { return }` gate swallowed.
+    let settled = AtomicBool::new(false);
+    let delivered = run_tail(
+        async { Ok::<bool, String>(false) },
+        async {
+            settled.store(true, Ordering::SeqCst);
+        },
+    )
+    .await;
+
+    assert!(
+        settled.load(Ordering::SeqCst),
+        "settle MUST run even though delivery returned false"
+    );
+    assert_eq!(
+        delivered,
+        Ok(false),
+        "the delivery result propagates UNCHANGED"
+    );
+}
+
+#[tokio::test]
+async fn settle_runs_on_delivery_error() {
+    // The `Err` leg: a failed delivery used to `?` straight out of the tail,
+    // so the settle never ran and the block was stranded. Worst case now is an
+    // answer-shaped header plus a warn — never a permanent spinner.
+    let settled = AtomicBool::new(false);
+    let delivered = run_tail(
+        async { Err::<bool, String>("delivery exploded".to_string()) },
+        async {
+            settled.store(true, Ordering::SeqCst);
+        },
+    )
+    .await;
+
+    assert!(
+        settled.load(Ordering::SeqCst),
+        "settle MUST run even though delivery errored"
+    );
+    assert_eq!(
+        delivered,
+        Err("delivery exploded".to_string()),
+        "the delivery error propagates UNCHANGED"
     );
 }

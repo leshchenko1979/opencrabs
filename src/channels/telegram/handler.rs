@@ -2675,6 +2675,11 @@ pub(crate) async fn handle_message(
             plan_kb,
         )
         .await;
+        // #402: DELIBERATE EARLY RETURN — the PREEMPTED-TURN teardown (the
+        // cancel guard above led here). A preempted turn is a teardown, not a
+        // delivery: no answer exists to settle and the guard is already
+        // released. Left as-is on purpose — unlike the delivery-gated return
+        // #402 removed, this one is not conditional on a delivery outcome.
         return Ok(());
     }
 
@@ -2696,10 +2701,12 @@ pub(crate) async fn handle_message(
     );
 
     // ── Final response ────────────────────────────────────────────────────────
-    // Extracted to deliver_final_response (#471 phase 2). `false` = a path
-    // that used to `return Ok(())` straight out of handle_message fired
-    // (reaction-only ack, cleanup-only shapes): preserve that exact control
-    // flow — the leftover-reaction flush below must NOT run for them.
+    // Extracted to deliver_final_response (#471 phase 2). `false` = a path that
+    // used to `return Ok(())` straight out of handle_message fired (reaction-only
+    // ack, cleanup-only shapes). #402 CHANGED that control flow on purpose: the
+    // result is captured and the settle tail runs FIRST, unconditionally, so a
+    // `false` delivery can no longer strand the flow block on the spinner. The
+    // result propagates only after the settle (see `delivered?` below).
     // Settled header outcome for the flow block (#480): success, or classify
     // the error as a timeout vs a generic failure. Computed before `result` is
     // moved into deliver_final_response; applied after, so it renders on the
@@ -2716,73 +2723,51 @@ pub(crate) async fn handle_message(
         }
     };
 
-    if !deliver_final_response(
-        &bot,
-        msg.chat.id,
-        Some(&msg),
-        thread_id,
-        &streaming,
-        session_id,
-        &agent,
-        &telegram_state,
-        &channel_msg_repo,
-        &voice_config,
-        is_voice,
-        is_dm,
-        chat_title,
-        streaming_msg_id,
-        result,
-    )
-    .await?
-    {
-        return Ok(());
-    }
-
-    // Stamp the settled outcome on the block and re-render its header once, now
-    // that delivery and folded-answer promotion have left the block in its
-    // final shape (#480). A no-op when no block was opened this turn (no tools
-    // or intermediates), so plain tool-less turns stay a single clean response.
-    {
-        let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
-        s.flow_outcome = Some(flow_outcome);
-        let (bg_indicator, bg_count) = bg_indicator_for(&agent, session_id);
-        s.bg_indicator = bg_indicator;
-        s.bg_count = bg_count;
-        // Sub-agents are the second background registry (#1183): the header
-        // must wait on them too, split working vs awaiting collection, or a
-        // turn ending with agents mid-work reads "✅ Finished".
-        s.subagent_counts = subagent_counts_for(&agent, session_id);
-        s.queued_count = telegram_state.queued_items_count(session_id);
-    }
-    // Recompute sections now that the turn has settled: the plan Approve/Discard
-    // keyboard attaches only at turn end (load_plan_state_section keys off
-    // turn_active = flow_outcome.is_none(), now false), so it must be refreshed
-    // here before the final render or the last in-flight tick's PlanKb::None
-    // would leave the button off for good (#571).
-    super::flow_chrome::refresh_sections(&streaming, &agent, session_id).await;
-    // Settle render (#1211 G2 Final): never dropped — if the edit bucket is
-    // empty the payload queues latest-wins and the governor's drainer lands
-    // it on refill.
-    refresh_flow(
-        &bot,
-        msg.chat.id,
-        &streaming,
-        super::governor::EditClass::Final,
+    // #402: delivery and settle ride ONE shared tail helper — run_tail — which
+    // runs the settle UNCONDITIONALLY and returns the delivery result unchanged.
+    // The old `if !delivered { return Ok(()) }` gate is gone: a `false`
+    // (reaction-only ack, cleanup-only shapes) or an `Err` used to skip the
+    // settle and strand the flow block on the `⚙` spinner forever.
+    let delivered = super::turn_settle::run_tail(
+        deliver_final_response(
+            &bot,
+            msg.chat.id,
+            Some(&msg),
+            thread_id,
+            &streaming,
+            session_id,
+            &agent,
+            &telegram_state,
+            &channel_msg_repo,
+            &voice_config,
+            is_voice,
+            is_dm,
+            chat_title,
+            streaming_msg_id,
+            result,
+        ),
+        // Settle the flow block's terminal shape (#402): SHARED with the
+        // crash-resume path, so the two copies can never drift apart again. A
+        // no-op when no block was opened this turn (no tools or intermediates),
+        // so plain tool-less turns stay a single clean response.
+        super::turn_settle::settle_turn_block(
+            &bot,
+            msg.chat.id,
+            &streaming,
+            &agent,
+            &telegram_state,
+            session_id,
+            flow_outcome,
+            streaming_msg_id,
+        ),
     )
     .await;
-    // #1377: register the settled card's state handle so later background-task
-    // completions fold their acks into THIS card instead of standalone
-    // bubbles. Same contract as the resume path's registration.
-    if streaming
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .open_group_msg_id
-        .is_some()
-    {
-        telegram_state
-            .register_flow_state(session_id, Arc::clone(&streaming))
-            .await;
-    }
+
+    // #402: the settle above has now run UNCONDITIONALLY — the block is off the
+    // spinner whatever delivery returned. Only here does the delivery result
+    // propagate: `Err` surfaces, `Ok(_)` (including the `false` reaction-only
+    // shape) continues into the plan-card restick and the queued-item flush.
+    delivered?;
     // Settle the persistent plan card (#580, #621): remove the old card first
     // so refresh_plan_card posts a fresh one at the bottom. This re-stick keeps
     // the card at the latest position instead of editing a buried message far
