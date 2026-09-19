@@ -134,6 +134,12 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // FORK (#299): the judge's last per-criterion evaluation, so `status` can
     // report it without re-invoking the model.
     include_str!("../migrations/20260918000002_add_goal_criterion_evaluations.sql"),
+    // FORK (#344): the durable await record — what a lane is waiting on when
+    // it ends its turn on an EXTERNAL completion (a CI run, a peer lane, the
+    // owner gate). Read by an OR-path beside the WAKE_RECENT_SECS freshness
+    // gate, so a stale binding carrying a wait is still classified. NULL
+    // `await_at` (pre-feature rows) == not awaiting.
+    include_str!("../migrations/20260919000001_session_bindings_await.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
