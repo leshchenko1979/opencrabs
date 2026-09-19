@@ -94,6 +94,12 @@
 
 **Uncertain streak** — consecutive `UNCERTAIN` verdicts on a goal. At `MAX_CONSECUTIVE_UNCERTAIN` (3) the goal parks as `paused`, naming the exhausted evidence budget; a `VERIFIED` or `REJECTED` verdict resets the streak.
 
+### Session recovery
+
+**Await record** — the three `session_bindings` columns (`await_kind`, `await_ref`, `await_at`) recording that a session ended its turn waiting on an EXTERNAL completion: a CI run, a peer lane, an owner reply. `await_at IS NULL` means not awaiting, so pre-feature rows keep their classification. Read by an OR-path beside the boot classifier's freshness gate (`WAKE_RECENT_SECS`), so a stale binding carrying a wait is still classified. **Not:** "parked" (that is the route sense — a report waiting for a channel route, `src/brain/agent/service/restart_recovery.rs`), "blocked", "pending".
+
+**Awaiting** — the boot-classifier outcome for a session carrying an await record. It is resumed through the same `resume_session` continuation an `interrupted` turn uses — no second wake mechanism. Distinct from the freshness gate, which is unchanged: this adds an eighth signal, it does not widen the window. **Not:** `interrupted` (a turn killed in flight), `unclassified` (no evidence either way).
+
 ### Fleet & process terms
 
 These live with the ops skill outside this repo (`fleet-directives.md` §Glossary: carrier, fan-out, lane, roster, CI gate, ORDER gates, single-flight, GREEN/RED, S2/S3). They are listed here by NAME ONLY so repo readers know the terms exist and where they are defined — this file does not copy them (single-writer law).
