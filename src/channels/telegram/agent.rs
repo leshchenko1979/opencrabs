@@ -37,6 +37,17 @@ impl MermaidProbe for TelegramMermaidProbe {
     }
 }
 
+/// The channel's render probe as a shared static, so a build that compiles this
+/// channel in validates in EVERY process — including one that never constructs
+/// the agent (a one-shot `run`, a test binary). Without this the seam would be
+/// a no-op there, which is a live behaviour change: the pre-#326 `#[cfg]` gate
+/// ran validation wherever the feature was COMPILED, not merely wherever a bot
+/// happened to be constructed (#326).
+pub(crate) fn telegram_probe() -> &'static dyn MermaidProbe {
+    static PROBE: TelegramMermaidProbe = TelegramMermaidProbe;
+    &PROBE
+}
+
 /// Telegram bot that forwards messages to the agent
 pub struct TelegramAgent {
     agent_service: Arc<AgentService>,
