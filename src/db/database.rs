@@ -273,8 +273,11 @@ pub struct MaintenanceKnobs {
     /// This is the bound on the write-lock hold: the monolithic `VACUUM;` held
     /// it for 119.8 s on `opencrabs.db` because its cost is proportional to the
     /// whole file, while a bounded reclaim's cost is proportional to this
-    /// number. 4096 pages = 16 MiB per sweep; at 24 sweeps/day that is
-    /// 0.38 GiB/day of reclaim capacity.
+    /// number. At the 4096-page default with a 4096-byte page size that is
+    /// 16 MiB per sweep, and the sweep runs once every 24 h
+    /// (`MaintenanceService::spawn_periodic` in `src/cli/ui.rs`), so the
+    /// default capacity is 16 MiB/day. The live freelists sit far below that
+    /// (measured 2026-09-19: 7 pages on `opencrabs.db`, 0 on `memory.db`).
     pub reclaim_pages_per_sweep: i64,
 }
 
@@ -446,6 +449,36 @@ fn ensure_incremental_autovacuum(
     }
 }
 
+/// Drain a bounded `PRAGMA incremental_vacuum(N)` to completion.
+///
+/// `Connection::execute_batch` steps each statement exactly ONCE
+/// (rusqlite 0.38.0, `src/lib.rs:546`), and `PRAGMA incremental_vacuum(N)`
+/// frees one page per step — so executing it once reclaims a single page
+/// whatever `N` is. The budget test caught exactly that: with a 100-page
+/// budget the freelist went 602 -> 601.
+///
+/// `Statement::step` is `pub(super)` (rusqlite 0.38.0, `src/statement.rs:862`)
+/// and cannot be called from here, so the statement is drained through `Rows`,
+/// whose `advance` steps until the statement reports done
+/// (rusqlite 0.38.0, `src/row.rs:215`).
+///
+/// The error is returned unchanged, so the `#273` busy/locked yield still
+/// applies to a reclaim that meets contention.
+fn reclaim_incremental_vacuum(conn: &rusqlite::Connection, pages: i64) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA incremental_vacuum({pages});"))?;
+    let mut rows = stmt.query([])?;
+    let mut steps: i64 = 0;
+    while rows.next()?.is_some() {
+        steps += 1;
+    }
+    tracing::debug!(
+        pages_budget = pages,
+        steps,
+        "incremental_vacuum drained to completion (#321)"
+    );
+    Ok(())
+}
+
 /// Bounded reclaim, guarded by the freelist threshold (#273, #321 Part A2/A4).
 ///
 /// Reclaims `knobs.reclaim_pages_per_sweep` pages per sweep instead of running
@@ -489,8 +522,12 @@ fn vacuum_if_fragmented(
     // ALWAYS an explicit N. A bare `PRAGMA incremental_vacuum;` reclaims the
     // ENTIRE freelist and would re-introduce the unbounded hold this exists to
     // bound — the hold is proportional to N, not to the size of the file.
+    //
+    // Draining matters as much as the `N`: the statement frees one page per
+    // step, so a single step reclaims one page whatever `N` is (see
+    // `reclaim_incremental_vacuum`).
     let pages = knobs.reclaim_pages_per_sweep;
-    let reclaim_res = conn.execute_batch(&format!("PRAGMA incremental_vacuum({pages});"));
+    let reclaim_res = reclaim_incremental_vacuum(conn, pages);
 
     // Restore standard 30s busy timeout
     let _ = conn.execute_batch("PRAGMA busy_timeout = 30000;");
