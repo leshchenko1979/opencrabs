@@ -347,6 +347,7 @@ pub mod memory_symbol_extractor_test;
 pub mod menu_auto_solo_test;
 #[cfg(feature = "telegram")]
 pub mod menu_refresh_test;
+pub mod mermaid_test;
 pub mod message_split_markup_test;
 pub mod mimo_tool_call_hint_test;
 pub mod mission_control_command_test;
