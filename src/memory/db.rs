@@ -1072,8 +1072,7 @@ impl Store {
         crate::db::execute_safe_maintenance(
             &self.conn,
             "memory.db",
-            1024,
-            crate::db::WAL_TRUNCATE_MIN_BYTES,
+            crate::db::MaintenanceKnobs::default(),
         )
         .map_err(|e| format!("vacuum_memory: {e}"))
     }

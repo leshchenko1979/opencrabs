@@ -257,6 +257,39 @@ fn apply_pragmas_in_memory(
 /// once the sidecar has actually grown past this threshold.
 pub const WAL_TRUNCATE_MIN_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Every tunable value the maintenance sweep reads (#321 Part A3).
+///
+/// These were literals at the call sites (`1024`, [`WAL_TRUNCATE_MIN_BYTES`]),
+/// so the sweep's cost could only be changed by editing the sweep itself. They
+/// now live in one place, which is also what makes the per-sweep budget a value
+/// rather than a constant buried in the maintenance path.
+#[derive(Debug, Clone, Copy)]
+pub struct MaintenanceKnobs {
+    /// Free pages required before a reclaim is attempted at all.
+    pub min_freelist_pages: i64,
+    /// Size (bytes) the `-wal` sidecar must exceed before a `TRUNCATE`
+    /// checkpoint is attempted (#298).
+    pub wal_truncate_min_bytes: u64,
+    /// Pages reclaimed per sweep by the bounded reclaim (#321 Part A2).
+    ///
+    /// This is the bound on the write-lock hold: the monolithic `VACUUM;` held
+    /// it for 119.8 s on `opencrabs.db` because its cost is proportional to the
+    /// whole file, while a bounded reclaim's cost is proportional to this
+    /// number. 4096 pages = 16 MiB per sweep; at 24 sweeps/day that is
+    /// 0.38 GiB/day of reclaim capacity.
+    pub reclaim_pages_per_sweep: i64,
+}
+
+impl Default for MaintenanceKnobs {
+    fn default() -> Self {
+        Self {
+            min_freelist_pages: 1024,
+            wal_truncate_min_bytes: WAL_TRUNCATE_MIN_BYTES,
+            reclaim_pages_per_sweep: 4096,
+        }
+    }
+}
+
 /// True when `conn` is journaling in WAL mode, i.e. a `-wal` sidecar exists.
 fn is_wal_mode(conn: &rusqlite::Connection) -> bool {
     conn.query_row("PRAGMA journal_mode;", [], |row| row.get::<_, String>(0))
@@ -345,25 +378,102 @@ fn truncate_wal_if_large(conn: &rusqlite::Connection, db_name: &str, min_bytes: 
     }
 }
 
-/// Conditional `VACUUM` guarded by the freelist threshold (#273).
+/// One-time conversion of a file database to incremental auto-vacuum (#321 Part A1).
+///
+/// `auto_vacuum` defaults to `NONE` (0), under which the only way to hand free
+/// pages back to the filesystem is a full `VACUUM` — whose write-lock hold is
+/// proportional to the whole file (measured: 119.8 s on `opencrabs.db`). Under
+/// `INCREMENTAL` (2) the same reclaim is available in bounded chunks via
+/// `PRAGMA incremental_vacuum(N)`, which is what makes a sweep's hold
+/// proportional to N instead of to the database size.
+///
+/// The pragma alone is a NO-OP on a database that already has tables — a probe
+/// read `0` straight back after setting it — so it must be followed by a
+/// `VACUUM` for the conversion to take effect. That `VACUUM` is the last
+/// unbounded hold in this path, which is why the conversion is attempted on
+/// every sweep until it succeeds: it happens once in the life of the file and
+/// every later sweep is bounded.
+///
+/// It cannot live in a migration: `rusqlite_migration` runs inside a
+/// transaction and `VACUUM` is rejected there ("cannot VACUUM from within a
+/// transaction").
+///
+/// Returns `true` when this call performed the conversion.
+fn ensure_incremental_autovacuum(
+    conn: &rusqlite::Connection,
+    db_name: &str,
+) -> rusqlite::Result<bool> {
+    // An in-memory database has no file to return pages to, and `auto_vacuum`
+    // is documented to have no effect on one — nothing to convert.
+    if !conn.path().is_some_and(|p| !p.is_empty()) {
+        return Ok(false);
+    }
+
+    let before: i64 = conn
+        .query_row("PRAGMA auto_vacuum;", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    if before == 2 {
+        return Ok(false);
+    }
+
+    // Yield fast if the conversion meets contention: a failure here is retried
+    // on the next sweep, so a fast fail beats a 30 s stall (#273 behaviour).
+    let _ = conn.execute_batch("PRAGMA busy_timeout = 2000;");
+    let converted = conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;");
+    let _ = conn.execute_batch("PRAGMA busy_timeout = 30000;");
+
+    match converted {
+        Ok(()) => {
+            let after: i64 = conn
+                .query_row("PRAGMA auto_vacuum;", [], |row| row.get(0))
+                .unwrap_or(0);
+            tracing::info!(
+                db = db_name,
+                auto_vacuum_before = before,
+                auto_vacuum_after = after,
+                "Converted database to incremental auto-vacuum (#321)"
+            );
+            Ok(true)
+        }
+        Err(e) if is_busy_or_locked(&e) => {
+            tracing::warn!(
+                db = db_name,
+                error = %e,
+                "auto-vacuum conversion met lock or busy contention; yielding until the next maintenance cycle (#273)"
+            );
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Bounded reclaim, guarded by the freelist threshold (#273, #321 Part A2/A4).
+///
+/// Reclaims `knobs.reclaim_pages_per_sweep` pages per sweep instead of running
+/// a monolithic `VACUUM;`, whose write-lock hold is proportional to the whole
+/// file (measured: 119.8 s on `opencrabs.db`) and therefore far past the 30 s
+/// writer `busy_timeout`. The bounded hold is proportional to the budget, which
+/// is what keeps it inside the timeout. It still takes a write lock, so it can
+/// still meet contention and yields via the #273 path below.
 ///
 /// Catches `SQLITE_BUSY` (code 5) / `SQLITE_LOCKED` (code 6) to yield
 /// gracefully to high-priority foreground queries.
 fn vacuum_if_fragmented(
     conn: &rusqlite::Connection,
     db_name: &str,
-    min_freelist_pages: i64,
+    knobs: MaintenanceKnobs,
 ) -> rusqlite::Result<bool> {
     let freelist_count: i64 = conn
         .query_row("PRAGMA freelist_count;", [], |row| row.get(0))
         .unwrap_or(0);
 
-    if freelist_count < min_freelist_pages {
+    if freelist_count < knobs.min_freelist_pages {
         tracing::debug!(
             freelist_count,
-            min_freelist_pages,
+            min_freelist_pages = knobs.min_freelist_pages,
             db = db_name,
-            "Skipping VACUUM: free page count below reclamation threshold"
+            "Skipping reclaim: free page count below reclamation threshold"
         );
         return Ok(false);
     }
@@ -371,20 +481,36 @@ fn vacuum_if_fragmented(
     tracing::info!(
         freelist_count,
         db = db_name,
-        "Freelist threshold met; attempting VACUUM"
+        pages_budget = knobs.reclaim_pages_per_sweep,
+        "Freelist threshold met; attempting bounded reclaim"
     );
 
-    // Temporary short busy timeout during VACUUM to yield fast on contention
+    // Temporary short busy timeout during the reclaim to yield fast on contention
     let _ = conn.execute_batch("PRAGMA busy_timeout = 2000;");
 
-    let vacuum_res = conn.execute_batch("VACUUM;");
+    // ALWAYS an explicit N. A bare `PRAGMA incremental_vacuum;` reclaims the
+    // ENTIRE freelist and would re-introduce the unbounded hold this exists to
+    // bound — the hold is proportional to N, not to the size of the file.
+    let pages = knobs.reclaim_pages_per_sweep;
+    let reclaim_res = conn.execute_batch(&format!("PRAGMA incremental_vacuum({pages});"));
 
     // Restore standard 30s busy timeout
     let _ = conn.execute_batch("PRAGMA busy_timeout = 30000;");
 
-    match vacuum_res {
+    match reclaim_res {
         Ok(()) => {
-            tracing::info!(db = db_name, "VACUUM completed successfully");
+            let freelist_after: i64 = conn
+                .query_row("PRAGMA freelist_count;", [], |row| row.get(0))
+                .unwrap_or(0);
+            let reclaimed_pages = freelist_count.saturating_sub(freelist_after);
+            tracing::info!(
+                db = db_name,
+                reclaimed_pages,
+                freelist_before = freelist_count,
+                freelist_after,
+                pages_budget = knobs.reclaim_pages_per_sweep,
+                "Bounded incremental reclaim completed (#321)"
+            );
             Ok(true)
         }
         Err(e) => {
@@ -392,7 +518,7 @@ fn vacuum_if_fragmented(
                 tracing::warn!(
                     db = db_name,
                     error = %e,
-                    "VACUUM encountered database lock or busy contention; yielding gracefully until next maintenance cycle (#273)"
+                    "Reclaim encountered database lock or busy contention; yielding gracefully until next maintenance cycle (#273)"
                 );
                 Ok(false)
             } else {
@@ -407,17 +533,18 @@ fn vacuum_if_fragmented(
 /// Steps:
 /// 1. Run `PRAGMA optimize;` to update SQLite query planner index statistics.
 /// 2. Run `PRAGMA wal_checkpoint(PASSIVE);` to checkpoint WAL pages without blocking active readers/writers.
-/// 3. Inspect `PRAGMA freelist_count`: if free pages >= `min_freelist_pages`, attempt `VACUUM;`.
-/// 4. If the `-wal` sidecar exceeds `wal_truncate_min_bytes`, run
+/// 3. Convert the file to incremental auto-vacuum if it is not already (#321 Part A1).
+/// 4. Inspect `PRAGMA freelist_count`: if free pages >= `knobs.min_freelist_pages`,
+///    reclaim up to `knobs.reclaim_pages_per_sweep` pages.
+/// 5. If the `-wal` sidecar exceeds `knobs.wal_truncate_min_bytes`, run
 ///    `PRAGMA wal_checkpoint(TRUNCATE);` to return the reclaimed space to disk (#298).
-/// 5. Catches `SQLITE_BUSY` (code 5) / `SQLITE_LOCKED` on vacuum to yield gracefully to high-priority queries.
+/// 6. Catches `SQLITE_BUSY` (code 5) / `SQLITE_LOCKED` on vacuum to yield gracefully to high-priority queries.
 ///
 /// Returns whether a `VACUUM` was performed.
 pub fn execute_safe_maintenance(
     conn: &rusqlite::Connection,
     db_name: &str,
-    min_freelist_pages: i64,
-    wal_truncate_min_bytes: u64,
+    knobs: MaintenanceKnobs,
 ) -> rusqlite::Result<bool> {
     // 1. Optimize query planner statistics
     if let Err(e) = conn.execute_batch("PRAGMA optimize;") {
@@ -429,13 +556,17 @@ pub fn execute_safe_maintenance(
         tracing::debug!("PRAGMA wal_checkpoint(PASSIVE) on {db_name} failed: {e}");
     }
 
-    // 3. Conditional VACUUM
-    let vacuumed = vacuum_if_fragmented(conn, db_name, min_freelist_pages)?;
+    // 3. One-time conversion to incremental auto-vacuum, so the reclaim
+    //    below is bounded instead of proportional to the whole file.
+    ensure_incremental_autovacuum(conn, db_name)?;
 
-    // 4. Reclaim the WAL sidecar. Runs on every sweep regardless of whether
+    // 4. Conditional reclaim
+    let vacuumed = vacuum_if_fragmented(conn, db_name, knobs)?;
+
+    // 5. Reclaim the WAL sidecar. Runs on every sweep regardless of whether
     //    VACUUM ran: a WAL can reach its high-water mark without one, and the
     //    VACUUM path is the case that pushes it to the database size (#298).
-    truncate_wal_if_large(conn, db_name, wal_truncate_min_bytes);
+    truncate_wal_if_large(conn, db_name, knobs.wal_truncate_min_bytes);
 
     Ok(vacuumed)
 }
@@ -563,14 +694,14 @@ impl Database {
 
     /// Run safe database maintenance (optimize, passive checkpoint, conditional vacuum, WAL truncate).
     ///
-    /// Unlike raw `VACUUM;`, this:
+    /// Unlike a raw `VACUUM;`, this:
     /// 1. Runs `PRAGMA optimize;` to update SQLite query planner statistics.
     /// 2. Runs `PRAGMA wal_checkpoint(PASSIVE);` without blocking active readers/writers.
-    /// 3. Checks `PRAGMA freelist_count`: only executes `VACUUM;` if unused pages >= threshold.
+    /// 3. Checks `PRAGMA freelist_count`: only reclaims if unused pages >= threshold.
     /// 4. Runs `PRAGMA wal_checkpoint(TRUNCATE);` when the `-wal` sidecar has grown
     ///    past [`WAL_TRUNCATE_MIN_BYTES`], returning the space to disk (#298).
-    /// 5. Catches `SQLITE_BUSY` (code 5) / `SQLITE_LOCKED` on vacuum to yield gracefully
-    ///    to high-priority foreground queries (#273).
+    /// 5. Catches `SQLITE_BUSY` (code 5) / `SQLITE_LOCKED` on the reclaim to yield
+    ///    gracefully to high-priority foreground queries (#273).
     pub async fn vacuum_database(&self) -> Result<bool> {
         let conn = self
             .pool
@@ -579,7 +710,7 @@ impl Database {
             .context("Failed to get connection for vacuum")?;
         let vacuumed = conn
             .interact(|conn| {
-                execute_safe_maintenance(conn, "opencrabs.db", 1024, WAL_TRUNCATE_MIN_BYTES)
+                execute_safe_maintenance(conn, "opencrabs.db", MaintenanceKnobs::default())
             })
             .await
             .map_err(|e| anyhow::anyhow!("vacuum_database interact error: {e}"))??;
