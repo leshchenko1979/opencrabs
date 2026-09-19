@@ -34,7 +34,10 @@ use crate::utils::retry::RetryConfig;
 pub const QUOTA_RETRY_ATTEMPTS: u32 = 2;
 
 /// Delay between quota retries. Short for the same reason: the point is to
-/// let the aggregator re-route, not to back off exponentially.
+/// let the aggregator re-route, not to back off exponentially. Applied
+/// flat by [`crate::utils::retry::RetryConfig::delay_for`], and it also
+/// overrides an upstream `Retry-After` hint — that hint describes the cap on
+/// ONE upstream key, which is exactly what the aggregator is routing around.
 pub const QUOTA_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 /// Operator-supplied retry values, merged from the provider's own section and
@@ -109,6 +112,7 @@ impl RetryOverrides {
         // bail-straight-to-fallback behaviour.
         if self.quota_exhausted {
             base.retry_quota_attempts = QUOTA_RETRY_ATTEMPTS;
+            base.retry_quota_delay = QUOTA_RETRY_DELAY;
         }
     }
 }

@@ -18,7 +18,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::brain::provider::error::{should_try_next_provider, ProviderError};
-use crate::brain::provider::retry_policy::{self, RetryOverrides, QUOTA_RETRY_ATTEMPTS};
+use crate::brain::provider::retry_policy::{
+    self, RetryOverrides, QUOTA_RETRY_ATTEMPTS, QUOTA_RETRY_DELAY,
+};
 use crate::utils::retry::{retry_with_notify, RetryConfig, RetryableError};
 
 /// A 429 whose body carries a HARD quota phrase — the aggregator case.
@@ -145,6 +147,69 @@ fn resolve_grants_the_quota_budget_only_when_opted_in() {
     assert_eq!(
         cfg.retry_quota_attempts, 0,
         "a provider that did not opt in keeps #952 behaviour"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Delay selection: the quota path must not inherit the exponential ramp.
+// ---------------------------------------------------------------------------
+
+/// A 429 that is BOTH a hard quota AND carries a parseable `Retry-After`.
+fn quota_429_with_retry_after(secs: u64) -> ProviderError {
+    ProviderError::ApiError {
+        status: 429,
+        message: format!("You exceeded your current quota. Please retry in {secs} seconds."),
+        error_type: None,
+    }
+}
+
+#[test]
+fn a_quota_error_waits_the_flat_quota_delay() {
+    // FLAT: the same delay on the first and the last attempt. The exponential
+    // ramp would make the second assertion fail, and that is the point — the
+    // aggregator is meant to reach another upstream key quickly, not to sit
+    // out the capped key's billing window.
+    let cfg = RetryConfig::default().with_quota_attempts(QUOTA_RETRY_ATTEMPTS);
+    assert_eq!(cfg.delay_for(0, &quota_429()), cfg.retry_quota_delay);
+    assert_eq!(cfg.delay_for(1, &quota_429()), cfg.retry_quota_delay);
+    assert_eq!(
+        cfg.retry_quota_delay, QUOTA_RETRY_DELAY,
+        "the opt-in must install the short flat quota delay"
+    );
+}
+
+#[test]
+fn a_quota_error_ignores_the_upstream_retry_after_hint() {
+    // The upstream hint describes the cap on ONE key. Reaching a DIFFERENT
+    // key sooner is the whole reason an aggregator opts in, so the hint must
+    // not stretch the quota wait out to its full value.
+    let err = quota_429_with_retry_after(20);
+    assert_eq!(
+        err.retry_after(),
+        Some(std::time::Duration::from_secs(20)),
+        "precondition: the hint is parseable, so the two paths are distinguishable"
+    );
+
+    let cfg = RetryConfig::default().with_quota_attempts(QUOTA_RETRY_ATTEMPTS);
+    assert_eq!(
+        cfg.delay_for(0, &err),
+        cfg.retry_quota_delay,
+        "a quota retry uses the flat quota delay, not the upstream hint"
+    );
+}
+
+#[test]
+fn a_non_quota_error_keeps_the_exponential_ramp() {
+    // Jitter off so the schedule is exact: 1s then 2s on the default config.
+    let cfg = RetryConfig {
+        jitter: 0.0,
+        ..RetryConfig::default()
+    };
+    assert_eq!(cfg.delay_for(0, &plain_429()), cfg.initial_delay);
+    assert_eq!(
+        cfg.delay_for(1, &plain_429()),
+        cfg.initial_delay * 2,
+        "the ordinary path must still ramp"
     );
 }
 
