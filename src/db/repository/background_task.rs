@@ -14,6 +14,7 @@
 
 use crate::db::Pool;
 use crate::db::database::interact_err;
+use crate::db::retry::{write_retry_config, write_with_retry};
 use anyhow::{Context, Result};
 use rusqlite::params;
 use uuid::Uuid;
@@ -51,37 +52,27 @@ impl BackgroundTaskRepository {
     ) -> Result<()> {
         let (id, session_id) = (id.to_string(), session_id.to_string());
         let (label, command, cwd) = (label.to_string(), command.to_string(), cwd.to_string());
-        self.pool
-            .get()
-            .await
-            .context("Failed to get connection")?
-            .interact(move |conn| {
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
                 conn.execute(
                     "INSERT INTO background_tasks \
                      (id, session_id, label, command, cwd, started_at) \
                      VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s','now'))",
                     params![id, session_id, label, command, cwd],
                 )
-            })
-            .await
-            .map_err(interact_err)?
-            .context("Failed to record background task")?;
+        })
+        .await
+        .context("Failed to record background task")?;
         Ok(())
     }
 
     /// Drop the row for a command that finished normally.
     pub async fn clear(&self, id: Uuid) -> Result<()> {
         let id = id.to_string();
-        self.pool
-            .get()
-            .await
-            .context("Failed to get connection")?
-            .interact(move |conn| {
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
                 conn.execute("DELETE FROM background_tasks WHERE id = ?1", params![id])
-            })
-            .await
-            .map_err(interact_err)?
-            .context("Failed to clear background task")?;
+        })
+        .await
+        .context("Failed to clear background task")?;
         Ok(())
     }
 

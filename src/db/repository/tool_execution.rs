@@ -5,6 +5,7 @@
 
 use crate::db::Pool;
 use crate::db::database::interact_err;
+use crate::db::retry::{write_retry_config, write_with_retry};
 use anyhow::{Context, Result};
 use rusqlite::params;
 
@@ -89,11 +90,7 @@ impl ToolExecutionRepository {
         let status = status.to_string();
         let provider = provider.map(|s| s.to_string());
         let model = model.map(|s| s.to_string());
-        self.pool
-            .get()
-            .await
-            .context("Failed to get connection")?
-            .interact(move |conn| {
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
                 conn.execute(
                     "INSERT OR IGNORE INTO tool_executions \
                      (id, message_id, session_id, tool_name, status, provider, model, duration_ms) \
@@ -109,10 +106,9 @@ impl ToolExecutionRepository {
                         duration_ms
                     ],
                 )
-            })
-            .await
-            .map_err(interact_err)?
-            .context("Failed to record tool execution")?;
+        })
+        .await
+        .context("Failed to record tool execution")?;
         Ok(())
     }
 
