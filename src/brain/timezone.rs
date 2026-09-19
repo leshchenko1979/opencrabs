@@ -142,6 +142,30 @@ fn is_tz_key(key: &str) -> bool {
     TZ_KEYS.contains(&lower.as_str())
 }
 
+/// City-name and abbreviation aliases that resolve to a zone.
+///
+/// Deliberately narrow: the Moscow family only, per the approved design (DP1).
+/// A wider Russian-city set is a follow-up owner decision, not an assumption —
+/// every entry is a claim the parser acts on, so an unreviewed list would
+/// silently resolve user text to the wrong zone.
+const TZ_ALIASES: [(&str, Tz); 4] = [
+    ("мск", Tz::Europe__Moscow),
+    ("msk", Tz::Europe__Moscow),
+    ("москва", Tz::Europe__Moscow),
+    ("moscow", Tz::Europe__Moscow),
+];
+
+/// Resolve a city name or abbreviation to a zone.
+///
+/// Case-insensitive; returns `None` for anything outside [`TZ_ALIASES`].
+fn tz_alias_lookup(s: &str) -> Option<Tz> {
+    let lower = s.trim().to_lowercase();
+    TZ_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == lower)
+        .map(|(_, tz)| *tz)
+}
+
 /// Parse a timezone value string into TzInfo.
 fn parse_tz_value(val: &str) -> Option<TzInfo> {
     // Check for "UTC+3 (MSK)" or "UTC-5 (EST)"
