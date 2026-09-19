@@ -600,3 +600,29 @@ pub fn hex_of(color: Color) -> Option<String> {
         _ => None,
     }
 }
+
+/// WCAG 2.x relative luminance (0.0 = black, 1.0 = white). The ONE
+/// implementation of this maths in the tree: the theme contrast checker
+/// ([`super::user_themes::contrast`]) and the mermaid renderer's
+/// dark-surface test (#318) both call it, so the two can never disagree
+/// about which surface is dark.
+///
+/// A non-`Rgb` colour carries no portable value — the terminal resolves
+/// index and named variants against its own palette — so it reports `0.0`
+/// (i.e. "dark"). Callers must treat that as the conservative default,
+/// never as a measurement.
+pub fn relative_luminance(color: Color) -> f64 {
+    let chan = |b: u8| -> f64 {
+        let x = f64::from(b) / 255.0;
+        if x <= 0.04045 {
+            x / 12.92
+        } else {
+            ((x + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let (r, g, b) = match color {
+        Color::Rgb(r, g, b) => (chan(r), chan(g), chan(b)),
+        _ => return 0.0,
+    };
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
