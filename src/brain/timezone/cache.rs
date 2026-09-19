@@ -8,6 +8,8 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+use super::parse::parse_timezone_heuristic;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TzInfo {
     pub tz: Tz,
