@@ -209,16 +209,26 @@ impl SessionBindingRepository {
     /// Idempotent: re-declaring a wait overwrites the kind/ref and restamps
     /// `await_at`, which is what a lane switching from one CI run to another
     /// wants.
+    ///
+    /// Returns the number of rows written — **`0` means the wait was NOT
+    /// recorded**. The write is a bare `UPDATE` keyed on `session_id`, so a
+    /// session with no binding row (a CLI one-shot, a cron turn, a sub-agent)
+    /// matches nothing and would otherwise look like success. Callers that
+    /// tell a lane it is parked must read this count and say so honestly: a
+    /// lane that believes it is parked but recorded nothing is never woken by
+    /// the boot classifier or the sweep, which is the precise failure #344
+    /// exists to remove.
     pub async fn set_await(
         &self,
         session_id: &str,
         kind: &str,
         await_ref: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let sid = session_id.to_string();
         let kind = kind.to_string();
         let reference = await_ref.map(str::to_string);
-        self.pool
+        let rows = self
+            .pool
             .get()
             .await
             .context("Failed to get connection")?
@@ -233,15 +243,20 @@ impl SessionBindingRepository {
             .await
             .map_err(interact_err)?
             .context("Failed to set await record")?;
-        Ok(())
+        Ok(rows)
     }
 
     /// Clear a session's await record — the external completion arrived, or
     /// the wait was abandoned (#344). Safe no-op if no binding exists or the
     /// row is already not awaiting.
-    pub async fn clear_await(&self, session_id: &str) -> Result<()> {
+    ///
+    /// Returns the number of rows written, so a caller can distinguish
+    /// "cleared" from "there was no binding row to clear" rather than
+    /// reporting a clear that never happened.
+    pub async fn clear_await(&self, session_id: &str) -> Result<usize> {
         let sid = session_id.to_string();
-        self.pool
+        let rows = self
+            .pool
             .get()
             .await
             .context("Failed to get connection")?
@@ -256,7 +271,7 @@ impl SessionBindingRepository {
             .await
             .map_err(interact_err)?
             .context("Failed to clear await record")?;
-        Ok(())
+        Ok(rows)
     }
 
     /// Every binding on one channel that carries an await record (#344),

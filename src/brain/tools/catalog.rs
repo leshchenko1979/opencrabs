@@ -162,6 +162,7 @@ pub const EXTENDED_TOOL_INVENTORY: &[(&str, &[&str])] = &[
         &[
             "cron_manage",
             "goal_manage",
+            "await_external",
             "session_search",
             "channel_search",
             "brave_search",
