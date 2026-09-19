@@ -152,6 +152,104 @@ pub fn cron_job_scope(deliver_to: Option<&str>) -> Vec<PermittedTarget> {
     parse_permitted_targets(deliver_to).unwrap_or_default()
 }
 
+/// The channel authorities a cron send scope can name, as the `&'static str`
+/// [`PermittedTarget`] stores.
+///
+/// The scope grammar is closed: a binding on any other channel (`cli`, `cron`,
+/// `a2a`, …) has no channel destination to permit, so it contributes nothing.
+/// Returning `None` for those keeps an unrecognised channel from silently
+/// widening the scope.
+fn channel_authority(channel: &str) -> Option<&'static str> {
+    match channel {
+        "telegram" => Some("telegram"),
+        "discord" => Some("discord"),
+        "slack" => Some("slack"),
+        "whatsapp" => Some("whatsapp"),
+        _ => None,
+    }
+}
+
+/// Expand the `session:<id|prefix>` segments of a job's `deliver_to` into the
+/// channel targets those sessions are BOUND to (#332, D1).
+///
+/// `parse_permitted_targets` recognises only the concrete channel prefixes, so
+/// a job whose `deliver_to` is `session:<uuid>` produced an empty permitted
+/// set. The turn was then scoped to Nowhere while the job HAD a destination —
+/// the session's own bound chat — and every sibling send into that chat was
+/// refused with a reason claiming the job declared no `deliver_to` at all.
+///
+/// This leg closes that gap: for each session segment, resolve the session and
+/// read its OWN binding row, appending the bound channel target. Both halves
+/// are shared code — [`resolve_job_session_target`] owns extraction, listing
+/// and the archived policy; [`SessionBindingRepository::by_session`] owns the
+/// binding read. This function owns neither, so the scope cannot drift from the
+/// delivery path about where a report belongs.
+///
+/// Fails CLOSED at every step. An unresolvable target, a session with no
+/// binding row, a binding on a channel outside the scope grammar, or a DB error
+/// all contribute nothing — the turn keeps the targets it can prove, and a job
+/// with nothing provable stays at Nowhere.
+///
+/// [`resolve_job_session_target`]: crate::cli::session_resolve::resolve_job_session_target
+/// [`SessionBindingRepository::by_session`]: crate::db::repository::SessionBindingRepository::by_session
+pub async fn expand_session_targets(
+    pool: &crate::db::Pool,
+    deliver_to: Option<&str>,
+) -> Vec<PermittedTarget> {
+    let Some(deliver_to) = deliver_to else {
+        return Vec::new();
+    };
+    let bindings = crate::db::repository::SessionBindingRepository::new(pool.clone());
+    let mut expanded = Vec::new();
+
+    for segment in deliver_to
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if !crate::channels::target_resolver::is_session_target(segment) {
+            continue;
+        }
+        let Some(session_id) =
+            crate::cli::session_resolve::resolve_job_session_target(pool, segment).await
+        else {
+            continue;
+        };
+        let Ok(Some(binding)) = bindings.by_session(&session_id.to_string()).await else {
+            continue;
+        };
+        let Some(channel) = channel_authority(&binding.channel) else {
+            continue;
+        };
+        expanded.push(PermittedTarget {
+            channel,
+            target_id: binding.chat_id,
+        });
+    }
+
+    expanded
+}
+
+/// The full permitted set for a job: its concrete channel targets plus the
+/// channel targets its `session:` segments resolve to, deduplicated.
+///
+/// The two legs are complementary rather than overlapping in practice, but a
+/// job may name both a channel and a session bound to that same channel — and
+/// a duplicated entry reads as noise in [`refusal_for`]'s "may only send to
+/// [...]" list. Order is preserved: concrete targets first, then expansions.
+pub async fn cron_job_scope_async(
+    pool: &crate::db::Pool,
+    deliver_to: Option<&str>,
+) -> Vec<PermittedTarget> {
+    let mut targets = cron_job_scope(deliver_to);
+    for extra in expand_session_targets(pool, deliver_to).await {
+        if !targets.contains(&extra) {
+            targets.push(extra);
+        }
+    }
+    targets
+}
+
 /// Why a send was refused, for the tool result the model reads.
 pub fn refusal_for(channel: &str, target_id: &str) -> String {
     match permission() {
@@ -189,6 +287,11 @@ pub fn extract_cron_job_id_from_session_title(title: &str) -> Option<uuid::Uuid>
 /// Returns `Some(targets)` (or `Some(vec![])` / Nowhere) if this session is
 /// a cron session, ensuring it runs under the appropriate send_scope guard.
 /// Returns `None` (Unscoped) if this is an ordinary non-cron session.
+///
+/// The targets are the job's full scope — concrete channel targets plus the
+/// channel targets its `session:` segments expand to via their sessions'
+/// bindings (#332) — so a resumed cron turn is scoped exactly like the firing
+/// turn that created it.
 pub async fn resolve_cron_session_scope(
     pool: &crate::db::Pool,
     session: Option<&crate::db::models::Session>,
@@ -201,7 +304,7 @@ pub async fn resolve_cron_session_scope(
     if let Some(id) = job_id {
         let repo = crate::db::CronJobRepository::new(pool.clone());
         match repo.find_by_id(&id.to_string()).await {
-            Ok(Some(job)) => Some(cron_job_scope(job.deliver_to.as_deref())),
+            Ok(Some(job)) => Some(cron_job_scope_async(pool, job.deliver_to.as_deref()).await),
             Ok(None) | Err(_) => {
                 // Cron job not found in DB or query error: fail closed to Nowhere
                 Some(Vec::new())
