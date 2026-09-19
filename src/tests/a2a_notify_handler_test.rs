@@ -276,9 +276,11 @@ async fn quiet_mode_banks_the_notice_and_returns_the_id() {
 
 #[tokio::test]
 async fn turn_end_mode_queues_instead_of_refusing() {
-    // fork #146: `delivery.mode=turn-end` (the deprecated interrupt=true)
-    // reaches the same policy through A2A — a mid-turn session QUEUES the
-    // message at its next boundary instead of refusing it.
+    // fork #146: `delivery.mode=turn-end` was the alias for interrupt=true;
+    // #373 retired the mode that alias selected and made turn-end the
+    // default, so this is now the plain default path through A2A — a
+    // mid-turn session QUEUES the message at its next boundary instead of
+    // refusing it.
     let ctx = placeholder_service_context().await;
     let session = SessionService::new(ctx.clone())
         .create_session(Some("#146 turn-end test".to_string()))

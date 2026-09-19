@@ -116,10 +116,11 @@ pub async fn handle_session_notify(
 
     // Delivery policy (fork #146): the A2A surface carries the SAME policy
     // ontology as the agent tool — `delivery {mode, quiet_for_secs,
-    // max_delay_secs}` with the deprecated `interrupt` alias resolving
-    // through the shared `resolve_mode`. Quiet banks the notice and returns
-    // its id; every success path records a receipt so `session/notify-status`
-    // can poll the injection stamp.
+    // max_delay_secs}` with the legacy `interrupt` argument resolving
+    // through the shared `resolve_mode`. #373 retired the `now` mode, so the
+    // argument is accepted but inert and unset resolves to turn-end. Quiet
+    // banks the notice and returns its id; every success path records a
+    // receipt so `session/notify-status` can poll the injection stamp.
     let mode = match resolve_mode(
         params
             .get("delivery")
@@ -252,7 +253,10 @@ pub async fn handle_session_notify(
         );
     }
 
-    let interrupt = matches!(mode, DeliveryMode::TurnEnd);
+    // #373: every non-quiet delivery queues for the target's next tool-loop
+    // boundary. This used to read `matches!(mode, DeliveryMode::TurnEnd)`,
+    // which made the default (`now`) refuse mid-turn instead of queueing.
+    let interrupt = true;
     let confirm = params
         .get("confirm")
         .and_then(serde_json::Value::as_bool)

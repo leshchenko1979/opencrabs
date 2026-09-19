@@ -1172,7 +1172,7 @@ async fn deliver_result(
                 bg_meta: None,
             };
             let delivery = crate::brain::agent::service::session_routes::deliver_to_session(
-                session_id, queued, false,
+                session_id, queued, true,
             );
             tracing::info!("Cron '{job_name}' session delivery verdict: {delivery:?}");
             return None;
