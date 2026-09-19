@@ -61,9 +61,12 @@ pub fn parse_timezone_heuristic(text: &str) -> Option<TzInfo> {
 /// a zone can never be mistaken for the user's own word.
 fn parenthetical_label(line: &str) -> Option<String> {
     let (_, rest) = line.split_once('(')?;
+    // Same first-`)` cut as `split_parenthetical`: a trailing trim folds any
+    // prose after the group into the label slot.
     let inner = rest
-        .trim_end_matches([')', '|', ' ', '\t'])
-        .trim();
+        .split_once(')')
+        .map_or(rest, |(group, _)| group)
+        .trim_matches(['|', ' ', '\t']);
     if inner.is_empty() || inner.parse::<Tz>().is_ok() || parse_utc_offset_or_iana(inner).is_some() {
         return None;
     }
@@ -202,7 +205,16 @@ fn parse_tz_value(val: &str) -> Option<TzInfo> {
 /// Split `outer (inner)` into its two trimmed parts.
 fn split_parenthetical(val: &str) -> Option<(&str, &str)> {
     let (outer, rest) = val.split_once('(')?;
-    Some((outer.trim(), rest.trim_end_matches(')').trim()))
+    // Cut at the group's OWN closing paren — the first `)` after the `(` —
+    // rather than trimming parens off the end of the line. A declaration
+    // followed by prose (`| **Timezone** | Москва (МСК, UTC+3) — … |`, the
+    // form the live default-profile USER.md actually carries) pushes the
+    // group's close out of reach of a trailing trim, so the label slot
+    // absorbed the entire sentence and `format_dual_time` rendered it into
+    // every turn's time marker. A trailing trim is only correct when the
+    // group is the last thing on the line.
+    let inner = rest.split_once(')').map_or(rest, |(group, _)| group);
+    Some((outer.trim(), inner.trim()))
 }
 
 /// Label taken from one declaration slot, or `None` when the slot is empty.
