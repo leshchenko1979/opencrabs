@@ -1,7 +1,7 @@
 //! Tests for named HTML entity decoding in Telegram markdown / rich rendering (#258).
 
 use crate::channels::telegram::markdown::{
-    decode_named_entities, markdown_to_telegram_html, md_to_html,
+    decode_named_entities, escape_html, markdown_to_telegram_html, md_to_html, unescape_html,
 };
 use crate::channels::telegram::rich::markdown_to_html;
 
@@ -117,4 +117,74 @@ fn test_md_to_html_integration() {
     let input = "**Alert**: CPU load &rarr; critical (&bull; note)";
     let rendered = md_to_html(input);
     assert!(rendered.contains("<b>Alert</b>: CPU load → critical (• note)"));
+}
+
+#[test]
+fn test_unescape_html_round_trips_escape_html() {
+    // unescape_html is the exact inverse of escape_html, so a round trip must
+    // be the identity for every input — including the entity-lookalike strings
+    // that a naive "decode everything" implementation would corrupt.
+    let cases = [
+        "Acknowledge & stamp gap closed",
+        "AT&T",
+        "Tom & Jerry <3",
+        "<b>bold</b>",
+        "&amp;",
+        "&lt;",
+        "&gt;",
+        "&amp;lt;",
+        "&#65;",
+        "&quot;",
+        "&apos;",
+        "&rarr;",
+        "a & b & c",
+        "",
+        "no entities at all",
+        "&&&&",
+    ];
+    for s in cases {
+        assert_eq!(
+            unescape_html(&escape_html(s)),
+            s,
+            "round trip failed for {s:?}"
+        );
+    }
+}
+
+#[test]
+fn test_unescape_html_decodes_amp_last() {
+    // Order is load-bearing: escape_html escapes '&' FIRST, so a literal
+    // "&lt;" in the source is stored as "&amp;lt;". Decoding "&amp;" before
+    // "&lt;" would yield "<" instead of the literal "&lt;" the author wrote.
+    assert_eq!(escape_html("&lt;"), "&amp;lt;");
+    assert_eq!(unescape_html("&amp;lt;"), "&lt;");
+    assert_eq!(escape_html("&amp;"), "&amp;amp;");
+    assert_eq!(unescape_html("&amp;amp;"), "&amp;");
+}
+
+#[test]
+fn test_unescape_html_leaves_foreign_entities_verbatim() {
+    // Scope is limited to the three entities escape_html can emit. Anything
+    // else must survive untouched — otherwise hand-authored labels from other
+    // lanes get silently rewritten.
+    assert_eq!(
+        unescape_html("&#65; &quot;q&quot; &apos;a&apos;"),
+        "&#65; &quot;q&quot; &apos;a&apos;"
+    );
+    assert_eq!(unescape_html("&rarr; &bull; &mdash;"), "&rarr; &bull; &mdash;");
+    assert_eq!(unescape_html("&unknown; &"), "&unknown; &");
+}
+
+#[test]
+fn test_unescape_html_restores_owner_label_display_width() {
+    // The defect this guards (#396): the escaped form of the owner's label is
+    // 34 characters, over the 30-unit solo button budget, while its display
+    // text is 30 and fits. Measuring the escaped form folded the button to a
+    // bare digit.
+    let label = "Acknowledge & stamp gap closed";
+    let escaped = escape_html(label);
+    assert_eq!(label.chars().count(), 30);
+    assert_eq!(escaped.chars().count(), 34);
+    assert_eq!(unescape_html(&escaped).chars().count(), 30);
+    assert_eq!(unescape_html(&escaped), label);
 }
