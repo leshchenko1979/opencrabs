@@ -1158,6 +1158,13 @@ pub(crate) async fn handle_message(
         wa_state.clear_pending_followups(session_id).await;
     }
 
+    // #319: a fresh exchange — re-arm the latch that `enqueue_image_reentry`
+    // spends in the delivery path, so a failure in this new turn gets its own
+    // correction turn. Deliberately OUTSIDE the follow-up branch above: a
+    // suggestion tap is still an inbound user message, so it opens a new
+    // exchange too.
+    wa_state.image_reentry.clear(session_id);
+
     // Fast-cancel: any recognised stop intent, in any supported language (#965).
     //
     // Cancellation is scoped to explicit stop requests and genuine follow-up
@@ -2000,6 +2007,23 @@ pub(crate) async fn handle_message(
             // branches so a reply whose only content was a broken image
             // reference still sends something (#286).
             let text_content = crate::utils::append_failure_notice(&text_content, &image_failures);
+
+            // #319: the model is told as well, once per exchange, so it can
+            // correct the delivery instead of believing the image arrived.
+            // The latch is spent before dispatching, so a second failure in the
+            // same exchange stays notice-only.
+            if crate::channels::image_reentry::enqueue_image_reentry(
+                &wa_state.image_reentry,
+                session_id,
+                &image_failures,
+                |msg| agent.enqueue_session_message(session_id, msg),
+            ) {
+                tracing::info!(
+                    "WhatsApp: post-delivery image re-entry queued for session {session_id} \
+                     ({} failure(s))",
+                    image_failures.len()
+                );
+            }
 
             // Send text response (markers stripped).
             // Skip if already delivered progressively via the intermediate-text callback
