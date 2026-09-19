@@ -214,3 +214,25 @@ fn template_placeholder_row_yields_no_timezone() {
 ";
     assert!(parse_timezone_heuristic(user_md).is_none());
 }
+
+/// Regression from LIVE data, not a synthetic case: the default profile's
+/// `USER.md` declares the timezone in a table row FOLLOWED BY PROSE —
+/// `| **Timezone** | Москва (МСК, UTC+3) — Алексей живёт в этом поясе… |`.
+/// That row sits ABOVE the profile's plain `**Timezone:** Europe/Moscow (МСК)`
+/// line, so once table rows became readable the row wins the first-match scan.
+///
+/// Before the first-`)` cut in `split_parenthetical`, the label slot absorbed
+/// the entire sentence (`split_once('(')` then `trim_end_matches(')')` cannot
+/// see a group close that prose has pushed off the end of the line) and
+/// `format_dual_time` rendered it verbatim into every turn's
+/// `[Current time: … (user: …)]` marker. The zone was never wrong — the label
+/// was unbounded, and it is injected into context on every turn.
+#[test]
+fn table_row_followed_by_prose_keeps_label_bounded() {
+    let user_md = "\
+| **Timezone** | Москва (МСК, UTC+3) — Алексей живёт в этом поясе и предпочитает, чтобы всё время в отчётах указывалось в нём, а не в UTC (директива 18.09.2026) |
+";
+    let info = parse_timezone_heuristic(user_md).expect("table row should parse");
+    assert_eq!(info.tz, Tz::Europe__Moscow);
+    assert_eq!(info.label.as_deref(), Some("МСК, UTC+3"));
+}
