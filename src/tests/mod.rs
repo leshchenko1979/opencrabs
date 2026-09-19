@@ -444,6 +444,8 @@ pub mod stored_key_test;
 pub mod systemd_unit_test;
 pub mod tasks_list_test;
 #[cfg(feature = "telegram")]
+pub mod telegram_await_sweep_test;
+#[cfg(feature = "telegram")]
 pub mod telegram_callback_session_topic_test;
 pub mod telegram_cancel_token_no_drop_test;
 pub mod telegram_details_fallback_render_test;

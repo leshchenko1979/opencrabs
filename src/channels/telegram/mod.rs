@@ -4,6 +4,7 @@
 //! allowlisted users to the AgentService and replying with responses.
 
 pub(crate) mod agent;
+pub(crate) mod await_sweep;
 pub(crate) mod commands_tg;
 pub mod config_alerts;
 pub(crate) mod cowork;
