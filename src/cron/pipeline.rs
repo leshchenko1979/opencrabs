@@ -1,6 +1,4 @@
 use crate::brain::goal::GoalManager;
-use crate::channels::target_resolver::extract_session_target;
-use crate::cron::scheduler::resolve_session_target;
 use crate::cron::trigger::{TriggerCondition, TriggerResult, TriggerRunner};
 use crate::db::models::{CronJob, CronJobRun};
 use crate::db::repository::CronJobRunRepository;
@@ -111,20 +109,13 @@ impl PipelineExecutor {
             return Ok(None);
         };
 
-        let Some(sid_raw) = extract_session_target(deliver_to) else {
-            return Ok(None);
-        };
-
-        let session_repo = crate::db::repository::SessionRepository::new(ctx.pool());
-        let sessions = session_repo
-            .list(crate::db::repository::SessionListOptions {
-                include_archived: true,
-                include_subagents: true,
-                ..Default::default()
-            })
-            .await
-            .unwrap_or_default();
-        let target_uuid = resolve_session_target(&sessions, sid_raw);
+        // ONE job-scoped session resolver (#332, D5) — archived and subagent
+        // rows included, `session:`/`oc://session/` grammar handled inside.
+        let target_uuid = crate::cli::session_resolve::resolve_job_session_target(
+            &ctx.pool(),
+            deliver_to,
+        )
+        .await;
 
         if let Some(uuid) = target_uuid {
             let goal_text = if let Some(ref tmpl) = job.goal_template {

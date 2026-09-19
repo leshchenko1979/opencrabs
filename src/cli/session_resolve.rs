@@ -83,6 +83,46 @@ pub(crate) async fn resolve_session_id_with_service(
     resolve_session_id(&sessions, id).map_err(anyhow::Error::msg)
 }
 
+/// Resolve a cron `deliver_to` session target against the DB (#332).
+///
+/// This is the **permissive tier** of the same concern the resolvers above
+/// cover. A scheduled job's target is written once, at create/update time, and
+/// must keep resolving for the life of the job — but the session it names can
+/// be archived, or can be a sub-agent session, long after the job was written.
+/// The three hand-rolled call sites this replaces disagreed on exactly that:
+/// some listed with `include_archived: false`, so a job silently lost its
+/// target the moment the session was archived, and delivery collapsed to
+/// nowhere with a misleading "no session matches" reason.
+///
+/// So this helper resolves against EVERY session — archived and subagent rows
+/// included — and every job-scoped caller shares it. Accepts the same grammar
+/// as the rest of the `deliver_to` surface: `session:<uuid|prefix>` and the
+/// `oc://session/<uuid|prefix>` URL form, both through
+/// [`extract_session_target`](crate::channels::target_resolver::extract_session_target).
+///
+/// Full UUIDs pass through without a DB hit (resolver parity). Anything else is
+/// matched as a case-insensitive prefix by [`resolve_one_by_prefix`]: `None`
+/// covers both "no match" and "ambiguous" — the caller owns the loud failure.
+pub(crate) async fn resolve_job_session_target(
+    pool: &crate::db::Pool,
+    raw_target: &str,
+) -> Option<Uuid> {
+    let raw = crate::channels::target_resolver::extract_session_target(raw_target)?;
+    if let Ok(uuid) = Uuid::parse_str(raw) {
+        return Some(uuid);
+    }
+    use crate::db::repository::{SessionListOptions, SessionRepository};
+    let sessions = SessionRepository::new(pool.clone())
+        .list(SessionListOptions {
+            include_archived: true,
+            include_subagents: true,
+            ..Default::default()
+        })
+        .await
+        .ok()?;
+    resolve_one_by_prefix(&sessions, raw).ok()
+}
+
 /// Resolve `--session <arg>` against the DB: an existing session id resumes,
 /// `None` creates a fresh one titled `default_title` (#1368).
 ///

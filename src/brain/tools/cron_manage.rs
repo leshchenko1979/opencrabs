@@ -995,22 +995,14 @@ pub(crate) async fn bake_delivery_target(
             return Ok(format!("session:{u}"));
         }
         if let Some(sc) = &context.service_context {
-            let service = crate::services::SessionService::new(sc.clone());
-            let list_res = service
-                .list_sessions(crate::db::repository::SessionListOptions {
-                    include_archived: false,
-                    limit: None,
-                    offset: 0,
-                    query: None,
-                    include_subagents: false,
-                })
-                .await;
-            if let Ok(sessions) = list_res {
-                let resolved =
-                    crate::cli::session_resolve::resolve_one_by_prefix(&sessions, id_str);
-                if let Ok(session) = resolved {
-                    return Ok(format!("session:{session}"));
-                }
+            // ONE job-scoped session resolver (#332, D5): archived and subagent
+            // sessions resolve, matching the fire-time delivery path — a job
+            // baked against an archived session must not resolve differently
+            // here than it does when it fires.
+            if let Some(session) =
+                crate::cli::session_resolve::resolve_job_session_target(&sc.pool(), raw).await
+            {
+                return Ok(format!("session:{session}"));
             }
         }
         return Ok(format!("session:{id_str}"));
