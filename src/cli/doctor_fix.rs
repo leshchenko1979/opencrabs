@@ -3,6 +3,7 @@
 //! Detection + repair of common stuck states. Every action returns what it
 //! changed so the CLI output doubles as the audit log (what, where, why).
 
+use crate::config::profile::InstanceOwner;
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -14,31 +15,111 @@ pub(crate) struct FixReport {
     pub detail: String,
 }
 
-/// Clear cron run rows stuck in `running` longer than `max_age_secs`.
+/// Who a stuck-run sweep may declare dead (#332, D4).
+///
+/// The two callers of [`run_all`] sit in genuinely different positions, so the
+/// policy is stated at the call site rather than inferred from an age: the
+/// startup sweep has just taken the instance lock and therefore owns nothing,
+/// while an explicit `--fix` may be racing a live daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClearPolicy {
+    /// The startup sweep: this process has just acquired the profile's instance
+    /// lock, so it cannot own any pre-existing row — every `running` row is an
+    /// orphan by definition, however young. Clearing them here, instead of
+    /// after an age threshold, is what stops a restart orphan from being read
+    /// as in-flight work by the #277 guard.
+    OrphanedAtStartup,
+    /// An explicit `--fix` on a possibly-live box: another process may be
+    /// running a job right now, so a row is cleared only when no live instance
+    /// owns the profile at all, or when it is past the age backstop.
+    Conservative,
+}
+
+impl ClearPolicy {
+    /// Does this policy declare every `running` row dead, whatever its age?
+    fn clears_everything(self, owner: InstanceOwner) -> bool {
+        match self {
+            // A process that has just taken the lock owns no pre-existing row.
+            Self::OrphanedAtStartup => true,
+            // `Self_` counts as live: this process holds the lock, so a row it
+            // wrote may still be executing.
+            Self::Conservative => matches!(owner, InstanceOwner::None),
+        }
+    }
+
+    /// Short name for the audit trail.
+    fn label(self) -> &'static str {
+        match self {
+            Self::OrphanedAtStartup => "orphaned-at-startup",
+            Self::Conservative => "conservative",
+        }
+    }
+}
+
+/// Why a row was marked interrupted: no live process can own it.
+const ORPHANED_REASON: &str =
+    "interrupted: cleared by doctor --fix (orphaned: no live process owns this run)";
+
+/// Why a row was marked interrupted: it outlived the age backstop.
+const AGED_REASON: &str = "interrupted: cleared by doctor --fix (no completion within max age)";
+
+/// Clear every `running` row: nothing can own one.
+const CLEAR_ORPHANS_SQL: &str = "UPDATE cron_job_runs SET status='interrupted', error=?1, \
+     completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+     WHERE status='running'";
+
+/// Clear only the `running` rows that outlived the age backstop.
+const CLEAR_AGED_SQL: &str = "UPDATE cron_job_runs SET status='interrupted', error=?1, \
+     completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+     WHERE status='running' AND started_at < ?2";
+
+/// Clear cron run rows left in `running` by a process that is gone.
 ///
 /// A crash between insert and mark-finish leaves `status='running'` forever,
 /// and anything reading runs treats those as live work (#1114). Rows only
 /// enter `running` via the insert path, which writes RFC3339 `+00:00`
 /// timestamps, so a lexicographic comparison against a cutoff in the same
 /// format is exact for exactly this population.
+///
+/// WHICH rows are orphans is decided by `policy` plus the live instance lock
+/// (#332, D4) — see `clear_stuck_cron_runs_with_owner`, the core this reads
+/// the owner for.
 pub async fn clear_stuck_cron_runs(
     pool: &crate::db::Pool,
+    policy: ClearPolicy,
     max_age_secs: i64,
 ) -> anyhow::Result<usize> {
-    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(max_age_secs)).to_rfc3339();
+    // The DB being swept and this lock resolve from the SAME profile, so the
+    // owner read is about the very rows in question.
+    let owner =
+        crate::config::profile::instance_owner(&crate::config::profile::current_profile_name());
+    clear_stuck_cron_runs_with_owner(pool, policy, owner, max_age_secs).await
+}
+
+/// Owner-injectable core of [`clear_stuck_cron_runs`] — the same split as
+/// `instance_owner_in` (`src/config/profile.rs`), so a test states the owner
+/// instead of writing the live `~/.opencrabs/locks/instance/<profile>.lock`.
+pub(crate) async fn clear_stuck_cron_runs_with_owner(
+    pool: &crate::db::Pool,
+    policy: ClearPolicy,
+    owner: InstanceOwner,
+    max_age_secs: i64,
+) -> anyhow::Result<usize> {
+    let clear_everything = policy.clears_everything(owner);
+    let (sql, reason) = if clear_everything {
+        (CLEAR_ORPHANS_SQL, ORPHANED_REASON)
+    } else {
+        (CLEAR_AGED_SQL, AGED_REASON)
+    };
+    let mut params = vec![reason.to_string()];
+    if !clear_everything {
+        params.push((chrono::Utc::now() - chrono::Duration::seconds(max_age_secs)).to_rfc3339());
+    }
     let n = pool
         .get()
         .await
         .context("Failed to get connection")?
-        .interact(move |conn| {
-            conn.execute(
-                "UPDATE cron_job_runs SET status='interrupted', \
-                 error='interrupted: cleared by doctor --fix (no completion within max age)', \
-                 completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
-                 WHERE status='running' AND started_at < ?1",
-                [cutoff],
-            )
-        })
+        .interact(move |conn| conn.execute(sql, rusqlite::params_from_iter(params)))
         .await
         // InteractError doesn't implement std::error::Error, so map it manually
         .map_err(|_| anyhow::anyhow!("cron interact failed"))??;
@@ -128,9 +209,14 @@ pub fn fix_brain_log_permissions(home: &Path) -> Vec<FixReport> {
     fixed
 }
 
-/// A cron run stuck in `running` longer than this is dead (crash between
-/// insert and mark-finish); anything shorter might still be live work.
-pub const STUCK_CRON_MAX_AGE_SECS: i64 = 3600;
+/// Age past which a `running` row is dead even on a box with a live owner.
+///
+/// Only [`ClearPolicy::Conservative`] consults it: at startup, orphanhood
+/// settles the question outright. 4h sits above the longest legitimate run
+/// measured for #332 (5534s) and below the oldest row that genuinely needed
+/// reclaiming (33573s), so live work is never declared interrupted while real
+/// residue is still collectable by this path.
+pub const STUCK_CRON_MAX_AGE_SECS: i64 = 14400;
 
 /// Pre-init markers older than this are residue: a session that entered
 /// plan intent and never reached `init` within a week is not coming back.
@@ -139,20 +225,23 @@ pub const PREINIT_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
 /// Run every repair and return the combined report (the audit trail).
 ///
 /// Cron rows need the pool; markers and permissions are pure filesystem.
-/// Callers render the reports: `cmd_doctor` prints them, the startup sweep
-/// logs them.
+/// `policy` is the caller's statement about whether it can own a pre-existing
+/// `running` row (#332, D4) — the startup sweep cannot, an explicit `--fix`
+/// on a live box can. Callers render the reports: `cmd_doctor` prints them,
+/// the startup sweep logs them.
 #[cfg_attr(not(unix), allow(unused_variables))]
 pub async fn run_all(
     pool: &crate::db::Pool,
     marker_roots: &[PathBuf],
     home: &Path,
+    policy: ClearPolicy,
 ) -> anyhow::Result<Vec<FixReport>> {
     let mut reports = Vec::new();
-    let stuck = clear_stuck_cron_runs(pool, STUCK_CRON_MAX_AGE_SECS).await?;
+    let stuck = clear_stuck_cron_runs(pool, policy, STUCK_CRON_MAX_AGE_SECS).await?;
     if stuck > 0 {
         reports.push(FixReport {
             action: "stuck-cron-rows-cleared",
-            detail: format!("{stuck} row(s) marked interrupted"),
+            detail: format!("{stuck} row(s) marked interrupted ({})", policy.label()),
         });
     }
     reports.extend(clear_stale_preinit_markers(marker_roots, PREINIT_MAX_AGE));
