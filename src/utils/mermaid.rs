@@ -180,10 +180,13 @@ pub(crate) fn format_mermaid_error(context: &str, errors: &[String]) -> String {
 // ── Render-probe seam (dependency inversion) ──
 //
 // Validation is only meaningful where a renderer exists: the verdict comes
-// from the renderer, not from a local parser. A channel installs its probe
-// once at construction; every caller then asks one question — "what does the
-// renderer say is wrong with the mermaid in this text?" — and gets an empty
-// list when there is nothing to fix (no renderer installed, or a clean parse).
+// from the renderer, not from a local parser. The probe resolves in two steps —
+// a probe a channel installed at runtime wins, otherwise the channel compiled
+// into this build answers, so a process that never constructs a channel (a
+// one-shot `run`, a test binary) still validates. Every caller then asks one
+// question — "what does the renderer say is wrong with the mermaid in this
+// text?" — and gets an empty list when there is nothing to fix (no rendering
+// channel in the build, or a clean parse).
 
 /// A channel that can render diagrams. The renderer — not a local parser —
 /// produces the verdict, so validation is only meaningful where a renderer
@@ -206,10 +209,29 @@ pub fn probe() -> Option<&'static dyn MermaidProbe> {
     PROBE.get().map(|b| b.as_ref())
 }
 
+/// The probe a build compiles in, if any: a rendering channel present at
+/// compile time answers validation in EVERY process — including one that never
+/// constructs that channel (a one-shot `run`, a test binary). A build with no
+/// rendering channel has none, and the seam stays the documented no-op.
+fn compiled_in_probe() -> Option<&'static dyn MermaidProbe> {
+    #[cfg(feature = "telegram")]
+    {
+        Some(crate::channels::telegram::agent::telegram_probe())
+    }
+    #[cfg(not(feature = "telegram"))]
+    {
+        None
+    }
+}
+
 /// Channel-agnostic entry point: what the renderer reports as wrong with the
 /// mermaid in `text`. Empty = nothing to fix.
+///
+/// A probe installed at runtime wins; otherwise the compiled-in channel
+/// answers. Either way the verdict comes from a renderer — this never falls
+/// back to a local parser.
 pub async fn validate(text: &str) -> Vec<String> {
-    validate_with(probe(), text).await
+    validate_with(probe().or_else(compiled_in_probe), text).await
 }
 
 /// Probe-explicit core, so both the installed and no-probe cases are testable
