@@ -8,7 +8,7 @@
 
 use crate::db::{Pool, database::interact_err};
 use anyhow::{Context, Result};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 /// What kind of interaction last refreshed a binding (#180).
 ///
@@ -341,11 +341,9 @@ impl SessionBindingRepository {
             .await
             .context("Failed to get connection")?
             .interact(move |conn| {
-                let mut rows = conn.prepare(&sql)?.query_map(params![sid], map_binding)?;
-                match rows.next() {
-                    Some(bound) => Ok(Some(bound?)),
-                    None => Ok(None),
-                }
+                conn.prepare(&sql)?
+                    .query_row(params![sid], map_binding)
+                    .optional()
             })
             .await
             .map_err(interact_err)?
