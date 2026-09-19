@@ -105,6 +105,17 @@ pub(crate) fn register_core_agent_tools(
     // the human to type /goal. The post-turn judge already activates on any
     // active goal row, tool-set or slash-set alike.
     tool_registry.register(Arc::new(crate::brain::tools::goal_manage::GoalManageTool));
+    // Await external — the durable write path for a lane parking on an
+    // external completion (#344). Both the boot classifier's `awaiting` bucket
+    // and the periodic sweep read the record this writes, so neither a daemon
+    // restart nor a completion that never arrives can leave a lane silently
+    // comatose. It needs the session-binding repository because the record IS
+    // the binding row.
+    tool_registry.register(Arc::new(
+        crate::brain::tools::await_external::AwaitExternalTool::new(
+            crate::db::SessionBindingRepository::new(db.pool().clone()),
+        ),
+    ));
     // A2A send — agent can communicate with remote A2A agents
     tool_registry.register(Arc::new(crate::brain::tools::a2a_send::A2aSendTool::new()));
     tool_registry.register(Arc::new(

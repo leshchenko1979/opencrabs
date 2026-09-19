@@ -50,6 +50,7 @@ pub mod approval_policy_resolution_test;
 pub mod atomic_write_test;
 pub mod auto_title_e2e_test;
 pub mod auto_title_test;
+pub mod await_external_tool_test;
 pub mod background_indicator_test;
 pub mod background_session_test;
 pub mod background_task_persistence_test;
