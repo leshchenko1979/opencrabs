@@ -145,3 +145,126 @@ fn resolved_target_deliver_to_session_format() {
 
     assert_eq!(rt.deliver_to(), format!("session:{id}"));
 }
+
+// ---------------------------------------------------------------------------
+// #332 — the job-scoped DB tier (`resolve_job_session_target`).
+//
+// The pure core above is policy-free; the DB tier is where the ARCHIVED policy
+// lives. Before #332 the three job-scoped call sites disagreed on it:
+// `bake_delivery_target` and `resolve_or_create_cron_session` listed live rows
+// only, so an archived target silently stopped resolving and delivery
+// collapsed to nowhere with a misleading "no session matches" reason. These
+// tests pin the shared helper's contract against a real in-memory DB with the
+// real migrations.
+// ---------------------------------------------------------------------------
+
+use crate::cli::session_resolve::resolve_job_session_target;
+use crate::db::Database;
+
+async fn test_db() -> crate::db::Pool {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    db.pool().clone()
+}
+
+fn titled_session(id: Uuid, title: &str) -> crate::db::models::Session {
+    let mut s = session_with_id(id);
+    s.title = Some(title.to_string());
+    s
+}
+
+/// A live session resolves by prefix.
+#[tokio::test]
+async fn job_target_resolves_live_session_by_prefix() {
+    let pool = test_db().await;
+    let repo = crate::db::repository::SessionRepository::new(pool.clone());
+    let id = Uuid::new_v4();
+    repo.create(&titled_session(id, "live")).await.unwrap();
+
+    let target = format!("session:{}", &id.to_string()[..8]);
+    assert_eq!(resolve_job_session_target(&pool, &target).await, Some(id));
+}
+
+/// The #332 regression itself: an ARCHIVED session still resolves. This is the
+/// whole point of the helper — a job's target outlives the session's lifecycle
+/// state, and the old `include_archived: false` listings lost it.
+#[tokio::test]
+async fn job_target_resolves_archived_session_by_prefix() {
+    let pool = test_db().await;
+    let repo = crate::db::repository::SessionRepository::new(pool.clone());
+    let id = Uuid::new_v4();
+    repo.create(&titled_session(id, "archived")).await.unwrap();
+    repo.archive(id).await.unwrap();
+
+    // Preconditions — without these the test would also pass against the OLD
+    // live-only listing and prove nothing.
+    assert!(
+        repo.list_archived().await.unwrap().iter().any(|s| s.id == id),
+        "precondition: the row must really be archived"
+    );
+    assert!(
+        !repo
+            .list(crate::db::repository::SessionListOptions {
+                include_archived: false,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == id),
+        "precondition: an archived row must be absent from a live-only listing"
+    );
+
+    let target = format!("session:{}", &id.to_string()[..8]);
+    assert_eq!(resolve_job_session_target(&pool, &target).await, Some(id));
+}
+
+/// Full UUIDs pass through with no rows in the table — fast-path parity with
+/// the pure core.
+#[tokio::test]
+async fn job_target_full_uuid_passthrough_without_rows() {
+    let pool = test_db().await;
+    let id = Uuid::new_v4();
+    assert_eq!(
+        resolve_job_session_target(&pool, &format!("session:{id}")).await,
+        Some(id)
+    );
+}
+
+/// The `oc://session/<id>` URL form is accepted too — one grammar for the whole
+/// `deliver_to` surface, extracted inside the helper.
+#[tokio::test]
+async fn job_target_accepts_oc_url_form() {
+    let pool = test_db().await;
+    let id = Uuid::new_v4();
+    assert_eq!(
+        resolve_job_session_target(&pool, &format!("oc://session/{id}")).await,
+        Some(id)
+    );
+}
+
+/// A channel target is not a session target: `None`, no panic, and no
+/// accidental prefix match against the session table.
+#[tokio::test]
+async fn job_target_rejects_non_session_grammar() {
+    let pool = test_db().await;
+    assert_eq!(
+        resolve_job_session_target(&pool, "telegram:123456:78").await,
+        None
+    );
+    assert_eq!(resolve_job_session_target(&pool, "oc://telegram/123/78").await, None);
+}
+
+/// A prefix matching no session is `None` (the caller owns the loud failure).
+#[tokio::test]
+async fn job_target_unknown_prefix_rejects() {
+    let pool = test_db().await;
+    let repo = crate::db::repository::SessionRepository::new(pool.clone());
+    repo.create(&titled_session(Uuid::new_v4(), "someone"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve_job_session_target(&pool, "session:zzzzzzzz").await,
+        None
+    );
+}

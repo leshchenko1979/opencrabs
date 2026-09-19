@@ -688,9 +688,16 @@ pub(crate) async fn resolve_or_create_cron_session(
 
     use crate::db::repository::SessionListOptions;
     let session_svc = SessionService::new(ctx.clone());
+    // `include_archived: true` — the lookup key is the job's title suffix, and
+    // an archived session is still this job's session (#332, D5). Listing only
+    // live rows made an archived session invisible, so the next fire minted a
+    // DUPLICATE `Cron: <name> <suffix>` session and orphaned the old one's
+    // context. Archived sessions are resumable everywhere else in the codebase
+    // (`session get`/`notify`, `resolve_session_id_with_service`); the job
+    // lookup now matches that policy.
     let sessions = session_svc
         .list_sessions(SessionListOptions {
-            include_archived: false,
+            include_archived: true,
             limit: None,
             offset: 0,
             query: None,
@@ -1050,26 +1057,31 @@ pub(crate) fn parse_telegram_target(target: &str) -> Option<(i64, Option<i64>)> 
 }
 
 /// Parse a session target out of a `deliver_to` entry (fork #144).
-/// Grammar: `session:<uuid-or-8+-char-prefix>` → the target session id.
-/// Full UUIDs pass through untouched; anything else is matched as a
-/// case-insensitive prefix against the session DB via the shared resolver
-/// (`crate::cli::session_resolve`) so operators can paste the short id that
-/// `session list` prints. Anything else → `None`; the caller owns the loud
-/// failure.
-pub(crate) async fn parse_session_target(target: &str) -> Option<Uuid> {
-    // Full UUID fast path — no DB needed (resolver passthrough parity).
-    if let Ok(uuid) = Uuid::parse_str(target) {
-        return Some(uuid);
+/// Grammar: `session:<uuid-or-prefix>` (and the `oc://session/…` URL form) →
+/// the target session id.
+///
+/// Thin shell over [`resolve_job_session_target`], the ONE job-scoped session
+/// resolver (#332). Archived and subagent sessions resolve — a job's target
+/// outlives the session's lifecycle state. Anything else → `None`; the caller
+/// owns the loud failure.
+///
+/// [`resolve_job_session_target`]: crate::cli::session_resolve::resolve_job_session_target
+pub(crate) async fn parse_session_target(
+    target: &str,
+    pool: Option<&crate::db::Pool>,
+) -> Option<Uuid> {
+    // A surface that already holds a pool (the delivery path does) reuses it;
+    // opening a second connection to the same DB file per delivery was pure
+    // overhead.
+    if let Some(pool) = pool {
+        return crate::cli::session_resolve::resolve_job_session_target(pool, target).await;
     }
     let config = crate::config::Config::load().ok()?;
     let db = crate::db::Database::connect(&config.database.path)
         .await
         .ok()?;
-    let sessions = crate::db::repository::SessionRepository::new(db.pool().clone())
-        .list(crate::db::repository::SessionListOptions::default())
-        .await
-        .ok()?;
-    resolve_session_target(&sessions, target)
+    let pool = db.pool().clone();
+    crate::cli::session_resolve::resolve_job_session_target(&pool, target).await
 }
 
 /// Pure resolution over a session set — the testable core. Full UUIDs are
@@ -1157,7 +1169,7 @@ async fn deliver_result(
             // are turn outputs, so the default mode is `turn-end` (never
             // derail a mid-turn session — the target drains at its next
             // boundary); `quiet` rides the same policy when configured.
-            let Some(session_id) = parse_session_target(target_id).await else {
+            let Some(session_id) = parse_session_target(target_id, pool.as_ref()).await else {
                 tracing::error!(
                     "Invalid session deliver_to target '{target_id}' for job '{job_name}' \
                      — no session matches; not delivering"
