@@ -1828,6 +1828,12 @@ pub(crate) fn short_session_id(uuid: Uuid) -> String {
 /// Captures sessions across longer CI cycles, tool intervals, and daemon restarts.
 pub const WAKE_RECENT_SECS: i64 = 3600;
 
+/// One resumable lane: `(session_id, chat_id, thread_id_raw)`. Both resumable
+/// buckets in [`BootWakeRecovery`] carry this shape and every wake source
+/// spawns them through a single path, so the type is named once rather than
+/// repeated (#344).
+pub type ResumeTargets = Vec<(Uuid, i64, Option<i64>)>;
+
 /// Promote the boot wake pass from notifier to RECOVERY (#33, owner-approved
 /// design 2026-08-29 22:02Z). The on-disk journal only rescues turns that
 /// were literally mid-loop at the kill instant; between-turn sessions have no
@@ -1843,11 +1849,6 @@ pub const WAKE_RECENT_SECS: i64 = 3600;
 /// - bot already replied → turn completed before the kill → log only.
 /// - no persisted topic messages → unclassifiable → log only (resuming
 ///   blind could replay noise the journal never saw).
-/// One resumable lane: `(session_id, chat_id, thread_id_raw)`. Both resumable
-/// buckets below carry this shape and the caller spawns them through a single
-/// path, so the type is named once rather than repeated (#344).
-pub type ResumeTargets = Vec<(Uuid, i64, Option<i64>)>;
-
 pub struct BootWakeRecovery {
     /// Triples whose topic's last message is from a user. Caller spawns the
     /// resume continuation.
