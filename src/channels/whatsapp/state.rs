@@ -109,6 +109,12 @@ pub struct WhatsAppState {
     /// loops, the resume path and the drainer task - one budget for the
     /// whole channel. `pub(crate)` so brain/tools can gate through it.
     pub(crate) rate_limiter: std::sync::Arc<super::rate_limit::WhatsappRateLimiter>,
+    /// #319: bounds the post-delivery image re-entry to one per user exchange,
+    /// so an image WhatsApp refused at send time is reported to the MODEL
+    /// exactly once instead of chaining correction turns. Re-armed by the next
+    /// inbound user message (`handler.rs`). `pub(crate)` so the wiring test in
+    /// `src/tests/` can exercise it.
+    pub(crate) image_reentry: crate::channels::image_reentry::ImageReentryLatch,
 }
 
 impl Default for WhatsAppState {
@@ -146,6 +152,7 @@ impl WhatsAppState {
             blocklist: super::blocklist::Blocklist::default(),
             outbox: super::outbox::Outbox::default(),
             rate_limiter: std::sync::Arc::new(super::rate_limit::WhatsappRateLimiter::new()),
+            image_reentry: crate::channels::image_reentry::ImageReentryLatch::new(),
         }
     }
 }
