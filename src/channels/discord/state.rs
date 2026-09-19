@@ -44,6 +44,12 @@ pub struct DiscordState {
     /// interaction can re-render after the turn ended. Insertion-ordered
     /// for pruning; bounded at [`Self::TOOL_GROUP_CAP`] (see `tool_group`).
     pub(super) tool_groups: Mutex<(Vec<u64>, HashMap<u64, tool_group::GroupState>)>,
+    /// #319: bounds the post-delivery image re-entry to one per user exchange,
+    /// so an image Discord refused at send time is reported to the MODEL
+    /// exactly once instead of chaining correction turns. Re-armed by the next
+    /// inbound user message (`handler.rs`). `pub(crate)` so the wiring test in
+    /// `src/tests/` can exercise it.
+    pub(crate) image_reentry: crate::channels::image_reentry::ImageReentryLatch,
 }
 
 impl Default for DiscordState {
@@ -66,6 +72,7 @@ impl DiscordState {
             pending_selects: Mutex::new(HashMap::new()),
             pending_forms: Mutex::new(HashMap::new()),
             tool_groups: Mutex::new((Vec::new(), HashMap::new())),
+            image_reentry: crate::channels::image_reentry::ImageReentryLatch::new(),
         }
     }
 }

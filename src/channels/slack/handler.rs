@@ -1082,6 +1082,11 @@ async fn handle_message(
     // the previous turn are stale now (#599).
     state.slack_state.clear_pending_followups(session_id).await;
 
+    // #319: a fresh exchange — re-arm the latch that `enqueue_image_reentry`
+    // spends in the delivery path, so a failure in this new turn gets its own
+    // correction turn.
+    state.slack_state.image_reentry.clear(session_id);
+
     // Process attached files — images as <<IMG:tmp_path>>, text files extracted inline
     let mut content = text.clone();
     // Set to true if an incoming audio attachment is successfully transcribed.
@@ -2304,6 +2309,23 @@ async fn handle_message(
             // An image the reply announced must not vanish silently: name the
             // ones that could not be attached (#286).
             let text_only = crate::utils::append_failure_notice(&text_only, &image_failures);
+
+            // #319: the model is told as well, once per exchange, so it can
+            // correct the delivery instead of believing the image arrived.
+            // The latch is spent before dispatching, so a second failure in the
+            // same exchange stays notice-only.
+            if crate::channels::image_reentry::enqueue_image_reentry(
+                &state.slack_state.image_reentry,
+                session_id,
+                &image_failures,
+                |msg| state.agent.enqueue_session_message(session_id, msg),
+            ) {
+                tracing::info!(
+                    "Slack: post-delivery image re-entry queued for session {session_id} \
+                     ({} failure(s))",
+                    image_failures.len()
+                );
+            }
 
             let chunks: Vec<String> = split_message(&text_only, 3000)
                 .into_iter()

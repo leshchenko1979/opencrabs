@@ -864,6 +864,12 @@ pub(crate) async fn handle_message(
         session_id,
         agent.message_enqueue_callback(),
     );
+
+    // #319: a fresh exchange — re-arm the latch that `enqueue_image_reentry`
+    // spends in the delivery path, so a failure in this new turn gets its own
+    // correction turn. Discord has no clear_pending_followups; this per-turn
+    // claim site is its re-arm point.
+    discord_state.image_reentry.clear(session_id);
     let approval_cb = make_approval_callback(discord_state.clone());
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -1420,6 +1426,23 @@ pub(crate) async fn handle_message(
                 Some(notice) => format!("{text_only}\n\n{notice}"),
                 None => text_only,
             };
+
+            // #319: the model is told as well, once per exchange, so it can
+            // correct the delivery instead of believing the image arrived.
+            // Placed after the notice is computed, so both delivery shapes
+            // already carry it; the latch is spent before dispatching.
+            if crate::channels::image_reentry::enqueue_image_reentry(
+                &discord_state.image_reentry,
+                session_id,
+                &image_failures,
+                |msg| agent.enqueue_session_message(session_id, msg),
+            ) {
+                tracing::info!(
+                    "Discord: post-delivery image re-entry queued for session {session_id} \
+                     ({} failure(s))",
+                    image_failures.len()
+                );
+            }
 
             if skip_final_post {
                 // Answer already visible via the kept intermediate: append the
