@@ -722,6 +722,7 @@ mod xiaomi_keyed_provider_regression_test;
 mod xiaomi_onboarding_test;
 //pub mod plan_mode_integration_test;
 pub mod scope_all_recency_test;
+pub mod session_binding_repo_test;
 pub mod session_cwd_restore_test;
 pub mod session_enqueue_callback_test;
 pub mod session_notify_test;
