@@ -169,21 +169,34 @@ impl MermaidStyle {
         q
     }
 
-    /// The base64url payload for one diagram: a JSON state object carrying the
-    /// source, the glyph palette, and the honoured `themeVariables`.
+    /// The base64url payload for one diagram: mermaid.ink's JSON state object,
+    /// carrying the source and the `mermaid` config (theme + palette).
+    ///
+    /// `themeVariables` MUST sit INSIDE the `mermaid` object. mermaid.ink
+    /// reads the top-level `mermaid` key as the mermaid CONFIG and ignores
+    /// every other top-level key but `code`/`autoSync`/`updateDiagram`, so a
+    /// top-level `themeVariables` is silently discarded. Measured on the wire
+    /// 2026-09-19, same diagram, same `?type=png&bgColor=282d37`: hoisting the
+    /// palette to the top level renders BYTE-IDENTICAL to a payload carrying
+    /// no palette at all (19802 B, zero `#ffffff` pixels, connector contrast
+    /// 9.22:1); the nested form lands it (20318 B, 95 `#ffffff` pixels,
+    /// connector contrast 13.81:1). Nested is the only form that reaches the
+    /// renderer.
     pub(crate) fn payload(&self, source: &str) -> String {
         let p = &self.palette;
         base64url(
             &json!({
                 "code": source,
-                "mermaid": { "theme": self.theme },
-                "themeVariables": {
-                    "lineColor": p.line,
-                    "nodeBorder": p.node_border,
-                    "mainBkg": p.main_bkg,
-                    "clusterBkg": p.cluster_bkg,
-                    "clusterBorder": p.cluster_border,
-                    "textColor": p.text,
+                "mermaid": {
+                    "theme": self.theme,
+                    "themeVariables": {
+                        "lineColor": p.line,
+                        "nodeBorder": p.node_border,
+                        "mainBkg": p.main_bkg,
+                        "clusterBkg": p.cluster_bkg,
+                        "clusterBorder": p.cluster_border,
+                        "textColor": p.text,
+                    },
                 },
             })
             .to_string(),
