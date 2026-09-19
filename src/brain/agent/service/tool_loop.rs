@@ -6092,29 +6092,22 @@ impl AgentService {
                     continue;
                 }
 
-                // Mermaid regen nudge (#37): if any fence in the reply fails
-                // to parse DETERMINISTICALLY, hand the model the renderer's
-                // own error text before the reply goes final — same shape as
-                // the empty-answer ladder: echo the broken text as an
-                // assistant message, inject the correction as a user-role
-                // [System: ...] nudge, re-run the iteration. Transient
-                // renderer failures stay silent here (preflight reports parse
-                // errors only) and keep the delivery path's degrade-to-block
-                // behaviour. Gated to channel sessions — the CLI has no
-                // mermaid delivery, so there is nothing to regenerate.
-                #[cfg(feature = "telegram")]
+                // Mermaid regen nudge (#37, #326): if any fence in the reply
+                // fails to parse DETERMINISTICALLY, hand the model the
+                // renderer's own error text before the reply goes final —
+                // same shape as the empty-answer ladder: echo the broken text
+                // as an assistant message, inject the correction as a
+                // user-role [System: ...] nudge, re-run the iteration.
+                // Transient renderer failures stay silent here (preflight
+                // reports parse errors only) and keep the delivery path's
+                // degrade-to-block behaviour. The verdict comes from the
+                // channel-agnostic seam: a channel that can render diagrams
+                // installs a probe; with none installed this is a no-op.
                 if mermaid_regen_retries < MERMAID_REGEN_MAX_NUDGES
                     && !is_cli_provider
                     && progress_callback.is_some()
-                    && crate::channels::telegram::rich::mermaid::should_render_mermaid(
-                        &iteration_text,
-                    )
                 {
-                    let parse_errors =
-                        crate::channels::telegram::rich::mermaid::preflight_parse_errors(
-                            &iteration_text,
-                        )
-                        .await;
+                    let parse_errors = crate::utils::mermaid::validate(&iteration_text).await;
                     if !parse_errors.is_empty() {
                         mermaid_regen_retries += 1;
                         let attempt = mermaid_regen_retries;
