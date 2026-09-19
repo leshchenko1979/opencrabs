@@ -41,7 +41,7 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, EmbeddingConfig, FallbackProviderConfig, ProviderConfig};
+use crate::config::{Config, EmbeddingConfig, FallbackProviderConfig, ProviderConfig, RetrySection};
 use crate::utils::providers::{configured_providers, normalize_provider_name};
 
 // ---------------------------------------------------------------- verdicts
@@ -591,8 +591,30 @@ fn full_provider_sentinel() -> serde_json::Value {
         cache_ttl: Some(300),
         timeout_secs: Some(60),
         stream_idle_timeout_secs: Some(20),
+        retry_max_attempts: Some(4),
+        retry_initial_delay_secs: Some(1.0),
+        retry_max_delay_secs: Some(30.0),
+        retry_backoff_multiplier: Some(2.0),
+        retry_jitter: Some(0.1),
+        retry_quota_exhausted: Some(true),
     };
     serde_json::to_value(cfg).expect("ProviderConfig serializes")
+}
+
+/// One fully-populated `[retry]` section (#346). Every field of
+/// `RetrySection` is `Option` behind `skip_serializing_if`, so
+/// `Config::default()` serializes the whole section as `{}` and hides all
+/// five leaves from the witness — the same hole `full_provider_sentinel`
+/// patches for `[providers.*]`.
+fn full_retry_sentinel() -> serde_json::Value {
+    let cfg = RetrySection {
+        max_attempts: Some(4),
+        initial_delay_secs: Some(1.0),
+        max_delay_secs: Some(30.0),
+        backoff_multiplier: Some(2.0),
+        jitter: Some(0.1),
+    };
+    serde_json::to_value(cfg).expect("RetrySection serializes")
 }
 
 fn full_fallback_sentinel() -> serde_json::Value {
@@ -660,6 +682,14 @@ fn schema_witness() -> &'static serde_json::Value {
             && let Ok(embedding) = serde_json::to_value(EmbeddingConfig::default())
         {
             memory.insert("embedding".into(), embedding);
+        }
+
+        // `[retry]` (#346): every `RetrySection` field is an `Option` behind
+        // `skip_serializing_if`, so `Config::default()` serializes the whole
+        // section as an empty object and all five leaves disappear. Replaced
+        // by the full sentinel, exactly as the provider sections below are.
+        if let Some(root) = witness.as_object_mut() {
+            root.insert("retry".into(), full_retry_sentinel());
         }
 
         // Every provider-shaped section under [providers.*] shares the
