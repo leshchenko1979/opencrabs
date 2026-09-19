@@ -967,10 +967,53 @@ pub fn instance_running(profile: &str) -> bool {
 }
 
 pub(crate) fn instance_running_in(lock_dir: &Path, profile: &str) -> bool {
+    // One read, one classification: the owner probe below owns the parsing and
+    // the liveness rule, so this predicate cannot drift from it (#332).
+    !matches!(instance_owner_in(lock_dir, profile), InstanceOwner::None)
+}
+
+/// Who holds the live instance lock for `profile`.
+///
+/// This is the ORPHANHOOD probe (#332, D4). A `cron_job_runs` row left at
+/// `status = 'running'` is an orphan when the process that wrote it is gone,
+/// and AGE cannot answer that: a restart orphans a row that is seconds old,
+/// while a legitimately long job outlives any age threshold. Ownership can — a
+/// process that has just taken the instance lock cannot be executing a row
+/// written before it started, so a pre-existing running row is an orphan no
+/// matter how young it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceOwner {
+    /// This process holds it.
+    Self_,
+    /// Another LIVE process holds it.
+    Other(u32),
+    /// Nobody does: no lock file, or a stamp that is unparsable or names a PID
+    /// that is no longer alive.
+    None,
+}
+
+/// Read-only probe: WHO owns the live instance lock for `profile`?
+///
+/// Same lock file as [`instance_running`], read for identity rather than
+/// existence. No lock acquisition, no writes, no signals.
+pub fn instance_owner(profile: &str) -> InstanceOwner {
+    instance_owner_in(&base_opencrabs_dir().join("locks").join("instance"), profile)
+}
+
+/// Dir-injectable core of [`instance_owner`] — the same split as
+/// [`instance_running_in`], so a test points at a TempDir instead of writing
+/// the live `~/.opencrabs/locks/instance/<profile>.lock`.
+pub(crate) fn instance_owner_in(lock_dir: &Path, profile: &str) -> InstanceOwner {
     let path = lock_dir.join(format!("{profile}.lock"));
-    match fs::read_to_string(&path) {
-        Ok(contents) => contents.trim().parse::<u32>().is_ok_and(is_pid_alive),
-        Err(_) => false, // missing lock file => no live instance => adoptable
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return InstanceOwner::None; // missing lock file => no live instance
+    };
+    match contents.trim().parse::<u32>() {
+        Ok(pid) if pid == std::process::id() => InstanceOwner::Self_,
+        Ok(pid) if is_pid_alive(pid) => InstanceOwner::Other(pid),
+        // Unparsable, or a stamp whose process is gone. The kernel releases the
+        // flock when the holder dies, so a stale stamp means nobody holds it.
+        _ => InstanceOwner::None,
     }
 }
 
