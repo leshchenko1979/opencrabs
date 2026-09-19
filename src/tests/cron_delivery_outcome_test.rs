@@ -386,3 +386,60 @@ async fn channel_credential_resolves_from_config_toml_only() {
     })
     .await;
 }
+
+/// #435: the SESSION arm was the one arm that lost its failure.
+///
+/// Every other arm of `deliver_result` calls `record_delivery_failure` before
+/// it gives up (#107), so a job whose result went nowhere leaves a
+/// `delivery_failed` row. The session arm logged `Invalid session deliver_to
+/// target … no session matches` and returned, leaving the run row reading
+/// `success` — the job looked delivered while its output was dropped. Caught
+/// live: a probe job burned 140 657 tokens, logged `completed`, and the
+/// delivery error sat in the daemon log with no corresponding row.
+///
+/// Fails against the pre-fix tree, where the row stays `running`.
+#[tokio::test]
+async fn unresolvable_session_target_records_delivery_failed() {
+    let pool = test_db().await;
+    let run_id = format!("{}-435", Uuid::new_v4());
+    seed_run(&pool, &run_id, chrono::Utc::now()).await;
+
+    // The failure path bails before any session machinery is touched, so this
+    // needs no live agent: a `session:` target whose id matches no row.
+    let out = crate::cron::scheduler::deliver_result(
+        "session:zzzzzzzz",
+        "435-test",
+        "body",
+        None,
+        Some(pool.clone()),
+        Some(run_id.clone()),
+    )
+    .await;
+    assert!(out.is_none(), "the session arm never hands back a task handle");
+
+    let run_id_owned = run_id.clone();
+    let (status, error) = pool
+        .get()
+        .await
+        .unwrap()
+        .interact(move |conn| {
+            conn.query_row(
+                "SELECT status, error FROM cron_job_runs WHERE id = ?1",
+                params![run_id_owned],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        status, "delivery_failed",
+        "a session target that resolves to nothing must not leave the run reading success"
+    );
+    let error = error.expect("a delivery_failed row carries its reason");
+    assert!(
+        error.contains("no session matches"),
+        "the reason names the cause: {error}"
+    );
+}

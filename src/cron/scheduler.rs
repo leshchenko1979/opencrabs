@@ -1091,7 +1091,7 @@ pub(crate) async fn parse_session_target(
 /// (fork #144: into a session's notify queue through the shared
 /// `notify_policy` path — default mode `turn-end`, cron results are turn
 /// outputs), or an HTTP(S) URL for generic webhook delivery.
-async fn deliver_result(
+pub(crate) async fn deliver_result(
     deliver_to: &str,
     job_name: &str,
     content: &str,
@@ -1160,10 +1160,12 @@ async fn deliver_result(
             // derail a mid-turn session — the target drains at its next
             // boundary); `quiet` rides the same policy when configured.
             let Some(session_id) = parse_session_target(target_id, pool.as_ref()).await else {
-                tracing::error!(
+                let reason = format!(
                     "Invalid session deliver_to target '{target_id}' for job '{job_name}' \
-                     — no session matches; not delivering"
+                     — no session matches; not delivering (#107)"
                 );
+                tracing::error!("{reason}");
+                record_delivery_failure(pool, run_id, &reason).await;
                 return None;
             };
             tracing::info!("Delivering cron result to session {session_id} (mode turn-end)");
