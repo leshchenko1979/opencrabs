@@ -648,3 +648,134 @@ async fn wake_recent_secs_constant_value_is_3600() {
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].session_id, sid.to_string());
 }
+
+// ---- #344: durable await record — waking a lane parked past the freshness gate ----
+//
+// The freshness gate measures when a binding was last TOUCHED, which is the
+// wrong clock for a lane waiting on an external completion: a CI run or a peer
+// lane outlives WAKE_RECENT_SECS by hours, and none of the other arms covers
+// that wait (`turn_open_at` is cleared, the topic's last message is the bot's,
+// and `has_active_autonomous_work` needs an ACTIVE plan or goal). These tests
+// pin the OR-path beside the gate: the await record alone promotes a lane, the
+// gate still holds for every lane that has none, and the buckets stay disjoint.
+
+/// Backdate a binding's `updated_at` by `age_secs`, so the freshness gate sees
+/// a lane untouched for that long. Panics unless exactly one row moved — a
+/// silently-absent row would let the test pass for the wrong reason.
+async fn backdate_binding(db: &Database, sid: Uuid, age_secs: i64) {
+    let pool = db.pool().clone();
+    let s_id = sid.to_string();
+    let affected = {
+        let conn = pool.get().await.unwrap();
+        conn.interact(move |conn| {
+            conn.execute(
+                "UPDATE session_bindings \
+                 SET updated_at = strftime('%s', 'now') - ?2 \
+                 WHERE session_id = ?1",
+                rusqlite::params![s_id, age_secs],
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap()
+    };
+    assert_eq!(affected, 1, "backdate must touch exactly one binding row");
+}
+
+#[tokio::test]
+async fn awaiting_binding_classifies_awaiting_past_freshness_gate() {
+    let db = test_db().await;
+    let parked = Uuid::new_v4();
+    let stale = Uuid::new_v4();
+    bind_session(&db, parked, "-100344", Some(344)).await;
+    bind_session(&db, stale, "-100345", Some(345)).await;
+    // Both lanes have been untouched for 12 h — far past WAKE_RECENT_SECS, so
+    // neither is visible to the freshness loop.
+    backdate_binding(&db, parked, 12 * 3600).await;
+    backdate_binding(&db, stale, 12 * 3600).await;
+    // Only the parked lane declared a wait on an external completion.
+    SessionBindingRepository::new(db.pool().clone())
+        .set_await(&parked.to_string(), "ci_run", Some("377"))
+        .await
+        .unwrap();
+
+    let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
+
+    assert_eq!(
+        r.awaiting.len(),
+        1,
+        "an awaiting lane must be resumed past the freshness gate"
+    );
+    assert_eq!(r.awaiting[0].0, parked);
+    assert_eq!(r.awaiting[0].1, -100344);
+    assert_eq!(r.awaiting[0].2, Some(344));
+    assert!(
+        r.interrupted.is_empty(),
+        "the awaiting pass must not sweep in any other lane"
+    );
+    // The companion stale binding has NO await record: the gate still holds, so
+    // it is in no bucket at all — not awaiting, not interrupted, not completed.
+    let stale_short = stale.simple().to_string()[..8].to_owned();
+    assert!(
+        !r.completed.contains(&stale_short) && !r.unclassified.contains(&stale_short),
+        "a stale binding without an await record must classify nothing"
+    );
+    assert_ne!(r.awaiting[0].0, stale);
+}
+
+#[tokio::test]
+async fn awaiting_inside_freshness_window_is_promoted_out_of_completed() {
+    let db = test_db().await;
+    let sid = Uuid::new_v4();
+    bind_session(&db, sid, "-100346", Some(346)).await;
+    // Bot spoke last and the turn closed — exactly the shape a parked lane
+    // leaves behind, and the shape the freshness loop logs as `completed`.
+    store_msg(&db, "-100346", Some("346"), "user:alexey", "ship it").await;
+    store_msg(
+        &db,
+        "-100346",
+        Some("346"),
+        BOT_SENDER_ID,
+        "Waiting on the CI gate.",
+    )
+    .await;
+    SessionBindingRepository::new(db.pool().clone())
+        .set_await(&sid.to_string(), "ci_run", Some("377"))
+        .await
+        .unwrap();
+
+    let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
+
+    assert_eq!(
+        r.awaiting.len(),
+        1,
+        "an awaiting lane inside the freshness window still resumes"
+    );
+    assert_eq!(r.awaiting[0].0, sid);
+    assert!(
+        r.completed.is_empty(),
+        "a promoted lane must leave `completed` — the buckets stay disjoint"
+    );
+    assert!(r.interrupted.is_empty());
+}
+
+#[tokio::test]
+async fn cleared_await_stops_resuming_a_stale_lane() {
+    let db = test_db().await;
+    let sid = Uuid::new_v4();
+    bind_session(&db, sid, "-100347", Some(347)).await;
+    backdate_binding(&db, sid, 12 * 3600).await;
+    let repo = SessionBindingRepository::new(db.pool().clone());
+    // A wait that was declared and then resolved must not re-wake the lane.
+    repo.set_await(&sid.to_string(), "ci_run", Some("377"))
+        .await
+        .unwrap();
+    repo.clear_await(&sid.to_string()).await.unwrap();
+
+    let r = classify_recently_active(db.pool().clone(), &HashSet::new()).await;
+
+    assert!(
+        r.awaiting.is_empty(),
+        "a cleared await record must not resume the lane"
+    );
+}

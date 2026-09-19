@@ -1843,10 +1843,20 @@ pub const WAKE_RECENT_SECS: i64 = 3600;
 /// - bot already replied → turn completed before the kill → log only.
 /// - no persisted topic messages → unclassifiable → log only (resuming
 ///   blind could replay noise the journal never saw).
+/// One resumable lane: `(session_id, chat_id, thread_id_raw)`. Both resumable
+/// buckets below carry this shape and the caller spawns them through a single
+/// path, so the type is named once rather than repeated (#344).
+pub type ResumeTargets = Vec<(Uuid, i64, Option<i64>)>;
+
 pub struct BootWakeRecovery {
-    /// `(session_id, chat_id, thread_id_raw)` triples whose topic's last
-    /// message is from a user. Caller spawns the resume continuation.
-    pub interrupted: Vec<(Uuid, i64, Option<i64>)>,
+    /// Triples whose topic's last message is from a user. Caller spawns the
+    /// resume continuation.
+    pub interrupted: ResumeTargets,
+    /// Triples carrying a durable await record (#344) — a lane parked on an
+    /// external completion (a CI run, a peer lane, the owner gate). Consulted
+    /// WITHOUT the freshness gate, because a wait outlives the window that gate
+    /// measures. Caller spawns the same resume continuation as `interrupted`.
+    pub awaiting: ResumeTargets,
     /// Short session ids whose turn completed before the kill — log only.
     pub completed: Vec<String>,
     /// Short session ids with no classifiable topic history — log only.
@@ -1915,6 +1925,7 @@ pub async fn classify_recently_active(
         tracing::warn!(target: "telegram", "Boot wake could not read recent session bindings");
         return BootWakeRecovery {
             interrupted: Vec::new(),
+            awaiting: Vec::new(),
             completed: Vec::new(),
             unclassified: Vec::new(),
         };
@@ -1922,6 +1933,7 @@ pub async fn classify_recently_active(
 
     let mut recovery = BootWakeRecovery {
         interrupted: Vec::new(),
+        awaiting: Vec::new(),
         completed: Vec::new(),
         unclassified: Vec::new(),
     };
@@ -2008,6 +2020,77 @@ pub async fn classify_recently_active(
             }
             None => recovery.unclassified.push(short_session_id(sid)),
         }
+    }
+
+    // #344: the freshness gate above measures when a binding was last TOUCHED,
+    // which is the wrong clock for a lane parked on an external completion — a
+    // CI run or a peer lane can outlive WAKE_RECENT_SECS by hours, and no other
+    // arm covers that wait (`turn_open_at` is cleared, the topic's last message
+    // is the bot's, and `has_active_autonomous_work` needs an ACTIVE plan or
+    // goal). So this query runs as an OR-path BESIDE the gate: it never widens
+    // the window and never replaces the freshness classification.
+    //
+    // Fail-open: a failed query must leave the freshness classification intact,
+    // never replace it with an empty recovery.
+    //
+    // The only set this pass defers to is the one already ROUTED to a resume. A
+    // session the loop merely LOGGED as `completed` is not handled: bot-last
+    // with a closed turn is exactly the shape a parked lane leaves behind, so
+    // deferring to `seen` would drop the very lane #344 exists to wake whenever
+    // the restart lands inside the freshness window.
+    let mut resumed_now: std::collections::HashSet<Uuid> = recovery
+        .interrupted
+        .iter()
+        .map(|(sid, _, _)| *sid)
+        .collect();
+    match binding_repo.awaiting_for_channel("telegram").await {
+        Ok(awaiting_bindings) => {
+            for b in awaiting_bindings {
+                // The SQL predicate already filtered on `await_at IS NOT NULL`.
+                // Restating it here keeps the accessor load-bearing and the loop
+                // correct if that predicate is ever loosened.
+                if !b.is_awaiting() {
+                    continue;
+                }
+                let Ok(sid) = Uuid::parse_str(&b.session_id) else {
+                    continue;
+                };
+                if already_resumed.contains(&sid) || !resumed_now.insert(sid) {
+                    continue;
+                }
+                let Ok(chat_id) = b.chat_id.parse::<i64>() else {
+                    continue;
+                };
+                tracing::info!(
+                    target: "telegram",
+                    "Boot classifier (#344): session {} awaits {} (ref={}) — resuming past the freshness gate",
+                    short_session_id(sid),
+                    b.await_kind.as_deref().unwrap_or("external"),
+                    b.await_ref.as_deref().unwrap_or("-")
+                );
+                recovery
+                    .awaiting
+                    .push((sid, chat_id, b.thread_id.map(i64::from)));
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "telegram",
+                "Boot classifier (#344): awaiting query failed ({e}) — freshness classification stands"
+            );
+        }
+    }
+
+    // A promoted session is resumed, not merely logged, so it leaves the
+    // `completed` bucket — the two buckets stay disjoint and the boot summary
+    // cannot report one lane as both.
+    if !recovery.awaiting.is_empty() {
+        let promoted: std::collections::HashSet<String> = recovery
+            .awaiting
+            .iter()
+            .map(|(sid, _, _)| short_session_id(*sid))
+            .collect();
+        recovery.completed.retain(|s| !promoted.contains(s));
     }
 
     if !recovery.completed.is_empty() || !recovery.unclassified.is_empty() {
