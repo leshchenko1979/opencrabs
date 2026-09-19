@@ -270,6 +270,7 @@ pub mod db_repository_file_test;
 pub mod db_repository_message_test;
 pub mod db_repository_pending_tombstone_test;
 pub mod db_repository_project_test;
+pub mod db_repository_session_binding_await_test;
 pub mod db_repository_session_test;
 pub mod db_retry_test;
 pub mod db_thread_id_stamp_heal_test;
