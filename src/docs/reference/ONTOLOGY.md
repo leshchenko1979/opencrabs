@@ -36,6 +36,8 @@
 
 ### Channels & delivery
 
+**Delivery mode** — how a `session_notify` reaches its target. `turn-end` (the default) queues the message for the target's next tool-loop boundary: against an IDLE target that is immediate delivery, against a BUSY one it queues instead of being dropped. `quiet` defers until the target has been idle for `quiet_for_secs` (any turn activity restarts the clock; `max_delay_secs` forces delivery into a busy turn). The retired `now` mode refused a mid-turn target instead of queueing and is now rejected (#373). **Not:** "interrupt" — that legacy argument is accepted but selects no behaviour.
+
 **Local image attachment** — an image on the local filesystem that a reply references and OpenCrabs delivers as native channel media, instead of leaving the reference in the message body as dead text. Two reference forms resolve to it: the **marker form** `<<IMG:/abs/path.png>>` and the **markdown form** `![alt](path)` (absolute, `~/…`, or relative to the session working directory). A remote `http(s)://` or `data:` target is fetched and delivered by the same path but is not a local file. Extraction is single-homed in `src/utils/image.rs` (`extract_local_images`; `strip_image_references` is the strip-only variant for surfaces that never send media; remote targets are resolved by `src/utils/image_fetch.rs`). **Not:** "image marker" as a name for the markdown form (a marker is the `<<IMG:…>>` form only), "attachment" alone (that names the channel-side artifact, not the reference).
 
 ### Brain & directives

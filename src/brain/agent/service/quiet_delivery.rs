@@ -125,7 +125,7 @@ async fn watch(id: Uuid, target: Uuid, poll: Duration) {
         let Some(batch) = sweep(id, target, now, mid_turn) else {
             continue; // not due yet (or own entry already gone)
         };
-        release_batch(target, batch, mid_turn);
+        release_batch(target, batch);
         return;
     }
 }
@@ -187,14 +187,15 @@ fn sweep(
     fired.then_some(batch)
 }
 
-/// Deliver a drained batch. The first entry wakes (`interrupt=false`)
-/// unless the target is mid-turn at fire time — then ALL ride the running
-/// turn (`interrupt=true`, the starvation cap's forced delivery);
-/// subsequent entries always ride. The channel-ownership gate
-/// re-evaluates per delivery inside `deliver_to_session`.
-fn release_batch(target: Uuid, batch: Vec<(Uuid, DeferredNotify)>, mid_turn: bool) {
+/// Deliver a drained batch. Every entry queues for the target's next
+/// tool-loop boundary (#373): the batch fires either because the target was
+/// idle past the quiet window, or because the starvation cap forced it into a
+/// busy turn, and in both cases queueing is what the sender asked for. The
+/// channel-ownership gate re-evaluates per delivery inside
+/// `deliver_to_session`.
+fn release_batch(target: Uuid, batch: Vec<(Uuid, DeferredNotify)>) {
     for (idx, (id, entry)) in batch.into_iter().enumerate() {
-        let interrupt = mid_turn || idx > 0;
+        let interrupt = true;
         let outcome = deliver_to_session(target, entry.msg, interrupt);
         tracing::info!(
             target: "quiet_delivery",

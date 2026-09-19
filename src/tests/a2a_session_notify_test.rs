@@ -241,21 +241,23 @@ async fn delivery_mode_turn_end_without_interrupt_resolves_cleanly() {
         }),
     );
 
-    // (1) With `interrupt: false` alongside `delivery.mode: "turn-end"`: fails with -32602 (the defect)
-    let mut bad_p = params(&sid.to_string(), "turn-end conflicting ping");
-    bad_p["delivery"] = serde_json::json!({ "mode": "turn-end" });
-    bad_p["interrupt"] = serde_json::json!(false);
-    let bad_resp = handle_session_notify(serde_json::json!(6), bad_p, ctx.clone()).await;
-    assert_eq!(
-        bad_resp.error.expect("error response").code,
-        error_codes::INVALID_PARAMS,
-        "explicit interrupt:false alongside mode:turn-end must be rejected by policy"
+    // (1) `interrupt: false` alongside `delivery.mode: "turn-end"` used to be
+    // rejected as a disagreement (-32602, the fork #158 defect). #373 made the
+    // argument inert — it selects no behaviour — so the pair now resolves to
+    // the same TurnEnd and must succeed.
+    let mut legacy_p = params(&sid.to_string(), "turn-end with inert interrupt ping");
+    legacy_p["delivery"] = serde_json::json!({ "mode": "turn-end" });
+    legacy_p["interrupt"] = serde_json::json!(false);
+    let legacy_resp = handle_session_notify(serde_json::json!(6), legacy_p, ctx.clone()).await;
+    assert!(
+        legacy_resp.error.is_none(),
+        "interrupt:false is inert since #373 and must not reject mode:turn-end: {legacy_resp:?}"
     );
 
-    // (2) With `interrupt` omitted (the fix): succeeds cleanly
+    // (2) With `interrupt` omitted (the fork #158 fix): succeeds cleanly
     let mut good_p = params(&sid.to_string(), "turn-end ping");
     good_p["delivery"] = serde_json::json!({ "mode": "turn-end" });
-    let resp = handle_session_notify(serde_json::json!(7), good_p, ctx).await;
+    let resp = handle_session_notify(serde_json::json!(7), good_p, ctx.clone()).await;
     assert!(
         resp.error.is_none(),
         "delivery.mode turn-end without interrupt must succeed: {resp:?}"
@@ -265,5 +267,16 @@ async fn delivery_mode_turn_end_without_interrupt_resolves_cleanly() {
     assert_eq!(
         queued.origin,
         crate::brain::agent::PushOrigin::SessionNotify
+    );
+
+    // (3) #373: the retired `now` mode is rejected at the protocol boundary
+    // rather than silently mapped back onto the behaviour it used to select.
+    let mut now_p = params(&sid.to_string(), "retired now ping");
+    now_p["delivery"] = serde_json::json!({ "mode": "now" });
+    let now_resp = handle_session_notify(serde_json::json!(8), now_p, ctx).await;
+    assert_eq!(
+        now_resp.error.expect("error response").code,
+        error_codes::INVALID_PARAMS,
+        "the retired 'now' mode must be rejected, not silently accepted"
     );
 }

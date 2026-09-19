@@ -14,8 +14,15 @@
 //! |------|-----------------------------------------------------|
 //! | 0    | delivered / redirected / parked — the message is safe |
 //! | 2    | unknown or dead uuid — nothing sent, nothing created |
-//! | 3    | refused: target mid-turn and `--interrupt` not set  |
+//! | 3    | RETIRED (#373): the refusal it reported is unreachable |
 //! | 4    | transport/config: a2a disabled, unreachable, bad response |
+//!
+//! Exit 3 is retained as a constant but no longer reachable through this
+//! verb: it reported "target mid-turn and `--interrupt` not set", and #373
+//! made the default QUEUE in that situation instead of refusing. The refusal
+//! still exists at the API level for callers that pass `interrupt=false`
+//! explicitly, but no CLI flag produces it. `--mode now` is likewise retired
+//! and now exits 4 with the retirement message.
 //!
 //! SENDER LABEL (#23, owner amendment "Overridable"): the CLI lane has no
 //! sender session, so the recipient's echo shows the carried label —
@@ -138,9 +145,9 @@ pub(crate) async fn run(
         "session_id": target.to_string(),
         "message": text,
     });
-    // Omit `interrupt` unless explicitly true (fork #158): the CLI flags default
-    // `interrupt` to false, but unconditionally sending `interrupt: false`
-    // conflicts with `delivery.mode: "turn-end"` in `notify_policy::resolve_mode`.
+    // Omit `interrupt` unless explicitly true (fork #158): the CLI flag
+    // defaults to false, and #373 made the argument inert, so sending it at
+    // all would be noise. Kept because old tooling still passes `--interrupt`.
     if interrupt {
         params["interrupt"] = serde_json::json!(true);
     }

@@ -163,12 +163,12 @@ impl Tool for SessionNotifyTool {
                 },
                 "delivery": {
                     "type": "object",
-                    "description": "Delivery policy. Omit for the default (mode 'now').",
+                    "description": "Delivery policy. Omit for the default (mode 'turn-end').",
                     "properties": {
                         "mode": {
                             "type": "string",
-                            "enum": ["now", "turn-end", "quiet"],
-                            "description": "'now' (default): deliver immediately; REFUSES while the target is mid-turn. 'turn-end': queue the message for the target's next tool-loop boundary even while it streams. 'quiet': defer until the target has been idle for quiet_for_secs (any turn activity restarts the clock; max_delay_secs forces delivery into a busy turn so the notice cannot be starved forever); returns a deferred verdict with a notification id."
+                            "enum": ["turn-end", "quiet"],
+                            "description": "'turn-end' (default): queue the message for the target's next tool-loop boundary. Against an IDLE target this delivers immediately; against a BUSY one it queues instead of being dropped — which is why it is the default. 'quiet': defer until the target has been idle for quiet_for_secs (any turn activity restarts the clock; max_delay_secs forces delivery into a busy turn so the notice cannot be starved forever); returns a deferred verdict with a notification id."
                         },
                         "quiet_for_secs": {
                             "type": "integer",
@@ -194,7 +194,7 @@ impl Tool for SessionNotifyTool {
                 },
                 "interrupt": {
                     "type": "boolean",
-                    "description": "Deprecated alias for delivery.mode: true = 'turn-end', false/unset = 'now'. Prefer delivery.mode; passing both is allowed only when they agree."
+                    "description": "Legacy alias for delivery.mode, accepted but inert (#373): it no longer selects a behaviour. Deliveries queue for the target's next tool-loop boundary by default; use delivery.mode 'quiet' to wait for the target to go idle instead."
                 }
             },
             "required": ["target_session"]
@@ -267,8 +267,10 @@ impl Tool for SessionNotifyTool {
         };
 
         // Failsafe default (fork #13): an unset interrupt must not derail a
-        // session that is mid-turn. v2 (fork #50) re-expresses the knob as
-        // the delivery policy — the alias keeps old prompts working.
+        // session that is mid-turn. v2 (fork #50) re-expressed the knob as
+        // the delivery policy; #373 retired the mode that knob selected, so
+        // `interrupt` is now accepted but inert — unset resolves to the
+        // turn-end default, which queues rather than refusing.
         let delivery_obj = input.get("delivery");
         let mode = resolve_mode(
             delivery_obj
@@ -359,7 +361,11 @@ impl Tool for SessionNotifyTool {
             ));
         }
 
-        let interrupt = matches!(mode, DeliveryMode::TurnEnd);
+        // #373: every non-quiet delivery queues for the target's next
+        // tool-loop boundary. This used to read
+        // `matches!(mode, DeliveryMode::TurnEnd)`, which made the default
+        // (`now`) refuse mid-turn instead of queueing.
+        let interrupt = true;
         let confirm = input
             .get("confirm")
             .and_then(Value::as_bool)

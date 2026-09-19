@@ -49,20 +49,21 @@ fn verdict_states_mirror_delivery_enum() {
 #[test]
 fn resolve_mode_defaults_and_alias() {
     use DeliveryMode::*;
-    // Default: refuse while streaming (the fork #13 failsafe).
-    assert!(matches!(resolve_mode(None, None, None).unwrap(), Now));
-    // The interrupt alias maps exactly onto the modes.
+    // #373: the default queues for the target's next tool-loop boundary. It
+    // used to refuse while streaming (the retired `now` mode).
+    assert!(matches!(
+        resolve_mode(None, None, None).unwrap(),
+        TurnEnd
+    ));
+    // The legacy `interrupt` argument is accepted but inert: it no longer
+    // selects a behaviour, so `false` must NOT restore the retired refusal.
     assert!(matches!(
         resolve_mode(None, Some(true), None).unwrap(),
         TurnEnd
     ));
     assert!(matches!(
         resolve_mode(None, Some(false), None).unwrap(),
-        Now
-    ));
-    assert!(matches!(
-        resolve_mode(Some("now"), None, None).unwrap(),
-        Now
+        TurnEnd
     ));
     assert!(matches!(
         resolve_mode(Some("turn-end"), None, None).unwrap(),
@@ -71,18 +72,34 @@ fn resolve_mode_defaults_and_alias() {
 }
 
 #[test]
+fn resolve_mode_retired_now_is_rejected() {
+    let err = resolve_mode(Some("now"), None, None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("retired"), "got: {err}");
+    assert!(err.contains("'quiet'"), "error must name a live alternative: {err}");
+    // It must not be silently mapped back onto the old behaviour, and the
+    // legacy alias must not resurrect it.
+    assert!(resolve_mode(Some("now"), Some(false), None).is_err());
+    assert!(resolve_mode(Some("now"), Some(true), None).is_err());
+}
+
+#[test]
 fn resolve_mode_agreeing_pair_passes_disagreement_rejected() {
     use DeliveryMode::*;
+    // `interrupt=true` still agrees with an explicit turn-end...
     assert!(matches!(
         resolve_mode(Some("turn-end"), Some(true), None).unwrap(),
         TurnEnd
     ));
+    // ...and is inert otherwise: `turn-end` with `interrupt=false` is no
+    // longer a disagreement, because the argument selects nothing (#373).
     assert!(matches!(
-        resolve_mode(Some("now"), Some(false), None).unwrap(),
-        Now
+        resolve_mode(Some("turn-end"), Some(false), None).unwrap(),
+        TurnEnd
     ));
-    assert!(resolve_mode(Some("now"), Some(true), None).is_err());
-    assert!(resolve_mode(Some("turn-end"), Some(false), None).is_err());
+    // quiet still contradicts it — quiet WAITS, turn-end QUEUES.
+    assert!(resolve_mode(Some("quiet"), Some(true), None).is_err());
 }
 
 #[test]
@@ -116,7 +133,7 @@ fn resolve_mode_quiet_defaults_and_custom_windows() {
 
 #[test]
 fn resolve_mode_quiet_contradicts_interrupt_true() {
-    // quiet WAITS; interrupt=true DERAILS — passing both is an error,
+    // quiet WAITS; interrupt=true QUEUES — passing both is an error,
     // never a silent precedence.
     assert!(resolve_mode(Some("quiet"), Some(true), None).is_err());
     // interrupt=false is the natural form and passes.
