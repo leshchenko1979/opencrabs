@@ -115,9 +115,10 @@ fn the_default_budget_for_a_quota_error_is_zero() {
 #[test]
 fn the_quota_opt_in_grants_a_bounded_budget() {
     let cfg = RetryConfig::default().with_quota_attempts(QUOTA_RETRY_ATTEMPTS);
-    assert_eq!(cfg.attempt_budget_for(&quota_429()), QUOTA_RETRY_ATTEMPTS);
+    let budget = cfg.attempt_budget_for(&quota_429());
+    assert_eq!(budget, QUOTA_RETRY_ATTEMPTS);
     assert!(
-        QUOTA_RETRY_ATTEMPTS > 0 && QUOTA_RETRY_ATTEMPTS <= 2,
+        budget > 0 && budget <= 2,
         "the aggregator budget is deliberately tiny, not a second backoff ramp"
     );
 }
