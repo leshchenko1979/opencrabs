@@ -4,8 +4,10 @@
 //! base64url JSON-state payload, the render-cache key, and the colour
 //! conversions the style is built from. Nothing here performs HTTP — the
 //! payload is decoded and parsed in-process, which is the point: a regression
-//! to the plain-code payload form (which mermaid.ink accepts, and in which it
-//! SILENTLY ignores `themeVariables`) or a dropped palette key fails HERE,
+//! to the plain-code payload form, or to the JSON-state form with
+//! `themeVariables` hoisted OUT of the `mermaid` object (mermaid.ink silently
+//! discards it there — see [`MermaidStyle::payload`]), or a dropped palette
+//! key fails HERE,
 //! rather than on the wire where it surfaces only as a mis-coloured diagram in
 //! a Telegram client.
 //!
@@ -474,8 +476,14 @@ fn payload_decodes_to_the_json_state_object_with_the_source() {
     assert_eq!(json["code"], src);
     assert!(json["mermaid"].is_object(), "mermaid must be an object");
     assert!(
-        json["themeVariables"].is_object(),
-        "themeVariables must be an object"
+        json["mermaid"]["themeVariables"].is_object(),
+        "themeVariables must be an object INSIDE the mermaid config — \
+         hoisted to the top level, mermaid.ink discards it without a warning"
+    );
+    assert!(
+        json["themeVariables"].is_null(),
+        "a top-level themeVariables is inert on the wire; the palette must \
+         live under `mermaid`"
     );
 }
 
@@ -495,7 +503,7 @@ fn payload_carries_the_palette_name_inside_the_json() {
 fn payload_theme_variables_carry_exactly_the_six_honoured_keys() {
     let style = MermaidStyle::from_values("dark", "#282d37");
     let json = decode_payload(&style, "A-->B;");
-    let vars = json["themeVariables"]
+    let vars = json["mermaid"]["themeVariables"]
         .as_object()
         .expect("themeVariables must be an object");
     let mut got: Vec<&str> = vars.keys().map(String::as_str).collect();
@@ -513,7 +521,7 @@ fn payload_theme_variables_carry_exactly_the_six_honoured_keys() {
 fn payload_never_carries_an_inert_key() {
     let style = MermaidStyle::from_values("dark", "#282d37");
     let json = decode_payload(&style, "A-->B;");
-    let vars = json["themeVariables"]
+    let vars = json["mermaid"]["themeVariables"]
         .as_object()
         .expect("themeVariables must be an object");
     for key in INERT_KEYS {
@@ -533,7 +541,7 @@ fn payload_theme_variables_match_the_style_palette() {
     // blanks or transposes a key.
     let style = MermaidStyle::from_values("dark", "#282d37");
     let json = decode_payload(&style, "A-->B;");
-    let vars = &json["themeVariables"];
+    let vars = &json["mermaid"]["themeVariables"];
     assert_eq!(vars["lineColor"], style.palette.line);
     assert_eq!(vars["nodeBorder"], style.palette.node_border);
     assert_eq!(vars["mainBkg"], style.palette.main_bkg);
