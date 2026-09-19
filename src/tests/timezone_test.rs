@@ -102,3 +102,15 @@ fn test_negative_caching_on_no_match() {
     // Second call hits cache returning None without re-reading
     assert!(cache.resolve_from_file(tmp.path()).is_none());
 }
+
+#[test]
+fn prose_mention_of_timezone_mid_sentence_does_not_match() {
+    // "timezone" appears here with a colon, but NOT in the key position. The
+    // matcher compares the whole normalised key, never a substring, so this
+    // line must not hijack the declaration.
+    let user_md = "\
+# Notes
+My timezone: is a personal matter, ask me instead.
+";
+    assert!(parse_timezone_heuristic(user_md).is_none());
+}
