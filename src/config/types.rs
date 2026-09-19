@@ -246,6 +246,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_auto() -> String {
+    "auto".to_string()
+}
+
 fn default_strip_empty_sections() -> bool {
     true
 }
@@ -534,6 +538,27 @@ pub struct TelegramConfig {
     /// keep mermaid fences as plain code blocks.
     #[serde(default = "default_true")]
     pub mermaid_render: bool,
+    /// Mermaid diagram glyph palette. `auto` (default) follows the ACTIVE TUI
+    /// theme: a `surface_code` relative luminance below 0.5 selects `dark`,
+    /// otherwise `default`. Any other value is passed through as a mermaid
+    /// theme name (`forest`, `neutral`, `base`, ...); an unrecognized value
+    /// normalizes to the `auto` result and logs a warning.
+    ///
+    /// The Telegram Bot API exposes NO client dark/light preference — no field
+    /// on `User`, `Chat` or `Message` reports the active theme — so following
+    /// the CLIENT is impossible from the bot side; this follows the SERVER's
+    /// active theme instead. Requires `mermaid_render`.
+    #[serde(default = "default_auto")]
+    pub mermaid_theme: String,
+    /// Mermaid diagram background — the parameter that removes the
+    /// transparency which composited diagrams onto white in a dark client
+    /// (#318). `auto` (default) uses the active TUI theme's `surface_code` as
+    /// 6-hex (`#282d37` for crab-dark); `none` restores the pre-#318
+    /// transparent look; any other value must be a 6-hex colour (`#RRGGBB` or
+    /// `RRGGBB`). An unrecognized value normalizes to the `auto` result and
+    /// logs a warning. Requires `mermaid_render`.
+    #[serde(default = "default_auto")]
+    pub mermaid_bg: String,
     /// Silently ignore /start commands from non-allowed users in group chats.
     /// When true (default), the bot does NOT reply with user ID in groups.
     /// Users who need their ID can DM the bot instead.
@@ -582,6 +607,8 @@ impl Default for TelegramConfig {
             session_idle_hours: None,
             rich_messages: true,
             mermaid_render: true,
+            mermaid_theme: default_auto(),
+            mermaid_bg: default_auto(),
             silence_group_start: true,
             bot_owner: Vec::new(),
             rate_limiter: RateLimiterConfig::default(),

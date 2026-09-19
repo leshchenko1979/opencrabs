@@ -135,3 +135,66 @@ fn test_config_partial_override_preserves_other_defaults() {
         "silence_group_start must remain true default"
     );
 }
+
+#[test]
+fn test_config_mermaid_theme_and_bg_default_to_auto() {
+    let d = TelegramConfig::default();
+    assert_eq!(d.mermaid_theme, "auto", "mermaid_theme must default to auto");
+    assert_eq!(d.mermaid_bg, "auto", "mermaid_bg must default to auto");
+
+    // [channels] omitted entirely.
+    let cfg: Config = toml::from_str("[agent]\nmax_tool_iterations = 10\n")
+        .expect("config must parse without channels table");
+    let tg = cfg.channels.telegram;
+    assert_eq!(
+        tg.mermaid_theme, "auto",
+        "mermaid_theme must default to auto when [channels] is omitted"
+    );
+    assert_eq!(
+        tg.mermaid_bg, "auto",
+        "mermaid_bg must default to auto when [channels] is omitted"
+    );
+
+    // Bare [channels.telegram] table.
+    let cfg: Config = toml::from_str("[channels.telegram]\n")
+        .expect("config must parse with a bare [channels.telegram]");
+    let tg = cfg.channels.telegram;
+    assert_eq!(
+        tg.mermaid_theme, "auto",
+        "mermaid_theme must default to auto when [channels.telegram] is empty"
+    );
+    assert_eq!(
+        tg.mermaid_bg, "auto",
+        "mermaid_bg must default to auto when [channels.telegram] is empty"
+    );
+}
+
+#[test]
+fn test_config_mermaid_theme_and_bg_explicit_values_respected() {
+    let cfg: Config = toml::from_str(
+        "[channels.telegram]\nmermaid_theme = \"forest\"\nmermaid_bg = \"none\"\n",
+    )
+    .expect("config must parse with explicit mermaid styling");
+    let tg = cfg.channels.telegram;
+    assert_eq!(
+        tg.mermaid_theme, "forest",
+        "explicit mermaid_theme must be respected"
+    );
+    assert_eq!(
+        tg.mermaid_bg, "none",
+        "explicit mermaid_bg must be respected"
+    );
+
+    // A partial override must not disturb the other new key.
+    let cfg: Config = toml::from_str("[channels.telegram]\nmermaid_theme = \"neutral\"\n")
+        .expect("config must parse with a partial mermaid override");
+    let tg = cfg.channels.telegram;
+    assert_eq!(
+        tg.mermaid_theme, "neutral",
+        "mermaid_theme = neutral must be applied"
+    );
+    assert_eq!(
+        tg.mermaid_bg, "auto",
+        "mermaid_bg must remain the auto default"
+    );
+}
