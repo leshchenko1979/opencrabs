@@ -1434,7 +1434,7 @@ async fn cmd_chat_inner(
                             let boot_parked_tg = boot_parked.clone();
                             let permitted_targets = permitted_targets.clone();
                             tokio::spawn(async move {
-                                crate::cron::send_scope::with_permitted_targets(
+                                crate::cron::send_scope::with_send_scope(
                                     permitted_targets,
                                     async move {
                                         // This path always knew the bot might not be
@@ -1549,7 +1549,7 @@ async fn cmd_chat_inner(
                         }
                         let permitted_targets = permitted_targets.clone();
                         tokio::spawn(async move {
-                            crate::cron::send_scope::with_permitted_targets(
+                            crate::cron::send_scope::with_send_scope(
                                 permitted_targets,
                                 async move {
                                     // Do NOT swap the shared agent's provider here.

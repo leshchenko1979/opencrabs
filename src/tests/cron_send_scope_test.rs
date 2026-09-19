@@ -8,7 +8,8 @@
 //! whose members had asked for nothing.
 
 use crate::cron::send_scope::{
-    PermittedTarget, SendPermission, may_send_to, permission, with_send_target,
+    NoTargetReason, PermittedTarget, SendPermission, SendScope, may_send_to, permission,
+    refusal_for, with_send_scope, with_send_target,
 };
 
 const CONFIGURED: i64 = -1004252074515;
@@ -230,13 +231,14 @@ async fn test_resolve_cron_session_scope() {
     };
     assert_eq!(
         resolve_cron_session_scope(&pool, Some(&cron_session), "cron").await,
-        Some(vec![PermittedTarget {
+        Some(SendScope::Permitted(vec![PermittedTarget {
             channel: "telegram",
             target_id: "-100555444".to_string(),
-        }])
+        }]))
     );
 
-    // 3. Channel == 'cron' but unknown job fails closed to Some([])
+    // 3. Channel == 'cron' but unknown job fails closed to Nowhere, and says
+    //    WHY it cannot name a target rather than inventing one.
     let unknown_cron_session = Session {
         id: Uuid::new_v4(),
         title: Some("Old cron session [cron-job:00000000-0000-0000-0000-000000000000]".to_string()),
@@ -251,9 +253,11 @@ async fn test_resolve_cron_session_scope() {
         auto_title_attempted: false,
         project_id: None,
     };
+    // The job row is gone, so WHAT it declared is unknowable — not "it
+    // declared nothing". Telling those apart is the point of #332's reason.
     assert_eq!(
         resolve_cron_session_scope(&pool, Some(&unknown_cron_session), "cron").await,
-        Some(vec![])
+        Some(SendScope::Nowhere(NoTargetReason::JobUnknown))
     );
 }
 
@@ -317,7 +321,7 @@ async fn test_resolve_cron_session_scope_targetless_job_is_nowhere() {
 
     assert_eq!(
         resolve_cron_session_scope(&pool, Some(&cron_session), "cron").await,
-        Some(vec![]),
+        Some(SendScope::Nowhere(NoTargetReason::Undeclared)),
         "a job with no deliver_to must resume Nowhere, not Unscoped"
     );
 }
@@ -404,10 +408,10 @@ async fn a_session_target_expands_to_the_bound_channel() {
     );
     assert_eq!(
         cron_job_scope_async(&pool, Some(&deliver_to)).await,
-        vec![PermittedTarget {
+        SendScope::Permitted(vec![PermittedTarget {
             channel: "telegram",
             target_id: "-100777888".to_string(),
-        }],
+        }]),
         "the full job scope must permit the bound chat, not collapse to Nowhere"
     );
 }
@@ -458,13 +462,19 @@ async fn an_unbound_session_target_permits_nothing() {
     let deliver_to = format!("session:{id}");
 
     assert!(expand_session_targets(&pool, Some(&deliver_to)).await.is_empty());
-    assert!(cron_job_scope_async(&pool, Some(&deliver_to)).await.is_empty());
+    assert_eq!(
+        cron_job_scope_async(&pool, Some(&deliver_to)).await,
+        SendScope::Nowhere(NoTargetReason::Unresolvable { declared: deliver_to.clone() }),
+        "the job DID declare a destination — it just cannot be resolved"
+    );
 }
 
 /// An ARCHIVED session yields Nowhere — the acceptance-criterion case. Archived
 /// rows carry no binding in the live DB (0 of 116 measured), so the expansion
-/// contributes nothing and the scope stays empty. Pinned as expected behaviour:
-/// an archived session is not a route.
+/// contributes nothing. Pinned as expected behaviour: an archived session is
+/// not a route, and the reason reads Unresolvable — the job declared a target
+/// that no channel can be resolved from, which is NOT the same fact as a job
+/// that declared nothing.
 #[tokio::test]
 async fn an_archived_session_target_permits_nothing() {
     use crate::cron::send_scope::{cron_job_scope_async, expand_session_targets};
@@ -489,7 +499,10 @@ async fn an_archived_session_target_permits_nothing() {
 
     let deliver_to = format!("session:{id}");
     assert!(expand_session_targets(&pool, Some(&deliver_to)).await.is_empty());
-    assert!(cron_job_scope_async(&pool, Some(&deliver_to)).await.is_empty());
+    assert_eq!(
+        cron_job_scope_async(&pool, Some(&deliver_to)).await,
+        SendScope::Nowhere(NoTargetReason::Unresolvable { declared: deliver_to.clone() })
+    );
 }
 
 /// A binding on a channel outside the scope grammar (`cli`, `cron`, …) has no
@@ -522,10 +535,10 @@ async fn concrete_and_expanded_targets_compose_without_duplicates() {
 
     assert_eq!(
         cron_job_scope_async(&pool, Some(&deliver_to)).await,
-        vec![PermittedTarget {
+        SendScope::Permitted(vec![PermittedTarget {
             channel: "telegram",
             target_id: "-100555444".to_string(),
-        }]
+        }])
     );
 }
 
@@ -541,10 +554,10 @@ async fn non_session_segments_are_untouched_by_the_expansion() {
     assert!(expand_session_targets(&pool, Some(deliver_to)).await.is_empty());
     assert_eq!(
         cron_job_scope_async(&pool, Some(deliver_to)).await,
-        vec![PermittedTarget {
+        SendScope::Permitted(vec![PermittedTarget {
             channel: "telegram",
             target_id: "-100999111".to_string(),
-        }]
+        }])
     );
 }
 
@@ -604,10 +617,124 @@ async fn resolve_cron_session_scope_is_binding_aware() {
 
     assert_eq!(
         resolve_cron_session_scope(&pool, Some(&cron_session), "cron").await,
-        Some(vec![PermittedTarget {
+        Some(SendScope::Permitted(vec![PermittedTarget {
             channel: "telegram",
             target_id: "-100321654".to_string(),
-        }]),
+        }])),
         "a resumed cron turn must be scoped like the firing turn that made it"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #332 · Step 3 — the Nowhere refusals say WHICH Nowhere
+//
+// A scope that may reach nothing is not one fact but three, and the old text
+// asserted the first in all of them: "this scheduled job has no deliver_to".
+// For a job whose `deliver_to` names an unbound session that is FALSE — the
+// field is set — and it sent the model looking for a configuration error that
+// was not there, while the real cause (a session target reaches a channel only
+// through that session's own binding) went unstated.
+// ---------------------------------------------------------------------------
+
+/// The absent-field case keeps its original, true text.
+#[tokio::test]
+async fn a_targetless_job_refusal_says_the_field_is_absent() {
+    let scope = Some(SendScope::Nowhere(NoTargetReason::Undeclared));
+    with_send_scope(scope, async {
+        let msg = refusal_for("telegram", "-100999");
+        assert!(msg.contains("has no deliver_to"), "got: {msg}");
+        assert!(msg.contains("telegram:-100999"), "got: {msg}");
+    })
+    .await;
+}
+
+/// The declared-but-unresolvable case must NOT claim the field is absent: the
+/// job HAS one, and the refusal names it and the real cause.
+#[tokio::test]
+async fn an_unresolvable_target_refusal_does_not_claim_a_missing_field() {
+    let declared = "session:2f0d6a1e-0000-0000-0000-000000000000".to_string();
+    let scope = Some(SendScope::Nowhere(NoTargetReason::Unresolvable {
+        declared: declared.clone(),
+    }));
+    with_send_scope(scope, async {
+        let msg = refusal_for("telegram", "-100999");
+        assert!(
+            !msg.contains("has no deliver_to"),
+            "the job DOES have a deliver_to; got: {msg}"
+        );
+        assert!(
+            msg.contains(&declared),
+            "the refusal must name the declared target; got: {msg}"
+        );
+        assert!(
+            msg.contains("binding"),
+            "and explain the real cause; got: {msg}"
+        );
+    })
+    .await;
+}
+
+/// An unreadable job row is a third fact again — never "the job declared
+/// nothing".
+#[tokio::test]
+async fn an_unreadable_job_refusal_does_not_claim_a_missing_field() {
+    let scope = Some(SendScope::Nowhere(NoTargetReason::JobUnknown));
+    with_send_scope(scope, async {
+        let msg = refusal_for("telegram", "-100999");
+        assert!(!msg.contains("has no deliver_to"), "got: {msg}");
+        assert!(msg.contains("could not be read"), "got: {msg}");
+    })
+    .await;
+}
+
+/// The three Nowhere refusals are pairwise distinct, so a reader can tell
+/// which case it is holding from the text alone.
+#[tokio::test]
+async fn the_nowhere_refusals_are_pairwise_distinct() {
+    let undeclared = with_send_scope(
+        Some(SendScope::Nowhere(NoTargetReason::Undeclared)),
+        async { refusal_for("telegram", "-1") },
+    )
+    .await;
+    let unresolvable = with_send_scope(
+        Some(SendScope::Nowhere(NoTargetReason::Unresolvable {
+            declared: "session:abc".to_string(),
+        })),
+        async { refusal_for("telegram", "-1") },
+    )
+    .await;
+    let unknown = with_send_scope(Some(SendScope::Nowhere(NoTargetReason::JobUnknown)), async {
+        refusal_for("telegram", "-1")
+    })
+    .await;
+
+    assert_ne!(undeclared, unresolvable);
+    assert_ne!(undeclared, unknown);
+    assert_ne!(unresolvable, unknown);
+}
+
+/// End to end on the real path: a job whose `deliver_to` names an UNBOUND
+/// session resolves to the unresolvable reason — not the undeclared one — and
+/// the text the model reads says so.
+#[tokio::test]
+async fn an_unbound_session_job_refuses_with_the_unresolvable_reason() {
+    use crate::cron::send_scope::cron_job_scope_async;
+
+    let pool = scope_test_pool().await;
+    let id = seed_bound_session(&pool, None, "").await;
+    let deliver_to = format!("session:{id}");
+
+    let scope = cron_job_scope_async(&pool, Some(&deliver_to)).await;
+    assert_eq!(
+        scope,
+        SendScope::Nowhere(NoTargetReason::Unresolvable { declared: deliver_to.clone() }),
+        "a job that DID declare a destination must not be read as undeclared"
+    );
+
+    with_send_scope(Some(scope), async {
+        let msg = refusal_for("telegram", "-100999");
+        assert!(!msg.contains("has no deliver_to"), "got: {msg}");
+        assert!(msg.contains(&deliver_to), "got: {msg}");
+    })
+    .await;
 }

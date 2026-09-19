@@ -902,23 +902,23 @@ async fn execute_job(
         }
     }
 
-    // Permitted destinations for this turn, taken from the job's own
-    // configuration (#148: authority-aware across telegram, discord, slack,
-    // whatsapp; #332: `session:` targets expand to the channel their session
-    // is BOUND to). A job with no `deliver_to` may send to none: its output
-    // lives in its session and the scheduler is the only thing that speaks.
-    // That absent field is a scope permitting nothing, NOT an absent scope —
-    // the scope never yields `None`, so a targetless job can never be
-    // read as a non-cron turn with every channel open (#317).
+    // Send scope for this turn, taken from the job's own configuration (#148:
+    // authority-aware across telegram, discord, slack, whatsapp; #332:
+    // `session:` targets expand to the channel their session is BOUND to). A
+    // job with no `deliver_to` may send to none: its output lives in its
+    // session and the scheduler is the only thing that speaks. That absent
+    // field is a scope permitting nothing, NOT an absent scope — the scope
+    // never yields `None`, so a targetless job can never be read as a non-cron
+    // turn with every channel open (#317).
     // Scoped across the whole turn so it holds inside every tool call, and
     // task-local so it never reaches a sibling job on the scheduler.
-    let permitted_targets: Option<Vec<crate::cron::send_scope::PermittedTarget>> = Some(
+    let send_scope: Option<crate::cron::send_scope::SendScope> = Some(
         crate::cron::send_scope::cron_job_scope_async(&ctx.pool(), job.deliver_to.as_deref()).await,
     );
 
     // Execute with auto-approved tools (no interactive user)
-    let result = crate::cron::send_scope::with_permitted_targets(
-        permitted_targets,
+    let result = crate::cron::send_scope::with_send_scope(
+        send_scope,
         agent.send_message_with_tools_and_callback(
             session_id,
             job.prompt.clone(),
