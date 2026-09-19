@@ -73,13 +73,35 @@ pub fn parse_timezone_heuristic(text: &str) -> Option<TzInfo> {
                     c == '(' || c == ')' || c == '[' || c == ']' || c == '`' || c == ',' || c == '.'
                 });
                 if let Ok(tz) = clean_word.parse::<Tz>() {
-                    return Some(TzInfo::new(tz, None));
+                    // A line reaching this arm resolved NOWHERE else, so the
+                    // parenthetical is the only declared label there is. Returning
+                    // `None` here is what rendered `Europe/Moscow (МСК)` as a bare
+                    // `Europe/Moscow` — carry it instead.
+                    return Some(TzInfo::new(tz, parenthetical_label(trimmed)));
                 }
             }
         }
     }
 
     None
+}
+
+/// Declared label carried by the parenthetical group of a free-form line.
+///
+/// The fallback scan matches a zone anywhere in a line, by which point the
+/// declaration key is unknown — so the parenthetical is the only label the line
+/// still offers. Returns `None` when the group is empty or is itself a zone
+/// form (`Europe/Moscow (UTC+3)` declares no label, it declares an offset), so
+/// a zone can never be mistaken for the user's own word.
+fn parenthetical_label(line: &str) -> Option<String> {
+    let (_, rest) = line.split_once('(')?;
+    let inner = rest
+        .trim_end_matches(|c| c == ')' || c == '|' || c == ' ' || c == '\t')
+        .trim();
+    if inner.is_empty() || inner.parse::<Tz>().is_ok() || parse_utc_offset_or_iana(inner).is_some() {
+        return None;
+    }
+    Some(inner.to_string())
 }
 
 /// Normalise a `USER.md` declaration line into a `(key, value)` pair.
