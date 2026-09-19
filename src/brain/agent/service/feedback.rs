@@ -162,7 +162,7 @@ impl AgentService {
             };
             let val = if success { 1.0 } else { 0.0 };
             if let Err(e) = repo.record(&sid, event, &tname, val, meta.as_deref()).await {
-                tracing::debug!("feedback ledger write failed: {e}");
+                tracing::debug!("feedback ledger write failed: {e:#}");
             }
         });
     }
@@ -192,7 +192,7 @@ impl AgentService {
                 .record(&sid, "discovery_miss", &tname, 0.0, meta.as_deref())
                 .await
             {
-                tracing::debug!("feedback ledger write failed: {e}");
+                tracing::debug!("feedback ledger write failed: {e:#}");
             }
         });
     }
@@ -213,7 +213,7 @@ impl AgentService {
         tokio::spawn(async move {
             let repo = crate::db::repository::FeedbackLedgerRepository::new(pool);
             if let Err(e) = repo.record(&sid, &et, &dim, 0.0, meta.as_deref()).await {
-                tracing::debug!("feedback ledger write failed: {e}");
+                tracing::debug!("feedback ledger write failed: {e:#}");
             }
         });
     }
