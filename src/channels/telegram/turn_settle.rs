@@ -52,6 +52,7 @@ use crate::brain::agent::AgentService;
 /// `telegram_state` supplies the two registry reads the settled header needs:
 /// the queued-item count and the flow-state registration that folds later
 /// background-task acks into this card (#1377).
+#[allow(clippy::too_many_arguments)] // the tail's own param set, mirroring deliver_final_response (#402)
 pub(crate) async fn settle_turn_block(
     bot: &Bot,
     chat_id: ChatId,
