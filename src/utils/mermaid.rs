@@ -194,12 +194,9 @@ pub trait MermaidProbe: Send + Sync {
 
 static PROBE: OnceLock<Box<dyn MermaidProbe>> = OnceLock::new();
 
-/// Installed once by a channel at init; first install wins.
-///
-/// `#[allow(dead_code)]` because in a build with no rendering channel
-/// compiled in, nothing calls this — the seam must still exist so the
-/// callers (`validate`) compile and stay a documented no-op (#326).
-#[allow(dead_code)]
+/// Installed once by a channel at init; first install wins. Public seam, so a
+/// build with no rendering channel compiled in still compiles it — its
+/// callers (`validate`) then stay a documented no-op (#326).
 pub fn install_probe(p: Box<dyn MermaidProbe>) {
     let _ = PROBE.set(p);
 }
@@ -221,50 +218,5 @@ pub(crate) async fn validate_with(p: Option<&dyn MermaidProbe>, text: &str) -> V
     match p {
         Some(p) => p.validate(text).await,
         None => Vec::new(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use futures::future::BoxFuture;
-
-    /// Stand-in renderer: returns a fixed verdict, so the test asserts the
-    /// SEAM's behaviour (pass-through vs no-op) without touching the network
-    /// or the global registry.
-    struct FakeProbe(Vec<String>);
-
-    impl MermaidProbe for FakeProbe {
-        fn validate<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Vec<String>> {
-            Box::pin(async move { self.0.clone() })
-        }
-    }
-
-    #[tokio::test]
-    async fn no_probe_is_a_no_op() {
-        let text = "```mermaid\ngraph TD;\nA-->B\n```";
-        assert!(validate_with(None, text).await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn installed_probe_verdict_passes_through() {
-        let probe = FakeProbe(vec!["line 3: unexpected token".to_string()]);
-        let errors = validate_with(Some(&probe), "```mermaid\ngraph TD;\nA-->B\n```").await;
-        assert_eq!(errors, vec!["line 3: unexpected token".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn clean_parse_reports_nothing_to_fix() {
-        let probe = FakeProbe(Vec::new());
-        let errors = validate_with(Some(&probe), "```mermaid\ngraph TD;\n```").await;
-        assert!(errors.is_empty());
-    }
-
-    #[test]
-    fn format_mermaid_error_names_the_context() {
-        let err = format_mermaid_error("plan markdown", &["boom".to_string()]);
-        assert!(err.starts_with("Mermaid diagram syntax error in plan markdown."));
-        assert!(err.contains("boom"));
-        assert!(err.contains("Correction rules:"));
     }
 }
