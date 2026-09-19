@@ -2256,7 +2256,26 @@ impl OpenAIProvider {
     ///   flip rather than a true quota exhaustion. Retrying in-place keeps
     ///   the user on the free tier instead of silently burning paid credits
     ///   on the fallback chain.
-    /// - All other providers keep the default (bail-to-fallback on 429).
+    /// - Every other provider keeps `RetryConfig::default()`, unless the
+    ///   operator configured one.
+    ///
+    /// Resolution order, highest priority first (#346):
+    ///
+    /// 1. an explicit override installed on the provider;
+    /// 2. the operator's per-provider `retry_*` keys;
+    /// 3. the global `[retry]` section;
+    /// 4. the family preset for (name, base URL, model);
+    /// 5. `RetryConfig::default()`.
+    ///
+    /// Applied per KEY, so a key the operator set does not freeze the
+    /// preset's other values. [`super::retry_policy::resolve`] owns both
+    /// halves so this provider and the factory cannot drift apart.
+    ///
+    /// A 429 is retryable whatever its body shape. A provider opted in with
+    /// `retry_quota_exhausted = true` additionally gets a small bounded
+    /// in-place budget for a HARD quota / billing 429; a provider that did
+    /// not opt in keeps #952's behaviour and rolls a quota 429 straight to
+    /// the fallback chain.
     pub(crate) fn retry_config(&self, model: &str) -> crate::utils::retry::RetryConfig {
         if let Some(ref ovr) = self.retry_config_override {
             return ovr.clone();
