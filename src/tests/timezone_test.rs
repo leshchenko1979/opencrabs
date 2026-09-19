@@ -166,3 +166,51 @@ fn parse_bare_moscow_abbreviation() {
     assert_eq!(info.tz, Tz::Europe__Moscow);
     assert_eq!(info.label.as_deref(), Some("МСК"));
 }
+
+/// The Identity block the shipped template actually teaches is a markdown
+/// TABLE (`src/docs/reference/templates/USER.md`), and a table row carries no
+/// colon. Before task 1 this form returned `None` — the product taught a form
+/// its own parser could not read.
+#[test]
+fn parse_table_row_with_offset() {
+    let user_md = "\
+| Field | Value |
+| --- | --- |
+| **Timezone** | UTC+3 (MSK) |
+";
+    let info = parse_timezone_heuristic(user_md).expect("table row should parse");
+    assert_eq!(info.tz, Tz::Etc__GMTMinus3);
+    assert_eq!(info.label.as_deref(), Some("MSK"));
+}
+
+#[test]
+fn parse_table_row_with_iana_and_label() {
+    let user_md = "\
+| **Timezone** | Europe/Moscow (МСК) |
+";
+    let info = parse_timezone_heuristic(user_md).expect("table row should parse");
+    assert_eq!(info.tz, Tz::Europe__Moscow);
+    assert_eq!(info.label.as_deref(), Some("МСК"));
+}
+
+/// Bare city alias inside a table cell — no colon anywhere in the row.
+#[test]
+fn parse_table_row_with_bare_city_alias() {
+    let user_md = "\
+| **Timezone** | Москва |
+";
+    let info = parse_timezone_heuristic(user_md).expect("table row should parse");
+    assert_eq!(info.tz, Tz::Europe__Moscow);
+    assert_eq!(info.label.as_deref(), Some("Москва"));
+}
+
+/// The template's placeholder row must NOT resolve. An unfilled USER.md is the
+/// common case, and resolving `(e.g. UTC, EST, CET)` to some zone would ground
+/// every timestamp on a guess.
+#[test]
+fn template_placeholder_row_yields_no_timezone() {
+    let user_md = "\
+| **Timezone** | *(e.g. UTC, EST, CET)* |
+";
+    assert!(parse_timezone_heuristic(user_md).is_none());
+}
