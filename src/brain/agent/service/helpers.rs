@@ -1209,7 +1209,7 @@ impl AgentService {
     /// Paths / commands collapse `$HOME` → `~` so channel displays don't expose
     /// the user's full home path and don't waste the truncation budget on
     /// a constant prefix.
-    pub(super) fn format_tool_summary(tool_name: &str, tool_input: &Value) -> String {
+    pub(crate) fn format_tool_summary(tool_name: &str, tool_input: &Value) -> String {
         use crate::utils::string::tilde_home;
         let raw = match tool_name {
             "bash" => {

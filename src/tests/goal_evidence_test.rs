@@ -142,14 +142,22 @@ fn render_names_every_section() {
     let evidence = GoalEvidence {
         running_tasks: vec!["cargo test (running 12s)".to_string()],
         unresolved_tasks: vec!["3. wire the call site (Pending)".to_string()],
+        tool_receipts: vec!["bash: git status — ok".to_string()],
+        files_touched: vec!["~/notes.md".to_string()],
         turns_used: 4,
         max_turns: 20,
     };
     let rendered = evidence.render();
-    assert!(rendered.contains("RUNNING BACKGROUND TASKS:"));
+    // Every header the pack declares, asserted from the declaration itself:
+    // adding a section without rendering it fails here, and so does dropping
+    // one the judge prompt still quotes (#364).
+    for section in GoalEvidence::SECTIONS {
+        assert!(rendered.contains(section), "missing section {section}");
+    }
     assert!(rendered.contains("- cargo test (running 12s)"));
-    assert!(rendered.contains("OPEN PLAN TASKS:"));
     assert!(rendered.contains("- 3. wire the call site (Pending)"));
+    assert!(rendered.contains("- bash: git status — ok"));
+    assert!(rendered.contains("- ~/notes.md"));
     assert!(rendered.contains("TURN BUDGET: 4/20 turns used"));
 }
 
@@ -160,6 +168,8 @@ fn render_marks_empty_sections_as_none() {
     let rendered = GoalEvidence::default().render();
     assert!(rendered.contains("RUNNING BACKGROUND TASKS:\n- (none)"));
     assert!(rendered.contains("OPEN PLAN TASKS:\n- (none)"));
+    assert!(rendered.contains("TOOL RECEIPTS:\n- (none)"));
+    assert!(rendered.contains("FILES TOUCHED:\n- (none)"));
     assert!(rendered.contains("TURN BUDGET: 0/0 turns used"));
 }
 
@@ -200,7 +210,7 @@ fn with_budget_attaches_the_turn_count() {
 async fn no_manager_and_no_plan_yields_an_empty_pack() {
     in_temp_home(async {
         let sid = Uuid::new_v4();
-        let evidence = build_goal_evidence(None, sid).await.with_budget(2, 20);
+        let evidence = build_goal_evidence(None, sid, Vec::new(), Vec::new()).await.with_budget(2, 20);
         assert!(evidence.running_tasks.is_empty());
         assert!(evidence.unresolved_tasks.is_empty());
         assert_eq!(evidence.turns_used, 2);
@@ -224,7 +234,7 @@ async fn active_plan_open_tasks_are_reported() {
         );
         save_plan(&plan).await.expect("plan saved");
 
-        let evidence = build_goal_evidence(None, sid).await;
+        let evidence = build_goal_evidence(None, sid, Vec::new(), Vec::new()).await;
         assert_eq!(evidence.unresolved_tasks.len(), 1);
         assert!(evidence.unresolved_tasks[0].contains("still open"));
     })
@@ -247,7 +257,7 @@ async fn fully_resolved_active_plan_reports_nothing_open() {
         );
         save_plan(&plan).await.expect("plan saved");
 
-        let evidence = build_goal_evidence(None, sid).await;
+        let evidence = build_goal_evidence(None, sid, Vec::new(), Vec::new()).await;
         assert!(evidence.unresolved_tasks.is_empty());
     })
     .await;
@@ -272,7 +282,7 @@ async fn editing_plan_is_not_evidence() {
         plan.pre_init_editing = true;
         save_plan(&plan).await.expect("plan saved");
 
-        let evidence = build_goal_evidence(None, sid).await;
+        let evidence = build_goal_evidence(None, sid, Vec::new(), Vec::new()).await;
         assert!(
             evidence.unresolved_tasks.is_empty(),
             "an unapproved draft is not outstanding work"
@@ -305,7 +315,7 @@ async fn evidence_agrees_with_the_reminder_on_a_pre_init_plan() {
             "the reminder stays silent on a pre-init plan"
         );
 
-        let evidence = build_goal_evidence(None, sid).await;
+        let evidence = build_goal_evidence(None, sid, Vec::new(), Vec::new()).await;
         assert!(
             evidence.unresolved_tasks.is_empty(),
             "the pack must agree with the reminder, not contradict it"
@@ -327,7 +337,7 @@ async fn a_running_detached_command_is_reported() {
         "sleep 5".to_string(),
     );
 
-    let evidence = build_goal_evidence(Some(mgr.as_ref()), sid).await;
+    let evidence = build_goal_evidence(Some(mgr.as_ref()), sid, Vec::new(), Vec::new()).await;
     assert_eq!(
         evidence.running_tasks.len(),
         1,
