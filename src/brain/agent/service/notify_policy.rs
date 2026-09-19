@@ -11,12 +11,18 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-/// Resolved v2 delivery policy (fork #50).
+/// Resolved v2 delivery policy (fork #50; the `now` mode retired by owner
+/// order 2026-09-19, #373).
+///
+/// There is deliberately no "refuse while mid-turn" mode any more. `now` was
+/// strictly dominated: against an IDLE target it delivered exactly as
+/// `turn-end` does, and against a BUSY one it refused — which the sender
+/// reported as a successful hand-off while the notice was dropped on the
+/// floor. Every non-quiet delivery therefore queues for the target's next
+/// tool-loop boundary, which is the `turn-end` behaviour.
 #[derive(Debug)]
 pub enum DeliveryMode {
-    /// Refuse while the target is mid-turn (the failsafe default).
-    Now,
-    /// Queue for the target's next tool-loop boundary (alias: interrupt=true).
+    /// Queue for the target's next tool-loop boundary (the default).
     TurnEnd,
     /// Defer until the target has been quiet for `quiet_for`; `max_delay`
     /// forces delivery into a busy turn (fork #43/#50).
@@ -103,13 +109,13 @@ pub(crate) async fn confirm_route(
     )
 }
 
-/// Resolve the v2 delivery policy against the deprecated `interrupt` alias
-/// (fork #50). `interrupt=true` was always "queue for the in-flight turn's
-/// next tool-loop boundary" — that is mode `turn-end`; unset/false was
-/// "refuse while streaming" — mode `now`. Both may be passed only when they
-/// agree; a disagreement is an error, never a silent precedence. `quiet`
-/// defers until the target has been idle for `quiet_for_secs` (starvation
-/// cap `max_delay_secs` forces delivery into a busy turn).
+/// Resolve the v2 delivery policy (#373: `turn-end` is the default; the `now`
+/// mode is retired). The `interrupt` argument is the legacy alias for the
+/// retired mode and is accepted-but-inert: an alias whose absent value
+/// diverges from its `false` value is not an alias, so `interrupt=false` no
+/// longer requests the refusal behaviour. `quiet` defers until the target has
+/// been idle for `quiet_for_secs` (starvation cap `max_delay_secs` forces
+/// delivery into a busy turn).
 ///
 /// Errors are plain strings; each consumer frames them for its own surface.
 pub(crate) fn resolve_mode(
@@ -128,35 +134,37 @@ pub(crate) fn resolve_mode(
             }
         }
     }
-    let resolved = match mode {
-        None => None,
-        Some(known @ ("now" | "turn-end")) => Some(known),
+    match mode {
         Some("quiet") => {
             // quiet contradicts interrupt=true by definition: quiet WAITS,
-            // turn-end DERAILS. interrupt=false/unset is the natural form.
+            // turn-end QUEUES. interrupt=false/unset is the natural form.
             if interrupt == Some(true) {
                 return Err(
                     "delivery.mode 'quiet' and interrupt=true disagree — quiet defers, \
-                     interrupt derails"
+                     turn-end queues"
                         .into(),
                 );
             }
             let quiet_for = secs(delivery, "quiet_for_secs", 60)?;
             let max_delay = secs(delivery, "max_delay_secs", 1800)?;
-            return Ok(DeliveryMode::Quiet {
+            Ok(DeliveryMode::Quiet {
                 quiet_for,
                 max_delay,
-            });
+            })
         }
-        Some(other) => {
-            return Err(format!(
-                "delivery.mode '{other}' is not available yet — use 'now', 'turn-end' or 'quiet'"
-            ));
-        }
-    };
-    match (resolved, interrupt) {
-        (Some("turn-end"), None | Some(true)) | (None, Some(true)) => Ok(DeliveryMode::TurnEnd),
-        (Some("now"), None | Some(false)) | (None, None | Some(false)) => Ok(DeliveryMode::Now),
-        _ => Err("delivery.mode and interrupt disagree — pass one, not both".into()),
+        // The default: queue for the target's next tool-loop boundary. This
+        // is identical to the retired `now` against an idle target, and
+        // strictly better against a busy one, where `now` silently refused.
+        None | Some("turn-end") => Ok(DeliveryMode::TurnEnd),
+        Some("now") => Err(
+            "delivery.mode 'now' is retired: it was identical to 'turn-end' for an idle \
+             target and silently refused for a busy one. Deliveries queue for the target's \
+             next tool-loop boundary by default — drop the mode, or use 'quiet' to wait for \
+             the target to go idle."
+                .into(),
+        ),
+        Some(other) => Err(format!(
+            "delivery.mode '{other}' is not available yet — use 'turn-end' or 'quiet'"
+        )),
     }
 }

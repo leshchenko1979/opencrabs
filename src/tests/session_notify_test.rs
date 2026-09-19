@@ -136,6 +136,12 @@ fn test_interactive_local_fallback_reports_delivered() {
 }
 
 // ── In-flight gate (fork #13) ────────────────────────────────────────────
+//
+// #373 retired the delivery mode that made this refusal the DEFAULT, so no
+// production caller passes `interrupt=false` any more — the notify tool, the
+// A2A handler, cron and the quiet-batch release all queue instead. The
+// refusal itself is retained at this API level for a caller that asks for it
+// explicitly; this test pins that contract, not the default.
 
 #[test]
 fn test_inflight_target_refuses_without_interrupt() {
@@ -148,7 +154,7 @@ fn test_inflight_target_refuses_without_interrupt() {
         Delivery::RefusedInFlight {
             redirected_to: None
         },
-        "#13: default-false must refuse a mid-turn target, not derail it"
+        "#13: an explicit interrupt=false must still refuse a mid-turn target"
     );
 }
 
@@ -195,10 +201,18 @@ fn test_no_probe_fails_open() {
 
 #[tokio::test]
 #[expect(clippy::await_holding_lock)]
-async fn test_tool_reports_refusal_with_remedy() {
+async fn test_tool_default_queues_to_inflight_target() {
     let _guard = test_guard();
     let session = Uuid::new_v4();
-    expect_channel_route(session);
+    let captured: std::sync::Arc<std::sync::Mutex<Option<QueuedUserMessage>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let sink = captured.clone();
+    crate::brain::agent::service::session_routes::register_session_route(
+        session,
+        std::sync::Arc::new(move |_id, queued| {
+            *sink.lock().unwrap() = Some(queued);
+        }),
+    );
     register_turn_probe(session, std::sync::Arc::new(|| true));
 
     let context = crate::brain::tools::r#trait::ToolExecutionContext::new(Uuid::new_v4());
@@ -209,14 +223,18 @@ async fn test_tool_reports_refusal_with_remedy() {
         )
         .await;
     let result = outcome.expect("tool executes");
+    // #373: this is the whole point of the change. A default notify to a
+    // mid-turn target used to be REFUSED — reported as a failed hand-off —
+    // because the default mode was `now`. It must now queue for the target's
+    // next tool-loop boundary, which is the turn-end behaviour.
     assert!(
-        !result.success,
-        "#13: refusal must read as failure to the sender"
+        result.success,
+        "a mid-turn target must QUEUE the default delivery, not refuse it: {:?}",
+        result.error
     );
-    let error = result.error.expect("#13: refusal carries an explanation");
     assert!(
-        error.contains("interrupt=true"),
-        "#13: the error must name the remedy so the sender learns the knob: {error}"
+        captured.lock().unwrap().is_some(),
+        "#373: the message must actually reach the route, not be dropped"
     );
 }
 
