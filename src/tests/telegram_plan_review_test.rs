@@ -63,7 +63,7 @@ fn editing_card_offers_review_approve_discard() {
         rows[1],
         vec![
             ("🔍 Review plan".to_string(), "plan:review".to_string()),
-            ("🗑 Discard".to_string(), "plan:no".to_string()),
+            ("🗑️ Discard".to_string(), "plan:no".to_string()),
         ],
         "Row 2 carries Review and Discard"
     );
@@ -82,7 +82,7 @@ fn reviewing_card_disables_approve_and_review_with_noop() {
         rows[1],
         vec![
             ("⏳ Reviewing plan…".to_string(), "plan:noop".to_string()),
-            ("🗑 Discard".to_string(), "plan:no".to_string()),
+            ("🗑️ Discard".to_string(), "plan:no".to_string()),
         ],
         "while a review runs the Review slot becomes a no-op ack, and Discard stays live"
     );

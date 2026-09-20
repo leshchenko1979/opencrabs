@@ -45,8 +45,8 @@ fn empty_group_renders_footer_only() {
     // collapses to the plain merged footer, which with elapsed_secs=0 (the
     // wrapper passes 0) is just the clock. The legacy live-status argument no
     // longer feeds the footer.
-    assert_eq!(render_flow_html(&[], None), "⚙ • 0:00 ⏱");
-    assert_eq!(render_flow_html(&[], Some("45s")), "⚙ • 0:00 ⏱");
+    assert_eq!(render_flow_html(&[], None), "⚙️ • 0:00 ⏱️");
+    assert_eq!(render_flow_html(&[], Some("45s")), "⚙️ • 0:00 ⏱️");
 }
 
 #[test]
@@ -57,7 +57,7 @@ fn single_tool_renders_block() {
     let out = render_flow_html(&[tline("✅ bash", "git status")], None);
     assert_eq!(
         out,
-        "⚙ • 0:00 ⏱\n<blockquote expandable><b>⛏ bash git status</b>\n\n<b>✅ bash</b> <code>git status</code></blockquote>"
+        "⚙️ • 0:00 ⏱️\n<blockquote expandable><b>⛏️ bash git status</b>\n\n<b>✅ bash</b> <code>git status</code></blockquote>"
     );
     assert!(out.contains("<blockquote expandable>"));
 }
@@ -68,7 +68,7 @@ fn single_tool_without_context_omits_trailing_space() {
     // <code>/space, even now that a lone tool renders as a block.
     let out = render_flow_html(&[tline("⚙️ web_search", "")], None);
     assert!(out.contains(
-        "<blockquote expandable><b>⛏ web_search</b>\n\n<b>⚙️ web_search</b></blockquote>"
+        "<blockquote expandable><b>⛏️ web_search</b>\n\n<b>⚙️ web_search</b></blockquote>"
     ));
     assert!(!out.contains("<b>⚙️ web_search</b> "));
     assert!(!out.contains("<code>"));
@@ -86,7 +86,7 @@ fn multiple_tools_render_expandable_blockquote() {
     );
     // ADR 0005 F1: the blockquote holds only the entry bodies; the status +
     // activity + count live in the merged footer (plain line after the block).
-    assert!(out.starts_with("⚙ • 0:00 ⏱\n<blockquote expandable><b>⛏ grep pattern</b>\n\n"));
+    assert!(out.starts_with("⚙️ • 0:00 ⏱️\n<blockquote expandable><b>⛏️ grep pattern</b>\n\n"));
     assert!(out.contains("<b>✅ bash</b> <code>cargo fmt</code>"));
     assert!(out.contains("<b>✅ read_file</b> <code>handler.rs</code>"));
     assert!(out.contains("<b>❌ grep</b> <code>pattern</code></blockquote>"));
@@ -105,7 +105,7 @@ fn blocks_are_separated_by_blank_lines() {
     // ADR 0005 F1: entries sit inside the blockquote separated by blank lines;
     // the summary header prefers the latest intermediary thought (#291).
     assert!(
-        out.starts_with("⚙ • 0:00 ⏱\n<blockquote expandable><b>Reformatted three files.</b>\n\n")
+        out.starts_with("⚙️ • 0:00 ⏱️\n<blockquote expandable><b>Reformatted three files.</b>\n\n")
     );
     assert!(out.contains("<b>✅ bash</b> <code>cargo fmt</code>\n\nReformatted three files."));
     assert!(
@@ -341,7 +341,7 @@ fn tool_plus_text_folds_into_one_blockquote() {
     // thought (#291) precedes tool calls and rides as the unexpanded summary header.
     assert!(out.contains("<blockquote expandable><b>Checked the tree, all clean.</b>\n\n"));
     let top_line = out.lines().next().unwrap();
-    assert_eq!(top_line, "⚙ • 0:00 ⏱");
+    assert_eq!(top_line, "⚙️ • 0:00 ⏱️");
     assert!(out.contains("<b>✅ bash</b> <code>git status</code>"));
     assert!(out.contains("Checked the tree, all clean."));
     assert!(out.contains("<b>✅ read_file</b> <code>handler.rs</code>"));
@@ -357,7 +357,7 @@ fn text_only_flow_uses_processing_log_header() {
         "<blockquote expandable><b>Switching provider…</b>\n\nSwitching provider…</blockquote>"
     ));
     let top_line = out.lines().next().unwrap();
-    assert_eq!(top_line, "⚙ • 0:00 ⏱");
+    assert_eq!(top_line, "⚙️ • 0:00 ⏱️");
     assert!(!out.contains("tool calls"));
 }
 
@@ -384,13 +384,13 @@ fn blank_text_entries_are_dropped() {
     // Blank text is dropped, leaving one tool entry rendered as a normal block.
     assert_eq!(
         out,
-        "⚙ • 0:00 ⏱\n<blockquote expandable><b>⛏ bash x</b>\n\n<b>✅ bash</b> <code>x</code></blockquote>"
+        "⚙️ • 0:00 ⏱️\n<blockquote expandable><b>⛏️ bash x</b>\n\n<b>✅ bash</b> <code>x</code></blockquote>"
     );
 }
 
 #[test]
 fn empty_flow_renders_footer_only() {
-    assert_eq!(render_flow_html(&[], None), "⚙ • 0:00 ⏱");
+    assert_eq!(render_flow_html(&[], None), "⚙️ • 0:00 ⏱️");
 }
 
 // ── folded_duplicates_final: block dedup against the final answer ──
@@ -478,7 +478,7 @@ fn live_status_rides_in_footer() {
         ],
         Some("45s"),
     );
-    assert!(out.starts_with("⚙ • 0:00 ⏱\n<blockquote expandable><b>Reading the handler.</b>\n\n"));
+    assert!(out.starts_with("⚙️ • 0:00 ⏱️\n<blockquote expandable><b>Reading the handler.</b>\n\n"));
     assert!(out.contains("<b>✅ bash</b> <code>cargo fmt</code>\n\nReading the handler.\n\n<b>⚙️ read_file</b> <code>handler.rs</code>"));
 }
 
@@ -495,7 +495,7 @@ fn no_duration_still_leads_with_activity() {
         None,
     );
     assert!(
-        out.starts_with("⚙ • 0:00 ⏱\n<blockquote expandable><b>⛏ read_file handler.rs</b>\n\n")
+        out.starts_with("⚙️ • 0:00 ⏱️\n<blockquote expandable><b>⛏️ read_file handler.rs</b>\n\n")
     );
     assert!(out.contains(
         "<b>✅ bash</b> <code>cargo fmt</code>\n\n<b>✅ read_file</b> <code>handler.rs</code>"
@@ -519,7 +519,7 @@ fn running_tool_fallback_does_not_double_the_gear() {
         !out.contains("⚙️ ⚙️"),
         "the running-tool fallback must not double the footer gear: {out}"
     );
-    assert!(out.contains("<blockquote expandable><b>⛏ bash gh pr list</b>"));
+    assert!(out.contains("<blockquote expandable><b>⛏️ bash gh pr list</b>"));
 }
 
 #[test]
@@ -531,7 +531,7 @@ fn live_status_on_text_only_flow_uses_processing_log_header() {
     // Text-only flow: intermediary thought is preferred as the summary header (#291).
     assert_eq!(
         out,
-        "⚙ • 0:00 ⏱\n<blockquote expandable><b>Looking into it.</b>\n\nLooking into it.</blockquote>"
+        "⚙️ • 0:00 ⏱️\n<blockquote expandable><b>Looking into it.</b>\n\nLooking into it.</blockquote>"
     );
 }
 
@@ -543,7 +543,7 @@ fn single_tool_progress_rides_in_footer() {
     let out = render_flow_html(&[tline("⚙️ bash", "git status")], Some("bash • 5s"));
     assert_eq!(
         out,
-        "⚙ • 0:00 ⏱\n<blockquote expandable><b>⛏ bash git status</b>\n\n<b>⚙\u{fe0f} bash</b> <code>git status</code></blockquote>"
+        "⚙️ • 0:00 ⏱️\n<blockquote expandable><b>⛏️ bash git status</b>\n\n<b>⚙\u{fe0f} bash</b> <code>git status</code></blockquote>"
     );
     assert!(out.contains("<blockquote expandable>"));
 }
@@ -573,12 +573,12 @@ fn flow_header_live_and_settled_formats() {
             Some("Reading logs"),
             HeaderMarkup::Html
         ),
-        "⛏ <b>Reading logs</b> • <i>3 tool calls</i> • <i>45s</i>"
+        "⛏️ <b>Reading logs</b> • <i>3 tool calls</i> • <i>45s</i>"
     );
     // No status message, duration present → count + duration (italic), no lead.
     assert_eq!(
         flow_header_text(3, &FlowHeader::Live(Some("45s")), None, HeaderMarkup::Html),
-        "⛏ <i>3 tool calls</i> • <i>45s</i>"
+        "⛏️ <i>3 tool calls</i> • <i>45s</i>"
     );
     // Neither status nor duration (just started) → plain bold count / log.
     assert_eq!(
@@ -597,7 +597,7 @@ fn flow_header_live_and_settled_formats() {
             Some("Reading logs"),
             HeaderMarkup::Markdown
         ),
-        "⛏ **Reading logs** • _3 tool calls_ • _45s_"
+        "⛏️ **Reading logs** • _3 tool calls_ • _45s_"
     );
     // Live header with completed/failed tool status glyphs strips the glyph
     // so in-flight turns keep the ⛏ pick and do NOT present bare ✅ / ❌.
@@ -608,7 +608,7 @@ fn flow_header_live_and_settled_formats() {
             Some("✅ glob reviews/20260915-c14/**"),
             HeaderMarkup::Markdown
         ),
-        "⛏ **glob reviews/20260915-c14/**** • _55 tool calls_ • _3:14_"
+        "⛏️ **glob reviews/20260915-c14/**** • _55 tool calls_ • _3:14_"
     );
     assert_eq!(
         flow_header_text(
@@ -617,7 +617,7 @@ fn flow_header_live_and_settled_formats() {
             Some("❌ read_file missing.md"),
             HeaderMarkup::Html
         ),
-        "⛏ <b>read_file missing.md</b> • <i>55 tool calls</i> • <i>3:14</i>"
+        "⛏️ <b>read_file missing.md</b> • <i>55 tool calls</i> • <i>3:14</i>"
     );
     // Live header with genuine system status icons (like ⏳ compaction) keeps
     // the icon bare and drops the standing pick.
@@ -664,7 +664,7 @@ fn flow_header_live_and_settled_formats() {
 fn flow_outcome_icons_and_verbs() {
     assert_eq!(FlowOutcome::Finished.icon_verb(), ("✅", "Finished"));
     assert_eq!(FlowOutcome::Failed.icon_verb(), ("❌", "Failed"));
-    assert_eq!(FlowOutcome::TimedOut.icon_verb(), ("⏱", "Timed out"));
+    assert_eq!(FlowOutcome::TimedOut.icon_verb(), ("⏱️", "Timed out"));
 }
 
 #[test]
@@ -683,7 +683,7 @@ fn settled_outcome_renders_block_header_over_lone_tool() {
     // footer below the log block, not as a header inside the blockquote.
     assert_eq!(
         out,
-        "❌ • 0:00 ⏱\n<blockquote expandable><b>⛏ bash cargo test</b>\n\n<b>✅ bash</b> <code>cargo test</code></blockquote>"
+        "❌ • 0:00 ⏱️\n<blockquote expandable><b>⛏️ bash cargo test</b>\n\n<b>✅ bash</b> <code>cargo test</code></blockquote>"
     );
 }
 
@@ -707,7 +707,7 @@ fn settled_block_carries_no_activity_preview_classic() {
     // The narration still lives in the collapsed body log, and the summary
     // header prefers the intermediary thought (#291).
     assert!(
-        out.starts_with("✅ • 0:00 ⏱\n<blockquote expandable><b>Running the test suite</b>\n\n")
+        out.starts_with("✅ • 0:00 ⏱️\n<blockquote expandable><b>Running the test suite</b>\n\n")
     );
     assert!(out.contains("Running the test suite"));
 }
@@ -728,7 +728,7 @@ fn settled_block_carries_no_activity_preview_rich() {
         },
     );
     assert!(
-        out.starts_with("<p>✅ • 0:00 ⏱</p><details><summary><sub>Running the test suite</sub>")
+        out.starts_with("<p>✅ • 0:00 ⏱️</p><details><summary><sub>Running the test suite</sub>")
     );
 }
 
@@ -757,7 +757,7 @@ fn rich_multiple_tools_render_markdown_header() {
     // No narration: the activity fallback (most recent tool line) leads the
     // header, bold, then the italic count (#509). Icon-led activity: the
     // standing gear is stripped (owner directive 2026-08-29).
-    assert!(out.starts_with("⛏ **read file.rs** • _2 tool calls_\n\n"));
+    assert!(out.starts_with("⛏️ **read file.rs** • _2 tool calls_\n\n"));
     assert!(out.contains("**✅ bash** `git status`"));
     assert!(out.contains("**✅ read** `file.rs`"));
 }
@@ -775,7 +775,7 @@ fn rich_live_status_in_header() {
         Some("10s"),
         false,
     );
-    assert!(out.starts_with("⛏ **grep pattern** • _2 tool calls_ • _10s_\n\n"));
+    assert!(out.starts_with("⛏️ **grep pattern** • _2 tool calls_ • _10s_\n\n"));
 }
 
 #[test]
@@ -789,7 +789,7 @@ fn rich_single_tool_live_status_appends() {
 #[test]
 fn details_empty_group_renders_footer_only() {
     // ADR 0005 F1: no entries → a plain <sub> footer line, no <details> wrapper.
-    assert_eq!(render_flow_details(&[], None), "<sub>⚙ • 0:00 ⏱</sub>");
+    assert_eq!(render_flow_details(&[], None), "<sub>⚙️ • 0:00 ⏱️</sub>");
 }
 
 #[test]
@@ -799,7 +799,7 @@ fn details_single_tool_renders_details_block() {
     let out = render_flow_details(&[tline("✅ bash", "git status")], None);
     assert_eq!(
         out,
-        "<p>⚙ • 0:00 ⏱</p><details><summary><sub>⛏ bash git status</sub></summary>\
+        "<p>⚙️ • 0:00 ⏱️</p><details><summary><sub>⛏️ bash git status</sub></summary>\
          <p><b>✅ bash</b> <code>git status</code></p></details>"
     );
     assert!(out.contains("<details>"));
@@ -816,7 +816,7 @@ fn details_multiple_tools_wrap_in_collapsed_details() {
     // collapsed block shows progress with the body hidden (#405); with no
     // narration it falls back to the most recent tool line.
     assert!(
-        out.starts_with("<p>⚙ • 0:00 ⏱</p><details><summary><sub>⛏ read file.rs</sub></summary>")
+        out.starts_with("<p>⚙️ • 0:00 ⏱️</p><details><summary><sub>⛏️ read file.rs</sub></summary>")
     );
     assert!(out.ends_with("</details>"));
     assert!(!out.contains("<details open"));
@@ -840,7 +840,7 @@ fn details_summary_carries_live_status() {
     let summary = &out[..summary_end];
     // ADR 0005 F1: the merged footer is the summary — cog + narration + count +
     // clock. The wrapper passes elapsed_secs=0, so the clock reads 0:00.
-    assert!(out.starts_with("<p>⚙ • 0:00 ⏱</p>"));
+    assert!(out.starts_with("<p>⚙️ • 0:00 ⏱️</p>"));
     // Summary carries latest intermediary thought (#291)
     assert!(summary.contains("<sub>Grepping.</sub>"));
 }

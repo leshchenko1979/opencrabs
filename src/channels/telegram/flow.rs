@@ -1037,7 +1037,7 @@ impl FlowOutcome {
         match self {
             FlowOutcome::Finished => ("✅", "Finished"),
             FlowOutcome::Failed => ("❌", "Failed"),
-            FlowOutcome::TimedOut => ("⏱", "Timed out"),
+            FlowOutcome::TimedOut => ("⏱️", "Timed out"),
         }
     }
 }
@@ -1244,7 +1244,7 @@ pub(crate) fn flow_header_text(
             if icon_led {
                 segs.join(" • ")
             } else {
-                format!("⛏ {}", segs.join(" • "))
+                format!("⛏️ {}", segs.join(" • "))
             }
         }
         FlowHeader::Settled {
@@ -1336,7 +1336,7 @@ impl ToolClass {
             ToolClass::Cron => "⏰",
             ToolClass::Agent => "🤖",
             ToolClass::Suggest => "💡",
-            ToolClass::Other => "⛏",
+            ToolClass::Other => "⛏️",
         }
     }
 }

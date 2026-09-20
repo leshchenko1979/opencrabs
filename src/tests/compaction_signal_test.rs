@@ -210,7 +210,7 @@ fn live_header_drops_gear_before_icon_status() {
             Some("Reading logs"),
             HeaderMarkup::Html
         ),
-        "⛏ <b>Reading logs</b> • <i>3 tool calls</i> • <i>0:12</i>"
+        "⛏️ <b>Reading logs</b> • <i>3 tool calls</i> • <i>0:12</i>"
     );
 }
 #[test]
@@ -233,7 +233,7 @@ fn live_footer_drops_gear_before_icon_activity() {
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(tool_done, "⚙ • 0:00 ⏱ • 4% 🧠");
+    assert_eq!(tool_done, "⚙️ • 0:00 ⏱️ • 4% 🧠");
     let icon = merged_footer(
         &FooterParts {
             outcome: None,
@@ -250,7 +250,7 @@ fn live_footer_drops_gear_before_icon_activity() {
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(icon, "⚙ • 0:00 ⏱");
+    assert_eq!(icon, "⚙️ • 0:00 ⏱️");
     let plain = merged_footer(
         &FooterParts {
             outcome: None,
@@ -267,7 +267,7 @@ fn live_footer_drops_gear_before_icon_activity() {
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(plain, "⚙ • 0:00 ⏱");
+    assert_eq!(plain, "⚙️ • 0:00 ⏱️");
     let plan_edit = merged_footer(
         &FooterParts {
             outcome: None,
@@ -284,7 +284,7 @@ fn live_footer_drops_gear_before_icon_activity() {
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(plan_edit, "✍️ • 0:30 ⏱ • 5% 🧠");
+    assert_eq!(plan_edit, "✍️ • 0:30 ⏱️ • 5% 🧠");
     let finished = merged_footer(
         &FooterParts {
             outcome: Some(("✅", "Finished")),
@@ -301,7 +301,7 @@ fn live_footer_drops_gear_before_icon_activity() {
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(finished, "✅ • 1:15 ⏱ • 10% 🧠");
+    assert_eq!(finished, "✅ • 1:15 ⏱️ • 10% 🧠");
 }
 
 #[test]
@@ -324,5 +324,5 @@ fn icon_led_segment_retires_the_bare_cog_fallback() {
         },
         HeaderMarkup::Markdown,
     );
-    assert_eq!(out, "⚙ • 1:05 ⏱");
+    assert_eq!(out, "⚙️ • 1:05 ⏱️");
 }
