@@ -357,7 +357,9 @@ pub(crate) struct StreamingState {
 
 /// A resolved line in the processing-log flow, ready to render. Tool lines
 /// carry the status label (icon + name) and context; text lines carry the
-/// sanitized intermediate text. Both are HTML-escaped at render time.
+/// sanitized intermediate text; system lines carry harness narration
+/// (compaction banners, lifecycle chrome, resume notes). All are HTML-escaped
+/// at render time.
 pub(crate) enum FlowLine {
     Tool {
         label: String,
@@ -368,6 +370,11 @@ pub(crate) enum FlowLine {
         raw_context: String,
     },
     Text(String),
+    /// System/harness narration — compaction banners, turn-lifecycle chrome,
+    /// resume notes — that belongs in the body log but must NEVER be promoted
+    /// to the collapsed header preview or the latest intermediary thought
+    /// (#444). Renders identically to `Text`; only the header selectors care.
+    System(String),
 }
 
 /// Render resolved flow lines into final Telegram HTML. A lone tool line with
@@ -416,6 +423,10 @@ pub(crate) fn latest_activity_preview(lines: &[FlowLine]) -> Option<String> {
                     return Some(text);
                 }
             }
+            // System/harness chrome (compaction banners, turn lifecycle) is not
+            // a thought: skip it and keep scanning backward for real content
+            // (#444).
+            FlowLine::System(_) => {}
         }
     }
     None
@@ -426,7 +437,12 @@ pub(crate) fn latest_activity_preview(lines: &[FlowLine]) -> Option<String> {
 pub(crate) fn latest_intermediary_thought(lines: &[FlowLine]) -> Option<String> {
     lines.iter().rev().find_map(|line| match line {
         FlowLine::Text(t) => human_readable_preview(t),
-        _ => None,
+        // Provenance-explicit (#444): system chrome is never a thought, and
+        // tool lines never carry thought text. Matching each variant by name
+        // (instead of a `_` catch-all) keeps a future variant from being
+        // silently classified as narration.
+        FlowLine::System(_) => None,
+        FlowLine::Tool { .. } => None,
     })
 }
 
@@ -648,7 +664,10 @@ fn flow_body_entries(lines: &[FlowLine], narration_cap: usize) -> (Vec<String>, 
                     });
                 }
             }
-            FlowLine::Text(text) => {
+            // `System` renders byte-identically to `Text` in the body log: the
+            // provenance split exists only for the header selectors (#444), so
+            // the two variants share one render arm rather than duplicating it.
+            FlowLine::Text(text) | FlowLine::System(text) => {
                 let text = text.trim();
                 if !text.is_empty() {
                     let rendered = format_inline(&escape_html(&cap_narration(text, narration_cap)));
@@ -911,7 +930,10 @@ pub(crate) fn render_flow_rich(
                     out.push(format!("**{label}** `{ctx}`"));
                 }
             }
-            FlowLine::Text(text) => {
+            // `System` shares the `Text` render arm: the body log shows chrome
+            // exactly as it shows narration — only the header selectors tell
+            // them apart (#444).
+            FlowLine::Text(text) | FlowLine::System(text) => {
                 let text = text.trim();
                 if !text.is_empty() {
                     out.push(text.to_string());
@@ -1341,7 +1363,8 @@ pub(crate) fn flow_lines(s: &StreamingState) -> Vec<FlowLine> {
                     raw_context: t.raw_context.clone(),
                 }
             }),
-            FlowEntry::Text(text) | FlowEntry::System(text) => Some(FlowLine::Text(text.clone())),
+            FlowEntry::Text(text) => Some(FlowLine::Text(text.clone())),
+            FlowEntry::System(text) => Some(FlowLine::System(text.clone())),
         })
         .collect()
 }
