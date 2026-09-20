@@ -931,6 +931,7 @@ pub mod telegram_code_fence_balance_test;
 pub mod telegram_command_sanitize_test;
 pub mod telegram_config_alerts_test;
 pub mod telegram_flow_chrome_test;
+pub mod telegram_flow_system_provenance_test;
 pub mod telegram_flow_telemetry_test;
 pub mod telegram_followup_midturn_queue_test;
 pub mod telegram_followup_pick_test;

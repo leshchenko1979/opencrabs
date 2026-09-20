@@ -1,5 +1,6 @@
 //! Compaction signal (#29): unit tests for the flow-line builders, the
-//! pinned-header const, the ETA predictor, and the footer-dedupe contract.
+//! pinned-header const, the ETA predictor, and the #444 system-provenance
+//! contract (a ⏳ compaction banner is a SYSTEM line, never narration).
 //! All pure — no agent, no mocks, no locks.
 
 use std::time::Duration;
@@ -40,16 +41,17 @@ fn compacting_line_rounds_fill_level() {
 }
 
 #[test]
-fn compacting_footer_suppresses_duplicate_activity_segment() {
-    // Dedupe (#29): during the silent window the newest log line IS the ⏳
-    // body entry, so the activity preview renders the compaction string a
-    // second time next to the pinned header — the owner-sighted duplication.
-    // While compacting the flag suppresses the activity segment: exactly ONE
-    // compaction string. With the flag off the duplicate returns (documents
-    // the suppression contract).
-    let lines = [FlowLine::Text(
+fn system_banner_stays_out_of_the_footer_preview() {
+    // Provenance contract (#444): the ⏳ compaction banner is a SYSTEM line, so
+    // `latest_activity_preview` / `latest_intermediary_thought` skip it and the
+    // footer can never echo the banner back beside the pinned header — with the
+    // compacting flag ON *or* OFF. Before #444 the banner was a `Text` line, so
+    // the flag was the only thing holding the duplicate back and the idle
+    // render showed it twice.
+    let lines = [FlowLine::System(
         "⏳ Compacting context — 66% full…".to_string(),
     )];
+    // Flag on (the silent compaction window): one banner, in the body log.
     let compacting = render_flow_html_chrome_pref(
         &lines,
         &FlowHeader::Live(Some(COMPACTING_HEADER_TEXT)),
@@ -64,8 +66,10 @@ fn compacting_footer_suppresses_duplicate_activity_segment() {
     assert_eq!(
         compacting.matches("Compacting context").count(),
         1,
-        "pinned header is the sole compaction string while compacting: {compacting:?}"
+        "system banner is never echoed by the footer preview: {compacting:?}"
     );
+    // Flag off (compaction done, header still pinned): STILL one banner —
+    // provenance, not the flag, is what keeps the duplicate out.
     let idle = render_flow_html_chrome_pref(
         &lines,
         &FlowHeader::Live(Some("⚙️")),
@@ -79,14 +83,14 @@ fn compacting_footer_suppresses_duplicate_activity_segment() {
     );
     assert_eq!(
         idle.matches("Compacting context").count(),
-        2,
-        "without the flag the activity preview duplicates the body entry: {idle:?}"
+        1,
+        "the flag is no longer load-bearing; provenance alone suppresses it: {idle:?}"
     );
 }
 
 #[test]
-fn compacting_rich_footer_suppresses_duplicate_status() {
-    let lines = [FlowLine::Text(
+fn system_banner_stays_out_of_the_rich_header_preview() {
+    let lines = [FlowLine::System(
         "⏳ Compacting context — 66% full…".to_string(),
     )];
     // Flag on: the HEADER (first line) carries the pinned compaction string
@@ -104,14 +108,15 @@ fn compacting_rich_footer_suppresses_duplicate_status() {
         rich.contains("⏳ Compacting context — 66% full…"),
         "body keeps the START line: {rich:?}"
     );
-    // Flag off: the header duplicates the body entry (documents the
-    // suppression contract).
+    // Flag off: STILL one — the SYSTEM line is skipped by the header preview on
+    // provenance alone (#444), so the flag no longer decides this. Before #444
+    // the banner was a `Text` line and the idle header showed it twice.
     let idle = render_flow_rich(&lines, Some(COMPACTING_HEADER_TEXT), false);
     let idle_header = idle.lines().next().unwrap_or_default();
     assert_eq!(
         idle_header.matches("Compacting context").count(),
-        2,
-        "without the flag the activity preview duplicates the pin: {idle:?}"
+        1,
+        "system provenance, not the flag, suppresses the duplicate: {idle:?}"
     );
 }
 

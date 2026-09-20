@@ -9,7 +9,10 @@ use crate::channels::telegram::flow::{
     render_flow_details_state,
 };
 
-fn base_test_state() -> StreamingState {
+/// Shared `StreamingState` fixture for flow-renderer tests. Also consumed by
+/// `telegram_flow_system_provenance_test` (#444), so a new field on
+/// `StreamingState` is added in ONE place.
+pub(crate) fn base_test_state() -> StreamingState {
     StreamingState {
         is_dm: false,
         is_cli: false,
