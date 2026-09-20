@@ -699,6 +699,15 @@ impl AgentService {
             }
         }
 
+        // #438 A5: the manifest is the model's answer to the retained-set
+        // budget. A DEGRADED run of compactions means that answer is not
+        // working, so the harness enforces the budget itself — auxiliary
+        // documents first, whole skills only after that. A healthy session
+        // (any completed tool call between compactions) is never touched, and
+        // a spec dropped here is reversible: asking for the skill re-registers
+        // it.
+        self.shed_retained_set_if_degraded(session_id, context.max_tokens);
+
         let cont_text = self.continuation_prompt(session_id, kind).await;
         if persist {
             message_service

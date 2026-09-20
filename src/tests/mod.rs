@@ -199,6 +199,7 @@ pub mod compaction_notice_test;
 pub mod compaction_persist_continuation_test;
 pub mod compaction_prompts_test;
 mod compaction_scope_test;
+pub mod compaction_shed_test;
 pub mod compaction_signal_test;
 pub mod compaction_single_continuation_path_test;
 pub mod compaction_skill_slug_service_test;

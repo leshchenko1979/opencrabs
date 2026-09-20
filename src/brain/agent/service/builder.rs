@@ -2117,4 +2117,84 @@ impl AgentService {
     pub fn active_skills_for_session(&self, session_id: Uuid) -> HashSet<String> {
         crate::brain::tools::seen_skills::active_for_session(session_id)
     }
+
+    /// #438 A5 — enforce the retained-set budget mechanically, once the model
+    /// has shown it cannot.
+    ///
+    /// The compactor prompt (A6) states the budget and asks the model to fit
+    /// the retained set inside it. A single compaction that comes in slightly
+    /// over is the model's call to make; a RUN of them —
+    /// [`SHED_STREAK_THRESHOLD`] or more compactions with no completed tool
+    /// call between them — is the #226 loop, where the floor is not coming
+    /// down and asking again will not bring it down. That run is the only case
+    /// this fires in.
+    ///
+    /// The order comes from [`crate::brain::skills::shed_order`]: auxiliary
+    /// documents first (a procedure for a finished task is the cheapest thing
+    /// to lose), whole skills only after that, largest first, and never the
+    /// last remaining entry. Applying it is sticky for the session — the
+    /// dropped specs stop being active — and reversible: asking for the skill
+    /// again re-registers it.
+    ///
+    /// Returns the dropped specs so the caller can report them; the log line
+    /// names the streak and the budget that triggered the shed.
+    pub(super) fn shed_retained_set_if_degraded(
+        &self,
+        session_id: Uuid,
+        max_tokens: usize,
+    ) -> Vec<String> {
+        let skills = crate::brain::skills::load_all_skills();
+        self.shed_retained_set(session_id, max_tokens, &skills)
+    }
+
+    /// The shed's decision and application, with the skill list supplied.
+    ///
+    /// Split from [`Self::shed_retained_set_if_degraded`] so the behaviour is
+    /// testable against synthetic skills; the production wrapper's only job is
+    /// to read the real set off disk.
+    ///
+    /// Crate-visible rather than module-private so the tests can supply
+    /// synthetic skills: `shed_retained_set_if_degraded` above is the only
+    /// production caller and its own job is to read the real set off disk.
+    pub(crate) fn shed_retained_set(
+        &self,
+        session_id: Uuid,
+        max_tokens: usize,
+        skills: &[crate::brain::skills::Skill],
+    ) -> Vec<String> {
+        let trend = self.compaction_state(session_id);
+        if trend.compaction_streak < SHED_STREAK_THRESHOLD {
+            return Vec::new();
+        }
+        let active = self.active_skills_for_session(session_id);
+        if active.is_empty() {
+            return Vec::new();
+        }
+        let seen_aux = crate::brain::tools::seen_skills::aux_seen_for_session(session_id);
+        let budget = crate::brain::skills::retained_set_budget_tokens(max_tokens);
+        let shed = crate::brain::skills::shed_order(&active, skills, &seen_aux, budget);
+        if shed.is_empty() {
+            return shed;
+        }
+        // Applying the order is what makes it sticky: the dropped specs stop
+        // being active, so the next turn re-injects only what survived.
+        for spec in &shed {
+            self.unregister_active_skill(session_id, spec);
+        }
+        tracing::info!(
+            "compaction shed (#438): dropped {} retained-set entries after {} consecutive \
+             compactions with no completed tool call, over the {}-token budget: {:?}",
+            shed.len(),
+            trend.compaction_streak,
+            budget,
+            shed,
+        );
+        shed
+    }
 }
+
+/// #438 A5: the streak at which the harness stops asking the model to fit the
+/// retained-set budget and enforces it itself. Two, because the first
+/// compaction that lands over budget is the model's call to make and the
+/// second one is a pattern.
+pub(super) const SHED_STREAK_THRESHOLD: u32 = 2;
