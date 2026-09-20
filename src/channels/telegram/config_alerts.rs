@@ -5,6 +5,9 @@
 //! background config reload cycles, dedupes alerts via stateful hashing, and
 //! delivers actionable diagnostics directly to the owner in Telegram DM.
 
+use crate::brain::provider::factory::{
+    NameResolution, normalized_fallback_chain, resolve_provider_name,
+};
 use crate::config::Config;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -194,70 +197,17 @@ pub fn audit_config_problems(
         .map(str::trim)
         .filter(|s| !s.is_empty() && *s != "none")
     {
-        let is_valid = if let Some((_, custom_name)) = crate::config::strip_custom_prefix(dp) {
-            config
-                .providers
-                .custom_by_name(custom_name)
-                .is_some_and(|p| {
-                    p.enabled && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
-                })
-        } else {
-            match dp {
-                "anthropic" => config
-                    .providers
-                    .anthropic
-                    .as_ref()
-                    .is_some_and(|p| p.enabled),
-                "openai" => config.providers.openai.as_ref().is_some_and(|p| p.enabled),
-                "gemini" => config.providers.gemini.as_ref().is_some_and(|p| p.enabled),
-                "openrouter" => config
-                    .providers
-                    .openrouter
-                    .as_ref()
-                    .is_some_and(|p| p.enabled),
-                "minimax" => config.providers.minimax.as_ref().is_some_and(|p| p.enabled),
-                "zai" => config.providers.zai.as_ref().is_some_and(|p| p.enabled),
-                "moonshot" => config
-                    .providers
-                    .moonshot
-                    .as_ref()
-                    .is_some_and(|p| p.enabled),
-                "xiaomi" => config.providers.xiaomi.as_ref().is_some_and(|p| p.enabled),
-                "qwen" => config.providers.qwen.as_ref().is_some_and(|p| p.enabled),
-                "github" => config.providers.github.as_ref().is_some_and(|p| p.enabled),
-                "ollama" => config.providers.ollama.as_ref().is_some_and(|p| p.enabled),
-                "claude-cli" => config
-                    .providers
-                    .claude_cli
-                    .as_ref()
-                    .is_some_and(|p| p.enabled),
-                "opencode-cli" => config
-                    .providers
-                    .opencode_cli
-                    .as_ref()
-                    .is_some_and(|p| p.enabled),
-                "codex-cli" => config
-                    .providers
-                    .codex_cli
-                    .as_ref()
-                    .is_some_and(|p| p.enabled),
-                "command-code-cli" => config
-                    .providers
-                    .command_code_cli
-                    .as_ref()
-                    .is_some_and(|p| p.enabled),
-                "codex" => config.providers.codex.as_ref().is_some_and(|p| p.enabled),
-                "opencode" => config
-                    .providers
-                    .opencode
-                    .as_ref()
-                    .is_some_and(|p| p.enabled),
-                "bedrock" => config.providers.bedrock.as_ref().is_some_and(|p| p.enabled),
-                "vertex" => config.providers.vertex.as_ref().is_some_and(|p| p.enabled),
-                _ => config.providers.custom_by_name(dp).is_some_and(|p| {
-                    p.enabled && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
-                }),
+        // Resolve the name exactly as `create_fallback` would, then apply the
+        // UNCHANGED enabled-only predicate (Decision D1). Widening it here to
+        // demand credentials would emit new owner-visible warnings for
+        // enabled-but-keyless keyed providers - a different defect, tracked
+        // separately rather than folded into this change.
+        let is_valid = match resolve_provider_name(config, dp) {
+            Some(NameResolution::Builtin { cfg, .. }) => cfg.enabled,
+            Some(NameResolution::Custom(cfg)) => {
+                cfg.enabled && cfg.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
             }
+            None => false,
         };
 
         if !is_valid {
@@ -277,51 +227,29 @@ pub fn audit_config_problems(
     if let Some(ref fb) = config.providers.fallback
         && fb.enabled
     {
-        for p_name in &fb.providers {
-            let is_valid =
-                if let Some((_, custom_name)) = crate::config::strip_custom_prefix(p_name) {
-                    config
-                        .providers
-                        .custom_by_name(custom_name)
-                        .is_some_and(|p| {
-                            p.enabled && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
-                        })
-                } else {
-                    match p_name.as_str() {
-                        "anthropic" => config.providers.anthropic.as_ref().is_some_and(|p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "openai" => config.providers.openai.as_ref().is_some_and(|p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "gemini" => config.providers.gemini.as_ref().is_some_and(|p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "openrouter" => config.providers.openrouter.as_ref().is_some_and(|p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "minimax" => config.providers.minimax.as_ref().is_some_and(|p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "zai" => config.providers.zai.as_ref().is_some_and(|p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "moonshot" => config.providers.moonshot.as_ref().is_some_and(|p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "xiaomi" => config.providers.xiaomi.as_ref().is_some_and(|p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "qwen" => config.providers.qwen.as_ref().is_some_and(|p| {
-                            p.enabled && p.api_key.as_ref().is_some_and(|k| !k.trim().is_empty())
-                        }),
-                        "github" => config.providers.github.as_ref().is_some_and(|p| p.enabled),
-                        "ollama" => config.providers.ollama.as_ref().is_some_and(|p| p.enabled),
-                        _ => config.providers.custom_by_name(p_name).is_some_and(|p| {
-                            p.enabled && p.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
-                        }),
-                    }
-                };
+        // Audit the list the runtime actually builds (Decision D2):
+        // normalized_fallback_chain drops the custom: prefix, rewrites
+        // provider/model to provider, and dedupes in order - so the audit
+        // cannot flag a spelling the chain builder already corrected.
+        for p_name in normalized_fallback_chain(config) {
+            let is_valid = match resolve_provider_name(config, &p_name) {
+                Some(NameResolution::Builtin {
+                    cfg,
+                    requires_api_key,
+                }) => {
+                    // The canonical credential rule (no key required, or a key
+                    // present) with the audit's own STRICTER test kept: a blank
+                    // key is not a credential, even though the loader's
+                    // api_key.is_some() would accept Some("").
+                    cfg.enabled
+                        && (!requires_api_key
+                            || cfg.api_key.as_ref().is_some_and(|k| !k.trim().is_empty()))
+                }
+                Some(NameResolution::Custom(cfg)) => {
+                    cfg.enabled && cfg.base_url.as_ref().is_some_and(|u| !u.trim().is_empty())
+                }
+                None => false,
+            };
 
             if !is_valid {
                 problems.push(ConfigProblem {

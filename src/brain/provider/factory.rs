@@ -232,17 +232,9 @@ static REGISTRATIONS: LazyLock<Vec<ProviderRegistration>> = LazyLock::new(|| {
 /// `custom:` prefix). Used by non-interactive switch surfaces (#461 family)
 /// to reject typos before touching session rows.
 pub fn provider_config_by_name<'a>(config: &'a Config, name: &str) -> Option<&'a ProviderConfig> {
-    let lookup = crate::config::strip_custom_prefix(name).map_or(name, |(_, rest)| rest);
-    if let Some(cfg) = config.providers.custom.as_ref().and_then(|m| {
-        m.get(lookup)
-            .or_else(|| m.get(&crate::config::custom_provider_key(lookup)))
-    }) {
-        return Some(cfg);
+    match resolve_provider_name(config, name)? {
+        NameResolution::Custom(cfg) | NameResolution::Builtin { cfg, .. } => Some(cfg),
     }
-    REGISTRATIONS
-        .iter()
-        .find(|reg| reg.session_id == name || reg.aliases.contains(&name))
-        .and_then(|reg| (reg.config_field)(config))
 }
 
 pub fn is_known_provider_name(config: &Config, name: &str) -> bool {
@@ -255,6 +247,56 @@ pub fn is_known_provider_name(config: &Config, name: &str) -> bool {
     REGISTRATIONS
         .iter()
         .any(|reg| reg.session_id == name || reg.aliases.contains(&name))
+}
+
+/// How a provider NAME resolves at runtime, plus the credential rule that
+/// applies to it. One home for the question both `config_alerts` and
+/// `startup_checks` ask: "would `create_fallback` build this name?"
+pub enum NameResolution<'a> {
+    /// A `[providers.custom.<name>]` section, with or without `custom:`.
+    Custom(&'a ProviderConfig),
+    /// A built-in registered provider. `requires_api_key` is the credential
+    /// rule declared by `ProviderConfigs::provider_registry()`.
+    Builtin {
+        cfg: &'a ProviderConfig,
+        requires_api_key: bool,
+    },
+}
+
+/// Resolve `name` exactly the way `create_fallback` does, so an audit cannot
+/// disagree with the runtime about which provider a name denotes.
+///
+/// Order is load-bearing: custom-FIRST (a user section literally named
+/// `opencode` must beat the built-in id, as `create_fallback` and
+/// `utils::providers` require), then `REGISTRATIONS` by `session_id` or alias.
+/// A name in neither is `None` — which is what keeps `bedrock`/`vertex`
+/// (present in `provider_registry()`, absent from `REGISTRATIONS`, no factory)
+/// invalid, matching the runtime's `Unknown fallback provider`.
+pub fn resolve_provider_name<'a>(config: &'a Config, name: &str) -> Option<NameResolution<'a>> {
+    let lookup = crate::config::strip_custom_prefix(name).map_or(name, |(_, rest)| rest);
+    if let Some(cfg) = config.providers.custom.as_ref().and_then(|m| {
+        m.get(lookup)
+            .or_else(|| m.get(&crate::config::custom_provider_key(lookup)))
+    }) {
+        return Some(NameResolution::Custom(cfg));
+    }
+    let reg = REGISTRATIONS
+        .iter()
+        .find(|reg| reg.session_id == name || reg.aliases.contains(&name))?;
+    let cfg = (reg.config_field)(config)?;
+    // Every buildable registration carries a `provider_registry()` row, so this
+    // lookup is total for the names that reach it. `custom` never does: its
+    // `config_field` returns `None`, so the `?` above already returned.
+    let requires_api_key = config
+        .providers
+        .provider_registry()
+        .into_iter()
+        .find(|(id, _, _, _)| *id == reg.session_id)
+        .is_some_and(|(_, _, requires_api_key, _)| requires_api_key);
+    Some(NameResolution::Builtin {
+        cfg,
+        requires_api_key,
+    })
 }
 
 pub const PROVIDER_NAMES: &[&str] = &[
