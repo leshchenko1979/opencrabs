@@ -155,9 +155,16 @@ async fn a_reference_inside_a_code_span_is_not_delivery_input() {
         .expect("a code span must not break delivery");
 
     assert_eq!(outbox.sent.len(), 1, "text only — nothing to attach");
+    // The reference must SURVIVE in the delivered text: inside a code span it
+    // is documentation, not delivery input, so extraction has to leave it be.
+    // It does not survive verbatim — the markdown-to-HTML layer rewrites
+    // ![chart](path) into an anchor before chunking, so the literal source
+    // syntax is absent by construction. Assert the surviving target, never
+    // the source syntax.
     assert!(
-        outbox.sent[0].1.contains("![chart]"),
-        "a code span is documentation, not delivery input: {}",
+        outbox.sent[0].1.contains("chart.png"),
+        "a code span is documentation, not delivery input — the reference must \
+         survive in the text rather than being extracted: {}",
         outbox.sent[0].1
     );
 
