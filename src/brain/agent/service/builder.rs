@@ -1,3 +1,4 @@
+use super::compaction::CompactionState;
 use super::types::*;
 use crate::brain::provider::Provider;
 use crate::brain::tools::ToolRegistry;
@@ -272,6 +273,11 @@ pub struct AgentService {
     pub(super) session_pressure_warned: std::sync::RwLock<HashMap<Uuid, bool>>,
     /// Observed wall-clock duration of each session's last SUCCESSFUL
     /// compaction (#29 E2). Feeds the `predicted` ETA hint on the next
+    /// Per-session compaction trend and loop-guard state (#438 S1). Read by the
+    /// compactor prompt, the shed, and the guard; reset by a committed tool
+    /// result. Bounded by `remove_session_provider`, like its siblings.
+    pub(super) session_compaction_state: std::sync::RwLock<HashMap<Uuid, CompactionState>>,
+
     /// `Compacting` event — grounded in what actually happened instead of a
     /// static guess. Written at CompactionSummary emit, read at Compacting
     /// emit; same per-session map pattern as `session_pressure_warned`.
@@ -467,6 +473,7 @@ impl AgentService {
             session_context_limits: std::sync::RwLock::new(HashMap::new()),
             session_primary_failure_streak: std::sync::RwLock::new(HashMap::new()),
             session_pressure_warned: std::sync::RwLock::new(HashMap::new()),
+            session_compaction_state: std::sync::RwLock::new(HashMap::new()),
             last_compaction_elapsed: std::sync::RwLock::new(HashMap::new()),
             session_outgoing_text_ring: std::sync::RwLock::new(HashMap::new()),
             context,
@@ -1630,6 +1637,12 @@ impl AgentService {
             .write()
             .expect("session_primary_failure_streak lock poisoned")
             .remove(&session_id);
+        // #438 S1: the compaction trend is per-session too — a stale streak
+        // would make the next session inherit a loop guard it never earned.
+        self.session_compaction_state
+            .write()
+            .expect("session_compaction_state lock poisoned")
+            .remove(&session_id);
         // #138 part 2: drop the session's ACTIVE skill set — memory and the
         // persisted flag — so a later restart cannot resurrect skills the
         // session no longer holds. The SEEN registry stays: a consumed skill
@@ -1677,6 +1690,57 @@ impl AgentService {
             .get(&session_id)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// #438 S1: record that a compaction just completed for this session —
+    /// raise the streak, restart the turns-since clock, and remember the
+    /// context share the session was at when it happened (the "window it
+    /// started from" the compactor prompt reports in A4).
+    ///
+    /// Crate-visible rather than module-private: the shed tests in
+    /// `src/tests/compaction_shed_test.rs` raise the streak through this same
+    /// entry point the compaction path uses, so the gate they exercise is the
+    /// production one and not a test-only re-implementation.
+    pub(crate) fn note_compaction_streak(&self, session_id: Uuid, before_pct: f64) {
+        let mut map = self
+            .session_compaction_state
+            .write()
+            .expect("session_compaction_state lock poisoned");
+        let entry = map.entry(session_id).or_default();
+        entry.compaction_streak = entry.compaction_streak.saturating_add(1);
+        entry.turns_since_compaction = 0;
+        entry.share_at_last_compaction = before_pct;
+    }
+
+    /// #438 S1: a committed tool result is the evidence that the last
+    /// compaction produced usable work — clear the streak so the loop guard
+    /// (A3) only ever fires on a run of compactions that produced nothing.
+    pub(super) fn reset_compaction_streak(&self, session_id: Uuid) {
+        if let Ok(mut map) = self.session_compaction_state.write() {
+            if let Some(entry) = map.get_mut(&session_id) {
+                entry.compaction_streak = 0;
+            }
+        }
+    }
+
+    /// #438 S1: one turn elapsed for this session. Kept alongside the streak
+    /// so the guard can tell "compacting every turn" from "compacted twice
+    /// over a long session".
+    pub(super) fn bump_turns_since_compaction(&self, session_id: Uuid) {
+        if let Ok(mut map) = self.session_compaction_state.write() {
+            if let Some(entry) = map.get_mut(&session_id) {
+                entry.turns_since_compaction = entry.turns_since_compaction.saturating_add(1);
+            }
+        }
+    }
+
+    /// #438 S1: read the session's compaction trend. Absent entry reads as the
+    /// default (no compactions yet), so callers need no `Option` handling.
+    pub(super) fn compaction_state(&self, session_id: Uuid) -> CompactionState {
+        self.session_compaction_state
+            .read()
+            .map(|map| map.get(&session_id).copied().unwrap_or_default())
+            .unwrap_or_default()
     }
 
     /// Snapshot of every per-session provider binding. Used by

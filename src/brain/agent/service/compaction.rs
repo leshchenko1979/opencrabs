@@ -58,6 +58,29 @@ impl CompactionOutcome {
     }
 }
 
+/// Per-session compaction TREND (#438 S1).
+///
+/// One definition, three readers: the compactor prompt reports the streak and
+/// the window it started from (A4), the loop guard breaks a run of compactions
+/// that produced no work (A3), and the shed decides whether the model already
+/// ignored the budget (A5).
+///
+/// Lives in `AgentService`, NOT in `AgentContext`: the context is rebuilt from
+/// the database at the start of every turn, so a counter kept there could never
+/// observe two compactions in a row.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CompactionState {
+    /// Consecutive compactions with no completed tool call between them.
+    /// Cleared by any committed tool result. A value that keeps climbing is
+    /// the signature of the #226 loop: the floor is not coming down.
+    pub(crate) compaction_streak: u32,
+    /// Assistant turns since the last compaction. Reset on compaction.
+    pub(crate) turns_since_compaction: u32,
+    /// Window fill level (%) when the last compaction ran — the "before"
+    /// number the next prompt measures its own outcome against.
+    pub(crate) share_at_last_compaction: f64,
+}
+
 /// A summariser running against a snapshot of a session's context while that
 /// session keeps taking turns.
 ///
@@ -489,6 +512,11 @@ impl AgentService {
         if let Ok(mut map) = self.last_compaction_elapsed.write() {
             map.insert(session_id, elapsed);
         }
+        // #438 S1: a compaction just completed — raise this session's streak and
+        // restart the turns-since clock. The streak is cleared by the next
+        // committed tool result, so a value that keeps climbing means the
+        // compaction produced no work (the #226 loop).
+        self.note_compaction_streak(session_id, before_pct);
         if let Some(cb) = progress_callback {
             let after_pct = if context.max_tokens > 0 {
                 (context.token_count as f64 / context.max_tokens as f64) * 100.0
@@ -690,6 +718,9 @@ impl AgentService {
         // Its own token: this task answers to session teardown, never to a
         // context that grew impatient.
         let cancel = tokio_util::sync::CancellationToken::new();
+        // #438 A4: read the trend BEFORE the task runs, so the prompt reports
+        // the compactions that came before this one.
+        let compaction_trend = self.compaction_state(session_id);
 
         let handle = tokio::spawn(async move {
             let summary = Self::compute_compaction_summary(
@@ -709,6 +740,7 @@ impl AgentService {
                 attempt_deadline,
                 None,
                 context_inventory,
+                compaction_trend,
             )
             .await?;
             Ok(Self::decorate_compaction_summary(summary, session_id, subagents).await)

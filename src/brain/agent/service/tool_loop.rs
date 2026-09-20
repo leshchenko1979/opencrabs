@@ -1011,6 +1011,12 @@ impl AgentService {
         has_progress_override: bool,
         progress_callback: Option<ProgressCallback>,
     ) -> Result<AgentResponse> {
+        // #438 S1: one assistant turn elapsed for this session. Recorded once
+        // per TURN (at the top of the per-turn body), not once per tool call,
+        // so the loop guard (A3) and the compactor prompt (A4) can tell
+        // "compacting every turn" from "compacted twice over a long session".
+        self.bump_turns_since_compaction(session_id);
+
         // Snapshot the manual-switch epoch at turn start. If the user
         // switches provider/model while this turn is in flight, an automatic
         // fallback the turn takes could otherwise stick over their pick. We
@@ -7741,6 +7747,12 @@ impl AgentService {
                 content: tool_results,
             };
             context.add_message(tool_result_msg);
+
+            // #438 S1: a committed tool result is the evidence that the last
+            // compaction produced usable work — clear the streak so the loop
+            // guard (A3) only fires on a run of compactions that produced
+            // nothing, and the shed (A5) never punishes a healthy session.
+            self.reset_compaction_streak(session_id);
 
             // The repeat correction goes AFTER the results, so the model sees
             // the identical output it just got and then why repeating it

@@ -1,4 +1,5 @@
 use super::builder::AgentService;
+use super::compaction::CompactionState;
 use crate::brain::agent::context::{AgentContext, CompactionScope};
 use crate::brain::agent::error::{AgentError, Result};
 use crate::brain::provider::{ContentBlock, LLMRequest, Message, Provider};
@@ -555,6 +556,11 @@ impl AgentService {
             Some(&self.tool_registry),
         );
 
+        // #438 A4: the trend this session is on, read BEFORE this compaction is
+        // recorded — so the prompt reports how many compactions came before it,
+        // not the one it is about to add.
+        let compaction_trend = self.compaction_state(session_id);
+
         let summary = Self::compute_compaction_summary(
             provider,
             self.fallback_chain_snapshot(),
@@ -575,6 +581,7 @@ impl AgentService {
             self.compaction_attempt_deadline(session_id),
             notifier,
             context_inventory,
+            compaction_trend,
         )
         .await?;
 
@@ -962,7 +969,7 @@ impl AgentService {
         } else {
             0.0
         };
-        let target_tokens = (snapshot_max_tokens as f64 * 0.05).round() as usize;
+        let target_tokens = crate::brain::skills::retained_set_budget_tokens(snapshot_max_tokens);
         out.push_str(&format!(
             "\nTotal active skills & tools: {} tokens ({:.1}% of context window, {} total tokens).\n\
              Guidance: aim to keep active skills and lazy tools <= 5% target (~{} tokens).\n",
@@ -970,6 +977,35 @@ impl AgentService {
         ));
 
         out
+    }
+
+    /// #438 A4 — the feedback the compactor prompt was missing: how many times
+    /// this session has compacted in a row, how little work passed between
+    /// those compactions, and how full the window was when the last one ran.
+    ///
+    /// Returns an empty string on the first compaction. There is no trend yet,
+    /// and a zeroed block would read as "compaction 0 — fine" rather than
+    /// "no history", which is the opposite of the intended signal.
+    fn compaction_trend_block(trend: CompactionState) -> String {
+        if trend.compaction_streak == 0 {
+            return String::new();
+        }
+        let share_clause = if trend.share_at_last_compaction > 0.0 {
+            format!(", with the window at {:.0}%", trend.share_at_last_compaction)
+        } else {
+            String::new()
+        };
+        format!(
+            "### Compaction trend (feedback on your last attempt):\n\
+             This session has now compacted {} time(s) in a row with no completed tool call \
+             between them. The previous compaction ran {} assistant turns ago{}.\n\
+             That streak means the previous compaction did not buy the session any room. \
+             Compact HARDER than last time: shed auxiliary documents before whole skills, and \
+             bring the retained set inside the budget stated in the Manifest Rules. A run of \
+             degraded compactions is broken by the harness shedding the retained set \
+             mechanically.\n\n",
+            trend.compaction_streak, trend.turns_since_compaction, share_clause,
+        )
     }
 
     /// Compute a compaction summary from a snapshot of messages.
@@ -999,6 +1035,7 @@ impl AgentService {
         attempt_deadline: std::time::Duration,
         notifier: Option<super::compaction_notice::CompactionNotifier>,
         context_inventory: String,
+        compaction_trend: CompactionState,
     ) -> Result<String> {
         let remaining_budget = snapshot_max_tokens.saturating_sub(snapshot_token_count);
 
@@ -1151,7 +1188,12 @@ impl AgentService {
              if only specific auxiliary procedures are needed.\n\
              - `discard_skills`: Skills or specific auxiliary documents whose tasks are complete and should be pruned to save budget.\n\
              - `required_tools`: Extended lazy tools (e.g. telegram_send, browser_navigate, cron_manage, pg_query) \
-             that the agent will need immediately on turn 1.\n\n\
+             that the agent will need immediately on turn 1.\n\
+             - BUDGET: the retained set you list must fit {budget} tokens — {ratio:.0}% of the \
+             {window}-token context window. The harness MEASURES the rendered set once this compaction \
+             lands and, if it is still over budget, sheds it mechanically: auxiliary documents first, \
+             then whole skills, largest first, and never the last remaining entry. Shedding is what \
+             happens when this budget is ignored, so list only what the next turn actually needs.\n\n\
              Format as YAML:\n\
              ```context-manifest\n\
              active_skills:\n\
@@ -1163,6 +1205,7 @@ impl AgentService {
                - <tool-name>\n\
              ```\n\n\
              Tool approval status: {}\n\n\
+             {trend}\
              BE EXHAUSTIVE. This is not a summary — it is a complete knowledge transfer. \
              Include code snippets, exact paths, user quotes, error messages. \
              The fresh agent has ZERO context beyond what you write here.",
@@ -1176,6 +1219,10 @@ impl AgentService {
             } else {
                 "AUTO-APPROVE OFF — tool approval is REQUIRED for every tool call"
             },
+            trend = compaction_trend_block(compaction_trend),
+            budget = crate::brain::skills::retained_set_budget_tokens(snapshot_max_tokens),
+            ratio = crate::brain::skills::RETAINED_SET_BUDGET_RATIO * 100.0,
+            window = snapshot_max_tokens,
         );
 
         // #1649: the scope prelude rides in front of the unchanged body;

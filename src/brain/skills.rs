@@ -731,6 +731,113 @@ pub fn active_skill_bodies(
     section
 }
 
+/// #438 A6: the share of the model's window the RETAINED set (`active_skills`
+/// plus the auxiliary documents they carry) is allowed to occupy after a
+/// compaction.
+///
+/// Stated as a RATIO, never as a flat token count. The design measured 10 000
+/// tokens against a 200 000-token window — 5 % — and a flat number is wrong on
+/// every other window, which is the char/token unit trap one level up. The
+/// compactor prompt (A6) and the mechanical shed (A5) both read this constant,
+/// so the number the model is given and the number the harness enforces are
+/// the same number.
+pub const RETAINED_SET_BUDGET_RATIO: f64 = 0.05;
+
+/// The token budget the retained set must fit, derived from the window.
+pub fn retained_set_budget_tokens(max_tokens: usize) -> usize {
+    ((max_tokens as f64) * RETAINED_SET_BUDGET_RATIO).round() as usize
+}
+
+/// The token cost of the retained set: exactly what [`active_skill_bodies`]
+/// would re-inject on the next turn, measured with the same tokenizer the
+/// request path uses.
+///
+/// Measuring the RENDERED block rather than summing raw file sizes keeps the
+/// number honest — `prompt_body()` adds the review-gate reminder, and the
+/// window pays for that too.
+pub fn retained_set_tokens(
+    active_skills: &std::collections::HashSet<String>,
+    skills: &[Skill],
+    seen_aux: &std::collections::HashMap<String, Vec<String>>,
+) -> usize {
+    crate::brain::tokenizer::count_tokens(&active_skill_bodies(active_skills, skills, seen_aux))
+}
+
+/// #438 A5: which entries to drop, in order, to bring the retained set back
+/// inside `budget_tokens`.
+///
+/// The shed order is the one the prompt states to the model (A6): auxiliary
+/// documents first — the cheapest thing to lose, a procedure for a finished
+/// task — and whole skills only after that, most expensive first inside each
+/// tier so the fewest entries are sacrificed.
+///
+/// Two invariants the caller can rely on:
+/// - the LAST remaining entry is never returned, so a shed can never empty the
+///   set and blind the next turn;
+/// - the loop stops as soon as the MEASURED total is inside budget, so the
+///   answer is not a sum of estimates.
+///
+/// Pure: no session, no disk, no logging. The caller applies the result and
+/// owns the receipt.
+pub fn shed_order(
+    active_skills: &std::collections::HashSet<String>,
+    skills: &[Skill],
+    seen_aux: &std::collections::HashMap<String, Vec<String>>,
+    budget_tokens: usize,
+) -> Vec<String> {
+    let mut active = active_skills.clone();
+    let mut aux_map = seen_aux.clone();
+    let mut order: Vec<String> = Vec::new();
+
+    while retained_set_tokens(&active, skills, &aux_map) > budget_tokens {
+        // (cost, spec, is_aux) — cost only orders the tier, the stopping
+        // condition is the measured total above.
+        let mut candidates: Vec<(usize, String, bool)> = Vec::new();
+        for skill in skills.iter().filter(|s| active.contains(&s.name)) {
+            if let Some(files) = aux_map.get(&skill.name) {
+                for file_name in files {
+                    if let Some(aux) = skill.auxiliary_files.iter().find(|a| &a.name == file_name) {
+                        candidates.push((
+                            crate::brain::tokenizer::count_tokens(&aux.body),
+                            format!("{}/{}", skill.name, file_name),
+                            true,
+                        ));
+                    }
+                }
+            }
+            candidates.push((
+                crate::brain::tokenizer::count_tokens(&skill.prompt_body()),
+                skill.name.clone(),
+                false,
+            ));
+        }
+        // The last entry stays: an emptied set blinds the next turn.
+        if candidates.len() <= 1 {
+            break;
+        }
+        let idx = candidates
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, (cost, _, is_aux))| (*is_aux, *cost))
+            .map(|(i, _)| i)
+            .expect("candidates is non-empty");
+        let (_, spec, is_aux) = candidates.remove(idx);
+        if is_aux {
+            if let Some((slug, file)) = spec.split_once('/')
+                && let Some(files) = aux_map.get_mut(slug)
+            {
+                files.retain(|f| f != file);
+            }
+        } else {
+            active.remove(&spec);
+            aux_map.remove(&spec);
+        }
+        order.push(spec);
+    }
+
+    order
+}
+
 type GlobsCache = std::sync::Mutex<Option<(std::time::Instant, PathBuf, Vec<Skill>)>>;
 static GLOBS_CACHE: OnceLock<GlobsCache> = OnceLock::new();
 
