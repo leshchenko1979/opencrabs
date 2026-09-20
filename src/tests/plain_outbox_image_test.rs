@@ -45,6 +45,18 @@ fn pin_rich(on: bool) {
     crate::config::Config::set_current(pinned);
 }
 
+/// A bot pointed at the mockito server.
+///
+/// MOCK PATHS ARE PASCALCASE FOR EVERY TELOXIDE REQUEST. teloxide 0.17 builds
+/// the method segment from the payload struct name, so `bot.send_message(..)`
+/// hits `/botTESTTOKEN/SendMessage` and `bot.send_photo(..)` hits
+/// `/botTESTTOKEN/SendPhoto` — NOT the lowercase forms the Bot API docs use.
+/// A lowercase mock never matches: mockito serves its own unmatched 501, whose
+/// empty body teloxide reports as `InvalidJson` and the send reads as a network
+/// failure. Only the hand-built rich URL (`rich/api.rs`, `format!("{}/bot{token}
+/// /sendRichMessage")`) stays camelCase — hence `sendRichMessage` below is
+/// lowercase while `SendMessage` / `SendPhoto` are not. Same trap, same
+/// explanation: `governor_gates_test.rs` (~:524).
 fn test_bot(server: &mockito::ServerGuard) -> teloxide::Bot {
     teloxide::Bot::with_client(
         "TESTTOKEN",
@@ -72,7 +84,7 @@ async fn the_fallback_leg_ships_a_local_image_and_strips_the_reference() {
 
     let mut server = mockito::Server::new_async().await;
     let text_mock = server
-        .mock("POST", "/botTESTTOKEN/sendMessage")
+        .mock("POST", "/botTESTTOKEN/SendMessage")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(SEND_MESSAGE_OK)
@@ -80,7 +92,7 @@ async fn the_fallback_leg_ships_a_local_image_and_strips_the_reference() {
         .create_async()
         .await;
     let photo_mock = server
-        .mock("POST", "/botTESTTOKEN/sendPhoto")
+        .mock("POST", "/botTESTTOKEN/SendPhoto")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(SEND_PHOTO_OK)
@@ -123,7 +135,7 @@ async fn a_reference_inside_a_code_span_is_not_delivery_input() {
 
     let mut server = mockito::Server::new_async().await;
     let text_mock = server
-        .mock("POST", "/botTESTTOKEN/sendMessage")
+        .mock("POST", "/botTESTTOKEN/SendMessage")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(SEND_MESSAGE_OK)
@@ -131,7 +143,7 @@ async fn a_reference_inside_a_code_span_is_not_delivery_input() {
         .create_async()
         .await;
     let no_photo = server
-        .mock("POST", "/botTESTTOKEN/sendPhoto")
+        .mock("POST", "/botTESTTOKEN/SendPhoto")
         .expect(0)
         .create_async()
         .await;
@@ -173,12 +185,12 @@ async fn a_rich_shaped_body_is_not_extracted_on_the_rich_plane() {
     // The double-send guard (#360): the rich plane resolves the reference
     // server-side, so attaching it here as well would deliver it twice.
     let no_photo = server
-        .mock("POST", "/botTESTTOKEN/sendPhoto")
+        .mock("POST", "/botTESTTOKEN/SendPhoto")
         .expect(0)
         .create_async()
         .await;
     let no_text = server
-        .mock("POST", "/botTESTTOKEN/sendMessage")
+        .mock("POST", "/botTESTTOKEN/SendMessage")
         .expect(0)
         .create_async()
         .await;
@@ -212,7 +224,7 @@ async fn an_undeliverable_reference_reaches_the_user_as_a_notice() {
 
     let mut server = mockito::Server::new_async().await;
     let text_mock = server
-        .mock("POST", "/botTESTTOKEN/sendMessage")
+        .mock("POST", "/botTESTTOKEN/SendMessage")
         .match_body(mockito::Matcher::Regex("Image not attached".to_string()))
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -221,7 +233,7 @@ async fn an_undeliverable_reference_reaches_the_user_as_a_notice() {
         .create_async()
         .await;
     let no_photo = server
-        .mock("POST", "/botTESTTOKEN/sendPhoto")
+        .mock("POST", "/botTESTTOKEN/SendPhoto")
         .expect(0)
         .create_async()
         .await;
@@ -258,7 +270,7 @@ async fn an_image_only_body_sends_the_image_and_no_empty_chunk() {
 
     let mut server = mockito::Server::new_async().await;
     let photo_mock = server
-        .mock("POST", "/botTESTTOKEN/sendPhoto")
+        .mock("POST", "/botTESTTOKEN/SendPhoto")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(SEND_PHOTO_OK)
@@ -268,7 +280,7 @@ async fn an_image_only_body_sends_the_image_and_no_empty_chunk() {
     // Stripping the reference leaves an empty body, and Telegram rejects an
     // empty text message with a 400 — the ladder must be skipped entirely.
     let no_text = server
-        .mock("POST", "/botTESTTOKEN/sendMessage")
+        .mock("POST", "/botTESTTOKEN/SendMessage")
         .expect(0)
         .create_async()
         .await;
@@ -308,7 +320,7 @@ async fn the_fallback_leg_fetches_a_remote_reference_and_attaches_it() {
         .create_async()
         .await;
     let text_mock = server
-        .mock("POST", "/botTESTTOKEN/sendMessage")
+        .mock("POST", "/botTESTTOKEN/SendMessage")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(SEND_MESSAGE_OK)
@@ -316,7 +328,7 @@ async fn the_fallback_leg_fetches_a_remote_reference_and_attaches_it() {
         .create_async()
         .await;
     let photo_mock = server
-        .mock("POST", "/botTESTTOKEN/sendPhoto")
+        .mock("POST", "/botTESTTOKEN/SendPhoto")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(SEND_PHOTO_OK)
