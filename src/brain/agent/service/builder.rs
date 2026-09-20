@@ -1715,7 +1715,12 @@ impl AgentService {
     /// #438 S1: a committed tool result is the evidence that the last
     /// compaction produced usable work — clear the streak so the loop guard
     /// (A3) only ever fires on a run of compactions that produced nothing.
-    pub(super) fn reset_compaction_streak(&self, session_id: Uuid) {
+    ///
+    /// Crate-visible like [`Self::note_compaction_streak`]: this is the reset
+    /// the tool loop performs after every committed tool result, and the tests
+    /// in `src/tests/compaction_degradation_test.rs` exercise the production
+    /// method rather than a re-implementation of it.
+    pub(crate) fn reset_compaction_streak(&self, session_id: Uuid) {
         if let Ok(mut map) = self.session_compaction_state.write() {
             if let Some(entry) = map.get_mut(&session_id) {
                 entry.compaction_streak = 0;
@@ -1726,7 +1731,7 @@ impl AgentService {
     /// #438 S1: one turn elapsed for this session. Kept alongside the streak
     /// so the guard can tell "compacting every turn" from "compacted twice
     /// over a long session".
-    pub(super) fn bump_turns_since_compaction(&self, session_id: Uuid) {
+    pub(crate) fn bump_turns_since_compaction(&self, session_id: Uuid) {
         if let Ok(mut map) = self.session_compaction_state.write() {
             if let Some(entry) = map.get_mut(&session_id) {
                 entry.turns_since_compaction = entry.turns_since_compaction.saturating_add(1);
@@ -1736,7 +1741,7 @@ impl AgentService {
 
     /// #438 S1: read the session's compaction trend. Absent entry reads as the
     /// default (no compactions yet), so callers need no `Option` handling.
-    pub(super) fn compaction_state(&self, session_id: Uuid) -> CompactionState {
+    pub(crate) fn compaction_state(&self, session_id: Uuid) -> CompactionState {
         self.session_compaction_state
             .read()
             .map(|map| map.get(&session_id).copied().unwrap_or_default())

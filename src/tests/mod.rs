@@ -193,6 +193,7 @@ pub mod command_handle_strip_test;
 pub mod command_label_test;
 pub mod command_rich_table_test;
 mod compaction_background_test;
+pub mod compaction_degradation_test;
 pub mod compaction_fallback_chain_test;
 pub mod compaction_loop_guard_test;
 pub mod compaction_manifest_tests;

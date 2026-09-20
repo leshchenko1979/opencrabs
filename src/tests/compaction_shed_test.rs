@@ -50,7 +50,8 @@ fn skill(name: &str, body_words: usize, aux: &[(&str, usize)]) -> Skill {
         "---\nname: {name}\ndescription: synthetic test skill {name}\n---\n\n{}\n",
         filler(body_words)
     );
-    let mut parsed = Skill::parse(name, &raw, SkillSource::Builtin).expect("synthetic skill parses");
+    let mut parsed =
+        Skill::parse(name, &raw, SkillSource::Builtin).expect("synthetic skill parses");
     parsed.auxiliary_files = aux
         .iter()
         .map(|(file, words)| AuxiliaryFile {
