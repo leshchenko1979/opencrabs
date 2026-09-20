@@ -765,6 +765,22 @@ pub(crate) async fn resume_session_inner(
                         )));
                 }
             }
+            // Live ctx meter (#135): TokenCount fires after every API
+            // response, tool execution and compaction merge. The running
+            // card's footer already has a ctx slot — feed it, so the meter
+            // moves during the turn instead of appearing only at settle.
+            // Ported to the resume path for parity (#450): without this arm
+            // a resumed turn showed no 🧠 ctx segment until a compaction fired.
+            ProgressEvent::TokenCount(tokens) => {
+                if let Ok(mut s) = st.lock() {
+                    s.sections.ctx = Some(crate::utils::format_ctx_footer(
+                        u32::try_from(tokens).unwrap_or(u32::MAX),
+                        ctx_max,
+                        None,
+                    ));
+                    s.dirty = true;
+                }
+            }
             ProgressEvent::ReasoningChunk { text } => {
                 if let Ok(mut s) = st.lock() {
                     s.thinking.push_str(&text);
