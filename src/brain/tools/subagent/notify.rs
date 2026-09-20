@@ -9,7 +9,7 @@
 //! from=<uuid>]` header prepended to every delivery.
 
 use crate::brain::agent::service::notify_policy::{
-    confirm_route, resolve_mode, DeliveryMode, CONFIRM_CAP,
+    CONFIRM_CAP, DeliveryMode, URGENT_FRAME, confirm_route, resolve_mode,
 };
 use crate::brain::tools::error::{Result, ToolError};
 use crate::brain::tools::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
@@ -168,8 +168,8 @@ impl Tool for SessionNotifyTool {
                     "properties": {
                         "mode": {
                             "type": "string",
-                            "enum": ["turn-end", "quiet"],
-                            "description": "'turn-end' (default): queue the message for the target's next tool-loop boundary. Against an IDLE target this delivers immediately; against a BUSY one it queues instead of being dropped — which is why it is the default. 'quiet': defer until the target has been idle for quiet_for_secs (any turn activity restarts the clock; max_delay_secs forces delivery into a busy turn so the notice cannot be starved forever); returns a deferred verdict with a notification id."
+                            "enum": ["turn-end", "interrupt", "quiet"],
+                            "description": "'turn-end' (default): queue the message for the target's next tool-loop boundary. Against an IDLE target this delivers immediately; against a BUSY one it queues instead of being dropped — which is why it is the default. 'interrupt': the urgent tier — the same delivery point, framed so the target yields its current plan and answers the notice in that turn; never deferred, and never a default (spell it explicitly). It is not pre-emption: no boundary exists inside a running tool call. 'quiet': defer until the target has been idle for quiet_for_secs (any turn activity restarts the clock; max_delay_secs forces delivery into a busy turn so the notice cannot be starved forever); returns a deferred verdict with a notification id."
                         },
                         "quiet_for_secs": {
                             "type": "integer",
@@ -260,7 +260,7 @@ impl Tool for SessionNotifyTool {
 
         // Mechanical sender signature — from execution context, not model text.
         let from = context.session_id;
-        let msg = crate::brain::agent::QueuedUserMessage {
+        let mut msg = crate::brain::agent::QueuedUserMessage {
             context_text: format!("[session-notify from={from}]\n\n{message}"),
             display_text: format!("📨 notify from {}:\n{message}", short_id(from)),
             origin: crate::brain::agent::PushOrigin::SessionNotify,
@@ -269,9 +269,11 @@ impl Tool for SessionNotifyTool {
 
         // Failsafe default (fork #13): an unset interrupt must not derail a
         // session that is mid-turn. v2 (fork #50) re-expressed the knob as
-        // the delivery policy; #373 retired the mode that knob selected, so
-        // `interrupt` is now accepted but inert — unset resolves to the
-        // turn-end default, which queues rather than refusing.
+        // the delivery policy; #373 retired the mode that knob selected, and
+        // #393 restored its intent as a first-class `interrupt` mode. The
+        // boolean is now the legacy ALIAS for that tier: `true` upgrades to
+        // `Interrupt`, absent/`false` resolves to the turn-end default, which
+        // queues rather than refusing.
         let delivery_obj = input.get("delivery");
         let mode = resolve_mode(
             delivery_obj
@@ -281,6 +283,16 @@ impl Tool for SessionNotifyTool {
             delivery_obj,
         )
         .map_err(ToolError::InvalidInput)?;
+
+        // #393: the urgent tier frames the notice in BOTH texts — the copy the
+        // target's model reads (context_text) and the copy its transcript
+        // shows (display_text). The frame is what makes the target yield its
+        // current plan and answer this notice in the same turn; the delivery
+        // point is unchanged (the next tool-loop boundary).
+        if matches!(mode, DeliveryMode::Interrupt) {
+            msg.context_text = format!("{URGENT_FRAME}{}", msg.context_text);
+            msg.display_text = format!("{URGENT_FRAME}{}", msg.display_text);
+        }
 
         use crate::brain::agent::service::notify_receipts;
         use crate::brain::agent::service::quiet_delivery;
@@ -366,6 +378,11 @@ impl Tool for SessionNotifyTool {
         // tool-loop boundary. This used to read
         // `matches!(mode, DeliveryMode::TurnEnd)`, which made the default
         // (`now`) refuse mid-turn instead of queueing.
+        // #393 TRAP: this literal MUST stay `true`. It is what keeps the
+        // mid-turn gate disarmed for EVERY mode — #373's queue-instead-of-
+        // refuse posture. Feeding the resolved mode into this parameter would
+        // set it `false` for `turn-end` and start REFUSING deliveries that
+        // today queue. The urgent tier is expressed in the frame, not here.
         let interrupt = true;
         let confirm = input
             .get("confirm")

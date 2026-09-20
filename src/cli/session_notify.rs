@@ -21,8 +21,17 @@
 //! verb: it reported "target mid-turn and `--interrupt` not set", and #373
 //! made the default QUEUE in that situation instead of refusing. The refusal
 //! still exists at the API level for callers that pass `interrupt=false`
-//! explicitly, but no CLI flag produces it. `--mode now` is likewise retired
-//! and now exits 4 with the retirement message.
+//! explicitly, but no CLI flag produces it — `--interrupt` is now the legacy
+//! ALIAS for the urgent tier (#393), not a way to request the refusal.
+//! `--mode now` is likewise retired and now exits 4 with the retirement
+//! message.
+//!
+//! Delivery modes (#393): `turn-end` (default) queues for the target's next
+//! tool-loop boundary; `interrupt` is the URGENT tier — the same delivery
+//! point, with precedence framing prepended so the target answers the notice
+//! in that turn instead of blending it into the plan it is already executing;
+//! `quiet` waits for the target to go idle. `interrupt` is never a default,
+//! and it is not pre-emption — no boundary exists inside a running tool call.
 //!
 //! SENDER LABEL (#23, owner amendment "Overridable"): the CLI lane has no
 //! sender session, so the recipient's echo shows the carried label —

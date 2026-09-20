@@ -242,16 +242,17 @@ async fn delivery_mode_turn_end_without_interrupt_resolves_cleanly() {
     );
 
     // (1) `interrupt: false` alongside `delivery.mode: "turn-end"` used to be
-    // rejected as a disagreement (-32602, the fork #158 defect). #373 made the
-    // argument inert — it selects no behaviour — so the pair now resolves to
-    // the same TurnEnd and must succeed.
-    let mut legacy_p = params(&sid.to_string(), "turn-end with inert interrupt ping");
+    // rejected as a disagreement (-32602, the fork #158 defect). Since #373 a
+    // `false` boolean selects no behaviour — and #393 keeps that rule, because
+    // only `true` upgrades to the urgent tier — so the pair resolves to the
+    // same TurnEnd and must succeed.
+    let mut legacy_p = params(&sid.to_string(), "turn-end with interrupt:false ping");
     legacy_p["delivery"] = serde_json::json!({ "mode": "turn-end" });
     legacy_p["interrupt"] = serde_json::json!(false);
     let legacy_resp = handle_session_notify(serde_json::json!(6), legacy_p, ctx.clone()).await;
     assert!(
         legacy_resp.error.is_none(),
-        "interrupt:false is inert since #373 and must not reject mode:turn-end: {legacy_resp:?}"
+        "interrupt:false selects nothing since #373 and must not reject mode:turn-end: {legacy_resp:?}"
     );
 
     // (2) With `interrupt` omitted (the fork #158 fix): succeeds cleanly

@@ -20,10 +20,25 @@ use serde_json::Value;
 /// reported as a successful hand-off while the notice was dropped on the
 /// floor. Every non-quiet delivery therefore queues for the target's next
 /// tool-loop boundary, which is the `turn-end` behaviour.
+///
+/// `interrupt` (fork #393, owner order) is the URGENT tier: the same delivery
+/// point as `turn-end`, but the notice carries precedence framing so the
+/// target answers it instead of blending it into the plan it is already
+/// executing. It is never deferred.
 #[derive(Debug)]
 pub enum DeliveryMode {
     /// Queue for the target's next tool-loop boundary (the default).
     TurnEnd,
+    /// The urgent tier (#393, owner order): delivers at the same boundary as
+    /// `TurnEnd` — the target's next tool-loop boundary — and adds precedence
+    /// framing, so the target yields its current plan and answers the notice
+    /// in that turn. Never deferred: unlike `Quiet` there is no idle wait and
+    /// no starvation cap.
+    ///
+    /// This is NOT pre-emption. No boundary exists inside a running tool
+    /// call, so a notice still cannot reach the middle of a long call; true
+    /// mid-tool abort would be a separate hard-cancel mechanism.
+    Interrupt,
     /// Defer until the target has been quiet for `quiet_for`; `max_delay`
     /// forces delivery into a busy turn (fork #43/#50).
     Quiet {
@@ -31,6 +46,13 @@ pub enum DeliveryMode {
         max_delay: Duration,
     },
 }
+
+/// Precedence frame prepended to an `interrupt`-mode notice (#393, owner
+/// order). It lives here, in the shared policy module, so the agent tool and
+/// the A2A handler cannot drift apart on what the urgent tier says to the
+/// target's model.
+pub(crate) const URGENT_FRAME: &str =
+    "⚡ URGENT — this notice takes precedence over your current plan.\n\n";
 
 /// Confirmation budget for `confirm: true`: how long the sender watches the
 /// receiving machinery for a wake before falling back to an honest
@@ -110,10 +132,18 @@ pub(crate) async fn confirm_route(
 }
 
 /// Resolve the v2 delivery policy (#373: `turn-end` is the default; the `now`
-/// mode is retired). The `interrupt` argument is the legacy alias for the
-/// retired mode and is accepted-but-inert: an alias whose absent value
-/// diverges from its `false` value is not an alias, so `interrupt=false` no
-/// longer requests the refusal behaviour. `quiet` defers until the target has
+/// mode is retired). `turn-end` is the default; `interrupt` (#393) is the
+/// URGENT tier — the same delivery point with precedence framing, never
+/// deferred. `quiet` defers until the target has been idle for
+/// `quiet_for_secs` (starvation cap `max_delay_secs` forces delivery into a
+/// busy turn).
+///
+/// The `interrupt` argument is the LEGACY ALIAS for the urgent tier, read in
+/// exactly two places: it contradicts `quiet` (which WAITS) and it UPGRADES a
+/// non-quiet resolution to `Interrupt`. Absence and `false` select nothing —
+/// an alias whose `true` maps to the ordinary tier is not an alias, and a
+/// boolean whose absent value diverges from its `false` value cannot express
+/// "not urgent".
 /// been idle for `quiet_for_secs` (starvation cap `max_delay_secs` forces
 /// delivery into a busy turn).
 ///
@@ -152,10 +182,27 @@ pub(crate) fn resolve_mode(
                 max_delay,
             })
         }
+        // The urgent tier (#393, owner order): the same delivery point as the
+        // default — the target's next tool-loop boundary — but the notice
+        // carries precedence framing, so the target answers it instead of
+        // blending it into the plan it is already executing. Never deferred.
+        Some("interrupt") => Ok(DeliveryMode::Interrupt),
         // The default: queue for the target's next tool-loop boundary. This
         // is identical to the retired `now` against an idle target, and
         // strictly better against a busy one, where `now` silently refused.
-        None | Some("turn-end") => Ok(DeliveryMode::TurnEnd),
+        None | Some("turn-end") => {
+            // Legacy alias upgrade (#393): `interrupt=true` was the pre-#373
+            // spelling of the urgent tier, and it must keep resolving onto
+            // the mode so the A2A param, the tool property and the CLI flag
+            // all mean the same thing. `false`/absent resolves to the
+            // ordinary tier — the boolean requests the tier, it never
+            // overrides an explicit non-quiet mode.
+            if interrupt == Some(true) {
+                Ok(DeliveryMode::Interrupt)
+            } else {
+                Ok(DeliveryMode::TurnEnd)
+            }
+        }
         Some("now") => Err(
             "delivery.mode 'now' is retired: it was identical to 'turn-end' for an idle \
              target and silently refused for a busy one. Deliveries queue for the target's \
@@ -164,7 +211,8 @@ pub(crate) fn resolve_mode(
                 .into(),
         ),
         Some(other) => Err(format!(
-            "delivery.mode '{other}' is not available yet — use 'turn-end' or 'quiet'"
+            "delivery.mode '{other}' is not available yet — use 'turn-end', \
+             'interrupt' or 'quiet'"
         )),
     }
 }

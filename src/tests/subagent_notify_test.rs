@@ -55,12 +55,15 @@ fn resolve_mode_defaults_and_alias() {
         resolve_mode(None, None, None).unwrap(),
         TurnEnd
     ));
-    // The legacy `interrupt` argument is accepted but inert: it no longer
-    // selects a behaviour, so `false` must NOT restore the retired refusal.
+    // The legacy `interrupt` argument is the alias for the urgent tier
+    // (#393): `true` still must NOT restore the retired refusal, but it does
+    // select the urgent tier.
     assert!(matches!(
         resolve_mode(None, Some(true), None).unwrap(),
-        TurnEnd
+        Interrupt
     ));
+    // `false` selects nothing — a false boolean is not a request for the
+    // ordinary tier, so it must NOT restore the retired refusal either.
     assert!(matches!(
         resolve_mode(None, Some(false), None).unwrap(),
         TurnEnd
@@ -87,18 +90,42 @@ fn resolve_mode_retired_now_is_rejected() {
 #[test]
 fn resolve_mode_agreeing_pair_passes_disagreement_rejected() {
     use DeliveryMode::*;
-    // `interrupt=true` still agrees with an explicit turn-end...
+    // `interrupt=true` is the legacy alias for the urgent tier (#393): it
+    // UPGRADES an explicit turn-end rather than agreeing with it.
     assert!(matches!(
         resolve_mode(Some("turn-end"), Some(true), None).unwrap(),
-        TurnEnd
+        Interrupt
     ));
-    // ...and is inert otherwise: `turn-end` with `interrupt=false` is no
-    // longer a disagreement, because the argument selects nothing (#373).
+    // ...and selects nothing otherwise: `turn-end` with `interrupt=false`
+    // resolves to the ordinary tier, because a false boolean is not an
+    // explicit request (#373).
     assert!(matches!(
         resolve_mode(Some("turn-end"), Some(false), None).unwrap(),
         TurnEnd
     ));
     // quiet still contradicts it — quiet WAITS, turn-end QUEUES.
+    assert!(resolve_mode(Some("quiet"), Some(true), None).is_err());
+}
+
+/// #393: `interrupt` is a first-class mode, not an alias-only spelling.
+#[test]
+fn resolve_mode_interrupt_is_the_urgent_tier() {
+    use DeliveryMode::*;
+    assert!(matches!(
+        resolve_mode(Some("interrupt"), None, None).unwrap(),
+        Interrupt
+    ));
+    // The named mode wins; the absent alias does not downgrade it.
+    assert!(matches!(
+        resolve_mode(Some("interrupt"), Some(false), None).unwrap(),
+        Interrupt
+    ));
+    // The legacy boolean reaches the same tier when no mode is given.
+    assert!(matches!(
+        resolve_mode(None, Some(true), None).unwrap(),
+        Interrupt
+    ));
+    // ...but it can still never mean "quiet".
     assert!(resolve_mode(Some("quiet"), Some(true), None).is_err());
 }
 
@@ -108,6 +135,11 @@ fn resolve_mode_rejects_unknown_modes() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("not available yet"), "got: {err}");
+    // The error must name the whole live vocabulary (#393 — the enum is the
+    // single source of truth for what a caller may ask for).
+    assert!(err.contains("'turn-end'"), "got: {err}");
+    assert!(err.contains("'interrupt'"), "got: {err}");
+    assert!(err.contains("'quiet'"), "got: {err}");
 }
 
 #[test]

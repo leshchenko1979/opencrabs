@@ -27,7 +27,7 @@
 
 use crate::a2a::types::*;
 use crate::brain::agent::service::notify_policy::{
-    confirm_route, resolve_mode, validate_sender_label, DeliveryMode, CONFIRM_CAP,
+    CONFIRM_CAP, DeliveryMode, URGENT_FRAME, confirm_route, resolve_mode, validate_sender_label,
 };
 use crate::brain::agent::service::notify_receipts;
 use crate::brain::agent::service::quiet_delivery;
@@ -118,7 +118,8 @@ pub async fn handle_session_notify(
     // ontology as the agent tool — `delivery {mode, quiet_for_secs,
     // max_delay_secs}` with the legacy `interrupt` argument resolving
     // through the shared `resolve_mode`. #373 retired the `now` mode, so the
-    // argument is accepted but inert and unset resolves to turn-end. Quiet
+    // argument is the legacy ALIAS for the urgent tier: `true` upgrades to
+    // `Interrupt`, absent/`false` resolves to turn-end. Quiet
     // banks the notice and returns its id; every success path records a
     // receipt so `session/notify-status` can poll the injection stamp.
     let mode = match resolve_mode(
@@ -181,12 +182,21 @@ pub async fn handle_session_notify(
         Some(t) => format!("📨 {t} (from {sender}):"),
         None => format!("📨 notify from {sender}:"),
     };
-    let msg = QueuedUserMessage {
+    let mut msg = QueuedUserMessage {
         context_text: format!("[session-notify from={CLI_SENDER_PREFIX}{sender}]\n\n{message}"),
         display_text: format!("{header}\n{message}"),
         origin: PushOrigin::SessionNotify,
         bg_meta: None,
     };
+
+    // #393: the urgent tier frames the notice in BOTH texts — the copy the
+    // target's model reads and the copy its transcript shows. The string
+    // comes from the shared policy const, so this surface and the agent tool
+    // cannot drift apart on what "urgent" says.
+    if matches!(mode, DeliveryMode::Interrupt) {
+        msg.context_text = format!("{URGENT_FRAME}{}", msg.context_text);
+        msg.display_text = format!("{URGENT_FRAME}{}", msg.display_text);
+    }
 
     let goal = params
         .get("goal")
@@ -253,7 +263,9 @@ pub async fn handle_session_notify(
         );
     }
 
-    // #373: every non-quiet delivery queues for the target's next tool-loop
+    // #393 TRAP: this literal MUST stay `true` — see the agent tool's copy.
+    // It keeps the mid-turn gate disarmed for every mode, so deliveries queue
+    // rather than being refused.
     // boundary. This used to read `matches!(mode, DeliveryMode::TurnEnd)`,
     // which made the default (`now`) refuse mid-turn instead of queueing.
     let interrupt = true;

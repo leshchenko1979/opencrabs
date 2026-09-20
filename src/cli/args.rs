@@ -411,10 +411,10 @@ pub enum SessionCommands {
         /// Sender label shown to the recipient (default: "CLI tooling")
         #[arg(long)]
         sender: Option<String>,
-        /// Deliver even if the session is mid-turn (#13 failsafe) — deprecated alias for --mode turn-end
+        /// Deliver as urgent — alias for `--mode interrupt`
         #[arg(long)]
         interrupt: bool,
-        /// Delivery mode: now (default) | turn-end | quiet
+        /// Delivery mode: turn-end (default) | interrupt | quiet — `interrupt` is the urgent tier (precedence framing, never deferred)
         #[arg(long)]
         mode: Option<String>,
         /// quiet mode: idle window before delivery, seconds (default 60)
