@@ -484,9 +484,30 @@ pub(crate) async fn send_markdown_outbox(
     // stale-topic eviction above fired, `thread_id` is now None — the
     // ladder (and its plain-text fallback, the #116 poisoning leg) is
     // re-addressed to General/DM instead of the dead topic.
+    //
+    // #368: markdown image references are collected HERE, on the fallback
+    // leg, and never at the top of the outbox. The rich arm above resolves a
+    // remote reference SERVER-side, so extracting before it would deliver
+    // every image twice — once inlined by Telegram, once attached by us —
+    // the regression #360 removed. `base_dir` is `None` because this layer
+    // carries no session handle: an absolute or `~`-prefixed target still
+    // resolves and delivers, while a relative one stays verbatim in the text
+    // rather than being silently dropped.
+    let image_scan = crate::utils::resolve_remote_images(crate::utils::extract_local_images(
+        markdown, None,
+    ))
+    .await;
+    let body = crate::utils::append_failure_notice(&image_scan.text, &image_scan.failures);
     let thread = thread_id.map(|t| t.0.0);
-    let html = super::handler::markdown_to_telegram_html(markdown);
-    let chunks = super::handler::split_message(&html, 4096);
+    let html = super::handler::markdown_to_telegram_html(&body);
+    // A body that was ONLY an image reference strips to empty; an empty chunk
+    // is a 400 from Telegram, so the ladder is skipped and the attachment
+    // below carries the message on its own.
+    let chunks = if body.trim().is_empty() {
+        Vec::new()
+    } else {
+        super::handler::split_message(&html, 4096)
+    };
     let total = chunks.len();
     let mut sent: Vec<(i32, String)> = Vec::new();
     for (i, chunk) in chunks.into_iter().enumerate() {
@@ -573,6 +594,71 @@ pub(crate) async fn send_markdown_outbox(
                     "{origin}/{origin_detail} chunk {}/{total} failed{partial}: {e}",
                     i + 1
                 ));
+            }
+        }
+    }
+    // 3. Attachments last, on whatever thread the ladder settled on — a dead
+    // topic evicted above must not re-poison the upload (#116). The same
+    // three helpers the turn path uses (delivery.rs): a picture above the
+    // 10 MB `sendPhoto` ceiling ships as a document rather than being
+    // rejected outright (#286). An extraction failure was already announced
+    // by the notice appended to the body above; a failure HERE cannot be,
+    // because the text has already gone out — so it is logged at `error`
+    // with the reference named, never swallowed.
+    for path in &image_scan.attachments {
+        let bytes = match tokio::fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(
+                    "{origin}/{origin_detail}: failed to read image {}: {e}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        let len = bytes.len();
+        let kind = telegram_media_kind(len as u64);
+        let uploaded = match kind {
+            TelegramMediaKind::Photo => {
+                photo_in_thread(bot, chat_id, thread_id, InputFile::memory(bytes))
+                    .await
+                    .map(|m| m.id.0)
+            }
+            TelegramMediaKind::Document => {
+                document_in_thread(bot, chat_id, thread_id, InputFile::memory(bytes))
+                    .await
+                    .map(|m| m.id.0)
+            }
+        };
+        match uploaded {
+            Ok(mid) => {
+                let reference = path.display().to_string();
+                super::telemetry::log_send_success(
+                    origin,
+                    origin_detail,
+                    "-",
+                    "outbox",
+                    match kind {
+                        TelegramMediaKind::Photo => "image_photo",
+                        TelegramMediaKind::Document => "image_document",
+                    },
+                    chat_id.0,
+                    thread_id.map(|t| t.0.0),
+                    mid,
+                    len,
+                    &super::telemetry::content_hash8(&reference),
+                );
+                sent.push((mid, format!("[image] {reference}")));
+            }
+            Err(e) => {
+                tracing::error!(
+                    "{origin}/{origin_detail}: failed to send image {} as {}: {e}",
+                    path.display(),
+                    match kind {
+                        TelegramMediaKind::Photo => "photo",
+                        TelegramMediaKind::Document => "document",
+                    }
+                );
             }
         }
     }
