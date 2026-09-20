@@ -115,10 +115,10 @@ async fn test_goal_turn_budget_formatting() {
 
 #[test]
 fn clock_glyph_formats_minutes_and_hours() {
-    assert_eq!(clock_glyph(0), "0:00 ⏱");
-    assert_eq!(clock_glyph(9), "0:09 ⏱");
-    assert_eq!(clock_glyph(83), "1:23 ⏱");
-    assert_eq!(clock_glyph(3665), "1:01:05 ⏱");
+    assert_eq!(clock_glyph(0), "0:00 ⏱️");
+    assert_eq!(clock_glyph(9), "0:09 ⏱️");
+    assert_eq!(clock_glyph(83), "1:23 ⏱️");
+    assert_eq!(clock_glyph(3665), "1:01:05 ⏱️");
 }
 
 // ── chrome assembly: title / prose / checklist / goal (Decision 3 / 12 / 13) ──
@@ -509,7 +509,7 @@ fn header_only_html_is_plain_footer_line() {
         &FlowSections::default(),
         10,
     );
-    assert_eq!(out, "⚙ • 0:10 ⏱");
+    assert_eq!(out, "⚙️ • 0:10 ⏱️");
     assert!(!out.contains("<blockquote"), "no outer expandable");
     assert!(
         !out.contains("<details"),
@@ -528,7 +528,7 @@ fn header_only_html_leads_with_chrome_then_footer() {
     );
     // Chrome leads (always visible): title then one line per checklist task; a
     // blank line separates it from the plain footer clock.
-    assert_eq!(out, "📋 <b>Ship it</b>\n☐ wire it\n☐ test it\n\n⚙ • 0:00 ⏱");
+    assert_eq!(out, "📋 <b>Ship it</b>\n☐ wire it\n☐ test it\n\n⚙️ • 0:00 ⏱️");
 }
 
 #[test]
@@ -549,7 +549,7 @@ fn header_only_settled_no_tool_turn_puts_ctx_before_clock() {
         &secs,
         3,
     );
-    assert_eq!(out, "✅ • 0:03 ⏱ • 9.1% 🧠");
+    assert_eq!(out, "✅ • 0:03 ⏱️ • 9.1% 🧠");
 }
 
 #[test]
@@ -561,7 +561,7 @@ fn header_only_details_is_plain_sub_footer_line() {
         &FlowSections::default(),
         5,
     );
-    assert_eq!(out, "<sub>⚙ • 0:05 ⏱</sub>");
+    assert_eq!(out, "<sub>⚙️ • 0:05 ⏱️</sub>");
     assert!(
         !out.contains("<details>"),
         "no log details before first entry"
@@ -596,9 +596,9 @@ fn html_populated_flow_has_no_outer_expandable() {
     );
     // The processing log lives in its OWN expandable, chrome outside it.
     assert!(out.contains(
-        "<blockquote expandable><b>⛏ read_file a.rs</b>\n\n<b>✅ bash</b> <code>git status</code>"
+        "<blockquote expandable><b>⛏️ read_file a.rs</b>\n\n<b>✅ bash</b> <code>git status</code>"
     ));
-    assert!(out.contains("⚙ • 0:20 ⏱"));
+    assert!(out.contains("⚙️ • 0:20 ⏱️"));
 }
 
 #[test]
@@ -616,10 +616,10 @@ fn details_populated_flow_keeps_chrome_outside_the_details() {
     // The telemetry line carries the 🎯 goal marker too (#250, Option 2): a goal
     // is present here, so the line leads with 🎯 before the state icon.
     assert!(out.starts_with(
-        "<p><b>🎯</b> finish the audit (0/20 turns)</p><p>&nbsp;</p><p>🎯 • ⚙ • 0:08 ⏱</p><details><summary><sub>⛏ grep todo</sub>"
+        "<p><b>🎯</b> finish the audit (0/20 turns)</p><p>&nbsp;</p><p>🎯 • ⚙️ • 0:08 ⏱️</p><details><summary><sub>⛏️ grep todo</sub>"
     ));
     assert!(out.ends_with("</details>"));
-    assert!(out.contains("0:08 ⏱"));
+    assert!(out.contains("0:08 ⏱️"));
 }
 
 #[test]
@@ -639,7 +639,7 @@ fn footer_shows_both_working_on_status_and_activity_summary() {
         &FlowSections::default(),
         30,
     );
-    assert!(out.contains("⚙ • 0:30 ⏱"), "telemetry line present");
+    assert!(out.contains("⚙️ • 0:30 ⏱️"), "telemetry line present");
     assert!(
         out.contains("Now checking the config."),
         "activity summary present"
@@ -662,7 +662,7 @@ fn live_footer_leads_with_activity_before_reasoning() {
         30,
     );
     assert!(
-        out.starts_with("⚙ • 0:30 ⏱\n<blockquote expandable><b>Now checking the config.</b>"),
+        out.starts_with("⚙️ • 0:30 ⏱️\n<blockquote expandable><b>Now checking the config.</b>"),
         "thought header leads tool block: got {out:?}"
     );
     assert!(out.contains("Now checking the config."));
@@ -700,7 +700,7 @@ fn summary_header_prefers_latest_intermediary_thought_with_truncation_and_fallba
         ..Default::default()
     };
     let header_act = summary_header(&parts_with_activity_only, HeaderMarkup::Html);
-    assert_eq!(header_act, "⛏ read_file config.toml");
+    assert_eq!(header_act, "⛏️ read_file config.toml");
 
     let parts_empty = FooterParts {
         thought: None,
@@ -708,7 +708,7 @@ fn summary_header_prefers_latest_intermediary_thought_with_truncation_and_fallba
         ..Default::default()
     };
     let header_empty = summary_header(&parts_empty, HeaderMarkup::Html);
-    assert_eq!(header_empty, "⛏ Processing log");
+    assert_eq!(header_empty, "⛏️ Processing log");
 }
 
 #[test]
@@ -725,10 +725,10 @@ fn single_tool_gets_its_own_log_block_and_footer() {
     assert!(out.starts_with("📋 <b>Plan</b>\n\n"));
     assert!(
         out.contains(
-            "<blockquote expandable><b>⛏ bash git status</b>\n\n<b>✅ bash</b> <code>git status</code></blockquote>"
+            "<blockquote expandable><b>⛏️ bash git status</b>\n\n<b>✅ bash</b> <code>git status</code></blockquote>"
         )
     );
-    assert!(out.contains("⚙ • 0:00 ⏱"));
+    assert!(out.contains("⚙️ • 0:00 ⏱️"));
 }
 
 #[test]
@@ -745,7 +745,7 @@ fn settled_footer_drops_the_cog() {
         &FlowSections::default(),
         124,
     );
-    assert!(out.contains("✅ • 2:04 ⏱"));
+    assert!(out.contains("✅ • 2:04 ⏱️"));
 }
 
 #[test]
@@ -772,8 +772,8 @@ fn settled_footer_shows_bg_indicator_when_task_running() {
     );
     assert!(
         with_bg.starts_with(
-            "✅ • 8:37 ⏱
-<blockquote expandable><b>⛏ grep todo</b>
+            "✅ • 8:37 ⏱️
+<blockquote expandable><b>⛏️ grep todo</b>
 
 "
         ),
@@ -792,8 +792,8 @@ fn settled_footer_shows_bg_indicator_when_task_running() {
     );
     assert!(
         without_bg.starts_with(
-            "✅ • 8:37 ⏱
-<blockquote expandable><b>⛏ grep todo</b>
+            "✅ • 8:37 ⏱️
+<blockquote expandable><b>⛏️ grep todo</b>
 
 "
         ),
@@ -811,7 +811,7 @@ fn settled_footer_shows_bg_indicator_when_task_running() {
         None,
     );
     assert!(
-        many.starts_with("<p>✅ • 8:37 ⏱</p><details><summary><sub>⛏ grep todo</sub></summary>"),
+        many.starts_with("<p>✅ • 8:37 ⏱️</p><details><summary><sub>⛏️ grep todo</sub></summary>"),
         "details flow renders with telemetry and summary header: {many:?}"
     );
     assert!(many.ends_with("</details>"));
@@ -858,7 +858,7 @@ fn settled_header_waits_when_bg_tasks_running() {
         },
         FlowOutcome::TimedOut,
     );
-    assert_eq!((icon, verb.as_str()), ("⏱", "Timed out"));
+    assert_eq!((icon, verb.as_str()), ("⏱️", "Timed out"));
 }
 
 #[test]
@@ -1374,7 +1374,7 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
         subagents: 0,
         queued_messages: 0,
     };
-    assert_eq!(base.format_line(), "⚙ • 0:00 ⏱");
+    assert_eq!(base.format_line(), "⚙ • 0:00 ⏱️");
 
     // Partial cases: zero suppression for non-positive fields
     let partial_bg = TelemetryMetrics {
@@ -1384,7 +1384,7 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
         subagents: 0,
         queued_messages: 0,
     };
-    assert_eq!(partial_bg.format_line(), "⚙ • 1:05 ⏱ • 3 ⛏ • 2 ⏏️");
+    assert_eq!(partial_bg.format_line(), "⚙ • 1:05 ⏱️ • 3 ⛏️ • 2 ⏏️");
 
     let partial_subagents = TelemetryMetrics {
         tool_count: 1,
@@ -1393,7 +1393,7 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
         subagents: 1,
         queued_messages: 0,
     };
-    assert_eq!(partial_subagents.format_line(), "⚙ • 0:10 ⏱ • 1 ⛏ • 1 🤖");
+    assert_eq!(partial_subagents.format_line(), "⚙ • 0:10 ⏱️ • 1 ⛏️ • 1 🤖");
 
     let partial_queued = TelemetryMetrics {
         tool_count: 5,
@@ -1402,7 +1402,7 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
         subagents: 0,
         queued_messages: 4,
     };
-    assert_eq!(partial_queued.format_line(), "⚙ • 1:00:05 ⏱ • 5 ⛏ • 4 ✉️");
+    assert_eq!(partial_queued.format_line(), "⚙ • 1:00:05 ⏱️ • 5 ⛏️ • 4 ✉️");
 
     // All non-zero fields present
     let all_present = TelemetryMetrics {
@@ -1415,10 +1415,10 @@ fn test_telemetry_metrics_format_line_zero_suppression() {
     // Goal presence check
     assert_eq!(
         all_present.format_telemetry_line("⚙", Some("12%"), true),
-        "🎯 • ⚙ • 0:30 ⏱ • 12% 🧠 • 4 ⛏ • 1 ⏏️ • 2 🤖 • 3 ✉️"
+        "🎯 • ⚙ • 0:30 ⏱️ • 12% 🧠 • 4 ⛏️ • 1 ⏏️ • 2 🤖 • 3 ✉️"
     );
     assert_eq!(
         all_present.format_telemetry_line("⚙", Some("12%"), false),
-        "⚙ • 0:30 ⏱ • 12% 🧠 • 4 ⛏ • 1 ⏏️ • 2 🤖 • 3 ✉️"
+        "⚙ • 0:30 ⏱️ • 12% 🧠 • 4 ⛏️ • 1 ⏏️ • 2 🤖 • 3 ✉️"
     );
 }

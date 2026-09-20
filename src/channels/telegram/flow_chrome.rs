@@ -62,7 +62,7 @@ impl PlanKb {
                 vec![InlineKeyboardButton::callback("✅ Approve plan", "plan:ok")],
                 vec![
                     InlineKeyboardButton::callback("🔍 Review plan", "plan:review"),
-                    InlineKeyboardButton::callback("🗑 Discard", "plan:no"),
+                    InlineKeyboardButton::callback("🗑️ Discard", "plan:no"),
                 ],
             ])),
             PlanKb::ReviewingApproveDiscard => Some(InlineKeyboardMarkup::new(vec![
@@ -72,11 +72,11 @@ impl PlanKb {
                 )],
                 vec![
                     InlineKeyboardButton::callback("⏳ Reviewing plan…", "plan:noop"),
-                    InlineKeyboardButton::callback("🗑 Discard", "plan:no"),
+                    InlineKeyboardButton::callback("🗑️ Discard", "plan:no"),
                 ],
             ])),
             PlanKb::DiscardOnly => Some(InlineKeyboardMarkup::new(vec![vec![
-                InlineKeyboardButton::callback("🗑 Discard plan", "plan:no"),
+                InlineKeyboardButton::callback("🗑️ Discard plan", "plan:no"),
             ]])),
             PlanKb::CompletedReview => Some(InlineKeyboardMarkup::new(vec![vec![
                 InlineKeyboardButton::callback("🔍 Review implementation", "plan:review_impl"),
@@ -353,9 +353,9 @@ impl FlowSections {
 pub(crate) fn clock_glyph(secs: u64) -> String {
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
     if h > 0 {
-        format!("{h}:{m:02}:{s:02} ⏱")
+        format!("{h}:{m:02}:{s:02} ⏱️")
     } else {
-        format!("{m}:{s:02} ⏱")
+        format!("{m}:{s:02} ⏱️")
     }
 }
 
@@ -392,7 +392,7 @@ impl TelemetryMetrics {
             segs.push(brain_ctx);
         }
         if self.tool_count > 0 {
-            segs.push(format!("{} ⛏", self.tool_count));
+            segs.push(format!("{} ⛏️", self.tool_count));
         }
         if self.detached_tasks > 0 {
             segs.push(format!("{} ⏏️", self.detached_tasks));
@@ -497,14 +497,14 @@ pub(crate) fn summary_header(parts: &FooterParts, markup: HeaderMarkup) -> Strin
             if starts_with_icon(act) {
                 return esc(act);
             } else {
-                return format!("⛏ {}", esc(act));
+                return format!("⛏️ {}", esc(act));
             }
         }
     }
     if let Some(w) = parts.working_on.filter(|w| starts_with_icon(w)) {
         return esc(w);
     }
-    "⛏ Processing log".to_string()
+    "⛏️ Processing log".to_string()
 }
 
 /// Build the standalone telemetry line (Option A).
@@ -528,7 +528,7 @@ pub(crate) fn standalone_telemetry_line(
     }) {
         "✍️"
     } else {
-        "⚙"
+        "⚙️"
     };
 
     if let Some(telem) = telemetry {

@@ -212,7 +212,7 @@ fn case_f_body_renders_chrome_and_counts_only_real_tools() {
         "the classic body log keeps the chrome (#444 parity): {html:?}"
     );
     assert!(
-        html.contains("⛏ Processing log"),
+        html.contains("⛏️ Processing log"),
         "the collapsed summary falls back to the log label, never the chrome: {html:?}"
     );
 
@@ -223,7 +223,7 @@ fn case_f_body_renders_chrome_and_counts_only_real_tools() {
         "the details body keeps the chrome (#444 parity): {details:?}"
     );
     assert!(
-        details.contains("⛏ Processing log"),
+        details.contains("⛏️ Processing log"),
         "the details summary falls back to the log label, never the chrome: {details:?}"
     );
 
