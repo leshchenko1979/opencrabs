@@ -195,7 +195,7 @@ impl Tool for SessionNotifyTool {
                 },
                 "interrupt": {
                     "type": "boolean",
-                    "description": "Legacy alias for delivery.mode, accepted but inert (#373): it no longer selects a behaviour. Deliveries queue for the target's next tool-loop boundary by default; use delivery.mode 'quiet' to wait for the target to go idle instead."
+                    "description": "Legacy alias for delivery.mode, DEPRECATED — prefer delivery.mode. `true` UPGRADES a non-quiet resolution to the urgent 'interrupt' tier (#393); absent or `false` selects nothing. Pairing `true` with delivery.mode 'quiet' is an error, because the two disagree. It does not arm a refusal gate: deliveries still queue for the target's next tool-loop boundary."
                 }
             },
             "required": ["target_session"]

@@ -155,8 +155,10 @@ pub(crate) async fn run(
         "message": text,
     });
     // Omit `interrupt` unless explicitly true (fork #158): the CLI flag
-    // defaults to false, and #373 made the argument inert, so sending it at
-    // all would be noise. Kept because old tooling still passes `--interrupt`.
+    // defaults to false, and absent or false selects nothing, so sending it at
+    // all would be noise. Since #393 `--interrupt` is the alias for the urgent
+    // 'interrupt' tier, so an explicit true UPGRADES a non-quiet resolution
+    // instead of being inert; kept because older tooling still passes it.
     if interrupt {
         params["interrupt"] = serde_json::json!(true);
     }
