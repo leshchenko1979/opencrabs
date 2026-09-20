@@ -108,7 +108,7 @@ jobs:
           cache-on-failure: true
 
       - name: Run sccache-action
-        uses: mozilla-actions/sccache-action@v0.0.8
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Build ([profile.ci], no tests)
         env:

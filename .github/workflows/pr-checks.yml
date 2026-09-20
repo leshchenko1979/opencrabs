@@ -167,7 +167,7 @@ jobs:
 
       - name: Run sccache-action
         if: ${{ !inputs.fix && !inputs.lockregen }}
-        uses: mozilla-actions/sccache-action@v0.0.8
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Install system deps (pkg-config, ALSA dev, mold + clang)
         if: ${{ !inputs.fix && !inputs.lockregen }}
