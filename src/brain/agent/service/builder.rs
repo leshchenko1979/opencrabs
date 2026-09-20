@@ -1721,10 +1721,10 @@ impl AgentService {
     /// in `src/tests/compaction_degradation_test.rs` exercise the production
     /// method rather than a re-implementation of it.
     pub(crate) fn reset_compaction_streak(&self, session_id: Uuid) {
-        if let Ok(mut map) = self.session_compaction_state.write() {
-            if let Some(entry) = map.get_mut(&session_id) {
-                entry.compaction_streak = 0;
-            }
+        if let Ok(mut map) = self.session_compaction_state.write()
+            && let Some(entry) = map.get_mut(&session_id)
+        {
+            entry.compaction_streak = 0;
         }
     }
 
@@ -1732,10 +1732,10 @@ impl AgentService {
     /// so the guard can tell "compacting every turn" from "compacted twice
     /// over a long session".
     pub(crate) fn bump_turns_since_compaction(&self, session_id: Uuid) {
-        if let Ok(mut map) = self.session_compaction_state.write() {
-            if let Some(entry) = map.get_mut(&session_id) {
-                entry.turns_since_compaction = entry.turns_since_compaction.saturating_add(1);
-            }
+        if let Ok(mut map) = self.session_compaction_state.write()
+            && let Some(entry) = map.get_mut(&session_id)
+        {
+            entry.turns_since_compaction = entry.turns_since_compaction.saturating_add(1);
         }
     }
 
