@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 /// What `enforce_context_budget` did to the context on this visit.
 ///
-/// Both variants MUST be persisted as a DB marker row. The summarised case is
+/// Every variant MUST be persisted as a DB marker row. The summarised case is
 /// obvious. The truncated case is the one that bit us: dropping the oldest
 /// messages without writing a marker leaves `messages_from_last_compaction`
 /// pointing at the same old anchor, so the next restart reloads the history
@@ -35,6 +35,13 @@ pub(crate) enum CompactionOutcome {
     /// Every summariser attempt failed, so the oldest messages were dropped
     /// to fit the window instead. Nothing before this point survives.
     Truncated,
+    /// #438 A3: compaction was SUPPRESSED, not performed — a run of
+    /// compactions produced no completed tool call between them, so another
+    /// attempt would spend a provider call on a context that has not come
+    /// down. The marker still has to land: the #226 harm was a session that
+    /// looped in SILENCE, and a break the model never sees is that same
+    /// silence at a lower bill.
+    LoopGuard,
 }
 
 impl CompactionOutcome {
@@ -53,6 +60,17 @@ impl CompactionOutcome {
                  messages were dropped to fit the window. Nothing before this point \
                  survives. Ask the user to restate anything you need rather than guessing \
                  at what was lost.]"
+            ),
+            Self::LoopGuard => format!(
+                "[CONTEXT COMPACTION SUSPENDED — The conversation crossed the compaction \
+                 threshold{trigger}, but the last {streak} compactions ran with no completed \
+                 tool call between them, so compacting again would spend another attempt on a \
+                 context that has not come down. Nothing was summarised: this is the harness \
+                 breaking a loop, not a fresh start. Anything the guard could free without a \
+                 summary has already been freed, so finish the step you are on — or tell the \
+                 user plainly what is blocking you — rather than re-summarising the \
+                 conversation this turn.]",
+                streak = COMPACTION_LOOP_GUARD_STREAK,
             ),
         }
     }
@@ -156,6 +174,68 @@ enum PendingState {
 /// before compaction went to the background.
 const BACKPRESSURE_CEILING_PCT: f64 = 80.0;
 
+/// #438 A3: the streak at which a run of compactions stops being compaction and
+/// starts being a loop.
+///
+/// Two, because compaction exists to buy the session room. The first one on a
+/// context that never came down is a judgement call; the second, with no
+/// completed tool call in between, is the #226 evidence — the floor is not
+/// coming down on its own, and neither the in-flight path (`PendingState` has
+/// no "abandoned" arm) nor Tier 2 can move a window pinned by one or two
+/// outsized messages.
+pub(crate) const COMPACTION_LOOP_GUARD_STREAK: u32 = 2;
+
+/// #438 A3 — has this session's compaction run stopped being compaction?
+///
+/// Pure, over the streak S1 already maintains: no second counter, no clock, no
+/// IO. The caller owns the break, so this stays testable without a service.
+///
+/// The guard, and what it is worth. `N` compactions with no completed tool call
+/// between them means the context never came down, and `hard_truncate_to`
+/// (`context.rs`) stopping at two messages is why: it cannot drop below two, so
+/// a window held open by one or two outsized messages re-triggers compaction on
+/// every visit. Compacting again cannot fix that, and the #226 harm was never
+/// the compaction itself — it was the session looping in silence for ~7 h. So
+/// the caller brakes visibly (`CompactionOutcome::LoopGuard`) instead of
+/// summarising again.
+///
+/// What the brake cannot do matters as much as what it can. Keeping the floor
+/// moving needs something the caller can reach that is NOT compaction, and
+/// neither `PendingState` nor the safety truncation provides one: unresolved,
+/// the turn proceeds unshrunken and the loop stays alive, spending turns rather
+/// than provider calls. That is why `N` is 2 and why it must not be raised —
+/// the only lever that would raise it (sparing the rare second, working
+/// compaction via a `streak >= 1` tail) also admits the pathological
+/// first-at-1-then-no-recovery run, and this predicate cannot tell those two
+/// apart because it has no outcome to read. Sizing that bound is the escalation
+/// half of #438 (a run that will not resolve must reach the owner); until it
+/// lands, the guard brakes on the predicate it has.
+pub(crate) fn compaction_loop_guard(compaction_streak: u32) -> bool {
+    compaction_streak >= COMPACTION_LOOP_GUARD_STREAK
+}
+
+/// Last-resort truncation to 80% of the window: the recovery that costs no
+/// provider call.
+///
+/// Two callers share it — the exhausted-summariser safety net, and the #438 A3
+/// loop guard, where compacting again would spend a call on a context that has
+/// not come down. Returns whether messages were actually dropped, which is what
+/// the caller's `truncated` bookkeeping and the persist-a-marker rule hang off.
+///
+/// Blind by design to the two-message floor in `AgentContext::hard_truncate_to`:
+/// a window pinned by two outsized messages cannot be brought down this way, and
+/// claiming otherwise would put a marker on a context that never shrank.
+fn safety_truncate_to_80(context: &mut AgentContext, max_tokens: usize) -> bool {
+    let target = (max_tokens as f64 * 0.80) as usize;
+    if context.token_count <= target {
+        return false;
+    }
+    let before_len = context.messages.len();
+    context.hard_truncate_to(target);
+    context.trim_to_fit(0);
+    context.messages.len() < before_len
+}
+
 /// Whether this visit has to stop and wait for an in-flight summariser.
 ///
 /// Waiting, never cancelling. Two reasons to stop running ahead of it:
@@ -249,11 +329,7 @@ impl AgentService {
                 context.token_count,
             );
 
-            let target = (effective_max as f64 * 0.80) as usize;
-            let before_len = context.messages.len();
-            context.hard_truncate_to(target);
-            context.trim_to_fit(0);
-            truncated |= context.messages.len() < before_len;
+            truncated |= safety_truncate_to_80(context, effective_max);
 
             if let Some(cb) = progress_callback {
                 cb(session_id, ProgressEvent::TokenCount(context.token_count));
@@ -307,6 +383,35 @@ impl AgentService {
             // Tier 2 may have already dropped messages to get us here. The
             // marker still has to land even though no summariser ran.
             return truncated.then_some(CompactionOutcome::Truncated);
+        }
+
+        // #438 A3 — the loop guard, and it sits HERE on purpose: after the
+        // in-flight summariser had its first refusal, after the 65% gate, and
+        // before the first compaction attempt. What it suppresses is the
+        // provider call that cannot help; Tier 2's truncation above has already
+        // run and the free truncation below still runs, so the recoveries that
+        // cost nothing are untouched. See `compaction_loop_guard` for why a run
+        // this long cannot be fixed by compacting again.
+        let loop_guard_streak = self.compaction_state(session_id).compaction_streak;
+        if compaction_loop_guard(loop_guard_streak) {
+            tracing::warn!(
+                "Compaction loop guard (#438): {} consecutive compactions with no completed \
+                 tool call — suppressing compaction at {:.0}% rather than spending another \
+                 summariser on a context that has not come down",
+                loop_guard_streak,
+                usage_pct,
+            );
+            // The floor may still be movable without a summary. When it is not
+            // (two outsized messages pin the window), the marker the caller
+            // persists is the whole break — deliberate, because a brake the
+            // model cannot see is the silence #226 was about.
+            if safety_truncate_to_80(context, effective_max) {
+                tracing::warn!(
+                    "Compaction loop guard (#438): context still over 80% — safety-truncated \
+                     without a summary"
+                );
+            }
+            return Some(CompactionOutcome::LoopGuard);
         }
 
         tracing::warn!(
@@ -435,10 +540,10 @@ impl AgentService {
                     context.token_count,
                     usage_pct,
                 );
-                let before_len = context.messages.len();
-                context.hard_truncate_to(safety_target);
-                context.trim_to_fit(0);
-                truncated |= context.messages.len() < before_len;
+                // Drops nothing when `hard_truncate_to`'s two-message floor is
+                // what holds the window open — hence the returned flag rather
+                // than an assumption that the truncation worked.
+                truncated |= safety_truncate_to_80(context, effective_max);
             } else {
                 tracing::warn!(
                     "Compaction exhausted, but context is at {} tokens (<=80%) — proceeding with turn uncompacted",
