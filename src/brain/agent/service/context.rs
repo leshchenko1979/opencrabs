@@ -1219,7 +1219,7 @@ impl AgentService {
             } else {
                 "AUTO-APPROVE OFF — tool approval is REQUIRED for every tool call"
             },
-            trend = compaction_trend_block(compaction_trend),
+            trend = Self::compaction_trend_block(compaction_trend),
             budget = crate::brain::skills::retained_set_budget_tokens(snapshot_max_tokens),
             ratio = crate::brain::skills::RETAINED_SET_BUDGET_RATIO * 100.0,
             window = snapshot_max_tokens,
