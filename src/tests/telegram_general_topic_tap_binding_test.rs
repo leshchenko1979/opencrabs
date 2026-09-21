@@ -69,52 +69,49 @@ fn repo(db: &Database) -> SessionBindingRepository {
 #[tokio::test]
 async fn general_topic_tap_persists_the_general_bucket() {
     let dir = tempfile::tempdir().expect("tempdir");
-    with_home_override_async(
-        dir.path().to_path_buf(),
-        async {
-            let db = test_db().await;
-            let sid = Uuid::new_v4();
-            create_session(&db, sid).await;
+    with_home_override_async(dir.path().to_path_buf(), async {
+        let db = test_db().await;
+        let sid = Uuid::new_v4();
+        create_session(&db, sid).await;
 
-            // Ingress in a known forum binds General under Some(GENERAL_TOPIC_ID).
-            let ingress = session_topic_for_event(false, None, true);
-            assert_eq!(ingress, Some(GENERAL_TOPIC_ID));
-            repo(&db)
-                .upsert(
-                    sid.to_string(),
-                    "telegram",
-                    &CHAT.to_string(),
-                    ingress,
-                    BindingOrigin::Text,
-                )
-                .await
-                .expect("ingress bind");
+        // Ingress in a known forum binds General under Some(GENERAL_TOPIC_ID).
+        let ingress = session_topic_for_event(false, None, true);
+        assert_eq!(ingress, Some(GENERAL_TOPIC_ID));
+        repo(&db)
+            .upsert(
+                sid.to_string(),
+                "telegram",
+                &CHAT.to_string(),
+                ingress,
+                BindingOrigin::Text,
+            )
+            .await
+            .expect("ingress bind");
 
-            // A tap now writes the SAME composed topic, not the raw thread id.
-            let tap = session_topic_for_event(false, None, true);
-            record_tap_binding(&repo(&db), sid, ChatId(CHAT), tap).await;
+        // A tap now writes the SAME composed topic, not the raw thread id.
+        let tap = session_topic_for_event(false, None, true);
+        record_tap_binding(&repo(&db), sid, ChatId(CHAT), tap).await;
 
-            let bound = repo(&db)
-                .by_session(&sid.to_string())
-                .await
-                .expect("read binding")
-                .expect("binding row must exist");
-            assert_eq!(
-                bound.thread_id,
-                Some(GENERAL_TOPIC_ID),
-                "a General tap must not wipe the Some(1) binding ingress established"
-            );
-            assert_eq!(bound.last_origin.as_deref(), Some("callback"));
+        let bound = repo(&db)
+            .by_session(&sid.to_string())
+            .await
+            .expect("read binding")
+            .expect("binding row must exist");
+        assert_eq!(
+            bound.thread_id,
+            Some(GENERAL_TOPIC_ID),
+            "a General tap must not wipe the Some(1) binding ingress established"
+        );
+        assert_eq!(bound.last_origin.as_deref(), Some("callback"));
 
-            // The witness, so the discriminating input is obtained rather than
-            // merely described: this is what the pre-fix call site wrote.
-            assert_eq!(
-                topic_session_id(false, None),
-                None,
-                "pre-fix call site passed the raw thread id, which is None here"
-            );
-        },
-    )
+        // The witness, so the discriminating input is obtained rather than
+        // merely described: this is what the pre-fix call site wrote.
+        assert_eq!(
+            topic_session_id(false, None),
+            None,
+            "pre-fix call site passed the raw thread id, which is None here"
+        );
+    })
     .await;
 }
 
@@ -122,25 +119,22 @@ async fn general_topic_tap_persists_the_general_bucket() {
 #[tokio::test]
 async fn real_topic_tap_persists_that_topic() {
     let dir = tempfile::tempdir().expect("tempdir");
-    with_home_override_async(
-        dir.path().to_path_buf(),
-        async {
-            let db = test_db().await;
-            let sid = Uuid::new_v4();
-            create_session(&db, sid).await;
+    with_home_override_async(dir.path().to_path_buf(), async {
+        let db = test_db().await;
+        let sid = Uuid::new_v4();
+        create_session(&db, sid).await;
 
-            let tap = session_topic_for_event(true, Some(REAL_TOPIC), true);
-            assert_eq!(tap, Some(REAL_TOPIC));
-            record_tap_binding(&repo(&db), sid, ChatId(CHAT), tap).await;
+        let tap = session_topic_for_event(true, Some(REAL_TOPIC), true);
+        assert_eq!(tap, Some(REAL_TOPIC));
+        record_tap_binding(&repo(&db), sid, ChatId(CHAT), tap).await;
 
-            let bound = repo(&db)
-                .by_session(&sid.to_string())
-                .await
-                .expect("read binding")
-                .expect("binding row must exist");
-            assert_eq!(bound.thread_id, Some(REAL_TOPIC));
-        },
-    )
+        let bound = repo(&db)
+            .by_session(&sid.to_string())
+            .await
+            .expect("read binding")
+            .expect("binding row must exist");
+        assert_eq!(bound.thread_id, Some(REAL_TOPIC));
+    })
     .await;
 }
 
@@ -150,25 +144,22 @@ async fn real_topic_tap_persists_that_topic() {
 #[tokio::test]
 async fn unknown_forum_tap_keeps_the_base_bucket() {
     let dir = tempfile::tempdir().expect("tempdir");
-    with_home_override_async(
-        dir.path().to_path_buf(),
-        async {
-            let db = test_db().await;
-            let sid = Uuid::new_v4();
-            create_session(&db, sid).await;
+    with_home_override_async(dir.path().to_path_buf(), async {
+        let db = test_db().await;
+        let sid = Uuid::new_v4();
+        create_session(&db, sid).await;
 
-            let tap = session_topic_for_event(false, None, false);
-            assert_eq!(tap, None);
-            record_tap_binding(&repo(&db), sid, ChatId(CHAT), tap).await;
+        let tap = session_topic_for_event(false, None, false);
+        assert_eq!(tap, None);
+        record_tap_binding(&repo(&db), sid, ChatId(CHAT), tap).await;
 
-            let bound = repo(&db)
-                .by_session(&sid.to_string())
-                .await
-                .expect("read binding")
-                .expect("binding row must exist");
-            assert_eq!(bound.thread_id, None);
-        },
-    )
+        let bound = repo(&db)
+            .by_session(&sid.to_string())
+            .await
+            .expect("read binding")
+            .expect("binding row must exist");
+        assert_eq!(bound.thread_id, None);
+    })
     .await;
 }
 
