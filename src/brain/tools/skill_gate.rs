@@ -6,9 +6,13 @@
 //! attempts a tool call that references a path matching one of those
 //! globs, and the skill body is NOT loaded (seen) in the current session
 //! context — fresh sessions AND post-compaction (owner decision
-//! 2026-09-10) — the call is rejected. The rejection's content IS the
-//! full skill body (the `plan_gate` deny precedent), so the body lands
-//! in-context the same turn and the identical retry succeeds.
+//! 2026-09-10) — the call is rejected. The rejection carries the skill
+//! body AND a durable route to the complete text (`gate_block_message`):
+//! the harness caps tool output at `DEFAULT_MAX_INLINE_TOOL_BYTES`, so a
+//! body larger than the cap reaches the caller as a head/tail preview —
+//! which is why the message names the skill's own source file instead of
+//! promising a complete body the cap can truncate. The identical retry
+//! succeeds either way: the retry is armed before the rejection returns.
 //!
 //! Laws (design v2, decisions 6–9):
 //! - **Fail-open:** any gate-internal error (pattern compile failure,
@@ -31,10 +35,13 @@
 //! - **Cheap + deterministic:** fast-exit when disabled / no loaded
 //!   skill declares globs / tool is exempt.
 
+use std::path::Path;
+
 use serde_json::Value;
 use uuid::Uuid;
 
 use super::seen_skills;
+use crate::brain::agent::service::tool_loop::DEFAULT_MAX_INLINE_TOOL_BYTES;
 
 /// Tools the gate never touches — recovery paths a blocked agent must
 /// keep available to read the skill body and re-arm itself.
@@ -70,6 +77,52 @@ pub enum GateVerdict {
         body: String,
         globs: Vec<String>,
     },
+}
+
+/// The gate's rejection text: the skill body, an honest statement of the
+/// harness cap, and a durable route to the complete body.
+///
+/// `source_path` is resolved by the CALLER and passed in — `None` for a
+/// built-in skill, which has no file on disk — so this formatter is pure
+/// and testable without touching a live home. `load_brain_file` (with the
+/// slug) is named in both arms: it is the one route that works for every
+/// skill, and it marks the skill seen exactly like the gate's own
+/// `mark_seen`.
+pub(crate) fn gate_block_message(
+    skill: &str,
+    matched_path: &str,
+    globs: &[String],
+    body: &str,
+    source_path: Option<&Path>,
+) -> String {
+    let route = match source_path {
+        Some(path) => format!(
+            "The complete body: read '{}' with read_file, or reload it with \
+             load_brain_file '{}' — both are exempt from this gate, and \
+             load_brain_file also takes query= for a section-filtered reload.",
+            path.display(),
+            skill
+        ),
+        None => format!(
+            "The complete body: reload it with load_brain_file '{}' (exempt from \
+             this gate; it also takes query= for a section-filtered reload). This \
+             skill is compiled in, so there is no file on disk to read.",
+            skill
+        ),
+    };
+    format!(
+        "[SKILL GATE] This call touches '{}', which matches skill '{}' (globs: {}), and \
+         that skill is not loaded in this session context. The skill body is appended \
+         below — but tool output is capped at {} bytes, so a longer body arrives as a \
+         head/tail preview rather than the complete text. {} Re-issue the identical \
+         call once you have read it.\n\n---\n\n{}",
+        matched_path,
+        skill,
+        globs.join(", "),
+        DEFAULT_MAX_INLINE_TOOL_BYTES,
+        route,
+        body
+    )
 }
 
 /// Gate entry point. `enabled` is the `[agent] skill_glob_gate` master
