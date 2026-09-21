@@ -3222,7 +3222,7 @@ fn spawn_settle_watcher(
 /// the raw value wrote `NULL` over the `Some(GENERAL_TOPIC_ID)` binding that
 /// ingress had just established, and the session stopped resolving for its own
 /// topic.
-async fn record_tap_binding(
+pub(crate) async fn record_tap_binding(
     repo: &SessionBindingRepository,
     session_id: Uuid,
     chat_id: teloxide::types::ChatId,
