@@ -404,14 +404,18 @@ impl ToolRegistry {
             // epoch-carrying registry (#150) this upserts the current
             // epoch, so the identical re-issued call passes.
             super::seen_skills::mark_seen(context.session_id, &skill);
-            let content = format!(
-                "[SKILL GATE] This call touches '{}' which matches skill '{}' (globs: {}), \
-                 not loaded in the current session context. The full skill body follows. \
-                 Read it, then re-issue the identical call.\n\n---\n\n{}",
-                matched_path,
-                skill,
-                globs.join(", "),
-                body
+            // The harness caps tool output (~16 KB by default), so a body
+            // larger than that reaches the caller as a head/tail preview
+            // (#458). Resolve the skill's own source file here and pass it
+            // IN: the formatter stays pure, and a built-in skill (`None`)
+            // is still covered by the `load_brain_file` route it names.
+            let source_path = crate::brain::skills::resolve_skill_path(&skill);
+            let content = super::skill_gate::gate_block_message(
+                &skill,
+                &matched_path,
+                &globs,
+                &body,
+                source_path.as_deref(),
             );
             return Ok(ToolResult::error(content));
         }

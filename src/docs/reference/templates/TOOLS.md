@@ -52,7 +52,7 @@ Tool = function the agent calls (`bash`, `grep`); command = slash shortcut in co
 
 ## Skill `globs:` frontmatter (path-scoped skill gate, #150)
 
-A `SKILL.md` may declare `globs:` so its topic is ENFORCED, not advisory: a tool call referencing a matching path is rejected (with the full skill body in the rejection) when the skill body is not in the current session context (fresh session or after compaction); the identical retry succeeds. Accepted forms — Cursor comma-string `globs: a/**, b.md`, inline flow `globs: [a/**, b.md]`, block list — quotes stripped; `metadata.globs` is ignored.
+A `SKILL.md` may declare `globs:` so its topic is ENFORCED, not advisory: a tool call referencing a matching path is rejected (the rejection carries the skill body and names a durable route to the complete text — `read_file` on the skill's source path, or `load_brain_file` with the slug; tool output is capped at 16 KB, so a longer body arrives as a head/tail preview) when the skill body is not in the current session context (fresh session or after compaction); the identical retry succeeds. Accepted forms — Cursor comma-string `globs: a/**, b.md`, inline flow `globs: [a/**, b.md]`, block list — quotes stripped; `metadata.globs` is ignored.
 
 - **Opt-in per skill:** no `globs` key = invisible to the gate; built-ins ship glob-less.
 - **Match:** case-insensitive against the normalized ABSOLUTE candidate path; `*` = one segment, `**` = recursive — write `**/` prefixes.

@@ -8,11 +8,12 @@
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::brain::agent::service::tool_loop::DEFAULT_MAX_INLINE_TOOL_BYTES;
 use crate::brain::skills::{Skill, SkillSource};
 use crate::brain::tools::error::expand_tilde;
 use crate::brain::tools::seen_skills;
 use crate::brain::tools::skill_gate::{
-    EXEMPT_TOOLS, GateVerdict, compile_pattern, harvest_candidates,
+    EXEMPT_TOOLS, GateVerdict, compile_pattern, gate_block_message, harvest_candidates,
 };
 
 fn skill(globs: &[&str]) -> Skill {
@@ -240,4 +241,49 @@ fn relative_pattern_resolves_against_cwd() {
         true,
     );
     assert!(matches!(v, GateVerdict::Block { .. }));
+}
+
+// ---------------------------------------------------------------------------
+// #458 — the rejection must not promise a body the harness cap truncates.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gate_message_names_the_source_path_and_the_reload_route() {
+    // A body larger than the tool-output cap arrives as a head/tail
+    // preview, so the message must name a durable route to the full text
+    // instead of asserting that the body follows.
+    let body = "BODY-MARKER\n".repeat(2_000);
+    assert!(body.len() > DEFAULT_MAX_INLINE_TOOL_BYTES);
+    let msg = gate_block_message(
+        "guard-skill",
+        "/work/guard/file.md",
+        &["**/guard/**".to_string()],
+        &body,
+        Some(std::path::Path::new("/root/.opencrabs/skills/guard-skill/SKILL.md")),
+    );
+    assert!(!msg.contains("The full skill body follows"));
+    assert!(msg.contains("/root/.opencrabs/skills/guard-skill/SKILL.md"));
+    assert!(msg.contains("load_brain_file 'guard-skill'"));
+    assert!(msg.contains(&DEFAULT_MAX_INLINE_TOOL_BYTES.to_string()));
+    assert!(msg.contains("head/tail preview"));
+    assert!(msg.ends_with(&body));
+}
+
+#[test]
+fn gate_message_builtin_arm_keeps_the_reload_route_without_a_file() {
+    // A compiled-in skill has no source file to name, so the message must
+    // drop the file route and keep the one that always works.
+    let no_globs: &[String] = &[];
+    let msg = gate_block_message(
+        "guard-skill",
+        "/work/guard/file.md",
+        no_globs,
+        "BODY-MARKER",
+        None,
+    );
+    assert!(msg.contains("load_brain_file 'guard-skill'"));
+    assert!(msg.contains("no file on disk to read"));
+    assert!(!msg.contains("read_file"));
+    assert!(!msg.contains("The full skill body follows"));
+    assert!(msg.ends_with("BODY-MARKER"));
 }
