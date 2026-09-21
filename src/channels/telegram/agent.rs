@@ -535,7 +535,7 @@ impl TelegramAgent {
                                         &cb_session_binding_repo,
                                         sid,
                                         chat_id,
-                                        thread_id,
+                                        callback_topic(&state, &query).await,
                                     )
                                     .await;
                                     tokio::spawn(async move {
@@ -2150,7 +2150,7 @@ impl TelegramAgent {
                                             &cb_session_binding_repo,
                                             session_id,
                                             chat_id,
-                                            thread_id,
+                                            callback_topic(&state, &query).await,
                                         )
                                         .await;
                                         // Visible seed turn, spawned so the
@@ -2283,7 +2283,7 @@ impl TelegramAgent {
                                             &cb_session_binding_repo,
                                             sid,
                                             cb_chat,
-                                            cb_thread,
+                                            callback_topic(&state, &query).await,
                                         )
                                         .await;
                                         let agent_cb = agent.clone();
@@ -3215,18 +3215,25 @@ fn spawn_settle_watcher(
 /// follow-up suggestion, a plan approval, and generic callback routing.
 /// Config pickers such as `/models` deliberately do not call it — they start
 /// no turn, so a resume would be noise.
+///
+/// `topic` is the COMPOSED session-scoping topic for the tap
+/// ([`callback_topic`]) — never a raw `message_thread_id`. The distinction is
+/// the #443 defect: a General-topic message carries NO thread id, so passing
+/// the raw value wrote `NULL` over the `Some(GENERAL_TOPIC_ID)` binding that
+/// ingress had just established, and the session stopped resolving for its own
+/// topic.
 async fn record_tap_binding(
     repo: &SessionBindingRepository,
     session_id: Uuid,
     chat_id: teloxide::types::ChatId,
-    thread_id: Option<teloxide::types::ThreadId>,
+    topic: Option<i32>,
 ) {
     if let Err(e) = repo
         .upsert(
             session_id.to_string(),
             "telegram",
             &chat_id.0.to_string(),
-            thread_id.map(|t| t.0.0),
+            topic,
             crate::db::BindingOrigin::Callback,
         )
         .await
@@ -3255,10 +3262,8 @@ async fn record_tap_binding(
 ///
 /// `None` when the callback carries no regular message: an inaccessible
 /// message is not a General-topic event, and has no topic to compose.
-async fn callback_topic_for_message(
-    state: &super::TelegramState,
-    msg: &teloxide::types::MaybeInaccessibleMessage,
-) -> Option<i32> {
+async fn callback_topic(state: &super::TelegramState, query: &CallbackQuery) -> Option<i32> {
+    let msg = query.message.as_ref()?;
     let m = msg.regular_message()?;
     let known_forum = state.is_known_forum(msg.chat().id.0).await;
     super::session_resolve::session_topic_for_event(
@@ -3291,7 +3296,7 @@ async fn resolve_callback_session(
     // construction instead of by two call sites staying in step.
     if let Some(msg) = &query.message {
         let chat_id = msg.chat().id.0;
-        let topic_id = callback_topic_for_message(state, msg).await;
+        let topic_id = callback_topic(state, query).await;
         if let Some(session_id) = state.chat_session(chat_id, topic_id).await {
             return Some(session_id);
         }
