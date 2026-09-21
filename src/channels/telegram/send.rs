@@ -122,24 +122,32 @@ where
     }
 }
 
-/// `bot.send_photo(chat_id, photo)` with optional `message_thread_id`.
+/// `bot.send_photo(chat_id, photo)` with optional `message_thread_id` and
+/// caption. The caption is the markdown title the reference carried — sending
+/// the bytes without it is how a captioned reference arrived captionless (#487).
 pub fn photo_in_thread<C>(
     bot: &Bot,
     chat_id: C,
     thread_id: Option<ThreadId>,
     photo: InputFile,
+    caption: Option<String>,
 ) -> teloxide::requests::MultipartRequest<teloxide::payloads::SendPhoto>
 where
     C: Into<ChatId>,
 {
     let req = bot.send_photo(chat_id.into(), photo);
+    let req = match caption {
+        Some(text) => req.caption(text),
+        None => req,
+    };
     match thread_id {
         Some(t) => req.message_thread_id(t),
         None => req,
     }
 }
 
-/// `bot.send_document(chat_id, document)` with optional `message_thread_id`.
+/// `bot.send_document(chat_id, document)` with optional `message_thread_id`
+/// and caption.
 /// Completes the `*_in_thread` family for #1079: documents landed in General
 /// in forum groups because the tool arm built its own request.
 pub fn document_in_thread<C>(
@@ -147,11 +155,16 @@ pub fn document_in_thread<C>(
     chat_id: C,
     thread_id: Option<ThreadId>,
     document: InputFile,
+    caption: Option<String>,
 ) -> teloxide::requests::MultipartRequest<teloxide::payloads::SendDocument>
 where
     C: Into<ChatId>,
 {
     let req = bot.send_document(chat_id.into(), document);
+    let req = match caption {
+        Some(text) => req.caption(text),
+        None => req,
+    };
     match thread_id {
         Some(t) => req.message_thread_id(t),
         None => req,
@@ -653,7 +666,8 @@ pub(crate) async fn send_markdown_outbox(
     // by the notice appended to the body above; a failure HERE cannot be,
     // because the text has already gone out — so it is logged at `error`
     // with the reference named, never swallowed.
-    for path in &image_scan.attachments {
+    for image in &image_scan.attachments {
+        let path = &image.path;
         let bytes = match tokio::fs::read(path).await {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -667,16 +681,24 @@ pub(crate) async fn send_markdown_outbox(
         let len = bytes.len();
         let kind = telegram_media_kind(len as u64);
         let uploaded = match kind {
-            TelegramMediaKind::Photo => {
-                photo_in_thread(bot, chat_id, thread_id, InputFile::memory(bytes))
-                    .await
-                    .map(|m| m.id.0)
-            }
-            TelegramMediaKind::Document => {
-                document_in_thread(bot, chat_id, thread_id, InputFile::memory(bytes))
-                    .await
-                    .map(|m| m.id.0)
-            }
+            TelegramMediaKind::Photo => photo_in_thread(
+                bot,
+                chat_id,
+                thread_id,
+                InputFile::memory(bytes),
+                image.caption.clone(),
+            )
+            .await
+            .map(|m| m.id.0),
+            TelegramMediaKind::Document => document_in_thread(
+                bot,
+                chat_id,
+                thread_id,
+                InputFile::memory(bytes),
+                image.caption.clone(),
+            )
+            .await
+            .map(|m| m.id.0),
         };
         match uploaded {
             Ok(mid) => {

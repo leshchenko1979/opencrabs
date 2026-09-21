@@ -1928,7 +1928,8 @@ pub(crate) async fn handle_message(
             // matching Telegram (commit 7a0ca1c9) beats both.
 
             // Send images before text
-            for img_path in img_paths {
+            for image in img_paths {
+                let img_path = image.path;
                 match tokio::fs::read(&img_path).await {
                     Ok(bytes) => {
                         use wacore::download::MediaType;
@@ -1953,6 +1954,10 @@ pub(crate) async fn handle_message(
                                         file_sha256: Some(upload.file_sha256.to_vec()),
                                         file_length: Some(upload.file_length),
                                         mimetype: Some(mime.to_string()),
+                                        // WhatsApp renders this under the
+                                        // image — the markdown title the
+                                        // reference carried (#487).
+                                        caption: image.caption,
                                         ..Default::default()
                                     }
                                     .into(),

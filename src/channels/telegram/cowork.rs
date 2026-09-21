@@ -287,7 +287,7 @@ pub async fn handle_cowork_group_join(
                 let user_chat = ChatId(cowork_state.chat_id);
                 // Warn-only: a QR sidecar photo; failure visibility suffices.
                 if let Err(e) =
-                    photo_in_thread(bot, user_chat, None, InputFile::file(qr_path)).await
+                    photo_in_thread(bot, user_chat, None, InputFile::file(qr_path), None).await
                 {
                     tracing::warn!(
                         "Telegram: cowork QR photo failed (chat={}): {e}",

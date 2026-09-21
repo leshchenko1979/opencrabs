@@ -518,7 +518,8 @@ pub(crate) async fn deliver_final_response(
             // Send each attachment. A picture above the 10 MB photo ceiling
             // would be rejected by `sendPhoto`, so it ships as a document
             // instead — an un-previewable image beats a missing one (#286).
-            for img_path in &img_paths {
+            for image in &img_paths {
+                let img_path = &image.path;
                 let bytes = match tokio::fs::read(img_path).await {
                     Ok(bytes) => bytes,
                     Err(e) => {
@@ -537,16 +538,24 @@ pub(crate) async fn deliver_final_response(
                 };
                 let kind = telegram_media_kind(bytes.len() as u64);
                 let sent = match kind {
-                    TelegramMediaKind::Photo => {
-                        photo_in_thread(bot, chat_id, thread_id, InputFile::memory(bytes))
-                            .await
-                            .map(|_| ())
-                    }
-                    TelegramMediaKind::Document => {
-                        document_in_thread(bot, chat_id, thread_id, InputFile::memory(bytes))
-                            .await
-                            .map(|_| ())
-                    }
+                    TelegramMediaKind::Photo => photo_in_thread(
+                        bot,
+                        chat_id,
+                        thread_id,
+                        InputFile::memory(bytes),
+                        image.caption.clone(),
+                    )
+                    .await
+                    .map(|_| ()),
+                    TelegramMediaKind::Document => document_in_thread(
+                        bot,
+                        chat_id,
+                        thread_id,
+                        InputFile::memory(bytes),
+                        image.caption.clone(),
+                    )
+                    .await
+                    .map(|_| ()),
                 };
                 if let Err(e) = sent {
                     tracing::error!(

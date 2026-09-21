@@ -1369,7 +1369,8 @@ pub(crate) async fn handle_message(
             // paths rode which batch so a rejected batch can be attributed back
             // to the images it carried (#286).
             let mut batch_paths: Vec<Vec<std::path::PathBuf>> = Vec::new();
-            for img_path in &img_paths {
+            for image in &img_paths {
+                let img_path = &image.path;
                 match tokio::fs::read(img_path).await {
                     Ok(bytes) => {
                         let fname = std::path::Path::new(img_path)

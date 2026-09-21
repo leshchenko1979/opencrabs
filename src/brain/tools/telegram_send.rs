@@ -1005,6 +1005,7 @@ impl TelegramSendTool {
                 ChatId(chat_id),
                 thread_id,
                 file.clone(),
+                None,
             );
             if let Some(ref c) = caption {
                 req = req.caption(c.clone());
@@ -1091,6 +1092,7 @@ impl TelegramSendTool {
                 ChatId(chat_id),
                 thread_id,
                 file.clone(),
+                None,
             );
             if let Some(ref c) = caption {
                 req = req.caption(c.clone());

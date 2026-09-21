@@ -248,7 +248,8 @@ pub async fn process_comment(
     // comment rather than nudging — the poll loop has no regen round (#286).
     let mut image_failures = image_scan.failures;
     let mut image_embeds: Vec<String> = Vec::new();
-    for img_path in img_paths {
+    for image in img_paths {
+        let img_path = image.path;
         match tokio::fs::read(&img_path).await {
             Ok(bytes) => {
                 let filename = std::path::Path::new(&img_path)

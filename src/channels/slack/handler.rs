@@ -2263,7 +2263,8 @@ async fn handle_message(
                 return;
             }
 
-            for img_path in img_paths {
+            for image in img_paths {
+                let img_path = image.path;
                 match tokio::fs::read(&img_path).await {
                     Ok(bytes) => {
                         let fname = std::path::Path::new(&img_path)

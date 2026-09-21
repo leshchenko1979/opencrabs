@@ -1,9 +1,9 @@
 //! Tests for `utils::image` — `<<IMG:path>>` marker extraction.
 
 use crate::utils::image::{
-    ImageTarget, LocalImageFailure, LocalImageFailureReason, LocalImageScan, classify_image_target,
-    code_regions, extract_img_markers, extract_local_images, failure_notice, image_extension,
-    is_remote_url, is_supported_image, is_telegram_media_ref, validate_local_image,
+    ImageTarget, LocalImage, LocalImageFailure, LocalImageFailureReason, LocalImageScan,
+    classify_image_target, code_regions, extract_img_markers, extract_local_images, failure_notice,
+    image_extension, is_remote_url, is_supported_image, is_telegram_media_ref, validate_local_image,
 };
 use crate::utils::image_fetch::{
     MAX_REMOTE_IMAGES_PER_REPLY, fetch_remote_image, resolve_remote_images,
@@ -88,13 +88,20 @@ fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     path
 }
 
+/// The resolved paths of a scan, in order — what the extraction assertions
+/// below compare on. A caption rides alongside each path in
+/// [`LocalImageScan::attachments`] and has its own test.
+fn resolved_paths(scan: &LocalImageScan) -> Vec<PathBuf> {
+    scan.attachments.iter().map(|a| a.path.clone()).collect()
+}
+
 #[test]
 fn markdown_image_resolves_and_leaves_the_text() {
     let dir = tempfile::tempdir().expect("tempdir");
     let png = write_file(dir.path(), "chart.png", PNG_BYTES);
     let scan = extract_local_images(&format!("before ![chart]({}) after", png.display()), None);
     assert_eq!(scan.text, "before  after");
-    assert_eq!(scan.attachments, vec![png]);
+    assert_eq!(resolved_paths(&scan), vec![png]);
     assert!(scan.remote.is_empty());
     assert!(scan.failures.is_empty());
 }
@@ -105,7 +112,7 @@ fn markdown_image_angle_bracket_target_holds_spaces() {
     let png = write_file(dir.path(), "a b.png", PNG_BYTES);
     let scan = extract_local_images(&format!("x ![alt](<{}>) y", png.display()), None);
     assert_eq!(scan.text, "x  y");
-    assert_eq!(scan.attachments, vec![png]);
+    assert_eq!(resolved_paths(&scan), vec![png]);
 }
 
 #[test]
@@ -117,7 +124,7 @@ fn markdown_image_accepts_a_title_after_the_target() {
         None,
     );
     assert_eq!(scan.text, "x  y");
-    assert_eq!(scan.attachments, vec![png]);
+    assert_eq!(resolved_paths(&scan), vec![png]);
 }
 
 #[test]
@@ -204,7 +211,7 @@ fn relative_markdown_target_resolves_against_the_base_dir() {
     let png = write_file(dir.path(), "rel.png", PNG_BYTES);
     let scan = extract_local_images("![a](rel.png)", Some(dir.path()));
     assert_eq!(scan.text, "");
-    assert_eq!(scan.attachments, vec![png]);
+    assert_eq!(resolved_paths(&scan), vec![png]);
 }
 
 #[test]
@@ -235,7 +242,7 @@ fn img_marker_with_an_absolute_path_is_attached() {
     let png = write_file(dir.path(), "shot.png", PNG_BYTES);
     let scan = extract_local_images(&format!("see <<IMG:{}>> now", png.display()), None);
     assert_eq!(scan.text, "see  now");
-    assert_eq!(scan.attachments, vec![png]);
+    assert_eq!(resolved_paths(&scan), vec![png]);
 }
 
 #[test]
@@ -526,12 +533,12 @@ async fn local_paths_are_refused_by_the_fetch_layer() {
 async fn scan_without_remote_targets_is_returned_untouched() {
     let scan = LocalImageScan {
         text: "hi".to_string(),
-        attachments: vec![PathBuf::from("/tmp/a.png")],
+        attachments: vec![LocalImage { path: PathBuf::from("/tmp/a.png"), caption: None }],
         ..LocalImageScan::default()
     };
     let out = resolve_remote_images(scan).await;
     assert_eq!(out.text, "hi");
-    assert_eq!(out.attachments, vec![PathBuf::from("/tmp/a.png")]);
+    assert_eq!(resolved_paths(&out), vec![PathBuf::from("/tmp/a.png")]);
     assert!(out.failures.is_empty());
 }
 
@@ -551,7 +558,55 @@ async fn remote_budget_marks_the_overflow_as_too_many() {
             .all(|f| f.reason == LocalImageFailureReason::TooMany)
     );
     assert!(scan.remote.is_empty());
-    for path in &scan.attachments {
-        let _ = std::fs::remove_file(path);
+    for image in &scan.attachments {
+        let _ = std::fs::remove_file(&image.path);
     }
+}
+
+// ---------------------------------------------------------------------------
+// #487: the markdown TITLE is the caption carrier, and it survives the scan
+// ---------------------------------------------------------------------------
+
+#[test]
+fn markdown_title_survives_from_parse_into_the_scan() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png = write_file(dir.path(), "chart.png", PNG_BYTES);
+    let scan = extract_local_images(
+        &format!("x ![alt]({} \"Quarterly revenue\") y", png.display()),
+        None,
+    );
+    assert_eq!(scan.text, "x  y");
+    assert_eq!(scan.attachments.len(), 1);
+    assert_eq!(scan.attachments[0].path, png);
+    assert_eq!(
+        scan.attachments[0].caption.as_deref(),
+        Some("Quarterly revenue"),
+        "the title is the caption carrier and must not be dropped"
+    );
+}
+
+#[test]
+fn markdown_title_in_single_quotes_is_captured_too() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png = write_file(dir.path(), "chart.png", PNG_BYTES);
+    let scan = extract_local_images(
+        &format!("x ![alt]({} 'Revenue by quarter') y", png.display()),
+        None,
+    );
+    assert_eq!(
+        scan.attachments[0].caption.as_deref(),
+        Some("Revenue by quarter")
+    );
+}
+
+#[test]
+fn markdown_without_a_title_has_no_caption() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png = write_file(dir.path(), "chart.png", PNG_BYTES);
+    let scan = extract_local_images(&format!("![alt]({})", png.display()), None);
+    assert_eq!(scan.attachments.len(), 1);
+    assert_eq!(
+        scan.attachments[0].caption, None,
+        "alt text is inert on every delivery leg and is not a caption"
+    );
 }

@@ -388,6 +388,20 @@ impl LocalImageFailure {
     }
 }
 
+/// A resolved local image together with the markdown title that captioned it.
+///
+/// Path and caption live in ONE value on purpose: the title belongs to the
+/// picture written above it, and two parallel vectors would let them desync the
+/// first time a candidate is dropped from one and not the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalImage {
+    /// Absolute path to the image on disk.
+    pub path: PathBuf,
+    /// The markdown title — `![alt](target "title")` — to ship as the media
+    /// caption. `None` when the reference carried no title.
+    pub caption: Option<String>,
+}
+
 /// Result of scanning a reply for image references.
 #[derive(Debug, Clone, Default)]
 pub struct LocalImageScan {
@@ -395,7 +409,7 @@ pub struct LocalImageScan {
     /// references inside code spans are left untouched.
     pub text: String,
     /// Resolved and validated local images, in order of appearance.
-    pub attachments: Vec<PathBuf>,
+    pub attachments: Vec<LocalImage>,
     /// Remote image URLs awaiting a fetch, in order of appearance.
     pub remote: Vec<String>,
     /// Rejected local candidates, in order of appearance.
@@ -556,8 +570,13 @@ fn parse_marker_at(text: &str, start: usize, prefix: &str) -> Option<(usize, Str
 /// the text begins with `![`). Accepts `![alt](target)`, the angle-bracket form
 /// `![alt](<target>)` that markdown requires when the path holds spaces, and an
 /// optional `"title"` / `'title'` after the target. Returns
-/// `(end_byte_exclusive, raw_target)`.
-fn parse_markdown_image(text: &str, start: usize) -> Option<(usize, String)> {
+/// `(end_byte_exclusive, raw_target, title)`.
+///
+/// The title is the caption carrier — `![alt](chart.png "Quarterly revenue")`
+/// renders "Quarterly revenue" as the photo's caption — so it is returned
+/// rather than dropped, and the `alt` text is NOT: alt is inert on every
+/// delivery leg.
+fn parse_markdown_image(text: &str, start: usize) -> Option<(usize, String, Option<String>)> {
     debug_assert!(text[start..].starts_with("!["));
     // `\![alt](path)` is escaped literal text, not a reference.
     if start > 0 && text[..start].ends_with('\\') {
@@ -584,16 +603,23 @@ fn parse_markdown_image(text: &str, start: usize) -> Option<(usize, String)> {
         (text[cursor..end].to_string(), end)
     };
     after_target = skip_whitespace(text, after_target);
+    // The title is the only caption carrier markdown offers, so it is captured
+    // here instead of being stepped over.
+    let mut title: Option<String> = None;
     if let Some(quote) = text[after_target..].chars().next()
         && (quote == '"' || quote == '\'')
     {
         let close = text[after_target + 1..].find(quote)?;
+        let parsed = text[after_target + 1..after_target + 1 + close].trim();
+        if !parsed.is_empty() {
+            title = Some(parsed.to_string());
+        }
         after_target = skip_whitespace(text, after_target + 1 + close + 1);
     }
     if !text[after_target..].starts_with(')') || target.trim().is_empty() {
         return None;
     }
-    Some((after_target + 1, target))
+    Some((after_target + 1, target, title))
 }
 
 /// Byte offset of the first non-whitespace char at or after `from`.
@@ -636,8 +662,12 @@ enum RemoteRefs {
 ///
 /// A marker's remote target always leaves the text whatever `remote` says — a
 /// marker is machine syntax, never prose, so there is no link to preserve.
+///
+/// `caption` is the markdown title the reference carried, bound to the image it
+/// captions. A marker has no title form, so it always passes `None`.
 fn record_candidate(
     raw: String,
+    caption: Option<String>,
     base_dir: Option<&Path>,
     strip_unresolved: bool,
     remote: RemoteRefs,
@@ -646,7 +676,7 @@ fn record_candidate(
     match classify_image_target(&raw, base_dir) {
         ImageTarget::Local(path) => {
             match validate_local_image(&path) {
-                Ok(()) => scan.attachments.push(path),
+                Ok(()) => scan.attachments.push(LocalImage { path, caption }),
                 Err(reason) => scan.failures.push(LocalImageFailure {
                     raw,
                     resolved: Some(path),
@@ -735,15 +765,15 @@ fn scan_image_references(
             && let Some((end, raw)) = parse_marker_at(text, i, IMG_PREFIX)
         {
             if !raw.is_empty() {
-                record_candidate(raw, base_dir, true, remote, &mut scan);
+                record_candidate(raw, None, base_dir, true, remote, &mut scan);
             }
             i = end;
             continue;
         }
         if !regions[i]
             && text[i..].starts_with("![")
-            && let Some((end, raw)) = parse_markdown_image(text, i)
-            && record_candidate(raw, base_dir, false, remote, &mut scan)
+            && let Some((end, raw, caption)) = parse_markdown_image(text, i)
+            && record_candidate(raw, caption, base_dir, false, remote, &mut scan)
         {
             i = end;
             continue;

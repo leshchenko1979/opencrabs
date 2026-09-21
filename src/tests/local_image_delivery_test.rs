@@ -12,8 +12,8 @@
 //!   marker/path still leaves.
 
 use crate::utils::image::{
-    LocalImageFailure, LocalImageFailureReason, append_failure_notice, extract_local_images,
-    failure_notice, strip_image_references,
+    LocalImageFailure, LocalImageFailureReason, LocalImageScan, append_failure_notice,
+    extract_local_images, failure_notice, strip_image_references,
 };
 use std::path::{Path, PathBuf};
 
@@ -26,6 +26,12 @@ fn write_fixture(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, bytes).expect("write fixture");
     path
+}
+
+/// The resolved paths of a scan, in order — what the assertions below compare
+/// on. Captions ride alongside each path in [`LocalImageScan::attachments`].
+fn resolved_paths(scan: &LocalImageScan) -> Vec<PathBuf> {
+    scan.attachments.iter().map(|a| a.path.clone()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -228,7 +234,7 @@ fn strip_only_removes_a_validated_local_path() {
     let png = write_fixture(dir.path(), "chart.png", PNG_BYTES);
     let scan = strip_image_references(&format!("x ![chart]({}) y", png.display()), None);
     assert_eq!(scan.text, "x  y");
-    assert_eq!(scan.attachments, vec![png]);
+    assert_eq!(resolved_paths(&scan), vec![png]);
 }
 
 #[test]
