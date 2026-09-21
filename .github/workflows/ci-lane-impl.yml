@@ -1,0 +1,476 @@
+name: CI lane impl
+
+# CI lane impl — the SINGLE `workflow_call` body behind BOTH carrier lanes.
+#
+# This file carries no `on: workflow_dispatch`. It is called by two thin shells
+# that keep their own names, triggers and inputs:
+#   * quick-build-linux.yml — sends `mode: build` (ORDER gates -> Linux amd64)
+#   * pr-checks.yml         — sends `mode: gate`  (PR-lane gates)
+# Filenames of both shells do NOT change; that is the point of this option.
+#
+# WHY `mode` AND NOTHING FINER: a `workflow_call` workflow cannot see which file
+# called it, so exactly one new selector is required, and it selects the JOB
+# FAMILY only. The step legs stay on the existing booleans (fix / lockregen /
+# swap / fast / diagnose), whose `if:` expressions move here verbatim. Folding
+# those five into `mode` would re-encode working expressions as churn with no
+# buyer. `mode` is `required: true` so a call with no family selected fails
+# loudly instead of silently defaulting into a leg.
+#
+# BODIES ARE ALREADY CALL-CLEAN: the legacy event-inputs context returns 0 hits
+# in both source files; every input read already uses the `inputs.` context form that
+# `workflow_call` populates. The bodies therefore move WITHOUT a single
+# reference rewrite — this was the largest structural risk of the option, and it
+# was measured rather than assumed.
+#
+# A second workflow was rejected: it would duplicate the whole gate body and
+# fork the triad flags that editor-upstream-pr.md §PR-GATE-STANDING pins
+# VERBATIM to this one file.
+#
+# TOOLCHAIN DECISION (implementation step 4): the Rust install step is resolved
+# ONCE here for both families, in the `dtolnay/rust-toolchain@master` form with
+# an explicit `toolchain: stable` — NOT `@stable`, and not a bare
+# `rust-toolchain.toml` read. Why: `@stable` always resolves the latest stable
+# and would IGNORE a future version pin added to the tree, so a pin could never
+# take effect; the `@master` + explicit `toolchain:` form is what pr-checks.yml
+# already used, so the gate lane's toolchain is byte-identical and the build
+# lane converges onto it rather than the other way round. The `rustfmt, clippy`
+# components ride along for both families: the build leg does not need them, but
+# resolving the toolchain in ONE place is the point of this file, and the
+# component download is small beside the build itself.
+#
+# DISPATCH CONSTRAINT (implementation step 5, settled from the GitHub docs, not
+# from an untested path): "To trigger the `workflow_dispatch` event, your
+# workflow must be in the default branch", with `--ref` as the documented escape
+# — "To run a workflow on a branch other than the repository's default branch,
+# use the `--ref` flag." Neither shell is on `main`, so EVERY dispatch of either
+# shell must carry `--ref ci/quick-build-linux`. A bare `gh workflow run <name>`
+# is NOT a supported form for these files and must not be introduced into any
+# tool or doc. Both sanctioned tools already pass `--ref` — which is precisely
+# why this option leaves them working.
+#
+# `concurrency:` and `permissions:` deliberately stay on the SHELLS, unchanged.
+# `oc-ship-audit` and `run_built_sha` key off `.jobs[].name`, so every job name
+# below travels VERBATIM from its source file, and each caller job's `name:` is
+# pinned to a short prefix-safe token (`ship` / `gate`) so the caller's own name
+# can never be the first decodable match.
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "Job family: 'build' = ORDER gates then Linux amd64 build (quick-build-linux.yml); 'gate' = PR-lane gates (pr-checks.yml)"
+        required: true
+        type: string
+      ref:
+        description: "Branch or full sha to gate (the PR-head branch, e.g. leshchenko1979/<slug>)"
+        required: false
+        default: main
+        type: string
+      fix:
+        description: "true = run cargo fmt --all and upload the diff as the fmt-fix artifact instead of gating"
+        required: false
+        default: false
+        type: boolean
+      lockregen:
+        description: "true = cargo metadata minimal re-resolve with the existing Cargo.lock; uploads the regenerated lock as the regen-lock artifact instead of gating"
+        required: false
+        default: false
+        type: boolean
+      swap:
+        description: "true = swap prep: mirror build-leg gate 4 (Session-Id trailer) on the gated ref before the gates; swap-mode GREEN means swappable"
+        required: false
+        default: false
+        type: boolean
+      fast:
+        description: "true = fast gate (fmt + clippy only, skip tests); for quick syntax and lint checks"
+        required: false
+        default: false
+        type: boolean
+      # INERT HERE, DELIBERATELY: `no_cancel` is consumed by each SHELL's own
+      # `concurrency.cancel-in-progress` expression (which stays on the shell),
+      # never by a step below — verified 0 references. It is declared so the
+      # contract carries all ten existing inputs verbatim and no caller's
+      # `with:` mapping can name a key the callee does not accept.
+      no_cancel:
+        description: "true = never cancel an in-flight run on this ref (immutable-sha gates: merge cutover + swap mode)"
+        required: false
+        default: false
+        type: boolean
+      diagnose:
+        description: "true = print the runner's real resource envelope (cpu/ram/disk/cgroup/sccache) around the test leg; diagnostic only, never fails the run"
+        required: false
+        default: false
+        type: boolean
+      source_repository:
+        description: "Repository to check out (owner/name)"
+        required: false
+        default: adolfousier/opencrabs
+        type: string
+      source_ref:
+        description: "Git ref to build (branch/tag/sha)"
+        required: false
+        default: main
+        type: string
+      features:
+        description: "Cargo feature set passed to --features (comma-separated)"
+        required: false
+        default: telegram,code-graph,browser
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # ------------------------------------------------------------------ gates --
+  # ORDER gates x4 — pure git/sha verification (test leg removed 2026-08-31,
+  # owner word: duplication of the PR-gate test deleted, not optimized).
+  # Gate 4 checks the Session-Id trailer SHAPE only — the workers ledger lives
+  # on the ops box and GitHub never sees it (design ruling); ledger-membership
+  # is verified box-side by oc-order-validate pre-dispatch. Defense in depth.
+  #
+  # These four gates stay a JOB, not steps of `build`: today they are separate
+  # jobs with `build` gated on `needs:`, and flattening them would move the
+  # failure surface the ship lane reports on. The name travels verbatim, so
+  # `oc-ship-audit`'s `contains($sha) and not contains("ORDER gates")`
+  # predicate stays satisfied.
+  order-gates:
+    if: ${{ inputs.mode == 'build' }}
+    name: ORDER gates (${{ inputs.source_ref }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Gate 1 SHAPE — source_ref is a FULL 40-hex sha
+        run: |
+          echo "${{ inputs.source_ref }}" | grep -Eq '^[0-9a-fA-F]{40}$' \
+            || { echo "GATE SHAPE FAIL: source_ref must be a full 40-hex sha (short form makes actions/checkout fetch a literal '<sha>*' branch): '${{ inputs.source_ref }}'"; exit 1; }
+
+      - name: Sync from origin (ordered sha)
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Gate 2 EXISTENCE — sha is a real commit
+        run: git rev-parse --verify "${{ inputs.source_ref }}^{commit}" >/dev/null
+
+      - name: Gate 3 CONTAINMENT — sha is an ancestor of source repo main
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "${{ inputs.source_ref }}" refs/remotes/origin/main \
+            || { echo "GATE CONTAINMENT FAIL: ${{ inputs.source_ref }} not contained in main tip $(git rev-parse refs/remotes/origin/main)"; exit 1; }
+
+      - name: Gate 4 SIGNATURE — Session-Id trailer present
+        run: |
+          git log -1 --format=%B "${{ inputs.source_ref }}" | grep -Eq '^Session-Id:[[:space:]]*[0-9a-fA-F-]{36}' \
+            || { echo "GATE SIGNATURE FAIL: no Session-Id trailer on ${{ inputs.source_ref }} (attribution mandatory)"; exit 1; }
+
+  build:
+    if: ${{ inputs.mode == 'build' }}
+    needs: order-gates
+    name: Linux amd64 (${{ inputs.source_ref }}, ${{ inputs.features }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Sync from origin
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ inputs.source_ref }}
+
+      - name: Install system deps (alsa for local-stt/local-tts, mold+clang for fast link)
+        run: sudo apt-get update -y && sudo apt-get install -y pkg-config libasound2-dev mold clang
+
+      # Toolchain resolved in ONE place — see the TOOLCHAIN DECISION note in the
+      # file header. `@master` + an explicit `toolchain:` honours a future
+      # version pin that `@stable` would ignore.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Run sccache-action
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Build ([profile.ci], no tests)
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
+        run: cargo build --locked --profile ci --no-default-features --features "${{ inputs.features }}"
+
+      - name: Strip
+        run: strip target/ci/opencrabs
+
+      # Provenance rider (v0.4.17): what produced this binary travels with
+      # it — the IDENTITY chain records flags, not just shas.
+      - name: Record build provenance
+        run: |
+          {
+            echo "source_repository=${{ inputs.source_repository }}"
+            echo "source_ref=${{ inputs.source_ref }}"
+            echo "features=${{ inputs.features }}"
+            echo "cargo_profile=ci"
+            echo "lto=thin codegen_units=16"
+            rustc -vV | grep -E '^(host|release):'
+          } > build-flags.txt
+
+      # Binary filename stays `opencrabs-linux-amd64` (swap scripts
+      # depend on it); only the ARTIFACT name carries the set.
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencrabs-linux-amd64-${{ inputs.features }}
+          path: |
+            target/ci/opencrabs
+            build-flags.txt
+          if-no-files-found: error
+
+  # --------------------------------------------------------------- PR gates --
+  # The PR-lane gate body, moved verbatim from pr-checks.yml. `mode: gate` runs
+  # this job and nothing else; the build family is gated off by `if:`.
+  pr-gates:
+    if: ${{ inputs.mode == 'gate' }}
+    name: PR-lane gates (${{ inputs.ref }}${{ inputs.fix && ' — FIX MODE' || inputs.lockregen && ' — LOCK REGEN' || inputs.swap && ' — SWAP MODE' || inputs.fast && ' — FAST' || '' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Gate 4 mirror — Session-Id trailer on the gated ref (swap mode)
+        if: ${{ inputs.swap && !inputs.fix && !inputs.lockregen }}
+        # Mirrors quick-build-linux.yml ORDER gate 4 EXACTLY (same regex), so
+        # a swap-mode RED here equals the build-leg refusal — caught minutes
+        # earlier, before a wasted build dispatch.
+        run: |
+          git log -1 --format=%B "${{ inputs.ref }}" | grep -Eq '^Session-Id:[[:space:]]*[0-9a-fA-F-]{36}' \
+            || { echo "GATE 4 MIRROR FAIL: no Session-Id trailer on ${{ inputs.ref }} (swap heads must be trailer-signed; for merge heads land an empty trailer-signed marker commit — fleet-directives 2026-09-03)"; exit 1; }
+
+      # Toolchain resolved in ONE place — see the TOOLCHAIN DECISION note in the
+      # file header. This is the form pr-checks.yml already used, unchanged.
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          save-if: true # pre-PR branches re-run on fix-forward; warm cache turns the second dispatch into minutes
+
+      - name: Run sccache-action
+        if: ${{ !inputs.fix && !inputs.lockregen }}
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Install system deps (pkg-config, ALSA dev, mold + clang)
+        if: ${{ !inputs.fix && !inputs.lockregen }}
+        # Mirrors upstream ci.yml's libasound2-dev (local-stt/cpal) plus the
+        # pkg-config that alsa-sys needs to compile at all (carrier lesson,
+        # 378a68a8), and mold+clang upfront for fast linking.
+        run: sudo apt-get update -qq && sudo apt-get install -y pkg-config libasound2-dev mold clang
+
+      - name: Check formatting
+        if: ${{ !inputs.fix && !inputs.lockregen }}
+        # Soft-fail, mirroring upstream ci.yml verbatim: "legacy un-formatted
+        # code blocks shouldn't block PRs yet. Promote to hard-fail once a fmt
+        # sweep lands on main." When upstream promotes it, so do we — not before.
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        if: ${{ !inputs.fix && !inputs.lockregen }}
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
+        run: cargo clippy --locked --lib --bins --tests --all-features -- -D warnings
+
+      - name: "Diagnose: resource envelope BEFORE test leg"
+        if: ${{ inputs.diagnose && !inputs.fix && !inputs.lockregen && !inputs.fast }}
+        # Input-gated diagnostic (default false). Every probe is `|| true`:
+        # a measurement that can fail the gate it measures is worthless.
+        run: |
+          echo "===== DIAG pre-test $(date -u +%FT%TZ) ====="
+          echo "--- cpu ---"
+          nproc; grep -m1 'model name' /proc/cpuinfo || true
+          echo "--- mem (MiB) ---"
+          free -m || true
+          echo "--- disk ---"
+          df -h / || true; df -h "$GITHUB_WORKSPACE" || true
+          echo "--- meminfo anchor (kB) ---"
+          grep -E '^(MemTotal|MemAvailable|SwapTotal):' /proc/meminfo || true
+          echo "--- cgroup layout ---"
+          cat /proc/self/cgroup 2>/dev/null || true
+          ls -la /sys/fs/cgroup 2>/dev/null | head -25 || true
+          mount 2>/dev/null | grep -i cgroup || true
+          echo "--- cgroup memory limits (resolved path, then ancestors) ---"
+          # The 2026-09-18 baseline run showed /sys/fs/cgroup/memory.max as
+          # UNREADABLE (the loop printed nothing), so the ceiling could not be
+          # read from the fixed path. Resolve the runner's OWN cgroup from
+          # /proc/self/cgroup and walk up, labelling every hit with its full
+          # path so an absent reading is distinguishable from a real "max".
+          CG=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)
+          for base in /sys/fs/cgroup "${CG:+/sys/fs/cgroup$CG}"; do
+            [ -d "$base" ] || continue
+            d="$base"
+            while [ -n "$d" ] && [ "$d" != "/" ] && [ "$d" != "/sys" ] && [ "$d" != "/sys/fs" ]; do
+              for f in memory.max memory.peak memory.current memory.high memory.swap.max; do
+                if [ -r "$d/$f" ]; then echo "$d/$f = $(cat "$d/$f")"; fi
+              done
+              d=$(dirname "$d")
+            done
+          done
+          echo "--- cgroup v1 memory (fallback) ---"
+          for f in memory.limit_in_bytes memory.max_usage_in_bytes; do
+            [ -r "/sys/fs/cgroup/memory/$f" ] && echo "/sys/fs/cgroup/memory/$f = $(cat "/sys/fs/cgroup/memory/$f")" || true
+          done
+          echo "--- cache sizes ---"
+          du -sh target 2>/dev/null || true
+          du -sh "$HOME/.cache/sccache" 2>/dev/null || true
+          du -sh "$HOME/.cargo/registry" 2>/dev/null || true
+          echo "--- sccache stats ---"
+          sccache --show-stats 2>/dev/null || echo "(sccache not on PATH)"
+          echo "===== DIAG pre-test END ====="
+
+      - name: Run tests
+        id: tests
+        if: ${{ !inputs.fix && !inputs.lockregen && !inputs.fast }}
+        # v0.4.23 law: the all-features test gate. Flags mirror upstream's
+        # `test` job exactly (profile ci + mold linker).
+        #
+        # sccache REMOVED from THIS leg 2026-09-17 (HQ; owner escalation on
+        # "a lot of recent jobs have concurrency problems"). Mechanism settled
+        # 2026-09-18 by a controlled A/B on ONE frozen sha and re-measured;
+        # every claim below carries its run-id receipt. The 2026-09-17 wording
+        # ("EVERY run died", "exhausts the hosted runner") was NOT what was
+        # measured and is superseded here.
+        #
+        # ASSOCIATION (Stage 3, frozen sha 917276229f, branches ci143-arm-a/b):
+        # sccache ON this leg => 3/3 killed (35311940193, 35311954158,
+        # 35311969301; exit 143, post-steps skipped); sccache OFF => 0/5
+        # (35311932972, 35311947218, 35311961750, 35311976997, 35311984779).
+        # Fisher exact one-tailed p = 0.01786. Re-measured on the same sha
+        # (Stage 5): OFF => 0/6 (35315974178, 35315980857, 35315988724,
+        # 35315997163, 35316005299, 35316013097), p = 0.01190 vs the ON arm,
+        # p = 0.00007 vs the 2026-09-17 census (16/17 = 94.1%).
+        #
+        # NOT "EVERY": run 35278837497 is an sccache-era survivor (OK, 28m27s),
+        # so that era's rate is 16/17, not 17/17.
+        #
+        # MECHANISM — capacity was MEASURED, not argued from the spec (Stage 2,
+        # run 35302713809): 4 vCPU, MemTotal 15.61 GiB, cgroup v2 memory.max =
+        # max on the runner AND its system.slice parent, memory.events oom /
+        # oom_kill = 0, dmesg empty, disk 75G free (49%). The kill is therefore
+        # NOT a cgroup-limit OOM, NOT the kernel OOM killer and NOT disk
+        # pressure — the sender is the runner agent's SIGTERM. What IS real: the
+        # job runs at 93.7% -> 95.4% of physical RAM and ends with 0.72 GiB of
+        # headroom, so the margin scheduling jitter must cover is under 1 GiB.
+        # That cliff is measured; its LINK to sccache is the association above.
+        # The exhaust mechanism itself is NOT instrumented (Stage 4 skipped).
+        #
+        # CAVEAT (Stage 5, 2026-09-18) — on a COLD cargo cache this leg sits at
+        # the 45-min job ceiling: Arm A ran cold ("No cache found.") at 31.82-
+        # 44.68 min, tightest margin 0.32 min, and 1/6 cold dispatches exceeded
+        # the ceiling (35311993052, 45.53 min, cancelled — not a 143 kill).
+        # Warm re-dispatch is 17.13-25.13 min. Removing sccache does NOT
+        # address that exposure.
+        #
+        # sccache STAYS on the Clippy leg (check-only; never died). Do NOT
+        # re-add here without a 143-free GREEN gate on this exact ref.
+        # Full evidence: /root/ci143-evidence/FINDINGS.md (Stages 0-5).
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+        run: cargo test --locked --profile ci --all-features --verbose
+
+      - name: "Diagnose: resource envelope AFTER test leg"
+        if: ${{ always() && inputs.diagnose && !inputs.fix && !inputs.lockregen && !inputs.fast }}
+        # `always()` is load-bearing: the value of this leg is the CONTRAST.
+        # On an ordinary test failure GitHub still runs it (and post-steps) and
+        # the envelope is captured; on a runner teardown it never runs at all,
+        # which is itself the signature (see the 2026-09-17 143 post-step
+        # evidence: post-steps skipped on 16/16 kills, ran on 6/6 controls).
+        run: |
+          echo "===== DIAG post-test $(date -u +%FT%TZ) ====="
+          echo "test-leg outcome: ${{ steps.tests.outcome }}"
+          echo "--- mem (MiB) ---"
+          free -m || true
+          echo "--- disk ---"
+          df -h / || true
+          echo "--- meminfo anchor (kB) ---"
+          grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo || true
+          echo "--- cgroup memory (resolved path, then ancestors) ---"
+          CG=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)
+          for base in /sys/fs/cgroup "${CG:+/sys/fs/cgroup$CG}"; do
+            [ -d "$base" ] || continue
+            d="$base"
+            while [ -n "$d" ] && [ "$d" != "/" ] && [ "$d" != "/sys" ] && [ "$d" != "/sys/fs" ]; do
+              for f in memory.max memory.peak memory.current memory.high memory.events; do
+                if [ -r "$d/$f" ]; then echo "$d/$f = $(cat "$d/$f")"; fi
+              done
+              d=$(dirname "$d")
+            done
+          done
+          echo "--- kernel oom / kill evidence ---"
+          dmesg 2>/dev/null | grep -iE 'oom|killed process|out of memory' | tail -20 || echo "(dmesg unreadable)"
+          echo "--- cache sizes ---"
+          du -sh target 2>/dev/null || true
+          du -sh "$HOME/.cache/sccache" 2>/dev/null || true
+          echo "--- sccache stats ---"
+          sccache --show-stats 2>/dev/null || echo "(sccache not on PATH)"
+          echo "===== DIAG post-test END ====="
+
+      - name: Apply cargo fmt (fix mode)
+        if: ${{ inputs.fix }}
+        run: |
+          cargo fmt --all
+          git diff > fmt-fix.patch
+          git diff --stat | tee fmt-fix.stat
+          echo "ref=${{ inputs.ref }}" > fmt-fix.meta
+          echo "patch_bytes=$(wc -c < fmt-fix.patch)" >> fmt-fix.meta
+
+      - name: Upload fmt-fix patch
+        if: ${{ inputs.fix }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fmt-fix
+          path: |
+            fmt-fix.patch
+            fmt-fix.stat
+            fmt-fix.meta
+          if-no-files-found: error
+
+      - name: "Guard: existing Cargo.lock present (lock-regen mode)"
+        if: ${{ inputs.lockregen }}
+        # Minimal re-resolve REQUIRES the existing lock: cargo metadata with
+        # no lock does a full re-resolve (the semver churn we're avoiding).
+        # Fail loudly instead of churning.
+        run: test -f Cargo.lock
+
+      - name: Minimal lock re-resolve (lock-regen mode)
+        if: ${{ inputs.lockregen }}
+        run: |
+          cargo metadata --format-version=1 > /dev/null
+          echo "=== lock delta ==="
+          git diff --stat Cargo.lock
+          git diff Cargo.lock | head -300
+
+      - name: Upload regen-lock (lock-regen mode)
+        if: ${{ inputs.lockregen }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: regen-lock
+          path: Cargo.lock
+          if-no-files-found: error
