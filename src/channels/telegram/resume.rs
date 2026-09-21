@@ -112,7 +112,7 @@ pub(crate) fn build_enqueue_callback(
             // `session_push_thread` keeps the two arms apart and reaches the
             // durable `session_bindings` row when the in-memory maps are still
             // empty.
-            let thread_id = super::send::session_push_thread(state, session_id, chat_id).await;
+            let thread_id = super::send::session_push_thread(&state, session_id, chat_id).await;
 
             // #1221: announce WHAT arrived before anything else happens — an
             // expandable blockquote echoing the completion output (rich format
@@ -373,7 +373,7 @@ pub(crate) fn build_enqueue_callback(
             // `session_push_thread` keeps the two arms apart and reaches the
             // durable `session_bindings` row when the in-memory maps are still
             // empty.
-            let thread_id = super::send::session_push_thread(state, session_id, chat_id).await;
+            let thread_id = super::send::session_push_thread(&state, session_id, chat_id).await;
             if let Err(e) = resume_session_inner(
                 bot,
                 teloxide::types::ChatId(chat_id),

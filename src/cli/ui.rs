@@ -1522,7 +1522,7 @@ async fn cmd_chat_inner(
                                         // spoke (#1319).
                                         let thread_id =
                                             crate::channels::telegram::send::session_push_thread(
-                                                tg, session_id, chat.0,
+                                                &tg, session_id, chat.0,
                                             )
                                             .await;
                                         match crate::channels::telegram::handler::resume_session(
