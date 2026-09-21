@@ -535,7 +535,7 @@ impl TelegramAgent {
                                         &cb_session_binding_repo,
                                         sid,
                                         chat_id,
-                                        thread_id,
+                                        thread_id.map(|t| t.0.0),
                                     )
                                     .await;
                                     tokio::spawn(async move {
@@ -2150,7 +2150,7 @@ impl TelegramAgent {
                                             &cb_session_binding_repo,
                                             session_id,
                                             chat_id,
-                                            thread_id,
+                                            thread_id.map(|t| t.0.0),
                                         )
                                         .await;
                                         // Visible seed turn, spawned so the
@@ -2283,7 +2283,7 @@ impl TelegramAgent {
                                             &cb_session_binding_repo,
                                             sid,
                                             cb_chat,
-                                            cb_thread,
+                                            cb_thread.map(|t| t.0.0),
                                         )
                                         .await;
                                         let agent_cb = agent.clone();
@@ -3215,18 +3215,18 @@ fn spawn_settle_watcher(
 /// follow-up suggestion, a plan approval, and generic callback routing.
 /// Config pickers such as `/models` deliberately do not call it — they start
 /// no turn, so a resume would be noise.
-async fn record_tap_binding(
+pub(crate) async fn record_tap_binding(
     repo: &SessionBindingRepository,
     session_id: Uuid,
     chat_id: teloxide::types::ChatId,
-    thread_id: Option<teloxide::types::ThreadId>,
+    topic: Option<i32>,
 ) {
     if let Err(e) = repo
         .upsert(
             session_id.to_string(),
             "telegram",
             &chat_id.0.to_string(),
-            thread_id.map(|t| t.0.0),
+            topic,
             crate::db::BindingOrigin::Callback,
         )
         .await

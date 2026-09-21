@@ -460,6 +460,8 @@ pub mod telegram_draft_streaming_compat_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_general_topic_delivery_test;
 #[cfg(feature = "telegram")]
+pub mod telegram_general_topic_tap_binding_test;
+#[cfg(feature = "telegram")]
 pub mod telegram_infer_table_separator_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_intermediate_status_report_test;
