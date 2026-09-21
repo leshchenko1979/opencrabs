@@ -50,7 +50,6 @@ async fn a2a_notify_dispatches_goal_to_target_session() {
         .await
         .expect("session creates");
 
-    let _g = test_guard();
     let sink = Arc::new(Mutex::new(Vec::new()));
     let sink_clone = sink.clone();
     register_session_route(
