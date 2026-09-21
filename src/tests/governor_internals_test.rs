@@ -357,8 +357,7 @@ async fn global_cooldown_suppresses_drop_eligible_gates() {
         chat,
         teloxide::types::MessageId(100),
         EditClass::BrainPreview,
-        "preview".to_string(),
-        false,
+        EditPayload::classic_html("preview"),
     )
     .await;
     assert!(

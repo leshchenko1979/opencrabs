@@ -1,4 +1,5 @@
 use crate::brain::agent::AgentContext;
+use crate::brain::agent::context::CompactionScope;
 use crate::brain::agent::service::AgentService;
 use crate::brain::prompt_builder::{
     BrainLoader, has_telegram_channel_capabilities, inject_telegram_channel_capabilities,
@@ -61,7 +62,12 @@ fn test_compaction_recovers_telegram_capabilities_if_in_brain() {
         telegram_channel_capabilities()
     ));
 
-    AgentService::apply_compaction_summary_after(&mut context, "Summary of previous tasks.", 0);
+    AgentService::apply_compaction_summary_after(
+        &mut context,
+        CompactionScope::FullWindow,
+        "Summary of previous tasks.",
+        0,
+    );
 
     let first_msg = context.messages.first().expect("summary message present");
     let text = match &first_msg.content[0] {
@@ -78,7 +84,12 @@ fn test_compaction_skips_capabilities_for_non_telegram_session() {
     let mut context = AgentContext::new(Uuid::new_v4(), 100_000);
     context.system_brain = Some("You are OpenCrabs.\n\n--- Runtime Info ---\n".to_string());
 
-    AgentService::apply_compaction_summary_after(&mut context, "Summary of previous tasks.", 0);
+    AgentService::apply_compaction_summary_after(
+        &mut context,
+        CompactionScope::FullWindow,
+        "Summary of previous tasks.",
+        0,
+    );
 
     let first_msg = context.messages.first().expect("summary message present");
     let text = match &first_msg.content[0] {
