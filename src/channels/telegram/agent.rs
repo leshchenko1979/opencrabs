@@ -3238,6 +3238,36 @@ async fn record_tap_binding(
     }
 }
 
+/// Session-scoping topic for a callback event (#443).
+///
+/// The SINGLE composition point for a callback's topic in this module. Every
+/// path that needs "which session bucket did this tap happen in" — the
+/// callback resolver and each tap path that records a binding — goes through
+/// here, so they cannot drift from each other or from message ingress.
+///
+/// Message ingress composes its topic through the same function
+/// (`handler.rs`), which applies the #1220 General-topic normalization: in a
+/// known forum a message carrying no explicit topic IS the General topic and
+/// resolves to `Some(GENERAL_TOPIC_ID)`, not to `None`. Composing it any other
+/// way is what made a General tap act on the pre-#1220 base session (#1248)
+/// and what let a General tap OVERWRITE the live `Some(GENERAL_TOPIC_ID)`
+/// binding with `NULL` (#443).
+///
+/// `None` when the callback carries no regular message: an inaccessible
+/// message is not a General-topic event, and has no topic to compose.
+async fn callback_topic_for_message(
+    state: &super::TelegramState,
+    msg: &teloxide::types::MaybeInaccessibleMessage,
+) -> Option<i32> {
+    let m = msg.regular_message()?;
+    let known_forum = state.is_known_forum(msg.chat().id.0).await;
+    super::session_resolve::session_topic_for_event(
+        m.is_topic_message,
+        m.thread_id.map(|t| t.0.0),
+        known_forum,
+    )
+}
+
 /// Resolve the correct session ID for a callback query.
 ///
 /// Callbacks from inline buttons (e.g. `/models` picker) fire in the chat
@@ -3256,22 +3286,12 @@ async fn resolve_callback_session(
     // topic the button was pressed in (#215) so a callback inside a topic
     // resolves that topic's session, not the base one.
     //
-    // #1248: this MUST compose the topic id exactly like message ingress —
-    // through `session_topic_for_event`, which applies the #1220 General-topic
-    // normalization. Calling `topic_session_id` alone resolved General to
-    // `None` here while ingress bound the session under
-    // `Some(GENERAL_TOPIC_ID)`, so button presses in a forum's General topic
-    // acted on the stale base session instead of the live one.
+    // #1248: the topic MUST be composed exactly like message ingress. It now
+    // comes from the shared helper below, so this lookup and ingress agree by
+    // construction instead of by two call sites staying in step.
     if let Some(msg) = &query.message {
         let chat_id = msg.chat().id.0;
-        let known_forum = state.is_known_forum(chat_id).await;
-        let topic_id = msg.regular_message().and_then(|m| {
-            super::session_resolve::session_topic_for_event(
-                m.is_topic_message,
-                m.thread_id.map(|t| t.0.0),
-                known_forum,
-            )
-        });
+        let topic_id = callback_topic_for_message(state, msg).await;
         if let Some(session_id) = state.chat_session(chat_id, topic_id).await {
             return Some(session_id);
         }
