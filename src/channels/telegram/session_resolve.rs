@@ -146,10 +146,10 @@ pub fn push_target(
     durable: Option<(i64, Option<i32>)>,
     chat_id: i64,
 ) -> PushTarget {
-    if let Some((chat, topic)) = in_memory.filter(|(chat, _)| *chat == chat_id) {
+    if let Some((_, topic)) = in_memory.filter(|(chat, _)| *chat == chat_id) {
         return PushTarget::Bound(topic);
     }
-    if let Some((chat, topic)) = durable.filter(|(chat, _)| *chat == chat_id) {
+    if let Some((_, topic)) = durable.filter(|(chat, _)| *chat == chat_id) {
         return PushTarget::Bound(topic);
     }
     PushTarget::Unbound
