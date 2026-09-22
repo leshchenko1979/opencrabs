@@ -560,3 +560,161 @@ fn payload_tracks_the_source_and_is_base64url() {
         "payload must be base64url with no padding, got {p}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// with_contrast_fills() — #430: an authored fill cannot blank out its label
+// ---------------------------------------------------------------------------
+
+use crate::channels::telegram::rich::mermaid::contrast_ratio;
+
+/// The `code` the payload actually ships, after #430 normalisation.
+fn rewritten(style: &MermaidStyle, source: &str) -> String {
+    decode_payload(style, source)["code"]
+        .as_str()
+        .expect("the payload must carry the diagram source as a string")
+        .to_string()
+}
+
+/// Parse `#rrggbb` into channels, panicking with the value on malformed input.
+fn rgb(hex: &str) -> (u8, u8, u8) {
+    let h = hex.trim_start_matches('#');
+    assert_eq!(h.len(), 6, "expected a 6-hex colour, got {hex}");
+    let pair = |at: usize| u8::from_str_radix(&h[at..at + 2], 16).expect("hex digit");
+    (pair(0), pair(2), pair(4))
+}
+
+#[test]
+fn a_light_fill_is_pinned_to_a_dark_label() {
+    // The owner-reported case, whose label measured 1.05:1 against the dark
+    // palette's `textColor #e6e6e6` — the label was invisible.
+    let src = "graph TD;\n    style A fill:#ffe6e6,stroke:#c00,stroke-width:2px";
+    for theme in ["dark", "default", "neutral"] {
+        let style = MermaidStyle::from_values(theme, "#282d37");
+        let code = rewritten(&style, src);
+        assert!(
+            code.contains("style A fill:#ffe6e6,stroke:#c00,stroke-width:2px,color:#000000"),
+            "a light fill must be pinned to a dark label for {theme}, got {code}"
+        );
+    }
+}
+
+#[test]
+fn a_dark_fill_is_pinned_to_a_light_label() {
+    let style = MermaidStyle::from_values("dark", "#282d37");
+    let code = rewritten(&style, "graph TD;\n    style A fill:#102030");
+    assert!(
+        code.ends_with("style A fill:#102030,color:#ffffff"),
+        "a dark fill must be pinned to a light label, got {code}"
+    );
+}
+
+#[test]
+fn the_reported_fills_all_reach_wcag_aa() {
+    // The user-visible claim, asserted end to end through payload(): each of
+    // the four fills from the report ends up with a label that clears AA.
+    let style = MermaidStyle::from_values("dark", "#282d37");
+    for fill in ["#ffe6e6", "#e6f3ff", "#fff2cc", "#e6ffe6"] {
+        let src = format!("graph TD;\n    style A fill:{fill}");
+        let code = rewritten(&style, &src);
+        let pinned = code.rsplit("color:#").next().expect("a label was pinned");
+        let ratio = contrast_ratio(rgb(fill), rgb(pinned));
+        assert!(
+            ratio >= 4.5,
+            "fill {fill} must end with a label at or above the WCAG AA floor, \
+             got {ratio:.2}:1 against #{pinned}"
+        );
+    }
+}
+
+#[test]
+fn an_authored_color_is_never_overwritten() {
+    let style = MermaidStyle::from_values("dark", "#282d37");
+    let src = "graph TD;\n    style A fill:#ffe6e6,color:#1a1a1a,stroke:#c00";
+    assert_eq!(
+        rewritten(&style, src),
+        src,
+        "a statement naming its own color must pass through byte-identical"
+    );
+}
+
+#[test]
+fn fills_that_are_not_six_hex_are_left_alone() {
+    let style = MermaidStyle::from_values("dark", "#282d37");
+    // `none`, a named colour, a 3-hex shorthand and a function all defeat a
+    // luminance read; inventing a colour for them would be worse than trusting
+    // the author, so each must survive untouched.
+    for fill in ["none", "red", "#abc", "rgba(1,2,3,0.5)"] {
+        let src = format!("graph TD;\n    style A fill:{fill}");
+        assert_eq!(
+            rewritten(&style, &src),
+            src,
+            "fill:{fill} must not be rewritten"
+        );
+    }
+}
+
+#[test]
+fn a_style_statement_without_a_fill_is_left_alone() {
+    let style = MermaidStyle::from_values("dark", "#282d37");
+    let src = "graph TD;\n    style A stroke:#c00,stroke-width:2px";
+    assert_eq!(
+        rewritten(&style, src),
+        src,
+        "only a fill override can blank a label; nothing else may be touched"
+    );
+}
+
+#[test]
+fn classdef_fills_are_normalised_too() {
+    let style = MermaidStyle::from_values("dark", "#282d37");
+    let code = rewritten(&style, "graph TD;\n    classDef warn fill:#fff2cc,stroke:#d6b656");
+    assert!(
+        code.ends_with("classDef warn fill:#fff2cc,stroke:#d6b656,color:#000000"),
+        "a classDef fill reaches the same nodes as an inline style, got {code}"
+    );
+}
+
+#[test]
+fn normalisation_preserves_every_other_line_and_newlines() {
+    let style = MermaidStyle::from_values("dark", "#282d37");
+    let src = "flowchart TD\n    A[one] --> B[two]\n    style A fill:#e6f3ff\n    B --> C\n";
+    let code = rewritten(&style, src);
+    assert_eq!(
+        code.lines().count(),
+        src.lines().count(),
+        "the rewrite is per line and must not add or drop one"
+    );
+    assert!(
+        code.ends_with('\n'),
+        "a trailing newline must survive the rewrite"
+    );
+    assert!(
+        code.contains("    A[one] --> B[two]\n") && code.contains("    B --> C\n"),
+        "non-style lines must be byte-identical, got {code:?}"
+    );
+}
+
+#[test]
+fn the_pinned_pair_clears_the_wcag_floor_for_every_fill() {
+    // The falsifying input behind choosing BLACK and WHITE: the mid-grey where
+    // the two candidates come closest. Softening either end drops below AA —
+    // `#1a1a1a`/`#f5f5f5` bottoms out at 3.998:1, the theme's own
+    // `#1a1a1a`/`#e6e6e6` at 3.745:1 — which is exactly why the pair is
+    // absolute and this test pins it.
+    let mut worst = f64::MAX;
+    let mut worst_grey = 0u8;
+    for v in 0..=255u8 {
+        let fill = (v, v, v);
+        let ratio = contrast_ratio(fill, (0, 0, 0)).max(contrast_ratio(fill, (255, 255, 255)));
+        if ratio < worst {
+            worst = ratio;
+            worst_grey = v;
+        }
+    }
+    assert!(
+        worst >= 4.5,
+        "the black/white label pair must clear the AA floor for every fill; \
+         worst was {worst:.3}:1 at \
+         #{worst_grey:02x}{worst_grey:02x}{worst_grey:02x}"
+    );
+}

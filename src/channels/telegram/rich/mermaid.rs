@@ -182,11 +182,16 @@ impl MermaidStyle {
     /// 9.22:1); the nested form lands it (20318 B, 95 `#ffffff` pixels,
     /// connector contrast 13.81:1). Nested is the only form that reaches the
     /// renderer.
+    ///
+    /// #430: the source is normalised on the way in — see `with_contrast_fills`
+    /// — so an authored light `fill:` cannot leave a label unreadable under the
+    /// dark palette. The rewrite is a pure function of `source`, so
+    /// [`Self::cache_key`] needs no extra term for it.
     pub(crate) fn payload(&self, source: &str) -> String {
         let p = &self.palette;
         base64url(
             &json!({
-                "code": source,
+                "code": with_contrast_fills(source),
                 "mermaid": {
                     "theme": self.theme,
                     "themeVariables": {
@@ -328,6 +333,127 @@ fn parse_rgb(hex: &str) -> Option<(u8, u8, u8)> {
     }
     let v = u32::from_str_radix(h, 16).ok()?;
     Some(((v >> 16) as u8, (v >> 8) as u8, v as u8))
+}
+
+/// Pure black and pure white — the only label pair that clears WCAG AA against
+/// **every** possible fill (see [`label_color_for`]).
+const LABEL_COLOR_DARK: &str = "#000000";
+const LABEL_COLOR_LIGHT: &str = "#ffffff";
+
+/// WCAG 2.x relative luminance of an sRGB triple.
+fn relative_luminance((r, g, b): (u8, u8, u8)) -> f64 {
+    let channel = |v: u8| {
+        let c = f64::from(v) / 255.0;
+        if c <= 0.039_28 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+}
+
+/// WCAG 2.x contrast ratio between two sRGB triples: 1.0 (identical) to 21.0.
+pub(crate) fn contrast_ratio(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// The label colour to pin on a node filled with `fill`: whichever of black or
+/// white contrasts more with it.
+///
+/// That pair is the whole point. Measured over all 256 greys, the worst case is
+/// 4.608:1 at `#757575` — still above the WCAG AA floor of 4.5:1. Softening
+/// either end fails it: `#1a1a1a`/`#f5f5f5` bottoms out at 3.998:1 at
+/// `#797979`, and the theme's own `#1a1a1a`/`#e6e6e6` at 3.745:1 at `#747474`.
+fn label_color_for(fill: (u8, u8, u8)) -> &'static str {
+    if contrast_ratio(fill, (0, 0, 0)) >= contrast_ratio(fill, (255, 255, 255)) {
+        LABEL_COLOR_DARK
+    } else {
+        LABEL_COLOR_LIGHT
+    }
+}
+
+/// The label colour to pin on a `style`/`classDef` statement that sets `fill:`
+/// and leaves `color:` to the theme — or `None` when the statement is not one
+/// this normaliser touches.
+///
+/// A statement that already sets `color:`, whose `fill:` is not a bare 6-hex
+/// value (`red`, `#abc`, `url(...)`, `none`), or whose `fill:` key is absent is
+/// left alone: inventing a colour from a fill we cannot read would be worse
+/// than trusting the author.
+fn pinned_label_color(line: &str) -> Option<&'static str> {
+    let trimmed = line.trim_start();
+    let rest = trimmed
+        .strip_prefix("style ")
+        .or_else(|| trimmed.strip_prefix("classDef "))?;
+    let mut fill = None;
+    let mut has_color = false;
+    for (i, prop) in rest.split(',').enumerate() {
+        // The first token carries the node id (or class name) ahead of its
+        // first property: `A fill:#ffe6e6`.
+        let prop = if i == 0 {
+            match prop.find(char::is_whitespace) {
+                Some(at) => &prop[at + 1..],
+                None => continue,
+            }
+        } else {
+            prop
+        };
+        let Some((key, value)) = prop.split_once(':') else {
+            continue;
+        };
+        match key.trim() {
+            "fill" => {
+                if let Some(rgb) = parse_rgb(value) {
+                    fill = Some(rgb);
+                }
+            }
+            "color" => has_color = true,
+            _ => {}
+        }
+    }
+    if has_color {
+        return None;
+    }
+    fill.map(label_color_for)
+}
+
+/// #430: pin a readable label colour on every authored `fill:` that omitted one.
+///
+/// mermaid does not adjust an author's inline `fill:`, so a light pastel under
+/// the dark palette's light `textColor` (`#e6e6e6`) renders its label at about
+/// 1.05:1 — measured, and the defect the owner reported live. The theme cannot
+/// repair it: the inline fill wins.
+///
+/// This DOES rewrite the author's source, so a node whose fill was authored
+/// without a colour renders with a colour the author did not write. That is the
+/// trade the design gate accepted — a legible diagram beats a faithful one
+/// nobody can read. Line structure and trailing whitespace are otherwise
+/// preserved, and a statement naming its own `color:` passes through
+/// byte-identical.
+fn with_contrast_fills(source: &str) -> String {
+    let mut out = String::with_capacity(source.len() + 32);
+    for (i, line) in source.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        match pinned_label_color(line) {
+            Some(color) => {
+                out.push_str(line.trim_end());
+                out.push_str(",color:");
+                out.push_str(color);
+            }
+            None => out.push_str(line),
+        }
+    }
+    // `str::lines` drops a trailing newline, and the payload must not silently
+    // lose one.
+    if source.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 /// Shift each channel of `base` by `delta`, clamped to the byte range, and
