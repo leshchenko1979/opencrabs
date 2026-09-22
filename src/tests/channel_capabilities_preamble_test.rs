@@ -13,7 +13,19 @@ fn test_inject_telegram_channel_capabilities_explicit() {
     let brain_with_runtime = "You are OpenCrabs.\n\n--- Runtime Info ---\nModel: test\n";
     let injected = inject_telegram_channel_capabilities(brain_with_runtime);
     assert!(has_telegram_channel_capabilities(&injected));
-    assert!(injected.contains("- Mermaid diagrams: native vertical rendering"));
+    // #513: the preamble must demonstrate the fence tag the renderer accepts.
+    // The resolver trims the fence info string and compares it to exactly
+    // `mermaid`, so an example carrying a suffix ships the diagram as an
+    // ordinary code fence — no render attempt, no image, and no error.
+    assert!(injected.contains("- Mermaid diagrams: native rendering"));
+    assert!(
+        injected.contains("tag the fence exactly ```mermaid"),
+        "the preamble must show the exact fence tag the renderer accepts"
+    );
+    assert!(
+        !injected.contains("```mermaid "),
+        "no mermaid example may carry a suffixed info string: the renderer trims it and accepts only exactly mermaid"
+    );
     assert!(injected.contains("- Markdown tables: GFM tables rendered natively"));
     assert!(injected.contains("- HTML glyphs / formatting"));
     assert!(injected.contains("- Image includes: Markdown syntax"));

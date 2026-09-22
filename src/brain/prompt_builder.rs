@@ -767,7 +767,7 @@ pub const TELEGRAM_CHANNEL_CAPABILITIES_MARKER: &str = "--- TELEGRAM CHANNEL CAP
 
 /// Body of the Telegram capabilities block (everything after the marker line).
 const TELEGRAM_CHANNEL_CAPABILITIES_BODY: &str = "\
-- Mermaid diagrams: native vertical rendering (```mermaid vertical flowchart TD, sequenceDiagram, node styling, numbered steps, icons).
+- Mermaid diagrams: native rendering; prefer vertical layouts (tag the fence exactly ```mermaid, no suffix, then open the body with flowchart TD or sequenceDiagram for multi-actor flows).
 - Markdown tables: GFM tables rendered natively as rich Telegram tables (header on own line, blank line before, delimiter row).
 - HTML glyphs / formatting: rich HTML entities, blockquotes (<blockquote>), code, and emoji styling.
 - Image includes: Markdown syntax (![alt](path/or/url)) for local/remote image rendering.";
