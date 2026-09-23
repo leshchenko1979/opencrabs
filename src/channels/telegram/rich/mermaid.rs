@@ -798,16 +798,13 @@ pub(crate) async fn resolve(style: &MermaidStyle, source: &str) -> MermaidResult
         Err(e) => return fail("client", source, "diagram renderer unavailable", Some(&e)),
     };
 
-    let resp = match client.get(&url).send().await {
+    // #516: the request rung retries ONCE for the transient class — a
+    // connect/send failure, a timeout, or a non-image non-4xx status. Pre-fix
+    // the rung was a single un-retried send, so one transient hiccup degraded
+    // a diagram the renderer would have served on the next try.
+    let resp = match send_with_retry(&client, &url, source, "connect").await {
         Ok(r) => r,
-        Err(e) => {
-            let note = if e.is_timeout() {
-                "diagram renderer timed out"
-            } else {
-                "diagram renderer unreachable"
-            };
-            return fail("connect", source, note, Some(&e));
-        }
+        Err(outcome) => return outcome,
     };
 
     let status = resp.status().as_u16();
@@ -940,6 +937,100 @@ pub(crate) fn classify_render_failure(status: u16, body: &str) -> MermaidResult 
         MermaidResult::ParseError(error_note(status, body))
     } else {
         MermaidResult::Failed(error_note(status, body))
+    }
+}
+
+/// Whether a non-image renderer response is worth ONE retry at the request
+/// rung (#516). The exact mirror of [`classify_render_failure`]: whatever that
+/// function calls a deterministic PARSE rejection of this source is final —
+/// re-sending the same bytes to the same renderer earns the same answer — and
+/// everything else (5xx, the transient 408/429, odd non-image responses) is
+/// infra and earns one cheap re-request. Derived from the classifier rather
+/// than restating its status ranges, so the retry gate and the failure kind can
+/// never disagree. Pure, so it is unit-testable without a network call.
+pub(crate) fn is_transient_render_failure(status: u16) -> bool {
+    !matches!(
+        classify_render_failure(status, ""),
+        MermaidResult::ParseError(_)
+    )
+}
+
+/// One attempt at the render request rung: either a response whose status and
+/// content type are worth examining, or a TRANSIENT failure carrying the note
+/// the reader would see, whether it was a timeout, and the transport error when
+/// there was one.
+///
+/// A deterministic rejection (4xx other than 408/429) comes back as a
+/// RESPONSE, not a failure — the caller classifies it to a
+/// [`MermaidResult::ParseError`] exactly as before — so only the transient
+/// class can drive a retry.
+async fn attempt_render_request(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<reqwest::Response, (String, bool, Option<reqwest::Error>)> {
+    match client.get(url).send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            if is_image_response(status, &content_type) || !is_transient_render_failure(status) {
+                return Ok(resp);
+            }
+            let body = resp.text().await.unwrap_or_default();
+            Err((error_note(status, &body), false, None))
+        }
+        Err(e) => {
+            let timeout = e.is_timeout();
+            let note = if timeout {
+                "diagram renderer timed out"
+            } else {
+                "diagram renderer unreachable"
+            };
+            Err((note.to_string(), timeout, Some(e)))
+        }
+    }
+}
+
+/// #516: send the render request, and on a TRANSIENT failure retry exactly
+/// once after the same backoff the body leg uses. Mirrors
+/// [`read_body_with_retry`]'s once-only discipline — one cheap re-request,
+/// never a loop — and labels the retry rung `{stage}-retry` the same way, so
+/// the ladder reads consistently in the daemon log.
+///
+/// The pre-fix path made exactly one attempt, which is why a single transient
+/// connect hiccup permanently degraded a diagram the renderer would have served
+/// on the next try.
+async fn send_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    source: &str,
+    stage: &str,
+) -> Result<reqwest::Response, MermaidResult> {
+    let (note, timed_out, err) = match attempt_render_request(client, url).await {
+        Ok(resp) => return Ok(resp),
+        Err(failure) => failure,
+    };
+    tracing::warn!(
+        stage,
+        source_len = source.len(),
+        timed_out,
+        error = %err.as_ref().map(|e| e.to_string()).unwrap_or_default(),
+        note = %note,
+        "mermaid render request failed; retrying once"
+    );
+    tokio::time::sleep(Duration::from_millis(BODY_RETRY_DELAY_MS)).await;
+    match attempt_render_request(client, url).await {
+        Ok(resp) => Ok(resp),
+        Err((retry_note, _, retry_err)) => Err(fail(
+            &format!("{stage}-retry"),
+            source,
+            retry_note,
+            retry_err.as_ref(),
+        )),
     }
 }
 

@@ -17,7 +17,8 @@ use crate::channels::telegram::rich::mermaid::{
     MediaEntry, MermaidStyle, PREVALIDATE_CONNECT_TIMEOUT_SECS, PREVALIDATE_TIMEOUT_SECS, base64url,
     cache_get, cache_put, classify_render_failure, error_note, failure_html, find_mermaid_fences,
     has_mermaid_fence, image_html, ink_url, ink_url_svg, is_diagram_capped, is_image_response,
-    looks_like_mermaid_source, markdown_failure_block, markdown_failure_block_with_link,
+    is_transient_render_failure, looks_like_mermaid_source, markdown_failure_block,
+    markdown_failure_block_with_link,
     neutralize_orphan_photo_refs, neutralize_prose_media_html, replacement_for, resolve_blocks,
     resolve_markdown_media, svg_link_md, unresolved_media_refs, unresolved_media_refs_by,
 };
@@ -413,6 +414,55 @@ fn classify_render_failure_empty_body_names_status() {
     match classify_render_failure(400, "   ") {
         MermaidResult::ParseError(note) => assert!(note.contains("HTTP 400")),
         other => panic!("expected ParseError, got {other:?}"),
+    }
+}
+
+#[test]
+fn is_transient_render_failure_retries_a_503_and_gates_a_400() {
+    // #516: the request rung earns exactly ONE retry, and only for the
+    // transient class. A 5xx is infra — the same request may well succeed on
+    // the next try. A 400 is a deterministic rejection of this exact source,
+    // so re-sending identical bytes would only burn a second round trip.
+    assert!(
+        is_transient_render_failure(503),
+        "a 5xx is transient infra and must be retried once"
+    );
+    assert!(
+        !is_transient_render_failure(400),
+        "a 400 is a parse rejection of this source and must NOT be retried"
+    );
+}
+
+#[test]
+fn is_transient_render_failure_retries_the_transient_4xx_pair() {
+    // 408 (request timeout) and 429 (rate limit) are 4xx but infra, not a
+    // model mistake — the same split classify_render_failure already draws.
+    assert!(is_transient_render_failure(408));
+    assert!(is_transient_render_failure(429));
+    for status in [404u16, 422, 451] {
+        assert!(
+            !is_transient_render_failure(status),
+            "status {status} is a deterministic rejection, not retryable"
+        );
+    }
+}
+
+#[test]
+fn is_transient_render_failure_mirrors_classify_render_failure() {
+    // The retry gate is DERIVED from the classifier, so the two can never
+    // disagree: whatever the classifier calls a ParseError is final, and
+    // everything else earns one retry. Asserted across the status classes
+    // rather than a sample, so an edit to either side breaks this test.
+    for status in [200u16, 204, 400, 404, 408, 418, 429, 451, 500, 502, 503, 504, 599] {
+        let is_parse_rejection = matches!(
+            classify_render_failure(status, "body"),
+            MermaidResult::ParseError(_)
+        );
+        assert_eq!(
+            is_transient_render_failure(status),
+            !is_parse_rejection,
+            "status {status}: the retry gate and the failure kind disagree"
+        );
     }
 }
 
