@@ -536,7 +536,8 @@ pub(crate) async fn deliver_final_response(
                         continue;
                     }
                 };
-                let kind = telegram_media_kind(bytes.len() as u64);
+                let len = bytes.len();
+                let kind = telegram_media_kind(len as u64);
                 let sent = match kind {
                     TelegramMediaKind::Photo => photo_in_thread(
                         bot,
@@ -546,7 +547,7 @@ pub(crate) async fn deliver_final_response(
                         image.caption.clone(),
                     )
                     .await
-                    .map(|_| ()),
+                    .map(|m| m.id.0),
                     TelegramMediaKind::Document => document_in_thread(
                         bot,
                         chat_id,
@@ -555,23 +556,45 @@ pub(crate) async fn deliver_final_response(
                         image.caption.clone(),
                     )
                     .await
-                    .map(|_| ()),
+                    .map(|m| m.id.0),
                 };
-                if let Err(e) = sent {
-                    tracing::error!(
-                        "Telegram: failed to send image {} as {}: {}",
-                        img_path.display(),
-                        match kind {
-                            TelegramMediaKind::Photo => "photo",
-                            TelegramMediaKind::Document => "document",
-                        },
-                        e
-                    );
-                    image_failures.push(LocalImageFailure {
-                        raw: img_path.display().to_string(),
-                        resolved: Some(img_path.clone()),
-                        reason: LocalImageFailureReason::DeliveryFailed,
-                    });
+                match sent {
+                    Ok(mid) => {
+                        let reference = img_path.display().to_string();
+                        // Match the outbox media receipt: len is sent bytes and
+                        // hash8 identifies the path, so one audit predicate covers both legs.
+                        super::telemetry::log_send_success(
+                            "turn",
+                            "-",
+                            &session_id.to_string(),
+                            "delivery_media",
+                            match kind {
+                                TelegramMediaKind::Photo => "image_photo",
+                                TelegramMediaKind::Document => "image_document",
+                            },
+                            chat_id.0,
+                            thread_id.map(|t| t.0.0),
+                            mid,
+                            len,
+                            &super::telemetry::content_hash8(&reference),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Telegram: failed to send image {} as {}: {}",
+                            img_path.display(),
+                            match kind {
+                                TelegramMediaKind::Photo => "photo",
+                                TelegramMediaKind::Document => "document",
+                            },
+                            e
+                        );
+                        image_failures.push(LocalImageFailure {
+                            raw: img_path.display().to_string(),
+                            resolved: Some(img_path.clone()),
+                            reason: LocalImageFailureReason::DeliveryFailed,
+                        });
+                    }
                 }
             }
 
