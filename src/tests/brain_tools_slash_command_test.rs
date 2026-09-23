@@ -1,6 +1,8 @@
+use crate::brain::skills::user_skills_dir;
 use crate::brain::tools::Tool;
 use crate::brain::tools::ToolExecutionContext;
 use crate::brain::tools::slash_command::*;
+use crate::config::profile::{home_for_profile, with_profile_home_async};
 use tokio;
 
 #[test]
@@ -118,4 +120,59 @@ async fn test_new_and_cowork_return_guidance_not_error() {
             "{cmd} should return guidance as success, not an error"
         );
     }
+}
+
+/// #520 criterion 4: the `/<name>` tool path (`brain/tools/slash_command.rs`)
+/// resolves a skill and hands its body to the model. It used to hand over the
+/// BARE body — no review-gate reminder, no #406 size warning — while the channel
+/// path (`channels/commands.rs`) already went through `prompt_body()`. It now
+/// routes through the same method.
+///
+/// **What makes this test discriminating** (a probe that cannot fail on the
+/// pre-fix code measures its own constants): the fixture declares
+/// `review_gate: true`, and `prompt_body()` prepends the reminder while the bare
+/// body does not — so the assertion below FAILS against the pre-fix path. SIZE
+/// could not serve as the discriminator here: no built-in skill exceeds the
+/// 500-line threshold (largest is 280), so a built-in-only fixture would pass
+/// under BOTH implementations and prove nothing.
+#[tokio::test]
+async fn skill_arm_carries_prompt_body_not_the_bare_body() {
+    let profile = format!("test-slash-skill-{}", uuid::Uuid::new_v4());
+
+    let result = with_profile_home_async(Some(&profile), async {
+        let skill_dir = user_skills_dir().join("gate-fixture");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: gate-fixture\ndescription: discriminating fixture\n\
+             review_gate: true\n---\n\nDraft the thing.\n",
+        )
+        .unwrap();
+
+        let tool = SlashCommandTool;
+        let ctx = ToolExecutionContext::new(uuid::Uuid::new_v4());
+        tool.execute(serde_json::json!({ "command": "/gate-fixture" }), &ctx)
+            .await
+            .unwrap()
+    })
+    .await;
+
+    let _ = std::fs::remove_dir_all(home_for_profile(Some(&profile)));
+
+    assert!(
+        result.success,
+        "the slash tool must resolve the user skill, got: {:?}",
+        result.error
+    );
+    assert!(
+        result.output.contains("SKILL REVIEW GATE"),
+        "the slash arm must inherit prompt_body(); the bare body carries no \
+         reminder. got: {}",
+        result.output
+    );
+    assert!(
+        result.output.contains("Draft the thing."),
+        "the body must still arrive in full, got: {}",
+        result.output
+    );
 }

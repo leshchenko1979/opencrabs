@@ -166,6 +166,13 @@ impl RsiProposalsTool {
 
         // Mirror the format documented in TOOLS.md: YAML frontmatter
         // with `name` + `description`, then the multi-line body.
+        //
+        // MUST stay on the RAW body — this writes a file to disk, it does not
+        // inject into model context. `prompt_body()` prepends the review-gate
+        // reminder and appends the #406 size warning, so routing this through it
+        // would bake both into the installed SKILL.md as if they were the skill's
+        // own text. (#520 froze the shared caller at `prompt_body()`; this is the
+        // one consumer where that would be wrong.)
         let contents = format!(
             "---\nname: {}\ndescription: {}\n---\n\n{}\n",
             proposal.skill.name,

@@ -175,7 +175,15 @@ pub fn recall_from_active_skills(
             }
         }
 
-        // 2. Main skill prompt body
+        // 2. Main skill prompt body.
+        //
+        // DELIBERATE EXCLUSION (#520, HQ ruling 2026-09-23): this path injects
+        // SECTIONS (`split_sections`), never a whole body, so it does not route
+        // through `prompt_body()` and the #406 size warning is absent here BY
+        // DESIGN, not by oversight. A whole-skill size warning attached to one
+        // section would read as "this section is too long" when it is the SKILL
+        // that is too long — a wrong signal. The warning's home is
+        // `prompt_body()`, which every whole-body injection path shares.
         for sec in split_sections(&skill.body) {
             named_sections.push(NamedSection {
                 source_name: format!("skill {}", skill.name),

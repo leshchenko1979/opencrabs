@@ -1015,9 +1015,18 @@ impl SlashCommandTool {
             // only commands.toml was consulted, so every skill reached the
             // "Unknown command" arm (#889). `/servers` and `/channels` are
             // skills on disk and failed for exactly this reason.
+            //
+            // #520: route through `prompt_body()` rather than the bare body, so
+            // this path matches the channel path (`channels/commands.rs`) and
+            // inherits both halves of it — the review-gate reminder for a
+            // `review_gate: true` skill, and the #406 size warning. Calling
+            // either helper directly here would reintroduce the second call
+            // site that #406 exists to eliminate.
             Ok(ToolResult::success(format!(
                 "Skill '{}' ({}): {}",
-                skill.name, skill.description, skill.body
+                skill.name,
+                skill.description,
+                skill.prompt_body()
             )))
         } else {
             // List available commands for context
