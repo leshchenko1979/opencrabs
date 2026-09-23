@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{
-    ChatKind, FileId, InlineKeyboardMarkup, MessageId, ParseMode, ReplyParameters,
+    ChatKind, FileId, InlineKeyboardMarkup, MessageId, MessageKind, ParseMode, ReplyParameters,
 };
 
 use super::send::{best_effort_delete, message_in_thread};
@@ -115,6 +115,36 @@ pub(crate) fn mentions_other_bot(text: &str, our_username: Option<&str>) -> bool
         lname.len() >= 5 && lname.ends_with("bot") && ours.as_ref() != Some(&lname)
     })
 }
+
+/// True when `msg` replies to a message the bot sent AS AN INTERLOCUTOR.
+///
+/// A reply to the bot is one way of addressing it - but not every bot-authored
+/// message is the bot *speaking*. Telegram service notices
+/// (`ForumTopicCreated`, `ForumTopicEdited`, pinned-message notices, ...) are
+/// authored by the bot **by construction**: whoever creates a forum topic or
+/// pins a message is recorded as the sender. A bare sender-id comparison
+/// therefore counts a reply to the TOPIC ROOT as "replied to the bot" (#527),
+/// which makes `respond_to = mention` unenforceable in exactly the topics it is
+/// set for - any member replying to the topic root gets an answer they never
+/// asked for.
+///
+/// So the replied-to message must be a real (common) message. Testing the kind
+/// rather than enumerating service kinds is exhaustive by construction and
+/// cannot drift: anything Telegram adds later is simply not `Common`, so it
+/// never counts as the bot speaking.
+///
+/// Shared by all three gate paths (ACL reply, `respond_to = mention`,
+/// `respond_to = auto`) so they cannot drift apart again.
+pub(crate) fn replied_to_bot_as_interlocutor(msg: &Message, bot_uid: Option<i64>) -> bool {
+    msg.reply_to_message().is_some_and(|reply| {
+        let from_bot = reply
+            .from
+            .as_ref()
+            .is_some_and(|u| bot_uid.is_some_and(|bid| u.id.0 as i64 == bid));
+        from_bot && matches!(reply.kind, MessageKind::Common(_))
+    })
+}
+
 
 /// Whether a sender's display name or username collapses to the same normalized
 /// form as the owner's — i.e. the sender is mimicking the owner. Cross-checks
@@ -795,12 +825,7 @@ pub(crate) async fn handle_message(
             let mentioned = bot_username
                 .as_ref()
                 .is_some_and(|uname| text_content.contains(&format!("@{}", uname)));
-            let replied_to_bot = msg.reply_to_message().is_some_and(|reply| {
-                reply
-                    .from
-                    .as_ref()
-                    .is_some_and(|u| bot_uid.is_some_and(|bid| u.id.0 as i64 == bid))
-            });
+            let replied_to_bot = replied_to_bot_as_interlocutor(&msg, bot_uid);
             if !mentioned && !replied_to_bot {
                 tracing::info!(
                     "Telegram: silently ignoring non-allowed user {} ({}) in group",
@@ -1085,12 +1110,7 @@ pub(crate) async fn handle_message(
                     .as_ref()
                     .is_some_and(|uname| text_content.contains(&format!("@{}", uname)));
 
-                let replied_to_bot = msg.reply_to_message().is_some_and(|reply| {
-                    reply
-                        .from
-                        .as_ref()
-                        .is_some_and(|u| bot_uid.is_some_and(|bid| u.id.0 as i64 == bid))
-                });
+                let replied_to_bot = replied_to_bot_as_interlocutor(&msg, bot_uid);
 
                 // A reply to our message that explicitly tags a DIFFERENT bot is
                 // addressed to that bot — the tag redirects it, so we defer
@@ -1171,12 +1191,7 @@ pub(crate) async fn handle_message(
                         .as_ref()
                         .is_some_and(|uname| text_content.contains(&format!("@{}", uname)));
 
-                    let replied_to_bot = msg.reply_to_message().is_some_and(|reply| {
-                        reply
-                            .from
-                            .as_ref()
-                            .is_some_and(|u| bot_uid.is_some_and(|bid| u.id.0 as i64 == bid))
-                    });
+                    let replied_to_bot = replied_to_bot_as_interlocutor(&msg, bot_uid);
 
                     // Reply-to-us that tags a different bot is addressed to that
                     // bot, not us (#648).
