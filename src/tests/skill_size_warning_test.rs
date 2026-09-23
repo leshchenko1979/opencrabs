@@ -181,7 +181,16 @@ fn auxiliary_within_the_threshold_stays_silent() {
 /// warning present here is a warning present after compaction.
 #[test]
 fn warning_survives_the_compaction_manifest_injection_path() {
-    let skills = vec![skill_with_body("canarya", &body_of_lines(SKILL_LINE_WARN_THRESHOLD + 1))];
+    let mut skill = skill_with_body("canarya", &body_of_lines(SKILL_LINE_WARN_THRESHOLD + 1));
+    // The compaction path re-injects the aux files a skill CARRIES: the aux arm
+    // matches `seen_aux` against the skill's own `auxiliary_files`, so the
+    // fixture must attach the file it names. Naming it in `seen_aux` alone
+    // emits nothing — the assertion would then measure the fixture, not the code.
+    skill.auxiliary_files = vec![AuxiliaryFile {
+        name: "editor.md".to_string(),
+        body: body_of_lines(20),
+    }];
+    let skills = vec![skill];
     // What `parse_context_manifest` yields for a documented `- canarya` entry,
     // plus the aux list the compaction path hands over.
     let manifest_active: HashSet<String> = ["canarya".to_string()].into_iter().collect();
@@ -197,6 +206,10 @@ fn warning_survives_the_compaction_manifest_injection_path() {
     assert!(
         section.contains("--- Active Auxiliary: editor.md ---"),
         "the compaction path also carries aux files, got: {section:?}"
+    );
+    assert!(
+        section.contains("line 501"),
+        "the full oversized body must survive the compaction path, got: {section:?}"
     );
 }
 
