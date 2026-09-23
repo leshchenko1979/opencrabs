@@ -688,6 +688,34 @@ pub fn normalize_skill_slug(raw: &str) -> String {
     trimmed.strip_prefix('/').unwrap_or(trimmed).to_string()
 }
 
+/// #406: the line count above which a loaded skill body is called out in the
+/// injected prompt as degrading focus and compaction frequency.
+///
+/// A LINE count — never bytes or tokens. The unit is named in the constant so
+/// it cannot drift into a different unit later; the sibling trap is on record
+/// (a 32 000-**token** provider limit encoded as 32 000 **characters**).
+pub const SKILL_LINE_WARN_THRESHOLD: usize = 500;
+
+/// #406: the size warning for one injected section, or `None` when the body is
+/// within [`SKILL_LINE_WARN_THRESHOLD`].
+///
+/// Warn, never gate: an oversized skill still loads — the operator must be able
+/// to reach for a large skill deliberately. The warning is returned as text so
+/// the caller places it INSIDE the injected section, where it survives
+/// compaction and the model reads it, not merely a log the model never sees.
+fn skill_size_warning(label: &str, body: &str) -> Option<String> {
+    let threshold = SKILL_LINE_WARN_THRESHOLD;
+    let lines = body.lines().count();
+    if lines <= threshold {
+        return None;
+    }
+    Some(format!(
+        "⚠️ SKILL SIZE WARNING — {label} is {lines} lines (threshold {threshold}).\n\
+         Large skills hurt agent focus and make context compaction more frequent.\n\
+         Consider splitting this skill before loading it."
+    ))
+}
+
 /// Build the system-brain fragment that re-injects the bodies of a session's
 /// active skills, so a skill survives compaction (#219).
 ///
@@ -707,22 +735,41 @@ pub fn active_skill_bodies(
     let mut section = String::new();
     for skill in skills {
         if active_skills.contains(&skill.name) {
+            // #406: measured on the skill's OWN body, not on `prompt_body()` —
+            // the review-gate reminder is harness decoration, and the count the
+            // operator reads must match the file they would actually split.
+            let warning = skill_size_warning(&skill.slash_name, &skill.body);
             // `prompt_body()` carries the review-gate reminder for flagged
             // skills so the gate survives compaction too.
-            section.push_str(&format!(
-                "\n\n--- Active Skill: {} ---\n{}",
-                skill.slash_name,
-                skill.prompt_body()
-            ));
+            let body = skill.prompt_body();
+            // The warning goes AFTER the body, never in front of it: the
+            // review-gate reminder is a hard behavioural brake and the first
+            // line of the injected section is where it belongs.
+            section.push_str(&format!("\n\n--- Active Skill: {} ---\n{}", skill.slash_name, body));
+            if let Some(warning) = warning {
+                section.push_str("\n\n");
+                section.push_str(&warning);
+            }
 
             // Reinject consumed auxiliary files (issue #216).
             if let Some(files) = seen_aux.get(&skill.name) {
                 for file_name in files {
                     if let Some(aux) = skill.auxiliary_files.iter().find(|a| &a.name == file_name) {
+                        // #406: auxiliary documents carry the same signal as
+                        // main bodies — the opencrabs-dev aux pair is 533 and
+                        // 657 lines, so an aux-only breach is the common case.
+                        // (`CHANGELOG.md` is never injected: `discover_aux_files`
+                        // excludes it by exact name, so it needs no special case
+                        // here.)
+                        let warning = skill_size_warning(&aux.name, &aux.body);
                         section.push_str(&format!(
                             "\n\n--- Active Auxiliary: {} ---\n{}",
                             aux.name, aux.body
                         ));
+                        if let Some(warning) = warning {
+                            section.push_str("\n\n");
+                            section.push_str(&warning);
+                        }
                     }
                 }
             }

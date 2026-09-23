@@ -940,6 +940,7 @@ pub mod restart_replay_context_test;
 pub mod review_instructions_test;
 pub mod shell_scan_test;
 pub mod skill_gate_test;
+pub mod skill_size_warning_test;
 pub mod slack_handler_test;
 pub mod slack_history_dedup_test;
 pub mod slack_thread_persistence_test;
