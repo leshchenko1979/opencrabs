@@ -7,9 +7,11 @@
 //! `CODE.md` file limits); what was missing was a RUNTIME warning.
 //!
 //! **The contract these tests pin.** One check at the single choke point every
-//! load path converges on — [`active_skill_bodies`], called by the slash /
-//! user-told path, the turn-start path, and the post-compaction manifest path
-//! (`compaction.rs` and `tool_loop.rs` both go through it). The warning lives
+//! load path converges on — `Skill::prompt_body()`, the method the manifest
+//! ([`active_skill_bodies`]), the glob gate, both `load_brain_file` branches,
+//! the `/`-skill channel path and the TUI paths all consume. #406 put the check
+//! inside [`active_skill_bodies`], which reaches one of those paths; #520 moved
+//! it down to the shared method so the rest inherit it. The warning lives
 //! INSIDE the injected section, so it survives compaction the way the
 //! review-gate reminder does.
 //!
@@ -240,5 +242,74 @@ fn review_gate_reminder_keeps_the_first_line() {
         reminder_at,
         section.find(header).expect("header must be present") + header.len(),
         "the reminder must still be the first thing after the header"
+    );
+}
+
+// --------------------------------------------------------- the shared caller
+
+/// The #520 contract: the warning lives on `prompt_body()`, the single method
+/// every skill-body injection path already calls — the glob gate's block body,
+/// both resolution branches of `load_brain_file`, the `/`-skill channel path,
+/// the TUI paths, and this module's own `active_skill_bodies`. A test that only
+/// drove `active_skill_bodies` would keep passing if the warning were wired into
+/// that one caller and nowhere else, which is exactly the defect #520 reports;
+/// this test fails the moment the warning leaves the shared method.
+///
+/// The four non-manifest consumers need live sessions/dbs to drive directly, so
+/// they are pinned structurally here: they call `prompt_body()` and nothing
+/// else, so what this asserts about the method they inherit.
+#[test]
+fn the_warning_lives_on_the_shared_prompt_body_method() {
+    let oversized = skill_with_body("canarya", &body_of_lines(SKILL_LINE_WARN_THRESHOLD + 1));
+    let within = skill_with_body("canarya", &body_of_lines(SKILL_LINE_WARN_THRESHOLD));
+
+    assert!(
+        oversized.prompt_body().contains("SKILL SIZE WARNING"),
+        "every injection path consumes prompt_body(), so the warning must be \
+         emitted there, got: {:?}",
+        oversized.prompt_body()
+    );
+    assert!(
+        within.prompt_body().contains("line 500"),
+        "the body must still be returned in full — warn, never gate"
+    );
+    assert!(
+        !within.prompt_body().contains("SKILL SIZE WARNING"),
+        "a within-budget skill must not warn on the shared path"
+    );
+}
+
+/// The manifest path composes its section by hand as well as calling
+/// `prompt_body()`, so a caller that kept its own copy of the warning would
+/// emit TWO here. Exactly one is the contract.
+#[test]
+fn the_manifest_path_emits_the_warning_once() {
+    let skills = vec![skill_with_body("canarya", &body_of_lines(SKILL_LINE_WARN_THRESHOLD + 1))];
+
+    let section = inject(&skills, &HashMap::new());
+
+    assert_eq!(
+        section.matches("SKILL SIZE WARNING").count(),
+        1,
+        "the warning must appear exactly once on the manifest path, got: {section:?}"
+    );
+}
+
+/// The warning names the skill by its CANONICAL slug (`Skill::name`) — the same
+/// identity field the gate, the registry and the manifest key on — so an
+/// operator maps a warning straight to the file to split.
+#[test]
+fn the_warning_names_the_skill_by_its_canonical_slug() {
+    let skill = skill_with_body("canarya", &body_of_lines(SKILL_LINE_WARN_THRESHOLD + 1));
+
+    let body = skill.prompt_body();
+
+    assert!(
+        body.contains("canarya is 501 lines"),
+        "the warning must name the skill and its true size, got: {body:?}"
+    );
+    assert!(
+        !body.contains("/canarya is"),
+        "the canonical slug, not the slash form, is the identity in the warning"
     );
 }
