@@ -1258,7 +1258,7 @@ pub(crate) fn markdown_failure_block(err: &str, source: &str) -> String {
     )
 }
 
-/// #189: the markdown failure block plus a `[svg]` escape hatch, for a
+/// #189: the markdown failure block plus the shared svg escape hatch, for a
 /// TRANSIENT failure ([`MermaidResult::Failed`]) only. In that case the
 /// response had already passed the `2xx + image/*` check before the body was
 /// lost, so the render very likely exists server-side and the link is worth
@@ -1272,9 +1272,9 @@ pub(crate) fn markdown_failure_block_with_link(
     style: &MermaidStyle,
 ) -> String {
     format!(
-        "{}\n\n[svg]({})",
+        "{}{}",
         markdown_failure_block(err, source),
-        ink_url_svg(style, source)
+        svg_link_md(style, source)
     )
 }
 
@@ -1296,21 +1296,33 @@ pub(crate) fn rendered_image_note(message: &str, source: &str) -> String {
     )
 }
 
+/// The ONE label every SVG escape hatch wears (#515).
+///
+/// Before this, the same `ink_url_svg` link shipped under two names — a short
+/// `svg` label on the failure block, a longer "Open SVG vector" on the
+/// capped-image path — so a reader could not tell two identical links apart.
+/// #220 already mandated a single DRY builder emitting the long form; the
+/// failure block inlined its own competing label instead of calling it.
+pub(crate) const SVG_HATCH_LABEL: &str = "Open SVG vector";
+
 /// #134 / #220 / #239: generic svg escape-hatch link fragment for markdown contexts —
 /// a small `[Open SVG vector]` link to the full-size vector render when the diagram
 /// is capped or scaled down. Always padded with trailing newline so subsequent markdown
 /// blocks (e.g. tables, headers) start on a fresh line and retain proper block spacing.
 pub(crate) fn svg_link_md(style: &MermaidStyle, source: &str) -> String {
-    format!("\n[Open SVG vector]({})\n", ink_url_svg(style, source))
+    format!("\n[{SVG_HATCH_LABEL}]({})\n", ink_url_svg(style, source))
 }
 
 /// #134: generic svg escape-hatch link fragment for HTML-fallback
-/// contexts — a small `[svg]` anchor to the vector render (generic
+/// contexts — a small hatch anchor to the vector render (generic
 /// hatch; the caller owns the trigger copy, ruling (a) 2026-09-10:
 /// ONE semantic — generic hatch here, caller-side trigger).
+///
+/// #515: the anchor text is [`SVG_HATCH_LABEL`], the same label the
+/// markdown builder emits, so both render paths read as one thing.
 pub(crate) fn svg_link_html(style: &MermaidStyle, source: &str) -> String {
     format!(
-        "\n<a href=\"{}\">[svg]</a>",
+        "\n<a href=\"{}\">[{SVG_HATCH_LABEL}]</a>",
         escape_html(&ink_url_svg(style, source))
     )
 }

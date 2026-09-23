@@ -85,7 +85,7 @@ fn render_block(block: &Block, wrap_p: bool, style: &mermaid::MermaidStyle) -> S
             // rejects it). This arm is a defensive fallback — but a
             // SUCCESSFUL render is never discarded as a failure (owner
             // directive 2026-09-10 03:56Z): degrade to the clamped-image
-            // note plus a small [svg] link the reader can open in a
+            // note plus a small hatch link the reader can open in a
             // browser. Broken fences keep the legible failure block.
             MermaidResult::ImageBytes(_) => {
                 super::mermaid::rendered_image_note(
@@ -504,7 +504,7 @@ mod tests {
 
     // #134 family, owner directive 03:56Z: the whole-message HTML fallback
     // stops discarding a successful render — ImageBytes yields the
-    // rendered-image note + [svg] link. Broken fences keep the failure
+    // rendered-image note + the shared svg hatch link. Broken fences keep the failure
     // block. Direct render_html() (module-internal), no resolver involved.
 
     #[test]
@@ -540,7 +540,7 @@ mod tests {
             "broken fences keep the legible failure block. Got:\n{html}"
         );
         assert!(
-            !html.contains("[svg]"),
+            !html.contains("mermaid.ink/svg/"),
             "no svg link for a render that never happened. Got:\n{html}"
         );
     }

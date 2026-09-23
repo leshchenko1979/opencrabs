@@ -468,7 +468,7 @@ fn markdown_failure_block_contains_warning_error_and_source() {
     assert!(md.contains("graph TD; A-->B"));
     assert!(md.contains("Source:"));
     assert!(
-        !md.contains("[svg]"),
+        !md.contains("mermaid.ink/svg/"),
         "the plain block carries no escape hatch. Got:\n{md}"
     );
 }
@@ -487,8 +487,9 @@ fn markdown_failure_block_with_link_appends_a_tappable_svg_hatch() {
     assert!(md.contains("diagram renderer dropped the image"));
     assert!(md.contains("flowchart TD"));
     assert!(
-        md.contains("[svg](https://mermaid.ink/svg/"),
-        "the hatch must be a markdown link to the vector endpoint. Got:\n{md}"
+        md.contains("[Open SVG vector](https://mermaid.ink/svg/"),
+        "the hatch must be a markdown link to the vector endpoint, and it must \\
+         wear the same label as the capped-image hatch. Got:\n{md}"
     );
 }
 
@@ -505,7 +506,7 @@ fn replacement_for_failed_offers_the_hatch_but_parse_error_does_not() {
         &style(),
     );
     assert!(
-        failed_md.contains("[svg](https://mermaid.ink/svg/"),
+        failed_md.contains("[Open SVG vector](https://mermaid.ink/svg/"),
         "a transient failure must carry the hatch. Got:\n{failed_md}"
     );
 
@@ -516,7 +517,7 @@ fn replacement_for_failed_offers_the_hatch_but_parse_error_does_not() {
         &style(),
     );
     assert!(
-        !parse_md.contains("[svg]"),
+        !parse_md.contains("mermaid.ink/svg/"),
         "a parse rejection must NOT carry the hatch. Got:\n{parse_md}"
     );
 }
