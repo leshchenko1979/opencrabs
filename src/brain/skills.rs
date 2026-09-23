@@ -356,12 +356,33 @@ impl Skill {
 
     /// The prompt dispatched on slash invocation: the skill body with
     /// [`REVIEW_GATE_REMINDER`] prepended when the skill declares
-    /// `review_gate: true`. Unflagged skills return the body unchanged.
+    /// `review_gate: true`, and with the #406 size warning appended when the
+    /// body exceeds [`SKILL_LINE_WARN_THRESHOLD`]. Unflagged, within-budget
+    /// skills return the body unchanged.
+    ///
+    /// #406/#520: the warning hangs off THIS method rather than off any single
+    /// caller, because every skill-body injection path already converges here —
+    /// the turn-start and post-compaction manifest ([`active_skill_bodies`]),
+    /// the glob gate's block body (`tools/skill_gate.rs`), both resolution
+    /// branches of `tools/load_brain_file.rs`, the `/`-skill channel path
+    /// (`channels/commands.rs`), and the TUI paths. Wiring the sites one by one
+    /// means a new caller silently ships unwarned; wired here it cannot.
+    ///
+    /// Measured on the skill's OWN body, so the count matches the file an
+    /// operator would actually split (`wc -l`): the review-gate reminder is
+    /// harness decoration and is never part of the skill's size. The warning is
+    /// APPENDED, so the reminder keeps the first line of the injected text.
+    ///
+    /// Warn, never gate — an oversized body is still returned in full.
     pub fn prompt_body(&self) -> String {
-        if self.review_gate {
+        let base = if self.review_gate {
             format!("{REVIEW_GATE_REMINDER}\n\n---\n\n{}", self.body)
         } else {
             self.body.clone()
+        };
+        match skill_size_warning(&self.name, &self.body) {
+            Some(warning) => format!("{base}\n\n{warning}"),
+            None => base,
         }
     }
 }
@@ -735,21 +756,12 @@ pub fn active_skill_bodies(
     let mut section = String::new();
     for skill in skills {
         if active_skills.contains(&skill.name) {
-            // #406: measured on the skill's OWN body, not on `prompt_body()` —
-            // the review-gate reminder is harness decoration, and the count the
-            // operator reads must match the file they would actually split.
-            let warning = skill_size_warning(&skill.slash_name, &skill.body);
-            // `prompt_body()` carries the review-gate reminder for flagged
-            // skills so the gate survives compaction too.
+            // `prompt_body()` now carries BOTH the review-gate reminder for
+            // flagged skills AND the #406 size warning: #520 moved the warning
+            // onto the method so every injection path inherits it. Emitting it
+            // again here would double it on this path.
             let body = skill.prompt_body();
-            // The warning goes AFTER the body, never in front of it: the
-            // review-gate reminder is a hard behavioural brake and the first
-            // line of the injected section is where it belongs.
             section.push_str(&format!("\n\n--- Active Skill: {} ---\n{}", skill.slash_name, body));
-            if let Some(warning) = warning {
-                section.push_str("\n\n");
-                section.push_str(&warning);
-            }
 
             // Reinject consumed auxiliary files (issue #216).
             if let Some(files) = seen_aux.get(&skill.name) {
