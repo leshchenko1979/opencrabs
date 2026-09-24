@@ -11,7 +11,9 @@ use crate::channels::telegram::flow::{
     compacting_flow_line, flow_header_text, render_flow_html_chrome_pref, render_flow_rich,
     starts_with_icon,
 };
-use crate::channels::telegram::flow_chrome::{FlowSections, FooterParts, merged_footer};
+use crate::channels::telegram::flow_chrome::{
+    FlowSections, FooterParts, TelemetryMetrics, merged_footer, standalone_telemetry_line,
+};
 
 #[test]
 fn compacting_line_without_prediction() {
@@ -220,6 +222,7 @@ fn live_footer_drops_gear_before_icon_activity() {
     let tool_done = merged_footer(
         &FooterParts {
             outcome: None,
+            compacting: false,
             plan_state: None,
             working_on: None,
             thought: None,
@@ -237,6 +240,7 @@ fn live_footer_drops_gear_before_icon_activity() {
     let icon = merged_footer(
         &FooterParts {
             outcome: None,
+            compacting: false,
             plan_state: None,
             working_on: None,
             thought: None,
@@ -254,6 +258,7 @@ fn live_footer_drops_gear_before_icon_activity() {
     let plain = merged_footer(
         &FooterParts {
             outcome: None,
+            compacting: false,
             plan_state: None,
             working_on: None,
             thought: None,
@@ -271,6 +276,7 @@ fn live_footer_drops_gear_before_icon_activity() {
     let plan_edit = merged_footer(
         &FooterParts {
             outcome: None,
+            compacting: false,
             plan_state: Some("✍️ Editing session plan"),
             working_on: None,
             thought: None,
@@ -288,6 +294,7 @@ fn live_footer_drops_gear_before_icon_activity() {
     let finished = merged_footer(
         &FooterParts {
             outcome: Some(("✅", "Finished")),
+            compacting: false,
             plan_state: None,
             working_on: None,
             thought: None,
@@ -307,10 +314,14 @@ fn live_footer_drops_gear_before_icon_activity() {
 #[test]
 fn icon_led_segment_retires_the_bare_cog_fallback() {
     // With an icon-led pin as the only narration (activity suppressed by the
-    // compaction dedupe, zero tool calls), state icon + clock leads followed by the icon.
+    // compaction dedupe, zero tool calls), state icon + clock leads followed by
+    // the icon. #398: the pin and the flag travel together — `compacting: true`
+    // is what puts ⏳ in segment 1, so it agrees with the header instead of
+    // falling through to the generic ⚙️.
     let out = merged_footer(
         &FooterParts {
             outcome: None,
+            compacting: true,
             plan_state: None,
             working_on: Some(COMPACTING_HEADER_TEXT),
             thought: None,
@@ -321,6 +332,81 @@ fn icon_led_segment_retires_the_bare_cog_fallback() {
             elapsed_secs: 65,
             bg: None,
             has_goal: false,
+        },
+        HeaderMarkup::Markdown,
+    );
+    assert_eq!(out, "⏳ • 1:05 ⏱️");
+}
+
+/// #398: while compacting, the live burst outranks a standing plan stage — the
+/// card must not say `✍️ Editing` under an `⏳ Compacting context…` header.
+/// Fails on the pre-fix tree: there the plan-state sniff alone drives segment 1.
+#[test]
+fn compacting_icon_beats_the_editing_pen() {
+    let parts = FooterParts {
+        outcome: None,
+        compacting: true,
+        plan_state: Some("✍️ Editing session plan"),
+        elapsed_secs: 30,
+        ..Default::default()
+    };
+    let telem = TelemetryMetrics {
+        tool_count: 0,
+        elapsed_secs: 30,
+        detached_tasks: 0,
+        subagents: 0,
+        queued_messages: 0,
+    };
+    let line = standalone_telemetry_line(&parts, Some(&telem), HeaderMarkup::Markdown);
+    assert_eq!(line, "⏳ • 0:30 ⏱️");
+    assert!(!line.contains("✍️"), "editing pen must not win while compacting");
+}
+
+/// #398: a settled card is terminal text, so the outcome icon outranks a
+/// still-set `compacting` flag (the settle path clears it anyway — ordering
+/// outcome first makes the ladder safe under both readings).
+#[test]
+fn settled_icon_outranks_a_stale_compacting_flag() {
+    let out = merged_footer(
+        &FooterParts {
+            outcome: Some(("✅", "Done")),
+            compacting: true,
+            elapsed_secs: 0,
+            ..Default::default()
+        },
+        HeaderMarkup::Markdown,
+    );
+    assert_eq!(out, "✅ • 0:00 ⏱️");
+}
+
+/// #398: the no-metrics path (`merged_footer`, `telemetry = None`) carries the
+/// same compacting icon — the fix must not live only on the telemetry branch.
+#[test]
+fn fallback_path_carries_the_compacting_icon() {
+    let out = merged_footer(
+        &FooterParts {
+            outcome: None,
+            compacting: true,
+            elapsed_secs: 0,
+            ..Default::default()
+        },
+        HeaderMarkup::Markdown,
+    );
+    assert_eq!(out, "⏳ • 0:00 ⏱️");
+}
+
+/// #398 regression fence: the compacting TEXT is not the signal — the FLAG is.
+/// Same narration as the fence test above, flag false, so the gear must stay.
+/// Fails if anyone re-implements the fix by sniffing the display string.
+#[test]
+fn stale_compacting_text_without_the_flag_still_shows_the_gear() {
+    let out = merged_footer(
+        &FooterParts {
+            outcome: None,
+            compacting: false,
+            working_on: Some(COMPACTING_HEADER_TEXT),
+            elapsed_secs: 65,
+            ..Default::default()
         },
         HeaderMarkup::Markdown,
     );

@@ -591,6 +591,7 @@ fn footer_parts<'a>(
     header: &'a FlowHeader,
     fallback_status: Option<&'a str>,
     sections: &'a super::flow_chrome::FlowSections,
+    compacting: bool,
     thought: Option<&'a str>,
     activity: Option<&'a str>,
     tool_count: usize,
@@ -605,6 +606,7 @@ fn footer_parts<'a>(
     let has_goal = sections.goal.is_some();
     super::flow_chrome::FooterParts {
         outcome,
+        compacting,
         plan_state: sections.plan_state.as_deref(),
         working_on: fallback_status,
         thought,
@@ -743,6 +745,7 @@ pub(crate) fn render_flow_html_chrome_pref(
         header,
         fallback_status,
         sections,
+        compacting,
         thought.as_deref(),
         activity.as_deref(),
         tool_count,
@@ -867,6 +870,7 @@ pub(crate) fn render_flow_details_chrome_pref(
         header,
         fallback_status,
         sections,
+        compacting,
         thought.as_deref(),
         activity.as_deref(),
         tool_count,

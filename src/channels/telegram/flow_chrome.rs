@@ -422,6 +422,11 @@ pub(crate) struct FooterParts<'a> {
     /// Settled outcome `(icon, verb)` (e.g. `("✅", "Finished")`) once the turn
     /// ends; `None` while live. Drives segment 1 and drops the in-flight cog.
     pub(crate) outcome: Option<(&'a str, &'a str)>,
+    /// Header-agreement flag (#398): `true` exactly while this turn is
+    /// compacting its context, i.e. while the header is pinned to
+    /// `COMPACTING_HEADER_TEXT` (`"⏳ Compacting context…"`). Segment 1 must
+    /// agree with that pin rather than fall through to the generic `⚙️`.
+    pub(crate) compacting: bool,
     /// Plan-mode status line (Decision 7) when in Plan mode; second segment on
     /// a live turn (after the activity, #1052).
     pub(crate) plan_state: Option<&'a str>,
@@ -518,8 +523,14 @@ pub(crate) fn standalone_telemetry_line(
         HeaderMarkup::Html => escape_html(s),
         HeaderMarkup::Markdown => s.to_string(),
     };
+    // #398: the compaction burst is a LIVE ACTION while a plan stage is a
+    // STANDING CONDITION, so the live signal wins — segment 1 must never
+    // contradict the `⏳ Compacting context…` header pin. Below `outcome` (a
+    // settled card is terminal), above the plan-stage rungs.
     let state_icon = if let Some((icon, _)) = parts.outcome {
         icon
+    } else if parts.compacting {
+        "⏳"
     } else if parts.plan_state.is_some_and(|ps| {
         ps.contains("Editing")
             || ps.contains("✍️")
