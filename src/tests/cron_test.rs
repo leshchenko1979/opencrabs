@@ -1484,6 +1484,7 @@ mod config_defaults {
         let config = CronConfig {
             default_provider: Some("minimax".to_string()),
             default_model: Some("MiniMax-M2.7".to_string()),
+            max_concurrent_turns: 2,
         };
         // Job has explicit provider — config default ignored
         assert_eq!(
@@ -1497,6 +1498,7 @@ mod config_defaults {
         let config = CronConfig {
             default_provider: Some("minimax".to_string()),
             default_model: Some("MiniMax-M2.7".to_string()),
+            max_concurrent_turns: 2,
         };
         // Job has no provider — falls back to config default
         assert_eq!(resolve_provider(None, &config), Some("minimax".to_string()));
@@ -1519,6 +1521,7 @@ mod config_defaults {
         let config = CronConfig {
             default_provider: Some("minimax".to_string()),
             default_model: Some("MiniMax-M2.7".to_string()),
+            max_concurrent_turns: 2,
         };
         assert_eq!(
             resolve_model(Some("MiniMax-M2.5"), &config),
@@ -1527,10 +1530,15 @@ mod config_defaults {
     }
 
     #[test]
-    fn test_cron_config_default_is_empty() {
+    fn test_cron_config_default_includes_admission_cap() {
         let config = CronConfig::default();
-        assert!(config.default_provider.is_none());
-        assert!(config.default_model.is_none());
+        assert_eq!(config.max_concurrent_turns, 2);
+    }
+
+    #[test]
+    fn test_cron_config_parses_admission_cap() {
+        let config: CronConfig = toml::from_str("max_concurrent_turns = 7").unwrap();
+        assert_eq!(config.max_concurrent_turns, 7);
     }
 }
 

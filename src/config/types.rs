@@ -1835,8 +1835,9 @@ impl Default for AgentConfig {
 /// [cron]
 /// default_provider = "minimax"
 /// default_model = "MiniMax-M2.7"
+/// max_concurrent_turns = 2
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronConfig {
     /// Default provider for cron jobs without an explicit provider
     #[serde(default)]
@@ -1845,6 +1846,24 @@ pub struct CronConfig {
     /// Default model for cron jobs without an explicit model
     #[serde(default)]
     pub default_model: Option<String>,
+
+    /// Maximum number of cron turns admitted concurrently.
+    #[serde(default = "default_cron_max_concurrent_turns")]
+    pub max_concurrent_turns: u32,
+}
+
+const fn default_cron_max_concurrent_turns() -> u32 {
+    2
+}
+
+impl Default for CronConfig {
+    fn default() -> Self {
+        Self {
+            default_provider: None,
+            default_model: None,
+            max_concurrent_turns: default_cron_max_concurrent_turns(),
+        }
+    }
 }
 
 /// OpenAI-compatible embedding provider configuration.
