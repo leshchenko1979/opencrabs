@@ -14,6 +14,7 @@ use crate::channels::telegram::flow::{
 use crate::channels::telegram::flow_chrome::{
     FlowSections, FooterParts, TelemetryMetrics, merged_footer, standalone_telemetry_line,
 };
+use crate::utils::plan_files::PlanModeState;
 
 #[test]
 fn compacting_line_without_prediction() {
@@ -223,7 +224,7 @@ fn live_footer_drops_gear_before_icon_activity() {
         &FooterParts {
             outcome: None,
             compacting: false,
-            plan_state: None,
+            plan_mode: None,
             working_on: None,
             thought: None,
             activity: Some("✅ bash git status"),
@@ -241,7 +242,7 @@ fn live_footer_drops_gear_before_icon_activity() {
         &FooterParts {
             outcome: None,
             compacting: false,
-            plan_state: None,
+            plan_mode: None,
             working_on: None,
             thought: None,
             activity: Some("⏳ Compacting context…"),
@@ -259,7 +260,7 @@ fn live_footer_drops_gear_before_icon_activity() {
         &FooterParts {
             outcome: None,
             compacting: false,
-            plan_state: None,
+            plan_mode: None,
             working_on: None,
             thought: None,
             activity: Some("Reading the handler."),
@@ -277,7 +278,7 @@ fn live_footer_drops_gear_before_icon_activity() {
         &FooterParts {
             outcome: None,
             compacting: false,
-            plan_state: Some("✍️ Editing session plan"),
+            plan_mode: Some(PlanModeState::PostInitEditing),
             working_on: None,
             thought: None,
             activity: None,
@@ -295,7 +296,7 @@ fn live_footer_drops_gear_before_icon_activity() {
         &FooterParts {
             outcome: Some(("✅", "Finished")),
             compacting: false,
-            plan_state: None,
+            plan_mode: None,
             working_on: None,
             thought: None,
             activity: None,
@@ -322,7 +323,7 @@ fn icon_led_segment_retires_the_bare_cog_fallback() {
         &FooterParts {
             outcome: None,
             compacting: true,
-            plan_state: None,
+            plan_mode: None,
             working_on: Some(COMPACTING_HEADER_TEXT),
             thought: None,
             activity: None,
@@ -346,7 +347,7 @@ fn compacting_icon_beats_the_editing_pen() {
     let parts = FooterParts {
         outcome: None,
         compacting: true,
-        plan_state: Some("✍️ Editing session plan"),
+        plan_mode: Some(PlanModeState::PostInitEditing),
         elapsed_secs: 30,
         ..Default::default()
     };

@@ -607,7 +607,7 @@ fn footer_parts<'a>(
     super::flow_chrome::FooterParts {
         outcome,
         compacting,
-        plan_state: sections.plan_state.as_deref(),
+        plan_mode: sections.plan_mode,
         working_on: fallback_status,
         thought,
         activity,

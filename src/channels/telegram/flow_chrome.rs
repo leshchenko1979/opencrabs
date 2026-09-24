@@ -16,6 +16,7 @@ use super::flow::{
 use super::handler::escape_html;
 use crate::brain::agent::AgentService;
 use crate::brain::goal::GoalManager;
+use crate::utils::plan_files::PlanModeState;
 
 use std::sync::Arc;
 use teloxide::prelude::*;
@@ -204,7 +205,12 @@ impl GoalSection {
 pub(crate) struct FlowSections {
     /// Plan-mode state line: Editing prose summary, Building checklist…,
     /// or seed-error chrome. Leads the chrome line when present.
-    pub(crate) plan_state: Option<String>,
+    ///
+    /// #399: the engine's own enum, never rendered display text. `None`
+    /// means the session has no plan; otherwise the live stage, carried
+    /// by identity so the ladder reads provenance instead of sniffing a
+    /// label for the word Editing.
+    pub(crate) plan_mode: Option<PlanModeState>,
     /// Plan keyboard the flow message should carry (attached on every
     /// open/edit; Telegram clears reply_markup on edits that omit it).
     pub(crate) plan_kb: PlanKb,
@@ -240,7 +246,7 @@ impl FlowSections {
     /// blank disclosure (Decision 12). A one-paragraph goal stays plain; a
     /// multi-paragraph goal collapses with the first paragraph as its inline
     /// summary. `settled` drives the Decision 10 goal icon. Empty when no
-    /// plan sections are present; `plan_state` and `ctx` live in the merged
+    /// plan sections are present; `plan_mode` and `ctx` live in the merged
     /// footer.
     pub(crate) fn chrome_rich(&self, settled: bool) -> String {
         let mut out = String::new();
@@ -427,9 +433,9 @@ pub(crate) struct FooterParts<'a> {
     /// `COMPACTING_HEADER_TEXT` (`"⏳ Compacting context…"`). Segment 1 must
     /// agree with that pin rather than fall through to the generic `⚙️`.
     pub(crate) compacting: bool,
-    /// Plan-mode status line (Decision 7) when in Plan mode; second segment on
-    /// a live turn (after the activity, #1052).
-    pub(crate) plan_state: Option<&'a str>,
+    /// Typed plan-mode state (#399), copied straight off `FlowSections`.
+    /// `Copy`, so no lifetime is carried and the borrow shape is unchanged.
+    pub(crate) plan_mode: Option<PlanModeState>,
     /// Non-plan "Working on …" / thinking preview; live-turn fallback for the
     /// reasoning segment (#1052: after the activity, not before it).
     pub(crate) working_on: Option<&'a str>,
@@ -531,12 +537,7 @@ pub(crate) fn standalone_telemetry_line(
         icon
     } else if parts.compacting {
         "⏳"
-    } else if parts.plan_state.is_some_and(|ps| {
-        ps.contains("Editing")
-            || ps.contains("✍️")
-            || ps.contains("Discussing")
-            || ps.contains("📝")
-    }) {
+    } else if parts.plan_mode.is_some_and(|m| m.is_editing()) {
         "✍️"
     } else {
         "⚙️"
@@ -818,6 +819,23 @@ pub(crate) fn plan_state_chrome(
     }
 }
 
+/// #399: the typed plan mode carried to the renderer, derived from the
+/// engine's own [`PlanModeState`]. `None` means the session has no plan at
+/// all; every live stage is carried through — including `Active` outside the
+/// seed window, which [`plan_state_chrome`] reports as `None` because it has
+/// no label to show. That gap is the #399 defect: the label is absent, so the
+/// ladder had nothing to read and fell to the generic cog.
+///
+/// Its own function rather than an inline `match` so the mapping is testable
+/// without an `AgentService`: `refresh_sections` is async and reads live plan
+/// files, this is pure.
+pub(crate) fn plan_mode_for_chrome(mode: PlanModeState) -> Option<PlanModeState> {
+    match mode {
+        PlanModeState::NoPlan => None,
+        m => Some(m),
+    }
+}
+
 pub(crate) async fn load_plan_state_section(
     session_id: Uuid,
     turn_active: bool,
@@ -871,7 +889,9 @@ pub(crate) async fn refresh_sections(
         let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
         s.flow_outcome.is_none()
     };
-    let (plan_state, plan_kb) = load_plan_state_section(session_id, turn_active).await;
+    // #399: only the keyboard is still taken from the chrome helper; the
+    // label string is no longer carried, so it is dropped at the binding.
+    let (_, plan_kb) = load_plan_state_section(session_id, turn_active).await;
     let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
     let goal = match live_goal {
         Some(g) if !g.completed => {
@@ -902,7 +922,8 @@ pub(crate) async fn refresh_sections(
         _ => None,
     };
     let next = FlowSections {
-        plan_state,
+        // #399: the enum by identity, not the label by resemblance.
+        plan_mode: plan_mode_for_chrome(mode),
         // plan_kb is still tracked here so the plan card can read it, but the
         // keyboard is attached to the CARD, not the flow block (#580).
         plan_kb,

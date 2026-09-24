@@ -9,12 +9,14 @@ use crate::channels::telegram::flow::{
     settled_icon_verb, subagent_waiting_phrase,
 };
 use crate::channels::telegram::flow_chrome::{
-    FlowSections, GoalSection, ProseSection, TelemetryMetrics, clock_glyph, split_plan_prose,
+    FlowSections, GoalSection, ProseSection, TelemetryMetrics, clock_glyph,
+    plan_mode_for_chrome, plan_state_chrome, split_plan_prose,
 };
+use crate::utils::plan_files::PlanModeState;
 
 fn sections(title: Option<&str>, checklist: Option<Vec<&str>>, goal: Option<&str>) -> FlowSections {
     FlowSections {
-        plan_state: None,
+        plan_mode: None,
         plan_kb: Default::default(),
         plan_title: title.map(str::to_string),
         prose: None,
@@ -89,7 +91,7 @@ async fn test_goal_turn_budget_formatting() {
 
     // Multi-paragraph goal rich chrome
     let multi_para = FlowSections {
-        plan_state: None,
+        plan_mode: None,
         plan_kb: Default::default(),
         plan_title: None,
         prose: None,
@@ -122,8 +124,10 @@ fn clock_glyph_formats_minutes_and_hours() {
 }
 
 // ── chrome assembly: title / prose / checklist / goal (Decision 3 / 12 / 13) ──
-// plan_state and ctx moved to the merged footer (Decision 7 / Decision 12), so
-// they must NOT appear in the chrome.
+// ctx moved to the merged footer (Decision 12), so it must NOT appear in the
+// chrome. (#399 retired the companion plan_state assertion: the stage is the
+// engine's PlanModeState now, not a string, so it CANNOT render here — the
+// property became unrepresentable rather than merely untested.)
 
 #[test]
 fn chrome_classic_order_title_checklist_rows_goal_and_omit_state_and_ctx() {
@@ -132,7 +136,6 @@ fn chrome_classic_order_title_checklist_rows_goal_and_omit_state_and_ctx() {
         Some(vec!["☑ scope it", "☐ build it"]),
         Some("close B"),
     );
-    s.plan_state = Some("✍️ Editing plan".to_string());
     s.ctx = Some("ctx 12.3k/200k".to_string());
     let out = s.chrome_classic(false);
     // Blank line between checklist and goal (the classic stand-in for the
@@ -143,18 +146,13 @@ fn chrome_classic_order_title_checklist_rows_goal_and_omit_state_and_ctx() {
         "📋 <b>Ship plan mode</b>\n☑ scope it\n☐ build it\n\n\
          <blockquote expandable><b>🎯</b> close B (0/20 turns)</blockquote>"
     );
-    assert!(
-        !out.contains("Editing plan"),
-        "plan_state stays in the footer"
-    );
     assert!(!out.contains("ctx"), "ctx stays in the footer");
 }
 
 #[test]
 fn chrome_empty_when_all_plan_sections_empty() {
     let mut s = sections(None, None, None);
-    // plan_state / ctx set but no title/prose/checklist/goal → no chrome.
-    s.plan_state = Some("✍️ Editing plan".to_string());
+    // ctx set but no title/prose/checklist/goal → no chrome.
     s.ctx = Some("ctx 1k/200k".to_string());
     assert!(s.chrome_classic(false).is_empty());
     assert!(s.chrome_rich(false).is_empty());
@@ -360,6 +358,39 @@ fn active_goal_never_shows_check_even_at_settle() {
         s.chrome_rich(true),
         "<p><b>🎯</b> still going (0/20 turns)</p>"
     );
+}
+
+// ── #399: the plan stage reaches the renderer as the engine's own enum ──
+
+#[test]
+fn active_plan_outside_the_seed_window_is_carried_as_some_active() {
+    // The negative control first: outside the seed window the label helper
+    // reports NO label. That absence is the #399 defect — the ladder had
+    // nothing to read, so an Active plan rendered the bare cog.
+    assert_eq!(
+        plan_state_chrome(PlanModeState::Active, false, false).0,
+        None,
+        "the label is absent outside the seed window — the state #399 reports"
+    );
+    // ...and the typed field carries the stage anyway, which is the fix.
+    assert_eq!(
+        plan_mode_for_chrome(PlanModeState::Active),
+        Some(PlanModeState::Active),
+        "the stage must survive the migration even where the label does not"
+    );
+
+    // Both Editing sub-states map through intact: is_editing() is the
+    // predicate the ladder reads, so neither may be dropped.
+    assert_eq!(
+        plan_mode_for_chrome(PlanModeState::PreInitEditing),
+        Some(PlanModeState::PreInitEditing)
+    );
+    assert_eq!(
+        plan_mode_for_chrome(PlanModeState::PostInitEditing),
+        Some(PlanModeState::PostInitEditing)
+    );
+    // NoPlan is the one state carried as None — never Some(NoPlan).
+    assert_eq!(plan_mode_for_chrome(PlanModeState::NoPlan), None);
 }
 
 // ── plan-state copy (Decision 7): Editing chrome carries no slash hints ──
