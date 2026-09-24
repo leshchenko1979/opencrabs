@@ -55,7 +55,14 @@ async fn absent_session_fails_loudly_without_queue_residue() {
         result.metadata.get("notify_reason").map(String::as_str),
         Some("no_such_session")
     );
-    assert!(result.output.contains("a2a_send"), "got: {}", result.output);
+    // A failing verdict carries its text in `error`, not `output`:
+    // `ToolResult::error` deliberately leaves `output` empty, and
+    // `build_tool_result_content` renders `error` to the caller
+    // (tool_loop.rs). Asserting on `output` here would pass on a verdict
+    // that told the model nothing — which is the defect this test exists to
+    // catch, so read the field the caller actually reads.
+    let detail = result.error.as_deref().unwrap_or_default();
+    assert!(detail.contains("a2a_send"), "got: {detail:?}");
     assert!(
         NotifyQueueRepository::new(db.pool().clone())
             .all()
