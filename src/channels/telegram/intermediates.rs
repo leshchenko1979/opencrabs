@@ -12,6 +12,7 @@ use super::send::message_in_thread;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{MessageId, ParseMode, ReplyParameters};
+use uuid::Uuid;
 
 /// Send an HTML message, falling back to plain text if Telegram rejects the HTML.
 /// Returns the resulting `MessageId` so callers that need to track or later delete
@@ -64,6 +65,7 @@ pub(crate) fn build_last_intermediate_with_footer(
 /// Returns `None` when the text carries no rich structure
 /// or the rich API rejects it — the caller then falls back to the HTML path.
 pub(crate) async fn try_send_intermediate_rich(
+    session_id: Uuid,
     bot: &Bot,
     chat_id: ChatId,
     thread_id: Option<teloxide::types::ThreadId>,
@@ -74,18 +76,11 @@ pub(crate) async fn try_send_intermediate_rich(
     }
     // Mermaid-aware sender (#1044/#1202): resolves fences into the rich
     // markdown media array; byte-identical to send_rich_markdown_id when no
-    // fence is present, so non-diagram reports are unaffected.
-    match super::rich::send_rich_with_mermaid_id(
-        bot.api_url().as_str(),
-        bot.token(),
-        chat_id.0,
-        thread_id,
-        text,
-        None,
-        "turn",
-        "-",
-    )
-    .await
+    // fence is present, so non-diagram reports are unaffected. Guarded against
+    // the abandoned-edit-loop duplicate (#500): this is the silent sender whose
+    // message and the tail's landed as two copies of one turn's text.
+    match super::delivery_dedup::send_rich_turn_guarded(session_id, bot, chat_id, thread_id, text)
+        .await
     {
         Ok(id) => Some(MessageId(id)),
         Err(e) => {
@@ -224,6 +219,7 @@ pub(crate) fn is_deliverable_rich_report(text: &str) -> bool {
 /// Returns true when something was delivered. Used to surface a rich report the
 /// model emitted before a tool call, which folding would otherwise bury (#582).
 pub(crate) async fn deliver_intermediate_message(
+    session_id: Uuid,
     bot: &Bot,
     chat: ChatId,
     thread_id: Option<teloxide::types::ThreadId>,
@@ -242,7 +238,7 @@ pub(crate) async fn deliver_intermediate_message(
             return true;
         }
     }
-    if let Some(id) = try_send_intermediate_rich(bot, chat, thread_id, text).await {
+    if let Some(id) = try_send_intermediate_rich(session_id, bot, chat, thread_id, text).await {
         // The bubble is non-sticky burial evidence (#1150): the flow block must
         // restick below its own output on the next append.
         tg.note_bot_bubble(chat.0, id.0);

@@ -620,6 +620,12 @@ pub(crate) async fn deliver_final_response(
                     options_pending(streaming),
                 ) {
                 let rich_md = pre_dedup_text.clone();
+                // Deliberately NOT guarded (#500): this arm REPLACES the
+                // intermediates it deletes, so a suppression here would answer
+                // with the id of an intermediate the block below then deletes,
+                // losing the content. It is self-cleaning — whatever it sends,
+                // the copies it supersedes are removed in the same breath — so
+                // it cannot leave a duplicate behind.
                 match super::rich::send_rich_with_mermaid_id(
                     bot.api_url().as_str(),
                     bot.token(),
@@ -886,15 +892,12 @@ pub(crate) async fn deliver_final_response(
                         // re-resolves media on every call, so the retry naturally
                         // re-fetches from the renderer. Structural 400s are never
                         // retried.
-                        let mut rich_send = super::rich::send_rich_with_mermaid_id(
-                            bot.api_url().as_str(),
-                            bot.token(),
-                            chat_id.0,
+                        let mut rich_send = super::delivery_dedup::send_rich_turn_guarded(
+                            session_id,
+                            bot,
+                            chat_id,
                             thread_id,
                             &rich_md,
-                            None,
-                            "turn",
-                            "-",
                         )
                         .await;
                         if rich_send.is_err() && is_no_media_found(rich_send.as_ref().unwrap_err())
@@ -902,15 +905,14 @@ pub(crate) async fn deliver_final_response(
                             tracing::warn!(
                                 "Telegram: rich send hit NO_MEDIA_FOUND (renderer flake?) — retrying once"
                             );
-                            rich_send = super::rich::send_rich_with_mermaid_id(
-                                bot.api_url().as_str(),
-                                bot.token(),
-                                chat_id.0,
+                            // Nothing was recorded for the failed attempt, so the
+                            // guard lets this retry through (#500).
+                            rich_send = super::delivery_dedup::send_rich_turn_guarded(
+                                session_id,
+                                bot,
+                                chat_id,
                                 thread_id,
                                 &rich_md,
-                                None,
-                                "turn",
-                                "-",
                             )
                             .await;
                         }

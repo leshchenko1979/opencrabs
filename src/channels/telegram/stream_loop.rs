@@ -198,7 +198,7 @@ pub(crate) fn spawn_edit_loop(
                                     // the collapsed trace.
                                     if super::intermediates::is_deliverable_rich_report(&text) {
                                         super::intermediates::deliver_intermediate_message(
-                                            &bot, chat, thread_id, &st, &tg, &text,
+                                            sid, &bot, chat, thread_id, &st, &tg, &text,
                                         )
                                         .await;
                                     } else {

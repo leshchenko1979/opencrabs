@@ -9,6 +9,7 @@ pub(crate) mod commands_tg;
 pub mod config_alerts;
 pub(crate) mod cowork;
 pub(crate) mod delivery;
+pub(crate) mod delivery_dedup;
 pub(crate) mod edit_retry;
 pub(crate) mod ephemeral;
 pub(crate) mod flow;
