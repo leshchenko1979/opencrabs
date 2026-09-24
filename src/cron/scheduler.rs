@@ -219,6 +219,7 @@ pub struct CronScheduler {
     run_repo: CronJobRunRepository,
     factory: Arc<ChannelFactory>,
     service_context: ServiceContext,
+    admission: Arc<tokio::sync::Semaphore>,
     /// Surfaces rebuild outcomes into the originating TUI session (#304):
     /// without it a failed background build was visible only in the log
     /// while the user waited for a reload that would never come.
@@ -232,11 +233,16 @@ impl CronScheduler {
         factory: Arc<ChannelFactory>,
         service_context: ServiceContext,
     ) -> Self {
+        let max_concurrent_turns = Config::load()
+            .map(|config| config.cron.max_concurrent_turns)
+            .unwrap_or(2)
+            .max(1) as usize;
         Self {
             repo,
             run_repo,
             factory,
             service_context,
+            admission: Arc::new(tokio::sync::Semaphore::new(max_concurrent_turns)),
             session_notifier: None,
         }
     }
