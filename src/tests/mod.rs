@@ -255,6 +255,7 @@ pub mod cron_scheduler_lock_test;
 pub mod cron_send_scope_test;
 pub mod cron_session_isolation_test;
 pub mod cron_session_target_test;
+pub mod cron_admission_cap_test;
 pub mod cron_test;
 pub mod cron_tool_registry_test;
 pub mod cron_trigger_pipeline_test;
