@@ -6,6 +6,7 @@
 
 use crate::db::Pool;
 use crate::db::database::interact_err;
+use crate::db::retry::{write_retry_config, write_with_retry};
 use crate::db::models::FeedbackEntry;
 use anyhow::{Context, Result};
 use rusqlite::params;
@@ -51,21 +52,16 @@ impl FeedbackLedgerRepository {
         let dim = dimension.to_string();
         let meta = metadata.map(|s| s.to_string());
 
-        self.pool
-            .get()
-            .await
-            .context("Failed to get connection")?
-            .interact(move |conn| -> rusqlite::Result<i64> {
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| -> rusqlite::Result<i64> {
                 conn.execute(
                     "INSERT INTO feedback_ledger (session_id, event_type, dimension, value, metadata) \
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![sid, et, dim, value, meta],
                 )?;
                 Ok(conn.last_insert_rowid())
-            })
-            .await
-            .map_err(interact_err)?
-            .context("Failed to record feedback")
+        })
+        .await
+        .context("Failed to record feedback")
     }
 
     /// Get recent feedback entries (most recent first)
