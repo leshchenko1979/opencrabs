@@ -419,8 +419,14 @@ impl CronScheduler {
                     .unwrap_or(&scheduler_profile)
                     .to_string();
 
+                let admission = self.admission.clone();
                 tokio::spawn(
                     async move {
+                        let Ok(_permit) = admission.acquire_owned().await else {
+                            tracing::error!("Cron admission semaphore closed; skipping job");
+                            return;
+                        };
+
                         // Wrap the ENTIRE execution in a task-local profile home scope
                         // (#182, #184). This means every tool call the agent makes
                         // (memory writes, config reads, file ops, brain reads) and all
