@@ -529,16 +529,26 @@ pub(crate) fn standalone_telemetry_line(
         HeaderMarkup::Html => escape_html(s),
         HeaderMarkup::Markdown => s.to_string(),
     };
-    // #398: the compaction burst is a LIVE ACTION while a plan stage is a
-    // STANDING CONDITION, so the live signal wins — segment 1 must never
-    // contradict the `⏳ Compacting context…` header pin. Below `outcome` (a
-    // settled card is terminal), above the plan-stage rungs.
+    // The state-icon ladder, most-live first (#398, #399). The slot renders
+    // the most LIVE thing the card is doing, and a standing condition never
+    // masks a live action:
+    //   1. `outcome` — a settled card is terminal and wins outright;
+    //   2. `compacting` — the live burst outranks a plan stage, so segment 1
+    //      must never contradict the `⏳ Compacting context…` header
+    //      pin (its `activity` and `thought` segments are suppressed too);
+    //   3. `plan_mode` Editing — the hand, outranking the standing checklist
+    //      beside it in `PostInitEditing` (the owner's overlap rule);
+    //   4. `plan_mode` Active — the clipboard. #399 adds this rung: a live
+    //      checklist used to render the generic cog, reading as "no plan";
+    //   5. the generic cog.
     let state_icon = if let Some((icon, _)) = parts.outcome {
         icon
     } else if parts.compacting {
         "⏳"
     } else if parts.plan_mode.is_some_and(|m| m.is_editing()) {
         "✍️"
+    } else if parts.plan_mode == Some(PlanModeState::Active) {
+        "📋"
     } else {
         "⚙️"
     };

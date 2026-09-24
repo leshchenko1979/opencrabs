@@ -413,3 +413,113 @@ fn stale_compacting_text_without_the_flag_still_shows_the_gear() {
     );
     assert_eq!(out, "⚙️ • 1:05 ⏱️");
 }
+
+// ── #399: the plan stage in segment 1, typed rather than sniffed ─────────
+
+/// #399: an Active plan OUTSIDE the seed window carries no label at all, which
+/// is exactly why it used to render the generic cog and read as "no plan". The
+/// typed field carries the stage regardless, so the clipboard shows. Fails on
+/// the pre-fix tree: there the sniff finds no label and falls through to the cog.
+#[test]
+fn active_plan_outside_the_seed_window_shows_the_clipboard() {
+    let out = merged_footer(
+        &FooterParts {
+            plan_mode: Some(PlanModeState::Active),
+            elapsed_secs: 65,
+            ..Default::default()
+        },
+        HeaderMarkup::Markdown,
+    );
+    assert_eq!(out, "📋 • 1:05 ⏱️");
+    assert!(
+        !out.contains("⚙️"),
+        "a live checklist must not read as no plan at all: {out}"
+    );
+}
+
+/// #399: the owner's overlap rule — a plan awaiting approval already HAS its
+/// tasks (`PostInitEditing` is the mode a pending-approval checklist derives
+/// to), and the hand outranks the clipboard beside it. Names the enum rather
+/// than a rendered string, because the ladder is the unit under test; the
+/// derivation has its own `plan_files` coverage.
+#[test]
+fn editing_plan_outranks_a_checklist_in_the_same_plan() {
+    let out = merged_footer(
+        &FooterParts {
+            plan_mode: Some(PlanModeState::PostInitEditing),
+            elapsed_secs: 65,
+            ..Default::default()
+        },
+        HeaderMarkup::Markdown,
+    );
+    assert_eq!(out, "✍️ • 1:05 ⏱️");
+    assert!(
+        !out.contains("📋"),
+        "the hand outranks the standing checklist: {out}"
+    );
+}
+
+/// #399 negative control: the clipboard must never leak onto a card with no
+/// plan at all — `None` is the one state that keeps the generic cog.
+#[test]
+fn no_plan_keeps_the_generic_cog() {
+    let out = merged_footer(
+        &FooterParts {
+            plan_mode: None,
+            elapsed_secs: 65,
+            ..Default::default()
+        },
+        HeaderMarkup::Markdown,
+    );
+    assert_eq!(out, "⚙️ • 1:05 ⏱️");
+}
+
+/// #399: rung 1 is terminal. A settled card shows its outcome even while an
+/// Active plan is live, so the new rung cannot resurrect a stage icon once the
+/// turn has ended.
+#[test]
+fn settled_card_never_shows_a_plan_stage_icon() {
+    let out = merged_footer(
+        &FooterParts {
+            outcome: Some(("✅", "Done")),
+            plan_mode: Some(PlanModeState::Active),
+            elapsed_secs: 65,
+            ..Default::default()
+        },
+        HeaderMarkup::Markdown,
+    );
+    assert_eq!(out, "✅ • 1:05 ⏱️");
+}
+
+/// #399: the ladder is ONE expression behind both render paths, so the
+/// no-metrics path and the metrics path must agree on the new rung. A rung
+/// added to only one of them is the drift this fences.
+#[test]
+fn fallback_path_agrees_with_the_metrics_path() {
+    let parts = FooterParts {
+        plan_mode: Some(PlanModeState::Active),
+        elapsed_secs: 65,
+        ctx: Some("ctx: 12K/200K 6%"),
+        ..Default::default()
+    };
+    let no_metrics = merged_footer(&parts, HeaderMarkup::Markdown);
+    let metrics = standalone_telemetry_line(
+        &parts,
+        Some(&TelemetryMetrics {
+            tool_count: 0,
+            elapsed_secs: 65,
+            detached_tasks: 0,
+            subagents: 0,
+            queued_messages: 0,
+        }),
+        HeaderMarkup::Markdown,
+    );
+    assert!(
+        no_metrics.starts_with("📋 • "),
+        "no-metrics path lost the rung: {no_metrics}"
+    );
+    assert!(
+        metrics.starts_with("📋 • "),
+        "metrics path lost the rung: {metrics}"
+    );
+}
