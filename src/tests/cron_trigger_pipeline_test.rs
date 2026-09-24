@@ -401,3 +401,101 @@ async fn test_timed_out_trigger_kills_its_shell() {
         found.trim()
     );
 }
+
+/// #457 — the gate-outcome arms, pinned where the decision actually lives.
+///
+/// **Why this is a source-shape test and not a behavioral one.** The decision
+/// under test is the `match` inside `CronScheduler::tick`, and that path has no
+/// seam: `tick` is private (as are `is_due`/`next_run_after`), the only public
+/// entry points (`run`/`run_adoptive`) are infinite poll loops, and an
+/// `TriggerOutcome::Error` cannot be produced cheaply — `TriggerRunner` reads a
+/// bad command as exit 127 (`Fired`), so the ONLY route to `Error` is genuinely
+/// outrunning the hard-coded 30 s ceiling. A behavioral test would therefore
+/// cost a production visibility widening plus a >30 s sleep plus a `Config::load()`
+/// dependency, to assert an ABSENCE. Extracting a pure "outcome ⇒ action" helper
+/// would be worse: production would never consult it, so it would pin a parallel
+/// function that can drift from the real match and would NOT fail if the early
+/// `return` were re-added. This test instead reads the arm that would have to
+/// change, and it FAILS on the pre-fix tree — which is the only property that
+/// makes a probe worth having.
+///
+/// The behavioral proof of the fix is the live smoke leg (a job whose gate
+/// provably overruns executes anyway), not this file.
+#[test]
+fn test_gate_outcome_arms_only_skipped_is_terminal() {
+    // Path is relative to this file: src/tests/ -> src/cron/scheduler.rs
+    let src = include_str!("../cron/scheduler.rs");
+
+    // Arms are ordered Skipped, Error, Fired, NoTrigger, so each arm's text runs
+    // from its own marker to the next marker. Slicing on the next marker is
+    // robust here, whereas brace-matching is not: the arms contain `{}` and
+    // `{err}` inside string literals, which a naive brace counter miscounts.
+    fn arm<'a>(src: &'a str, from: &str, to: &str) -> &'a str {
+        let start = src
+            .find(from)
+            .unwrap_or_else(|| panic!("arm `{from}` not found — did the match move?"));
+        let rest = &src[start..];
+        let end = rest
+            .find(to)
+            .unwrap_or_else(|| panic!("arm `{to}` not found after `{from}` — did the match move?"));
+        &rest[..end]
+    }
+
+    const SKIPPED: &str = "TriggerOutcome::Skipped(ref trig_res) =>";
+    const ERROR: &str = "TriggerOutcome::Error(err) =>";
+    const FIRED: &str = "TriggerOutcome::Fired(ref trig_res) =>";
+    const NO_TRIGGER: &str = "TriggerOutcome::NoTrigger =>";
+
+    let skipped = arm(src, SKIPPED, ERROR);
+    let error = arm(src, ERROR, FIRED);
+    let no_trigger = arm(src, NO_TRIGGER, "resolve_or_create_cron_session");
+
+    // Skipped => Skip. The one outcome that legitimately blocks execution: the
+    // gate ran and said NO.
+    assert!(
+        skipped.contains("record_skipped_run"),
+        "the Skipped arm must still record the skipped run"
+    );
+    assert!(
+        skipped.contains("return Ok(())"),
+        "the Skipped arm must remain terminal — a gate that ran and said NO blocks the job"
+    );
+
+    // Error => Proceed. This is the #457 fix. A gate that cannot complete is
+    // UNKNOWN, not FALSE, so the arm must warn and fall THROUGH.
+    assert!(
+        error.contains("tracing::warn!"),
+        "#457: a failed/timed-out gate must warn and fail open"
+    );
+    assert!(
+        !error.contains("tracing::error!"),
+        "#457: the gate error must not be logged as an error — it is not terminal"
+    );
+    assert!(
+        !error.contains("return"),
+        "#457 REGRESSION: the Error arm returns early again — that is the terminality \
+         that destroys a scheduled wake (a date-keyed job loses it for a YEAR). \
+         The arm must fall through to resolve_or_create_cron_session + execute_job."
+    );
+    assert!(
+        !error.contains("complete_error"),
+        "#457: the Error arm must not write a terminal error run row"
+    );
+    assert!(
+        !error.contains("new_running"),
+        "#457: the Error arm must not write its own run row — a second row for a job \
+         that did execute would corrupt the census surface this issue was found through"
+    );
+
+    // NoTrigger => Proceed. Already an empty arm that falls through; pinned so a
+    // later edit cannot quietly make it terminal.
+    assert!(
+        !no_trigger.contains("return"),
+        "the NoTrigger arm must keep falling through to execution"
+    );
+    assert!(
+        !no_trigger.contains("complete_error"),
+        "the NoTrigger arm must not write an error run row"
+    );
+}
+

@@ -446,20 +446,17 @@ impl CronScheduler {
                                         return Ok(());
                                     }
                                     crate::cron::TriggerOutcome::Error(err) => {
-                                        tracing::error!(
-                                            "Cron job '{}' trigger execution error: {err}",
+                                        // #457: a gate that cannot complete within the ceiling is
+                                        // UNKNOWN, not FALSE. Fail OPEN — fall through to the shared
+                                        // execution path below so a scheduled wake is never destroyed
+                                        // by a transient gate overrun. No error run row is written
+                                        // here: the job's own run row is the durable record, and a
+                                        // second (false "error") row for a job that did execute would
+                                        // corrupt the surface the #457 census counts on.
+                                        tracing::warn!(
+                                            "Cron job '{}' trigger execution error — failing open, executing anyway: {err}",
                                             job.name
                                         );
-                                        let run = CronJobRun::new_running(
-                                            job.id,
-                                            job.name.clone(),
-                                            job.provider.clone(),
-                                            job.model.clone(),
-                                        );
-                                        let run_id = run.id.to_string();
-                                        let _ = run_repo.insert(&run).await;
-                                        let _ = run_repo.complete_error(&run_id, &format!("Trigger error: {err}")).await;
-                                        return Ok(());
                                     }
                                     crate::cron::TriggerOutcome::Fired(ref trig_res) => {
                                         tracing::info!(
