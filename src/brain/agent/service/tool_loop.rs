@@ -8252,7 +8252,14 @@ impl AgentService {
                 // complete that trailing task so the archive below fires.
                 let mutated = !final_text.trim().is_empty()
                     && finished.complete_trailing_delivery_task();
-                Ok((mutated, mutated && finished.is_complete()))
+                // The archive decision follows the document's completeness
+                // AFTER the mutation — never the mutation itself. Binding it to
+                // `mutated` meant a plan whose LAST task the agent completed
+                // through the tool (so `complete_trailing_delivery_task` has
+                // nothing left to do) never archived at all: every box ticked,
+                // `status: Active`, card still live, session never back to
+                // NoPlan (#597).
+                Ok((mutated, finished.is_complete()))
             },
         )
         .await
