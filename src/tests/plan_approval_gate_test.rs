@@ -362,3 +362,132 @@ fn approval_source_serde_roundtrip() {
     let back: ApprovalSource = serde_json::from_str("\"auto\"").unwrap();
     assert_eq!(back, ApprovalSource::Auto);
 }
+
+// ── #510: unattended (headless) sessions ─────────────────────────
+
+#[tokio::test]
+async fn headless_checklist_auto_activates_and_stamps_headless() {
+    // #510. A headless session — cron execute, one-shot `opencrabs run`,
+    // a sub-agent — has no surface on which a human can press Approve.
+    // Leaving its plan in Editing strands it forever, so it activates,
+    // stamped `Headless`: never `User` (no human approved it) and never
+    // `Auto` (which the resume demotion would correctly reclaim).
+    in_temp_home(async {
+        let ctx = ToolExecutionContext::new(Uuid::new_v4())
+            .with_auto_approve(true)
+            .with_headless(true);
+        let tool = PlanTool;
+
+        let input = json!({
+            "operation": "init",
+            "title": "Cron checklist",
+            "mode": "checklist",
+            "tasks": [{"title": "t1", "description": "d1"}]
+        });
+
+        let result = tool.execute(input, &ctx).await.unwrap();
+        assert!(result.success, "init failed: {}", result.output);
+
+        let plan = load_plan(ctx.session_id).await.unwrap();
+        assert_eq!(
+            plan.status,
+            PlanStatus::Active,
+            "an unattended session must not wait for an approval no human \
+             can give (#510)"
+        );
+        assert_eq!(
+            plan.approval_source,
+            Some(ApprovalSource::Headless),
+            "the activation must be attributable to the unattended path"
+        );
+        assert!(
+            !plan.pending_approval,
+            "no approval-queue marker: nothing is waiting for a human"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn headless_design_init_is_refused_under_the_default_gate() {
+    // Regression guard for 168bd25fc7 (#510). That commit narrowed the
+    // design-track refusal to the escape hatch (`!require_approval`), so
+    // under the DEFAULT `plan_require_approval = true` an unattended
+    // session could enter the prose-editing leg and wait forever for an
+    // approval that could never arrive.
+    in_temp_home(async {
+        let ctx = ToolExecutionContext::new(Uuid::new_v4())
+            .with_auto_approve(true)
+            .with_headless(true);
+        let tool = PlanTool;
+
+        let input = json!({
+            "operation": "init",
+            "title": "Cron design plan",
+            "mode": "design"
+        });
+
+        let result = tool.execute(input, &ctx).await.unwrap();
+        assert!(
+            !result.success,
+            "a headless session must be refused the design (prose-editing) \
+             leg under the default gate — got: {}",
+            result.output
+        );
+        assert!(
+            load_plan(ctx.session_id).await.is_none(),
+            "a refused init must leave no plan behind"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn interactive_design_init_still_waits_for_approval() {
+    // The other arm of the regression guard: the headless carve-out must
+    // not over-refuse. An INTERACTIVE session (headless = false) under the
+    // default gate still enters the design leg and waits for a human —
+    // which is correct, because a human is there to approve it.
+    in_temp_home(async {
+        let ctx = ToolExecutionContext::new(Uuid::new_v4()).with_auto_approve(true);
+        let tool = PlanTool;
+
+        let input = json!({
+            "operation": "init",
+            "title": "Interactive design plan",
+            "mode": "design"
+        });
+
+        let result = tool.execute(input, &ctx).await.unwrap();
+        assert!(
+            result.success,
+            "the interactive design leg must not be refused: {}",
+            result.output
+        );
+
+        let plan = load_plan(ctx.session_id).await.unwrap();
+        assert_eq!(
+            plan.status,
+            PlanStatus::Editing,
+            "an interactive design plan waits for the human's Approve"
+        );
+        assert!(plan.pending_approval);
+        assert_eq!(plan.approval_source, None);
+    })
+    .await;
+}
+
+#[test]
+fn headless_approval_source_serde_is_distinct() {
+    // The stamp must round-trip under its OWN name — a persisted `headless`
+    // must never deserialize as `auto` (which resume would demote) nor as
+    // `user` (which would claim a human approved it).
+    assert_eq!(
+        serde_json::to_string(&ApprovalSource::Headless).unwrap(),
+        "\"headless\""
+    );
+    let back: ApprovalSource = serde_json::from_str("\"headless\"").unwrap();
+    assert_eq!(back, ApprovalSource::Headless);
+    assert_ne!(back, ApprovalSource::Auto);
+    assert_ne!(back, ApprovalSource::User);
+}

@@ -1958,9 +1958,21 @@ impl Tool for PlanTool {
                     // waits in Editing for a human Approve like any plan. Only
                     // the explicit `[agent] plan_require_approval = false`
                     // escape hatch keeps the legacy #581 auto-activation.
-                    let auto_active = context.auto_approve && !require_approval;
+                    //
+                    // #510: an UNATTENDED session is the exception. There is no
+                    // surface on which a human can approve it, so leaving the
+                    // plan in Editing strands it forever — the defect this
+                    // stamp exists to prevent. It activates, stamped `Headless`
+                    // (never `Auto`, never `User`) so the unattended activation
+                    // is auditable and, unlike `Auto`, is NOT demoted on resume
+                    // (demoting would re-strand the session on the next load).
+                    let auto_active = (context.auto_approve && !require_approval) || context.headless;
                     if auto_active {
-                        imported.approve(ApprovalSource::Auto);
+                        imported.approve(if context.headless {
+                            ApprovalSource::Headless
+                        } else {
+                            ApprovalSource::Auto
+                        });
                     } else {
                         // Durable approval-queue marker (#1145) — without it an
                         // imported checklist (Editing, no `.md`) derives NoPlan
@@ -2035,12 +2047,23 @@ impl Tool for PlanTool {
                     // Anything else under auto-approve — agent-initiated
                     // design, or a keyword soft-nudge — keeps the rush
                     // behavior and is refused toward the checklist track.
+                    //
+                    // #510: an UNATTENDED session can never satisfy this gate
+                    // either — there is no human to read the prose and press
+                    // Approve — so the design track is refused for it outright.
+                    // This restores the pre-168bd25fc7 condition for headless
+                    // sessions, which that commit narrowed to the escape hatch
+                    // (`!require_approval`), leaving a cron session under the
+                    // DEFAULT gate free to enter Editing and strand forever.
                     let slash_armed = matches!(state, PlanModeState::PreInitEditing)
                         && matches!(
                             crate::utils::plan_files::pre_init_origin(plan_sid).await,
                             crate::utils::plan_files::PreInitOrigin::Slash
                         );
-                    if design && context.auto_approve && !require_approval && !slash_armed {
+                    let yolo_design_refused =
+                        context.auto_approve && !require_approval && !slash_armed;
+                    let unattended_design_refused = context.headless && !slash_armed;
+                    if design && (yolo_design_refused || unattended_design_refused) {
                         return Ok(ToolResult::error(
                             "The design track under tool auto-approve is available only \
                              when the user entered Plan mode with the /plan command (the \
@@ -2111,9 +2134,20 @@ impl Tool for PlanTool {
                     // Editing for a human Approve. Only the explicit
                     // `[agent] plan_require_approval = false` escape hatch keeps
                     // the legacy #581 auto-activation.
-                    let auto_active = !design && context.auto_approve && !require_approval;
+                    //
+                    // #510: an UNATTENDED session is the exception — it has no
+                    // surface on which a human can approve, so an Editing plan
+                    // strands it. Stamped `Headless` so the unattended
+                    // activation is auditable and survives the resume demotion
+                    // that correctly reclaims `Auto`. See the import path above.
+                    let auto_active =
+                        !design && ((context.auto_approve && !require_approval) || context.headless);
                     if auto_active {
-                        new_plan.approve(ApprovalSource::Auto);
+                        new_plan.approve(if context.headless {
+                            ApprovalSource::Headless
+                        } else {
+                            ApprovalSource::Auto
+                        });
                     } else {
                         // Durable approval-queue marker (#1145): state
                         // derivation keys on this flag, not on the design

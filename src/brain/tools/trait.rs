@@ -189,6 +189,18 @@ impl ToolExecutionContext {
         self
     }
 
+    /// Mark the session UNATTENDED — no live user on any surface (#510).
+    ///
+    /// Set by the surfaces that have no channel binding to a human: cron
+    /// execute (`src/cron/scheduler.rs`), one-shot `opencrabs run`
+    /// (`src/cli/commands.rs`) and sub-agents (`spawn.rs`). The plan tool
+    /// keys its approval behaviour on this: an unattended session can never
+    /// press Approve, so it must not be left waiting for one.
+    pub fn with_headless(mut self, headless: bool) -> Self {
+        self.headless = headless;
+        self
+    }
+
     /// Set timeout
     pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
         self.timeout_secs = timeout_secs;

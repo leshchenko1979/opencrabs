@@ -198,6 +198,17 @@ pub enum ApprovalSource {
     /// operator re-enables the gate, `load_plan_from_path` demotes Active
     /// plans carrying this stamp back to the approval queue on resume.
     Auto,
+    /// Auto-activated because the session is UNATTENDED — no live user on
+    /// any surface (`ToolExecutionContext::headless`: cron execute, one-shot
+    /// `opencrabs run`, sub-agents). Such a session can never press Approve,
+    /// so an Editing plan strands it forever (#510).
+    ///
+    /// DELIBERATELY NOT DEMOTED by `load_plan_from_path`: demoting on resume
+    /// would re-strand the very session this stamp exists to unblock, which
+    /// is the #510 defect. The distinct stamp keeps the unattended
+    /// activation auditable — it can never be mistaken for a human approval
+    /// (`User`) or for the operator's escape-hatch policy (`Auto`).
+    Headless,
 }
 
 /// Plan document containing tasks and metadata
