@@ -138,10 +138,10 @@ impl Tool for GoalManageTool {
                         "🎯 Goal set (ID: {}):\n\n{}\n\nWorking toward this autonomously for up \
                          to {} turns. After each turn a judge checks whether it's met; if not, \
                          you continue automatically. Use action 'status' to check progress, \
-                         'pause' to hold, 'clear' to stop.{}\n\nNote: while a background command \
-                         is still running or a plan task is unresolved, the loop continues \
-                         without consulting the judge — those are mechanical signs of work in \
-                         flight.",
+                         'pause' to hold, 'clear' to stop.{}\n\nNote: work the harness can \
+                         already see is unfinished is never put to the judge — a running \
+                         background command parks the goal without spending a turn, while an \
+                         unresolved plan task continues the loop.",
                         goal.id,
                         goal.goal_text,
                         goal.max_turns,
