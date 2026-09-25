@@ -465,3 +465,63 @@ async fn markdown_card_keeps_ordinary_prose_html() {
         "non-media prose HTML must survive. Got:\n{md}"
     );
 }
+
+#[tokio::test]
+async fn markdown_card_headingless_preamble_is_delimited_from_the_title_block() {
+    // Regression (#602). A design document's PREAMBLE — the prose before its
+    // first `##` — arrives as a heading-less ProseSection and ships RAW
+    // markdown. The title serialises to `<p>…</p>`, and a CommonMark HTML
+    // block runs until a BLANK line, so a preamble placed directly against it
+    // was swallowed as HTML text: `**Issue:**` and its links rendered
+    // literally instead of being parsed. The blank line is the fix.
+    let prose = vec![ProseSection {
+        heading: None,
+        body: "**Issue:** https://example.invalid/1".to_string(),
+    }];
+    let md = render_plan_card_markdown(Some(TITLE), None, Some(&prose), None)
+        .await
+        .expect("card with a heading-less preamble must render");
+
+    assert!(
+        md.contains("</p>\n\n**Issue:**"),
+        "the preamble must be separated from the title's `<p>` block by a \
+         BLANK line, or the HTML block swallows it and its markdown renders \
+         literally (#602). Got:\n{md}"
+    );
+    assert!(
+        md.contains("**Issue:** https://example.invalid/1"),
+        "the preamble must ship RAW markdown for the rich dialect to parse — \
+         not pre-converted, not escaped. Got:\n{md}"
+    );
+}
+
+#[tokio::test]
+async fn markdown_card_preamble_does_not_swallow_the_following_section() {
+    // The preamble sits BETWEEN the title's `<p>` and the first `<details>` —
+    // exactly the shape of the owner's card (#602). Both boundaries need the
+    // delimiter: the HTML block opened by `<p>` would otherwise run through
+    // the preamble and consume the `<details>` opener with it.
+    let prose = vec![
+        ProseSection {
+            heading: None,
+            body: "**Issue:** https://example.invalid/1".to_string(),
+        },
+        ProseSection {
+            heading: Some("Context".to_string()),
+            body: "- one\n- two".to_string(),
+        },
+    ];
+    let md = render_plan_card_markdown(Some(TITLE), None, Some(&prose), None)
+        .await
+        .expect("card with preamble + section must render");
+
+    assert!(
+        md.contains("</p>\n\n**Issue:**"),
+        "preamble must be delimited from the title's HTML block. Got:\n{md}"
+    );
+    assert!(
+        md.contains("https://example.invalid/1\n\n<details>"),
+        "preamble must be delimited from the following `<details>`, or the \
+         title's HTML block consumes the details opener too. Got:\n{md}"
+    );
+}
