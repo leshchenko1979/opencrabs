@@ -1166,5 +1166,8 @@ async fn recent_profile_reports_admissions_including_typing() {
     assert!(second.contains("by_surface{typing=2,"), "both admissions: {second}");
     assert!(second.contains("window{1s=1,"), "only newest in 1s: {second}");
     assert!(second.contains("5s=2,"), "both are in 5s: {second}");
-    assert!(second.contains("60s=2,"), "both are in 60s: {second}");
+    // `60s` is the LAST field of the window group, so the source format string
+    // (`window{{1s={},5s={},60s={}}}`) closes it with `}` — not a comma. Built
+    // from the format string, never from a rendered line (AGENTS.md, #580 cycle).
+    assert!(second.contains("60s=2}"), "both are in 60s: {second}");
 }
