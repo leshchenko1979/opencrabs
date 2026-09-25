@@ -5,10 +5,6 @@ use deadpool_sqlite::{Config, Hook, InteractError, Pool as DeadPool, Runtime};
 use rusqlite_migration::{M, Migrations};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::AtomicBool;
-
-/// Flag set when the startup integrity check detects corruption.
-static DB_INTEGRITY_FAILED: AtomicBool = AtomicBool::new(false);
 
 /// Global pool handle set once on startup. Used by components that can't
 /// otherwise receive a pool via dependency injection (e.g. CLI providers
@@ -20,11 +16,6 @@ static GLOBAL_POOL: OnceLock<Pool> = OnceLock::new();
 /// first `Database::connect` call (e.g. in unit tests).
 pub fn global_pool() -> Option<&'static Pool> {
     GLOBAL_POOL.get()
-}
-
-/// Returns true (once) if the last startup integrity check detected corruption.
-pub fn db_integrity_failed() -> bool {
-    DB_INTEGRITY_FAILED.swap(false, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Type alias for database pool
@@ -837,32 +828,51 @@ impl Database {
 
         tracing::info!("Database migrations completed");
 
-        // Run integrity check on startup
-        let integrity_ok = self
+        Ok(())
+    }
+
+    /// Run a full `PRAGMA integrity_check` and return the verdict (#459).
+    ///
+    /// The check reads every page, so its cost is O(database size) — measured
+    /// at 93–149 s per call on the live ops database (2026-09-25). It is
+    /// deliberately NOT part of `run_migrations()`: whether a process can act
+    /// on the verdict is the CALLER's decision, so the scan belongs on the one
+    /// surface that can deliver it, never on every open.
+    ///
+    /// * `Ok(None)` — clean pass.
+    /// * `Ok(Some(detail))` — a corruption finding **or** an inconclusive
+    ///   check, carrying SQLite's own message.
+    /// * `Err(e)` — the check could not be attempted at all (pool/interact
+    ///   failure). That is no evidence of corruption.
+    pub async fn run_integrity_check(&self) -> Result<Option<String>> {
+        let result = self
             .pool
             .get()
             .await
             .context("Failed to get connection for integrity check")?
-            .interact(|conn| -> rusqlite::Result<bool> {
-                let result: String =
-                    conn.pragma_query_value(None, "integrity_check", |r| r.get(0))?;
-                Ok(result == "ok")
+            .interact(|conn| -> rusqlite::Result<String> {
+                // A pragma that dies mid-scan is itself a corruption signal, so
+                // it becomes the detail rather than an error: `?` here would
+                // downgrade a real finding to a log line.
+                match conn.pragma_query_value(None, "integrity_check", |r| r.get::<_, String>(0)) {
+                    Ok(s) => Ok(s),
+                    Err(e) => Ok(format!("integrity_check could not complete: {e}")),
+                }
             })
             .await
             .map_err(interact_err)?
             .context("Failed to run integrity check")?;
 
-        if !integrity_ok {
+        if result == "ok" {
+            tracing::debug!("Database integrity check passed");
+            Ok(None)
+        } else {
             tracing::error!(
                 "Database integrity check FAILED — data may be corrupted. \
                  Consider backing up and recreating the database."
             );
-            DB_INTEGRITY_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
-        } else {
-            tracing::debug!("Database integrity check passed");
+            Ok(Some(result))
         }
-
-        Ok(())
     }
 
     /// Close the database connection pool

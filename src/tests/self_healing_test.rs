@@ -126,11 +126,64 @@ async fn db_integrity_check_passes_on_clean_db() {
     let db = Database::connect_in_memory().await.unwrap();
     db.run_migrations().await.unwrap();
 
-    // After successful migrations, integrity should be fine
-    // The flag should not be set (false)
-    // Note: db_integrity_failed() is a global static, so this test just
-    // verifies the clean path doesn't set the flag
-    assert!(!crate::db::db_integrity_failed());
+    // #459: the verdict is a returned value now, not a process-global flag.
+    // A clean database yields no detail — and no caller can clear it.
+    assert_eq!(db.run_integrity_check().await.unwrap(), None);
+}
+
+/// A corrupt database must never report a clean pass (#459).
+///
+/// The assertion is deliberately loose about WHICH failure shape appears: a
+/// damaged file may surface as a non-`ok` pragma row or as a pragma error, and
+/// `run_integrity_check` maps both to `Ok(Some(..))`. What it must never return
+/// is `Ok(None)` — the value the alert path reads as healthy.
+#[tokio::test]
+async fn corrupt_db_never_reports_a_clean_pass() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("corrupt.db");
+
+    // Build a real file spanning several pages, so page 3 is inside the table's
+    // b-tree rather than a freelist or unused page.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, blob TEXT NOT NULL);")
+            .unwrap();
+        conn.execute_batch("BEGIN;").unwrap();
+        {
+            let mut stmt = conn.prepare("INSERT INTO t (blob) VALUES (?1)").unwrap();
+            let payload = "x".repeat(100);
+            for _ in 0..500 {
+                stmt.execute(rusqlite::params![payload]).unwrap();
+            }
+        }
+        conn.execute_batch("COMMIT;").unwrap();
+    }
+
+    // Overwrite 4 KB at offset 8192 (1-indexed page 3) with garbage. Page 1 is
+    // the header and stays intact, so the pool can still open the file — which
+    // is what makes this a test of the CHECK rather than of the open path.
+    let size = std::fs::metadata(&path).unwrap().len();
+    assert!(
+        size > 8192 + 4096,
+        "fixture must be large enough to hold the corruption region; got {size} B"
+    );
+    {
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.seek(SeekFrom::Start(8192)).unwrap();
+        f.write_all(&[0xEFu8; 4096]).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    let db = Database::connect(&path)
+        .await
+        .expect("the pool must open a corrupt file: connect is lazy and apply_pragmas only reads page 1");
+    let result = db.run_integrity_check().await;
+    assert!(
+        !matches!(result, Ok(None)),
+        "a corrupt database must never report a clean pass; got {result:?}"
+    );
 }
 
 #[tokio::test]

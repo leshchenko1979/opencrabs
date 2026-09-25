@@ -9,7 +9,7 @@ pub mod repository;
 pub mod retry;
 
 pub use database::{
-    Database, MaintenanceKnobs, Pool, PoolExt, WAL_TRUNCATE_MIN_BYTES, db_integrity_failed,
+    Database, MaintenanceKnobs, Pool, PoolExt, WAL_TRUNCATE_MIN_BYTES,
     execute_safe_maintenance, global_pool, interact_err,
 };
 pub use models::*;
