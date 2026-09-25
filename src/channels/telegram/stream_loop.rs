@@ -277,6 +277,13 @@ pub(crate) fn spawn_edit_loop(
                         {
                             let mut s = st.lock().unwrap_or_else(|e| e.into_inner());
                             s.queued_count = tg.queued_items_count(sid);
+                            // #585: the sub-agent segment needs the same live
+                            // stamp as the queued segment above. Its only other
+                            // writer is `turn_settle`, which runs after the turn
+                            // ends, so without this line the render gate reads a
+                            // permanent zero and the `N 🤖` segment is suppressed
+                            // for the whole time the agents are actually alive.
+                            s.subagent_counts = super::delivery::subagent_counts_for(&agent, sid);
                         }
                         super::flow_chrome::tick_flow_header(
                             &bot,
