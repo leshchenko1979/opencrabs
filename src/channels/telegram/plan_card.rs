@@ -56,6 +56,12 @@ enum CardBlock {
     /// Already block-level markup (`<details>`, `<blockquote>`, `<p>`-wrapped
     /// prose) that must not be wrapped again — `<p>` cannot contain `<details>`.
     Block(String),
+    /// Raw markdown that must be delimited from adjacent HTML-block content by
+    /// a BLANK LINE. A CommonMark HTML block (the title's `<p>`, a `<details>`)
+    /// runs until a blank line, so raw markdown placed directly against one is
+    /// swallowed as literal text and its markup never parses (#602). The classic
+    /// serializer never receives one — its heading-less arm converts to HTML.
+    Raw(String),
     /// A blank line before the goal on the classic card. The rich serializer
     /// ignores it: block-level elements already space themselves.
     ClassicGap,
@@ -74,7 +80,7 @@ fn serialize_card(style: CollapsibleStyle, blocks: &[CardBlock]) -> String {
         CollapsibleStyle::BlockquoteExpandable => {
             for b in blocks {
                 match b {
-                    CardBlock::Line(s) | CardBlock::Block(s) => {
+                    CardBlock::Line(s) | CardBlock::Block(s) | CardBlock::Raw(s) => {
                         if !out.is_empty() {
                             out.push('\n');
                         }
@@ -100,6 +106,10 @@ fn serialize_card(style: CollapsibleStyle, blocks: &[CardBlock]) -> String {
                         out.push_str("</p>");
                     }
                     CardBlock::Block(s) => out.push_str(s),
+                    // Never produced on this path (the rich-HTML card's
+                    // heading-less arm converts to HTML), but the match must
+                    // stay exhaustive. Treated as a block.
+                    CardBlock::Raw(s) => out.push_str(s),
                     CardBlock::ClassicGap => {}
                 }
             }
@@ -303,13 +313,20 @@ pub(crate) async fn render_plan_card_markdown(
             // markdown — the #941 oneliner regression.
             let body = super::rich::mermaid::neutralize_prose_media_html(&sec.body);
             let body = body.trim();
-            blocks.push(CardBlock::Block(match &sec.heading {
-                Some(h) => format!(
+            blocks.push(match &sec.heading {
+                Some(h) => CardBlock::Block(format!(
                     "<details><summary><b>{}</b></summary>\n\n{body}\n\n</details>",
                     escape_html(h)
-                ),
-                None => body.to_string(),
-            }));
+                )),
+                // A heading-less section is the design document's PREAMBLE —
+                // the prose before the first `##`. It ships raw markdown, so
+                // it must be delimited from its neighbours by blank lines: the
+                // title serialises to `<p>`, and a CommonMark HTML block runs
+                // until a blank line, so a preamble placed directly against it
+                // is swallowed as literal text and its markdown never parses
+                // (#602). `CardBlock::Raw` carries that contract.
+                None => CardBlock::Raw(body.to_string()),
+            });
         }
     }
 
@@ -360,6 +377,19 @@ pub(crate) async fn render_plan_card_markdown(
                     out.push('\n');
                 }
                 out.push_str(s);
+            }
+            CardBlock::Raw(s) => {
+                // Raw markdown must be FENCED OFF by a blank line on both
+                // sides (#602). An HTML block — the title's `<p>`, a
+                // `<details>` — runs until a blank line, so raw markdown
+                // placed directly against one is swallowed as literal text
+                // and its own markup never parses. This is the preamble arm:
+                // the prose before the design document's first `##`.
+                if !out.is_empty() && !out.ends_with("\n\n") {
+                    out.push_str("\n\n");
+                }
+                out.push_str(s);
+                out.push_str("\n\n");
             }
             CardBlock::ClassicGap => {
                 if !out.is_empty() {
