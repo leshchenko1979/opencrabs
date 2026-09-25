@@ -1,16 +1,23 @@
 //! Plan mutations are serialised per session (#506).
 //!
-//! The plan tool reads the plan JSON when it enters `execute` and writes it
-//! back much later, with nothing held across the pair. Two calls dispatched in
-//! ONE parallel block therefore both read the same baseline and the second save
+//! The plan tool reads the plan JSON when it enters `execute` and writes it back
+//! much later, with nothing held across the pair. Two calls dispatched in ONE
+//! parallel block therefore both read the same baseline and the second save
 //! reverts the first: the agent is told a task completed and the state never
-//! persisted. The failure is a FALSE SUCCESS RECEIPT, which is why it is worse
-//! than a lost write.
+//! persisted. That false success receipt is what makes this worse than a lost
+//! write.
 //!
 //! `utils::plan_files::mutate_plan` is the one serialised read-modify-write
 //! primitive; every production writer routes through it or holds the exposed
-//! `plan_state_lock` around its own window. These tests pin the invariant the
-//! `#822` card lock already relied on, extended to the plan store itself.
+//! `plan_state_lock` around its own window.
+//!
+//! HARNESS NOTE. `with_profile_home_async` scopes a `tokio::task_local!`, and a
+//! task-local is NOT inherited by `tokio::spawn` (that fn's own doc says it
+//! "never leaks to sibling tasks"). A spawned leg therefore starts with the REAL
+//! home and resolves a different session dir than the fixture seeded — which is
+//! exactly how these tests first failed in CI, with `load_plan` returning None
+//! for a plan written a moment earlier. Every spawned leg re-enters the scope
+//! through `in_profile`.
 //!
 //! Fixtures are synthetic and carry no user identifiers.
 
@@ -25,17 +32,41 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use uuid::Uuid;
 
-/// Run `f` under a throwaway profile home so nothing touches the real
-/// `~/.opencrabs/agents/session/`, then clean the profile dir up.
-async fn in_temp_home<F, T>(f: F) -> T
+/// A throwaway profile home, so nothing touches the real
+/// `~/.opencrabs/session/`. Removed on drop, including on a panicking test.
+struct TempProfile(String);
+
+impl TempProfile {
+    fn new() -> Self {
+        Self(format!("plan-mutation-lock-test-{}", Uuid::new_v4()))
+    }
+
+    /// The profile name, owned so it can be moved into a spawned task.
+    fn name(&self) -> String {
+        self.0.clone()
+    }
+
+    /// Run `fut` with the profile home pointed at this profile.
+    async fn scoped<F, T>(&self, fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        with_profile_home_async(Some(&self.0), fut).await
+    }
+}
+
+impl Drop for TempProfile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(home_for_profile(Some(&self.0)));
+    }
+}
+
+/// Enter `profile`'s home inside a SPAWNED task — see the harness note above.
+async fn in_profile<F, T>(profile: String, fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    let profile = format!("plan-mutation-lock-test-{}", Uuid::new_v4());
-    let out = with_profile_home_async(Some(&profile), f).await;
-    let home = home_for_profile(Some(&profile));
-    let _ = std::fs::remove_dir_all(&home);
-    out
+    with_profile_home_async(Some(&profile), fut).await
 }
 
 /// Seed an `Active` checklist, the state `complete` and `start` both require
@@ -57,20 +88,22 @@ async fn seed_active_plan(sid: Uuid, tasks: usize) {
 /// The issue's own reproduction: `complete` and `start` dispatched together.
 ///
 /// Before the fix both loaded the same baseline, the second save won, and the
-/// completed task silently reverted to Pending while the caller had already
-/// been handed a success receipt. Both mutations must survive.
-#[tokio::test]
+/// completed task silently reverted to Pending while the caller had already been
+/// handed a success receipt. Multi-threaded so the two legs genuinely overlap:
+/// `execute` awaits between the load and the save (`clear_task_goal`,
+/// `is_plan_autonomy`, mermaid validation), and that window is what loses the
+/// write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_complete_and_start_both_persist() {
-    in_temp_home(async {
+    let tp = TempProfile::new();
+    tp.scoped(async {
         let sid = Uuid::new_v4();
         seed_active_plan(sid, 4).await;
 
         // Two contexts, same session id: the tool resolves plan state from
         // `context.session_id`, which is what the race shares.
-        let ctx_complete = ToolExecutionContext::new(sid);
-        let ctx_start = ToolExecutionContext::new(sid);
-
-        let complete = tokio::spawn(async move {
+        let complete = tokio::spawn(in_profile(tp.name(), async move {
+            let ctx = ToolExecutionContext::new(sid);
             PlanTool
                 .execute(
                     serde_json::json!({
@@ -79,18 +112,19 @@ async fn concurrent_complete_and_start_both_persist() {
                         "action": "success",
                         "output": "done",
                     }),
-                    &ctx_complete,
+                    &ctx,
                 )
                 .await
-        });
-        let start = tokio::spawn(async move {
+        }));
+        let start = tokio::spawn(in_profile(tp.name(), async move {
+            let ctx = ToolExecutionContext::new(sid);
             PlanTool
                 .execute(
                     serde_json::json!({ "operation": "start", "task_order": 2 }),
-                    &ctx_start,
+                    &ctx,
                 )
                 .await
-        });
+        }));
 
         let (complete, start) = tokio::join!(complete, start);
         let complete = complete.unwrap().unwrap();
@@ -123,9 +157,10 @@ async fn concurrent_complete_and_start_both_persist() {
 /// mutation persists. Serialising is necessary but not sufficient — a lock that
 /// still saved a stale baseline would pass the first assertion and fail the
 /// second.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_mutations_serialise_and_all_persist() {
-    in_temp_home(async {
+    let tp = TempProfile::new();
+    tp.scoped(async {
         const N: usize = 8;
         let sid = Uuid::new_v4();
         // Start from an existing plan so every mutation is a read-modify-write
@@ -138,7 +173,7 @@ async fn concurrent_mutations_serialise_and_all_persist() {
         let mut handles = Vec::new();
         for i in 0..N {
             let (inside, max_seen) = (inside.clone(), max_seen.clone());
-            handles.push(tokio::spawn(async move {
+            handles.push(tokio::spawn(in_profile(tp.name(), async move {
                 mutate_plan(sid, move |plan| {
                     let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
                     max_seen.fetch_max(now, Ordering::SeqCst);
@@ -159,7 +194,7 @@ async fn concurrent_mutations_serialise_and_all_persist() {
                 })
                 .await
                 .unwrap();
-            }));
+            })));
         }
         for h in handles {
             h.await.unwrap();
@@ -189,6 +224,7 @@ async fn different_sessions_do_not_block_each_other() {
     let lock_a = plan_state_lock(a);
     let held = lock_a.lock().await;
 
+    // B must be acquirable while A is held.
     let lock_b = plan_state_lock(b);
     assert!(
         lock_b.try_lock().is_ok(),
@@ -215,18 +251,20 @@ async fn the_same_session_returns_the_same_lock() {
 /// (design 1.4, option (b)).
 ///
 /// This pins the contract the code relies on at its `drop(state_guard.take())`
-/// site: once the guard is released, another task's mutation proceeds. The
-/// live-spawn half — asserting the release happens at that exact statement
-/// while a real worker is in flight — needs spawn machinery (a service context
-/// plus a manager and registry) that a unit test cannot wire, so it belongs to
-/// the behavioural smoke leg.
+/// site: once the guard is released, another mutation proceeds. The live-spawn
+/// half — asserting the release happens at that exact statement while a real
+/// worker is in flight — needs spawn machinery (a service context plus a manager
+/// and registry) that a unit test cannot wire, so it belongs to the behavioural
+/// smoke leg.
 #[tokio::test]
 async fn the_state_slot_is_free_across_a_slow_await() {
-    in_temp_home(async {
+    let tp = TempProfile::new();
+    tp.scoped(async {
         let sid = Uuid::new_v4();
         seed_active_plan(sid, 2).await;
 
-        // Mirror the code's shape: mutate, release, then await something slow.
+        // Mirror the code's shape: take the slot, release it, then await
+        // something slow in the worker's place.
         let lock = plan_state_lock(sid);
         let guard = lock.lock().await;
         drop(guard);
@@ -258,14 +296,15 @@ async fn the_state_slot_is_free_across_a_slow_await() {
     .await;
 }
 
-/// The read-back receipt (leg 2). The lock alone cannot catch a writer that
-/// does not take it — `archive_plan`, `discard_plan`, or a hand-edited file —
-/// so a save that was replaced must surface as an ERROR rather than a success
-/// receipt. This is the false-receipt half of #506, which is the half that
-/// misleads the agent.
+/// The read-back receipt (leg 2). The lock alone cannot catch a writer that does
+/// not take it — `archive_plan`, `discard_plan`, or a hand-edited file — so a
+/// save that was replaced must surface as an ERROR rather than a success
+/// receipt. This is the false-receipt half of #506, the half that misleads the
+/// agent.
 #[tokio::test]
 async fn read_back_receipt_reports_a_replaced_save() {
-    in_temp_home(async {
+    let tp = TempProfile::new();
+    tp.scoped(async {
         let sid = Uuid::new_v4();
         seed_active_plan(sid, 2).await;
         let expected = load_plan(sid).await.expect("seeded plan");
@@ -276,9 +315,9 @@ async fn read_back_receipt_reports_a_replaced_save() {
             .await
             .expect("a plan that was just persisted must verify");
 
-        // Force the lost update the receipt exists to catch: a stale baseline
-        // is written over the saved file, exactly as a non-lock-taking writer
-        // would leave it.
+        // Force the lost update the receipt exists to catch: a stale baseline is
+        // written over the saved file, exactly as a non-lock-taking writer would
+        // leave it.
         let mut stale = PlanDocument::new(sid, "Stale baseline".to_string());
         stale.status = PlanStatus::Active;
         save_plan(&stale).await.unwrap();
@@ -302,7 +341,8 @@ async fn read_back_receipt_reports_a_replaced_save() {
 /// into a failure. This is the false-negative guard for the receipt above.
 #[tokio::test]
 async fn a_clean_mutation_still_returns_success() {
-    in_temp_home(async {
+    let tp = TempProfile::new();
+    tp.scoped(async {
         let sid = Uuid::new_v4();
         seed_active_plan(sid, 1).await;
 
