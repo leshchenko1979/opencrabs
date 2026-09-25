@@ -1518,10 +1518,25 @@ pub(crate) async fn pace_rich(
             let now = gate_now();
             let need = bucket.next_token_in_for(now, 0.0);
             if need.is_zero() {
-                let _ = bucket.take(now);
-                peer.counters.admitted_rich += 1;
-                peer.recent.push(now, SURFACE_RICH);
-                None
+                // #580: `take` is the ONLY enforcement point for the per-chat
+                // step-2 pause. A paused bucket still REPORTS a token, because
+                // `next_token_in_for` consults `refill` (frozen while paused)
+                // and never the pause itself — so discarding this Result left
+                // a declared window unenforced on the one surface that carries
+                // every measured 429, while typing (`admit_chat_action`) and
+                // edits (`edit_admission`) honour the identical gate.
+                match bucket.take(now) {
+                    Ok(()) => {
+                        peer.counters.admitted_rich += 1;
+                        peer.recent.push(now, SURFACE_RICH);
+                        None
+                    }
+                    Err(_) if class.is_droppable() => {
+                        peer.counters.note_rich_drop(class);
+                        return RichAdmission::Dropped(class);
+                    }
+                    Err(wait) => Some(wait),
+                }
             } else if class.is_droppable() {
                 peer.counters.note_rich_drop(class);
                 return RichAdmission::Dropped(class);

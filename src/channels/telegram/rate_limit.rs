@@ -225,7 +225,17 @@ pub(crate) async fn wait_out(
     extra: &str,
     chat: Option<i64>,
 ) -> WaitOutcome {
-    record_global_429(window, chat);
+    // #580: a 429 with a known chat arms the per-chat step-2 pause as well as
+    // the process-wide deadline. `note_429_pause` records the global itself,
+    // so the known-chat arm goes through it; a 429 with no chat in scope keeps
+    // the bare global recording. The two are independent: the process-wide
+    // deadline de-synchronises every chat, while the per-chat pause stops the
+    // OFFENDING chat's bucket banking quota it would spend the instant that
+    // deadline expires (refill is frozen inside a declared window).
+    match chat {
+        Some(id) => super::governor::note_429_pause(teloxide::types::ChatId(id), window),
+        None => record_global_429(window, None),
+    }
 
     let chat = chat.map_or_else(|| "-".to_string(), |c| c.to_string());
     if exceeds_inline_bound(window) {
