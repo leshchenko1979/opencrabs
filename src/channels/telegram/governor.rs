@@ -964,29 +964,33 @@ pub(crate) fn note_429_pause(chat: ChatId, wait: Duration) {
     let pause = wait.min(MAX_429_PAUSE);
     let now = gate_now();
     let mut map = peers().lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(peer) = map.get_mut(&chat_id) {
-        let mut armed = 0usize;
-        // Owner ruling 2026-09-08 (research-backed): pause ONLY the
-        // offending arm. Telegram's per-chat flood limits are enforced
-        // per surface — 1 msg/s per chat, 20 msg/min per group, ~20
-        // edits/min per group (grammY/PTB FloodLimit, Bot FAQ) — so a
-        // window declared on the rich arm does not throttle the send
-        // arm's separate budget. Pausing everything over-punishes
-        // unrelated traffic; the offending arm is the evidence.
-        for slot in [peer.rich.as_mut(), peer.edits.as_mut()]
-            .into_iter()
-            .flatten()
-        {
-            slot.pause_until = Some(now + pause);
-            armed += 1;
-        }
-        if armed > 0 {
-            peer.counters.pause_armed_429 += 1;
-            tracing::info!(
-                "Governor: 429 pause {pause:?} armed on rich+edits for chat={chat_id} (step 2, per-chat scope)"
-            );
-        }
-    }
+    let peer = map.entry(chat_id).or_default();
+    // Owner ruling 2026-09-08 (research-backed): pause ONLY the
+    // offending arm. Telegram's per-chat flood limits are enforced
+    // per surface — 1 msg/s per chat, 20 msg/min per group, ~20
+    // edits/min per group (grammY/PTB FloodLimit, Bot FAQ) — so a
+    // window declared on the rich arm does not throttle the send
+    // arm's separate budget. Pausing everything over-punishes
+    // unrelated traffic; the offending arm is the evidence.
+    //
+    // #580: `ensure_bucket` rather than `as_mut()`. A 429 can be the FIRST
+    // event a chat produces — the peer map is empty at boot and in a fresh
+    // test registry — and the old `get_mut(..) + flatten()` armed NOTHING
+    // there: the process-wide deadline was recorded while the offending
+    // chat's bucket stayed un-paused, free to bank quota it would spend the
+    // instant that deadline expired.
+    //
+    // Creating the peer does NOT change rollout semantics: `or_default()`
+    // leaves `forum_seen` false, so `pace_rich` still returns `Now` for an
+    // ungoverned chat exactly as it did before. The pause simply waits,
+    // armed, for the chat to become governed.
+    let until = now + pause;
+    ensure_bucket(&mut peer.rich, lim.rich_burst, lim.rich_rate_per_sec).pause_arm(until);
+    ensure_bucket(&mut peer.edits, lim.edit_burst, lim.edit_rate_per_sec).pause_arm(until);
+    peer.counters.pause_armed_429 += 1;
+    tracing::info!(
+        "Governor: 429 pause {pause:?} armed on rich+edits for chat={chat_id} (step 2, per-chat scope)"
+    );
 }
 
 /// G2 gate for `editMessageText`. Returns true when the caller must perform
