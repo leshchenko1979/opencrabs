@@ -466,3 +466,81 @@ async fn the_goal_path_never_clears_a_foreign_await_kind() {
     );
     assert_eq!(binding.await_ref.as_deref(), Some("35423208985"));
 }
+
+/// Falsifying input: a goal that is CLEARED while its deferral await record is
+/// still standing. `clear_goal` DELETES the goal row, so the next
+/// `evaluate_after_turn` takes the `Ok(None)` early return — which is precisely
+/// where the clear used to sit BELOW, skipping it entirely and stranding the
+/// record until the await sweep woke a session that had stopped waiting.
+///
+/// Measured live on the #567 smoke probe (2026-09-25): the record outlived the
+/// cleared goal by 49 minutes, and the daemon log showed the early return
+/// (`Goal satisfied: no active goal`) with no clear behind it.
+#[tokio::test]
+async fn a_cleared_goal_does_not_strand_its_deferral_await_record() {
+    let db = test_db().await;
+    let sid = Uuid::new_v4();
+    let sid_s = bind_session(&db, sid).await;
+    let goal_mgr = GoalManager::new(ServiceContext::new(db.pool().clone()));
+    let repo = SessionBindingRepository::new(db.pool().clone());
+
+    goal_mgr
+        .set_goal(sid, "follow the skill".to_string(), None, None, Some(20))
+        .await
+        .expect("set_goal should succeed");
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let waiting = GoalEvidence {
+        running_tasks: vec!["sleep 180 (running 126s)".to_string()],
+        ..Default::default()
+    };
+    let decision = goal_mgr
+        .evaluate_after_turn(
+            provider.as_ref(),
+            "mock-model",
+            sid,
+            &waiting,
+            "still running",
+        )
+        .await;
+    assert!(
+        matches!(decision, GoalDecision::Deferred { .. }),
+        "the deferral must fire before the clear can be exercised"
+    );
+
+    let binding = repo
+        .by_session(&sid_s)
+        .await
+        .unwrap()
+        .expect("binding must exist");
+    assert_eq!(binding.await_kind.as_deref(), Some("background_task"));
+
+    // The lane abandons the goal while the wait it declared is still standing.
+    goal_mgr
+        .clear_goal(sid)
+        .await
+        .expect("clear_goal should succeed");
+
+    // The next turn-end evaluation finds no goal at all: the early-return path.
+    let _ = goal_mgr
+        .evaluate_after_turn(
+            provider.as_ref(),
+            "mock-model",
+            sid,
+            &GoalEvidence::default(),
+            "goal abandoned",
+        )
+        .await;
+
+    let binding = repo
+        .by_session(&sid_s)
+        .await
+        .unwrap()
+        .expect("binding must exist");
+    assert!(
+        binding.await_kind.is_none(),
+        "a cleared goal leaves nothing waiting — the record must not outlive it, \
+         or the sweep wakes a session that stopped waiting"
+    );
+    assert!(binding.await_at.is_none());
+}

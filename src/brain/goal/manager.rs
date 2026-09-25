@@ -378,6 +378,21 @@ impl GoalManager {
         evidence: &GoalEvidence,
         last_response: &str,
     ) -> GoalDecision {
+        // The deferral's wait is released BEFORE the goal is loaded, and that
+        // ordering is the whole point (#567 fix-up). A goal that has been
+        // CLEARED deletes its row, so `get_goal` returns `None` and the match
+        // below returns early — and that early return used to skip the clear
+        // entirely, stranding the await record until the sweep woke the session
+        // spuriously. Clearing first covers every exit path: no goal, a load
+        // error, a non-active goal, and the normal judged path alike. A deferral
+        // that still holds simply re-writes the record below, so the clear costs
+        // nothing while the wait is genuine.
+        //
+        // Scoped to `DEFERRED_AWAIT_KIND`, which only the deferral writes:
+        // `await_external` accepts `ci_run | peer_lane | owner_gate | external`,
+        // so a wait declared through that tool is untouched (#344).
+        self.clear_deferral_await(session_id).await;
+
         // Load current goal
         let goal = match self.get_goal(session_id).await {
             Ok(Some(g)) => g,
@@ -393,14 +408,6 @@ impl GoalManager {
                 };
             }
         };
-
-        // Any evaluation that reaches here is NOT a deferral: the wait this
-        // goal declared (#567) is over, or the goal has ended. Clearing first
-        // and re-setting only on the deferral path below means a stale wait can
-        // never outlive the deferral it belonged to — and the clear is scoped to
-        // our own kind, so a `ci_run` wait declared through `await_external` in
-        // this same session is untouched (#344).
-        self.clear_deferral_await(session_id).await;
 
         // Check if goal is already completed/failed
         if goal.state != "active" {
