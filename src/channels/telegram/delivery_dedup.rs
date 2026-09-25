@@ -11,7 +11,31 @@
 //! it cannot abort an `await` that is already inside a POST — the abandoned
 //! loop's send landed as msg 11897 while the tail, whose `sent_intermediates`
 //! snapshot had been read 3.3 s earlier (count=0), sent the same text again as
-//! msg 11898. Ten such pairs in one day of ordinary traffic.
+//! msg 11898.
+//!
+//! ## Why admission is a reservation, not a check-then-record
+//!
+//! The first version of this guard called `claim` (lock, test, unlock), then
+//! sent, then `remember`ed (lock, insert). That does not close the race, and
+//! the box measured it failing: shipped as `2d1a32f64`, it logged **zero**
+//! suppressions in a day in which the mechanism recurred, and the per-join-event
+//! duplicate rate was unchanged (6/147 = 4.1 % before, 1/27 = 3.7 % after).
+//!
+//! The reason is where the gap sits. `pace_rich` runs *inside*
+//! `send_rich_with_mermaid_id` (`rich/api.rs:334`), so the distance between the
+//! check and the record is the whole pacing wait plus the POST — measured at
+//! **4.5 s** in the 06:09 recurrence (verdict 06:09:42.036, sends 06:09:46.584
+//! and .638, both `len=2446 hash8=a1fa0f8e`). Two senders claiming within that
+//! window both see "nothing landed yet" and both send. A check separated from
+//! its record by an `await` is not a guard.
+//!
+//! So [`reserve`] *inserts* a pending slot under the lock and admits only the
+//! caller that inserted it. A second sender sees [`Admission::InFlight`] and
+//! waits for the peer's message id instead of sending. [`mark_landed`] fills in
+//! the real id once Telegram confirms; [`release`] drops the reservation when
+//! the send failed, so a genuine retry (the
+//! `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND` retry in `delivery.rs`) is never
+//! suppressed by its own failed attempt.
 //!
 //! The guard sits at [`send_rich_turn_guarded`], the one path both senders
 //! share — the turn's final delivery (`delivery.rs`) and the intermediate
@@ -26,16 +50,9 @@
 //! the tool outbox (`send.rs`) calls that form directly, and a tool asked twice
 //! for the same message must send it twice.
 //!
-//! Two properties are load-bearing:
-//!
-//! * A fingerprint is recorded only once a send has actually LANDED. Recording
-//!   at attempt time would let a failed send convince its own retry (the
-//!   `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND` retry in `delivery.rs`) that it was a
-//!   duplicate, and the message would never go out at all.
-//! * A suppressed send answers with the id the content already landed at
-//!   rather than an error. An error would read to the caller as a failed send
-//!   and drive the HTML fallback — which would deliver the duplicate this
-//!   exists to prevent.
+//! A suppressed send answers with the id the content already landed at rather
+//! than an error. An error would read to the caller as a failed send and drive
+//! the HTML fallback — which would deliver the duplicate this exists to prevent.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -51,6 +68,14 @@ use uuid::Uuid;
 /// closest.
 pub(crate) const TTL: Duration = Duration::from_secs(60);
 
+/// How long a sender that finds a peer already in flight waits for that peer's
+/// message id before giving up and sending anyway. Covers the pacing wait plus
+/// a POST (4.5 s + ~0.1 s measured) with a wide margin.
+const WAIT_MAX: Duration = Duration::from_secs(20);
+
+/// Polling step while waiting on an in-flight peer.
+const WAIT_STEP: Duration = Duration::from_millis(100);
+
 /// Bound on remembered sends. Far above the number of distinct messages in
 /// flight across a busy box, and cheap to rebuild: a miss costs one duplicate,
 /// which is exactly the pre-fix behaviour for that one call.
@@ -60,8 +85,34 @@ const MAX_TRACKED: usize = 256;
 /// same text to one topic — one topic is not one writer.
 type Key = (Uuid, i64, Option<i32>, u64);
 
-fn tracked() -> &'static Mutex<HashMap<Key, (Instant, i32)>> {
-    static TRACKED: OnceLock<Mutex<HashMap<Key, (Instant, i32)>>> = OnceLock::new();
+/// What is known about a destination's content: either a sender owns it right
+/// now, or it landed at a known message id.
+enum Slot {
+    Pending(Instant),
+    Landed(Instant, i32),
+}
+
+impl Slot {
+    fn at(&self) -> Instant {
+        match self {
+            Slot::Pending(t) => *t,
+            Slot::Landed(t, _) => *t,
+        }
+    }
+}
+
+/// Verdict on a reservation attempt.
+pub(crate) enum Admission {
+    /// The caller inserted the reservation and owns the send.
+    Send,
+    /// This content already landed; answer with that message id.
+    Landed(i32),
+    /// Another sender holds the reservation and has not landed yet.
+    InFlight,
+}
+
+fn tracked() -> &'static Mutex<HashMap<Key, Slot>> {
+    static TRACKED: OnceLock<Mutex<HashMap<Key, Slot>>> = OnceLock::new();
     TRACKED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -72,28 +123,43 @@ fn fingerprint(markdown: &str) -> u64 {
     hasher.finish()
 }
 
-/// The message id an identical send already landed at inside the window, or
-/// `None` when this send is fresh and should go out.
+fn key_of(session_id: Uuid, chat_id: i64, thread_id: Option<i32>, markdown: &str) -> Key {
+    (session_id, chat_id, thread_id, fingerprint(markdown))
+}
+
+/// Try to take the reservation for this content, or report who already holds it.
 ///
 /// Expired entries are pruned on every call, so the map cannot grow without
 /// bound even when traffic runs one way.
-pub(crate) fn claim(
+pub(crate) fn reserve(
     session_id: Uuid,
     chat_id: i64,
     thread_id: Option<i32>,
     markdown: &str,
     now: Instant,
-) -> Option<i32> {
+) -> Admission {
     let mut map = tracked().lock().unwrap_or_else(|e| e.into_inner());
-    map.retain(|_, (at, _)| now.saturating_duration_since(*at) < TTL);
-    map.get(&(session_id, chat_id, thread_id, fingerprint(markdown)))
-        .map(|(_, id)| *id)
+    map.retain(|_, slot| now.saturating_duration_since(slot.at()) < TTL);
+    let key = key_of(session_id, chat_id, thread_id, markdown);
+    match map.get(&key) {
+        Some(Slot::Landed(_, id)) => Admission::Landed(*id),
+        Some(Slot::Pending(_)) => Admission::InFlight,
+        None => {
+            if map.len() >= MAX_TRACKED {
+                // Nothing here is worth an eviction policy: dropping the lot
+                // costs one duplicate per live conversation, once.
+                map.clear();
+            }
+            map.insert(key, Slot::Pending(now));
+            Admission::Send
+        }
+    }
 }
 
-/// Record that a send with this content landed as `message_id`.
+/// Record that the reserved send landed as `message_id`.
 ///
 /// Called only after Telegram confirmed the send, never at attempt time.
-pub(crate) fn remember(
+pub(crate) fn mark_landed(
     session_id: Uuid,
     chat_id: i64,
     thread_id: Option<i32>,
@@ -102,13 +168,18 @@ pub(crate) fn remember(
     now: Instant,
 ) {
     let mut map = tracked().lock().unwrap_or_else(|e| e.into_inner());
-    let key = (session_id, chat_id, thread_id, fingerprint(markdown));
+    let key = key_of(session_id, chat_id, thread_id, markdown);
     if map.len() >= MAX_TRACKED && !map.contains_key(&key) {
-        // Nothing here is worth an eviction policy: dropping the lot costs one
-        // duplicate per live conversation, once.
         map.clear();
     }
-    map.insert(key, (now, message_id));
+    map.insert(key, Slot::Landed(now, message_id));
+}
+
+/// Drop the reservation after a send that did not land, so a genuine retry of
+/// this content is not suppressed by its own failed attempt.
+pub(crate) fn release(session_id: Uuid, chat_id: i64, thread_id: Option<i32>, markdown: &str) {
+    let mut map = tracked().lock().unwrap_or_else(|e| e.into_inner());
+    map.remove(&key_of(session_id, chat_id, thread_id, markdown));
 }
 
 /// Send a turn's rich markdown under the duplicate guard (#500).
@@ -126,16 +197,39 @@ pub(crate) async fn send_rich_turn_guarded(
 ) -> anyhow::Result<i32> {
     let thread = thread_id.map(|t| t.0.0);
     let hash8 = fingerprint(markdown) as u32;
-    if let Some(landed_id) = claim(session_id, chat_id.0, thread, markdown, Instant::now()) {
-        tracing::info!(
-            "Telegram: duplicate rich send suppressed — this content already landed as \
-             msg {landed_id} (session={session_id} chat={} thread={thread:?} hash8={hash8:08x})",
-            chat_id.0
-        );
-        return Ok(landed_id);
-    }
 
-    let id = super::rich::send_rich_with_mermaid_id(
+    let mut waited = Duration::ZERO;
+    let owned = loop {
+        match reserve(session_id, chat_id.0, thread, markdown, Instant::now()) {
+            Admission::Send => break true,
+            Admission::Landed(id) => {
+                tracing::info!(
+                    "Telegram: duplicate rich send suppressed — this content already landed as \
+                     msg {id} (session={session_id} chat={} thread={thread:?} hash8={hash8:08x})",
+                    chat_id.0
+                );
+                return Ok(id);
+            }
+            Admission::InFlight => {
+                if waited >= WAIT_MAX {
+                    // The peer reserved but never landed. Sending anyway is the
+                    // pre-fix behaviour for this one call; dropping the content
+                    // would be worse.
+                    tracing::warn!(
+                        "Telegram: rich send waited {WAIT_MAX:?} on an in-flight duplicate that \
+                         never landed — sending anyway (session={session_id} chat={} \
+                         thread={thread:?} hash8={hash8:08x})",
+                        chat_id.0
+                    );
+                    break false;
+                }
+                tokio::time::sleep(WAIT_STEP).await;
+                waited += WAIT_STEP;
+            }
+        }
+    };
+
+    let sent = super::rich::send_rich_with_mermaid_id(
         bot.api_url().as_str(),
         bot.token(),
         chat_id.0,
@@ -145,12 +239,26 @@ pub(crate) async fn send_rich_turn_guarded(
         "turn",
         "-",
     )
-    .await?;
+    .await;
 
-    // A send that returned no message id did not land, so it must not suppress
-    // its own retry.
-    if id != 0 {
-        remember(session_id, chat_id.0, thread, markdown, id, Instant::now());
+    match sent {
+        Ok(id) if id != 0 => {
+            mark_landed(session_id, chat_id.0, thread, markdown, id, Instant::now());
+            Ok(id)
+        }
+        // A send that returned no message id did not land, so it must not
+        // suppress its own retry.
+        Ok(id) => {
+            if owned {
+                release(session_id, chat_id.0, thread, markdown);
+            }
+            Ok(id)
+        }
+        Err(e) => {
+            if owned {
+                release(session_id, chat_id.0, thread, markdown);
+            }
+            Err(e)
+        }
     }
-    Ok(id)
 }
