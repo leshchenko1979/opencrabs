@@ -90,7 +90,7 @@
 
 **Evidence pack** — the mechanical facts the runtime supplies to the judge: running background tasks, unresolved plan tasks, and the turn budget used/max. **Not:** "context" (the judge is given no session history, tool results, or plan text).
 
-**Mechanical gate** — the pre-judge short-circuit: while a background task is still running or a plan task is unresolved, the goal loop continues **without** consulting the model. Both are machine-readable signs of unfinished work that the agent's own prose cannot make untrue.
+**Mechanical gate** — the pre-judge short-circuit: while a background task is still running or a plan task is unresolved, the goal loop acts **without** consulting the model. The two cases then diverge (#567): an unresolved **plan task** is work the agent can advance, so the loop re-prompts and bills the turn; a **running background task** is work it is *waiting on*, so the loop defers — the turn ends, the budget is untouched, and an await record arms the completion wake. Both are machine-readable signs the agent's own prose cannot make untrue.
 
 **Uncertain streak** — consecutive `UNCERTAIN` verdicts on a goal. At `MAX_CONSECUTIVE_UNCERTAIN` (3) the goal parks as `paused`, naming the exhausted evidence budget; a `VERIFIED` or `REJECTED` verdict resets the streak.
 

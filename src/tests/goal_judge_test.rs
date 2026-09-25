@@ -444,10 +444,14 @@ fn parse_or_continue_truncates_non_ascii_without_panicking() {
 // or an open plan task), and how many UNCERTAIN verdicts in a row are too many.
 // ---------------------------------------------------------------------------
 
-/// A background task the harness can still see running is unfinished work, so
-/// the judge is never asked — the mechanical gate outranks any status report.
+/// A running background task is work the agent is WAITING on, not work it can
+/// advance — so the judge is still never asked, but the turn ends deferred
+/// rather than re-prompted (#567). Falsifying input: `running_tasks` non-empty
+/// with no open plan task. Before #567 this returned `Continue` and billed the
+/// turn, which is the defect: the continuation prompt asks for work that does
+/// not exist, so the turn can only re-report until the budget runs out.
 #[tokio::test]
-async fn running_task_short_circuits_the_judge() {
+async fn running_task_defers_the_goal_without_billing_the_turn() {
     let db = Database::connect_in_memory().await.unwrap();
     db.run_migrations().await.unwrap();
     let goal_mgr = GoalManager::new(ServiceContext::new(db.pool().clone()));
@@ -478,39 +482,44 @@ async fn running_task_short_circuits_the_judge() {
         .await;
 
     match decision {
-        GoalDecision::Continue {
-            continuation_prompt,
-            ..
+        GoalDecision::Deferred {
+            ref reason,
+            ref wake_ref,
         } => {
             assert!(
-                continuation_prompt.contains("Mechanical gate:"),
-                "prompt must name the mechanical gate, got: {continuation_prompt}"
+                reason.contains("background task(s) still running"),
+                "reason must name the hold reason, got: {reason}"
             );
             assert!(
-                continuation_prompt.contains("background task(s) still running"),
-                "prompt must name the hold reason, got: {continuation_prompt}"
+                reason.contains("cargo test --all-features"),
+                "reason must name the running task, got: {reason}"
             );
-            assert!(
-                continuation_prompt.contains("cargo test --all-features"),
-                "prompt must name the running task, got: {continuation_prompt}"
+            assert_eq!(
+                wake_ref, "cargo test --all-features (pid 4242)",
+                "wake_ref must carry the task label so the await record names what it waits on"
             );
         }
-        other => panic!("expected GoalDecision::Continue, got: {other:?}"),
+        other => panic!("expected GoalDecision::Deferred, got: {other:?}"),
     }
 
     assert_eq!(
         provider.call_count(),
         0,
-        "the mechanical gate must skip the judge entirely"
+        "the deferral must still skip the judge entirely"
     );
 
-    // The turn still counts against the budget, and the goal stays live.
+    // The turn performs no goal work, so it must not be billed; the goal stays
+    // live so the completion wake can resume it.
     let after = goal_mgr.get_goal(sid).await.unwrap().unwrap();
-    assert_eq!(after.turns_used, 1);
+    assert_eq!(
+        after.turns_used, 0,
+        "a deferred turn must not consume the budget (billing it is the #567 defect)"
+    );
     assert_eq!(after.state, "active");
 }
 
-/// An open plan task is the same class of evidence as a running process.
+/// An open plan task is work the agent can actually advance, so the #299
+/// re-prompt stands — and unlike a deferral it still bills the turn.
 #[tokio::test]
 async fn open_plan_task_short_circuits_the_judge() {
     let db = Database::connect_in_memory().await.unwrap();
@@ -537,10 +546,18 @@ async fn open_plan_task_short_circuits_the_judge() {
         GoalDecision::Continue {
             continuation_prompt,
             ..
-        } => assert!(
-            continuation_prompt.contains("plan task(s) still open"),
-            "prompt must name the open plan tasks, got: {continuation_prompt}"
-        ),
+        } => {
+            // Moved here from the running-task leg (#567): the mechanical gate
+            // still exists, it just no longer covers the running-task case.
+            assert!(
+                continuation_prompt.contains("Mechanical gate:"),
+                "prompt must name the mechanical gate, got: {continuation_prompt}"
+            );
+            assert!(
+                continuation_prompt.contains("plan task(s) still open"),
+                "prompt must name the open plan tasks, got: {continuation_prompt}"
+            );
+        }
         other => panic!("expected GoalDecision::Continue, got: {other:?}"),
     }
 
