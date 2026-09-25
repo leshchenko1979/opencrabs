@@ -171,9 +171,12 @@ pub(crate) async fn wait_global_cooldown(bound: Duration) -> bool {
     };
 
     let wait = remaining.min(bound);
-    #[cfg(test)]
-    super::governor::test_support::advance(wait.as_millis() as u64);
-
+    // The real sleep IS the clock here: this function is awaited by tests that
+    // read wall time back (`global_pacer_burst_smoothing_and_cooldown` measures
+    // the window it waited). It must NOT also advance the virtual offset — the
+    // two together moved the clock by `2 x wait`, so a deadline still seconds
+    // out read as cleared and a bounded wait reported success against a window
+    // it never waited out (#556).
     tokio::time::sleep(wait).await;
     !is_global_cooldown_active()
 }
@@ -234,6 +237,11 @@ pub(crate) async fn wait_out(
         window.as_secs()
     );
 
+    // Both clocks are needed HERE: every caller of this function in tests runs
+    // on a paused clock, which the virtual offset does not touch — the advance
+    // moves `gate_now`, the sleep moves tokio's clock, and the callers read
+    // both. (`wait_global_cooldown` is the opposite case: its callers read wall
+    // time back, so it must sleep and must NOT advance — see its note.)
     #[cfg(test)]
     super::governor::test_support::advance(window.as_millis() as u64);
 
