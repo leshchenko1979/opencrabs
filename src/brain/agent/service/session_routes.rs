@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use uuid::Uuid;
 
@@ -185,6 +186,58 @@ pub(crate) fn turn_probe(session_id: Uuid) -> Option<TurnProbe> {
             None
         }
     }
+}
+
+/// True while ANY registered session is mid-turn (#522 AFK gate).
+///
+/// Probes are CLONED out under the registry lock and CALLED after it is
+/// released: each probe takes its own channel's lock (telegram's
+/// `active_turns`), so calling one while holding `TURN_PROBES` would order the
+/// two locks against each other.
+///
+/// A poisoned registry reads as BUSY, not idle: a spurious "busy" costs at most
+/// one `max_delay` deferral of a housekeeping tick, whereas a spurious "idle"
+/// stalls a live turn on a 16 s Store-mutex hold.
+pub(crate) fn any_turn_in_flight() -> bool {
+    let probes: Vec<TurnProbe> = match TURN_PROBES.lock() {
+        Ok(guard) => guard
+            .as_ref()
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default(),
+        Err(e) => {
+            tracing::error!(target: "background_task", "Could not read turn probes: {e}");
+            return true;
+        }
+    };
+    probes.into_iter().any(|p| p())
+}
+
+/// Instant of the last observed fleet activity: an in-flight turn OR any
+/// inbound message (#522 owner refinement). `None` until seeded or noted.
+///
+/// One clock for the whole process, deliberately: the reclaim tick needs a
+/// "is anyone using this daemon right now" answer, and per-chat granularity
+/// would buy nothing a housekeeping tick can spend. The cost is that traffic in
+/// ANY chat the bot can see defers the reclaim for every chat, bounded by
+/// `MEMORY_RECLAIM_MAX_DELAY`.
+static LAST_ACTIVITY: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Note fleet activity — resets the AFK clock.
+///
+/// Two writers: the reclaim ticker (a turn is in flight) and every inbound
+/// channel message. The channel writer is what makes a group message from
+/// another member — one that starts no turn — count as activity.
+pub fn note_activity() {
+    if let Ok(mut guard) = LAST_ACTIVITY.lock() {
+        *guard = Some(Instant::now());
+    }
+}
+
+/// Last activity instant, or `None` when the clock was never seeded or the lock
+/// is unreadable. A caller reads `None` as "just active", i.e. it DEFERS — the
+/// same fail-BUSY policy as [`any_turn_in_flight`].
+pub fn last_activity() -> Option<Instant> {
+    LAST_ACTIVITY.lock().ok().and_then(|g| *g)
 }
 
 /// Does the session still own the channel it was bound to?

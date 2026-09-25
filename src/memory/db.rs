@@ -548,6 +548,11 @@ impl Store {
 
                 CREATE INDEX IF NOT EXISTS idx_imports_module ON imports(module_path);
                 CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file_path);
+
+                -- #522: replace_file_graph deletes a file's graph rows by
+                -- file_path; without this index every such DELETE is a full
+                -- scan of the table that doubled to GiB.
+                CREATE INDEX IF NOT EXISTS idx_call_edges_file ON call_edges(file_path);
                 ",
             )
             .map_err(|e| format!("ensure_symbol_tables: {e}"))?;
@@ -571,6 +576,45 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM imports", [], |r| r.get(0))
             .map_err(|e| format!("symbol_graph_counts imports: {e}"))?;
         Ok((symbols, edges, imports))
+    }
+
+    /// Drop every graph row owned by one file so the next extract REPLACES it
+    /// instead of appending (#522). One transaction: a crash mid-replace must
+    /// never leave the file with a partial or empty graph.
+    #[cfg(feature = "code-graph")]
+    pub fn replace_file_graph(&self, file_path: &str) -> Result<(), String> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("replace_file_graph begin: {e}"))?;
+        tx.execute(
+            "DELETE FROM symbols WHERE file_path = ?1",
+            params![file_path],
+        )
+        .map_err(|e| format!("replace_file_graph symbols: {e}"))?;
+        tx.execute(
+            "DELETE FROM call_edges WHERE file_path = ?1",
+            params![file_path],
+        )
+        .map_err(|e| format!("replace_file_graph call_edges: {e}"))?;
+        tx.execute(
+            "DELETE FROM imports WHERE file_path = ?1",
+            params![file_path],
+        )
+        .map_err(|e| format!("replace_file_graph imports: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("replace_file_graph commit: {e}"))?;
+        Ok(())
+    }
+
+    /// Free pages currently on the SQLite freelist; `0` when the pragma fails.
+    ///
+    /// Not cfg-gated: the maintenance sweep reads it on every build, and a
+    /// failing pragma must read as "no holes" rather than error a sweep.
+    pub fn freelist_count(&self) -> i64 {
+        self.conn
+            .query_row("PRAGMA freelist_count;", [], |row| row.get(0))
+            .unwrap_or(0)
     }
 
     /// Insert a symbol into the symbol graph.
@@ -1068,12 +1112,17 @@ impl Store {
     }
 
     /// Run safe memory store maintenance (optimize, passive checkpoint, and conditional vacuum) (#273).
+    ///
+    /// Default knobs. The maintenance sweep passes its own through
+    /// [`Store::vacuum_memory_with`] so the freelist gate and the reclaim
+    /// budget are always the same numbers (#522).
     pub fn vacuum_memory(&self) -> Result<bool, String> {
-        crate::db::execute_safe_maintenance(
-            &self.conn,
-            "memory.db",
-            crate::db::MaintenanceKnobs::default(),
-        )
-        .map_err(|e| format!("vacuum_memory: {e}"))
+        self.vacuum_memory_with(crate::db::MaintenanceKnobs::default())
+    }
+
+    /// [`Store::vacuum_memory`] under caller-supplied knobs (#522).
+    pub fn vacuum_memory_with(&self, knobs: crate::db::MaintenanceKnobs) -> Result<bool, String> {
+        crate::db::execute_safe_maintenance(&self.conn, "memory.db", knobs)
+            .map_err(|e| format!("vacuum_memory: {e}"))
     }
 }

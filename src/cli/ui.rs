@@ -1238,6 +1238,13 @@ async fn cmd_chat_inner(
         std::time::Duration::from_secs(86400),
     );
 
+    // Memory-only reclaim (#522): ONE bounded #321 batch per tick, skipped
+    // while any turn is in flight or any inbound message has just landed.
+    // Message prune and the main-DB reclaim stay on the 24 h sweep above.
+    crate::services::maintenance::MaintenanceService::spawn_memory_reclaim(
+        crate::services::maintenance::MEMORY_RECLAIM_TICK,
+    );
+
     let agent_service = Arc::new(
         AgentService::new(provider.clone(), service_context.clone(), config)
             .await
