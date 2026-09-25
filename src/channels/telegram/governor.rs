@@ -984,9 +984,14 @@ pub(crate) fn note_429_pause(chat: ChatId, wait: Duration) {
     // leaves `forum_seen` false, so `pace_rich` still returns `Now` for an
     // ungoverned chat exactly as it did before. The pause simply waits,
     // armed, for the chat to become governed.
+    //
+    // Set `pause_until` directly rather than through `pause_arm`: that helper
+    // is `#[cfg(test)]` (it exists so the internals test can arm a pause on a
+    // clock-pure bucket), and this is production code. This is the same field
+    // assignment the pre-#580 loop used.
     let until = now + pause;
-    ensure_bucket(&mut peer.rich, lim.rich_burst, lim.rich_rate_per_sec).pause_arm(until);
-    ensure_bucket(&mut peer.edits, lim.edit_burst, lim.edit_rate_per_sec).pause_arm(until);
+    ensure_bucket(&mut peer.rich, lim.rich_burst, lim.rich_rate_per_sec).pause_until = Some(until);
+    ensure_bucket(&mut peer.edits, lim.edit_burst, lim.edit_rate_per_sec).pause_until = Some(until);
     peer.counters.pause_armed_429 += 1;
     tracing::info!(
         "Governor: 429 pause {pause:?} armed on rich+edits for chat={chat_id} (step 2, per-chat scope)"
