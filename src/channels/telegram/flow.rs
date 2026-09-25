@@ -312,12 +312,12 @@ pub(crate) struct StreamingState {
     /// instead of "✅ Finished". Parallel to [`Self::bg_indicator`] (the footer
     /// label) but carries the numeric count the header needs.
     pub(crate) bg_count: Option<usize>,
-    /// Alive sub-agent counts at settle time (#1183), from the session-scoped
-    /// read of the (process-global) sub-agent manager: `working` vs `awaiting`
-    /// collection. Zero while the turn is live; stamped once at settle next to
-    /// [`Self::bg_count`] so the waiting header covers BOTH background
-    /// registries — sub-agents live outside `BackgroundTaskManager`, which the
-    /// pre-#1183 header read exclusively.
+    /// Alive sub-agent counts (#1183), from the session-scoped read of the
+    /// (process-global) sub-agent manager: `working` vs `awaiting` collection.
+    /// Stamped on every activity tick while the turn is live (#585) and again
+    /// at settle beside [`Self::bg_count`], so the telemetry segment and the
+    /// waiting header both see a real count — sub-agents live outside
+    /// `BackgroundTaskManager`, which the pre-#1183 header read exclusively.
     pub(crate) subagent_counts: SubagentCounts,
     /// Count of pending queued reactions / user messages mid-turn (#232).
     pub(crate) queued_count: usize,
