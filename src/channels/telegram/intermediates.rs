@@ -325,12 +325,16 @@ where
                 }
                 if attempt < MAX_RETRIES {
                     attempt += 1;
-                    super::rate_limit::wait_out(
+                    let outcome = super::rate_limit::wait_out(
                         what,
                         requested,
                         &format!(" (attempt {attempt}/{MAX_RETRIES})"),
+                        None,
                     )
                     .await;
+                    if matches!(outcome, super::rate_limit::WaitOutcome::Deferred) {
+                        return Err(teloxide::RequestError::RetryAfter(secs));
+                    }
                 } else {
                     tracing::error!(
                         "Telegram: {what} still rate-limited after {MAX_RETRIES} retries ({}s) — giving up",

@@ -27,6 +27,7 @@ async fn send_rich_markdown_id_uses_custom_api_url() {
         None,
         "test",
         "-",
+        crate::channels::telegram::governor::EditClass::Final,
     )
     .await;
 
@@ -55,6 +56,7 @@ async fn send_rich_html_id_uses_custom_api_url() {
         None,
         "test",
         "-",
+        crate::channels::telegram::governor::EditClass::Final,
     )
     .await;
 
@@ -83,6 +85,7 @@ async fn edit_rich_html_uses_custom_api_url() {
         None,
         "test",
         "-",
+        crate::channels::telegram::governor::EditClass::Final,
     )
     .await;
 
@@ -126,6 +129,7 @@ async fn edit_rich_markdown_media_url_entry_uses_custom_api_url() {
         Some(&kb),
         "test",
         "-",
+        crate::channels::telegram::governor::EditClass::Final,
     )
     .await;
 
@@ -163,6 +167,7 @@ async fn send_rich_markdown_media_target_id_uses_custom_api_url() {
         None,
         "test",
         "-",
+        crate::channels::telegram::governor::EditClass::Final,
     )
     .await;
 
@@ -207,6 +212,7 @@ async fn a_base_with_a_trailing_slash_does_not_double_the_separator() {
         None,
         "test",
         "-",
+        crate::channels::telegram::governor::EditClass::Final,
     )
     .await;
 
@@ -234,6 +240,7 @@ async fn a_base_without_a_trailing_slash_still_works() {
         None,
         "test",
         "-",
+        crate::channels::telegram::governor::EditClass::Final,
     )
     .await;
 

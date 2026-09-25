@@ -890,17 +890,19 @@ pub(crate) async fn send_buttons_raw(
                 return Err("rate-limited after retry".to_string());
             }
             attempt += 1;
-            let wait = parsed
-                .get("parameters")
-                .and_then(|p| p.get("retry_after"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(5)
-                .min(15);
-            let wait = std::time::Duration::from_secs(wait);
-            // This path sleeps on its own rather than going through `wait_out`,
-            // so without this the 429 stays private to one send.
-            super::rate_limit::record_global_429(wait);
-            tokio::time::sleep(wait).await;
+            let wait = std::time::Duration::from_secs(
+                parsed
+                    .get("parameters")
+                    .and_then(|p| p.get("retry_after"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(5),
+            );
+            if matches!(
+                super::rate_limit::wait_out("send_buttons", wait, "", Some(chat_id)).await,
+                super::rate_limit::WaitOutcome::Deferred,
+            ) {
+                return Err("rate-limited by a long retry_after window".to_string());
+            }
             continue;
         }
         if status.is_success()

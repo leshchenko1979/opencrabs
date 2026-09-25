@@ -120,9 +120,21 @@ const GLOBAL_MAX_HOLD: Duration = Duration::from_secs(5);
 ///
 /// Returns `true` if a permit was cleanly acquired or successfully waited for,
 /// or `false` if the hold exceeded `GLOBAL_MAX_HOLD` and failed open to prevent deadlock.
+///
+/// Since #556 it also returns `false` when an active cooldown outlasts
+/// [`rate_limit::MAX_INLINE_RATE_LIMIT_WAIT`]. The cooldown deadline is never
+/// shortened, so a multi-minute ban cannot be waited out inline; the caller
+/// decides what that means — [`pace_rich`] drops or defers, [`pace_send`] warns
+/// and fails open to the reactive backstop.
 pub(crate) async fn acquire_global_permit() -> bool {
-    // 1. First, respect any active global 429 cooldown lock
-    super::rate_limit::wait_global_cooldown().await;
+    // 1. First, respect any active global 429 cooldown lock. Bounded (#556):
+    //    sleeping the full deadline here is the #1064 regression by another
+    //    door, so a cooldown that outlasts the bound fails closed instead.
+    if !super::rate_limit::wait_global_cooldown(super::rate_limit::MAX_INLINE_RATE_LIMIT_WAIT)
+        .await
+    {
+        return false;
+    }
 
     // 2. Proactive global token bucket pacing
     let mut total_held = Duration::ZERO;
@@ -464,12 +476,33 @@ pub(crate) struct Counters {
     pub(crate) throttled_typing_ms: u64,
     pub(crate) throttled_send_ms: u64,
     pub(crate) throttled_rich_ms: u64,
+    /// G4 rich-endpoint drops of cosmetic chrome (#556). Counted separately
+    /// from the G2 `dropped_*` family on purpose: the two gates spend
+    /// different budgets, and a summary that merges them would attribute a
+    /// rich refusal to the edit bucket.
+    pub(crate) dropped_rich: u64,
+    /// G4 rich calls refused because the global 429 cooldown outlasted the
+    /// inline bound and the class may not be dropped (#556).
+    pub(crate) deferred_rich: u64,
 }
 
 impl Counters {
     /// Record a ladder drop. The Final arm stays empty ON PURPOSE: finals are
     /// never dropped here — admission queues them instead (#1211).
-    pub(crate) fn note_drop(&mut self, class: EditClass) {
+    /// Record a G4 rich drop (#556). `_class` rides along for the same reason
+    /// [`Self::note_drop`] carries one: the counter is per-gate, not
+    /// per-class, and a future rank change must not start counting here.
+    pub(crate) fn note_rich_drop(&mut self, _class: EditClass) {
+        self.dropped_rich += 1;
+    }
+
+    /// Record a G4 rich deferral (#556) — a final or interactive rich call
+    /// refused because a cooldown outlasted the inline bound.
+    pub(crate) fn note_rich_defer(&mut self, _class: EditClass) {
+        self.deferred_rich += 1;
+    }
+
+    /// Record a ladder drop. The Final arm stays empty ON PURPOSE: finals are
         match class {
             EditClass::Clock => self.dropped_clock += 1,
             EditClass::BrainPreview => self.dropped_brain_preview += 1,
@@ -503,6 +536,8 @@ impl Counters {
             && self.pause_armed_429 == 0
             && self.throttled_typing_ms == 0
             && self.throttled_send_ms == 0
+            && self.dropped_rich == 0
+            && self.deferred_rich == 0
     }
 }
 
@@ -539,7 +574,7 @@ pub(crate) fn format_summary(chat_id: i64, c: &Counters, finals_pending: usize) 
     Some(format!(
         "Telegram rate-limiter chat={chat_id}: \
          admitted{{typing={},edits={},sends={},rich={}}} \
-         dropped{{clock={},brain_preview={},intermediary={},status={},typing={}}} \
+         dropped{{clock={},brain_preview={},intermediary={},status={},typing={},rich={},deferred_rich={}}} \
          finals{{queued={},superseded={},delivered={},failed={},pending={}}} \
          interactive{{admitted={},overflow={},pause429={}}} \
          throttled_ms{{typing={},send={},rich={}}}",
@@ -552,6 +587,8 @@ pub(crate) fn format_summary(chat_id: i64, c: &Counters, finals_pending: usize) 
         c.dropped_intermediary,
         c.dropped_status,
         c.dropped_typing,
+        c.dropped_rich,
+        c.deferred_rich,
         c.queued_finals,
         c.superseded_finals,
         c.delivered_finals,
@@ -759,6 +796,16 @@ pub(crate) enum EditClass {
 }
 
 impl EditClass {
+    /// Whether this class may be DROPPED when its bucket is dry (#556).
+    ///
+    /// The G2 ladder boundary, expressed once so the rich gate reuses the same
+    /// classifier instead of inventing a second one: everything below `Final`
+    /// self-heals on the next full-state refresh, while finals queue and taps
+    /// pass through.
+    pub(crate) fn is_droppable(self) -> bool {
+        self.drop_rank() < EditClass::Final.drop_rank()
+    }
+
     /// Ladder rank: higher drops later. Kept explicit so a test pins the
     /// ordering the issue locks in, even if variants reorder.
     pub(crate) fn drop_rank(self) -> u8 {
@@ -791,7 +838,7 @@ enum Admission {
 /// Fire-and-forget safe: best-effort estimate of which bucket felt the 429.
 pub(crate) fn note_429_pause(chat: ChatId, wait: Duration) {
     // Record in global cooldown lock so all concurrent operations across all chats/topics coordinate
-    super::rate_limit::record_global_429(wait);
+    super::rate_limit::record_global_429(wait, Some(chat.0));
     let chat_id = chat.0;
     if chat_id >= 0 {
         return; // DMs ungoverned, matching every other gate
@@ -1044,7 +1091,7 @@ async fn deliver_final(chat_id: i64, msg_id: i32, mut pending: PendingFinal) {
     // other: record it before the per-peer requeue maths, so other chats pause
     // instead of walking into the same throttle.
     if let Some(wait) = retry_after {
-        super::rate_limit::record_global_429(wait);
+        super::rate_limit::record_global_429(wait, Some(chat_id));
     }
     let verdict = {
         let mut map = peers().lock().unwrap_or_else(|e| e.into_inner());
@@ -1087,18 +1134,28 @@ async fn deliver_final(chat_id: i64, msg_id: i32, mut pending: PendingFinal) {
             );
         }
         Verdict::Retried => {
-            // Respect a 429 window if that is what bounced us, capped inline
-            // like every other send path (#1064), then let the tick cadence
-            // handle plain transients.
+            // Respect a 429 window if that is what bounced us: sleep it in
+            // full when it is within the inline bound (#556 — no truncated
+            // wait, that is what fired the retry inside the ban), and defer
+            // when it is not, letting the tick cadence handle plain
+            // transients.
             if let Some(window) = retry_after {
-                let (wait, _) = super::rate_limit::clamp_inline_wait(window);
-                tokio::time::sleep(wait).await;
-                // Under tokio's paused runtime the sleep above returns
-                // instantly, so the virtual clock has to absorb it or the
-                // hold accounting never moves and this loop cannot reach its
-                // bound. Production reads the same real clock for both.
-                #[cfg(test)]
-                test_support::advance(wait.as_millis() as u64);
+                if super::rate_limit::exceeds_inline_bound(window) {
+                    tracing::warn!(
+                        "Telegram rate-limiter: queued final deferred — {}s window exceeds \
+                         the {}s inline bound, next tick re-attempts chat={chat_id} msg={msg_id}",
+                        window.as_secs(),
+                        super::rate_limit::MAX_INLINE_RATE_LIMIT_WAIT.as_secs()
+                    );
+                } else {
+                    tokio::time::sleep(window).await;
+                    // Under tokio's paused runtime the sleep above returns
+                    // instantly, so the virtual clock has to absorb it or the
+                    // hold accounting never moves and this loop cannot reach its
+                    // bound. Production reads the same real clock for both.
+                    #[cfg(test)]
+                    test_support::advance(window.as_millis() as u64);
+                }
             }
         }
     }
@@ -1128,6 +1185,7 @@ async fn run_final_edit(chat_id: i64, msg_id: i32, pending: &PendingFinal) -> Re
             reply_markup.as_ref(),
             "turn",
             "-",
+            EditClass::Final,
         )
         .await
         .map_err(|e| e.to_string()),
@@ -1140,6 +1198,7 @@ async fn run_final_edit(chat_id: i64, msg_id: i32, pending: &PendingFinal) -> Re
             reply_markup.as_ref(),
             "turn",
             "-",
+            EditClass::Final,
         )
         .await
         .map_err(|e| e.to_string()),
@@ -1163,13 +1222,7 @@ async fn run_final_edit(chat_id: i64, msg_id: i32, pending: &PendingFinal) -> Re
 // G3 — send pacing
 // ---------------------------------------------------------------------------
 
-enum PaceVerdict {
-    Go,
-    /// Budget exhausted — fail OPEN (delay-never-drop, #297): the send goes
-    /// out and the reactive backstop owns whatever comes back.
-    FailOpen(Duration),
-    Wait(Duration),
-}
+
 
 /// G3 gate ahead of full-message sends. Two AND-ed buckets: ~1/s spacing and
 /// an ~18/min group ceiling (both configurable). Holds the caller just long
@@ -1273,28 +1326,76 @@ pub(crate) async fn pace_send(chat: ChatId) {
 /// the reactive `wait_out` backstop still owns anything that gets through.
 /// Unlike [`pace_send`], `pace_rich` never fails open past [`SEND_MAX_HOLD`]:
 /// rich calls wait until a token is refilled so they never fire unadmitted into
+
+/// G4 gate ahead of rich-endpoint calls (`sendRichMessage` and its edit
+/// sibling), which sit in their own method family with their own budget.
+///
+/// G1/G2/G3 govern `sendChatAction`, `editMessageText` and `sendMessage`.
+/// Telegram meters the rich endpoint separately, so none of those buckets
+/// sees its traffic — a deployment can therefore take zero typing 429s while
+/// the rich endpoint 429s hundreds of times a day. Measured on one: 260 real
+/// 429s in a day against 7,891 rich edits and 399 rich sends, each costing a
+/// 17-24 s `retry_after`, roughly 87 minutes of stalled flow rendering. Those
+/// 429s cluster in the p99 minutes (40-46 calls) while the median minute runs
+/// 18, which is what the 30/min default is sized against.
+///
+/// Holds rather than drops, like [`pace_send`]: a rich call is content, and
+/// the reactive `wait_out` backstop still owns anything that gets through.
+/// Unlike [`pace_send`], `pace_rich` never fails open past [`SEND_MAX_HOLD`]:
+/// rich calls wait until a token is refilled so they never fire unadmitted into
 /// Telegram to trigger server-level 429 lockouts across the chat.
-pub(crate) async fn pace_rich(chat: ChatId, thread_id: Option<i32>) {
+/// Result of G4 rich-endpoint admission (#556).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RichAdmission {
+    /// A rich call may proceed to Telegram.
+    Now,
+    /// Cosmetic rich chrome was dropped before it could consume the endpoint budget.
+    Dropped(EditClass),
+    /// A global 429 cooldown remains active after the bounded wait.
+    Deferred,
+}
+
+/// G4 rich-endpoint admission. Cosmetic classes may drop when no rich token is
+/// available; finals and interactive edits wait until they acquire one.
+pub(crate) async fn pace_rich(
+    chat: ChatId,
+    thread_id: Option<i32>,
+    class: EditClass,
+) -> RichAdmission {
     let chat_id = chat.0;
     // DMs (positive ids) untouched, cheap exit first.
     if chat_id >= 0 {
-        return;
+        return RichAdmission::Now;
     }
     // Proactive global limiter & global 429 lock. Above the per-chat gate on
     // purpose: `limits.enabled` is a per-chat pacing policy, while the global
     // permit is the process-wide ceiling and the shared 429 cooldown. Below
     // the gate, switching the per-chat pacer off would also delete the safety
     // floor and let every chat keep firing straight through a live cooldown.
-    acquire_global_permit().await;
+    // #556: `false` now also means a cooldown outlasts the inline bound, so
+    // the refusal is classified — chrome drops, content defers.
+    if !acquire_global_permit().await {
+        return refuse_rich(chat_id, class);
+    }
 
     let lim = Limits::from_config();
     if !lim.enabled {
-        return;
+        return RichAdmission::Now;
     }
 
     ensure_summary_task();
     let mut waited = Duration::ZERO;
     loop {
+        // #556: a cooldown armed by ANOTHER chat must not be sent through just
+        // because this bucket has a token. Re-checked each pass and bounded:
+        // a cooldown that outlasts the bound refuses instead of being slept.
+        if !super::rate_limit::wait_global_cooldown(
+            super::rate_limit::MAX_INLINE_RATE_LIMIT_WAIT,
+        )
+        .await
+        {
+            return refuse_rich(chat_id, class);
+        }
         let delay = {
             let mut map = peers().lock().unwrap_or_else(|e| e.into_inner());
             let peer = map.entry(chat_id).or_default();
@@ -1305,7 +1406,7 @@ pub(crate) async fn pace_rich(chat: ChatId, thread_id: Option<i32>) {
                 peer.forum_seen = true;
             }
             if !peer.forum_seen {
-                return;
+                return RichAdmission::Now;
             }
             let bucket = ensure_bucket(&mut peer.rich, lim.rich_burst, lim.rich_rate_per_sec);
             let now = gate_now();
@@ -1314,6 +1415,9 @@ pub(crate) async fn pace_rich(chat: ChatId, thread_id: Option<i32>) {
                 let _ = bucket.take(now);
                 peer.counters.admitted_rich += 1;
                 None
+            } else if class.is_droppable() {
+                peer.counters.note_rich_drop(class);
+                return RichAdmission::Dropped(class);
             } else {
                 Some(need)
             }
@@ -1321,7 +1425,7 @@ pub(crate) async fn pace_rich(chat: ChatId, thread_id: Option<i32>) {
         match delay {
             None => {
                 fold_rich_ms(chat_id, waited);
-                return;
+                return RichAdmission::Now;
             }
             Some(delay) => {
                 let start = gate_now();
@@ -1335,6 +1439,24 @@ pub(crate) async fn pace_rich(chat: ChatId, thread_id: Option<i32>) {
                 waited += gate_now().duration_since(start);
             }
         }
+    }
+}
+
+/// Classify a G4 refusal (#556): cosmetic chrome drops, finals and taps defer.
+///
+/// Either way the call is NOT sent and NOT slept through — a cooldown that
+/// outlasts the inline bound is the one thing the rich gate must never wait
+/// out inline, because that is the #1064 regression wearing a different hat.
+/// Counted per gate so a summary separates a rich refusal from an edit drop.
+fn refuse_rich(chat_id: i64, class: EditClass) -> RichAdmission {
+    let mut map = peers().lock().unwrap_or_else(|e| e.into_inner());
+    let peer = map.entry(chat_id).or_default();
+    if class.is_droppable() {
+        peer.counters.note_rich_drop(class);
+        RichAdmission::Dropped(class)
+    } else {
+        peer.counters.note_rich_defer(class);
+        RichAdmission::Deferred
     }
 }
 
@@ -1494,6 +1616,8 @@ pub(crate) mod test_support {
         pub throttled_typing_ms: u64,
         pub admitted_rich: u64,
         pub throttled_rich_ms: u64,
+        pub dropped_rich: u64,
+        pub deferred_rich: u64,
         pub throttled_send_ms: u64,
         pub finals_pending: usize,
     }
@@ -1521,6 +1645,8 @@ pub(crate) mod test_support {
             throttled_typing_ms: p.counters.throttled_typing_ms,
             admitted_rich: p.counters.admitted_rich,
             throttled_rich_ms: p.counters.throttled_rich_ms,
+            dropped_rich: p.counters.dropped_rich,
+            deferred_rich: p.counters.deferred_rich,
             throttled_send_ms: p.counters.throttled_send_ms,
             finals_pending: p.finals.len(),
         })

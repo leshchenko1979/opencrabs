@@ -28,7 +28,13 @@ async fn plan_card_create_throttle_arms_the_global_cooldown() {
     assert!(!is_global_cooldown_active(), "precondition: no cooldown");
 
     let state = TelegramState::new();
-    handle_create_failure("Too Many Requests: retry after 9", &state, Uuid::new_v4()).await;
+    handle_create_failure(
+        "Too Many Requests: retry after 9",
+        &state,
+        Uuid::new_v4(),
+        ChatId(-100),
+    )
+    .await;
 
     assert!(
         is_global_cooldown_active(),
@@ -75,7 +81,13 @@ async fn a_non_throttle_card_failure_leaves_the_cooldown_alone() {
     reset_global_cooldown();
 
     let state = TelegramState::new();
-    handle_create_failure("Bad Request: message text is empty", &state, Uuid::new_v4()).await;
+    handle_create_failure(
+        "Bad Request: message text is empty",
+        &state,
+        Uuid::new_v4(),
+        ChatId(-100),
+    )
+    .await;
 
     assert!(
         !is_global_cooldown_active(),

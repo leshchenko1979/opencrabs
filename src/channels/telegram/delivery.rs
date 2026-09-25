@@ -1028,7 +1028,24 @@ pub(crate) async fn deliver_final_response(
                                 });
                             }
                             Err(teloxide::RequestError::RetryAfter(secs)) => {
-                                super::rate_limit::wait_out("edit", secs.duration(), "").await;
+                                // #556: a window over the inline bound is not slept
+                                // and is not retried — the next pass re-renders.
+                                if matches!(
+                                    super::rate_limit::wait_out(
+                                        "edit",
+                                        secs.duration(),
+                                        "",
+                                        Some(chat_id.0)
+                                    )
+                                    .await,
+                                    super::rate_limit::WaitOutcome::Deferred
+                                ) {
+                                    tracing::warn!(
+                                        "Telegram: edit deferred by long 429 window chat={}",
+                                        chat_id.0
+                                    );
+                                    continue;
+                                }
                                 match bot
                                     .edit_message_text(chat_id, mid, &chunks[0])
                                     .parse_mode(ParseMode::Html)

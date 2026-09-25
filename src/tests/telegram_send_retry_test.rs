@@ -128,30 +128,13 @@ async fn small_windows_are_waited_in_full() {
 }
 
 #[test]
-fn clamp_inline_wait_respects_the_cap_boundary() {
-    use crate::channels::telegram::rate_limit::clamp_inline_wait;
-    // Under the cap: unchanged, not flagged.
-    assert_eq!(
-        clamp_inline_wait(Duration::from_secs(0)),
-        (Duration::from_secs(0), false)
-    );
-    assert_eq!(
-        clamp_inline_wait(Duration::from_secs(5)),
-        (Duration::from_secs(5), false)
-    );
-    assert_eq!(
-        clamp_inline_wait(Duration::from_secs(30)),
-        (Duration::from_secs(30), false),
-        "exactly the cap is not a capped wait"
-    );
-    // Over the cap: clamped and flagged for the forensics log line.
-    assert_eq!(
-        clamp_inline_wait(Duration::from_secs(31)),
-        (Duration::from_secs(30), true)
-    );
-    assert_eq!(
-        clamp_inline_wait(Duration::from_secs(8288)),
-        (Duration::from_secs(30), true),
-        "the observed flood-ban window clamps to the cap"
-    );
+fn inline_bound_defers_only_windows_over_sixty_seconds() {
+    use crate::channels::telegram::rate_limit::{
+        exceeds_inline_bound, MAX_INLINE_RATE_LIMIT_WAIT,
+    };
+
+    assert_eq!(MAX_INLINE_RATE_LIMIT_WAIT, Duration::from_secs(60));
+    assert!(!exceeds_inline_bound(Duration::from_secs(60)));
+    assert!(exceeds_inline_bound(Duration::from_secs(61)));
+    assert!(exceeds_inline_bound(Duration::from_secs(8288)));
 }

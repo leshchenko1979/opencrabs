@@ -1442,6 +1442,7 @@ async fn place_once(
                 None,
                 "turn",
                 "-",
+                super::governor::EditClass::Final,
             )
             .await
             .map_err(|e| classify_rich_err(&e.to_string()))

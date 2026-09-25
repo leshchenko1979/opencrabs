@@ -412,6 +412,7 @@ impl TelegramAgent {
                                                                 None,
                                                                 "stale-strip",
                                                                 "#59 stale rich strip",
+                                                                super::governor::EditClass::Final,
                                                             )
                                                             .await
                                                         } else {
@@ -426,6 +427,7 @@ impl TelegramAgent {
                                                                 None,
                                                                 "stale-strip",
                                                                 "#59 stale rich strip",
+                                                                super::governor::EditClass::Final,
                                                             )
                                                             .await
                                                             .map_err(|e| e.to_string())
@@ -651,6 +653,7 @@ impl TelegramAgent {
                                                         Some(&serde_json::json!(empty_kb)),
                                                         "turn",
                                                         "-",
+                                                        super::governor::EditClass::Final,
                                                     )
                                                     .await
                                                     .map(|_| ())
@@ -2568,6 +2571,7 @@ async fn refire_pick_edit(
             Some(&serde_json::json!(kb)),
             "turn",
             "-",
+            super::governor::EditClass::Final,
         )
         .await
         .map_err(|e| e.to_string()),

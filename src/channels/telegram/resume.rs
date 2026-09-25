@@ -290,12 +290,16 @@ pub(crate) fn build_enqueue_callback(
                         match echo.await {
                             Ok(_) => {}
                             Err(teloxide::RequestError::RetryAfter(secs)) => {
-                                super::rate_limit::wait_out(
+                                let outcome = super::rate_limit::wait_out(
                                     "bg-resume echo",
                                     secs.duration(),
                                     " on first delivery, retrying once",
+                                    Some(chat_id),
                                 )
                                 .await;
+                                if matches!(outcome, super::rate_limit::WaitOutcome::Deferred) {
+                                    continue;
+                                }
                                 let mut retry = bot
                                     .send_message(teloxide::types::ChatId(chat_id), classic_html)
                                     .parse_mode(teloxide::types::ParseMode::Html);

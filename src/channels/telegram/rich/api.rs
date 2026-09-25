@@ -6,6 +6,7 @@
 //! nested lists, math) — so there is no block JSON to construct: we pass the
 //! model's markdown straight through.
 
+use super::governor::{EditClass, RichAdmission};
 use super::mermaid;
 use super::render_html::markdown_to_html_mermaid;
 use crate::channels::telegram::suggest_options::enforce_button_fit;
@@ -35,7 +36,7 @@ pub(crate) async fn send_rich_html_id(
     if let Some(kb) = reply_markup {
         body["reply_markup"] = kb.clone();
     }
-    let result = post_rich(&url, &body, origin, origin_detail).await?;
+    let result = post_rich(&url, &body, origin, origin_detail, EditClass::Final).await?;
     result
         .get("message_id")
         .and_then(serde_json::Value::as_i64)
@@ -68,11 +69,16 @@ pub(crate) async fn edit_rich_markdown(
     if let Some(kb) = reply_markup {
         body["reply_markup"] = kb.clone();
     }
-    post_and_check(&url, &body, origin, origin_detail).await
+    post_and_check(&url, &body, origin, origin_detail, EditClass::Final).await
 }
 
 /// Edit an existing rich message with HTML input (#420 path A).
 /// `reply_markup` is optional — pass `None` to leave the keyboard unchanged.
+///
+/// `class` carries the caller's drop ladder (#556). Only the flow passes a
+/// real one, because its clock ticks are pure chrome; every other caller
+/// passes [`EditClass::Final`] — a non-flow edit is content, and content is
+/// never dropped.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn edit_rich_html(
     api_url: &str,
@@ -83,6 +89,7 @@ pub(crate) async fn edit_rich_html(
     reply_markup: Option<&serde_json::Value>,
     origin: &str,
     origin_detail: &str,
+    class: EditClass,
 ) -> anyhow::Result<()> {
     let url = format!("{}/bot{token}/editMessageText", api_base(api_url));
     let mut body = serde_json::json!({
@@ -93,7 +100,7 @@ pub(crate) async fn edit_rich_html(
     if let Some(kb) = reply_markup {
         body["reply_markup"] = kb.clone();
     }
-    post_and_check(&url, &body, origin, origin_detail).await
+    post_and_check(&url, &body, origin, origin_detail, class).await
 }
 
 /// Edit an existing rich message with markdown input + a `media` array (#98).
@@ -123,9 +130,9 @@ pub(crate) async fn edit_rich_markdown_media(
         body
     };
     if media.iter().any(|m| m.bytes.is_some()) {
-        post_rich_multipart(&url, media, &body, origin, origin_detail).await?;
+        post_rich_multipart(&url, media, &body, origin, origin_detail, EditClass::Final).await?;
     } else {
-        post_and_check(&url, &body, origin, origin_detail).await?;
+        post_and_check(&url, &body, origin, origin_detail, EditClass::Final).await?;
     }
     Ok(())
 }
@@ -213,6 +220,7 @@ pub(crate) async fn send_rich_markdown_target_id(
         &build_body_target(chat_id, thread_id, reply_to, markdown),
         origin,
         origin_detail,
+        EditClass::Final,
     )
     .await?;
     result
@@ -305,6 +313,7 @@ async fn post_rich(
     body: &serde_json::Value,
     origin: &str,
     origin_detail: &str,
+    class: EditClass,
 ) -> anyhow::Result<serde_json::Value> {
     let client = reqwest::Client::new();
     let mut attempt = 0u32;
@@ -331,11 +340,24 @@ async fn post_rich(
         // reactive 429 handling below.
         {
             let (_, chat_id, thread, _, _) = rich_send_fields(url, body);
-            crate::channels::telegram::governor::pace_rich(
+            match crate::channels::telegram::governor::pace_rich(
                 teloxide::types::ChatId(chat_id),
                 thread,
+                class,
             )
-            .await;
+            .await {
+                RichAdmission::Now => {}
+                RichAdmission::Dropped(dropped) => {
+                    tracing::debug!(
+                        "Telegram rate-limiter: {:?} rich call dropped before send for chat={chat_id}",
+                        dropped
+                    );
+                    return Ok(serde_json::Value::Null);
+                }
+                RichAdmission::Deferred => {
+                    anyhow::bail!("Telegram rich call deferred by active global 429 cooldown");
+                }
+            }
         }
         let resp = client.post(url).json(body).send().await?;
         let status = resp.status();
@@ -385,12 +407,19 @@ async fn post_rich(
                 .and_then(|r| r.as_u64())
                 .unwrap_or(5);
             attempt += 1;
-            crate::channels::telegram::rate_limit::wait_out(
-                "rich API",
-                std::time::Duration::from_secs(retry_after),
-                &format!(" (attempt {attempt}/{RICH_MAX_RETRIES})"),
-            )
-            .await;
+            let (_, chat_id, _, _, _) = rich_send_fields(url, body);
+            if matches!(
+                crate::channels::telegram::rate_limit::wait_out(
+                    "rich API",
+                    std::time::Duration::from_secs(retry_after),
+                    &format!(" (attempt {attempt}/{RICH_MAX_RETRIES})"),
+                    Some(chat_id),
+                )
+                .await,
+                crate::channels::telegram::rate_limit::WaitOutcome::Deferred,
+            ) {
+                anyhow::bail!("Telegram rich call deferred by long 429 window");
+            }
             continue;
         }
 
@@ -445,13 +474,15 @@ async fn post_rich(
 }
 
 /// POST `body` and discard the result — for calls where only success matters.
+/// `class` is the caller's drop ladder (#556); see [`edit_rich_html`].
 async fn post_and_check(
     url: &str,
     body: &serde_json::Value,
     origin: &str,
     origin_detail: &str,
+    class: EditClass,
 ) -> anyhow::Result<()> {
-    post_rich(url, body, origin, origin_detail)
+    post_rich(url, body, origin, origin_detail, class)
         .await
         .map(|_| ())
 }
@@ -552,10 +583,10 @@ pub(crate) async fn send_rich_markdown_media_target_id(
 
     let result = if media.iter().any(|m| m.bytes.is_some()) {
         // Local render → multipart upload of the PNG bytes (attach://).
-        post_rich_multipart(&url, media, &body, origin, origin_detail).await?
+        post_rich_multipart(&url, media, &body, origin, origin_detail, EditClass::Final).await?
     } else {
         // Legacy URL path → plain JSON; Telegram refetches the URL.
-        post_rich(&url, &body, origin, origin_detail).await?
+        post_rich(&url, &body, origin, origin_detail, EditClass::Final).await?
     };
 
     result
@@ -634,6 +665,7 @@ async fn post_rich_multipart(
     body: &serde_json::Value,
     origin: &str,
     origin_detail: &str,
+    class: EditClass,
 ) -> anyhow::Result<serde_json::Value> {
     let client = reqwest::Client::new();
     let mut attempt = 0u32;
@@ -641,11 +673,24 @@ async fn post_rich_multipart(
     loop {
         {
             let (_, chat_id, thread, _, _) = rich_send_fields(url, body);
-            crate::channels::telegram::governor::pace_rich(
+            match crate::channels::telegram::governor::pace_rich(
                 teloxide::types::ChatId(chat_id),
                 thread,
+                class,
             )
-            .await;
+            .await {
+                RichAdmission::Now => {}
+                RichAdmission::Dropped(dropped) => {
+                    tracing::debug!(
+                        "Telegram rate-limiter: {:?} rich call dropped before send for chat={chat_id}",
+                        dropped
+                    );
+                    return Ok(serde_json::Value::Null);
+                }
+                RichAdmission::Deferred => {
+                    anyhow::bail!("Telegram rich call deferred by active global 429 cooldown");
+                }
+            }
         }
         // Form is not Clone, so rebuild it from media+body each attempt.
         let form = build_multipart_form(media, body);
@@ -688,12 +733,19 @@ async fn post_rich_multipart(
                 .and_then(|r| r.as_u64())
                 .unwrap_or(5);
             attempt += 1;
-            crate::channels::telegram::rate_limit::wait_out(
-                "rich API",
-                std::time::Duration::from_secs(retry_after),
-                &format!(" (attempt {attempt}/{RICH_MAX_RETRIES})"),
-            )
-            .await;
+            let (_, chat_id, _, _, _) = rich_send_fields(url, body);
+            if matches!(
+                crate::channels::telegram::rate_limit::wait_out(
+                    "rich API",
+                    std::time::Duration::from_secs(retry_after),
+                    &format!(" (attempt {attempt}/{RICH_MAX_RETRIES})"),
+                    Some(chat_id),
+                )
+                .await,
+                crate::channels::telegram::rate_limit::WaitOutcome::Deferred,
+            ) {
+                anyhow::bail!("Telegram rich call deferred by long 429 window");
+            }
             continue;
         }
 

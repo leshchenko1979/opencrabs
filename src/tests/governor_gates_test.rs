@@ -946,7 +946,7 @@ async fn rich_calls_are_paced_once_the_bucket_empties() {
 
     // The burst passes without any hold at all: ordinary traffic is untouched.
     for _ in 0..4 {
-        governor::pace_rich(CHAT, Some(TOPIC)).await;
+        governor::pace_rich(CHAT, Some(TOPIC), governor::EditClass::Final).await;
     }
     let snap = ts::snapshot(CHAT).unwrap();
     assert_eq!(snap.admitted_rich, 4);
@@ -958,7 +958,7 @@ async fn rich_calls_are_paced_once_the_bucket_empties() {
     // The next one has to wait for a refill — 30/min is one token every 2 s.
     ts::burn_bucket(CHAT, ts::BucketKind::Rich, 4, 0.5);
     ts::advance(2_100);
-    governor::pace_rich(CHAT, Some(TOPIC)).await;
+    governor::pace_rich(CHAT, Some(TOPIC), governor::EditClass::Final).await;
     assert_eq!(
         ts::snapshot(CHAT).unwrap().admitted_rich,
         5,
@@ -980,7 +980,7 @@ async fn rich_pacing_waits_for_refill_without_failing_open() {
     const TOPIC: i32 = 4243;
 
     // Burst token consumed immediately at t=0.
-    governor::pace_rich(CHAT, Some(TOPIC)).await;
+    governor::pace_rich(CHAT, Some(TOPIC), governor::EditClass::Final).await;
     let snap0 = ts::snapshot(CHAT).unwrap();
     assert_eq!(snap0.admitted_rich, 1);
     assert_eq!(snap0.throttled_rich_ms, 0);
@@ -990,7 +990,7 @@ async fn rich_pacing_waits_for_refill_without_failing_open() {
     // FailOpen immediately without holding.
     // With fail-open eliminated (#176), it waits cleanly for the full 60 s refill,
     // admits the call, and attributes the full wait time to throttled_rich_ms.
-    governor::pace_rich(CHAT, Some(TOPIC)).await;
+    governor::pace_rich(CHAT, Some(TOPIC), governor::EditClass::Final).await;
 
     let snap = ts::snapshot(CHAT).unwrap();
     assert_eq!(snap.admitted_rich, 2, "refilled token must admit cleanly");
@@ -1009,7 +1009,7 @@ async fn rich_pacing_leaves_dms_and_non_forums_alone() {
 
     // DM: positive id, never governed, no peer state created.
     for _ in 0..10 {
-        governor::pace_rich(ChatId(4242), Some(7)).await;
+        governor::pace_rich(ChatId(4242), Some(7), governor::EditClass::Final).await;
     }
     assert!(
         ts::snapshot(ChatId(4242)).is_none(),
@@ -1019,7 +1019,7 @@ async fn rich_pacing_leaves_dms_and_non_forums_alone() {
     // Group that has never been seen carrying a topic: forums-only rollout.
     const PLAIN: ChatId = ChatId(-100_666);
     for _ in 0..10 {
-        governor::pace_rich(PLAIN, None).await;
+        governor::pace_rich(PLAIN, None, governor::EditClass::Final).await;
     }
     assert_eq!(
         ts::snapshot(PLAIN).map(|s| s.admitted_rich).unwrap_or(0),
@@ -1036,11 +1036,49 @@ async fn a_disabled_limiter_governs_nothing() {
 
     const CHAT: ChatId = ChatId(-100_777);
     for _ in 0..10 {
-        governor::pace_rich(CHAT, Some(9)).await;
+        governor::pace_rich(CHAT, Some(9), governor::EditClass::Final).await;
         assert!(governor::admit_chat_action(CHAT, Some(9)).await);
     }
     // The master switch is what restores fully reactive behaviour, so it must
     // short-circuit before any bucket is touched.
     ts::burn_bucket(CHAT, ts::BucketKind::Typing, 1, 1.0);
     assert!(governor::admit_chat_action(CHAT, Some(9)).await);
+}
+
+/// #556: with the rich bucket dry, cosmetic chrome is DROPPED at G4 while a
+/// final holds for a token and lands — the rich gate may refuse chrome, never
+/// content.
+#[tokio::test(start_paused = true)]
+async fn pace_rich_drops_cosmetic_and_holds_final() {
+    let _guard = ts::registry_guard().await;
+    ts::reset(1_000);
+    crate::channels::telegram::rate_limit::reset_global_cooldown();
+    rl_config!(enabled: true, rich_per_minute: 30, rich_burst: 1);
+
+    const CHAT: ChatId = ChatId(-100_888);
+    const TOPIC: i32 = 777;
+
+    // The burst is one token: the first final takes it.
+    assert!(matches!(
+        governor::pace_rich(CHAT, Some(TOPIC), governor::EditClass::Final).await,
+        governor::RichAdmission::Now
+    ));
+
+    // Dry bucket + cosmetic chrome -> dropped at the rich gate, never held.
+    assert!(matches!(
+        governor::pace_rich(CHAT, Some(TOPIC), governor::EditClass::Clock).await,
+        governor::RichAdmission::Dropped(governor::EditClass::Clock)
+    ));
+    let snap = ts::snapshot(CHAT).unwrap();
+    assert_eq!(snap.dropped_rich, 1, "a G4 drop is counted at the rich gate");
+    assert_eq!(snap.admitted_rich, 1, "a dropped tick must not be admitted");
+
+    // Dry bucket + final -> holds for the refill and lands (30/min = one token
+    // every 2s), rather than being dropped like the chrome above.
+    ts::advance(2_100);
+    assert!(matches!(
+        governor::pace_rich(CHAT, Some(TOPIC), governor::EditClass::Final).await,
+        governor::RichAdmission::Now
+    ));
+    assert_eq!(ts::snapshot(CHAT).unwrap().admitted_rich, 2);
 }

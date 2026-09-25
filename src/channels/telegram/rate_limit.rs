@@ -1,4 +1,4 @@
-//! Back off when Telegram says to (#814).
+//! Back off when Telegram says to (#814, #556).
 //!
 //! The plan card was writing often enough to trip flood control, and the error
 //! was logged and dropped. Nothing recorded that the API had asked for a pause,
@@ -8,6 +8,14 @@
 //!
 //! The card is chrome. Skipping an update is strictly better than being
 //! throttled into a loop that also spams duplicates into the chat.
+//!
+//! #556 — obedience. Telegram's advertised window is a fact, and the cooldown
+//! deadline is never shortened to fit an inline wait: the deadline is
+//! `retry_after + RETRY_MARGIN`, full stop. What is bounded is the *sleep*, not
+//! the deadline — a window longer than [`MAX_INLINE_RATE_LIMIT_WAIT`] is not
+//! slept-and-sent, it is deferred, and the armed deadline carries the retry.
+//! Sending early is never an option; deferring is strictly more obedient than
+//! truncating the wait and retrying inside the ban that is still running.
 
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
@@ -51,37 +59,51 @@ pub(crate) fn parse_retry_after(error: &str) -> Option<Duration> {
 /// renewing the penalty, which is the loop this exists to break.
 pub(crate) const RETRY_MARGIN: Duration = Duration::from_secs(2);
 
-/// Longest 429 wait any send path may sleep inline (#1064).
+/// Longest 429 wait any send path may sleep inline (#1064, #556).
 ///
-/// Telegram can hand out multi-hour windows (8288s observed on a flooded
-/// chat). Sleeping the full window inside the send call parked the whole
-/// agent turn for hours: the reply was already computed, the process just
-/// sat in `tokio::time::sleep` waiting to deliver it. Typical flood windows
-/// (placeholder-edit churn, command bursts) are seconds and stay under the
-/// cap, so their behavior is unchanged. Oversized windows are slept up to
-/// the cap, the retry fails again, and the existing never-silent error
-/// paths (#1019) take over. Every send path shares this policy through
-/// [`wait_out`].
-pub(crate) const MAX_INLINE_RATE_LIMIT_WAIT: Duration = Duration::from_secs(30);
+/// This is an INLINE BOUND, not a cap on the cooldown deadline. It is the
+/// longest a single call sleeps before returning, and the threshold above which
+/// a window is deferred rather than slept-and-sent. The deadline itself (see
+/// [`record_global_429`]) is never shortened to fit it — shortening the
+/// deadline is what let every chat resume 13s inside a live 45s ban.
+///
+/// 60s because every window measured over five days (1 976 of them, 248 of
+/// them on 2026-09-24) is 31–45s: a 60s bound sleeps every real window in full
+/// and leaves the deferral branch for windows that are, by construction,
+/// multi-minute bans. Telegram can hand out such windows (8288s observed on a
+/// flooded chat, #1064) and sleeping one inline parked the whole agent turn for
+/// hours, so it is not slept at all — the armed deadline carries the retry and
+/// the caller is told to defer.
+///
+/// Every send path shares this policy through [`wait_out`].
+pub(crate) const MAX_INLINE_RATE_LIMIT_WAIT: Duration = Duration::from_secs(60);
 
-/// The inline wait for a 429: the requested window, clamped to
-/// [`MAX_INLINE_RATE_LIMIT_WAIT`]. `capped` tells callers whether the log
-/// line should say the wait was shortened (forensics: a capped wait means
-/// the chat was flood-banned, not merely throttled).
-pub(crate) fn clamp_inline_wait(requested: Duration) -> (Duration, bool) {
-    if requested > MAX_INLINE_RATE_LIMIT_WAIT {
-        (MAX_INLINE_RATE_LIMIT_WAIT, true)
-    } else {
-        (requested, false)
-    }
+/// Whether a 429 window is too long to sleep inline.
+///
+/// The single predicate the whole policy keys on: `false` means sleep the
+/// window in full and retry; `true` means sleep nothing and defer to the armed
+/// cooldown.
+pub(crate) fn exceeds_inline_bound(window: Duration) -> bool {
+    window > MAX_INLINE_RATE_LIMIT_WAIT
 }
 
 /// Record a 429 cooldown globally across the entire process.
 ///
-/// Extends the active cooldown deadline monotonically to `max(existing, now + wait + margin)`.
-pub(crate) fn record_global_429(retry_after: Duration) {
-    let (wait, capped) = clamp_inline_wait(retry_after);
-    let total_wait = wait + RETRY_MARGIN;
+/// Extends the active cooldown deadline monotonically to
+/// `max(existing, now + retry_after + margin)`.
+///
+/// The deadline is deliberately NOT clamped (#556). A 45s ban must set a 47s
+/// deadline: a deadline shorter than the window Telegram asked for lets every
+/// chat resume inside a ban that is still running, which is what produced the
+/// retry loop this module exists to break. Obedience is a property of the
+/// deadline; the inline sleep is bounded separately, in [`wait_out`].
+///
+/// `chat` names the chat that was throttled, or `None` where the call path
+/// genuinely has no chat (it renders as `-`, the convention this crate already
+/// uses for unknown fields). Without it a 429 cannot be attributed to a chat
+/// after the fact.
+pub(crate) fn record_global_429(retry_after: Duration, chat: Option<i64>) {
+    let total_wait = retry_after + RETRY_MARGIN;
     let now = super::governor::gate_now();
     let new_deadline = now + total_wait;
 
@@ -94,18 +116,18 @@ pub(crate) fn record_global_429(retry_after: Duration) {
         }
     };
 
-    if capped {
+    let chat = chat.map_or_else(|| "-".to_string(), |c| c.to_string());
+    if exceeds_inline_bound(retry_after) {
         tracing::warn!(
-            "Telegram: Global 429 cooldown activated: {}s requested exceeds {}s cap \
-             — cooling down for {}s (deadline {:?}); chat likely flood-banned",
+            "Telegram: Global 429 cooldown activated: {}s window exceeds the {}s inline bound \
+             — deadline {}s out, chat={chat} likely flood-banned; inline waits will defer (#556)",
             retry_after.as_secs(),
             MAX_INLINE_RATE_LIMIT_WAIT.as_secs(),
-            total_wait.as_secs(),
-            active_deadline
+            total_wait.as_secs()
         );
     } else {
         tracing::warn!(
-            "Telegram: Global 429 cooldown activated: cooling down for {}s (deadline {:?})",
+            "Telegram: Global 429 cooldown activated: cooling down for {}s (deadline {:?}) chat={chat}",
             total_wait.as_secs(),
             active_deadline
         );
@@ -125,10 +147,16 @@ pub(crate) fn is_global_cooldown_active() -> bool {
     }
 }
 
-/// Await any active global 429 cooldown, sleeping until the deadline expires.
+/// Await any active global 429 cooldown, sleeping at most `bound`.
 ///
-/// Returns the duration waited (if any).
-pub(crate) async fn wait_global_cooldown() -> Duration {
+/// Returns `true` when no cooldown is active after the sleep — the caller may
+/// proceed — and `false` when the deadline is still in the future, meaning the
+/// caller must DEFER and must not send through it.
+///
+/// The bound exists because the deadline is un-clamped (#556): without it, an
+/// 8288s window would be slept here in full, which is the #1064 regression by
+/// another door. The bound limits the SLEEP, never the deadline.
+pub(crate) async fn wait_global_cooldown(bound: Duration) -> bool {
     let now = super::governor::gate_now();
     let remaining = {
         let lock = GLOBAL_COOLDOWN.read().unwrap_or_else(|e| e.into_inner());
@@ -138,15 +166,16 @@ pub(crate) async fn wait_global_cooldown() -> Duration {
         }
     };
 
-    if let Some(wait) = remaining {
-        #[cfg(test)]
-        super::governor::test_support::advance(wait.as_millis() as u64);
+    let Some(remaining) = remaining else {
+        return true;
+    };
 
-        tokio::time::sleep(wait).await;
-        wait
-    } else {
-        Duration::ZERO
-    }
+    let wait = remaining.min(bound);
+    #[cfg(test)]
+    super::governor::test_support::advance(wait.as_millis() as u64);
+
+    tokio::time::sleep(wait).await;
+    !is_global_cooldown_active()
 }
 
 /// Reset the global 429 cooldown (used for testing).
@@ -156,33 +185,58 @@ pub(crate) fn reset_global_cooldown() {
     *lock = None;
 }
 
-/// Clamp the requested 429 window and sleep it, logging one standardized
-/// line (#1085 P1b R1 — this warn+sleep block was copy-pasted at four send
-/// sites with drifting wording). `what` names the send ("HTML send",
-/// "edit", ...); `extra` carries per-site context such as an attempt
-/// counter or message id into the line. The capped branch's wording is
-/// forensic, do not soften it: a window over the cap means the chat is
-/// flood-banned, not merely throttled (#1064).
-pub(crate) async fn wait_out(what: &str, window: Duration, extra: &str) {
-    record_global_429(window);
-    let (wait, capped) = clamp_inline_wait(window);
-    if capped {
+/// What a [`wait_out`] call did with the window Telegram asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WaitOutcome {
+    /// The window was slept in full; the caller may retry now.
+    Slept,
+    /// The window is longer than the inline bound: nothing was slept and the
+    /// caller must NOT retry — the armed cooldown carries it.
+    Deferred,
+}
+
+/// Record the 429 and either sleep the window in full or defer it.
+///
+/// One standardized warn+sleep site (#1085 P1b R1 — this block was copy-pasted
+/// at four send sites with drifting wording). `what` names the send ("HTML
+/// send", "edit", ...); `extra` carries per-site context such as an attempt
+/// counter or message id into the line; `chat` is the throttled chat, or `None`
+/// where the call path genuinely has no chat (renders as `-`).
+///
+/// #556: the window is slept in FULL when it is within the inline bound —
+/// Telegram's advertised window is respected, not shortened to fit a cap. A
+/// window over the bound is not slept at all and the caller is told to defer.
+/// The old `capped` wording is gone with the truncated wait it described: a
+/// window over the bound means the chat is flood-banned, and the correct
+/// response is to stop sending, not to sleep 30s and try again inside the ban.
+pub(crate) async fn wait_out(
+    what: &str,
+    window: Duration,
+    extra: &str,
+    chat: Option<i64>,
+) -> WaitOutcome {
+    record_global_429(window, chat);
+
+    let chat = chat.map_or_else(|| "-".to_string(), |c| c.to_string());
+    if exceeds_inline_bound(window) {
         tracing::warn!(
-            "Telegram: {what} rate-limited{extra}: {}s window exceeds {}s inline cap \
-             — waiting {}s; capped inline, chat likely flood-banned (#1064)",
+            "Telegram: {what} rate-limited{extra}: {}s window exceeds the {}s inline bound \
+             — NOT sleeping, deferring to the next attempt after the cooldown expires, \
+             chat={chat} (#556)",
             window.as_secs(),
-            MAX_INLINE_RATE_LIMIT_WAIT.as_secs(),
-            wait.as_secs()
+            MAX_INLINE_RATE_LIMIT_WAIT.as_secs()
         );
-    } else {
-        tracing::warn!(
-            "Telegram: {what} rate-limited{extra} — waiting {}s",
-            wait.as_secs()
-        );
+        return WaitOutcome::Deferred;
     }
 
-    #[cfg(test)]
-    super::governor::test_support::advance(wait.as_millis() as u64);
+    tracing::warn!(
+        "Telegram: {what} rate-limited{extra} — waiting {}s chat={chat}",
+        window.as_secs()
+    );
 
-    tokio::time::sleep(wait).await;
+    #[cfg(test)]
+    super::governor::test_support::advance(window.as_millis() as u64);
+
+    tokio::time::sleep(window).await;
+    WaitOutcome::Slept
 }

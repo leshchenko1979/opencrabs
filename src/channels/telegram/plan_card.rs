@@ -439,7 +439,7 @@ pub(crate) async fn handle_edit_failure(
         // A 429 learned here is a process-wide fact, not a per-card one: the
         // server is throttling this bot, and every other chat is about to hit
         // the same wall. Suppressing card writes locally teaches them nothing.
-        super::rate_limit::record_global_429(wait);
+        super::rate_limit::record_global_429(wait, Some(chat.0));
         tracing::warn!(
             "Telegram plan card edit throttled for session {session_id}: {error} — \
              pausing card writes for {}s",
@@ -525,10 +525,17 @@ async fn edit_plan_card_html_in_place(
 
 /// Classify a plan card create failure. Suppresses future writes on rate-limit,
 /// warns on other errors.
-pub(crate) async fn handle_create_failure(error: &str, state: &TelegramState, session_id: Uuid) {
+pub(crate) async fn handle_create_failure(
+    error: &str,
+    state: &TelegramState,
+    session_id: Uuid,
+    chat: ChatId,
+) {
     if let Some(wait) = super::rate_limit::parse_retry_after(error) {
         // Same as the edit path: record it globally before suppressing locally.
-        super::rate_limit::record_global_429(wait);
+        // #556: the creating chat names the throttle — without it a 429 line
+        // cannot be attributed to a chat after the fact.
+        super::rate_limit::record_global_429(wait, Some(chat.0));
         tracing::warn!(
             "Telegram plan card create throttled for session {session_id}: {error} — \
              pausing card writes for {}s",
@@ -1391,7 +1398,7 @@ pub(crate) async fn refresh_plan_card(
                 .await
         }
         Err(e) => {
-            handle_create_failure(&e.to_string(), state, session_id).await;
+            handle_create_failure(&e.to_string(), state, session_id, chat).await;
         }
     }
     true

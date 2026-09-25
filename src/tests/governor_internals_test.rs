@@ -96,11 +96,15 @@ fn ladder_order_drops_clock_first_and_final_never_drops() {
         throttled_send_ms: 2500,
         admitted_rich: 11,
         throttled_rich_ms: 3500,
+        dropped_rich: 17,
+        deferred_rich: 18,
     };
     let line = format_summary(-100123, &c, 2).expect("active peer must summarize");
     assert!(line.contains("chat=-100123"));
     assert!(line.contains("admitted{typing=12,edits=34,sends=5,rich=11}"));
-    assert!(line.contains("dropped{clock=1,brain_preview=2,intermediary=3,status=4,typing=6}"));
+    assert!(line.contains(
+        "dropped{clock=1,brain_preview=2,intermediary=3,status=4,typing=6,ri,deferred_ri}"
+    ));
     assert!(line.contains("finals{queued=7,superseded=8,delivered=9,failed=10,pending=2}"));
     assert!(line.contains("interactive{admitted=13,overflow=14,pause429=15}"));
     assert!(line.contains("throttled_ms{typing=1500,send=2500,rich=3500}"));
@@ -316,13 +320,20 @@ async fn global_pacer_burst_smoothing_and_cooldown() {
     assert!(acquired, "26th permit must be granted after refill delay");
 
     // 3. Global 429 lock causes acquire_global_permit to wait full cooldown
-    crate::channels::telegram::rate_limit::record_global_429(Duration::from_secs(5));
+    crate::channels::telegram::rate_limit::record_global_429(Duration::from_secs(5), Some(-1001));
     assert!(crate::channels::telegram::rate_limit::is_global_cooldown_active());
 
-    let waited = crate::channels::telegram::rate_limit::wait_global_cooldown().await;
+    // #556: the deadline is no longer clamped, so an in-bound window is waited
+    // out IN FULL — a truncated wait is what fired the retry inside the ban.
+    let started = Instant::now();
+    let clear = crate::channels::telegram::rate_limit::wait_global_cooldown(
+        crate::channels::telegram::rate_limit::MAX_INLINE_RATE_LIMIT_WAIT,
+    )
+    .await;
+    assert!(clear, "an in-bound cooldown must be waited out, not deferred");
     assert!(
-        waited >= Duration::from_millis(6900) && waited <= Duration::from_millis(7100),
-        "waited {waited:?} expected ~7s (5s + 2s margin)"
+        started.elapsed() >= Duration::from_millis(6900),
+        "the full ~7s window must be slept, not truncated to a cap"
     );
     assert!(!crate::channels::telegram::rate_limit::is_global_cooldown_active());
 
@@ -339,7 +350,7 @@ async fn global_cooldown_suppresses_drop_eligible_gates() {
     crate::channels::telegram::governor::test_support::mark_forum(chat);
 
     // When global cooldown is active:
-    crate::channels::telegram::rate_limit::record_global_429(Duration::from_secs(10));
+    crate::channels::telegram::rate_limit::record_global_429(Duration::from_secs(10), Some(-1001));
     assert!(crate::channels::telegram::rate_limit::is_global_cooldown_active());
 
     // G1 typing must drop immediately without holding

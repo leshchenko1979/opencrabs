@@ -1606,6 +1606,7 @@ pub(crate) async fn refresh_flow_rich_details(
         None,
         "turn",
         "-",
+        class,
     )
     .await
     {
@@ -1725,12 +1726,14 @@ pub(crate) async fn refresh_flow_html(
         // content. Deleting here used to wipe a fully rendered report off
         // the screen over a 9-second throttle (#356).
         Err(teloxide::RequestError::RetryAfter(secs)) => {
-            super::rate_limit::wait_out(
+            let outcome = super::rate_limit::wait_out(
                 "refresh_flow",
                 secs.duration(),
                 &format!(" for mid={mid:?}, then retrying"),
+                Some(chat.0),
             )
             .await;
+            if matches!(outcome, super::rate_limit::WaitOutcome::Deferred) { return; }
             let retry_html = {
                 let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
                 if s.open_group_msg_id != Some(mid) {
