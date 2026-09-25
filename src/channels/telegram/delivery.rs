@@ -19,7 +19,7 @@ use super::send::{
 use crate::brain::agent::AgentService;
 use crate::db::ChannelMessageRepository;
 use crate::db::models::ChannelMessage as DbChannelMessage;
-use crate::utils::sanitize::redact_secrets;
+use crate::utils::sanitize::{redact_secrets, redact_secrets_scoped};
 use crate::utils::{LocalImageFailure, LocalImageFailureReason};
 use std::sync::Arc;
 use teloxide::prelude::*;
@@ -174,6 +174,21 @@ pub(crate) async fn deliver_final_response(
             )
             .await;
             let (text_only, img_paths) = (image_scan.text, image_scan.attachments);
+            // A picture this turn already delivered as a promoted intermediate
+            // must not ship twice (#502). Filtering the ATTACHMENT list — not
+            // the text — is what makes the final leg ship exactly one photo
+            // when the closing answer repeats the reference: the text still
+            // dedups by the existing normalized-text rule, untouched.
+            let img_paths: Vec<crate::utils::image::LocalImage> = {
+                let delivered = {
+                    let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+                    s.delivered_image_paths.clone()
+                };
+                img_paths
+                    .into_iter()
+                    .filter(|i| !delivered.contains(&i.path))
+                    .collect()
+            };
             // References that never became attachments: rejected local paths,
             // failed downloads, and — appended to below — images the channel
             // itself refused. Drives the honest notice and the regen nudge.
@@ -515,88 +530,16 @@ pub(crate) async fn deliver_final_response(
                 s.sections.ctx = (!footer.is_empty()).then(|| footer.clone());
             }
 
-            // Send each attachment. A picture above the 10 MB photo ceiling
-            // would be rejected by `sendPhoto`, so it ships as a document
-            // instead — an un-previewable image beats a missing one (#286).
-            for image in &img_paths {
-                let img_path = &image.path;
-                let bytes = match tokio::fs::read(img_path).await {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        tracing::error!(
-                            "Telegram: failed to read image {}: {}",
-                            img_path.display(),
-                            e
-                        );
-                        image_failures.push(LocalImageFailure {
-                            raw: img_path.display().to_string(),
-                            resolved: Some(img_path.clone()),
-                            reason: LocalImageFailureReason::Unreadable,
-                        });
-                        continue;
-                    }
-                };
-                let len = bytes.len();
-                let kind = telegram_media_kind(len as u64);
-                let sent = match kind {
-                    TelegramMediaKind::Photo => photo_in_thread(
-                        bot,
-                        chat_id,
-                        thread_id,
-                        InputFile::memory(bytes),
-                        image.caption.clone(),
-                    )
-                    .await
-                    .map(|m| m.id.0),
-                    TelegramMediaKind::Document => document_in_thread(
-                        bot,
-                        chat_id,
-                        thread_id,
-                        InputFile::memory(bytes),
-                        image.caption.clone(),
-                    )
-                    .await
-                    .map(|m| m.id.0),
-                };
-                match sent {
-                    Ok(mid) => {
-                        let reference = img_path.display().to_string();
-                        // Match the outbox media receipt: len is sent bytes and
-                        // hash8 identifies the path, so one audit predicate covers both legs.
-                        super::telemetry::log_send_success(
-                            "turn",
-                            "-",
-                            &session_id.to_string(),
-                            "delivery_media",
-                            match kind {
-                                TelegramMediaKind::Photo => "image_photo",
-                                TelegramMediaKind::Document => "image_document",
-                            },
-                            chat_id.0,
-                            thread_id.map(|t| t.0.0),
-                            mid,
-                            len,
-                            &super::telemetry::content_hash8(&reference),
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Telegram: failed to send image {} as {}: {}",
-                            img_path.display(),
-                            match kind {
-                                TelegramMediaKind::Photo => "photo",
-                                TelegramMediaKind::Document => "document",
-                            },
-                            e
-                        );
-                        image_failures.push(LocalImageFailure {
-                            raw: img_path.display().to_string(),
-                            resolved: Some(img_path.clone()),
-                            reason: LocalImageFailureReason::DeliveryFailed,
-                        });
-                    }
-                }
-            }
+            // Send each attachment through the SHARED loop (#502), so the
+            // promotion fallback and this leg cannot drift on kind selection,
+            // captions, failure reasons or telemetry. The paths it reports as
+            // delivered are already filtered above (a picture the promotion
+            // path put in the chat is not re-sent here), so the first element
+            // is deliberately ignored — only the channel's own refusals join
+            // the notice.
+            let (_, refused) =
+                send_local_images(session_id, bot, chat_id, thread_id, &img_paths).await;
+            image_failures.extend(refused);
 
             // An image the reply announced must not vanish silently when the
             // send fails: the reply says plainly which one is missing. This is
@@ -898,6 +841,11 @@ pub(crate) async fn deliver_final_response(
                             chat_id,
                             thread_id,
                             &rich_md,
+                            // No local media on this arm: it replaces the
+                            // HTML intermediates with one rich message of the
+                            // SAME content, and any picture already went out
+                            // with its own bubble (#502).
+                            &[],
                         )
                         .await;
                         if rich_send.is_err() && is_no_media_found(rich_send.as_ref().unwrap_err())
@@ -913,6 +861,7 @@ pub(crate) async fn deliver_final_response(
                                 chat_id,
                                 thread_id,
                                 &rich_md,
+                                &[],
                             )
                             .await;
                         }
@@ -1326,6 +1275,179 @@ pub(crate) async fn deliver_final_response(
     Ok(true)
 }
 
+/// Send each resolved image as its own bubble, routing by the photo ceiling
+/// exactly as the final leg does (#286). Returns the paths that landed and the
+/// failures the channel itself refused.
+///
+/// One home for the loop the final-response leg and the promotion fallback both
+/// need (#502): they must not drift on kind selection, captions, failure
+/// reasons or telemetry, and a copy-pasted second version is how they would.
+/// Both halves of the outcome are returned because the callers need both and
+/// they are set in different arms — inferring one from the other would couple
+/// two independent facts.
+pub(crate) async fn send_local_images(
+    session_id: Uuid,
+    bot: &Bot,
+    chat_id: ChatId,
+    thread_id: Option<teloxide::types::ThreadId>,
+    images: &[crate::utils::image::LocalImage],
+) -> (Vec<std::path::PathBuf>, Vec<LocalImageFailure>) {
+    let mut delivered: Vec<std::path::PathBuf> = Vec::new();
+    let mut failures: Vec<LocalImageFailure> = Vec::new();
+
+    // A picture above the 10 MB photo ceiling would be rejected by `sendPhoto`,
+    // so it ships as a document instead — an un-previewable image beats a
+    // missing one (#286).
+    for image in images {
+        let img_path = &image.path;
+        let bytes = match tokio::fs::read(img_path).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(
+                    "Telegram: failed to read image {}: {}",
+                    img_path.display(),
+                    e
+                );
+                failures.push(LocalImageFailure {
+                    raw: img_path.display().to_string(),
+                    resolved: Some(img_path.clone()),
+                    reason: LocalImageFailureReason::Unreadable,
+                });
+                continue;
+            }
+        };
+        let len = bytes.len();
+        let kind = telegram_media_kind(len as u64);
+        let sent = match kind {
+            TelegramMediaKind::Photo => photo_in_thread(
+                bot,
+                chat_id,
+                thread_id,
+                InputFile::memory(bytes),
+                image.caption.clone(),
+            )
+            .await
+            .map(|m| m.id.0),
+            TelegramMediaKind::Document => document_in_thread(
+                bot,
+                chat_id,
+                thread_id,
+                InputFile::memory(bytes),
+                image.caption.clone(),
+            )
+            .await
+            .map(|m| m.id.0),
+        };
+        match sent {
+            Ok(mid) => {
+                delivered.push(img_path.clone());
+                let reference = img_path.display().to_string();
+                // Match the outbox media receipt: len is sent bytes and
+                // hash8 identifies the path, so one audit predicate covers both legs.
+                super::telemetry::log_send_success(
+                    "turn",
+                    "-",
+                    &session_id.to_string(),
+                    "delivery_media",
+                    match kind {
+                        TelegramMediaKind::Photo => "image_photo",
+                        TelegramMediaKind::Document => "image_document",
+                    },
+                    chat_id.0,
+                    thread_id.map(|t| t.0.0),
+                    mid,
+                    len,
+                    &super::telemetry::content_hash8(&reference),
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Telegram: failed to send image {} as {}: {}",
+                    img_path.display(),
+                    match kind {
+                        TelegramMediaKind::Photo => "photo",
+                        TelegramMediaKind::Document => "document",
+                    },
+                    e
+                );
+                failures.push(LocalImageFailure {
+                    raw: img_path.display().to_string(),
+                    resolved: Some(img_path.clone()),
+                    reason: LocalImageFailureReason::DeliveryFailed,
+                });
+            }
+        }
+    }
+
+    (delivered, failures)
+}
+
+/// The ONE pipeline a mid-turn intermediate goes through — shared by the live
+/// edit loop and the post-loop drain, which is why it lives here rather than in
+/// either caller (#502, #470).
+///
+/// The order of these steps IS the fix. The image scan used to run AFTER the
+/// strip and its result was discarded, so by the time the promotion gate
+/// decided, the reference was already gone and the gate could not see an
+/// attachment that had been removed 21 lines earlier. Scanning first means the
+/// gate sees the picture, and the rewritten text carries it into the bubble the
+/// model wrote.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_intermediate(
+    session_id: Uuid,
+    bot: &Bot,
+    chat: ChatId,
+    thread_id: Option<teloxide::types::ThreadId>,
+    streaming: &Arc<std::sync::Mutex<StreamingState>>,
+    tg: &TelegramState,
+    cwd: &std::path::Path,
+    react_target: Option<MessageId>,
+    raw: &str,
+) {
+    // 1. Sanitize: strip LLM artifacts, then redact secrets at the session's
+    //    own scope (a DM keeps them, a group scrubs them — #677).
+    let text = crate::utils::sanitize::strip_llm_artifacts(raw);
+    // One short lock for both reads, released before any await.
+    let (is_dm, delivered) = {
+        let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+        (s.is_dm, s.delivered_image_paths.clone())
+    };
+    let text = redact_secrets_scoped(&text, is_dm);
+
+    // 2. Extract the react directive BEFORE the rewrite, so both output forms
+    //    are marker-free by construction rather than by a second pass. The
+    //    sole behavioural delta is an image whose ALT TEXT contains a
+    //    `<<react:…>>` directive; no real input has one.
+    let (text, react_emoji) = crate::utils::extract_react_marker(&text);
+    // A resumed turn has no inbound message to react to: the marker is stripped
+    // above but nothing fires (#261).
+    if let Some(ref emoji) = react_emoji
+        && let Some(target) = react_target
+    {
+        fire_reaction(bot, chat, target, emoji).await;
+    }
+
+    // 3. ONE walk for both text forms: the rich form embeds each resolvable
+    //    reference as `tg://photo?id=imgN`, the stripped form drops it, and the
+    //    fresh entries and failures come out of the same pass. `Some(cwd)` is
+    //    the session working directory — the same base the final leg resolves
+    //    against.
+    let rw = crate::utils::image::rewrite_local_images(&text, Some(cwd), "img", &delivered);
+
+    // 4. A fresh picture is report-shaped content on its own (#502); anything
+    //    else keeps folding, with the failure notice carried along so a broken
+    //    reference is named instead of vanishing.
+    if super::intermediates::should_promote_intermediate(&rw.stripped, rw.entries.len()) {
+        super::intermediates::deliver_intermediate_message(
+            session_id, bot, chat, thread_id, streaming, tg, &rw,
+        )
+        .await;
+    } else {
+        let folded = crate::utils::append_failure_notice(&rw.stripped, &rw.failures);
+        append_intermediate_to_flow(bot, chat, thread_id, streaming, &folded).await;
+    }
+}
+
 /// Drain the display items left queued after the edit loop stopped,
 /// folding them into the processing-log flow. ONE shared implementation for
 /// handle_message and resume_session (#470 / #462 item 1: the drains were
@@ -1333,11 +1455,20 @@ pub(crate) async fn deliver_final_response(
 /// `react_target` is the inbound message a folded `<<react:>>` directive
 /// acknowledges; resume has none (the original message id is lost across
 /// restarts), so the directive strips without firing (#261).
+///
+/// `cwd` and `tg` are threaded through for the shared intermediate pipeline
+/// (#502): the drain resolves relative image references against the same
+/// session working directory the live loop uses, and the promotion path needs
+/// the Telegram state to note its own bubbles.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn drain_remaining_display(
+    session_id: Uuid,
     bot: &Bot,
     chat: ChatId,
     thread_id: Option<teloxide::types::ThreadId>,
     streaming: &Arc<std::sync::Mutex<StreamingState>>,
+    tg: &TelegramState,
+    cwd: &std::path::Path,
     remaining: Vec<DisplayItem>,
     react_target: Option<MessageId>,
 ) {
@@ -1348,22 +1479,22 @@ pub(crate) async fn drain_remaining_display(
                 tool_buffer.push(idx);
             }
             DisplayItem::Intermediate(text) => {
-                // Fold into the open processing-log flow instead of sending
-                // a standalone message (#300); sanitize exactly like the
-                // live edit-loop path.
+                // Fold or promote through the ONE shared pipeline (#502),
+                // which sanitizes exactly like the live edit-loop path.
                 append_tool_group(bot, chat, thread_id, streaming, &tool_buffer).await;
                 tool_buffer.clear();
-                let text = crate::utils::sanitize::strip_llm_artifacts(&text);
-                let text = redact_secrets(&text);
-                // Strip-only: this is an intermediate bubble, not the delivery
-                // path, so a remote link is left in the text rather than
-                // deleted by a scan that will never fetch it (#286).
-                let text = crate::utils::strip_image_references(&text, None).text;
-                let (text, react_emoji) = crate::utils::extract_react_marker(&text);
-                if let (Some(target), Some(emoji)) = (react_target, react_emoji.as_deref()) {
-                    fire_reaction(bot, chat, target, emoji).await;
-                }
-                append_intermediate_to_flow(bot, chat, thread_id, streaming, &text).await;
+                handle_intermediate(
+                    session_id,
+                    bot,
+                    chat,
+                    thread_id,
+                    streaming,
+                    tg,
+                    cwd,
+                    react_target,
+                    &text,
+                )
+                .await;
             }
             DisplayItem::System(text) => {
                 // Chrome folds into the same block, in order, but skips the

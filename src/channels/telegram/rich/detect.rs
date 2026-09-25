@@ -57,7 +57,7 @@ pub(crate) fn should_send_native_rich_for(text: &str, has_buttons: bool) -> bool
         .telegram
         .rich_messages;
     let structured = has_rich_structure(text);
-    let verdict = flag && (structured || has_buttons);
+    let verdict = flag && rich_required(structured, has_buttons);
     // Same visibility rationale as the base verdict (#860): both inputs are
     // recorded so a false verdict says which half caused it — plus the
     // buttons_forced input, so a prose-with-buttons send is distinguishable
@@ -68,6 +68,53 @@ pub(crate) fn should_send_native_rich_for(text: &str, has_buttons: bool) -> bool
         flag,
         structured,
         has_buttons,
+        contains_table(text),
+        text.len()
+    );
+    verdict
+}
+
+/// Pure: a text must ride the rich plane when it has block structure OR when
+/// the caller holds resolved media to embed — because the media array exists
+/// ONLY on the rich plane (#502).
+///
+/// Split out of [`should_send_native_rich_for`] so the verdict itself is
+/// unit-testable. Both halves of that function are `||`-combinations of a
+/// caller-supplied capability (`has_buttons`, `has_media`) with the text's own
+/// structure, and the capability question is exactly the same question in both
+/// cases — one home for it, rather than a second copy that can drift.
+pub(crate) fn rich_required(structured: bool, has_media: bool) -> bool {
+    structured || has_media
+}
+
+/// [`should_send_native_rich`] with a media override (#502): the second gate a
+/// local image must pass on its way into a promoted intermediate bubble.
+///
+/// The `rich_messages` flag still gates everything — with the plane off, media
+/// is delivered by the caller's fallback leg, never by a forced rich send.
+/// What the override changes is the structure half: a thin prose intermediate
+/// carrying one chart has NO block structure (`has_rich_structure` looks for a
+/// table, heading, list item, fence, `$$` or `<details>`), so the plain verdict
+/// is `false`, the send returns `None`, and the picture is lost a SECOND time —
+/// once by the promotion gate and again here. Holding resolved media is itself
+/// a reason to use the rich plane, because it is the only plane that has a
+/// media array.
+pub(crate) fn should_send_native_rich_for_media(text: &str, has_media: bool) -> bool {
+    let flag = crate::config::Config::current()
+        .channels
+        .telegram
+        .rich_messages;
+    let structured = has_rich_structure(text);
+    let verdict = flag && rich_required(structured, has_media);
+    // Same visibility rationale as the twins above (#860): a false verdict must
+    // say which half caused it, and `media_forced` is what distinguishes an
+    // image-bearing prose send from an ordinary unstructured one.
+    tracing::info!(
+        "Telegram rich verdict: {} (rich_messages={}, structured={}, media_forced={}, table={}, len={})",
+        verdict,
+        flag,
+        structured,
+        has_media,
         contains_table(text),
         text.len()
     );

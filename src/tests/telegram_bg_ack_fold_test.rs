@@ -50,6 +50,7 @@ fn base_state(with_card: bool) -> StreamingState {
         sent_intermediates: Vec::new(),
         intermediate_msg_ids: Vec::new(),
         voice_msg_ids: Vec::new(),
+        delivered_image_paths: Vec::new(),
         applied_plan_kb: Default::default(),
         processing: false,
         final_bubble: None,

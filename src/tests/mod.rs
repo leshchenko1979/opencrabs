@@ -975,6 +975,8 @@ pub mod telegram_impersonation_test;
 pub mod telegram_join_detection_test;
 pub mod telegram_last_intermediate_footer_test;
 pub mod telegram_leading_hash_shield_test;
+pub mod telegram_local_image_media_test;
+pub mod telegram_local_image_promotion_test;
 pub mod telegram_long_rate_limit_test;
 pub mod telegram_md_to_html_test;
 pub mod telegram_mermaid_test;

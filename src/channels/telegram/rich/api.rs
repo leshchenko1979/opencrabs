@@ -628,6 +628,27 @@ pub(crate) fn multipart_scalar_fields(body: &serde_json::Value) -> Vec<(String, 
     fields
 }
 
+/// The file name and MIME a byte entry's multipart part carries, derived from
+/// the bytes themselves (#502).
+///
+/// Split out so the identity is unit-testable without a live bot — a
+/// `reqwest::multipart::Form` exposes no accessor, so the part shape could not
+/// be asserted through the form it builds. Deriving both halves from the magic
+/// bytes is what stops a JPEG shipping as `<id>.png` with `image/png`, which
+/// the hardcoded version did for every format a local reference can point at
+/// (`is_supported_image` accepts PNG, JPEG, GIF, WEBP and BMP).
+pub(crate) fn media_part_identity(id: &str, bytes: &[u8]) -> (String, &'static str) {
+    let ext = crate::utils::image::image_extension(bytes);
+    let mime = match ext {
+        "png" => "image/png",
+        "jpg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => "image/bmp",
+    };
+    (format!("{id}.{ext}"), mime)
+}
+
 /// Build the multipart/form-data request for a `sendRichMessage` whose media
 /// array references uploaded PNG bytes via `attach://<id>`. Scalar parts come
 /// from [`multipart_scalar_fields`]; each byte entry becomes a file part
@@ -645,10 +666,11 @@ fn build_multipart_form(
     }
     for m in media {
         if let Some(bytes) = &m.bytes {
+            let (file_name, mime) = media_part_identity(&m.id, bytes);
             let part = reqwest::multipart::Part::bytes(bytes.clone())
-                .file_name(format!("{}.png", m.id))
-                .mime_str("image/png")
-                .expect("image/png is a valid mime");
+                .file_name(file_name)
+                .mime_str(mime)
+                .expect("a literal image mime is always valid");
             form = form.part(m.id.clone(), part);
         }
     }
@@ -913,27 +935,61 @@ pub(crate) async fn send_rich_with_mermaid_target_id(
     origin: &str,
     origin_detail: &str,
 ) -> anyhow::Result<i32> {
-    if !mermaid::should_render_mermaid(markdown) {
-        return send_rich_markdown_target_id(
-            api_url,
-            token,
-            chat_id,
-            thread_id,
-            reply_to,
-            markdown,
-            origin,
-            origin_detail,
-        )
-        .await;
-    }
+    send_rich_with_media_target_id(
+        api_url,
+        token,
+        chat_id,
+        thread_id,
+        reply_to,
+        markdown,
+        &[],
+        origin,
+        origin_detail,
+    )
+    .await
+}
 
+#[allow(clippy::too_many_arguments)]
+/// [`send_rich_with_mermaid_target_id`] with a caller-supplied media array
+/// (#502): the composition core both senders now share.
+///
+/// `local_media` carries entries whose ids the CALLER has already rewritten
+/// into `markdown` as `tg://photo?id=<id>` references — the media array is the
+/// sole authority for such a reference (#334), so a ref without its entry would
+/// be shielded away and the picture lost. Local entries use the `imgN` id
+/// namespace and cannot collide with the resolver's `diagN`.
+///
+/// The two media sources are merged, and the plain-markdown early return keys
+/// on the MERGED array: a message with no fence but with local media still has
+/// something to embed, and taking the old early return would send the `tg://`
+/// references as dead text — the exact silent loss this fixes.
+pub(crate) async fn send_rich_with_media_target_id(
+    api_url: &str,
+    token: &str,
+    chat_id: i64,
+    thread_id: Option<ThreadId>,
+    reply_to: Option<i32>,
+    markdown: &str,
+    local_media: &[super::mermaid::MediaEntry],
+    origin: &str,
+    origin_detail: &str,
+) -> anyhow::Result<i32> {
     // Resolve every fence once: valid diagrams become markdown media
     // references, broken ones become legible failure blocks. Non-fence text
-    // is left byte-identical.
-    let (resolved, media) = mermaid::resolve_markdown_media(markdown).await;
+    // is left byte-identical. Runs ONLY when a fence is present, exactly as
+    // before — the local-image rewrite happened upstream of this call, on text
+    // the fence resolver had not touched, and each pass recomputes its own
+    // offsets on its own input.
+    let (resolved, mut media) = if mermaid::should_render_mermaid(markdown) {
+        let (text, media) = mermaid::resolve_markdown_media(markdown).await;
+        (text, media)
+    } else {
+        (markdown.to_string(), Vec::new())
+    };
+    media.extend(local_media.iter().cloned());
 
-    // All fences failed → `resolved` carries only failure blocks, no media to
-    // embed; send it as plain rich markdown (no `media` field).
+    // Nothing to embed at all (no fence, no local media, or every fence failed)
+    // → send it as plain rich markdown with no `media` field.
     if media.is_empty() {
         return send_rich_markdown_target_id(
             api_url,
