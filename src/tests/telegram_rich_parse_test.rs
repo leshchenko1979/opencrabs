@@ -298,6 +298,9 @@ fn has_rich_structure_gates_native_rich_path() {
     assert!(has_rich_structure(
         "<details><summary>peek</summary>\n\nbody\n\n</details>"
     ));
+    assert!(has_rich_structure("![alt](https://example.com/chart.png \"caption\")"));
+    assert!(!has_rich_structure("`![alt](https://example.com/chart.png)`"));
+    assert!(!has_rich_structure("```\n![alt](https://example.com/chart.png)\n```"));
     // Plain prose — even with inline emphasis — stays on the existing path.
     assert!(!has_rich_structure("Just a normal reply."));
     assert!(!has_rich_structure(

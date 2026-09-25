@@ -899,6 +899,49 @@ pub(crate) async fn send_rich_with_mermaid_id(
     .await
 }
 
+/// Like [`send_rich_with_mermaid_id`] but resolves local markdown image
+/// references against `base_dir` first, rebuilding each valid host path as a
+/// media entity at its original offset (#487).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_rich_with_mermaid_in_dir_id(
+    api_url: &str,
+    token: &str,
+    chat_id: i64,
+    thread_id: Option<ThreadId>,
+    markdown: &str,
+    base_dir: Option<&std::path::Path>,
+    origin: &str,
+    origin_detail: &str,
+) -> anyhow::Result<i32> {
+    let (resolved, media) = mermaid::resolve_markdown_media_in_dir(markdown, base_dir).await;
+    if media.is_empty() {
+        return send_rich_markdown_target_id(
+            api_url,
+            token,
+            chat_id,
+            thread_id,
+            None,
+            &resolved,
+            origin,
+            origin_detail,
+        )
+        .await;
+    }
+    send_rich_markdown_media_target_id(
+        api_url,
+        token,
+        chat_id,
+        thread_id,
+        None,
+        &resolved,
+        &media,
+        None,
+        origin,
+        origin_detail,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Like [`send_rich_with_mermaid_id`] but carries an optional Telegram reply
 /// target (`reply_parameters`) on the rich send, so a rich reply lands

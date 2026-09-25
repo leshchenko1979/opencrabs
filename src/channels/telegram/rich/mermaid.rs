@@ -19,6 +19,10 @@ use super::ast::Block;
 pub use super::ast::MermaidResult;
 use crate::channels::telegram::markdown::escape_html;
 use crate::tui::render::theme;
+use crate::utils::image::{
+    ImageTarget, classify_image_target, code_regions, parse_markdown_image, validate_local_image,
+};
+use std::path::Path;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde_json::json;
@@ -1140,6 +1144,72 @@ pub(crate) fn resolve_markdown_media(text: &str) -> BoxFuture<'static, (String, 
         }
         // Media was pushed in reverse fence order; restore fence order.
         media.reverse();
+        (result, media)
+    }
+    .boxed()
+}
+
+/// Resolve mermaid fences and validated local markdown images into one rich
+/// media array. Local paths are rebuilt at their original byte offsets as
+/// `tg://photo` references while their bytes travel in matching entries; other
+/// targets remain untouched for Telegram's native remote handling.
+pub(crate) fn resolve_markdown_media_in_dir(
+    text: &str,
+    base_dir: Option<&Path>,
+) -> BoxFuture<'static, (String, Vec<MediaEntry>)> {
+    let text = text.to_string();
+    let base_dir = base_dir.map(Path::to_path_buf);
+    async move {
+        let (mut result, mut media) = resolve_markdown_media(&text).await;
+        let regions = code_regions(&result);
+        let mut references = Vec::new();
+        let mut cursor = 0;
+        while cursor < result.len() {
+            if !regions[cursor] && result[cursor..].starts_with("![")
+                && let Some((end, raw, _)) = parse_markdown_image(&result, cursor)
+                && let ImageTarget::Local(path) = classify_image_target(&raw, base_dir.as_deref())
+                && validate_local_image(&path).is_ok()
+            {
+                references.push((cursor, end, raw, path));
+                cursor = end;
+                continue;
+            }
+            let ch = result[cursor..]
+                .chars()
+                .next()
+                .expect("cursor lies on a char boundary");
+            cursor += ch.len_utf8();
+        }
+        for (index, (start, end, raw, path)) in references.into_iter().enumerate().rev() {
+            let Ok(bytes) = tokio::fs::read(&path).await else {
+                continue;
+            };
+            let id = format!("local{index}");
+            let original = &result[start..end];
+            // Locate the target by its position inside the reference, never by
+            // the first or last raw match: the alt text and an optional title
+            // may repeat the path verbatim, and only the run after `](` is it.
+            let Some(open) = original.find("](") else {
+                continue;
+            };
+            let Some(rel) = original[open + 2..].find(&raw) else {
+                continue;
+            };
+            let target_start = open + 2 + rel;
+            let target_end = target_start + raw.len();
+            let mut rebuilt = String::with_capacity(original.len() + id.len());
+            rebuilt.push_str(&original[..target_start]);
+            rebuilt.push_str("tg://photo?id=");
+            rebuilt.push_str(&id);
+            rebuilt.push_str(&original[target_end..]);
+            result.replace_range(start..end, &rebuilt);
+            media.push(MediaEntry {
+                id,
+                url: None,
+                bytes: Some(bytes),
+            });
+        }
+        media.sort_by(|left, right| left.id.cmp(&right.id));
         (result, media)
     }
     .boxed()

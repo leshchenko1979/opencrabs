@@ -11,6 +11,8 @@
 //! Split out of `mod.rs` when it went declarations-only (#1293 era):
 //! functions never live in `mod.rs` (see CONTRIBUTING.md).
 
+use crate::utils::contains_markdown_image_reference;
+
 use super::{list, table};
 
 /// Whether `text` is better served by the AST renderer than the legacy
@@ -76,9 +78,13 @@ pub(crate) fn should_send_native_rich_for(text: &str, has_buttons: bool) -> bool
 
 /// Whether `text` contains block-level markdown structure that native rich
 /// rendering handles meaningfully better than plain/HTML: a table, ATX
-/// heading, list item, fenced code block, block math, or a `<details>`
-/// collapse block — matched by `<details>` line prefix so the inline
-/// `<details><summary>` openers count too (the #15 receipt cards emitted that shape before the parser-safe block form).
+/// heading, list item, fenced code block, block math, a `<details>` collapse
+/// block — matched by `<details>` line prefix so the inline
+/// `<details><summary>` openers count too (the #15 receipt cards emitted that
+/// shape before the parser-safe block form) — or a valid markdown image
+/// reference. Image references must use the rich plane: remote URLs are
+/// resolved by Telegram there, while local paths are rebuilt into media
+/// entries before the request is sent.
 /// Plain prose (even
 /// with inline emphasis) returns false, so it stays on the existing path and
 /// is never reinterpreted by Telegram's markdown parser. Gates the native
@@ -91,6 +97,7 @@ pub(crate) fn should_send_native_rich_for(text: &str, has_buttons: bool) -> bool
 /// native-block serializer (#420 path B), not exclusion.
 pub(crate) fn has_rich_structure(text: &str) -> bool {
     contains_table(text)
+        || contains_markdown_image_reference(text)
         || text.lines().any(|line| {
             let t = line.trim_start();
             is_atx_heading(t)

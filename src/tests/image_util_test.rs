@@ -2,8 +2,9 @@
 
 use crate::utils::image::{
     ImageTarget, LocalImage, LocalImageFailure, LocalImageFailureReason, LocalImageScan,
-    classify_image_target, code_regions, extract_img_markers, extract_local_images, failure_notice,
-    image_extension, is_remote_url, is_supported_image, is_telegram_media_ref, validate_local_image,
+    classify_image_target, code_regions, contains_markdown_image_reference, extract_img_markers,
+    extract_local_images, failure_notice, image_extension, is_remote_url, is_supported_image,
+    is_telegram_media_ref, validate_local_image,
 };
 use crate::utils::image_fetch::{
     MAX_REMOTE_IMAGES_PER_REPLY, fetch_remote_image, resolve_remote_images,
@@ -93,6 +94,19 @@ fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
 /// [`LocalImageScan::attachments`] and has its own test.
 fn resolved_paths(scan: &LocalImageScan) -> Vec<PathBuf> {
     scan.attachments.iter().map(|a| a.path.clone()).collect()
+}
+
+#[test]
+fn markdown_image_reference_detection_ignores_code() {
+    assert!(contains_markdown_image_reference(
+        "before ![chart](https://example.com/chart.png \"caption\") after"
+    ));
+    assert!(!contains_markdown_image_reference(
+        "`![chart](https://example.com/chart.png)`"
+    ));
+    assert!(!contains_markdown_image_reference(
+        "```markdown\n![chart](https://example.com/chart.png)\n```"
+    ));
 }
 
 #[test]

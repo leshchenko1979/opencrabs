@@ -20,7 +20,7 @@ use crate::brain::agent::AgentService;
 use crate::db::ChannelMessageRepository;
 use crate::db::models::ChannelMessage as DbChannelMessage;
 use crate::utils::sanitize::redact_secrets;
-use crate::utils::{LocalImageFailure, LocalImageFailureReason};
+use crate::utils::{LocalImage, LocalImageFailure, LocalImageFailureReason};
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{InputFile, MessageId, ParseMode};
@@ -137,6 +137,104 @@ pub(crate) fn subagent_counts_for(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Deliver a reply's local images as standalone messages — the extraction leg.
+///
+/// Split out of `deliver_final_response` so the SAME code can run twice (#487):
+/// up front when the rich plane does not own the images, and again as the floor
+/// when a rich send that DID own them fails. Without the second call the picture
+/// would vanish with no notice at all — the #502 failure mode.
+///
+/// Returns the failures instead of pushing them into the caller's list, so the
+/// caller decides what the honest notice says.
+async fn send_extraction_images(
+    bot: &Bot,
+    chat_id: ChatId,
+    thread_id: Option<ThreadId>,
+    session_id: Uuid,
+    images: &[LocalImage],
+) -> Vec<LocalImageFailure> {
+    let mut failures = Vec::new();
+    // A picture above the 10 MB photo ceiling would be rejected by `sendPhoto`,
+    // so it ships as a document instead — an un-previewable image beats a
+    // missing one (#286).
+    for image in images {
+        let img_path = &image.path;
+        let bytes = match tokio::fs::read(img_path).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!("Telegram: failed to read image {}: {}", img_path.display(), e);
+                failures.push(LocalImageFailure {
+                    raw: img_path.display().to_string(),
+                    resolved: Some(img_path.clone()),
+                    reason: LocalImageFailureReason::Unreadable,
+                });
+                continue;
+            }
+        };
+        let len = bytes.len();
+        let kind = telegram_media_kind(len as u64);
+        let sent = match kind {
+            TelegramMediaKind::Photo => photo_in_thread(
+                bot,
+                chat_id,
+                thread_id,
+                InputFile::memory(bytes),
+                image.caption.clone(),
+            )
+            .await
+            .map(|m| m.id.0),
+            TelegramMediaKind::Document => document_in_thread(
+                bot,
+                chat_id,
+                thread_id,
+                InputFile::memory(bytes),
+                image.caption.clone(),
+            )
+            .await
+            .map(|m| m.id.0),
+        };
+        match sent {
+            Ok(mid) => {
+                let reference = img_path.display().to_string();
+                // Match the outbox media receipt: len is sent bytes and hash8
+                // identifies the path, so one audit predicate covers both legs.
+                super::telemetry::log_send_success(
+                    "turn",
+                    "-",
+                    &session_id.to_string(),
+                    "delivery_media",
+                    match kind {
+                        TelegramMediaKind::Photo => "image_photo",
+                        TelegramMediaKind::Document => "image_document",
+                    },
+                    chat_id.0,
+                    thread_id.map(|t| t.0.0),
+                    mid,
+                    len,
+                    &super::telemetry::content_hash8(&reference),
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Telegram: failed to send image {} as {}: {}",
+                    img_path.display(),
+                    match kind {
+                        TelegramMediaKind::Photo => "photo",
+                        TelegramMediaKind::Document => "document",
+                    },
+                    e
+                );
+                failures.push(LocalImageFailure {
+                    raw: img_path.display().to_string(),
+                    resolved: Some(img_path.clone()),
+                    reason: LocalImageFailureReason::DeliveryFailed,
+                });
+            }
+        }
+    }
+    failures
+}
+
 pub(crate) async fn deliver_final_response(
     bot: &Bot,
     chat_id: ChatId,
@@ -169,10 +267,13 @@ pub(crate) async fn deliver_final_response(
             // ships as native media instead of arriving as bare markdown
             // (#286).
             let image_cwd = agent.get_working_directory_for_session(session_id);
+            let original_content = response.content.clone();
             let image_scan = crate::utils::resolve_remote_images(
                 crate::utils::extract_local_images(&response.content, Some(image_cwd.as_path())),
             )
             .await;
+            // `original_content` retains markdown image references for the rich
+            // media resolver; `text_only` is the extraction-leg fallback text.
             let (text_only, img_paths) = (image_scan.text, image_scan.attachments);
             // References that never became attachments: rejected local paths,
             // failed downloads, and — appended to below — images the channel
@@ -181,6 +282,17 @@ pub(crate) async fn deliver_final_response(
             // Strip LLM-hallucinated artifacts (<!-- tools-v2 -->, XML tool blocks)
             let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
             let text_only = redact_secrets(&text_only);
+
+            // #487: the rich plane rebuilds a local image reference into a
+            // media entry and re-emits it at its ORIGINAL offset, so the picture
+            // lands where it was written, captioned. It therefore needs the
+            // reference INTACT — `text_only` above has it stripped for the
+            // extraction leg — and it must be sanitised the same way, or the
+            // rich plane becomes a path that bypasses redaction.
+            let rich_source =
+                redact_secrets(&crate::utils::sanitize::strip_llm_artifacts(&original_content));
+            let body_carries_image =
+                crate::utils::contains_markdown_image_reference(&rich_source);
 
             // Drop an echoed plan title (#837). The reminder shows the model
             // the title every turn and it opens by repeating it, directly
@@ -515,87 +627,24 @@ pub(crate) async fn deliver_final_response(
                 s.sections.ctx = (!footer.is_empty()).then(|| footer.clone());
             }
 
-            // Send each attachment. A picture above the 10 MB photo ceiling
-            // would be rejected by `sendPhoto`, so it ships as a document
-            // instead — an un-previewable image beats a missing one (#286).
-            for image in &img_paths {
-                let img_path = &image.path;
-                let bytes = match tokio::fs::read(img_path).await {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        tracing::error!(
-                            "Telegram: failed to read image {}: {}",
-                            img_path.display(),
-                            e
-                        );
-                        image_failures.push(LocalImageFailure {
-                            raw: img_path.display().to_string(),
-                            resolved: Some(img_path.clone()),
-                            reason: LocalImageFailureReason::Unreadable,
-                        });
-                        continue;
-                    }
-                };
-                let len = bytes.len();
-                let kind = telegram_media_kind(len as u64);
-                let sent = match kind {
-                    TelegramMediaKind::Photo => photo_in_thread(
-                        bot,
-                        chat_id,
-                        thread_id,
-                        InputFile::memory(bytes),
-                        image.caption.clone(),
-                    )
-                    .await
-                    .map(|m| m.id.0),
-                    TelegramMediaKind::Document => document_in_thread(
-                        bot,
-                        chat_id,
-                        thread_id,
-                        InputFile::memory(bytes),
-                        image.caption.clone(),
-                    )
-                    .await
-                    .map(|m| m.id.0),
-                };
-                match sent {
-                    Ok(mid) => {
-                        let reference = img_path.display().to_string();
-                        // Match the outbox media receipt: len is sent bytes and
-                        // hash8 identifies the path, so one audit predicate covers both legs.
-                        super::telemetry::log_send_success(
-                            "turn",
-                            "-",
-                            &session_id.to_string(),
-                            "delivery_media",
-                            match kind {
-                                TelegramMediaKind::Photo => "image_photo",
-                                TelegramMediaKind::Document => "image_document",
-                            },
-                            chat_id.0,
-                            thread_id.map(|t| t.0.0),
-                            mid,
-                            len,
-                            &super::telemetry::content_hash8(&reference),
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Telegram: failed to send image {} as {}: {}",
-                            img_path.display(),
-                            match kind {
-                                TelegramMediaKind::Photo => "photo",
-                                TelegramMediaKind::Document => "document",
-                            },
-                            e
-                        );
-                        image_failures.push(LocalImageFailure {
-                            raw: img_path.display().to_string(),
-                            resolved: Some(img_path.clone()),
-                            reason: LocalImageFailureReason::DeliveryFailed,
-                        });
-                    }
-                }
+            // #487: exactly ONE leg may own this reply's images. The rich plane
+            // rebuilds a local reference in place; the extraction loop below
+            // sends it as a standalone message and destroys its position. So the
+            // loop runs only when the rich plane will NOT carry the body — and
+            // "will carry" is decided HERE, once, from the same predicate the
+            // delivery site consults. A body that is ONLY an image keeps the
+            // extraction leg: it has no text bubble to carry the reference into
+            // a rich send, so routing it to the rich plane would drop it.
+            let rich_owns_images = body_carries_image
+                && !text_only.trim().is_empty()
+                && super::rich::should_send_native_rich_for(
+                    &rich_source,
+                    options_pending(streaming),
+                );
+            if !rich_owns_images {
+                image_failures.extend(
+                    send_extraction_images(bot, chat_id, thread_id, session_id, &img_paths).await,
+                );
             }
 
             // An image the reply announced must not vanish silently when the
@@ -619,6 +668,11 @@ pub(crate) async fn deliver_final_response(
                     &pre_dedup_text,
                     options_pending(streaming),
                 ) {
+                // #487: this arm fires only when `text_only` is EMPTY, which
+                // forces `rich_owns_images` false (it requires non-empty text) —
+                // so the image was already delivered by the extraction leg above
+                // and this send must stay on `pre_dedup_text`. Sending the
+                // reference-bearing source here would ship the picture twice.
                 let rich_md = pre_dedup_text.clone();
                 // Deliberately NOT guarded (#500): this arm REPLACES the
                 // intermediates it deletes, so a suppression here would answer
@@ -626,13 +680,13 @@ pub(crate) async fn deliver_final_response(
                 // losing the content. It is self-cleaning — whatever it sends,
                 // the copies it supersedes are removed in the same breath — so
                 // it cannot leave a duplicate behind.
-                match super::rich::send_rich_with_mermaid_id(
+                match super::rich::api::send_rich_with_mermaid_in_dir_id(
                     bot.api_url().as_str(),
                     bot.token(),
                     chat_id.0,
                     thread_id,
                     &rich_md,
-                    None,
+                    Some(image_cwd.as_path()),
                     "turn",
                     "-",
                 )
@@ -839,14 +893,23 @@ pub(crate) async fn deliver_final_response(
                 // to the HTML path where they showed as bare markup). Non-table
                 // rich content still tries blocks first (clean fences) then falls
                 // back to markdown.
-                let mut delivered_rich = super::rich::should_send_native_rich_for(
-                    &text_only,
-                    // #45: `options_pending` is true when the turn stashed a
-                    // suggest_options set mid-turn (#1226 K helper) — force the
-                    // rich plane for prose so buttons never live on a plain host.
-                    options_pending(streaming),
-                ) && {
-                    let rich_md = text_only.clone();
+                let mut delivered_rich = (rich_owns_images
+                    || super::rich::should_send_native_rich_for(
+                        &text_only,
+                        // #45: `options_pending` is true when the turn stashed a
+                        // suggest_options set mid-turn (#1226 K helper) — force the
+                        // rich plane for prose so buttons never live on a plain host.
+                        options_pending(streaming),
+                    ))
+                    && {
+                    // #487: an image-bearing body is sent from `rich_source`, so
+                    // the resolver can rebuild the reference in place; every
+                    // other body keeps the plain pipeline output, byte for byte.
+                    let rich_md = if rich_owns_images {
+                        rich_source.clone()
+                    } else {
+                        text_only.clone()
+                    };
                     // Send a FRESH rich message rather than editing the streamed
                     // placeholder into rich. Editing a normal message into a rich
                     // one glitches the client render — overlap during the
@@ -892,12 +955,13 @@ pub(crate) async fn deliver_final_response(
                         // re-resolves media on every call, so the retry naturally
                         // re-fetches from the renderer. Structural 400s are never
                         // retried.
-                        let mut rich_send = super::delivery_dedup::send_rich_turn_guarded(
+                        let mut rich_send = super::delivery_dedup::send_rich_turn_guarded_in_dir(
                             session_id,
                             bot,
                             chat_id,
                             thread_id,
                             &rich_md,
+                            Some(image_cwd.as_path()),
                         )
                         .await;
                         if rich_send.is_err() && is_no_media_found(rich_send.as_ref().unwrap_err())
@@ -907,12 +971,13 @@ pub(crate) async fn deliver_final_response(
                             );
                             // Nothing was recorded for the failed attempt, so the
                             // guard lets this retry through (#500).
-                            rich_send = super::delivery_dedup::send_rich_turn_guarded(
+                            rich_send = super::delivery_dedup::send_rich_turn_guarded_in_dir(
                                 session_id,
                                 bot,
                                 chat_id,
                                 thread_id,
                                 &rich_md,
+                                Some(image_cwd.as_path()),
                             )
                             .await;
                         }
@@ -947,6 +1012,29 @@ pub(crate) async fn deliver_final_response(
                 };
 
                 if !delivered_rich {
+                    // #487: the rich plane owned this body's images and did not
+                    // deliver them. The extraction leg is the floor — without
+                    // this the picture would vanish with no notice at all, which
+                    // is exactly the #502 failure mode. Runs here rather than up
+                    // front because the rich send is only known to have failed
+                    // at this point.
+                    if rich_owns_images && !img_paths.is_empty() {
+                        let late = send_extraction_images(
+                            bot,
+                            chat_id,
+                            thread_id,
+                            session_id,
+                            &img_paths,
+                        )
+                        .await;
+                        if !late.is_empty() {
+                            tracing::error!(
+                                "Telegram: {} image(s) also failed on the extraction fallback",
+                                late.len()
+                            );
+                            image_failures.extend(late);
+                        }
+                    }
                     // #tg-mermaid-delivery-hardening: last-chance mermaid render
                     // before degrading to chunks — the classic chunked HTML path
                     // cannot embed `<img>`, so when the source carried a diagram

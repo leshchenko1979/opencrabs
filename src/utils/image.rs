@@ -439,7 +439,7 @@ pub enum ImageTarget {
 /// fenced block (three backticks) and an inline span (one) both open and
 /// close with the same rule — one home for "is this inside code", shared by
 /// the markdown image scanner and the reaction-marker scanner.
-pub fn code_regions(text: &str) -> Vec<bool> {
+pub(crate) fn code_regions(text: &str) -> Vec<bool> {
     let mut regions = vec![false; text.len()];
     let mut in_code = false;
     for (i, byte) in text.bytes().enumerate() {
@@ -566,6 +566,19 @@ fn parse_marker_at(text: &str, start: usize, prefix: &str) -> Option<(usize, Str
     ))
 }
 
+pub(crate) fn contains_markdown_image_reference(text: &str) -> bool {
+    let regions = code_regions(text);
+    let mut i = 0;
+    while i < text.len() {
+        if !regions[i] && text[i..].starts_with("![") && parse_markdown_image(text, i).is_some() {
+            return true;
+        }
+        let ch = text[i..].chars().next().expect("i lies on a char boundary");
+        i += ch.len_utf8();
+    }
+    false
+}
+
 /// Parse a markdown image reference starting at `start` (a char boundary where
 /// the text begins with `![`). Accepts `![alt](target)`, the angle-bracket form
 /// `![alt](<target>)` that markdown requires when the path holds spaces, and an
@@ -576,7 +589,10 @@ fn parse_marker_at(text: &str, start: usize, prefix: &str) -> Option<(usize, Str
 /// renders "Quarterly revenue" as the photo's caption — so it is returned
 /// rather than dropped, and the `alt` text is NOT: alt is inert on every
 /// delivery leg.
-fn parse_markdown_image(text: &str, start: usize) -> Option<(usize, String, Option<String>)> {
+pub(crate) fn parse_markdown_image(
+    text: &str,
+    start: usize,
+) -> Option<(usize, String, Option<String>)> {
     debug_assert!(text[start..].starts_with("!["));
     // `\![alt](path)` is escaped literal text, not a reference.
     if start > 0 && text[..start].ends_with('\\') {

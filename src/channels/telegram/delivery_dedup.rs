@@ -56,6 +56,7 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use teloxide::types::{ChatId, ThreadId};
@@ -195,6 +196,24 @@ pub(crate) async fn send_rich_turn_guarded(
     thread_id: Option<ThreadId>,
     markdown: &str,
 ) -> anyhow::Result<i32> {
+    send_rich_turn_guarded_in_dir(session_id, bot, chat_id, thread_id, markdown, None).await
+}
+
+/// [`send_rich_turn_guarded`] with a base directory for resolving local
+/// markdown image references (#487).
+///
+/// The directory rides THROUGH the guard rather than around it: a caller that
+/// sent with a base dir and one that did not must still share one admission
+/// record for identical markdown, or the #500 duplicate this guard exists to
+/// stop would come back the moment a turn carried an image.
+pub(crate) async fn send_rich_turn_guarded_in_dir(
+    session_id: Uuid,
+    bot: &teloxide::Bot,
+    chat_id: ChatId,
+    thread_id: Option<ThreadId>,
+    markdown: &str,
+    base_dir: Option<&Path>,
+) -> anyhow::Result<i32> {
     let thread = thread_id.map(|t| t.0.0);
     let hash8 = fingerprint(markdown) as u32;
 
@@ -229,17 +248,34 @@ pub(crate) async fn send_rich_turn_guarded(
         }
     };
 
-    let sent = super::rich::send_rich_with_mermaid_id(
-        bot.api_url().as_str(),
-        bot.token(),
-        chat_id.0,
-        thread_id,
-        markdown,
-        None,
-        "turn",
-        "-",
-    )
-    .await;
+    let sent = match base_dir {
+        Some(dir) => {
+            super::rich::api::send_rich_with_mermaid_in_dir_id(
+                bot.api_url().as_str(),
+                bot.token(),
+                chat_id.0,
+                thread_id,
+                markdown,
+                Some(dir),
+                "turn",
+                "-",
+            )
+            .await
+        }
+        None => {
+            super::rich::send_rich_with_mermaid_id(
+                bot.api_url().as_str(),
+                bot.token(),
+                chat_id.0,
+                thread_id,
+                markdown,
+                None,
+                "turn",
+                "-",
+            )
+            .await
+        }
+    };
 
     match sent {
         Ok(id) if id != 0 => {
