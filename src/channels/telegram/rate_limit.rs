@@ -107,6 +107,13 @@ pub(crate) fn record_global_429(retry_after: Duration, chat: Option<i64>) {
     let now = super::governor::gate_now();
     let new_deadline = now + total_wait;
 
+    // #580: the event-time profile is read BEFORE the cooldown lock is taken,
+    // so the two locks are never held together. It is what makes a 429
+    // attributable to a RATE rather than to a bucket ceiling — the send log
+    // cannot see `sendChatAction`, and no other instrument reports a sliding
+    // window. Instrumentation only: this reads, it never gates.
+    let profile = super::governor::recent_profile(chat);
+
     let mut lock = GLOBAL_COOLDOWN.write().unwrap_or_else(|e| e.into_inner());
     let active_deadline = match *lock {
         Some(existing) if existing > new_deadline => existing,
@@ -120,14 +127,14 @@ pub(crate) fn record_global_429(retry_after: Duration, chat: Option<i64>) {
     if exceeds_inline_bound(retry_after) {
         tracing::warn!(
             "Telegram: Global 429 cooldown activated: {}s window exceeds the {}s inline bound \
-             — deadline {}s out, chat={chat} likely flood-banned; inline waits will defer (#556)",
+             — deadline {}s out, chat={chat} likely flood-banned; inline waits will defer (#556) {profile}",
             retry_after.as_secs(),
             MAX_INLINE_RATE_LIMIT_WAIT.as_secs(),
             total_wait.as_secs()
         );
     } else {
         tracing::warn!(
-            "Telegram: Global 429 cooldown activated: cooling down for {}s (deadline {:?}) chat={chat}",
+            "Telegram: Global 429 cooldown activated: cooling down for {}s (deadline {:?}) chat={chat} {profile}",
             total_wait.as_secs(),
             active_deadline
         );

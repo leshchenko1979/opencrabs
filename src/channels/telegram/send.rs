@@ -327,7 +327,23 @@ pub async fn fire_chat_action<C>(
         .await
         .map(|_| ())
     {
-        tracing::warn!("Telegram: chat action failed ({}): {}", why, e);
+        // #580: `sendChatAction` is the one governed surface with NO success
+        // telemetry, so typing — 44.39 % of measured demand — is invisible to
+        // the send log, and a group budget shared with typing cannot be seen
+        // from it. This arm is deliberately LOG-ONLY: recording a 429 here
+        // would arm the process-wide cooldown, and step 1 ships no behaviour
+        // change. It exists so the next measurement can see whether Telegram
+        // meters `sendChatAction` toward the group budget.
+        match &e {
+            teloxide::RequestError::RetryAfter(secs) => tracing::warn!(
+                "Telegram: chat action rate-limited ({}): retry_after={}s chat={} (#580 log-only, \
+                 no cooldown armed)",
+                why,
+                secs.duration().as_secs(),
+                chat.0
+            ),
+            _ => tracing::warn!("Telegram: chat action failed ({}): {}", why, e),
+        }
     }
 }
 

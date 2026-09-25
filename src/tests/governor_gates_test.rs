@@ -18,7 +18,7 @@
 //! exercised here — these tests assert governors NEVER let a call through
 //! that would need it.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use teloxide::types::{ChatId, MessageId};
 use teloxide::Bot;
@@ -1081,4 +1081,90 @@ async fn pace_rich_drops_cosmetic_and_holds_final() {
         governor::RichAdmission::Now
     ));
     assert_eq!(ts::snapshot(CHAT).unwrap().admitted_rich, 2);
+}
+
+/// #580: the ring is a SLIDING window, not a cumulative counter — it is what
+/// makes "what was the rate in the second before this 429" answerable at all.
+/// Before it, the send log could only answer per-surface questions, and the
+/// periodic summary could only answer cumulative ones.
+#[test]
+fn recent_ring_counts_surfaces_windows_and_gaps() {
+    let t0 = Instant::now();
+    let mut r = governor::Recent::default();
+    assert_eq!(r.gap_ms(t0), None, "an empty ring has no gap");
+    assert_eq!(r.count_within(t0, Duration::from_secs(60)), 0);
+
+    r.push(t0, governor::SURFACE_TYPING);
+    r.push(t0 + Duration::from_millis(500), governor::SURFACE_EDITS);
+    r.push(t0 + Duration::from_millis(900), governor::SURFACE_RICH);
+
+    let now = t0 + Duration::from_millis(900);
+    assert_eq!(r.count_within(now, Duration::from_secs(1)), 3, "all three in 1s");
+    assert_eq!(r.count_within(now, Duration::from_millis(100)), 1, "only newest");
+
+    assert_eq!(r.count_surface(now, Duration::from_secs(60), governor::SURFACE_TYPING), 1);
+    assert_eq!(r.count_surface(now, Duration::from_secs(60), governor::SURFACE_EDITS), 1);
+    assert_eq!(r.count_surface(now, Duration::from_secs(60), governor::SURFACE_RICH), 1);
+    assert_eq!(r.count_surface(now, Duration::from_secs(60), governor::SURFACE_SENDS), 0);
+
+    // The gap is measured to the NEWEST admission, so each push resets it.
+    assert_eq!(r.gap_ms(now), Some(0));
+    assert_eq!(r.gap_ms(now + Duration::from_millis(250)), Some(250));
+}
+
+/// #580: the ring is bounded. An unbounded deque on the admission hot path
+/// would be a leak in a daemon that runs for weeks.
+#[test]
+fn recent_ring_evicts_oldest_past_capacity() {
+    let t0 = Instant::now();
+    let mut r = governor::Recent::default();
+    for i in 0..(governor::RECENT_CAP as u64 + 10) {
+        r.push(t0 + Duration::from_millis(i), governor::SURFACE_RICH);
+    }
+    let now = t0 + Duration::from_millis(governor::RECENT_CAP as u64 + 9);
+    assert_eq!(r.count_within(now, Duration::from_secs(60)), governor::RECENT_CAP);
+    // The OLDEST went, not the newest — the newest is still 0ms old.
+    assert_eq!(r.gap_ms(now), Some(0), "newest entry survived eviction");
+}
+
+/// #580: a missing peer renders every field as `-` rather than dropping the
+/// fields, so the line shape is constant and a parser never special-cases it.
+#[test]
+fn recent_profile_unknown_peer_keeps_the_line_shape() {
+    let dash = "window{1s=-,5s=-,60s=-} by_surface{typing=-,edits=-,sends=-,rich=-} gap_ms=-";
+    assert_eq!(governor::recent_profile(None), dash);
+    for field in ["window{1s=", "by_surface{typing=", "gap_ms="] {
+        assert!(dash.contains(field), "shape field {field} must be present");
+    }
+}
+
+/// #580: `sendChatAction` emits no success telemetry, so typing — 44.39 % of
+/// measured demand — is invisible to the send log. The ring is the only
+/// instrument that can see it. This pins that an admission lands in it and that
+/// the reported windows actually slide.
+#[tokio::test(start_paused = true)]
+async fn recent_profile_reports_admissions_including_typing() {
+    let _guard = ts::registry_guard().await;
+    ts::reset(1_000);
+    rl_config!(enabled: true);
+
+    let chat = ChatId(-1005800000001);
+    ts::mark_forum(chat);
+
+    assert!(governor::admit_chat_action(chat, Some(7)).await, "first refresh");
+
+    let first = governor::recent_profile(Some(chat.0));
+    assert!(first.contains("by_surface{typing=1,"), "typing visible: {first}");
+    assert!(!first.contains("gap_ms=-"), "populated ring has a gap: {first}");
+
+    // Two seconds on, the first admission has left the 1s window and is still
+    // inside the 5s one — which is the whole point of a sliding ring.
+    ts::advance(2_000);
+    assert!(governor::admit_chat_action(chat, Some(7)).await);
+
+    let second = governor::recent_profile(Some(chat.0));
+    assert!(second.contains("by_surface{typing=2,"), "both admissions: {second}");
+    assert!(second.contains("window{1s=1,"), "only newest in 1s: {second}");
+    assert!(second.contains("5s=2,"), "both are in 5s: {second}");
+    assert!(second.contains("60s=2,"), "both are in 60s: {second}");
 }

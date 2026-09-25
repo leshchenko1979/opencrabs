@@ -42,7 +42,7 @@
 //! throttle milliseconds, summarized by one periodic INFO line
 //! ([`summary_loop`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -447,7 +447,68 @@ struct PendingFinal {
     attempts: u32,
 }
 
-/// Counters behind the periodic summary line. Field-per-class instead of a
+/// How many recent admissions the event-time ring keeps per peer (#580).
+///
+/// 64 samples at the measured 42.8 admits/min is ~90 s of history, which spans
+/// the 60 s window the group limit is quoted in. ~24 B per entry across ~6
+/// peers is ~9 KiB — immaterial against the daemon cgroup.
+pub(crate) const RECENT_CAP: usize = 64;
+
+/// Surface labels for the event-time ring (#580).
+///
+/// The send log carries only three of these: `sendChatAction` emits no success
+/// telemetry at all, so typing — 44.39 % of measured demand — is invisible to
+/// it. That blind spot is why a per-minute "under the ceiling" reading was
+/// wrong, and the ring exists to close it.
+pub(crate) const SURFACE_TYPING: &str = "typing";
+pub(crate) const SURFACE_EDITS: &str = "edits";
+pub(crate) const SURFACE_SENDS: &str = "sends";
+pub(crate) const SURFACE_RICH: &str = "rich";
+
+/// Most recent admissions for one peer, newest last (#580).
+///
+/// Event-time state, deliberately NOT inside [`Counters`]: the counters are
+/// cumulative and gated by `all_zero()` in [`format_summary`], while a ring is a
+/// sliding window. Keeping them apart leaves the summary format and its
+/// field-coverage test untouched.
+#[derive(Default)]
+pub(crate) struct Recent {
+    t: VecDeque<(Instant, &'static str)>,
+}
+
+impl Recent {
+    /// Record one admission, evicting the oldest past [`RECENT_CAP`].
+    pub(crate) fn push(&mut self, now: Instant, surface: &'static str) {
+        if self.t.len() >= RECENT_CAP {
+            self.t.pop_front();
+        }
+        self.t.push_back((now, surface));
+    }
+
+    /// Admissions across every surface within `window` of `now`.
+    pub(crate) fn count_within(&self, now: Instant, window: Duration) -> usize {
+        let cutoff = now.checked_sub(window).unwrap_or(now);
+        self.t.iter().filter(|(t, _)| *t >= cutoff).count()
+    }
+
+    /// Admissions of one surface within `window` of `now`.
+    pub(crate) fn count_surface(&self, now: Instant, window: Duration, surface: &str) -> usize {
+        let cutoff = now.checked_sub(window).unwrap_or(now);
+        self.t
+            .iter()
+            .filter(|(t, s)| *t >= cutoff && *s == surface)
+            .count()
+    }
+
+    /// Milliseconds since the most recent admission, `None` when empty.
+    pub(crate) fn gap_ms(&self, now: Instant) -> Option<u128> {
+        self.t
+            .back()
+            .map(|(t, _)| now.saturating_duration_since(*t).as_millis())
+    }
+}
+
+/// Counters behind the periodic summary line. Field-per-class instead of
 /// map so the summary formatting cannot silently miss a newly named class.
 #[derive(Default)]
 pub(crate) struct Counters {
@@ -558,11 +619,53 @@ struct Peer {
     /// A drainer task is currently running for this peer.
     draining: bool,
     counters: Counters,
+    /// Event-time admission ring (#580) — see [`Recent`].
+    recent: Recent,
 }
 
 fn peers() -> &'static Mutex<HashMap<i64, Peer>> {
     static PEERS: OnceLock<Mutex<HashMap<i64, Peer>>> = OnceLock::new();
     PEERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Event-time request profile for a chat, as a log suffix (#580).
+///
+/// Answers "what was the request rate in the seconds before this 429", which no
+/// other instrument on this box can: the send log is blind to `sendChatAction`,
+/// and the periodic summary is cumulative and periodic, so neither can report a
+/// sliding window. `None` — a DM, an unknown peer, or the governor disabled —
+/// renders every field as `-` rather than omitting them, so the line shape stays
+/// constant for a parser.
+///
+/// The caller ([`super::rate_limit::record_global_429`]) invokes this BEFORE it
+/// takes the cooldown lock, so the two locks are never held together.
+pub(crate) fn recent_profile(chat: Option<i64>) -> String {
+    let now = gate_now();
+    let map = peers().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(peer) = chat.and_then(|c| map.get(&c)) else {
+        return "window{1s=-,5s=-,60s=-} by_surface{typing=-,edits=-,sends=-,rich=-} gap_ms=-"
+            .to_string();
+    };
+    let r = &peer.recent;
+    let (s1, s5, s60) = (
+        Duration::from_secs(1),
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
+    let gap = r
+        .gap_ms(now)
+        .map_or_else(|| "-".to_string(), |g| g.to_string());
+    format!(
+        "window{{1s={},5s={},60s={}}} by_surface{{typing={},edits={},sends={},rich={}}} gap_ms={}",
+        r.count_within(now, s1),
+        r.count_within(now, s5),
+        r.count_within(now, s60),
+        r.count_surface(now, s60, SURFACE_TYPING),
+        r.count_surface(now, s60, SURFACE_EDITS),
+        r.count_surface(now, s60, SURFACE_SENDS),
+        r.count_surface(now, s60, SURFACE_RICH),
+        gap,
+    )
 }
 
 /// Format one peer's summary line. Pure so the field coverage is pinned by a
@@ -691,9 +794,11 @@ pub(crate) async fn admit_chat_action(chat: ChatId, thread_id: Option<i32>) -> b
                 lim.typing_burst,
                 1.0 / lim.typing_interval.as_secs_f64(),
             );
-            match bucket.take(gate_now()) {
+            let now = gate_now();
+            match bucket.take(now) {
                 Ok(()) => {
                     peer.counters.admitted_typing += 1;
+                    peer.recent.push(now, SURFACE_TYPING);
                     Decision::Admit
                 }
                 Err(wait) => {
@@ -931,6 +1036,9 @@ pub(crate) async fn edit_admission(
             } else {
                 peer.counters.admitted_edits += 1;
             }
+            // Both arms spend `peer.edits` and both land on `editMessageText`,
+            // so the ring records the surface once, whichever arm fired.
+            peer.recent.push(now, SURFACE_EDITS);
             Admission::Now
         } else if is_interactive {
             // Floor dry: a tap NEVER queues and NEVER drops — the acked token
@@ -1277,9 +1385,11 @@ pub(crate) async fn pace_send(chat: ChatId) {
                 let _ = sec.take(now);
                 let _ = min.take(now);
                 peer.counters.admitted_sends += 1;
+                peer.recent.push(now, SURFACE_SENDS);
                 PaceVerdict::Go
             } else if waited + need > SEND_MAX_HOLD {
                 peer.counters.admitted_sends += 1;
+                peer.recent.push(now, SURFACE_SENDS);
                 PaceVerdict::FailOpen(need)
             } else {
                 PaceVerdict::Wait(need)
@@ -1401,6 +1511,7 @@ pub(crate) async fn pace_rich(
             if need.is_zero() {
                 let _ = bucket.take(now);
                 peer.counters.admitted_rich += 1;
+                peer.recent.push(now, SURFACE_RICH);
                 None
             } else if class.is_droppable() {
                 peer.counters.note_rich_drop(class);
