@@ -263,6 +263,19 @@ fn apply_pragmas_in_memory(
 /// once the sidecar has actually grown past this threshold.
 pub const WAL_TRUNCATE_MIN_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Freelist level above which the maintenance sweep SKIPS the bulk memory GC
+/// (#522).
+///
+/// `gc_orphans` is a bulk `DELETE`, so it can add GiB to the freelist in one
+/// sweep while the bounded reclaim removes 16 MiB — the holes then outlive the
+/// budget that was meant to pay for them. This cap gates the DELETE side only:
+/// once the freelist is already this large, more holes are not what the file
+/// needs. 65 536 pages at a 4 KiB page size is 256 MiB.
+///
+/// The reclaim side is unaffected — a sweep over the cap still runs its
+/// bounded reclaim, so the file keeps shrinking while the GC stands down.
+pub const MEMORY_GC_FREELIST_CAP: i64 = 65_536;
+
 /// Every tunable value the maintenance sweep reads (#321 Part A3).
 ///
 /// These were literals at the call sites (`1024`, [`WAL_TRUNCATE_MIN_BYTES`]),
@@ -273,6 +286,11 @@ pub const WAL_TRUNCATE_MIN_BYTES: u64 = 64 * 1024 * 1024;
 pub struct MaintenanceKnobs {
     /// Free pages required before a reclaim is attempted at all.
     pub min_freelist_pages: i64,
+    /// Freelist level above which the bulk memory GC is skipped (#522).
+    ///
+    /// See [`MEMORY_GC_FREELIST_CAP`] for why the *delete* side needs a ceiling
+    /// of its own. Injected as `0` / `i64::MAX` in tests to pin both arms.
+    pub memory_gc_freelist_cap: i64,
     /// Size (bytes) the `-wal` sidecar must exceed before a `TRUNCATE`
     /// checkpoint is attempted (#298).
     pub wal_truncate_min_bytes: u64,
@@ -284,8 +302,12 @@ pub struct MaintenanceKnobs {
     /// number. At the 4096-page default with a 4096-byte page size that is
     /// 16 MiB per sweep, and the sweep runs once every 24 h
     /// (`MaintenanceService::spawn_periodic` in `src/cli/ui.rs`), so the
-    /// default capacity is 16 MiB/day. The live freelists sit far below that
-    /// (measured 2026-09-19: 7 pages on `opencrabs.db`, 0 on `memory.db`).
+    /// default capacity is 16 MiB/day. Measured 2026-09-23 on the healed
+    /// `memory.db`: 123 786 pages (483.5 MiB) holding 1 133 free pages
+    /// (4.43 MiB, 0.92 % of pages), against a measured churn of 3.44 GiB/day —
+    /// 3 522.6 MiB/day against a 16 MiB/day budget, a ~220x shortfall. The
+    /// budget is a floor on growth, never a fix for the writers that punch the
+    /// holes (#522).
     pub reclaim_pages_per_sweep: i64,
 }
 
@@ -293,6 +315,7 @@ impl Default for MaintenanceKnobs {
     fn default() -> Self {
         Self {
             min_freelist_pages: 1024,
+            memory_gc_freelist_cap: MEMORY_GC_FREELIST_CAP,
             wal_truncate_min_bytes: WAL_TRUNCATE_MIN_BYTES,
             reclaim_pages_per_sweep: 4096,
         }

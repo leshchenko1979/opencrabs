@@ -277,6 +277,92 @@ fn test_symbol_kinds() {
     assert_eq!(results[0].0, "function");
 }
 
+/// Per-table row counts owned by one `file_path`, read on a SECOND connection.
+///
+/// `Store` exposes no raw statement access, so this mirrors the house pattern
+/// in `memory::store::clear_skipped_placeholders`: its own connection, with a
+/// busy timeout, against the same file.
+fn file_graph_counts(db_path: &std::path::Path, file_path: &str) -> (i64, i64, i64) {
+    let conn = rusqlite::Connection::open(db_path).expect("open count connection");
+    conn.busy_timeout(std::time::Duration::from_secs(30))
+        .expect("busy_timeout");
+    let count = |sql: &str| -> i64 {
+        conn.query_row(sql, [file_path], |r| r.get(0))
+            .expect("count query")
+    };
+    (
+        count("SELECT COUNT(*) FROM symbols WHERE file_path = ?1"),
+        count("SELECT COUNT(*) FROM call_edges WHERE file_path = ?1"),
+        count("SELECT COUNT(*) FROM imports WHERE file_path = ?1"),
+    )
+}
+
+/// A re-index of a CHANGED file must REPLACE its graph, never append (#522).
+///
+/// Two independent stores, so the expectation is derived rather than frozen:
+/// store A sees V1 then V2 for one key, store B sees V2 alone. A replacing
+/// implementation leaves A at B's shape; an appending one leaves A at V1+V2.
+#[test]
+fn test_reindex_replaces_file_graph() {
+    let dir_a = TempDir::new().unwrap();
+    let path_a = dir_a.path().join("test_memory.db");
+    let store_a = Store::open(&path_a).unwrap();
+    store_a.ensure_symbol_tables().unwrap();
+
+    let dir_b = TempDir::new().unwrap();
+    let path_b = dir_b.path().join("test_memory.db");
+    let store_b = Store::open(&path_b).unwrap();
+    store_b.ensure_symbol_tables().unwrap();
+
+    // Deliberately different shapes: V2 has more definitions and a different
+    // import, so an append cannot coincidentally equal a replace.
+    const V1: &str = r#"
+use std::fmt;
+
+pub fn alpha() {
+    beta();
+}
+
+pub fn beta() {}
+"#;
+    const V2: &str = r#"
+use std::collections::HashMap;
+
+pub fn gamma() {
+    delta();
+}
+
+pub fn delta() {}
+
+pub fn epsilon() {}
+"#;
+
+    let key = "a.rs";
+    crate::memory::symbol_extractor::extract_and_store(&store_a, key, V1);
+    crate::memory::symbol_extractor::extract_and_store(&store_a, key, V2);
+    crate::memory::symbol_extractor::extract_and_store(&store_b, key, V2);
+
+    let (sym_b, edge_b, imp_b) = file_graph_counts(&path_b, key);
+    assert!(
+        sym_b > 0 && edge_b > 0 && imp_b > 0,
+        "fixture must populate all three tables from V2 alone, got \
+         symbols={sym_b} call_edges={edge_b} imports={imp_b}"
+    );
+
+    assert_eq!(
+        file_graph_counts(&path_a, key),
+        (sym_b, edge_b, imp_b),
+        "re-index must leave the file at V2's shape, not V1+V2"
+    );
+    // Each store holds exactly ONE file, so the unfiltered totals must agree
+    // too — that is the whole-store form of the same claim.
+    assert_eq!(
+        store_a.symbol_graph_counts().unwrap(),
+        store_b.symbol_graph_counts().unwrap(),
+        "one file per store: whole-store totals must match V2's own extract"
+    );
+}
+
 /// Benchmark scaffolding: populate the LIVE profile store's symbol graph
 /// from a real repository, bypassing the document layer (the external sweep
 /// already indexed the files as FTS documents; this backfills symbols for

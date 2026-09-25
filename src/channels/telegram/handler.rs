@@ -421,6 +421,17 @@ pub(crate) async fn handle_message(
     channel_msg_repo: ChannelMessageRepository,
     _session_binding_repo: SessionBindingRepository,
 ) -> ResponseResult<()> {
+    // #522: any inbound message is fleet activity — it resets the memory
+    // reclaim's AFK clock. Placed before EVERY early return, like
+    // note_incoming_msg below, because the messages that matter most here are
+    // the ones we never answer: a group message from another member starts no
+    // turn, so a turn-only clock reads a live chat as idle and lets the 16 s
+    // Store hold land just as that lane is about to reply.
+    //
+    // No branch on chat type, sender, ACL, mention or `is_bot`: a peer bot
+    // posting means the chat is live, and the safe direction is to defer.
+    crate::brain::agent::service::session_routes::note_activity();
+
     let user = match msg.from {
         Some(ref u) => u,
         None => return Ok(()),

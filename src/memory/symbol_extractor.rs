@@ -321,6 +321,15 @@ pub(crate) fn extract_and_store(store: &super::db::Store, key: &str, body: &str)
     let path = std::path::Path::new(key);
     match extractor.extract(path, body) {
         Ok((symbols, call_edges)) => {
+            // Replace, not append: re-indexing a changed file must not stack a
+            // second copy of its graph (#522). On a replace failure we return
+            // WITHOUT inserting: the transaction rolled back, so the file keeps
+            // its previous graph (stale) rather than gaining a second copy
+            // (doubled). For a row-doubling defect, stale is the safe direction.
+            if let Err(e) = store.replace_file_graph(key) {
+                tracing::warn!("code-graph: replace_file_graph {key}: {e}");
+                return;
+            }
             // Definitions (everything except imports)
             for sym in symbols.iter().filter(|s| s.kind != SymbolKind::Import) {
                 if let Err(e) = store.insert_symbol(

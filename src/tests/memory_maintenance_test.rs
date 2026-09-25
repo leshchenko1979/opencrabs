@@ -1,11 +1,16 @@
 //! Tests for memory garbage collection, orphan pruning, and maintenance sweeps (#241).
 
+use crate::brain::agent::service::session_routes;
+use crate::config::profile::with_home_override_async;
 use crate::db::Database;
+use crate::db::MaintenanceKnobs;
 use crate::db::models::{Message, Session};
 use crate::db::repository::{MessageRepository, SessionRepository};
 use crate::memory::db::{MemoryGcReport, Store};
 use crate::services::context::ServiceContext;
-use crate::services::maintenance::{leave, try_enter};
+use crate::services::maintenance::{
+    MaintenanceService, enter_maintenance, leave, reclaim_is_due, try_enter,
+};
 use crate::services::session::SessionService;
 use tempfile::tempdir;
 
@@ -136,4 +141,174 @@ fn test_maintenance_single_flight() {
     // Re-entry succeeds after leave
     assert!(try_enter());
     leave();
+
+    // #522: the sweep takes the RAII permit, not the bare try_enter/leave pair,
+    // so an unwind inside the sweep body cannot wedge maintenance for the
+    // process lifetime — which would silently disable the 24 h sweep AND the
+    // reclaim ticker together. Dropping the permit must release the flag.
+    //
+    // These assertions live in THIS test rather than a second one on purpose:
+    // the flag is process-global, so two tests taking it would race under the
+    // parallel harness.
+    let permit = enter_maintenance().expect("first permit");
+    assert!(
+        enter_maintenance().is_none(),
+        "a held permit must exclude a second"
+    );
+    drop(permit);
+    let again = enter_maintenance().expect("dropping the permit must release the flag");
+    // Explicitly released, so the flag is free for whatever runs next.
+    drop(again);
+}
+
+/// Row count for one query, read on a SECOND connection to the memory store.
+///
+/// `Store` exposes no raw statement access, so this mirrors the house pattern
+/// in `memory::store::clear_skipped_placeholders`: its own connection, with a
+/// busy timeout, against the same WAL file.
+fn memory_row_count(db_path: &std::path::Path, sql: &str) -> i64 {
+    let conn = rusqlite::Connection::open(db_path).expect("open count connection");
+    conn.busy_timeout(std::time::Duration::from_secs(30))
+        .expect("busy_timeout");
+    conn.query_row(sql, [], |r| r.get(0)).expect("count query")
+}
+
+/// Over the freelist cap the bulk memory GC is SKIPPED; under it the GC runs
+/// and prunes (#522).
+///
+/// The `0` / `i64::MAX` cap injection is the file's own idiom
+/// (`min_freelist_pages: 0` / `i64::MAX` in `sqlite_maintenance_test.rs`), and
+/// it is what makes this fixture freelist-independent: `freelist_count() >= 0`
+/// always holds, `>= i64::MAX` never does.
+///
+/// `run_maintenance_inner` is called directly — not `run_maintenance_with` — so
+/// the test never contends for the process-global single-flight flag with a
+/// test running in parallel.
+#[tokio::test]
+async fn test_memory_gc_skipped_over_freelist_cap() {
+    let home = tempdir().expect("tempdir");
+
+    with_home_override_async(home.path().to_path_buf(), async {
+        // A `content` row with no matching `documents` row is an orphan for
+        // `gc_orphans` step 3, which runs unconditionally.
+        const ORPHAN: &str = "SELECT COUNT(*) FROM content WHERE hash = 'orphan-522'";
+        let memory_db = crate::config::opencrabs_home()
+            .join("memory")
+            .join("memory.db");
+
+        let db = Database::connect_in_memory().await.unwrap();
+        db.run_migrations().await.unwrap();
+        let svc = MaintenanceService::new(ServiceContext::new(db.pool().clone()));
+
+        {
+            // The store the sweep itself resolves, so the test drives the same
+            // handle `run_maintenance_inner` takes. Guard scoped: holding it
+            // across the sweep would deadlock the non-reentrant Mutex.
+            let store_mutex = crate::memory::get_store().expect("get_store");
+            let store = store_mutex.lock().expect("store lock");
+            assert!(
+                store.freelist_count() >= 0,
+                "fixture precondition: cap 0 is always at or below the freelist"
+            );
+            store
+                .insert_content("orphan-522", "orphan body", "2026-09-25T00:00:00Z")
+                .expect("insert orphan content");
+        }
+
+        assert_eq!(
+            memory_row_count(&memory_db, ORPHAN),
+            1,
+            "fixture must place the orphan before the sweep"
+        );
+
+        // Arm 1 — cap 0: the freelist is always at or above it, so the bulk GC
+        // must stand down while the reclaim still runs.
+        let over_cap = svc
+            .run_maintenance_inner(MaintenanceKnobs {
+                memory_gc_freelist_cap: 0,
+                ..Default::default()
+            })
+            .await
+            .expect("sweep over cap");
+        assert!(
+            over_cap.memory_gc_skipped,
+            "freelist at or above the cap must skip the bulk GC"
+        );
+        assert_eq!(
+            memory_row_count(&memory_db, ORPHAN),
+            1,
+            "a skipped GC must leave orphans in place"
+        );
+
+        // Arm 2 — cap i64::MAX: unreachable, so the GC runs and prunes.
+        let under_cap = svc
+            .run_maintenance_inner(MaintenanceKnobs {
+                memory_gc_freelist_cap: i64::MAX,
+                ..Default::default()
+            })
+            .await
+            .expect("sweep under cap");
+        assert!(
+            !under_cap.memory_gc_skipped,
+            "freelist below the cap must run the bulk GC"
+        );
+        assert_eq!(
+            memory_row_count(&memory_db, ORPHAN),
+            0,
+            "a running GC must prune the orphan"
+        );
+    })
+    .await;
+}
+
+/// The reclaim gate's contract, pinned without a clock (#522).
+#[test]
+fn test_memory_reclaim_due_predicate() {
+    // Due once the quiet window elapses while nothing is in flight.
+    assert!(!reclaim_is_due(
+        false,
+        std::time::Duration::from_secs(59),
+        std::time::Duration::ZERO
+    ));
+    assert!(reclaim_is_due(
+        false,
+        std::time::Duration::from_secs(60),
+        std::time::Duration::ZERO
+    ));
+
+    // A turn in flight defers — right up to the starvation cap, which fires
+    // regardless so a permanently busy box cannot starve the reclaim.
+    assert!(!reclaim_is_due(
+        true,
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(1799)
+    ));
+    assert!(reclaim_is_due(
+        true,
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(1800)
+    ));
+
+    // Long idle, but a live turn still defers.
+    assert!(!reclaim_is_due(
+        true,
+        std::time::Duration::from_secs(600),
+        std::time::Duration::ZERO
+    ));
+}
+
+/// The activity clock advances when noted, and a note leaves a readable
+/// instant (#522).
+#[test]
+fn test_activity_clock_advances() {
+    // Deliberately race-tolerant: `LAST_ACTIVITY` is a process-global shared
+    // with every other test in this binary, and a concurrent note can only move
+    // it forward. Do NOT assert absence before the note — the ticker seeds the
+    // clock at spawn, so an absolute-absence assertion would be flaky rather
+    // than stronger.
+    let before = session_routes::last_activity();
+    session_routes::note_activity();
+    let after = session_routes::last_activity();
+    assert!(after.is_some(), "a note must leave a readable instant");
+    assert!(after >= before, "the clock must never move backwards");
 }
