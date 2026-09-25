@@ -595,7 +595,7 @@ pub struct TelegramConfig {
     /// Proactive per-peer flood governors (#1211), `[channels.telegram.
     /// rate_limiter]`. Three independent token buckets keyed by forum chat id
     /// — typing (~1 call / 3 s, burst 8, concurrent sessions coalesced per
-    /// topic), edits (~30/min with a priority drop ladder clock → brain
+    /// topic), edits (18/min by default with a priority drop ladder clock → brain
     /// preview → intermediary → status; settle renders and plan-card refreshes
     /// queue latest-wins and are never dropped) and sends (~1/s under an
     /// ~18/min ceiling) — keep a busy multi-topic deployment under Telegram's
@@ -692,8 +692,9 @@ pub struct TelegramGroupConfig {
 /// Proactive flood-governor knobs (#1211), `[channels.telegram.rate_limiter]`.
 ///
 /// Defaults are the documented Telegram bot regime per peer: ~20 typing
-/// actions / 5 s + 40 / 30 s, edits observed safe at 30/min, sends under
-/// ~20/min. The governors read these live on every gate evaluation.
+/// actions / 5 s + 40 / 30 s, edits observed safe at ~20/min (this box
+/// measured 18/min sustained tripping flood control after 15-18 min), sends
+/// under ~20/min. The governors read these live on every gate evaluation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimiterConfig {
     /// Master switch. Default true — enforcement only ever engages for FORUM
