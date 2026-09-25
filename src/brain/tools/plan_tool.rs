@@ -1694,6 +1694,25 @@ impl Tool for PlanTool {
         // the size guard applies. The engine's lifecycle state (NoPlan /
         // pre-init / post-init Editing / Active) is derived from the same
         // files.
+        // #506: this call is one atomic mutation of a read-modify-write store,
+        // so the per-session `state` slot is taken BEFORE the load. With the
+        // load outside the lock, two calls in one parallel block each read the
+        // same baseline and the last save reverts the other's task — the
+        // lost-update half of #506, where a `complete` and a `start` both
+        // returned success and only one survived on disk.
+        //
+        // Scope is the load -> mutate -> save window ONLY. The isolated-worker
+        // spawn below releases it across the await, so plan availability never
+        // depends on how long a subagent takes (design 1.4, option (b)).
+        //
+        // No re-entry: nothing called under this guard may take it again.
+        // `sync_md_to_json` runs from registry.rs AFTER this returns,
+        // `discard_plan` and `archive_plan` are lock-free, and the card takes
+        // `card` then `state` in that order while this call takes `state`
+        // alone — so the two orderings cannot deadlock.
+        let state_lock = crate::utils::plan_files::plan_state_lock(plan_sid);
+        let mut state_guard = Some(state_lock.lock().await);
+
         let mut plan: Option<PlanDocument> = crate::utils::plan_files::load_plan(plan_sid).await;
         let state = crate::utils::plan_files::plan_mode_state(plan_sid).await;
 
@@ -2493,6 +2512,12 @@ impl Tool for PlanTool {
                                     tracing::info!(
                                         "plan start #{order}: routing to isolated worker session"
                                     );
+                                    // Release the plan lock across the spawn (design
+                                    // 1.4 option (b)): a hung worker must never block
+                                    // every plan operation for this session. The Ok arm
+                                    // returns below, so only the spawn-failure path
+                                    // reaches the re-acquire before the shared save.
+                                    drop(state_guard.take());
                                     match spawn_plan_worker(context, plan_sid, order, brief).await {
                                         Ok(worker_output) => {
                                             // Collect, don't trust: workers
@@ -2795,6 +2820,15 @@ impl Tool for PlanTool {
             // try_approve, so re-saving the stale local copy would clobber it;
             // the autonomy ops touch a session marker, not the plan.
             PlanOperation::Approve => {
+                // #506 RE-ENTRANCY: `try_approve` takes the same `state` slot
+                // this call holds — it routes through `mutate_plan` — and the
+                // slot is NOT reentrant, so holding it across this call would
+                // deadlock the approve outright (the task would wait forever on
+                // a lock it already owns). Release it first; the primitive
+                // re-loads under its own acquisition, so the approve still runs
+                // on a fresh baseline. This arm returns below and never reaches
+                // the shared save, so nothing here needs the guard back.
+                drop(state_guard.take());
                 if !crate::utils::plan_files::is_plan_autonomy(plan_sid).await {
                     return Ok(ToolResult::error(
                         "Self-approval is off for this session. The user approves the plan via \
@@ -2884,6 +2918,17 @@ impl Tool for PlanTool {
                 ));
             }
         };
+
+        // The persist below must be lock-protected. Only the isolated-spawn
+        // fall-through arrives here having released it; every other path still
+        // holds the guard taken before the load.
+        if state_guard.is_none() {
+            state_guard = Some(state_lock.lock().await);
+        }
+        debug_assert!(
+            state_guard.is_some(),
+            "the shared plan save must run under the session's state slot"
+        );
 
         // Save through the shared store (atomic write, canonical
         // "Editing" / "Active" status strings).

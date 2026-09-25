@@ -23,7 +23,9 @@
 //! `None` (NoPlan).
 
 use crate::tui::plan::{ApprovalSource, PlanDocument, PlanStatus};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -439,6 +441,141 @@ pub fn load_plan_from_path(path: &Path) -> Option<PlanDocument> {
     Some(plan)
 }
 
+/// Per-session plan locks (#506, #822): one registry, two named slots.
+///
+/// - **state** guards the plan JSON/`.md` read-modify-write. Before it
+///   existed, neither the loader nor the saver was serialised, so two
+///   mutations of one plan in the same parallel block (`complete` and
+///   `start`) each read the same baseline, each wrote its own version, and
+///   the second write silently discarded the first — while BOTH returned a
+///   success receipt (#506).
+/// - **card** guards the Telegram plan card's post/edit/delete. Its own
+///   read-decide-write is why it exists: with nothing held across that, two
+///   concurrent refreshes both saw no card, both posted, and the second id
+///   overwrote the first, leaving one card visible but untracked and
+///   permanently uneditable (#822). It is deliberately a SEPARATE slot from
+///   **state** because it is held across the Telegram API calls (and 429
+///   backoff): plan mutation must never queue behind Telegram latency. The
+///   card takes **state** briefly around its own JSON read, so it can never
+///   render a half-mutated plan.
+///
+/// Process-wide rather than per-service, following the `seen_skills` /
+/// `notify_receipts` idiom, so every service instance and every consumer
+/// shares one lock per session. Per session, so unrelated chats never wait on
+/// each other.
+struct PlanSessionLocks {
+    state: Arc<tokio::sync::Mutex<()>>,
+    card: Arc<tokio::sync::Mutex<()>>,
+}
+
+fn session_locks() -> &'static std::sync::Mutex<HashMap<Uuid, Arc<PlanSessionLocks>>> {
+    static LOCKS: OnceLock<std::sync::Mutex<HashMap<Uuid, Arc<PlanSessionLocks>>>> = OnceLock::new();
+    LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// The session's slot pair, created on first use.
+///
+/// The map lock is held only for the lookup/insert and never across an await,
+/// so a poisoned map is recovered rather than panicking the daemon — the map
+/// itself is still structurally valid.
+fn locks_for(session_id: Uuid) -> Arc<PlanSessionLocks> {
+    session_locks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(session_id)
+        .or_insert_with(|| {
+            Arc::new(PlanSessionLocks {
+                state: Arc::new(tokio::sync::Mutex::new(())),
+                card: Arc::new(tokio::sync::Mutex::new(())),
+            })
+        })
+        .clone()
+}
+
+/// The `state` slot: held across a plan read-modify-write.
+///
+/// Exposed for the one shape [`mutate_plan`] cannot cover — a caller that must
+/// await something slow (the isolated-worker spawn) BETWEEN two mutations.
+/// Hold it for the mutation windows only, never across the await, so plan
+/// availability never depends on how long the awaited thing takes.
+pub fn plan_state_lock(session_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+    locks_for(session_id).state.clone()
+}
+
+/// The `card` slot (#822): held across the plan card's Telegram API calls.
+pub fn plan_card_lock(session_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+    locks_for(session_id).card.clone()
+}
+
+/// The single serialised read-modify-write for a session's plan (#506).
+///
+/// Takes the `state` slot, loads the plan FRESH from disk inside the critical
+/// section, hands it to `f`, then persists whatever `f` left behind. Because
+/// the load happens under the lock, a concurrent mutation can no longer act on
+/// a baseline another writer is about to replace — the lost-update half of
+/// #506. An `Err` from `f` aborts without writing, so a refused mutation never
+/// half-lands.
+///
+/// The lock covers load → mutate → save ONLY. A caller that must await
+/// something slow between two mutations stays outside it: take
+/// [`plan_state_lock`] for that shape rather than widening this one.
+pub async fn mutate_plan<T, F>(session_id: Uuid, f: F) -> Result<T, String>
+where
+    F: FnOnce(&mut Option<PlanDocument>) -> Result<T, String>,
+{
+    let lock = plan_state_lock(session_id);
+    let _guard = lock.lock().await;
+    let mut plan = load_plan(session_id).await;
+    let value = f(&mut plan)?;
+    if let Some(ref current) = plan {
+        save_plan(current)
+            .await
+            .map_err(|e| format!("Failed to save plan: {e}"))?;
+        // Read-back receipt (#506, leg 2): the save is atomic by rename, so the
+        // file can never tear — but it CAN be replaced wholesale by a writer
+        // that does not take this lock (`archive_plan`, `discard_plan`, a
+        // hand-edited file). Without this check such a clobber is invisible and
+        // the caller is handed a success receipt for a mutation that is gone.
+        // Comparing the persisted bytes is what makes the class fail loudly;
+        // the lock alone cannot, because it only excludes lock-takers.
+        verify_persisted(session_id, current).await?;
+    }
+    Ok(value)
+}
+
+/// Read-back receipt for a plan mutation (#506).
+///
+/// Re-reads the file `save_plan` wrote and compares it to the bytes that save
+/// produced. `save_plan` serialises with `to_string_pretty` and publishes by
+/// rename, so a document that survived is byte-identical to what was written;
+/// any difference means a non-lock-taking writer replaced it between the save
+/// and this read.
+///
+/// Deliberately compares BYTES rather than re-loading through `load_plan`:
+/// the load path legitimately normalises (legacy status mapping, the #20
+/// demotion of an `Auto`-approved plan back to the approval queue), so a
+/// document-level comparison would report a divergence for a plan that was
+/// persisted exactly as written. Byte equality cannot be fooled that way.
+pub async fn verify_persisted(session_id: Uuid, expected: &PlanDocument) -> Result<(), String> {
+    let path = plan_json_path(session_id).await;
+    let written = serde_json::to_string_pretty(expected)
+        .map_err(|e| format!("plan read-back could not serialize the saved document: {e}"))?;
+    let on_disk = std::fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "plan read-back FAILED: {} is unreadable immediately after the save: {e}",
+            path.display()
+        )
+    })?;
+    if on_disk != written {
+        return Err(format!(
+            "plan read-back DIVERGED: the mutation is NOT in {}. Another writer replaced \
+             the file after this save, so the change was LOST. Re-read the plan and retry.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Save the plan atomically (temp file + rename), writing the canonical
 /// `"Editing"` / `"Active"` status strings.
 pub async fn save_plan(plan: &PlanDocument) -> std::io::Result<()> {
@@ -836,54 +973,70 @@ pub async fn sync_md_to_json(session_id: Uuid) -> Result<(), String> {
     let Ok(body) = std::fs::read_to_string(&md) else {
         return Ok(());
     };
-    let Some(mut plan) = load_plan_from_path(&json) else {
-        return Ok(());
-    };
-    if plan.status != PlanStatus::Editing {
-        return Ok(());
-    }
-
-    let warnings = template_section_warnings(&body);
-    if !warnings.is_empty() {
-        // The generic write tool has already updated the .md by the time the
-        // registry reaches this mirror. Restore the pre-write state so a
-        // refused write has no observable persistence side effect: the last
-        // accepted body, or the scaffold when nothing has been mirrored yet.
-        // A fresh plan's description is empty; restoring it would delete the
-        // draft AND the scaffold the guard's own contract depends on.
-        let restore = if plan.description.trim().is_empty() {
-            design_scaffold(&plan.title)
-        } else {
-            plan.description.clone()
-        };
-        if let Err(e) = std::fs::write(&md, restore) {
-            tracing::warn!("Failed to restore refused plan .md write: {e}");
-        }
-        return Err(format!(
-            "PLAN TEMPLATE WRITE REFUSED: {}\n\nPlan template contract: each `**Label:**` must be a single line: label + space + text",
-            warnings.join("; ")
-        ));
-    }
 
     // #326: validation goes through the channel-agnostic seam — it returns the
     // installed renderer's verdict, or nothing when no renderer is present.
+    //
+    // Deliberately OUTSIDE the lock below: it is a pure function of `body`
+    // (it reads no plan state), and it is the slowest step here, so it must
+    // not extend the critical section. Its verdict is carried in.
     let parse_errors = crate::utils::mermaid::validate(&body).await;
-    if !parse_errors.is_empty() {
-        if let Err(e) = std::fs::write(&md, &plan.description) {
-            tracing::warn!("Failed to restore refused plan .md write: {e}");
-        }
-        let err = crate::utils::mermaid::format_mermaid_error("plan markdown", &parse_errors);
-        return Err(format!(
-            "PLAN WRITE REFUSED: {err}\n\nPlease fix the Mermaid diagram syntax in the plan design and try again."
-        ));
-    }
 
-    plan.description = body;
-    plan.updated_at = chrono::Utc::now();
-    if let Err(e) = save_plan(&plan).await {
-        tracing::warn!("Failed to mirror plan .md into JSON description: {e}");
-    }
-    Ok(())
+    // #506: this mirror is a read-modify-write on the plan JSON, so it runs
+    // through the same serialised primitive as every other mutation. It is the
+    // seventh writer — reached from the generic write tool's registry seam, not
+    // from the plan tool — and it was the one site where the load and the save
+    // were separated by the template/mermaid checks, i.e. the widest window of
+    // any caller for a concurrent mutation to be reverted.
+    //
+    // On refusal the closure returns Err, so the primitive does NOT save: the
+    // JSON keeps its previous description while the `.md` is restored, which is
+    // the contract the refusal tests pin.
+    mutate_plan(session_id, |plan| {
+        let Some(plan) = plan.as_mut() else {
+            return Ok(());
+        };
+        if plan.status != PlanStatus::Editing {
+            return Ok(());
+        }
+
+        let warnings = template_section_warnings(&body);
+        if !warnings.is_empty() {
+            // The generic write tool has already updated the .md by the time the
+            // registry reaches this mirror. Restore the pre-write state so a
+            // refused write has no observable persistence side effect: the last
+            // accepted body, or the scaffold when nothing has been mirrored yet.
+            // A fresh plan's description is empty; restoring it would delete the
+            // draft AND the scaffold the guard's own contract depends on.
+            let restore = if plan.description.trim().is_empty() {
+                design_scaffold(&plan.title)
+            } else {
+                plan.description.clone()
+            };
+            if let Err(e) = std::fs::write(&md, restore) {
+                tracing::warn!("Failed to restore refused plan .md write: {e}");
+            }
+            return Err(format!(
+                "PLAN TEMPLATE WRITE REFUSED: {}\n\nPlan template contract: each `**Label:**` must be a single line: label + space + text",
+                warnings.join("; ")
+            ));
+        }
+
+        if !parse_errors.is_empty() {
+            if let Err(e) = std::fs::write(&md, &plan.description) {
+                tracing::warn!("Failed to restore refused plan .md write: {e}");
+            }
+            let err = crate::utils::mermaid::format_mermaid_error("plan markdown", &parse_errors);
+            return Err(format!(
+                "PLAN WRITE REFUSED: {err}\n\nPlease fix the Mermaid diagram syntax in the plan design and try again."
+            ));
+        }
+
+        plan.description = body;
+        plan.updated_at = chrono::Utc::now();
+        Ok(())
+    })
+    .await
 }
 
 /// Advisory light-template-B checks for the design `.md`: `## Context`

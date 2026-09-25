@@ -105,48 +105,54 @@ pub async fn try_approve(session_id: Uuid, source: ApprovalSource) -> ApproveOut
                 .to_string(),
         ),
         PlanModeState::PostInitEditing => {
-            let Some(mut plan) = plan_files::load_plan(session_id).await else {
-                return ApproveOutcome::Refused(
-                    "Plan JSON is unreadable; cannot approve. /discard and start over.".to_string(),
-                );
-            };
-            // Checklist-mode plan: the user authored a task list during Editing
-            // (init mode="checklist") and just reviewed it. The deliverable is
-            // the checklist, not a design `.md` — the placeholder scaffold `.md`
-            // only exists to hold the plan in Editing for approval. Validating
-            // that empty scaffold as design prose wrongly refused a ready plan
-            // (#573 audit: 6 real tasks, empty template). Approve straight to
-            // Active and start executing; there is nothing to seed.
-            if !plan.tasks.is_empty() {
-                plan.approve(source);
-                if let Err(e) = plan_files::save_plan(&plan).await {
-                    return ApproveOutcome::Refused(format!(
-                        "Failed to persist the approval: {e}. Try again."
+            // #506: this approve is a read-modify-write on the same store the
+            // plan tool mutates, so it runs through the one serialised
+            // primitive — load under the session's `state` slot, mutate, save.
+            // Without it the approve could be stamped onto a baseline a
+            // concurrent `add_task` was about to replace, activating a plan
+            // that is not the one the user reviewed.
+            let outcome = plan_files::mutate_plan(session_id, |plan| {
+                let Some(plan) = plan.as_mut() else {
+                    return Ok(ApproveOutcome::Refused(
+                        "Plan JSON is unreadable; cannot approve. /discard and start over."
+                            .to_string(),
                     ));
-                }
-                return ApproveOutcome::SeedTurn {
-                    prompt: start_prompt(),
                 };
-            }
-            // Design track: no tasks yet, so the `.md` prose IS the plan.
-            // Validate it, approve, and seed tasks from its numbered steps.
-            let body = std::fs::read_to_string(&md_path).unwrap_or_default();
-            if let Err(why) = validate_for_approve(&body) {
-                return ApproveOutcome::Refused(format!(
-                    "Plan not ready to approve: {why}. Fill the template in {} first.",
-                    md_path.display()
-                ));
-            }
-            // First approve: Editing -> Active + approved_at + source.
-            // The .md freezes automatically (the gate keys off Active status).
-            plan.approve(source);
-            if let Err(e) = plan_files::save_plan(&plan).await {
-                return ApproveOutcome::Refused(format!(
-                    "Failed to persist the approval: {e}. The .md is untouched; try again."
-                ));
-            }
-            ApproveOutcome::SeedTurn {
-                prompt: seed_prompt(&md_path),
+                // Checklist-mode plan: the user authored a task list during Editing
+                // (init mode="checklist") and just reviewed it. The deliverable is
+                // the checklist, not a design `.md` — the placeholder scaffold `.md`
+                // only exists to hold the plan in Editing for approval. Validating
+                // that empty scaffold as design prose wrongly refused a ready plan
+                // (#573 audit: 6 real tasks, empty template). Approve straight to
+                // Active and start executing; there is nothing to seed.
+                if !plan.tasks.is_empty() {
+                    plan.approve(source);
+                    return Ok(ApproveOutcome::SeedTurn {
+                        prompt: start_prompt(),
+                    });
+                }
+                // Design track: no tasks yet, so the `.md` prose IS the plan.
+                // Validate it, approve, and seed tasks from its numbered steps.
+                let body = std::fs::read_to_string(&md_path).unwrap_or_default();
+                if let Err(why) = validate_for_approve(&body) {
+                    return Ok(ApproveOutcome::Refused(format!(
+                        "Plan not ready to approve: {why}. Fill the template in {} first.",
+                        md_path.display()
+                    )));
+                }
+                // First approve: Editing -> Active + approved_at + source.
+                // The .md freezes automatically (the gate keys off Active status).
+                plan.approve(source);
+                Ok(ApproveOutcome::SeedTurn {
+                    prompt: seed_prompt(&md_path),
+                })
+            })
+            .await;
+            match outcome {
+                Ok(outcome) => outcome,
+                Err(e) => ApproveOutcome::Refused(format!(
+                    "Failed to persist the approval: {e}. Try again."
+                )),
             }
         }
         PlanModeState::Active => {

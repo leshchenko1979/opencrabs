@@ -8227,22 +8227,52 @@ impl AgentService {
         // `is_complete` requires non-empty, all-resolved tasks, so Editing and
         // in-progress plans are untouched; `load_plan` is a fast no-op when the
         // session has no live plan.
-        if let Some(mut finished) = crate::utils::plan_files::load_plan(session_id).await {
-            // A plan whose only remaining task is the trailing delivery step
-            // never reaches is_complete() on its own — delivering the answer is
-            // what leaves that box unchecked, so the card lingers with 1/N done
-            // (#737). When THIS turn delivered a final response, complete that
-            // trailing task and persist, so the archive below fires.
-            if !final_text.trim().is_empty()
-                && finished.complete_trailing_delivery_task()
-                && let Err(e) = crate::utils::plan_files::save_plan(&finished).await
-            {
-                tracing::warn!("Failed to persist auto-completed trailing plan task: {e}");
+        // #506: this is the THIRD writer of the plan store — it runs at turn
+        // settle, outside the plan tool, and is exactly the actor that made the
+        // lock alone insufficient. It goes through the same serialised
+        // primitive as the tool, so a concurrent `complete` cannot be reverted
+        // by a settle-time write built from a stale baseline.
+        //
+        // Both mutations happen under ONE acquisition: the trailing-task
+        // completion and the archive decision are derived from the same
+        // in-memory document, so archiving is decided by what `is_complete()`
+        // says AFTER the mutation, never by a second disk read. A failure to
+        // persist stays non-fatal here (turn settle must not fail the turn) but
+        // is now distinguishable: the mutation reports whether it landed.
+        match crate::utils::plan_files::mutate_plan(
+            session_id,
+            |plan| {
+                let Some(finished) = plan.as_mut() else {
+                    return Ok((false, false));
+                };
+                // A plan whose only remaining task is the trailing delivery step
+                // never reaches is_complete() on its own — delivering the answer
+                // is what leaves that box unchecked, so the card lingers with
+                // 1/N done (#737). When THIS turn delivered a final response,
+                // complete that trailing task so the archive below fires.
+                let mutated = !final_text.trim().is_empty()
+                    && finished.complete_trailing_delivery_task();
+                Ok((mutated, mutated && finished.is_complete()))
+            },
+        )
+        .await
+        {
+            Ok((mutated, archived)) => {
+                if mutated {
+                    tracing::info!("Plan: auto-completed trailing delivery task at turn settle");
+                }
+                if archived
+                    && let Err(e) = crate::utils::plan_files::archive_plan(session_id).await
+                {
+                    tracing::warn!("Failed to archive completed plan at turn settle: {e}");
+                }
             }
-            if finished.is_complete()
-                && let Err(e) = crate::utils::plan_files::archive_plan(session_id).await
-            {
-                tracing::warn!("Failed to archive completed plan at turn settle: {e}");
+            // A persist failure must stay non-fatal at turn settle (the turn
+            // has already delivered), but it must NEVER be silent: this is the
+            // path the read-back receipt exists to make loud, so swallowing the
+            // Err here would discard the very signal #506 added.
+            Err(e) => {
+                tracing::warn!("Failed to persist plan at turn settle: {e}");
             }
         }
 

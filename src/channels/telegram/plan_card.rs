@@ -1098,8 +1098,18 @@ pub(crate) async fn refresh_plan_card(
     // create is exactly what leaves the window open.
     let card_lock = state.plan_card_lock(session_id).await;
     let _guard = card_lock.lock().await;
-    let (json_title, checklist) = load_plan_sections(session_id).await;
-    let prose = load_plan_prose(session_id).await;
+    // #506: the `state` slot is taken briefly around the plan reads so the card
+    // can never render a plan a concurrent mutation is midway through
+    // replacing. Released immediately — it is the `card` slot, not this one,
+    // that is held across the Telegram API calls below, so plan mutation never
+    // queues behind Telegram latency (design 1.4, option (b)).
+    let (json_title, checklist, prose) = {
+        let state_lock = crate::utils::plan_files::plan_state_lock(session_id);
+        let _state_guard = state_lock.lock().await;
+        let (json_title, checklist) = load_plan_sections(session_id).await;
+        let prose = load_plan_prose(session_id).await;
+        (json_title, checklist, prose)
+    };
     // #155 D2: the title normally comes from the plan JSON, and the `.md` H1 is
     // stripped out of the prose by design, so nothing else supplies one. When
     // the JSON is gone but the `.md` survives — a reviewer rewrite after a
