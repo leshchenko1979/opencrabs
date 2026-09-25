@@ -297,7 +297,9 @@ impl Tool for SessionNotifyTool {
 
         use crate::brain::agent::service::notify_receipts;
         use crate::brain::agent::service::quiet_delivery;
-        use crate::brain::agent::service::session_routes::{deliver_to_session, Delivery};
+        use crate::brain::agent::service::session_routes::{
+            deliver_to_session, session_route, Delivery,
+        };
 
         let caller_str = from.to_string();
         let target_str = target.to_string();
@@ -336,17 +338,24 @@ impl Tool for SessionNotifyTool {
                     ));
                 }
                 Ok(Some(_)) => {
-                    // #574: a session with no `session_bindings` row can never
-                    // drain a queue — no channel can ever claim it, so the
-                    // park is permanent and the receipt is a lie. Refuse it
-                    // here, BEFORE any delivery path, so no durable queue row
-                    // is ever written for a target that cannot consume it.
-                    // A session that HAS a binding but whose channel has not
-                    // claimed it since restart remains the legitimate park
-                    // (see the `Delivery::Parked` arm below).
+                    // #574: the tool already computed whether the target has
+                    // a durable binding, but used it only to pick message
+                    // text — parking an unclaimable target and reporting
+                    // success. Refuse that case here, BEFORE any delivery
+                    // path, so no durable queue row is ever written for a
+                    // target that cannot consume it. The bound-but-unclaimed
+                    // park is untouched (see the `Delivery::Parked` arm).
                     match SessionBindingRepository::new(pool).by_session(&target_str).await {
                         Ok(Some(_)) => {}
-                        Ok(None) => {
+                        // #574: no durable binding means no channel can claim
+                        // this session ACROSS A RESTART. A channel may still
+                        // hold it right now through an in-memory route, and
+                        // such a target is reachable, so delivery proceeds
+                        // normally — refusing on the binding alone would
+                        // reject a live, deliverable session. Only a target
+                        // with NEITHER a binding nor a live route is genuinely
+                        // undeliverable.
+                        Ok(None) if session_route(target).is_none() => {
                             notify_journal::record(
                                 &caller_str,
                                 &target_str,
@@ -370,6 +379,8 @@ impl Tool for SessionNotifyTool {
                                 ],
                             ));
                         }
+                        // Reachable right now: fall through to delivery.
+                        Ok(None) => {}
                         Err(error) => tracing::warn!(
                             error = %error,
                             session_id = %target,

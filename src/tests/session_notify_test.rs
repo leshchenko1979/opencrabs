@@ -196,6 +196,56 @@ async fn bound_but_unclaimed_session_still_parks_as_awaiting_channel_claim() {
 }
 
 #[tokio::test]
+#[expect(clippy::await_holding_lock)]
+async fn unbound_session_with_a_live_route_still_delivers() {
+    // #574, control for the refusal's PREDICATE. A durable binding is how a
+    // session survives a restart; it is not the only way to be REACHABLE. A
+    // channel holding the session right now has registered an in-memory
+    // route, so refusing on the binding alone would reject a live,
+    // deliverable target. This pins that the refusal does not fire there.
+    let _guard = test_guard();
+    let db = Database::connect_in_memory().await.expect("in-memory DB");
+    db.run_migrations().await.expect("migrations");
+    let target = Session::new(Some("live but unbound".into()), None, None);
+    SessionRepository::new(db.pool().clone())
+        .create(&target)
+        .await
+        .expect("seed session");
+    let delivered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = delivered.clone();
+    register_session_route(
+        target.id,
+        std::sync::Arc::new(move |_id, _queued| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }),
+    );
+
+    let mut context = ToolExecutionContext::new(Uuid::new_v4());
+    context.service_context = Some(ServiceContext::new(db.pool().clone()));
+    let result = SessionNotifyTool
+        .execute(
+            serde_json::json!({"target_session": target.id.to_string(), "message": "probe"}),
+            &context,
+        )
+        .await
+        .expect("tool returns a verdict");
+
+    assert!(
+        result.success,
+        "a session with a live route is reachable and must deliver: {result:?}"
+    );
+    assert_eq!(
+        result.metadata.get("notify_state").map(String::as_str),
+        Some("delivered")
+    );
+    assert_eq!(
+        delivered.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the registered route callback must actually have been invoked"
+    );
+}
+
+#[tokio::test]
 // The guard serializes suites touching the process-global parked-queue state
 // (#1206); holding it across the tool `.await` below is the entire point —
 // the awaited region must not interleave with another test's park.
