@@ -288,6 +288,15 @@ impl Bucket {
         self.pause_until = Some(until);
     }
 
+    /// Test-only read of the armed step-2 pause (mirrors `reserve_peek`).
+    /// `is_some()` is the assertion that matters: `wait_out` sleeps the window
+    /// it just armed, so by the time a caller observes it the deadline is
+    /// already in the past and `> now` would read as "not armed".
+    #[cfg(test)]
+    pub(crate) fn pause_peek(&self) -> Option<Instant> {
+        self.pause_until
+    }
+
     fn refill(&mut self, now: Instant) {
         // Frozen refill inside a declared 429 window (step 2): tokens do not
         // accrue while the pause holds, so bulk cannot bank quota it would
@@ -1627,6 +1636,34 @@ pub(crate) mod test_support {
     /// sleeping anywhere — mocked passage of time per the #1211 test brief.
     pub(crate) fn advance(ms: u64) {
         CLOCK_OFFSET_MS.fetch_add(ms, Ordering::Relaxed);
+    }
+
+    /// Arm the per-chat step-2 pause on a chat's rich bucket directly.
+    ///
+    /// Deliberately NOT `note_429_pause`: that also records the process-wide
+    /// cooldown, and `pace_rich` refuses via the global permit before it ever
+    /// reaches the bucket — so a test built on it would pass for the wrong
+    /// reason and prove nothing about the per-chat gate.
+    pub(crate) fn arm_rich_pause(chat: ChatId, wait: std::time::Duration) {
+        // Derive the bucket shape from the SAME source `pace_rich` reads.
+        // `ensure_bucket` REPLACES a slot whose capacity or refill differs, so
+        // hardcoding these would silently discard the armed pause the moment a
+        // test set the rich knobs to anything but the literals — and the
+        // failure would read as "the gate admitted", not "the pause vanished".
+        let lim = Limits::from_config();
+        let mut map = peers().lock().unwrap_or_else(|e| e.into_inner());
+        let peer = map.entry(chat.0).or_default();
+        let bucket = ensure_bucket(&mut peer.rich, lim.rich_burst, lim.rich_rate_per_sec);
+        bucket.pause_arm(gate_now() + wait);
+    }
+
+    /// Whether a chat's rich bucket carries an armed step-2 pause.
+    pub(crate) fn rich_pause_armed(chat: ChatId) -> bool {
+        let map = peers().lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&chat.0)
+            .and_then(|p| p.rich.as_ref())
+            .and_then(|b| b.pause_peek())
+            .is_some()
     }
 
     /// Process-wide settle notifier for the drainer wire tests (#28 mode 4).

@@ -1171,3 +1171,67 @@ async fn recent_profile_reports_admissions_including_typing() {
     // from the format string, never from a rendered line (AGENTS.md, #580 cycle).
     assert!(second.contains("60s=2}"), "both are in 60s: {second}");
 }
+
+/// #580: a declared 429 window must hold the rich arm's bulk admissions.
+///
+/// Before the fix `pace_rich` computed `need` from `next_token_in_for` (which
+/// consults `refill` — frozen while paused — and never the pause itself), got
+/// ZERO, then discarded `take`'s refusal and admitted anyway. The window was
+/// armed and silently ignored on the one surface that carries every measured
+/// 429.
+#[tokio::test(start_paused = true)]
+async fn rich_gate_drops_a_cosmetic_tick_inside_a_declared_429_window() {
+    let _guard = ts::registry_guard().await;
+    ts::reset(1_000);
+    crate::channels::telegram::rate_limit::reset_global_cooldown();
+    rl_config!(enabled: true, rich_per_minute: 30, rich_burst: 2);
+
+    const CHAT: ChatId = ChatId(-100_891);
+    const TOPIC: i32 = 777;
+
+    // Stocked bucket + an armed window. No global cooldown is recorded, so
+    // this isolates the per-chat gate from the process-wide one.
+    governor::test_support::arm_rich_pause(CHAT, std::time::Duration::from_secs(30));
+    assert!(governor::test_support::rich_pause_armed(CHAT));
+
+    assert!(
+        matches!(
+            governor::pace_rich(CHAT, Some(TOPIC), governor::EditClass::Clock).await,
+            governor::RichAdmission::Dropped(governor::EditClass::Clock)
+        ),
+        "a cosmetic tick inside a declared window must be dropped, not admitted"
+    );
+    let snap = ts::snapshot(CHAT).unwrap();
+    assert_eq!(snap.dropped_rich, 1, "the drop is counted at the rich gate");
+    assert_eq!(snap.admitted_rich, 0, "a declared window must not admit");
+}
+
+/// #580: a 429 with a known chat arms that chat's per-chat pause.
+///
+/// The arming is what freezes the bucket's refill for the declared window, so
+/// the offending chat cannot bank quota and spend it the moment the
+/// process-wide deadline expires.
+#[tokio::test(start_paused = true)]
+async fn wait_out_arms_the_per_chat_pause_for_a_known_chat() {
+    let _guard = ts::registry_guard().await;
+    ts::reset(1_000);
+    crate::channels::telegram::rate_limit::reset_global_cooldown();
+    rl_config!(enabled: true);
+
+    const CHAT: i64 = -100_892;
+    let outcome = crate::channels::telegram::rate_limit::wait_out(
+        "test send",
+        std::time::Duration::from_secs(5),
+        "",
+        Some(CHAT),
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        crate::channels::telegram::rate_limit::WaitOutcome::Slept
+    ));
+    assert!(
+        governor::test_support::rich_pause_armed(ChatId(CHAT)),
+        "a 429 naming a chat must arm that chat's per-chat pause"
+    );
+}
