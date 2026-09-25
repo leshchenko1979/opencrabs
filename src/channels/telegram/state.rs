@@ -369,6 +369,10 @@ pub struct TelegramState {
     callback_origins: std::sync::Mutex<HashMap<String, Uuid>>,
     /// Stateful deduplication tracker for proactive DM config alerts (#263).
     config_alert_state: std::sync::Arc<crate::channels::telegram::config_alerts::ConfigAlertState>,
+    /// Boot-time DB integrity verdict (#459). `Some` carries SQLite's own
+    /// corruption message. Written once by the daemon before the channel
+    /// agents start; read non-consuming, so no reader can clear it.
+    db_integrity_detail: Mutex<Option<String>>,
 }
 
 impl Default for TelegramState {
@@ -484,6 +488,7 @@ impl TelegramState {
             config_alert_state: std::sync::Arc::new(
                 crate::channels::telegram::config_alerts::ConfigAlertState::new(),
             ),
+            db_integrity_detail: Mutex::new(None),
         }
     }
 
@@ -492,6 +497,18 @@ impl TelegramState {
         &self,
     ) -> &std::sync::Arc<crate::channels::telegram::config_alerts::ConfigAlertState> {
         &self.config_alert_state
+    }
+
+    /// Record the boot-time DB integrity verdict (#459). Called once by the
+    /// daemon at boot, before the channel agents start.
+    pub async fn set_db_integrity_detail(&self, detail: String) {
+        *self.db_integrity_detail.lock().await = Some(detail);
+    }
+
+    /// Read the boot-time DB integrity verdict (#459). A read, never a take —
+    /// unlike the retired process-global `swap`, no reader can clear it.
+    pub async fn db_integrity_detail(&self) -> Option<String> {
+        self.db_integrity_detail.lock().await.clone()
     }
 
     /// Claim an outbound media send, returning `true` if it is fresh and

@@ -872,6 +872,21 @@ async fn cmd_chat_inner(
     // Shared Telegram state for proactive messaging
     #[cfg(feature = "telegram")]
     let telegram_state = Arc::new(crate::channels::telegram::TelegramState::new());
+
+    // #459: the integrity check reads every page (~93–149 s on the ops DB), so it
+    // runs ONCE, in the long-lived daemon at boot — never on a cold CLI verb or the
+    // TUI, neither of which can act on the verdict. It rides the existing proactive
+    // config-alert DM path, which is the one out-of-band channel a headless daemon
+    // has to reach the owner.
+    #[cfg(feature = "telegram")]
+    if headless {
+        match db.run_integrity_check().await {
+            Ok(Some(detail)) => telegram_state.set_db_integrity_detail(detail).await,
+            Ok(None) => {}
+            Err(e) => tracing::error!("Database integrity check could not be run: {e:#}"),
+        }
+    }
+
     // Durable plan-card tracking (#809): without it a restart loses which
     // message carries the card, so the next turn posts a second one below the
     // stale card instead of updating it, and the old one can never be removed.

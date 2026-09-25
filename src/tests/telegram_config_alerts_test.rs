@@ -1,6 +1,7 @@
 use crate::channels::telegram::config_alerts::{
     ConfigAlertState, ConfigProblem, ConfigProblemKind, Severity, audit_config_problems,
-    format_config_alert, format_config_recovery, resolve_recipient_chat_ids,
+    db_integrity_problem, format_config_alert, format_config_recovery,
+    resolve_recipient_chat_ids,
 };
 use crate::config::Config;
 
@@ -562,6 +563,36 @@ fn test_audit_fallback_predicate_divergences_are_locked_in() {
         invalid_fallback_providers(&config),
         Vec::<String>::new(),
         "P2 divergence (issue #461): the audit trusts the registry's requires_api_key flag"
+    );
+}
+
+/// Boot-time DB integrity verdict renders through the config-alert path (#459).
+///
+/// DISCRIMINATING: `None` (a clean check) must yield no problem at all, so a
+/// healthy boot stays silent rather than DMing the owner about a healthy DB.
+#[test]
+fn db_integrity_problem_renders_the_sqlite_detail() {
+    // A clean check yields no problem, so a healthy boot stays silent.
+    assert!(db_integrity_problem(None).is_none());
+
+    let problem = db_integrity_problem(Some("Page 42 is never used"))
+        .expect("a detail must produce a problem");
+    assert_eq!(problem.severity, Severity::Error);
+    assert!(matches!(
+        problem.kind,
+        ConfigProblemKind::DatabaseIntegrityFailed { .. }
+    ));
+    assert_eq!(problem.kind.title(), "Database Integrity Check Failed");
+    assert!(
+        problem.kind.details().contains("Page 42 is never used"),
+        "details must carry SQLite's own message, got: {}",
+        problem.kind.details()
+    );
+
+    let rendered = format_config_alert(std::slice::from_ref(&problem), Some("ops"));
+    assert!(
+        rendered.contains("Database Integrity Check Failed"),
+        "the alert must render the corruption title, got: {rendered}"
     );
 }
 

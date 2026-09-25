@@ -1528,15 +1528,6 @@ impl App {
             ));
         }
 
-        // Notify user if DB integrity check failed
-        if crate::db::db_integrity_failed() {
-            self.push_system_message(
-                "⚠️ Database integrity check FAILED — data may be corrupted. \
-                 Consider backing up and recreating the database."
-                    .to_string(),
-            );
-        }
-
         // Notify user if the autonomous RSI loop has filed proposals
         // they haven't reviewed yet. The banner points at the
         // direct-action path (Mission Control's Inbox panel, where
