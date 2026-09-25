@@ -274,6 +274,37 @@ impl SessionBindingRepository {
         Ok(rows)
     }
 
+    /// Clear a session's await record only when it carries `kind` (#567).
+    ///
+    /// Scoped deliberately. `await_external` writes its own waits (`ci_run`,
+    /// `peer_lane`, `owner_gate`, `external`) through the same three columns,
+    /// and a session can carry both a goal and a declared CI wait at once — an
+    /// unscoped clear from the goal path would silently un-park that lane, which
+    /// is the precise failure #344 exists to remove. Zero rows affected when the
+    /// binding carries some other kind (or is not awaiting at all), so this is a
+    /// safe no-op on the common path.
+    pub async fn clear_await_of_kind(&self, session_id: &str, kind: &str) -> Result<usize> {
+        let sid = session_id.to_string();
+        let kind = kind.to_string();
+        let rows = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "UPDATE session_bindings \
+                     SET await_kind = NULL, await_ref = NULL, await_at = NULL \
+                     WHERE session_id = ?1 AND await_kind = ?2",
+                    params![sid, kind],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to clear typed await record")?;
+        Ok(rows)
+    }
+
     /// Every binding on one channel that carries an await record (#344),
     /// oldest wait first.
     ///

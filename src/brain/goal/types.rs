@@ -262,7 +262,30 @@ pub enum GoalDecision {
     /// Goal budget exhausted, evidence budget exhausted, or auto-paused due to
     /// parse failures.
     Paused { reason: String },
+    /// The goal is waiting on harness-visible work it cannot advance (#567).
+    ///
+    /// The turn ends here and the goal stays `state='active'`. The turn budget
+    /// is deliberately NOT consumed: no goal work occurred, and billing the
+    /// turn is what converted a wait into *"budget exhausted while waiting"* —
+    /// the #567 symptom itself.
+    ///
+    /// Reachable ONLY when the sole mechanical blocker is a running background
+    /// task AND no plan task is open. A hold on open plan tasks is work the
+    /// agent *can* advance, so it keeps the #299 re-prompt.
+    ///
+    /// **#299 invariant, preserved:** this is never a path to `Done`. A running
+    /// process still outranks any completion claim, and a goal cannot be marked
+    /// done while a task it started is alive. The deferral delays the judgement
+    /// until the harness can see the work finish; it does not skip it.
+    Deferred { reason: String, wake_ref: String },
 }
+
+/// The `await_kind` a deferred goal registers on its session binding (#567).
+///
+/// Written by the goal manager on the deferral path and read by the two
+/// existing wait readers — the boot classifier and the await sweep — so a
+/// deferral whose completion wake is lost still has a backstop (#344).
+pub const DEFERRED_AWAIT_KIND: &str = "background_task";
 
 /// Maximum consecutive judge parse failures before auto-pause.
 /// Protects against models that can't produce valid JSON.

@@ -4,10 +4,11 @@ use crate::brain::goal::criteria::{derive_criteria_if_needed, parse_criteria, se
 use crate::brain::goal::evidence::GoalEvidence;
 use crate::brain::goal::judge::{JudgeOutcome, judge_goal};
 use crate::brain::goal::types::{
-    CriterionEvaluation, CriterionStatus, GoalDecision, GoalVerdict, MAX_CONSECUTIVE_UNCERTAIN,
-    MAX_PARSE_FAILURES,
+    CriterionEvaluation, CriterionStatus, DEFERRED_AWAIT_KIND, GoalDecision, GoalVerdict,
+    MAX_CONSECUTIVE_UNCERTAIN, MAX_PARSE_FAILURES,
 };
 use crate::brain::provider::Provider;
+use crate::db::SessionBindingRepository;
 use crate::db::models::GoalState;
 use crate::services::ServiceContext;
 use chrono::Utc;
@@ -393,6 +394,14 @@ impl GoalManager {
             }
         };
 
+        // Any evaluation that reaches here is NOT a deferral: the wait this
+        // goal declared (#567) is over, or the goal has ended. Clearing first
+        // and re-setting only on the deferral path below means a stale wait can
+        // never outlive the deferral it belonged to — and the clear is scoped to
+        // our own kind, so a `ci_run` wait declared through `await_external` in
+        // this same session is untouched (#344).
+        self.clear_deferral_await(session_id).await;
+
         // Check if goal is already completed/failed
         if goal.state != "active" {
             return GoalDecision::Done {
@@ -448,6 +457,32 @@ impl GoalManager {
         // model call here is both cheaper and strictly more reliable than
         // asking a model to weigh a status report against a running process.
         if let Some(hold) = mechanical_hold(evidence) {
+            // #567: the hold conflated two different states. When a PLAN TASK is
+            // open there is work the agent can actually advance, so the #299
+            // re-prompt is right and stays. When the only blocker is a running
+            // background task, the agent is *waiting on the task that is the
+            // goal* — the continuation prompt asks for work that does not exist,
+            // the turn can only re-report, and billing it burns the very budget
+            // the goal needs to survive the wait. Defer instead: end the turn,
+            // keep the goal active, spend no budget.
+            if evidence.unresolved_tasks.is_empty() {
+                let reason = format!(
+                    "{} background task(s) still running: {}",
+                    evidence.running_tasks.len(),
+                    evidence.running_tasks.join("; ")
+                );
+                tracing::info!(
+                    session_id = %session_id,
+                    turns_used,
+                    max_turns = goal.max_turns,
+                    "Goal deferred — turn ends with budget intact: {}",
+                    reason
+                );
+                let wake_ref = evidence.running_tasks.join("; ");
+                self.record_deferral_await(session_id, &wake_ref).await;
+                return GoalDecision::Deferred { reason, wake_ref };
+            }
+
             tracing::info!(
                 session_id = %session_id,
                 "Goal mechanical hold — judge skipped: {}",
@@ -568,6 +603,64 @@ impl GoalManager {
                     corrections: outcome.corrections,
                 }
             }
+        }
+    }
+
+    /// Register the durable await record for a deferred goal (#567, #344).
+    ///
+    /// A goal is a continuation mechanism and cannot start a turn by itself
+    /// (#480), so a deferral needs an external waker. The primary one is the
+    /// background-task completion enqueue, which pushes a turn for a bound
+    /// session. This record is the BACKSTOP for the wake that is lost: it is the
+    /// same `await_kind` / `await_ref` / `await_at` handle #344 built for CI
+    /// waits, read by the boot classifier on restart and by the await sweep for
+    /// a wait that outlives `await_stale_secs`.
+    ///
+    /// A session with no binding row cannot be woken by either reader — the
+    /// UPDATE matches nothing. That is logged rather than swallowed, because a
+    /// deferral that believes it is parked while nothing can wake it is the
+    /// exact failure #344 exists to remove. The deferral itself is still
+    /// correct in that case: the goal stays active and the boot classifier is
+    /// the remaining backstop.
+    async fn record_deferral_await(&self, session_id: Uuid, wake_ref: &str) {
+        let repo = SessionBindingRepository::new(self.ctx.pool());
+        match repo
+            .set_await(
+                &session_id.to_string(),
+                DEFERRED_AWAIT_KIND,
+                Some(wake_ref),
+            )
+            .await
+        {
+            Ok(0) => tracing::warn!(
+                session_id = %session_id,
+                "Deferred goal has no session binding — the await record did not land, \
+                 so only the boot classifier can wake this session"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                error = %e,
+                session_id = %session_id,
+                "failed to record the deferral await"
+            ),
+        }
+    }
+
+    /// Clear a deferral await record left by [`Self::record_deferral_await`].
+    ///
+    /// Scoped to [`DEFERRED_AWAIT_KIND`], so it can never un-park a lane whose
+    /// wait was declared through `await_external` (#344).
+    async fn clear_deferral_await(&self, session_id: Uuid) {
+        let repo = SessionBindingRepository::new(self.ctx.pool());
+        if let Err(e) = repo
+            .clear_await_of_kind(&session_id.to_string(), DEFERRED_AWAIT_KIND)
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                session_id = %session_id,
+                "failed to clear the deferral await"
+            );
         }
     }
 }

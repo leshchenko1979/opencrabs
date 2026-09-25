@@ -6402,6 +6402,29 @@ impl AgentService {
                                 );
                             }
                         }
+                        // #567: the goal is waiting on a task the agent cannot
+                        // advance. End the turn with NO continuation prompt and
+                        // NO billing — `final_response` is left as the
+                        // assistant's own text, so what the user sees is the
+                        // report, not a re-prompt. The goal stays active and the
+                        // await record written by the manager wakes it when the
+                        // task finishes.
+                        crate::brain::goal::GoalDecision::Deferred {
+                            ref reason,
+                            ref wake_ref,
+                        } => {
+                            tracing::info!("Goal deferred: {}", reason);
+                            if let Some(ref cb) = progress_callback {
+                                cb(
+                                    session_id,
+                                    ProgressEvent::SelfHealingAlert {
+                                        message: format!(
+                                            "⏳ Goal waiting on a running task — not billed: {wake_ref}"
+                                        ),
+                                    },
+                                );
+                            }
+                        }
                     }
                 }
                 break;
