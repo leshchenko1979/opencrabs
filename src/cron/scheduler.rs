@@ -442,6 +442,13 @@ impl CronScheduler {
                                     crate::config::opencrabs_home()
                                 );
 
+                                // #526 — the fired trigger's payload, already substituted into the
+                                // prompt in the arm that owns the TriggerResult. The match scrutinee
+                                // is a temporary, so the result cannot outlive the match; None for
+                                // every non-firing outcome keeps the turn message byte-identical to
+                                // pre-fix behaviour.
+                                let mut fired_prompt: Option<String> = None;
+
                                 // Pre-flight trigger evaluation
                                 match crate::cron::PipelineExecutor::evaluate_trigger(&job).await {
                                     crate::cron::TriggerOutcome::Skipped(ref trig_res) => {
@@ -487,6 +494,13 @@ impl CronScheduler {
                                             )
                                             .await;
                                         }
+                                        // #526 — only the non-empty-prompt half reaches here; the
+                                        // empty-prompt half returned above. Substitute the fired
+                                        // payload through the existing helper (no new symbol).
+                                        fired_prompt = Some(crate::cron::interpolate_template(
+                                            &job.prompt,
+                                            trig_res,
+                                        ));
                                     }
                                     crate::cron::TriggerOutcome::NoTrigger => {}
                                 }
@@ -500,6 +514,7 @@ impl CronScheduler {
                                             cron_sid,
                                             &run_repo,
                                             notifier.as_ref(),
+                                            fired_prompt.as_deref(),
                                         )
                                         .await
                                     }
@@ -802,6 +817,7 @@ async fn execute_job(
     cron_session_id: Uuid,
     run_repo: &CronJobRunRepository,
     session_notifier: Option<&SessionNotifier>,
+    fired_prompt: Option<&str>,
 ) -> anyhow::Result<()> {
     // Reserved one-shot background rebuild — build + exec-restart, never an
     // agent prompt.
@@ -921,6 +937,13 @@ async fn execute_job(
     // turn with every channel open (#317).
     // Scoped across the whole turn so it holds inside every tool call, and
     // task-local so it never reaches a sibling job on the scheduler.
+    //
+    // #526 — the caller already substituted a fired trigger's payload into the
+    // prompt. None on every other outcome (and the rebuild path returned before
+    // this line), so the turn message stays byte-identical to pre-fix behaviour
+    // when nothing fired.
+    let turn_prompt = fired_prompt.unwrap_or(job.prompt.as_str());
+
     let send_scope: Option<crate::cron::send_scope::SendScope> = Some(
         crate::cron::send_scope::cron_job_scope_async(&ctx.pool(), job.deliver_to.as_deref()).await,
     );
@@ -930,7 +953,7 @@ async fn execute_job(
         send_scope,
         agent.send_message_with_tools_and_callback(
             session_id,
-            job.prompt.clone(),
+            turn_prompt.to_string(),
             effective_model,
             None, // no cancel token
             Some(Arc::new(|_| {
