@@ -1185,7 +1185,6 @@ async fn run_final_edit(chat_id: i64, msg_id: i32, pending: &PendingFinal) -> Re
             reply_markup.as_ref(),
             "turn",
             "-",
-            EditClass::Final,
         )
         .await
         .map_err(|e| e.to_string()),
@@ -1221,8 +1220,13 @@ async fn run_final_edit(chat_id: i64, msg_id: i32, pending: &PendingFinal) -> Re
 // ---------------------------------------------------------------------------
 // G3 — send pacing
 // ---------------------------------------------------------------------------
-
-
+enum PaceVerdict {
+    Go,
+    /// Budget exhausted — fail OPEN (delay-never-drop, #297): the send goes
+    /// out and the reactive backstop owns whatever comes back.
+    FailOpen(Duration),
+    Wait(Duration),
+}
 
 /// G3 gate ahead of full-message sends. Two AND-ed buckets: ~1/s spacing and
 /// an ~18/min group ceiling (both configurable). Holds the caller just long
@@ -1309,23 +1313,6 @@ pub(crate) async fn pace_send(chat: ChatId) {
         }
     }
 }
-
-/// G4 gate ahead of rich-endpoint calls (`sendRichMessage` and its edit
-/// sibling), which sit in their own method family with their own budget.
-///
-/// G1/G2/G3 govern `sendChatAction`, `editMessageText` and `sendMessage`.
-/// Telegram meters the rich endpoint separately, so none of those buckets
-/// sees its traffic — a deployment can therefore take zero typing 429s while
-/// the rich endpoint 429s hundreds of times a day. Measured on one: 260 real
-/// 429s in a day against 7,891 rich edits and 399 rich sends, each costing a
-/// 17-24 s `retry_after`, roughly 87 minutes of stalled flow rendering. Those
-/// 429s cluster in the p99 minutes (40-46 calls) while the median minute runs
-/// 18, which is what the 30/min default is sized against.
-///
-/// Holds rather than drops, like [`pace_send`]: a rich call is content, and
-/// the reactive `wait_out` backstop still owns anything that gets through.
-/// Unlike [`pace_send`], `pace_rich` never fails open past [`SEND_MAX_HOLD`]:
-/// rich calls wait until a token is refilled so they never fire unadmitted into
 
 /// G4 gate ahead of rich-endpoint calls (`sendRichMessage` and its edit
 /// sibling), which sit in their own method family with their own budget.

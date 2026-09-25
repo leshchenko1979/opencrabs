@@ -6,7 +6,7 @@
 //! nested lists, math) — so there is no block JSON to construct: we pass the
 //! model's markdown straight through.
 
-use super::governor::{EditClass, RichAdmission};
+use crate::channels::telegram::governor::{EditClass, RichAdmission};
 use super::mermaid;
 use super::render_html::markdown_to_html_mermaid;
 use crate::channels::telegram::suggest_options::enforce_button_fit;

@@ -298,8 +298,10 @@ pub(crate) fn build_enqueue_callback(
                                 )
                                 .await;
                                 if matches!(outcome, super::rate_limit::WaitOutcome::Deferred) {
-                                    continue;
-                                }
+                                    tracing::warn!(
+                                        "[bg-resume] echo deferred by long 429 window chat={chat_id}"
+                                    );
+                                } else {
                                 let mut retry = bot
                                     .send_message(teloxide::types::ChatId(chat_id), classic_html)
                                     .parse_mode(teloxide::types::ParseMode::Html);
@@ -310,6 +312,7 @@ pub(crate) fn build_enqueue_callback(
                                     tracing::warn!(
                                         "[bg-resume] #1221 echo bubble failed on 429 retry: {e}"
                                     );
+                                }
                                 }
                             }
                             Err(e) => {

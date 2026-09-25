@@ -412,7 +412,6 @@ impl TelegramAgent {
                                                                 None,
                                                                 "stale-strip",
                                                                 "#59 stale rich strip",
-                                                                super::governor::EditClass::Final,
                                                             )
                                                             .await
                                                         } else {

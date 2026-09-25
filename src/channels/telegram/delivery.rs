@@ -1044,8 +1044,7 @@ pub(crate) async fn deliver_final_response(
                                         "Telegram: edit deferred by long 429 window chat={}",
                                         chat_id.0
                                     );
-                                    continue;
-                                }
+                                } else {
                                 match bot
                                     .edit_message_text(chat_id, mid, &chunks[0])
                                     .parse_mode(ParseMode::Html)
@@ -1092,6 +1091,7 @@ pub(crate) async fn deliver_final_response(
                                             );
                                         }
                                     }
+                                }
                                 }
                             }
                             Err(e) => {
