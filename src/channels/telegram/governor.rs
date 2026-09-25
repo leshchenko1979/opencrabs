@@ -487,8 +487,6 @@ pub(crate) struct Counters {
 }
 
 impl Counters {
-    /// Record a ladder drop. The Final arm stays empty ON PURPOSE: finals are
-    /// never dropped here — admission queues them instead (#1211).
     /// Record a G4 rich drop (#556). `_class` rides along for the same reason
     /// [`Self::note_drop`] carries one: the counter is per-gate, not
     /// per-class, and a future rank change must not start counting here.
@@ -503,6 +501,8 @@ impl Counters {
     }
 
     /// Record a ladder drop. The Final arm stays empty ON PURPOSE: finals are
+    /// never dropped here — admission queues them instead (#1211).
+    pub(crate) fn note_drop(&mut self, class: EditClass) {
         match class {
             EditClass::Clock => self.dropped_clock += 1,
             EditClass::BrainPreview => self.dropped_brain_preview += 1,
