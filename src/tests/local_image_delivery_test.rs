@@ -193,6 +193,69 @@ fn an_empty_body_becomes_the_notice_alone() {
 }
 
 // ---------------------------------------------------------------------------
+// #502 — the notice a PROMOTED intermediate bubble carries
+// ---------------------------------------------------------------------------
+
+/// The exact line a promoted bubble shows when a resolved entry could not be
+/// read back (the file vanished between validation and the send). The wording
+/// is load-bearing: it is what the owner reads in the chat, and step 8 of the
+/// #502 plan pins it verbatim.
+#[test]
+fn a_promoted_bubble_names_an_unreadable_entry_with_the_real_wording() {
+    let failures = vec![LocalImageFailure {
+        raw: "/tmp/probe-502.png".to_string(),
+        resolved: Some(PathBuf::from("/tmp/probe-502.png")),
+        reason: LocalImageFailureReason::Unreadable,
+    }];
+    let notice = failure_notice(&failures).expect("a notice");
+
+    assert_eq!(
+        notice,
+        "⚠️ Image not attached — the reply referenced an image that could not be delivered:\n- /tmp/probe-502.png (file could not be read)"
+    );
+}
+
+/// A promoted bubble whose picture DID land still reports the one that did not:
+/// the notice rides the prose the model wrote, rather than replacing it.
+#[test]
+fn a_partly_delivered_promoted_bubble_keeps_its_prose_and_appends_the_notice() {
+    let body = "Here is the chart I promised.";
+    let failures = vec![LocalImageFailure {
+        raw: "/tmp/gone.png".to_string(),
+        resolved: Some(PathBuf::from("/tmp/gone.png")),
+        reason: LocalImageFailureReason::Unreadable,
+    }];
+
+    let combined = append_failure_notice(body, &failures);
+    assert!(combined.starts_with(body));
+    assert!(combined.contains("- /tmp/gone.png (file could not be read)"));
+}
+
+/// The dedup key is the NOTICE-FREE stripped body (#502): if the notice were
+/// part of the recorded text, the same intermediate would stop matching its own
+/// final response and the user would read the answer twice.
+#[test]
+fn the_dedup_record_is_the_notice_free_body() {
+    let stripped = "Here is the chart I promised.";
+    let failures = vec![LocalImageFailure {
+        raw: "/tmp/gone.png".to_string(),
+        resolved: None,
+        reason: LocalImageFailureReason::NotFound,
+    }];
+
+    let delivered_body = append_failure_notice(stripped, &failures);
+    assert_ne!(
+        delivered_body, stripped,
+        "the user-visible body does carry the notice"
+    );
+    assert_eq!(
+        append_failure_notice(stripped, &[]),
+        stripped,
+        "the value recorded for dedup is the notice-free body"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // strip_image_references — remote link survives, local reference does not
 // ---------------------------------------------------------------------------
 

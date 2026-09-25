@@ -9,6 +9,7 @@
 use super::handler::StreamingState;
 use super::markdown::{markdown_to_telegram_html, split_message, strip_html_tags};
 use super::send::message_in_thread;
+use crate::utils::{LocalImageFailure, LocalImageFailureReason};
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{MessageId, ParseMode, ReplyParameters};
@@ -64,14 +65,23 @@ pub(crate) fn build_last_intermediate_with_footer(
 /// array; with no fence this is byte-identical to `send_rich_markdown_id`.
 /// Returns `None` when the text carries no rich structure
 /// or the rich API rejects it — the caller then falls back to the HTML path.
+///
+/// `media` carries resolved LOCAL images (#502) whose ids the caller has
+/// already rewritten into `text` as `tg://photo?id=<id>` references. The media
+/// array is the sole authority for such a reference (#334), so the gate below
+/// must let a media-bearing message onto the rich plane even when its text has
+/// no block structure — otherwise a thin prose intermediate with one chart
+/// takes the `None` arm, falls back to HTML, and the picture is lost a second
+/// time.
 pub(crate) async fn try_send_intermediate_rich(
     session_id: Uuid,
     bot: &Bot,
     chat_id: ChatId,
     thread_id: Option<teloxide::types::ThreadId>,
     text: &str,
+    media: &[super::rich::mermaid::MediaEntry],
 ) -> Option<MessageId> {
-    if !super::rich::should_send_native_rich(text) {
+    if !super::rich::should_send_native_rich_for_media(text, !media.is_empty()) {
         return None;
     }
     // Mermaid-aware sender (#1044/#1202): resolves fences into the rich
@@ -79,8 +89,10 @@ pub(crate) async fn try_send_intermediate_rich(
     // fence is present, so non-diagram reports are unaffected. Guarded against
     // the abandoned-edit-loop duplicate (#500): this is the silent sender whose
     // message and the tail's landed as two copies of one turn's text.
-    match super::delivery_dedup::send_rich_turn_guarded(session_id, bot, chat_id, thread_id, text)
-        .await
+    match super::delivery_dedup::send_rich_turn_guarded(
+        session_id, bot, chat_id, thread_id, text, media,
+    )
+    .await
     {
         Ok(id) => Some(MessageId(id)),
         Err(e) => {
@@ -214,10 +226,38 @@ pub(crate) fn is_deliverable_rich_report(text: &str) -> bool {
     is_deliverable_status_report(text)
 }
 
-/// Deliver `text` as its own message (rich-first, HTML fallback) and record it
-/// in `sent_intermediates` so the final-response dedup will not resend it.
-/// Returns true when something was delivered. Used to surface a rich report the
-/// model emitted before a tool call, which folding would otherwise bury (#582).
+/// The promotion decision for a mid-turn intermediate (#582 + #502).
+///
+/// The fourth trigger: a reference to a picture this turn has not put in the
+/// chat yet is report-shaped content on its own, and burying it in the
+/// collapsed processing log loses it outright — the fold path strips image
+/// references, and the final-response leg only re-scans the FINAL text, so a
+/// turn that streams a chart and closes with a short summary delivered neither
+/// the picture nor a notice (#502).
+///
+/// `fresh_images` counts images NOT yet delivered this turn — a reference whose
+/// picture already rode an earlier bubble is not a reason to open a second one.
+///
+/// Deliberately a separate function rather than a wider
+/// [`is_deliverable_rich_report`]: that predicate is pure and has 27 test call
+/// sites, and putting the image count into its signature would drag the
+/// filesystem (and the turn's delivered-path snapshot) into a pure verdict.
+/// The text argument is the STRIPPED form, so the three existing arms see
+/// byte-for-byte what they see today and no existing verdict moves.
+pub(crate) fn should_promote_intermediate(text: &str, fresh_images: usize) -> bool {
+    fresh_images > 0 || is_deliverable_rich_report(text)
+}
+
+/// Deliver a promoted intermediate as its own message (rich-first, HTML
+/// fallback) and record it in `sent_intermediates` so the final-response dedup
+/// will not resend it. Returns true when something was delivered.
+///
+/// Takes the WHOLE [`LocalImageRewrite`] rather than a `&str` (#502) so no call
+/// site can hand this function the wrong text form. That matters: the rich form
+/// carries `tg://photo?id=imgN` references that only resolve against the media
+/// array sent with it, while the stripped form is the shape the HTML fallback
+/// and the dedup record need — the HTML plane has no media array and would ship
+/// a `tg://` reference as dead visible markdown.
 pub(crate) async fn deliver_intermediate_message(
     session_id: Uuid,
     bot: &Bot,
@@ -225,33 +265,98 @@ pub(crate) async fn deliver_intermediate_message(
     thread_id: Option<teloxide::types::ThreadId>,
     streaming: &Arc<std::sync::Mutex<StreamingState>>,
     tg: &super::state::TelegramState,
-    text: &str,
+    rw: &crate::utils::image::LocalImageRewrite,
 ) -> bool {
     // #690 follow-up (#980): re-expand a collapsed table once, up front, so the
     // dedup record, the rich send and the HTML fallback all see the same
     // expanded shape. The HTML path reflows again internally but is idempotent.
-    let expanded = super::rich::reflow_collapsed_tables(text);
-    let text = expanded.as_str();
+    // Both forms are reflowed: they are two renderings of one intermediate.
+    let rich_expanded = super::rich::reflow_collapsed_tables(&rw.rich);
+    let stripped_expanded = super::rich::reflow_collapsed_tables(&rw.stripped);
+    let rich = rich_expanded.as_str();
+    let text = stripped_expanded.as_str();
     {
         let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
         if s.sent_intermediates.iter().any(|prev| prev == text) {
             return true;
         }
     }
-    if let Some(id) = try_send_intermediate_rich(session_id, bot, chat, thread_id, text).await {
+
+    // Read the resolved bytes ONCE for the rich media array. A read that fails
+    // here is an honest failure for the notice, never a panic — the reference
+    // validated seconds ago, but a file can disappear between the two.
+    let mut failures = rw.failures.clone();
+    let mut media: Vec<super::rich::mermaid::MediaEntry> = Vec::new();
+    for entry in &rw.entries {
+        match tokio::fs::read(&entry.image.path).await {
+            Ok(bytes) => media.push(super::rich::mermaid::MediaEntry {
+                id: entry.id.clone(),
+                url: None,
+                bytes: Some(bytes),
+            }),
+            Err(e) => {
+                tracing::warn!(
+                    "Telegram: failed to read promoted image {}: {}",
+                    entry.image.path.display(),
+                    e
+                );
+                failures.push(LocalImageFailure {
+                    raw: entry.image.path.display().to_string(),
+                    resolved: Some(entry.image.path.clone()),
+                    reason: LocalImageFailureReason::Unreadable,
+                });
+            }
+        }
+    }
+
+    // An image the bubble announced must not vanish silently when it cannot be
+    // read: the notice rides the same bubble the model wrote (#502).
+    let body = crate::utils::append_failure_notice(rich, &failures);
+
+    if let Some(id) = try_send_intermediate_rich(session_id, bot, chat, thread_id, &body, &media)
+        .await
+    {
         // The bubble is non-sticky burial evidence (#1150): the flow block must
         // restick below its own output on the next append.
         tg.note_bot_bubble(chat.0, id.0);
         let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
         s.sent_intermediates.push(text.to_string());
         s.intermediate_msg_ids.push(id);
+        // Record the paths that just rode this bubble, so neither a later
+        // intermediate nor the final leg ships the same picture twice (#502).
+        // The API's own success is the receipt here: the bytes went out with
+        // this request.
+        for entry in &rw.entries {
+            s.delivered_image_paths.push(entry.image.path.clone());
+        }
         return true;
     }
+
+    // ── HTML fallback ───────────────────────────────────────────────────────
+    // Uses the STRIPPED form, never a re-strip of the rich form: the HTML plane
+    // has no media array, and `record_candidate` leaves a `tg://photo?id=` ref
+    // verbatim (it classifies as MediaRef), so rendering the rich form here
+    // would show the user dead markdown where the picture should be.
+    //
+    // The picture is not lost on this plane either (#502): each resolved image
+    // ships as its own bubble through the SAME helper the final leg uses, so
+    // the two cannot drift on kind selection, captions or failure reasons.
+    let mut plain = crate::utils::append_failure_notice(text, &failures);
+    let images: Vec<crate::utils::image::LocalImage> =
+        rw.entries.iter().map(|e| e.image.clone()).collect();
+    let (delivered, refused) =
+        super::delivery::send_local_images(session_id, bot, chat, thread_id, &images).await;
+    if !delivered.is_empty() {
+        let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+        s.delivered_image_paths.extend(delivered);
+    }
+    plain = crate::utils::append_failure_notice(&plain, &refused);
+
     // Resolve fences here too (#1142 parity): when the rich path rejected the
     // message, the HTML fallback must still render the diagram instead of
     // shipping raw fence text. Identical to markdown_to_telegram_html when
     // the feature is off or no fence is present.
-    let html = super::rich::markdown_to_html_mermaid(text).await;
+    let html = super::rich::markdown_to_html_mermaid(&plain).await;
     if html.is_empty() {
         return false;
     }

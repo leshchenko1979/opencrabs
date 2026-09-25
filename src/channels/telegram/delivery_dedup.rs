@@ -123,6 +123,29 @@ fn fingerprint(markdown: &str) -> u64 {
     hasher.finish()
 }
 
+/// The guard's content key: the markdown plus, when the send carries a media
+/// array, each entry's id and byte length (#502).
+///
+/// Two promoted intermediates can carry IDENTICAL text — `![chart](tg://photo
+/// ?id=img0)` is the same string whatever picture `img0` resolves to — and the
+/// text alone would make the second one a "duplicate" whose media silently
+/// differs from the first. With no media the key is the markdown verbatim, so
+/// every existing caller and test sees the fingerprint it sees today.
+pub(crate) fn content_key(markdown: &str, media: &[super::rich::mermaid::MediaEntry]) -> String {
+    if media.is_empty() {
+        return markdown.to_string();
+    }
+    let mut key = String::with_capacity(markdown.len() + media.len() * 16);
+    key.push_str(markdown);
+    for m in media {
+        key.push('\0');
+        key.push_str(&m.id);
+        key.push(':');
+        key.push_str(&m.bytes.as_ref().map_or(0, Vec::len).to_string());
+    }
+    key
+}
+
 fn key_of(session_id: Uuid, chat_id: i64, thread_id: Option<i32>, markdown: &str) -> Key {
     (session_id, chat_id, thread_id, fingerprint(markdown))
 }
@@ -188,20 +211,27 @@ pub(crate) fn release(session_id: Uuid, chat_id: i64, thread_id: Option<i32>, ma
 /// can bypass the other. A send suppressed as a duplicate answers with the id
 /// the content is already in, so the caller records a delivered message rather
 /// than falling back and sending it a third time.
+///
+/// `media` is the resolved local-media array the rich send carries (#502);
+/// every existing caller passes `&[]` and gets today's behaviour byte-for-byte.
+/// The guard keys on [`content_key`] — the markdown plus the media identity —
+/// so two sends with the same text but different pictures are NOT duplicates
+/// of each other.
 pub(crate) async fn send_rich_turn_guarded(
     session_id: Uuid,
     bot: &teloxide::Bot,
     chat_id: ChatId,
     thread_id: Option<ThreadId>,
     markdown: &str,
+    media: &[super::rich::mermaid::MediaEntry],
 ) -> anyhow::Result<i32> {
     let thread = thread_id.map(|t| t.0.0);
-    let hash8 = fingerprint(markdown) as u32;
+    let key = content_key(markdown, media);
+    let hash8 = fingerprint(&key) as u32;
 
     let mut waited = Duration::ZERO;
     let owned = loop {
-        match reserve(session_id, chat_id.0, thread, markdown, Instant::now()) {
-            Admission::Send => break true,
+        match reserve(session_id, chat_id.0, thread, &key, Instant::now()) {
             Admission::Landed(id) => {
                 tracing::info!(
                     "Telegram: duplicate rich send suppressed — this content already landed as \
@@ -226,16 +256,18 @@ pub(crate) async fn send_rich_turn_guarded(
                 tokio::time::sleep(WAIT_STEP).await;
                 waited += WAIT_STEP;
             }
+            Admission::Send => break true,
         }
     };
 
-    let sent = super::rich::send_rich_with_mermaid_id(
+    let sent = super::rich::send_rich_with_media_target_id(
         bot.api_url().as_str(),
         bot.token(),
         chat_id.0,
         thread_id,
-        markdown,
         None,
+        markdown,
+        media,
         "turn",
         "-",
     )
@@ -243,20 +275,20 @@ pub(crate) async fn send_rich_turn_guarded(
 
     match sent {
         Ok(id) if id != 0 => {
-            mark_landed(session_id, chat_id.0, thread, markdown, id, Instant::now());
+            mark_landed(session_id, chat_id.0, thread, &key, id, Instant::now());
             Ok(id)
         }
         // A send that returned no message id did not land, so it must not
         // suppress its own retry.
         Ok(id) => {
             if owned {
-                release(session_id, chat_id.0, thread, markdown);
+                release(session_id, chat_id.0, thread, &key);
             }
             Ok(id)
         }
         Err(e) => {
             if owned {
-                release(session_id, chat_id.0, thread, markdown);
+                release(session_id, chat_id.0, thread, &key);
             }
             Err(e)
         }

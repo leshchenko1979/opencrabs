@@ -699,6 +699,7 @@ pub(crate) async fn resume_session_inner(
         sent_intermediates: Vec::new(),
         intermediate_msg_ids: Vec::new(),
         voice_msg_ids: Vec::new(),
+        delivered_image_paths: Vec::new(),
         processing: true,
         // Cap folded narration only for CLI providers (#532).
         is_cli: agent.provider_for_session(session_id).cli_handles_tools(),
@@ -1108,11 +1109,17 @@ pub(crate) async fn resume_session_inner(
 
     // Send remaining display items through the ONE shared drain (#470).
     // Resume has no inbound message to react to.
+    // The session working directory the intermediate pipeline resolves relative
+    // image references against — the same base `deliver_final_response` uses.
+    let drain_cwd = agent.get_working_directory_for_session(session_id);
     drain_remaining_display(
+        session_id,
         &bot,
         chat_id,
         thread_id,
         &streaming,
+        &telegram_state,
+        &drain_cwd,
         remaining_display,
         None,
     )

@@ -48,6 +48,7 @@ fn open_roll() -> std::sync::Arc<std::sync::Mutex<StreamingState>> {
         sent_intermediates: Vec::new(),
         intermediate_msg_ids: Vec::new(),
         voice_msg_ids: Vec::new(),
+        delivered_image_paths: Vec::new(),
         processing: true,
         is_cli: false,
     }))

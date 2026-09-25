@@ -2534,6 +2534,7 @@ pub(crate) async fn handle_message(
         sent_intermediates: Vec::new(),
         intermediate_msg_ids: Vec::new(),
         voice_msg_ids: Vec::new(),
+        delivered_image_paths: Vec::new(),
         processing: true,
         // Provider runs tools in the CLI (claude-cli) → its whole turn folds
         // into the block, so folded narration is capped; API providers skip
@@ -2758,11 +2759,17 @@ pub(crate) async fn handle_message(
 
     // Send any remaining display items that weren't flushed by the edit loop
     // through the ONE shared drain (#470).
+    // The session working directory the intermediate pipeline resolves relative
+    // image references against — the same base `deliver_final_response` uses.
+    let drain_cwd = agent.get_working_directory_for_session(session_id);
     drain_remaining_display(
+        session_id,
         &bot,
         msg.chat.id,
         thread_id,
         &streaming,
+        &telegram_state,
+        &drain_cwd,
         remaining_display,
         Some(msg.id),
     )
@@ -3128,10 +3135,15 @@ pub(crate) async fn handle_reaction(
     // visible text and firing no reaction). When a marker is found and the
     // incoming reaction is not a stop signal (the react-only default), drop any
     // surrounding leaked text: it is the model's reasoning, not a real reply.
-    // Strip-only: this turn's expected output is a bare reaction marker, and the
-    // final response handler owns image delivery — a remote link must survive
-    // here rather than be deleted by a scan with no fetch step (#286).
-    let text_only = crate::utils::strip_image_references(&response.content, None).text;
+    // Strip-only scan: this turn's expected output is a bare reaction marker, so
+    // a remote link must survive here rather than be deleted by a scan with no
+    // fetch step (#286). `None` base_dir is deliberate and must NOT become the
+    // session cwd: the surrounding text on this path is the model's reasoning,
+    // and a relative target in it is prose, not an attachment. An image that
+    // WAS named and could not be delivered is reported below (#502) — this is
+    // the third strip site the issue names, and it is no longer silent.
+    let image_scan = crate::utils::strip_image_references(&response.content, None);
+    let text_only = image_scan.text;
     let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
     let text_only = redact_secrets(&text_only);
     let (text_only, react_emoji) = crate::utils::extract_react_marker_lenient(&text_only);
@@ -3169,6 +3181,11 @@ pub(crate) async fn handle_reaction(
 
     // ── 11. Deliver text response ───────────────────────────────────────
     if !text_only.trim().is_empty() {
+        // An image this reply named that could not be delivered is reported
+        // rather than silently removed (#502). Placed AFTER the react-only
+        // early return above on purpose: a reaction-only ack carries no text
+        // and must not grow a notice.
+        let text_only = crate::utils::append_failure_notice(&text_only, &image_scan.failures);
         let html = md_to_html(&text_only);
         if let Err(e) = message_in_thread(&bot, chat_id, None, html).await {
             tracing::warn!("Telegram reaction: failed to send text reply: {}", e);

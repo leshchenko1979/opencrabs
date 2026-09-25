@@ -36,10 +36,11 @@ pub(crate) mod table;
 // never go unused in the non-test target.
 pub(crate) use api::{
     send_rich_with_mermaid, send_rich_with_mermaid_id, send_rich_with_mermaid_target_id,
+    send_rich_with_media_target_id,
 };
 pub(crate) use detect::{
     contains_table, is_atx_heading, prefers_rich_render, should_send_native_rich,
-    should_send_native_rich_for,
+    should_send_native_rich_for, should_send_native_rich_for_media,
 };
 pub(crate) use render_html::{
     markdown_to_html, markdown_to_html_mermaid, markdown_to_html_mermaid_p, markdown_to_html_p,

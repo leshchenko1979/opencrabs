@@ -208,6 +208,7 @@ async fn resume_shape_loop_edits_tools_in_place_and_never_reacts() {
         sent_intermediates: Vec::new(),
         intermediate_msg_ids: Vec::new(),
         voice_msg_ids: Vec::new(),
+        delivered_image_paths: Vec::new(),
         applied_plan_kb: Default::default(),
         processing: true,
         final_bubble: None,

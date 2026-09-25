@@ -748,6 +748,207 @@ pub fn strip_image_references(text: &str, base_dir: Option<&Path>) -> LocalImage
     scan_image_references(text, base_dir, RemoteRefs::KeepInText)
 }
 
+/// One resolved image reference and the media id assigned to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedImageRef {
+    /// The id the rewritten reference points at: `tg://photo?id=<id>`.
+    pub id: String,
+    /// The validated image, path and caption bound in one value as everywhere
+    /// else in this module.
+    pub image: LocalImage,
+}
+
+/// A text prepared for the rich media plane, in both forms a mid-turn
+/// intermediate needs.
+///
+/// Two buffers come out of ONE walk, so a reference is classified and
+/// validated (stat + header read) exactly once per intermediate rather than
+/// once per form — and the two forms cannot disagree about which references
+/// were images, because they were decided by the same predicate on the same
+/// pass.
+#[derive(Debug, Clone, Default)]
+pub struct LocalImageRewrite {
+    /// Input with every resolvable local reference replaced IN PLACE by
+    /// `![<alt>](tg://photo?id=<prefix><n>)`. Refs inside code spans, remote
+    /// targets and Telegram media refs are left byte-identical. This is the
+    /// form the rich send carries, with its `media` array.
+    pub rich: String,
+    /// Input with every resolvable local reference removed — the shape
+    /// [`strip_image_references`] already produces, for the fold path and for
+    /// the HTML fallback, which has no media array and would otherwise ship a
+    /// `tg://` reference as dead visible markdown.
+    pub stripped: String,
+    /// Resolved images in order of appearance, with the id each got.
+    pub entries: Vec<ResolvedImageRef>,
+    /// Rejected candidates, in order of appearance.
+    pub failures: Vec<LocalImageFailure>,
+}
+
+/// Walk state for [`rewrite_local_images`], holding the per-reference policy so
+/// the walk itself stays a single readable loop.
+struct Rewriter<'a> {
+    base_dir: Option<&'a Path>,
+    id_prefix: &'a str,
+    already_delivered: &'a [PathBuf],
+    out: LocalImageRewrite,
+}
+
+impl Rewriter<'_> {
+    /// File one parsed reference. Returns `true` when the reference was
+    /// consumed and must leave BOTH text buffers — the same split
+    /// [`record_candidate`] draws for the scan, so a reference that stays
+    /// verbatim in the scan's text stays verbatim in both of ours.
+    ///
+    /// `strip_unresolved` distinguishes the two reference forms exactly as
+    /// [`record_candidate`] does: a marker is machine syntax and always leaves
+    /// the text, while a markdown reference whose target cannot be resolved
+    /// stays verbatim, because it may be ordinary prose that merely looks like
+    /// a reference.
+    fn file(
+        &mut self,
+        raw: &str,
+        alt: &str,
+        caption: Option<String>,
+        strip_unresolved: bool,
+    ) -> bool {
+        match classify_image_target(raw, self.base_dir) {
+            ImageTarget::Local(path) => match validate_local_image(&path) {
+                Ok(()) => {
+                    // Comparison is on the RESOLVED ABSOLUTE path, which is
+                    // what classify_image_target returns, so two spellings of
+                    // one file (`~/x.png` and `/root/x.png`) dedup correctly.
+                    if self.already_delivered.contains(&path) {
+                        // The picture is already in the chat. Consume the
+                        // reference, record nothing, report no failure: a
+                        // delivered picture is not a lost one, and a second
+                        // bubble for a picture the reader has would be noise.
+                        return true;
+                    }
+                    let id = format!("{}{}", self.id_prefix, self.out.entries.len());
+                    let alt = if alt.trim().is_empty() { "image" } else { alt };
+                    self.out.rich.push_str(&format!("![{alt}](tg://photo?id={id})"));
+                    self.out.entries.push(ResolvedImageRef {
+                        id,
+                        image: LocalImage { path, caption },
+                    });
+                }
+                Err(reason) => self.out.failures.push(LocalImageFailure {
+                    raw: raw.to_string(),
+                    resolved: Some(path),
+                    reason,
+                }),
+            },
+            // Remote targets and Telegram media refs have nothing to embed
+            // here: the rich plane's media array is built from local bytes, and
+            // deleting a link nothing downstream will fetch is the #286 loss
+            // this call site must not reintroduce.
+            ImageTarget::Remote(_) | ImageTarget::MediaRef(_) => return strip_unresolved,
+            ImageTarget::Unresolved => {
+                if strip_unresolved {
+                    self.out.failures.push(LocalImageFailure {
+                        raw: raw.to_string(),
+                        resolved: None,
+                        reason: LocalImageFailureReason::NotFound,
+                    });
+                }
+                return strip_unresolved;
+            }
+        }
+        true
+    }
+}
+
+/// The alt text of a markdown image reference whose `![` sits at `start`.
+///
+/// Returned verbatim so the rewritten reference keeps the author's own
+/// wording. [`parse_markdown_image`] returns the target and the title but not
+/// the alt — alt is inert on every delivery leg today — so the rewrite reads it
+/// from the span itself instead of widening that parser.
+fn markdown_alt(text: &str, start: usize) -> String {
+    match text[start + 2..].find(']') {
+        Some(rel) => text[start + 2..start + 2 + rel].to_string(),
+        None => String::new(),
+    }
+}
+
+/// Rewrite a mid-turn intermediate for the rich media plane (#502).
+///
+/// The sibling of [`scan_image_references`]: same walk, same `code_regions`
+/// guard, same [`classify_image_target`] + [`validate_local_image`]
+/// classification, so a reference is judged by exactly one rule set no matter
+/// which consumer asks. What differs is the output — a reference that resolves
+/// becomes an EMBEDDED picture in `rich` rather than leaving the text entirely,
+/// which is the whole point: the promotion path already carries a media array
+/// and already uploads bytes via multipart `attach://`, it was simply never
+/// shown the image.
+///
+/// `base_dir` is the session working directory, and it is passed `Some` by the
+/// intermediate call sites (#502). Absolute and `~`-prefixed targets behave
+/// exactly as before; a RELATIVE target now resolves against that base, the
+/// same base the final-response leg already uses. Two consequences, both
+/// intended: a relative reference that resolves is delivered instead of
+/// shipping as dead markdown, and one that does not resolve is recorded as a
+/// [`LocalImageFailure`] so the honest notice can name it instead of removing
+/// it in silence.
+///
+/// `already_delivered` is a snapshot of the paths this turn has already put in
+/// the chat. It is a plain slice rather than turn state so this module stays
+/// channel-agnostic.
+pub fn rewrite_local_images(
+    text: &str,
+    base_dir: Option<&Path>,
+    id_prefix: &str,
+    already_delivered: &[PathBuf],
+) -> LocalImageRewrite {
+    let regions = code_regions(text);
+    let mut rw = Rewriter {
+        base_dir,
+        id_prefix,
+        already_delivered,
+        out: LocalImageRewrite {
+            rich: String::with_capacity(text.len()),
+            stripped: String::with_capacity(text.len()),
+            entries: Vec::new(),
+            failures: Vec::new(),
+        },
+    };
+    let mut i = 0;
+
+    while i < text.len() {
+        if text[i..].starts_with(IMG_PREFIX)
+            && let Some((end, raw)) = parse_marker_at(text, i, IMG_PREFIX)
+        {
+            if !raw.is_empty() {
+                // A marker carries no alt and no title, exactly as the scan's
+                // own call site passes `None` for the caption.
+                rw.file(&raw, "", None, true);
+            }
+            i = end;
+            continue;
+        }
+        if !regions[i]
+            && text[i..].starts_with("![")
+            && let Some((end, raw, caption)) = parse_markdown_image(text, i)
+        {
+            let alt = markdown_alt(text, i);
+            if rw.file(&raw, &alt, caption, false) {
+                i = end;
+                continue;
+            }
+            // Not consumed: fall through and copy the reference verbatim,
+            // one char at a time, exactly as the scan does.
+        }
+        let ch = text[i..].chars().next().expect("i lies on a char boundary");
+        rw.out.rich.push(ch);
+        rw.out.stripped.push(ch);
+        i += ch.len_utf8();
+    }
+
+    rw.out.rich = rw.out.rich.trim().to_string();
+    rw.out.stripped = rw.out.stripped.trim().to_string();
+    rw.out
+}
+
 fn scan_image_references(
     text: &str,
     base_dir: Option<&Path>,

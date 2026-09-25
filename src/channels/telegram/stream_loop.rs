@@ -14,11 +14,11 @@ use teloxide::types::{ChatAction, ChatId, MessageId, ParseMode, ThreadId};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::delivery::handle_intermediate;
 use super::flow::{
-    DisplayItem, StreamingState, append_intermediate_to_flow, append_system_to_flow,
-    append_tool_group, restick_flow_if_buried,
+    DisplayItem, StreamingState, append_system_to_flow, append_tool_group, restick_flow_if_buried,
 };
-use super::handler::{fire_reaction, thinking_status_excerpt};
+use super::handler::thinking_status_excerpt;
 use super::markdown::markdown_to_telegram_html;
 use super::send::{best_effort_delete, fire_chat_action, message_in_thread};
 use super::state::TelegramState;
@@ -45,6 +45,11 @@ pub(crate) fn spawn_edit_loop(
         let agent = agent.clone();
         let sid = session_id;
         async move {
+            // The session working directory cannot change mid-turn, so it is
+            // resolved ONCE here rather than per intermediate (#502). It is the
+            // base a relative image reference resolves against — the same base
+            // the final-response leg already uses.
+            let cwd = agent.get_working_directory_for_session(sid);
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
@@ -155,58 +160,27 @@ pub(crate) fn spawn_edit_loop(
                                 }
                                 DisplayItem::Intermediate(text) => {
                                     // Flush buffered tools into the open flow,
-                                    // then fold this intermediate into the SAME
-                                    // in-place processing-log message. It no
-                                    // longer lands as its own message, so only
-                                    // the final response stays clean at the
-                                    // bottom (#300).
+                                    // then hand the intermediate to the ONE
+                                    // shared pipeline (#502, `handle_intermediate`):
+                                    // it sanitizes, fires a mid-turn reaction,
+                                    // resolves any local image into the bubble
+                                    // that named it, and either promotes the
+                                    // bubble or folds it into the collapsed log.
                                     append_tool_group(&bot, chat, thread_id, &st, &tool_buffer)
                                         .await;
                                     tool_buffer.clear();
-
-                                    // Sanitize exactly as before folding:
-                                    // strip LLM artifacts, redact secrets, strip
-                                    // image references (the final-response
-                                    // handler sends the image), and extract +
-                                    // fire <<react:>> now so a mid-turn reaction
-                                    // acknowledges the user immediately (#261).
-                                    // Strip-only: a remote link stays in the
-                                    // text — nothing here fetches it (#286).
-                                    let text = crate::utils::sanitize::strip_llm_artifacts(text);
-                                    let text = crate::utils::redact_secrets_scoped(&text, is_dm);
-                                    let text =
-                                        crate::utils::strip_image_references(&text, None).text;
-                                    let (text, react_emoji) =
-                                        crate::utils::extract_react_marker(&text);
-                                    // A resumed turn has no inbound message to
-                                    // react to: the marker is stripped above but
-                                    // nothing fires (#261).
-                                    if let Some(ref emoji) = react_emoji
-                                        && let Some(target) = react_target
-                                    {
-                                        fire_reaction(&bot, chat, target, emoji).await;
-                                    }
-
-                                    // A substantial rich report (a table) the
-                                    // model emits before a tool call would be
-                                    // buried in the collapsed log — surface it as
-                                    // its own rich message instead (#582). Thin
-                                    // narration keeps folding: folded intermediates
-                                    // are NOT recorded in sent_intermediates, so
-                                    // the final-response dedup does not suppress the
-                                    // visible answer just because it also appears in
-                                    // the collapsed trace.
-                                    if super::intermediates::is_deliverable_rich_report(&text) {
-                                        super::intermediates::deliver_intermediate_message(
-                                            sid, &bot, chat, thread_id, &st, &tg, &text,
-                                        )
-                                        .await;
-                                    } else {
-                                        append_intermediate_to_flow(
-                                            &bot, chat, thread_id, &st, &text,
-                                        )
-                                        .await;
-                                    }
+                                    handle_intermediate(
+                                        sid,
+                                        &bot,
+                                        chat,
+                                        thread_id,
+                                        &st,
+                                        &tg,
+                                        &cwd,
+                                        react_target,
+                                        text,
+                                    )
+                                    .await;
                                 }
                                 DisplayItem::System(text) => {
                                     // Chrome folds into the same block, in
