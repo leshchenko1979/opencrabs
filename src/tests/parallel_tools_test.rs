@@ -90,7 +90,7 @@ impl Tool for PathWriterTool {
         _input: serde_json::Value,
         _context: &ToolExecutionContext,
     ) -> crate::brain::tools::Result<crate::brain::tools::ToolResult> {
-        Ok(crate::brain::tools::ToolResult::success("wrote"))
+        Ok(crate::brain::tools::ToolResult::success("wrote".to_string()))
     }
 }
 
