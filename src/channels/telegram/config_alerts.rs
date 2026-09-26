@@ -34,6 +34,7 @@ pub enum ConfigProblemKind {
     IgnoredOrTypoConfigKeys(Vec<String>),
     NoValidBotOwnerConfigured,
     CommandCatalogOverflow { count: usize },
+    DatabaseIntegrityFailed { detail: String },
 }
 
 impl ConfigProblemKind {
@@ -51,6 +52,7 @@ impl ConfigProblemKind {
             Self::IgnoredOrTypoConfigKeys(_) => "Unrecognized / Typo Config Keys",
             Self::NoValidBotOwnerConfigured => "No Valid Telegram bot_owner Configured",
             Self::CommandCatalogOverflow { .. } => "Too Many Commands / Skills",
+            Self::DatabaseIntegrityFailed { .. } => "Database Integrity Check Failed",
         }
     }
 
@@ -85,6 +87,9 @@ impl ConfigProblemKind {
                 format!(
                     "Command & skill catalog has {count} commands, exceeding Telegram's hard limit of 100 commands per scope."
                 )
+            }
+            Self::DatabaseIntegrityFailed { detail } => {
+                format!("SQLite reported corruption in the database file: {detail}")
             }
         }
     }
@@ -335,6 +340,21 @@ pub fn audit_config_problems(
     problems
 }
 
+/// Build the alert problem for a boot-time DB integrity verdict (#459).
+///
+/// `None` (a clean check) yields no problem, so a healthy boot stays silent.
+pub fn db_integrity_problem(detail: Option<&str>) -> Option<ConfigProblem> {
+    detail.map(|detail| ConfigProblem {
+        kind: ConfigProblemKind::DatabaseIntegrityFailed {
+            detail: detail.to_string(),
+        },
+        severity: Severity::Error,
+        remediation: "Back up the database file, then recreate it (run `/doctor` for diagnostics). \
+                      SQLite reported this during the startup integrity check."
+            .into(),
+    })
+}
+
 /// Format detected configuration problems into a rich Markdown Telegram alert.
 pub fn format_config_alert(problems: &[ConfigProblem], profile_name: Option<&str>) -> String {
     let profile_tag = match profile_name {
@@ -519,7 +539,15 @@ pub async fn run_proactive_config_audit(
         }
     };
 
-    let problems = audit_config_problems(config, &raw_config, raw_keys.as_deref());
+    // #459: the DB integrity problem goes FIRST. `format_config_alert` truncates at
+    // 3800 chars, so a long config-problem list must not be able to push a corruption
+    // alert off the end. Dedupe is order-independent (`compute_hash` sorts), so this
+    // affects rendering only.
+    let mut problems: Vec<ConfigProblem> =
+        db_integrity_problem(state.db_integrity_detail().await.as_deref())
+            .into_iter()
+            .collect();
+    problems.extend(audit_config_problems(config, &raw_config, raw_keys.as_deref()));
     let alert_state = state.config_alert_state();
 
     if !alert_state.should_alert(&problems) {
