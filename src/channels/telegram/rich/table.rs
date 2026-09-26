@@ -318,20 +318,31 @@ pub(crate) fn normalize_rich_markdown(text: &str) -> String {
 /// Pass order, in full: 1 `balance_code_fences` → 2 `shield_unresolvable_markdown_images`
 /// → 3 `shield_bare_leading_hashes` → 4 `reflow_collapsed_tables` →
 /// 5 `infer_missing_table_separators` → 6 `ensure_blank_line_before_tables` (1-6 via
-/// [`normalize_tables_with_media`]) → **7 `ensure_blank_line_before_block_html` (#552)**
-/// → 8 `neutralize_orphan_photo_refs` → 9 `neutralize_prose_media_html`.
-/// Pass 7 sits here deliberately: the two orphan guards rewrite INLINE content only —
-/// they insert and remove no lines — so they can neither create nor destroy the
-/// quote-run-to-HTML-opener adjacency pass 7 exists to break.
+/// [`normalize_tables_with_media`]) → **7 `own_line_media_refs` (#487)** →
+/// **8 `ensure_blank_line_before_block_html` (#552)** → 9 `neutralize_orphan_photo_refs`
+/// → 10 `neutralize_prose_media_html`.
+/// Pass 7 runs before pass 8 because it MOVES references between lines, and pass 8's
+/// invariant is about final line structure: a quote run must not swallow a block-level
+/// HTML opener in the text actually sent. Pass 8 likewise emits well-formed lines that
+/// pass 7 could not confuse. The two orphan guards (9, 10) rewrite INLINE content only —
+/// they insert and remove no lines — so they can affect neither.
 pub(crate) fn normalize_rich_markdown_with_media(text: &str, media: &[MediaEntry]) -> String {
     let decoded = crate::channels::telegram::markdown::decode_named_entities(text);
     let normalized = normalize_tables_with_media(&decoded, media);
+    // #487: the shield inside the pass above has already escaped every orphan
+    // reference, so what remains here resolves. Telegram drops the caption of an
+    // INLINE media reference, and the markdown title is a local image's only
+    // caption channel on this plane — so every *titled* reference that still
+    // resolves gets a line of its own before the orphan guards run.
+    let own_line = own_line_media_refs(&normalized, media);
     // Terminate a blockquote run before a block-level HTML opener (#552): an unbroken
     // line after a `>` run is a CommonMark lazy continuation, so a `<details>` opener
     // would land INSIDE the quote and its unmatched closers make Telegram reject the
     // whole message (`RICH_MESSAGE_CONTENT_REQUIRED`), silently dropping the card to
-    // HTML. Runs before the orphan guards, which cannot affect line structure.
-    let quote_shielded = ensure_blank_line_before_block_html(&normalized);
+    // HTML. Runs on the line structure the split above produced, so the invariant
+    // holds for the text actually sent; the orphan guards below rewrite inline
+    // content only and can affect neither.
+    let quote_shielded = ensure_blank_line_before_block_html(&own_line);
     // Both orphan guards run on EVERY rich path from here (#334, H6) — not just on the
     // plan card's HTML path. The image shield above covers markdown image syntax; these
     // cover a reference written as bare prose text (`tg://photo?id=X`, `attach://X`) and
@@ -353,13 +364,14 @@ pub(crate) fn normalize_rich_markdown_with_media(text: &str, media: &[MediaEntry
 /// #1085 whack-a-mole retired). All passes are idempotent and fence-safe;
 /// pipe-free input returns unchanged.
 ///
-/// **Pass order (1-6 of 9 — the chain does NOT end here).** 1 `balance_code_fences`
+/// **Pass order (1-6 of 10 — the chain does NOT end here).** 1 `balance_code_fences`
 /// → 2 `shield_unresolvable_markdown_images` → 3 `shield_bare_leading_hashes`
 /// → 4 `reflow_collapsed_tables` → 5 `infer_missing_table_separators`
 /// → 6 `ensure_blank_line_before_tables`. The rich plane continues past this
 /// function in [`normalize_rich_markdown_with_media`], which runs
-/// **7 `ensure_blank_line_before_block_html` (#552)** followed by the two orphan
-/// guards (8 `neutralize_orphan_photo_refs`, 9 `neutralize_prose_media_html`).
+/// **7 `own_line_media_refs` (#487)**, **8 `ensure_blank_line_before_block_html`
+/// (#552)** followed by the two orphan
+/// guards (9 `neutralize_orphan_photo_refs`, 10 `neutralize_prose_media_html`).
 /// Read that entry for the complete order; this block covers passes 1-6 only.
 ///
 /// Also shields unresolvable markdown images (`![alt](path)`) so Telegram's rich parser
@@ -375,8 +387,9 @@ pub(crate) fn normalize_tables(text: &str) -> String {
 /// the media array of the request this text belongs to. A caller with no media array
 /// uses [`normalize_tables`], which is this function with an empty slice.
 ///
-/// This is passes **1-6 of 9** — the chain continues in
+/// This is passes **1-6 of 10** — the chain continues in
 /// [`normalize_rich_markdown_with_media`], which adds pass 7
+/// (`own_line_media_refs`, #487), pass 8
 /// (`ensure_blank_line_before_block_html`, #552) and the two orphan guards.
 pub(crate) fn normalize_tables_with_media(text: &str, media: &[MediaEntry]) -> String {
     let balanced = balance_code_fences(text);
@@ -867,6 +880,128 @@ fn parse_markdown_image_at(line: &str, start: usize) -> Option<(&str, usize)> {
     Some((target, match_end))
 }
 
+/// Move every titled, resolvable media reference onto a line of its own.
+///
+/// Telegram's rich parser drops the caption of an INLINE media reference: the
+/// same `![alt](tg://photo?id=X "caption")` renders with its caption when it is
+/// alone on its line, and with no caption at all when it shares that line with
+/// other text (measured 2026-09-27, probe messages 80128/80134 — inline → no
+/// caption; own line → caption, with or without a blank line before it). The
+/// markdown title is the only caption channel a local image has on this plane,
+/// so a *titled* reference that shares its line is split onto its own.
+///
+/// An UNTITLED reference never moves: it has no caption to gain, and leaving it
+/// put preserves the inline placement issue #360 asks this plane for. Orphans
+/// are the shield's business (and are already escaped by the time this runs), an
+/// `http(s)` image keeps today's behaviour, and table rows and code fences are
+/// left alone — splitting a table row breaks the table, and a fenced block is
+/// literal text.
+fn own_line_media_refs(text: &str, media: &[MediaEntry]) -> String {
+    if !text.contains("![") {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut in_fence = false;
+    let mut fence_char = ' ';
+    let mut fence_len = 0;
+
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            let ch = trimmed.chars().next().unwrap();
+            let count = trimmed.chars().take_while(|&c| c == ch).count();
+            if !in_fence {
+                in_fence = true;
+                fence_char = ch;
+                fence_len = count;
+                out.push_str(line);
+                continue;
+            } else if ch == fence_char && count >= fence_len {
+                in_fence = false;
+                out.push_str(line);
+                continue;
+            }
+        }
+
+        if in_fence || !line.contains("![") || line.contains('|') {
+            out.push_str(line);
+            continue;
+        }
+
+        split_media_refs_onto_own_lines(line, &mut out, media);
+    }
+
+    out
+}
+
+/// Split one line so every resolvable markdown image reference in it stands
+/// alone. Text segments keep their order around the references and an empty
+/// segment is dropped rather than emitting a blank line.
+fn split_media_refs_onto_own_lines(line: &str, out: &mut String, media: &[MediaEntry]) {
+    let bytes = line.as_bytes();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        // A reference inside an inline code span is literal text.
+        if bytes[i] == b'`' {
+            let n = bytes[i..].iter().take_while(|&&b| b == b'`').count();
+            let delim = &line[i..i + n];
+            match line[i + n..].find(delim) {
+                Some(rel) => {
+                    i += n + rel + n;
+                    continue;
+                }
+                None => break,
+            }
+        }
+        // `\![alt](...)` is escaped literal text, not a reference.
+        if bytes[i] == b'!'
+            && bytes.get(i + 1).copied() == Some(b'[')
+            && (i == 0 || bytes[i - 1] != b'\\')
+            && let Some((target, end)) = parse_markdown_image_at(line, i)
+            && is_valid_telegram_photo_url(target, media)
+            // Only a titled reference moves. An untitled one has no caption to
+            // gain, so splitting it would cost inline placement for nothing —
+            // and placement is what issue #360 asks the rich plane to keep.
+            // A media id never contains whitespace, so whitespace inside the
+            // parsed target means a markdown title follows it.
+            && target.contains(char::is_whitespace)
+        {
+            spans.push((i, end));
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+
+    if spans.is_empty() {
+        out.push_str(line);
+        return;
+    }
+
+    let mut parts: Vec<&str> = Vec::new();
+    let mut cursor = 0;
+    for (start, end) in &spans {
+        let before = line[cursor..*start].trim();
+        if !before.is_empty() {
+            parts.push(before);
+        }
+        parts.push(&line[*start..*end]);
+        cursor = *end;
+    }
+    let tail = line[cursor..].trim();
+    if !tail.is_empty() {
+        parts.push(tail);
+    }
+    out.push_str(&parts.join("\n"));
+}
+
 /// Check whether `target` is a valid Telegram photo URL/ref **for this request**.
 ///
 /// - `http://` / `https://` — valid by scheme; Telegram fetches the URL itself.
@@ -915,7 +1050,12 @@ fn telegram_media_id(url: &str) -> Option<&str> {
         return None;
     }
     let id = query.strip_prefix("id=")?;
-    Some(id.split('&').next().unwrap_or(id))
+    // The id ends at `&` or at whitespace. Whitespace matters because a markdown
+    // title rides the reference itself — `tg://photo?id=p1 "caption"` — and the
+    // title is not part of the id. Reading it in made every titled reference look
+    // like an orphan, so the shield escaped its `!` and the image rendered as
+    // literal text (measured 2026-09-27, before this split).
+    Some(id.split(|c: char| c == '&' || c.is_whitespace()).next().unwrap_or(id))
 }
 
 /// Whether `id` names an entry in this request's media array.

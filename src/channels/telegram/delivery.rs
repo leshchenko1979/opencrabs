@@ -197,6 +197,59 @@ pub(crate) async fn deliver_final_response(
             let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
             let text_only = redact_secrets(&text_only);
 
+            // #487: the rich plane rebuilds a local image reference IN PLACE —
+            // a `tg://photo?id=imgN` reference at the original offset, its bytes
+            // in the media array — so the picture lands where it was written and
+            // Telegram renders its markdown title as the caption. The extraction
+            // leg does neither: it tears the reference out and ships the file as
+            // a standalone bubble, detached from the text that introduced it.
+            // Exactly ONE leg may own a reply's images, so the decision is made
+            // here, once, from the same rewrite the rich send will carry. The
+            // bytes are read here rather than at the send so a read that fails
+            // between validation and delivery joins the honest notice below.
+            let rich_source =
+                redact_secrets(&crate::utils::sanitize::strip_llm_artifacts(&response.content));
+            let rich_rw = {
+                let delivered = {
+                    let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+                    s.delivered_image_paths.clone()
+                };
+                crate::utils::image::rewrite_local_images(
+                    &rich_source,
+                    Some(image_cwd.as_path()),
+                    "img",
+                    &delivered,
+                )
+            };
+            let mut rich_media: Vec<super::rich::mermaid::MediaEntry> = Vec::new();
+            for entry in &rich_rw.entries {
+                match tokio::fs::read(&entry.image.path).await {
+                    Ok(bytes) => rich_media.push(super::rich::mermaid::MediaEntry {
+                        id: entry.id.clone(),
+                        url: None,
+                        bytes: Some(bytes),
+                    }),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Telegram: failed to read local image {} for the rich plane: {}",
+                            entry.image.path.display(),
+                            e
+                        );
+                        image_failures.push(LocalImageFailure {
+                            raw: entry.image.path.display().to_string(),
+                            resolved: Some(entry.image.path.clone()),
+                            reason: LocalImageFailureReason::Unreadable,
+                        });
+                    }
+                }
+            }
+            // A body that is ONLY an image keeps the extraction leg: it has no
+            // text bubble to carry a reference into a rich send, so routing it
+            // there would drop it.
+            let rich_owns_images = !rich_media.is_empty()
+                && !text_only.trim().is_empty()
+                && super::rich::should_send_native_rich_for_media(&rich_source, true);
+
             // Drop an echoed plan title (#837). The reminder shows the model
             // the title every turn and it opens by repeating it, directly
             // under the card that already renders it.
@@ -546,9 +599,14 @@ pub(crate) async fn deliver_final_response(
             // path put in the chat is not re-sent here), so the first element
             // is deliberately ignored — only the channel's own refusals join
             // the notice.
-            let (_, refused) =
-                send_local_images(session_id, bot, chat_id, thread_id, &img_paths).await;
-            image_failures.extend(refused);
+            // #487: when the rich plane owns this reply's images it rebuilds
+            // each reference in place, so this leg must NOT also send them —
+            // that would ship every picture twice, one copy of it detached.
+            if !rich_owns_images {
+                let (_, refused) =
+                    send_local_images(session_id, bot, chat_id, thread_id, &img_paths).await;
+                image_failures.extend(refused);
+            }
 
             // An image the reply announced must not vanish silently when the
             // send fails: the reply says plainly which one is missing. This is
@@ -760,7 +818,7 @@ pub(crate) async fn deliver_final_response(
             let html = markdown_to_telegram_html(&text_only);
             // Final answers stay clean prose: the ctx footer lives on the
             // settled flow message, not here.
-            let display_html = html.clone();
+            let mut display_html = html.clone();
             tracing::info!(
                 "Telegram deliver: html.len={}, ctx footer on flow='{}'",
                 html.len(),
@@ -800,14 +858,29 @@ pub(crate) async fn deliver_final_response(
                 // to the HTML path where they showed as bare markup). Non-table
                 // rich content still tries blocks first (clean fences) then falls
                 // back to markdown.
-                let mut delivered_rich = super::rich::should_send_native_rich_for(
-                    &text_only,
-                    // #45: `options_pending` is true when the turn stashed a
-                    // suggest_options set mid-turn (#1226 K helper) — force the
-                    // rich plane for prose so buttons never live on a plain host.
-                    options_pending(streaming),
-                ) && {
-                    let rich_md = text_only.clone();
+                let mut delivered_rich = (rich_owns_images
+                    || super::rich::should_send_native_rich_for(
+                        &text_only,
+                        // #45: `options_pending` is true when the turn stashed a
+                        // suggest_options set mid-turn (#1226 K helper) — force the
+                        // rich plane for prose so buttons never live on a plain host.
+                        options_pending(streaming),
+                    ))
+                    && {
+                    // #487: an image-bearing body is sent from the REWRITTEN
+                    // markdown, whose `tg://photo` references only resolve
+                    // against the media array sent with it; every other body
+                    // keeps today's text, byte for byte.
+                    let rich_md = if rich_owns_images {
+                        rich_rw.rich.clone()
+                    } else {
+                        text_only.clone()
+                    };
+                    let rich_media: &[super::rich::mermaid::MediaEntry] = if rich_owns_images {
+                        rich_media.as_slice()
+                    } else {
+                        &[]
+                    };
                     // Send a FRESH rich message rather than editing the streamed
                     // placeholder into rich. Editing a normal message into a rich
                     // one glitches the client render — overlap during the
@@ -859,11 +932,10 @@ pub(crate) async fn deliver_final_response(
                             chat_id,
                             thread_id,
                             &rich_md,
-                            // No local media on this arm: it replaces the
-                            // HTML intermediates with one rich message of the
-                            // SAME content, and any picture already went out
-                            // with its own bubble (#502).
-                            &[],
+                            // #487: empty unless the rich plane owns this
+                            // body's images, in which case the references in
+                            // `rich_md` resolve against exactly these entries.
+                            rich_media,
                         )
                         .await;
                         if rich_send.is_err() && is_no_media_found(rich_send.as_ref().unwrap_err())
@@ -879,7 +951,7 @@ pub(crate) async fn deliver_final_response(
                                 chat_id,
                                 thread_id,
                                 &rich_md,
-                                &[],
+                                rich_media,
                             )
                             .await;
                         }
@@ -914,6 +986,21 @@ pub(crate) async fn deliver_final_response(
                 };
 
                 if !delivered_rich {
+                    // #487: the rich plane owned this body's images and did not
+                    // deliver them. The extraction leg is the floor — without it
+                    // the picture would vanish with no notice at all, which is
+                    // exactly the #502 failure mode (silent in both directions).
+                    // Its notice joins the fallback HTML here because the shared
+                    // append above ran before the rich outcome was known.
+                    if rich_owns_images && !img_paths.is_empty() {
+                        let (_, refused) =
+                            send_local_images(session_id, bot, chat_id, thread_id, &img_paths)
+                                .await;
+                        if !refused.is_empty() {
+                            display_html =
+                                crate::utils::append_failure_notice(&display_html, &refused);
+                        }
+                    }
                     // #tg-mermaid-delivery-hardening: last-chance mermaid render
                     // before degrading to chunks — the classic chunked HTML path
                     // cannot embed `<img>`, so when the source carried a diagram

@@ -826,7 +826,8 @@ impl Rewriter<'_> {
                     }
                     let id = format!("{}{}", self.id_prefix, self.out.entries.len());
                     let alt = if alt.trim().is_empty() { "image" } else { alt };
-                    self.out.rich.push_str(&format!("![{alt}](tg://photo?id={id})"));
+                    let title = rich_title(caption.as_deref());
+                    self.out.rich.push_str(&format!("![{alt}](tg://photo?id={id}{title})"));
                     self.out.entries.push(ResolvedImageRef {
                         id,
                         image: LocalImage { path, caption },
@@ -856,6 +857,36 @@ impl Rewriter<'_> {
         }
         true
     }
+}
+
+/// Render a local image's caption as the markdown title of its rewritten
+/// reference — the only caption channel this plane offers.
+///
+/// The rich media array has no caption field (Telegram ignores one on
+/// `InputRichMessageMedia`), so the caption rides the markdown title instead:
+/// measured 2026-09-27, a `tg://photo` reference titled `"CAP"` renders with
+/// `caption: CAP` and the same reference untitled renders with none at all.
+///
+/// Emitted only when the caption is expressible with the one delimiter measured
+/// to work. The returned string INCLUDES its separating space, because markdown
+/// requires `![alt](target "title")` — without it the title fuses into the
+/// target, the media id stops resolving, and the orphan shield escapes the `!`
+/// so the image renders as literal text.
+///
+/// A caption containing `)` (terminates the reference), `"` (no alternative
+/// delimiter is measured to work, and a malformed reference can fail the whole
+/// message) or `\` (escape interaction) is dropped, which is exactly today's
+/// caption-less behaviour: the image still arrives, merely unnamed. Newlines
+/// fold to spaces because the reference must stay on one line.
+fn rich_title(caption: Option<&str>) -> String {
+    let Some(caption) = caption else {
+        return String::new();
+    };
+    let folded = caption.split_whitespace().collect::<Vec<_>>().join(" ");
+    if folded.is_empty() || folded.contains([')', '"', '\\']) {
+        return String::new();
+    }
+    format!(" \"{folded}\"")
 }
 
 /// The alt text of a markdown image reference whose `![` sits at `start`.

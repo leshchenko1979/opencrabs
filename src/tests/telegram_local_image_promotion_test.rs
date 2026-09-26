@@ -150,20 +150,92 @@ fn two_references_get_ids_in_order_of_appearance() {
 }
 
 #[test]
-fn a_markdown_title_never_leaks_into_the_rich_reference() {
+fn a_markdown_title_survives_as_the_rich_caption_channel() {
+    // #487, and this test is the REVERSAL of the behaviour it previously pinned.
     // The rich media plane has no caption field — `InputRichMessageMedia` is
-    // `{id, media}` — so the title must not survive as markdown the rich
-    // parser would render as literal text.
+    // `{id, media}`, and Telegram ignores unrelated `InputMedia*` fields — so the
+    // markdown title is a local image's ONLY caption channel on it. Measured
+    // 2026-09-27 against the live API: a `tg://photo` reference titled "CAP"
+    // renders with `caption: CAP`, and the same reference untitled renders with
+    // no caption at all. Dropping the title therefore destroyed the caption
+    // rather than protecting the message from dead text.
     let dir = tempfile::tempdir().expect("tempdir");
     let png = write_fixture(dir.path(), "chart.png", PNG_BYTES);
 
     let text = format!("![alt]({} \"Quarterly revenue\")", png.display());
     let rw = rewrite_local_images(&text, Some(dir.path()), "img", &[]);
 
-    assert_eq!(rw.rich, "![alt](tg://photo?id=img0)");
-    assert!(
-        !rw.rich.contains("Quarterly revenue"),
-        "the title is dropped, not carried as dead text"
+    assert_eq!(
+        rw.rich,
+        "![alt](tg://photo?id=img0 \"Quarterly revenue\")",
+        "the title is rewritten onto the reference, space-separated as markdown requires"
+    );
+    assert_eq!(
+        rw.entries[0].image.caption.as_deref(),
+        Some("Quarterly revenue"),
+        "and the caption travels on the entry too"
+    );
+    assert!(rw.failures.is_empty());
+}
+
+#[test]
+fn an_inexpressible_caption_is_dropped_rather_than_mangling_the_reference() {
+    // A caption carrying `)` would terminate the reference mid-title, and `\\`
+    // interacts with escaping. Both degrade to today's caption-less behaviour —
+    // the picture still arrives — instead of risking the whole message.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png = write_fixture(dir.path(), "chart.png", PNG_BYTES);
+
+    for caption in ["revenue) 2026", "back\\slash"] {
+        let text = format!("![alt]({png} \"{caption}\")", png = png.display());
+        let rw = rewrite_local_images(&text, Some(dir.path()), "img", &[]);
+        assert_eq!(
+            rw.rich, "![alt](tg://photo?id=img0)",
+            "caption {caption:?} must be dropped, not emitted"
+        );
+        assert_eq!(
+            rw.entries[0].image.caption.as_deref(),
+            Some(caption),
+            "the parsed caption is still carried on the entry for the fallback leg"
+        );
+    }
+}
+
+#[test]
+fn a_caption_holding_a_double_quote_survives_parsing_but_not_re_emission() {
+    // The `"` case needs a single-quoted source title: a double quote inside a
+    // double-quoted title is not parseable markdown at all, so it would test the
+    // parser rather than the re-emission guard.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png = write_fixture(dir.path(), "chart.png", PNG_BYTES);
+
+    let text = format!("![alt]({png} 'say \"hi\"')", png = png.display());
+    let rw = rewrite_local_images(&text, Some(dir.path()), "img", &[]);
+
+    assert_eq!(
+        rw.entries[0].image.caption.as_deref(),
+        Some("say \"hi\""),
+        "a single-quoted title parses, so the caption is carried"
+    );
+    assert_eq!(
+        rw.rich, "![alt](tg://photo?id=img0)",
+        "but no delimiter is measured to work around an interior double quote, \
+         so it is dropped rather than emitted malformed"
+    );
+}
+
+#[test]
+fn a_multiline_caption_folds_to_one_line() {
+    // The reference must stay on one line or the own-line split cannot find it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png = write_fixture(dir.path(), "chart.png", PNG_BYTES);
+
+    let text = format!("![alt]({png} \"quarterly\n  revenue\")", png = png.display());
+    let rw = rewrite_local_images(&text, Some(dir.path()), "img", &[]);
+    assert_eq!(
+        rw.rich,
+        "![alt](tg://photo?id=img0 \"quarterly revenue\")",
+        "interior whitespace folds to a single space"
     );
 }
 

@@ -11,7 +11,9 @@ use crate::channels::telegram::rich::api::{
 };
 use crate::channels::telegram::rich::mermaid::MediaEntry;
 use crate::channels::telegram::rich::normalize_rich_markdown;
-use crate::channels::telegram::rich::table::shield_unresolvable_markdown_images;
+use crate::channels::telegram::rich::{
+    normalize_rich_markdown_with_media, table::shield_unresolvable_markdown_images,
+};
 use teloxide::types::{MessageId, ThreadId};
 
 #[test]
@@ -215,4 +217,152 @@ fn test_shield_is_fence_and_code_span_safe_for_media_refs() {
         bytes: Some(vec![1, 2, 3]),
     }];
     assert_eq!(shield_unresolvable_markdown_images(prose, &matching), prose);
+}
+
+// ---------------------------------------------------------------------------
+// #487 — a local image's caption rides the markdown title, and the title only
+// reaches Telegram when the reference stands alone on its own line.
+// ---------------------------------------------------------------------------
+
+fn photo_entry(id: &str) -> MediaEntry {
+    MediaEntry {
+        id: id.to_string(),
+        url: None,
+        bytes: Some(vec![0x89, b'P', b'N', b'G']),
+    }
+}
+
+#[test]
+fn a_titled_reference_sharing_its_line_is_split_so_the_caption_survives() {
+    // Telegram's rich parser drops the caption of an INLINE media reference
+    // (measured 2026-09-27: inline → no caption, own line → caption, with or
+    // without a blank line before it). The title is a local image's only caption
+    // channel on this plane, so the reference has to move to keep the caption.
+    let media = vec![photo_entry("img0")];
+    let out = normalize_rich_markdown_with_media(
+        "Here is the chart: ![alt](tg://photo?id=img0 \"Quarterly revenue\") enjoy.",
+        &media,
+    );
+
+    let line = out
+        .lines()
+        .find(|l| l.contains("tg://photo?id=img0"))
+        .expect("the reference survives the normalizer");
+    assert_eq!(
+        line.trim(),
+        "![alt](tg://photo?id=img0 \"Quarterly revenue\")",
+        "the reference stands alone on its line, title intact"
+    );
+    assert!(out.contains("Here is the chart:"));
+    assert!(out.contains("enjoy."));
+}
+
+#[test]
+fn an_untitled_reference_keeps_its_inline_placement() {
+    // Nothing to gain, so nothing moves: splitting an untitled reference would
+    // cost the inline placement #360 asks this plane for.
+    let media = vec![photo_entry("img0")];
+    let input = "Look here ![alt](tg://photo?id=img0) and then read on.";
+    let out = normalize_rich_markdown_with_media(input, &media);
+
+    assert!(
+        out.contains("Look here ![alt](tg://photo?id=img0) and then read on."),
+        "an untitled reference stays inline: {out:?}"
+    );
+}
+
+#[test]
+fn a_markdown_title_does_not_make_its_reference_look_like_an_orphan() {
+    // The bug this pins: the target parser used to read the whole
+    // `tg://photo?id=img0 "Quarterly revenue"` run as the target, so the id came
+    // out as `img0 "Quarterly revenue"`, matched no entry, and the shield escaped
+    // the `!` — which renders the image as literal text.
+    let media = vec![photo_entry("img0")];
+    let input = "![alt](tg://photo?id=img0 \"Quarterly revenue\")";
+
+    assert_eq!(
+        shield_unresolvable_markdown_images(input, &media),
+        input,
+        "a titled reference whose id matches is not an orphan"
+    );
+    let out = normalize_rich_markdown_with_media(input, &media);
+    assert!(
+        out.starts_with("![alt]("),
+        "the `!` is not escaped, so this stays an image and not dead text: {out:?}"
+    );
+}
+
+#[test]
+fn two_titled_references_on_one_line_each_get_their_own() {
+    let media = vec![photo_entry("img0"), photo_entry("img1")];
+    let out = normalize_rich_markdown_with_media(
+        "![a](tg://photo?id=img0 \"First\") and ![b](tg://photo?id=img1 \"Second\")",
+        &media,
+    );
+
+    let refs: Vec<&str> = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("!["))
+        .collect();
+    assert_eq!(
+        refs,
+        vec![
+            "![a](tg://photo?id=img0 \"First\")",
+            "![b](tg://photo?id=img1 \"Second\")",
+        ],
+        "each reference is alone on its line, in order"
+    );
+}
+
+#[test]
+fn a_titled_remote_image_is_split_too() {
+    // The caption rule belongs to Telegram's parser, not to the local-image
+    // path, so a fetchable URL gets the same treatment.
+    let out = normalize_rich_markdown_with_media(
+        "See ![chart](https://example.test/a.png \"Quarterly revenue\") here.",
+        &[],
+    );
+    assert!(
+        out.contains("![chart](https://example.test/a.png \"Quarterly revenue\")\n"),
+        "the titled remote ref is alone on its line: {out:?}"
+    );
+}
+
+#[test]
+fn a_title_never_moves_a_reference_out_of_a_table_row_or_a_code_fence() {
+    let media = vec![photo_entry("img0")];
+
+    let table = "| col | other |\n|---|---|\n| a | ![x](tg://photo?id=img0 \"C\") |";
+    let out = normalize_rich_markdown_with_media(table, &media);
+    assert!(
+        out.contains("| a | ![x](tg://photo?id=img0 \"C\") |")
+            || out.contains("![x](tg://photo?id=img0 \"C\") |"),
+        "splitting a table row would break the table: {out:?}"
+    );
+
+    let fenced = "```\nsee ![x](tg://photo?id=img0 \"C\") here\n```";
+    assert_eq!(
+        normalize_rich_markdown_with_media(fenced, &media),
+        fenced,
+        "a fenced block is literal text and survives byte-identically"
+    );
+}
+
+#[test]
+fn an_orphan_titled_reference_is_still_neutralised() {
+    // The split only claims references that resolve against THIS request; an
+    // orphan is the guards' business and must still be escaped, not uploaded.
+    let out = normalize_rich_markdown_with_media(
+        "see ![x](tg://photo?id=missing \"C\") here",
+        &[photo_entry("img0")],
+    );
+    assert!(
+        out.contains("\\![x]("),
+        "an orphan keeps its escaped `!` rather than becoming a split image line: {out:?}"
+    );
+    assert!(
+        !out.contains("\n![x]("),
+        "an orphan must not be given a line of its own — the escape is what saves it: {out:?}"
+    );
 }
