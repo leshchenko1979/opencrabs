@@ -250,10 +250,26 @@ impl Tool for ContextTool {
     async fn execute(&self, input: Value, context: &ToolExecutionContext) -> Result<ToolResult> {
         let input: ContextInput = serde_json::from_value(input)?;
         let store_path = get_store_path(context);
+
+        // Serialise the whole read-modify-write, not just the save (#600).
+        // `ContextStore::save` renames a uniquely-named temp file over the
+        // target, which makes each write atomic but leaves the window between
+        // the load below and that write wide open: two mutations in one
+        // parallel batch both read the same baseline, the later save replaces
+        // the file outright, and both calls return success carrying their own
+        // stale count. The guard is taken BEFORE the read — the #593 lesson
+        // that `edit.rs` applies to the same class of defect. It stays
+        // advisory (a contended writer waits briefly, then proceeds), but the
+        // hold is one read and one write of a single file, far shorter than
+        // the wait, so competing mutations of one store serialise in practice
+        // and any residual overlap is reported rather than silent.
+        let write_lock = super::path_lock::acquire(&store_path);
+        let contended = write_lock.as_ref().is_some_and(|l| !l.is_held());
+
         let session_id_str = context.session_id.to_string();
         let mut store = ContextStore::load(&store_path, &session_id_str).await?;
 
-        let result = match input.operation {
+        let mut result = match input.operation {
             ContextOperation::Set {
                 key,
                 value,
@@ -448,6 +464,15 @@ impl Tool for ContextTool {
                 )
             }
         };
+
+        // An overlapping mutation is reported, not swallowed: the counts above
+        // were computed from the store we read AND wrote under the lock, so
+        // they describe the persisted state — but a contended writer cannot
+        // prove no peer interleaved, and only the caller can decide what that
+        // means. Same idiom as `edit.rs`.
+        if contended {
+            result.push_str(&super::path_lock::contention_notice(&store_path));
+        }
 
         Ok(ToolResult::success(result))
     }
