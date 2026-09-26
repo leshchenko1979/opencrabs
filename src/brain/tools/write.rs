@@ -116,29 +116,16 @@ impl Tool for WriteTool {
             )));
         }
 
-        // Create parent directories if requested (before path validation)
+        // Create parent directories if requested (before path validation).
+        //
+        // No path confinement here (issue #609): security is enforced at the
+        // tool level via `requires_approval` and capability flags — see
+        // `validate_path_safety` — not by restricting paths to one directory.
+        // The previous guard was also inverted: it fired only when the parent
+        // ALREADY existed, so it refused the ordinary repeat-write.
         if input.create_dirs
             && let Some(parent) = path.parent()
         {
-            // Validate parent path is within working directory
-            let canonical_wd = context.working_dir().canonicalize().map_err(|e| {
-                ToolError::Internal(format!("Failed to canonicalize working directory: {}", e))
-            })?;
-
-            // If parent exists, check it's within bounds
-            if parent.exists() {
-                let canonical_parent = parent.canonicalize().map_err(|e| {
-                    ToolError::InvalidInput(format!("Failed to resolve parent path: {}", e))
-                })?;
-
-                if !canonical_parent.starts_with(&canonical_wd) {
-                    return Ok(ToolResult::error(format!(
-                        "Access denied: Path '{}' is outside the working directory",
-                        input.path
-                    )));
-                }
-            }
-
             fs::create_dir_all(parent).await.map_err(ToolError::Io)?;
         }
 
