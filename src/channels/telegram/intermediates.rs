@@ -248,6 +248,23 @@ pub(crate) fn should_promote_intermediate(text: &str, fresh_images: usize) -> bo
     fresh_images > 0 || is_deliverable_rich_report(text)
 }
 
+/// Is a promoted bubble burial evidence — text the final rich message repeats,
+/// and therefore safe to delete once that message lands?
+///
+/// #617: a bubble that carried a local image is a **deliverable**, not burial
+/// evidence. The supersession cleanup (`delivery.rs`) deletes every id in
+/// `intermediate_msg_ids` when the rich fallback succeeds — and that fallback
+/// carries no media — so deleting a media-carrying bubble removes the only copy
+/// of the picture, *after* it was delivered. The final leg has already skipped
+/// those paths via `delivered_image_paths`, so nothing re-sends it.
+///
+/// Deliberately a pure predicate, for the same reason as
+/// [`should_promote_intermediate`]: both directions are testable without a live
+/// bot, and the caller keeps the lock discipline.
+pub(crate) fn promoted_bubble_is_burial_evidence(media_count: usize) -> bool {
+    media_count == 0
+}
+
 /// Deliver a promoted intermediate as its own message (rich-first, HTML
 /// fallback) and record it in `sent_intermediates` so the final-response dedup
 /// will not resend it. Returns true when something was delivered.
@@ -321,7 +338,14 @@ pub(crate) async fn deliver_intermediate_message(
         tg.note_bot_bubble(chat.0, id.0);
         let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
         s.sent_intermediates.push(text.to_string());
-        s.intermediate_msg_ids.push(id);
+        // #617: only a bubble that carried NO media is burial evidence. A bubble
+        // that carried a local image holds the only copy of that picture — the
+        // rich-fallback cleanup deletes every id pushed here, and the final leg
+        // has already skipped these paths, so a delete would remove a picture
+        // the user has already been shown.
+        if promoted_bubble_is_burial_evidence(media.len()) {
+            s.intermediate_msg_ids.push(id);
+        }
         // Record the paths that just rode this bubble, so neither a later
         // intermediate nor the final leg ships the same picture twice (#502).
         // The API's own success is the receipt here: the bytes went out with
