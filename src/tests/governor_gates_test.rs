@@ -66,27 +66,33 @@ async fn global_permit_names_its_cause_and_only_a_cooldown_refuses() {
     );
     ts::reset(0);
 
-    // 3. PacerHeld: exhaust the global pacer (capacity 25) and keep asking. The
-    //    hold then exceeds GLOBAL_MAX_HOLD and the verdict is PacerHeld — whose
-    //    disposition is PROCEED. That is the whole point of naming the cause,
-    //    and what made pace_rich's old refusal on this variant an over-refusal.
+    // 3. Bounded hold, then Admitted. Draining the 25-token burst makes the next
+    //    call wait one refill — 40ms at GLOBAL_REFILL_PER_SEC (25/s) — which is
+    //    far inside GLOBAL_MAX_HOLD, so the pacer holds briefly and admits.
     for _ in 0..25 {
         let _ = governor::acquire_global_permit().await;
     }
     assert_eq!(
         governor::acquire_global_permit().await,
-        governor::GlobalPermit::PacerHeld
+        governor::GlobalPermit::Admitted,
+        "the 26th call waits one refill and is admitted"
     );
-    assert!(
-        governor::GlobalPermit::PacerHeld.may_proceed(),
-        "a pacer hold is our own artifact: the code documents it as failing open"
-    );
+
+    // 4. The disposition table itself — the contract both callers read. Pinned
+    //    directly because the PacerHeld BRANCH is structurally unreachable at
+    //    the current constants: the refill is a const 25/s, so the longest
+    //    single hold is 40ms and `total_held` cannot pass GLOBAL_MAX_HOLD (5s),
+    //    and nothing arms a `pause_until` on the global bucket (only peer
+    //    buckets are paused). No runtime sequence can produce it, but the
+    //    variant still needs its disposition pinned.
     assert!(governor::GlobalPermit::Admitted.may_proceed());
+    assert!(governor::GlobalPermit::PacerHeld.may_proceed());
+    assert!(!governor::GlobalPermit::CooldownActive.may_proceed());
     ts::reset(0);
 }
 
 #[tokio::test(start_paused = true)]
-async fn pace_rich_admits_on_a_pacer_hold_and_refuses_only_a_cooldown() {
+async fn pace_rich_refuses_only_a_server_cooldown_and_admits_otherwise() {
     let _guard = ts::registry_guard().await;
     ts::reset(0);
     rl_config!(enabled: true, rich_per_minute: 60, rich_burst: 2);
@@ -94,7 +100,9 @@ async fn pace_rich_admits_on_a_pacer_hold_and_refuses_only_a_cooldown() {
     const CHAT: ChatId = ChatId(-100_444);
     ts::mark_forum(CHAT);
 
-    // Exhaust the global pacer so the permit reports PacerHeld, not Admitted.
+    // Drain the global burst. The permit that follows is Admitted (one 40ms
+    // refill wait), not PacerHeld — see the unreachability note in the sibling
+    // test above. This half pins that a PROCEED verdict lets content through.
     for _ in 0..25 {
         let _ = governor::acquire_global_permit().await;
     }
@@ -103,8 +111,8 @@ async fn pace_rich_admits_on_a_pacer_hold_and_refuses_only_a_cooldown() {
             governor::pace_rich(CHAT, Some(7), governor::EditClass::Final).await,
             governor::RichAdmission::Now
         ),
-        "a pacer hold is our own artifact, so the rich gate must ADMIT: refusing \
-         here drops or defers content on a condition the shared code documents as non-refusing"
+        "a proceed verdict must let a Final through: the rich gate refuses only \
+         on a server-issued cooldown"
     );
 
     // A server-issued cooldown, by contrast, still refuses a Final.

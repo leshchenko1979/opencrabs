@@ -1547,9 +1547,15 @@ pub(crate) async fn pace_rich(
     // #556 classified the refusal — chrome drops, content defers. #635 names
     // the CAUSE: only a server-issued cooldown refuses. A pacer hold is our own
     // scheduling artifact whose own comment says it fails open, so refusing
-    // content on it was an over-refusal (latent: the pacer-hold warn fired 0
-    // times in the 8 retained dailies against 54 cooldown bails).
-    if acquire_global_permit().await == GlobalPermit::CooldownActive {
+    // content on it was an over-refusal — and that branch is structurally
+    // unreachable at the current constants, not merely unobserved: the refill is
+    // a const 25/s, so the longest single hold is 40ms and `total_held` cannot
+    // pass GLOBAL_MAX_HOLD (5s), and nothing arms a `pause_until` on the global
+    // bucket. Measured: the pacer-hold warn fired 0 times in the 8 retained
+    // dailies against 54 cooldown bails. The disposition is read from its ONE
+    // home (`may_proceed`) rather than re-derived from a variant comparison.
+    let permit = acquire_global_permit().await;
+    if !permit.may_proceed() {
         return refuse_rich(chat_id, class);
     }
 
