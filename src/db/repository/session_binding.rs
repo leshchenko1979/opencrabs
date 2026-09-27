@@ -499,17 +499,25 @@ impl SessionBindingRepository {
     ) -> Result<Option<SessionBinding>> {
         let ch = channel.to_string();
         let cid = chat_id.to_string();
+        // `BINDING_COLUMNS` is alias-prefixed (`b.…`), so the table needs the
+        // alias — and the constant must be INTERPOLATED. A bare literal passes
+        // the braces through to SQLite, which rejects the statement as
+        // `unrecognized token` at offset 7 (CI run 36309971357: 7 failures from
+        // this one line).
+        let sql = format!(
+            "SELECT {BINDING_COLUMNS} \
+             FROM session_bindings b \
+             WHERE b.channel = ?1 AND b.chat_id = ?2 AND b.thread_id IS ?3"
+        );
         self.pool
             .get()
             .await
             .context("Failed to get connection")?
             .interact(move |conn| {
-                conn.prepare(
-                    "SELECT {BINDING_COLUMNS} FROM session_bindings WHERE channel = ?1 AND chat_id = ?2 AND thread_id IS ?3",
-                )?
-                .query_map(params![ch, cid, thread_id], map_binding)?
-                .next()
-                .transpose()
+                conn.prepare(&sql)?
+                    .query_map(params![ch, cid, thread_id], map_binding)?
+                    .next()
+                    .transpose()
             })
             .await
             .map_err(interact_err)?
