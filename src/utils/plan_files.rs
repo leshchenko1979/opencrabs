@@ -249,6 +249,13 @@ fn is_marker_stale(path: &Path) -> bool {
 }
 
 /// Derive the session's plan-mode state from disk.
+///
+/// Deliberately does NOT archive a completed-but-`Active` plan (#627). ADR 0005
+/// Decision 9 keeps a finished plan live until the completing turn settles, so
+/// the user sees its all-☑ checklist in that turn's message — and this read sits
+/// on the flow-chrome render path. `heal_completed_active_plan` owns that sweep;
+/// its seam is the turn-start call in `apply_plan_mode_provider`, and
+/// `completing_last_task_keeps_plan_live_until_settle` pins the split.
 pub async fn plan_mode_state(session_id: Uuid) -> PlanModeState {
     let json = plan_json_read_path(session_id).await;
     // load_plan_from_path returns None for a missing/unreadable/terminal file
@@ -668,6 +675,50 @@ pub async fn pre_init_origin(session_id: Uuid) -> PreInitOrigin {
 /// Whether the durable pre-init Editing flag is set for the session.
 pub async fn is_pre_init_editing(session_id: Uuid) -> bool {
     plan_mode_state(session_id).await == PlanModeState::PreInitEditing
+}
+
+/// Archive a plan whose every task is terminal but which still reads `Active`
+/// on disk (#627).
+///
+/// `PlanStatus` has no completed variant — only `Editing` and `Active` — so a
+/// finished plan is indistinguishable from a live one to `plan_mode_state_of`,
+/// and `plan init` is then refused with an instruction that cannot be obeyed
+/// ("Complete its remaining tasks"). The settle hook at the tail of
+/// `run_tool_loop_inner` does archive a finished plan, but only on a turn that
+/// reaches that tail, so a plan completed in an errored turn — or on a lane
+/// that never turned again — stayed `Active` for ever.
+///
+/// Called at turn start, which is the boundary the settle hook would have used.
+/// NOT called from `plan_mode_state`: ADR 0005 Decision 9 keeps a finished plan
+/// live until the completing turn settles so the user sees its all-☑ checklist,
+/// and that read sits on the flow-chrome render path.
+///
+/// Returns whether a plan was archived. An unarchived file is never reported
+/// as healed, because the caller keeps the refusal in that case — `plan init`
+/// must never overwrite a plan still on disk.
+pub(crate) async fn heal_completed_active_plan(session_id: Uuid) -> bool {
+    let json = plan_json_read_path(session_id).await;
+    let completed = load_plan_from_path(&json)
+        .is_some_and(|p| p.status == PlanStatus::Active && p.is_complete());
+    if !completed {
+        return false;
+    }
+    match archive_plan(session_id).await {
+        Ok(()) => {
+            tracing::info!(
+                "Plan: archived a completed-but-Active plan at {} (#627)",
+                json.display()
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Plan: could not archive completed plan at {}: {e} (#627)",
+                json.display()
+            );
+            false
+        }
+    }
 }
 
 /// Archive the session's plan artifacts (`.json` and `.md`) under

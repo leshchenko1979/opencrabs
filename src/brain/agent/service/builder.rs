@@ -1303,7 +1303,21 @@ impl AgentService {
     /// A no-op when the config sets no plan-mode keys, which is the default: no
     /// provider is built and no swap happens, so an install that has never
     /// heard of this feature behaves exactly as before.
+    ///
+    /// The one part that always runs is the #627 plan-store heal below: that is
+    /// store hygiene, not provider routing, so it is deliberately not behind
+    /// the config.
     pub(crate) async fn apply_plan_mode_provider(&self, session_id: Uuid) {
+        // #627: a finished plan still reads `Active` on disk (`PlanStatus` has
+        // no completed variant), and `plan init` is then refused with an
+        // instruction the lane cannot obey ("Complete its remaining tasks").
+        // The settle hook is the only other archiver, and it runs solely at the
+        // tail of a turn that reaches it — so recover here, once per turn,
+        // before the model runs and before the state read below.
+        // Deliberately not inside `plan_mode_state`: ADR 0005 Decision 9 keeps a
+        // finished plan live until the completing turn settles, and that read
+        // sits on the flow-chrome render path.
+        crate::utils::plan_files::heal_completed_active_plan(session_id).await;
         let state = crate::utils::plan_files::plan_mode_state(session_id).await;
         let config = match crate::config::Config::load() {
             Ok(c) => c,

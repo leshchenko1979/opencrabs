@@ -5,12 +5,12 @@
 //! scaffold, and the Editing markdown-to-description mirror.
 
 use crate::config::profile::{home_for_profile, with_profile_home_async};
-use crate::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskType};
+use crate::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus, TaskType};
 use crate::utils::plan_files::{
-    PlanModeState, archive_dir, create_design_md, discard_plan, is_plan_autonomy,
-    is_pre_init_editing, load_plan, plan_json_path, plan_md_path, plan_mode_state,
-    pre_init_marker_path, save_plan, set_plan_autonomy, set_pre_init_editing, sync_md_to_json,
-    template_section_warnings,
+    PlanModeState, archive_dir, create_design_md, discard_plan, heal_completed_active_plan,
+    is_plan_autonomy, is_pre_init_editing, load_plan, peek_plan_just_archived, plan_json_path,
+    plan_md_path, plan_mode_state, pre_init_marker_path, save_plan, set_plan_autonomy,
+    set_pre_init_editing, sync_md_to_json, template_section_warnings,
 };
 use uuid::Uuid;
 
@@ -463,6 +463,183 @@ async fn archive_roundtrip_latest_archived_plan_finds_writer_output() {
             );
         assert_eq!(doc.title, "Round trip");
         assert_eq!(doc.tasks.len(), 1);
+    })
+    .await;
+}
+
+// ── #627: a completed-but-Active plan is healed on the state read ────────────
+
+/// Build a plan whose every task is terminal, with `status` as given.
+async fn write_terminal_plan(session_id: Uuid, status: PlanStatus, tasks: usize) -> PlanDocument {
+    let mut plan = PlanDocument::new(session_id, "Terminal plan".to_string());
+    for i in 0..tasks {
+        plan.add_task(task(i + 1, &format!("t{}", i + 1)));
+    }
+    plan.status = status;
+    for t in plan.tasks.iter_mut() {
+        t.status = TaskStatus::Completed;
+    }
+    save_plan(&plan).await.unwrap();
+    plan
+}
+
+/// Plan artifacts currently sitting in the session's archive dir (sorted,
+/// the `just_archived` sidecar excluded). Empty when nothing was archived.
+async fn archived_plan_names(session_id: Uuid) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(archive_dir(session_id).await) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| !n.ends_with(".flag"))
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn complete_active_plan_is_healed_at_the_turn_boundary() {
+    in_temp_home(async {
+        // #627: the plan finished, but its turn never reached the settle hook,
+        // so it still reads `Active` on disk with every task terminal. Before
+        // the heal, `plan init` refused the lane with an instruction it could
+        // not obey ("Complete its remaining tasks") — because `PlanStatus` has
+        // no completed variant.
+        let sid = Uuid::new_v4();
+        let plan = write_terminal_plan(sid, PlanStatus::Active, 2).await;
+        assert!(plan.is_complete(), "precondition: every task is terminal");
+        let json = plan_json_path(sid).await;
+        assert!(json.exists(), "precondition: the plan file is live on disk");
+
+        assert!(
+            heal_completed_active_plan(sid).await,
+            "a completed Active plan must report itself healed"
+        );
+        assert_eq!(plan_mode_state(sid).await, PlanModeState::NoPlan);
+
+        // The artifacts moved under `archive/`, so no later consumer can read
+        // the file back as a live plan.
+        assert!(!json.exists(), "the healed plan must leave the live path");
+        assert_eq!(
+            archived_plan_names(sid).await.len(),
+            1,
+            "exactly one plan JSON must be archived"
+        );
+
+        // The durable stamp is what lets the Telegram card FINALIZE instead of
+        // being deleted — healing through `archive_plan` keeps it (#1231).
+        assert!(
+            peek_plan_just_archived(sid).await,
+            "the heal must stamp just_archived (#1231)"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn state_read_does_not_archive_a_complete_active_plan() {
+    in_temp_home(async {
+        // ADR 0005 Decision 9: a finished plan stays live until the completing
+        // turn SETTLES, so the user sees its all-☑ checklist in that turn's
+        // message. `plan_mode_state` sits on the flow-chrome render path, so it
+        // must never archive — this is the seam #627's first design got wrong
+        // and the gate caught.
+        let sid = Uuid::new_v4();
+        let plan = write_terminal_plan(sid, PlanStatus::Active, 2).await;
+        assert!(plan.is_complete(), "precondition: every task is terminal");
+
+        assert_eq!(
+            plan_mode_state(sid).await,
+            PlanModeState::Active,
+            "the render path must keep a finished plan live until settle (ADR 0005 D9)"
+        );
+        assert!(
+            plan_json_path(sid).await.exists(),
+            "a state read must not move the plan off the live path"
+        );
+        assert!(archived_plan_names(sid).await.is_empty());
+        assert!(!peek_plan_just_archived(sid).await);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn incomplete_active_plan_is_not_healed() {
+    in_temp_home(async {
+        // Negative control: the heal must not fire on genuinely unfinished
+        // work, or a live lane would lose its checklist mid-flight.
+        let sid = Uuid::new_v4();
+        let mut plan = PlanDocument::new(sid, "Still running".to_string());
+        plan.add_task(task(1, "done"));
+        plan.add_task(task(2, "pending"));
+        plan.status = PlanStatus::Active;
+        plan.tasks[0].status = TaskStatus::Completed;
+        save_plan(&plan).await.unwrap();
+
+        assert!(!plan.is_complete(), "precondition: one task is still open");
+        assert!(
+            !heal_completed_active_plan(sid).await,
+            "an unfinished plan must not be reported healed"
+        );
+        assert_eq!(plan_mode_state(sid).await, PlanModeState::Active);
+        assert!(
+            plan_json_path(sid).await.exists(),
+            "an incomplete Active plan must stay live"
+        );
+        assert!(archived_plan_names(sid).await.is_empty());
+        assert!(!peek_plan_just_archived(sid).await);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn editing_plan_with_terminal_tasks_is_not_archived() {
+    in_temp_home(async {
+        // Status guard: a design-track plan can have every task terminal while
+        // still awaiting approval — archiving it would delete the design gate.
+        let sid = Uuid::new_v4();
+        let plan = write_terminal_plan(sid, PlanStatus::Editing, 1).await;
+        assert!(plan.is_complete(), "precondition: every task is terminal");
+        let md = create_design_md(sid, "Terminal plan").await.unwrap();
+        assert!(md.exists(), "precondition: the design .md is present");
+
+        assert!(
+            !heal_completed_active_plan(sid).await,
+            "an Editing plan is never healed, whatever its task states"
+        );
+        assert_eq!(plan_mode_state(sid).await, PlanModeState::PostInitEditing);
+        assert!(
+            plan_json_path(sid).await.exists(),
+            "an Editing plan is never healed, whatever its task states"
+        );
+        assert!(archived_plan_names(sid).await.is_empty());
+        assert!(!peek_plan_just_archived(sid).await);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn second_heal_archives_nothing_further() {
+    in_temp_home(async {
+        // The heal runs once per turn, so it repeats. A second call must
+        // observe the already-healed state, archive nothing, and say so.
+        let sid = Uuid::new_v4();
+        write_terminal_plan(sid, PlanStatus::Active, 1).await;
+
+        assert!(heal_completed_active_plan(sid).await);
+        let after_first = archived_plan_names(sid).await;
+        assert_eq!(after_first.len(), 1);
+
+        assert!(
+            !heal_completed_active_plan(sid).await,
+            "a second heal must report that nothing was archived"
+        );
+        assert_eq!(
+            archived_plan_names(sid).await,
+            after_first,
+            "a second heal must not archive a second copy"
+        );
     })
     .await;
 }
