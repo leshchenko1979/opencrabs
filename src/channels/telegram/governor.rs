@@ -116,24 +116,68 @@ const GLOBAL_REFILL_PER_SEC: f64 = 25.0;
 /// Max duration a request may be held by the global pacer before failing open.
 const GLOBAL_MAX_HOLD: Duration = Duration::from_secs(5);
 
+/// What [`acquire_global_permit`] decided, and why.
+///
+/// #635 — the refusal used to be ONE `bool` carrying two opposite policies.
+/// The old doc asked the two callers to behave differently on an
+/// indistinguishable bit ("[`pace_rich`] drops or defers, [`pace_send`] warns
+/// and fails open"), which no caller can do: `pace_send` discarded the value
+/// and `pace_rich` refused on both. Naming the cause is what lets each caller
+/// apply the policy its own comment already states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GlobalPermit {
+    /// A permit was cleanly acquired, or the cooldown was waited out.
+    Admitted,
+    /// A server-issued 429 window outlasts the inline bound. Obey it: this is
+    /// the one refusal that means "do not send".
+    CooldownActive,
+    /// OUR pacer held longer than `GLOBAL_MAX_HOLD`. Fail open: the hold is a
+    /// scheduling artifact of our own buckets, never a server instruction.
+    PacerHeld,
+}
+
+impl GlobalPermit {
+    /// The disposition, stated ONCE so no caller re-derives it (#635).
+    ///
+    /// `true` = the caller may proceed. Before this existed the policy lived
+    /// in two doc comments that contradicted each other.
+    pub(crate) fn may_proceed(self) -> bool {
+        match self {
+            GlobalPermit::Admitted | GlobalPermit::PacerHeld => true,
+            GlobalPermit::CooldownActive => false,
+        }
+    }
+}
+
 /// Acquire a permit from the global rate limiter and wait out any active global 429 cooldown.
 ///
-/// Returns `true` if a permit was cleanly acquired or successfully waited for,
-/// or `false` if the hold exceeded `GLOBAL_MAX_HOLD` and failed open to prevent deadlock.
-///
-/// Since #556 it also returns `false` when an active cooldown outlasts
+/// Returns [`GlobalPermit::Admitted`] when a permit was cleanly acquired or the
+/// cooldown was successfully waited out, and NAMES the cause of a refusal:
+/// [`GlobalPermit::PacerHeld`] when the hold exceeded `GLOBAL_MAX_HOLD` and
+/// failed open to prevent deadlock, or [`GlobalPermit::CooldownActive`] since
+/// #556 when an active cooldown outlasts
 /// [`rate_limit::MAX_INLINE_RATE_LIMIT_WAIT`]. The cooldown deadline is never
-/// shortened, so a multi-minute ban cannot be waited out inline; the caller
-/// decides what that means — [`pace_rich`] drops or defers, [`pace_send`] warns
-/// and fails open to the reactive backstop.
-pub(crate) async fn acquire_global_permit() -> bool {
+/// shortened, so a multi-minute ban cannot be waited out inline.
+///
+/// #635 — the two refusals are NOT interchangeable: a cooldown is a server
+/// instruction and is obeyed, while a pacer hold is our own artifact and fails
+/// open. Callers read [`GlobalPermit::may_proceed`] instead of re-deriving it.
+pub(crate) async fn acquire_global_permit() -> GlobalPermit {
     // 1. First, respect any active global 429 cooldown lock. Bounded (#556):
     //    sleeping the full deadline here is the #1064 regression by another
     //    door, so a cooldown that outlasts the bound fails closed instead.
     if !super::rate_limit::wait_global_cooldown(super::rate_limit::MAX_INLINE_RATE_LIMIT_WAIT)
         .await
     {
-        return false;
+        // #635 — the cause is named, not collapsed into a bare `false`. One
+        // line per refused call, so a ban is attributable in the log rather
+        // than indistinguishable from a pacer hold.
+        tracing::warn!(
+            "Telegram: global permit refused — an active 429 cooldown outlasts the {}s inline \
+             bound, so this call must not be sent (#635: CooldownActive)",
+            super::rate_limit::MAX_INLINE_RATE_LIMIT_WAIT.as_secs()
+        );
+        return GlobalPermit::CooldownActive;
     }
 
     // 2. Proactive global token bucket pacing
@@ -154,16 +198,17 @@ pub(crate) async fn acquire_global_permit() -> bool {
 
         match wait_res {
             Ok(()) => {
-                return true;
+                return GlobalPermit::Admitted;
             }
             Err(delay) => {
                 total_held += delay;
                 if total_held > GLOBAL_MAX_HOLD {
                     tracing::warn!(
-                        "Telegram: Global pacer held for {:?} exceeding 5s limit — failing open to avoid hanging turns",
+                        "Telegram: Global pacer held for {:?} exceeding 5s limit — failing open to \
+                         avoid hanging turns (#635: PacerHeld)",
                         total_held
                     );
-                    return false;
+                    return GlobalPermit::PacerHeld;
                 }
 
                 #[cfg(test)]
@@ -1370,7 +1415,19 @@ pub(crate) async fn pace_send(chat: ChatId) {
     // permit is the process-wide ceiling and the shared 429 cooldown. Below
     // the gate, switching the per-chat pacer off would also delete the safety
     // floor and let every chat keep firing straight through a live cooldown.
-    acquire_global_permit().await;
+    // #635 — consume the verdict instead of discarding it. The disposition is
+    // read from ONE place (`may_proceed`), so the policy cannot drift between
+    // callers. The signature stays `()` on purpose: pushing the verdict out to
+    // the seven call sites would make each one choose a policy, and a caller
+    // choosing "hold" would hold content that goes out today.
+    let permit = acquire_global_permit().await;
+    if !permit.may_proceed() {
+        // Deliberately still sends. A plain message is content, and the
+        // reactive backstop in `wait_out` carries the retry — the permit's own
+        // warn already named the cause, so this is debug-level to avoid
+        // doubling the line count during a ban.
+        tracing::debug!("Telegram: pace_send proceeding through a {permit:?} refusal (#635)");
+    }
 
     let lim = Limits::from_config();
     if !lim.enabled {
@@ -1487,9 +1544,12 @@ pub(crate) async fn pace_rich(
     // permit is the process-wide ceiling and the shared 429 cooldown. Below
     // the gate, switching the per-chat pacer off would also delete the safety
     // floor and let every chat keep firing straight through a live cooldown.
-    // #556: `false` now also means a cooldown outlasts the inline bound, so
-    // the refusal is classified — chrome drops, content defers.
-    if !acquire_global_permit().await {
+    // #556 classified the refusal — chrome drops, content defers. #635 names
+    // the CAUSE: only a server-issued cooldown refuses. A pacer hold is our own
+    // scheduling artifact whose own comment says it fails open, so refusing
+    // content on it was an over-refusal (latent: the pacer-hold warn fired 0
+    // times in the 8 retained dailies against 54 cooldown bails).
+    if acquire_global_permit().await == GlobalPermit::CooldownActive {
         return refuse_rich(chat_id, class);
     }
 
