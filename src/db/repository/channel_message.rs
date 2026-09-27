@@ -633,6 +633,36 @@ impl ChannelMessageRepository {
             .context("Failed to fetch latest topic name")
     }
 
+    /// The topic-lifecycle facts, newest first (#572 boot reconciliation).
+    ///
+    /// Facts are written by the inbound teardown path and by the reconcile
+    /// probe, and they are the only durable record of topic state:
+    /// `channel_messages` otherwise carries `thread_id` and `topic_name`
+    /// alone, so a closed topic and a merely quiet one are indistinguishable.
+    ///
+    /// Newest-first over the three lifecycle types, so a caller walking the
+    /// rows and keeping the FIRST per `(chat, thread)` gets that topic's
+    /// current state — a topic closed and later reopened resolves to the
+    /// reopen. Bounded by `limit`: this is a boot task, not a table walk.
+    pub async fn topic_lifecycle_facts(&self, limit: i64) -> Result<Vec<ChannelMessage>> {
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT * FROM channel_messages \
+                         WHERE message_type IN ('topic_closed', 'topic_reopened', 'topic_deleted') \
+                         ORDER BY created_at DESC, rowid DESC LIMIT ?1",
+                )?;
+                let rows = stmt.query_map(params![limit], ChannelMessage::from_row)?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to read topic lifecycle facts")
+    }
+
     /// Sender id of the NEWEST message in one topic (#33 boot classifier).
     /// `thread_id = None` addresses the General/DM arm (rows stored with a
     /// NULL thread). The classifier reads this to tell an interrupted turn

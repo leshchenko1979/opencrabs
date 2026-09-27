@@ -504,7 +504,7 @@ async fn handle_topic_teardown(
         event,
         msg.chat.id.0,
         tid.0.0,
-        msg.id.0,
+        Some(msg.id.0),
         msg.from.as_ref().map(|u| u.id.0),
         msg.from.as_ref().map(|u| u.first_name.as_str()),
         channel_msg_repo,
@@ -528,7 +528,7 @@ pub(crate) async fn apply_topic_teardown(
     event: TopicEvent,
     chat_id: i64,
     thread: i32,
-    msg_id: i32,
+    msg_id: Option<i32>,
     actor_id: Option<u64>,
     actor_name: Option<&str>,
     channel_msg_repo: &ChannelMessageRepository,
@@ -550,7 +550,7 @@ pub(crate) async fn apply_topic_teardown(
         actor_name.unwrap_or_default().to_string(),
         format!("topic {label}"),
         message_type.into(),
-        Some(msg_id.to_string()),
+        msg_id.map(|m| m.to_string()),
     )
     .with_thread(Some(thread.to_string()), None);
     if let Err(e) = channel_msg_repo.insert(&row).await {
@@ -566,6 +566,22 @@ pub(crate) async fn apply_topic_teardown(
         return;
     }
 
+    teardown_binding(session_binding_repo, session_svc, chat_id, thread).await;
+}
+
+/// Delete a topic's binding row and retire the session it named (#572).
+/// Returns `true` when a binding row was actually removed.
+///
+/// Shared by the inbound teardown and by BOTH reconcile passes, so the delete
+/// and the retire cannot drift apart between the three callers. Deliberately
+/// writes NO fact: the reconcile pass applies a fact that already exists, and
+/// writing one per boot would grow the table on every restart.
+pub(crate) async fn teardown_binding(
+    session_binding_repo: &SessionBindingRepository,
+    session_svc: &SessionService,
+    chat_id: i64,
+    thread: i32,
+) -> bool {
     // Resolve the bound session BEFORE the delete: afterwards the row naming
     // it is gone, and a session with no binding is unreachable.
     let bound = session_binding_repo
@@ -575,32 +591,37 @@ pub(crate) async fn apply_topic_teardown(
         .flatten()
         .map(|b| b.session_id);
 
-    match session_binding_repo
+    let removed = match session_binding_repo
         .delete_by_channel_chat_thread("telegram", &chat_id.to_string(), Some(thread))
         .await
     {
-        Ok(n) => tracing::info!(
-            "Telegram: forum topic {thread} in chat {chat_id} {label} — removed {n} binding row(s)"
-        ),
-        Err(e) => tracing::warn!(
-            "Telegram: failed to remove binding of {label} topic {thread} in chat {chat_id}: {e}"
-        ),
-    }
+        Ok(n) => {
+            tracing::info!("Telegram: topic {thread} in chat {chat_id} — removed {n} binding row(s)");
+            n > 0
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Telegram: failed to remove the binding of topic {thread} in chat {chat_id}: {e}"
+            );
+            false
+        }
+    };
 
     if let Some(sid) = bound {
         match Uuid::parse_str(&sid) {
             Ok(uuid) => {
                 if let Err(e) = session_svc.archive_session(uuid).await {
                     tracing::warn!(
-                        "Telegram: failed to retire session {uuid} of {label} topic {thread}: {e}"
+                        "Telegram: failed to retire session {uuid} of topic {thread}: {e}"
                     );
                 }
             }
             Err(e) => tracing::warn!(
-                "Telegram: session {sid} bound to {label} topic {thread} is not a uuid: {e}"
+                "Telegram: session {sid} bound to topic {thread} is not a uuid: {e}"
             ),
         }
     }
+    removed
 }
 
 #[allow(clippy::too_many_arguments)]

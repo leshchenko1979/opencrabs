@@ -1835,6 +1835,17 @@ async fn cmd_chat_inner(
         telegram_state.clone(),
     );
 
+    // Topic-binding reconciliation (#572): apply recorded closure facts, then
+    // probe a bounded residue. Started AFTER the classifier and the await sweep
+    // for the same reason both exist before it — recovery first, then hygiene —
+    // and before the channel manager so the pass is live before any channel can
+    // route a wake into a topic this may retire.
+    #[cfg(feature = "telegram")]
+    crate::channels::telegram::topic_reconcile::spawn(
+        db.pool().clone(),
+        telegram_state.clone(),
+    );
+
     // Channel manager — handles dynamic spawn/stop of channel agents on config reload
     let channel_manager = Arc::new(crate::channels::ChannelManager::new(
         channel_factory.clone(),
