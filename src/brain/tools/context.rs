@@ -259,10 +259,13 @@ impl Tool for ContextTool {
         // the file outright, and both calls return success carrying their own
         // stale count. The guard is taken BEFORE the read — the #593 lesson
         // that `edit.rs` applies to the same class of defect. It stays
-        // advisory (a contended writer waits briefly, then proceeds), but the
-        // hold is one read and one write of a single file, far shorter than
-        // the wait, so competing mutations of one store serialise in practice
-        // and any residual overlap is reported rather than silent.
+        // advisory (a contended writer waits briefly, then proceeds), so any
+        // residual overlap is reported rather than silent. A short hold is
+        // NECESSARY BUT NOT SUFFICIENT, and this comment used to claim the
+        // former as a reason for the latter: measured, a hold far shorter than
+        // the wait still serialised nothing, because the waiter stalled the
+        // task the holder needed to finish on. The two paragraphs below are
+        // what actually makes it work.
         //
         // The wait must NOT run on this task. A parallel batch is polled
         // cooperatively on one task (`buffered` in `parallel_tools.rs`), so a
@@ -274,11 +277,24 @@ impl Tool for ContextTool {
         // holder that could not make progress. Offloading the wait to the
         // blocking pool lets the holder complete, and the waiters then contend
         // against a lock that is actually released.
-        let lock_target = store_path.clone();
-        let write_lock =
-            tokio::task::spawn_blocking(move || super::path_lock::acquire(&lock_target))
-                .await
-                .unwrap_or(None);
+        //
+        // But the PATH must be resolved on THIS task, not in the blocking
+        // closure. `resolve_profile_home` reads a `tokio::task_local` override,
+        // and `spawn_blocking` starts a new task that cannot see it: resolving
+        // there keyed the lock to the real profile home while the store stayed
+        // in the scoped one, so contending writers took different lock files,
+        // each reported `is_held()` true, and the arbitration was silently
+        // inert. `a_contended_write_is_reported_not_swallowed` is that defect's
+        // receipt — it failed with a plain success where the notice belongs.
+        let lock_at = super::path_lock::lock_path(&store_path);
+        let write_lock = match lock_at {
+            Some(path) => {
+                tokio::task::spawn_blocking(move || super::path_lock::acquire_at(&path))
+                    .await
+                    .unwrap_or(None)
+            }
+            None => None,
+        };
         let contended = write_lock.as_ref().is_some_and(|l| !l.is_held());
 
         let session_id_str = context.session_id.to_string();
