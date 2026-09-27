@@ -920,13 +920,8 @@ pub(crate) async fn send_buttons_raw(
                 return Err("rate-limited after retry".to_string());
             }
             attempt += 1;
-            let wait = std::time::Duration::from_secs(
-                parsed
-                    .get("parameters")
-                    .and_then(|p| p.get("retry_after"))
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(5),
-            );
+            let wait = super::rate_limit::parse_retry_after_json(&parsed)
+                .unwrap_or_else(|| std::time::Duration::from_secs(5));
             if matches!(
                 super::rate_limit::wait_out("send_buttons", wait, "", Some(chat_id)).await,
                 super::rate_limit::WaitOutcome::Deferred,
