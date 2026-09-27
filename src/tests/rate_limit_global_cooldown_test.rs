@@ -26,6 +26,37 @@ fn test_parse_retry_after() {
 }
 
 #[test]
+fn test_parse_retry_after_sees_the_structured_json_arm() {
+    // #635 — the canonical parser is the ONE home for both shapes. The text arm
+    // matches "retry after" (space); the Bot API body spells the field
+    // `retry_after` (underscore), so before this arm existed every JSON caller
+    // needed its own private copy of the walk.
+    assert_eq!(
+        parse_retry_after(r#"{"ok":false,"parameters":{"retry_after":30}}"#),
+        Some(Duration::from_secs(30))
+    );
+    assert_eq!(
+        parse_retry_after(r#"{"parameters":{"retry_after":7}}"#),
+        Some(Duration::from_secs(7))
+    );
+    // The direct arm the four call sites use, reached without re-serialising.
+    let body: serde_json::Value =
+        serde_json::from_str(r#"{"parameters":{"retry_after":30}}"#).unwrap();
+    assert_eq!(
+        crate::channels::telegram::rate_limit::parse_retry_after_json(&body),
+        Some(Duration::from_secs(30))
+    );
+    // A body without the key yields None, so each caller keeps its own default.
+    let missing: serde_json::Value = serde_json::from_str(r#"{"ok":false}"#).unwrap();
+    assert_eq!(
+        crate::channels::telegram::rate_limit::parse_retry_after_json(&missing),
+        None
+    );
+    // A rendered error string is still not throttling on its own.
+    assert_eq!(parse_retry_after("Other error"), None);
+}
+
+#[test]
 fn test_inline_bound_defers_only_windows_over_sixty_seconds() {
     assert_eq!(MAX_INLINE_RATE_LIMIT_WAIT, Duration::from_secs(60));
     assert!(!exceeds_inline_bound(Duration::from_secs(60)));

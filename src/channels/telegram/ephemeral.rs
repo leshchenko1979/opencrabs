@@ -231,12 +231,7 @@ async fn post(token: &str, method: &str, body: &serde_json::Value) -> Outcome {
         let text = resp.text().await.unwrap_or_default();
         let retry_after = serde_json::from_str::<serde_json::Value>(&text)
             .ok()
-            .and_then(|v| {
-                v.get("parameters")
-                    .and_then(|p| p.get("retry_after"))
-                    .and_then(serde_json::Value::as_u64)
-            })
-            .map(std::time::Duration::from_secs)
+            .and_then(|v| super::rate_limit::parse_retry_after_json(&v))
             .unwrap_or(RETRY_AFTER_CAP)
             .min(RETRY_AFTER_CAP);
         tracing::warn!(
