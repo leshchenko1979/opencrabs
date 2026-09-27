@@ -304,6 +304,53 @@ async fn test_upsert_evicts_previous_binding_for_same_key() {
     .await;
 }
 
+/// A chat-level binding carries `thread_id` NULL, and the eviction must still
+/// fire (#572). This is the discriminating leg for the `IS ?3` predicate: with
+/// `thread_id = NULL` the comparison is never true, so an `=`-form eviction
+/// deletes nothing and this test fails — which is exactly how the defect
+/// shipped unnoticed, since every other eviction test binds a real thread.
+#[tokio::test]
+async fn test_upsert_evicts_previous_binding_for_same_key_with_null_thread() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    with_home_override_async(
+        dir.path().to_path_buf(),
+        async {
+            let db = test_db().await;
+            let sid1 = Uuid::new_v4();
+            let sid2 = Uuid::new_v4();
+            create_session(&db, sid1, false).await;
+            create_session(&db, sid2, false).await;
+            let repo = SessionBindingRepository::new(db.pool().clone());
+            repo.upsert(sid1.to_string(), "telegram", "-1003936827469", None, BindingOrigin::Text)
+                .await
+                .expect("upsert sid1 (chat-level)");
+            repo.upsert(sid2.to_string(), "telegram", "-1003936827469", None, BindingOrigin::Text)
+                .await
+                .expect("upsert sid2 (chat-level)");
+            let none1 = repo.by_session(&sid1.to_string()).await.expect("by_session read");
+            assert!(
+                none1.is_none(),
+                "sid1 chat-level binding should be evicted — a NULL thread must still match"
+            );
+            let bound2 = repo
+                .by_session(&sid2.to_string())
+                .await
+                .expect("by_session read")
+                .expect("sid2 binding exists");
+            assert_eq!(bound2.thread_id, None);
+            // The teardown delete must reach a NULL-thread row too.
+            let deleted = repo
+                .delete_by_channel_chat_thread("telegram", "-1003936827469", None)
+                .await
+                .expect("delete chat-level");
+            assert_eq!(deleted, 1, "expected the NULL-thread row to be deleted");
+            let none2 = repo.by_session(&sid2.to_string()).await.expect("by_session read");
+            assert!(none2.is_none(), "chat-level binding should be gone");
+        },
+    )
+    .await;
+}
+
 /// Test upsert does not delete binding for different chat_id (same session_id).
 #[tokio::test]
 async fn test_upsert_does_not_delete_different_chat_id() {

@@ -143,9 +143,12 @@ impl SessionBindingRepository {
             .await
             .context("Failed to get connection")?
             .interact(move |conn| {
-                // Evict any existing binding for the same (channel, chat_id, thread_id)
+                // Evict any existing binding for the same (channel, chat_id, thread_id).
+                // IS, not =: a chat-level binding carries thread_id NULL, and
+                // `thread_id = NULL` is never true, so the eviction would be a
+                // silent no-op for exactly the non-forum chats (#572).
                 conn.execute(
-                    "DELETE FROM session_bindings WHERE channel = ?1 AND chat_id = ?2 AND thread_id = ?3",
+                    "DELETE FROM session_bindings WHERE channel = ?1 AND chat_id = ?2 AND thread_id IS ?3",
                     params![ch, cid, thread_id],
                 )?;
                 if is_callback {
