@@ -263,7 +263,22 @@ impl Tool for ContextTool {
         // hold is one read and one write of a single file, far shorter than
         // the wait, so competing mutations of one store serialise in practice
         // and any residual overlap is reported rather than silent.
-        let write_lock = super::path_lock::acquire(&store_path);
+        //
+        // The wait must NOT run on this task. A parallel batch is polled
+        // cooperatively on one task (`buffered` in `parallel_tools.rs`), so a
+        // blocking sleep here stalls every sibling future — including the one
+        // already holding the lock, whose critical section then cannot finish
+        // and whose guard is never released. Measured with the wait inline:
+        // three mutations in one batch, all three read the same baseline, two
+        // lost, and the batch took 1.72 s — two 750 ms waits burned against a
+        // holder that could not make progress. Offloading the wait to the
+        // blocking pool lets the holder complete, and the waiters then contend
+        // against a lock that is actually released.
+        let lock_target = store_path.clone();
+        let write_lock =
+            tokio::task::spawn_blocking(move || super::path_lock::acquire(&lock_target))
+                .await
+                .unwrap_or(None);
         let contended = write_lock.as_ref().is_some_and(|l| !l.is_held());
 
         let session_id_str = context.session_id.to_string();
