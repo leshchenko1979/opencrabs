@@ -101,6 +101,29 @@ fn history_lines_are_empty_for_no_messages() {
 }
 
 #[test]
+fn history_lines_shift_to_the_resolved_timezone() {
+    // #362: #349 added the `Some(tz)` arm and nothing exercised it. Reverting
+    // the `with_timezone` call, or dropping the argument at the call site, left
+    // every test green -- so the CI gate could not catch a regression of #349.
+    // Both arms run on ONE fixture so they pin each other: the same rows must
+    // render shifted when a zone is supplied, and raw UTC when it is not.
+    let newest_first = vec![msg("Carlos", "second", 14, 3), msg("Adi", "first", 14, 2)];
+    // Moscow has been a fixed +03:00 (no DST) since 2014, so 14:02Z renders as
+    // 17:02 rather than a tzdata-dependent value.
+    let moscow =
+        crate::brain::timezone::TzInfo::new(chrono_tz::Tz::Europe__Moscow, Some("MSK".into()));
+    assert_eq!(
+        render_history_lines(&newest_first, Some(&moscow)),
+        "[17:02] Adi: first\n[17:03] Carlos: second"
+    );
+    // The negative arm: same fixture, no zone -- unchanged UTC output.
+    assert_eq!(
+        render_history_lines(&newest_first, None),
+        "[14:02] Adi: first\n[14:03] Carlos: second"
+    );
+}
+
+#[test]
 fn dedup_helpers_survive_the_lift() {
     assert_eq!(normalize_for_dedup("  A   B \n"), "a b");
     let haystacks = vec![normalize_for_dedup("the Deploy   failed twice")];
