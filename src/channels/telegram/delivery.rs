@@ -224,25 +224,34 @@ pub(crate) async fn deliver_final_response(
             // streaming placeholder is edited with the final response.
             // Intermediates stay visible as-is; only the streaming
             // placeholder's final text is pruned.
+            // The bubble TEXTS, for the comparison below. The ids a bubble
+            // occupies are read separately at the supersession site (#620), so
+            // the two never have to be index-aligned by hand.
             let sent = {
                 let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
-                s.sent_intermediates.clone()
+                s.sent_bubbles
+                    .iter()
+                    .map(|b| b.text.clone())
+                    .collect::<Vec<_>>()
             };
             tracing::info!(
-                "Telegram dedup: response.content len={}, sent_intermediates count={}",
+                "Telegram dedup: response.content len={}, sent_bubbles count={}",
                 text_only.len(),
                 sent.len(),
             );
             let pre_dedup_text = text_only.clone();
-            // Normalize whitespace for comparison — collapse runs of
-            // whitespace (including newlines) to single spaces so that
-            // minor formatting differences between the streamed
-            // intermediate and the final response don't bypass dedup.
-            let norm = |s: &str| -> String { s.split_whitespace().collect::<Vec<_>>().join(" ") };
+            // Whitespace-normalized comparison. The predicate has ONE home
+            // (#620) — `normalize_for_dedup` — shared with the supersession
+            // cleanup below: if the two arms normalized differently, one could
+            // delete a bubble the other never matched, which is the same silent
+            // loss this fix removes.
             let mut suppressed_final = false;
             let text_only = if !sent.is_empty() {
-                let norm_final = norm(&text_only);
-                if sent.iter().any(|i| norm(i) == norm_final) {
+                let norm_final = super::intermediates::normalize_for_dedup(&text_only);
+                if sent
+                    .iter()
+                    .any(|i| super::intermediates::normalize_for_dedup(i) == norm_final)
+                {
                     tracing::info!(
                         "Telegram dedup: match found among {} intermediates (normalized) — suppressing final response",
                         sent.len()
@@ -566,9 +575,12 @@ pub(crate) async fn deliver_final_response(
                 // Deliberately NOT guarded (#500): this arm REPLACES the
                 // intermediates it deletes, so a suppression here would answer
                 // with the id of an intermediate the block below then deletes,
-                // losing the content. It is self-cleaning — whatever it sends,
-                // the copies it supersedes are removed in the same breath — so
-                // it cannot leave a duplicate behind.
+                // losing the content. #620 makes that premise true BY
+                // CONSTRUCTION: the delete set below is exactly the bubbles
+                // whose text this message re-sends, so it cannot leave a
+                // duplicate behind. Bubbles whose text this message does NOT
+                // carry are now spared — they hold the only copy of that prose,
+                // and deleting them was the silent loss #620 fixes.
                 match super::rich::send_rich_with_mermaid_id(
                     bot.api_url().as_str(),
                     bot.token(),
@@ -582,18 +594,24 @@ pub(crate) async fn deliver_final_response(
                 .await
                 {
                     Ok(rich_msg_id) => {
-                        // Delete the HTML intermediates now that rich message succeeded
-                        let intermediate_ids = {
+                        // Delete ONLY the intermediates this rich message
+                        // re-sends (#620). The former code deleted every id it
+                        // had recorded for the turn, on the premise that the
+                        // rich message supersedes all of them — it supersedes
+                        // the bubbles whose TEXT it actually repeats. A
+                        // narration bubble it does not repeat is the only copy
+                        // of that prose.
+                        let superseded = {
                             let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
-                            s.intermediate_msg_ids.clone()
+                            super::intermediates::superseded_ids(&s.sent_bubbles, &rich_md)
                         };
-                        for mid in &intermediate_ids {
+                        for mid in &superseded {
                             best_effort_delete(bot, chat_id, *mid, "intermediate cleanup").await;
                         }
                         tracing::info!(
-                            "Telegram: rich fallback delivered ({} chars), deleted {} HTML intermediates",
+                            "Telegram: rich fallback delivered ({} chars), deleted {} superseded HTML intermediates",
                             rich_md.len(),
-                            intermediate_ids.len()
+                            superseded.len()
                         );
                         // Merge candidate (#tg-suggest-merge): every rich
                         // bubble can carry the suggestion controls now —

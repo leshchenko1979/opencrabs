@@ -199,6 +199,24 @@ pub(crate) struct RetainedGoal {
     pub(crate) max_turns: Option<u32>,
 }
 
+/// One intermediate bubble already delivered to Telegram: the text it carried
+/// and the message ids it occupies (one id per 4096-char chunk on the HTML
+/// plane).
+///
+/// The two travel together because the supersession cleanup must delete ONLY
+/// the bubbles whose content the rich fallback re-sends — a text-only vector
+/// cannot say which ids to spare, and the ids alone cannot say which text they
+/// carry (#620).
+pub(crate) struct SentBubble {
+    /// The STRIPPED text form — the shape the HTML plane rendered and the
+    /// final-response dedup compares against.
+    pub(crate) text: String,
+    /// Ids this bubble occupies. EMPTY for a bubble that carried media: it
+    /// holds the only copy of that picture, so it is never burial evidence
+    /// (#617) and never enters the cleanup's delete set.
+    pub(crate) ids: Vec<MessageId>,
+}
+
 pub(crate) struct StreamingState {
     /// Whether this session's chat is a DM (owner-private). Drives scope-aware
     /// redaction: secrets show in DMs, scrub in group/channel chats (#677).
@@ -321,13 +339,21 @@ pub(crate) struct StreamingState {
     pub(crate) subagent_counts: SubagentCounts,
     /// Count of pending queued reactions / user messages mid-turn (#232).
     pub(crate) queued_count: usize,
-    /// Intermediate texts already sent — used to dedup final response
-    pub(crate) sent_intermediates: Vec<String>,
-    /// Message IDs of every intermediate chunk delivered to Telegram, so a
-    /// cancelled in-flight call can clean up after itself. Without this, a
-    /// cancelled old call leaves its intermediate visible and the new call
-    /// re-sends the same text — the exact-match duplicate the user reported.
-    pub(crate) intermediate_msg_ids: Vec<MessageId>,
+    /// `sent_bubbles` — the intermediate bubbles already delivered this turn,
+    /// each pairing the text it carried with the message ids it occupies
+    /// (#620).
+    ///
+    /// The pairing is STRUCTURAL, not incidental: the supersession cleanup in
+    /// `delivery.rs` deletes only the bubbles whose content the rich fallback
+    /// re-sends, and neither half of the former two-vector shape could answer
+    /// that question — a text-only vector cannot say which ids to spare, and
+    /// the ids alone cannot say which text they carry (the HTML plane pushes
+    /// ONE text against N chunk ids).
+    ///
+    /// A bubble that carried media keeps its text and gets `ids: vec![]` — the
+    /// #617 guard: it holds the only copy of that picture, so it is never
+    /// burial evidence and never enters the delete set.
+    pub(crate) sent_bubbles: Vec<SentBubble>,
     /// Absolute paths of local images already delivered this turn by the
     /// promotion path (#502). The final media leg skips them so the same
     /// picture is never shipped twice; the promotion path skips them too, so

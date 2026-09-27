@@ -6,6 +6,7 @@
 //! only visibility widened to pub(crate) so the handler glob re-export
 //! keeps every existing call site and test import stable).
 
+use super::flow::SentBubble;
 use super::handler::StreamingState;
 use super::markdown::{markdown_to_telegram_html, split_message, strip_html_tags};
 use super::send::message_in_thread;
@@ -252,11 +253,12 @@ pub(crate) fn should_promote_intermediate(text: &str, fresh_images: usize) -> bo
 /// and therefore safe to delete once that message lands?
 ///
 /// #617: a bubble that carried a local image is a **deliverable**, not burial
-/// evidence. The supersession cleanup (`delivery.rs`) deletes every id in
-/// `intermediate_msg_ids` when the rich fallback succeeds — and that fallback
-/// carries no media — so deleting a media-carrying bubble removes the only copy
-/// of the picture, *after* it was delivered. The final leg has already skipped
-/// those paths via `delivered_image_paths`, so nothing re-sends it.
+/// evidence. The supersession cleanup (`delivery.rs`) deletes the ids a bubble
+/// records in `sent_bubbles` when the rich fallback succeeds — and that
+/// fallback carries no media — so giving a media bubble ids would remove the
+/// only copy of the picture, *after* it was delivered. The final leg has
+/// already skipped those paths via `delivered_image_paths`, so nothing
+/// re-sends it. Such a bubble therefore records EMPTY ids.
 ///
 /// Deliberately a pure predicate, for the same reason as
 /// [`should_promote_intermediate`]: both directions are testable without a live
@@ -265,9 +267,50 @@ pub(crate) fn promoted_bubble_is_burial_evidence(media_count: usize) -> bool {
     media_count == 0
 }
 
+/// Normalize a bubble body for the dedup comparison — collapse runs of
+/// whitespace (including newlines) to single spaces, so minor formatting
+/// differences between a streamed intermediate and the final response do not
+/// bypass dedup.
+///
+/// ONE home for the predicate (#620). Two consumers must agree on what "the
+/// same text" means: the dedup that SUPPRESSES the final response, and the
+/// burial that DELETES intermediates. Split them and either arm can be wrong
+/// in both directions — a bubble deleted that the dedup never matched (silent
+/// text loss), or a bubble spared whose text the rich message just re-sent
+/// (a duplicate). So the comparison is shared by construction, not by
+/// convention.
+pub(crate) fn normalize_for_dedup(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Which intermediates does re-sending `rich_text` as one rich bubble REPLACE?
+///
+/// #620: the burial arm deleted EVERY id in the list on the premise that the
+/// rich message supersedes all of them. It supersedes the bubbles whose text it
+/// actually repeats — and only those. A narration bubble whose text the rich
+/// message does not carry is the sole copy of that prose; deleting it loses the
+/// text with no trace.
+///
+/// Composition with [`promoted_bubble_is_burial_evidence`] (#617) is deliberate
+/// and one-directional: that guard keeps a media bubble's ids out of the list
+/// entirely, so a media bubble reaches this filter carrying NO ids and can
+/// contribute none. The guard stays load-bearing and is not duplicated here.
+///
+/// Pure + free function for the same reason as that predicate — both directions
+/// (selected and spared) are testable without a live bot.
+pub(crate) fn superseded_ids(bubbles: &[SentBubble], rich_text: &str) -> Vec<MessageId> {
+    let norm_final = normalize_for_dedup(rich_text);
+    bubbles
+        .iter()
+        .filter(|b| normalize_for_dedup(&b.text) == norm_final)
+        .flat_map(|b| b.ids.iter().copied())
+        .collect()
+}
+
 /// Deliver a promoted intermediate as its own message (rich-first, HTML
-/// fallback) and record it in `sent_intermediates` so the final-response dedup
-/// will not resend it. Returns true when something was delivered.
+/// fallback) and record it in `sent_bubbles` so the final-response dedup will
+/// not resend it and the supersession cleanup knows which ids it occupies.
+/// Returns true when something was delivered.
 ///
 /// Takes the WHOLE [`LocalImageRewrite`] rather than a `&str` (#502) so no call
 /// site can hand this function the wrong text form. That matters: the rich form
@@ -294,7 +337,7 @@ pub(crate) async fn deliver_intermediate_message(
     let text = stripped_expanded.as_str();
     {
         let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
-        if s.sent_intermediates.iter().any(|prev| prev == text) {
+        if s.sent_bubbles.iter().any(|prev| prev.text == text) {
             return true;
         }
     }
@@ -337,15 +380,21 @@ pub(crate) async fn deliver_intermediate_message(
         // restick below its own output on the next append.
         tg.note_bot_bubble(chat.0, id.0);
         let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
-        s.sent_intermediates.push(text.to_string());
         // #617: only a bubble that carried NO media is burial evidence. A bubble
         // that carried a local image holds the only copy of that picture — the
-        // rich-fallback cleanup deletes every id pushed here, and the final leg
-        // has already skipped these paths, so a delete would remove a picture
-        // the user has already been shown.
-        if promoted_bubble_is_burial_evidence(media.len()) {
-            s.intermediate_msg_ids.push(id);
-        }
+        // rich-fallback cleanup deletes the ids a bubble carries, and the final
+        // leg has already skipped these paths, so a delete would remove a picture
+        // the user has already been shown. Such a bubble records EMPTY ids, which
+        // is also what keeps it out of the #620 delete set.
+        let ids = if promoted_bubble_is_burial_evidence(media.len()) {
+            vec![id]
+        } else {
+            Vec::new()
+        };
+        s.sent_bubbles.push(SentBubble {
+            text: text.to_string(),
+            ids,
+        });
         // Record the paths that just rode this bubble, so neither a later
         // intermediate nor the final leg ships the same picture twice (#502).
         // The API's own success is the receipt here: the bytes went out with
@@ -398,8 +447,14 @@ pub(crate) async fn deliver_intermediate_message(
         }
     }
     let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
-    s.sent_intermediates.push(text.to_string());
-    s.intermediate_msg_ids.extend(sent_ids);
+    // ONE text, N ids — the HTML plane chunks a single bubble across as many
+    // messages as 4096 chars requires. Pairing them here is the whole point of
+    // `SentBubble`: two parallel vectors could not say which ids carry which
+    // text, which is what made the #620 over-delete unfixable at the cleanup.
+    s.sent_bubbles.push(SentBubble {
+        text: text.to_string(),
+        ids: sent_ids,
+    });
     true
 }
 
