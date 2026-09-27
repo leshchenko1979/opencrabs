@@ -124,6 +124,83 @@ pub(crate) fn ensure_blank_line_before_tables(text: &str) -> String {
     result
 }
 
+/// Block-level HTML tags whose opener must not be swallowed by a preceding
+/// blockquote run (#552). Inline tags — `b`, `i`, `code`, `br`, `a`, `span`, … —
+/// are deliberately absent: after a quote they remain inline content, and
+/// splitting them off would change rendering the message never asked for.
+const BLOCK_HTML_OPENERS: &[&str] = &[
+    "details", "summary", "table", "blockquote", "pre", "ul", "ol", "li", "h1", "h2", "h3", "h4",
+    "h5", "h6", "p",
+];
+
+/// The element name a line's leading `<…>` opener carries, or `None` when the
+/// line opens no element at all (`<!`, `</`, `<?`, or a bare `<`).
+fn html_opener_tag(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix('<')?;
+    let end = rest
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    Some(&rest[..end])
+}
+
+/// Whether `line` opens a block-level HTML element from [`BLOCK_HTML_OPENERS`].
+/// A quote line never qualifies — the pass must not split inside a blockquote.
+fn is_block_html_opener(line: &str) -> bool {
+    if line.trim_start().starts_with('>') {
+        return false;
+    }
+    let Some(tag) = html_opener_tag(line) else {
+        return false;
+    };
+    BLOCK_HTML_OPENERS
+        .iter()
+        .any(|&t| t.eq_ignore_ascii_case(tag))
+}
+
+/// Insert one blank line before a block-level HTML opener that directly follows
+/// a blockquote run (#552). Telegram's rich parser treats an unbroken line after
+/// a `>` run as a CommonMark *lazy continuation* of that quote, so a `<details>`
+/// opener lands *inside* the blockquote and its `</details>` closers go
+/// unmatched — Telegram then rejects the whole message with
+/// `RICH_MESSAGE_CONTENT_REQUIRED`, the daemon logs `Rich plan card create
+/// failed … falling back to HTML`, and the card loses rich rendering entirely
+/// (measured: 409 rejections from one plan card on 2026-09-24). Detection is by
+/// opener set, not by "any HTML": inline tags stay inline content and are never
+/// split off. Code fences (``` and ~~~) are never mutated, nothing is ever
+/// inserted inside a quote, the pass is idempotent, and a body with no
+/// quote-then-HTML adjacency returns unchanged.
+pub(crate) fn ensure_blank_line_before_block_html(text: &str) -> String {
+    if !text.contains('<') || !text.contains('>') {
+        return text.to_string();
+    }
+    let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 1);
+    let mut in_fence = false;
+    for line in &lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            out.push(line.clone());
+            continue;
+        }
+        if !in_fence
+            && is_block_html_opener(line)
+            && out.last().is_some_and(|prev| prev.trim_start().starts_with('>'))
+        {
+            out.push(String::new());
+        }
+        out.push(line.clone());
+    }
+    let mut result = out.join("\n");
+    if text.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
 /// If a table begins at `lines[start]` (a pipe row immediately followed by a
 /// separator row), parse it and return the table plus the index just past it.
 pub(super) fn try_parse(lines: &[String], start: usize) -> Option<(Table, usize)> {
@@ -237,16 +314,31 @@ pub(crate) fn normalize_rich_markdown(text: &str) -> String {
 /// request actually carries. Callers that own a media array MUST use this entry —
 /// the media-free form reads every `tg`/`attach` ref as an orphan, because a request
 /// carrying no media genuinely cannot resolve one.
+///
+/// Pass order, in full: 1 `balance_code_fences` → 2 `shield_unresolvable_markdown_images`
+/// → 3 `shield_bare_leading_hashes` → 4 `reflow_collapsed_tables` →
+/// 5 `infer_missing_table_separators` → 6 `ensure_blank_line_before_tables` (1-6 via
+/// [`normalize_tables_with_media`]) → **7 `ensure_blank_line_before_block_html` (#552)**
+/// → 8 `neutralize_orphan_photo_refs` → 9 `neutralize_prose_media_html`.
+/// Pass 7 sits here deliberately: the two orphan guards rewrite INLINE content only —
+/// they insert and remove no lines — so they can neither create nor destroy the
+/// quote-run-to-HTML-opener adjacency pass 7 exists to break.
 pub(crate) fn normalize_rich_markdown_with_media(text: &str, media: &[MediaEntry]) -> String {
     let decoded = crate::channels::telegram::markdown::decode_named_entities(text);
     let normalized = normalize_tables_with_media(&decoded, media);
+    // Terminate a blockquote run before a block-level HTML opener (#552): an unbroken
+    // line after a `>` run is a CommonMark lazy continuation, so a `<details>` opener
+    // would land INSIDE the quote and its unmatched closers make Telegram reject the
+    // whole message (`RICH_MESSAGE_CONTENT_REQUIRED`), silently dropping the card to
+    // HTML. Runs before the orphan guards, which cannot affect line structure.
+    let quote_shielded = ensure_blank_line_before_block_html(&normalized);
     // Both orphan guards run on EVERY rich path from here (#334, H6) — not just on the
     // plan card's HTML path. The image shield above covers markdown image syntax; these
     // cover a reference written as bare prose text (`tg://photo?id=X`, `attach://X`) and
     // a model-authored `<img>` / `<video>` / `<audio>` tag. Telegram fails the WHOLE
     // message when any of them cannot be resolved (#134, #334). Both are idempotent:
     // each rewrite drops the `//` its trigger requires, and `&lt;` contains no `<`.
-    let neutralized = super::mermaid::neutralize_orphan_photo_refs(&normalized, media);
+    let neutralized = super::mermaid::neutralize_orphan_photo_refs(&quote_shielded, media);
     let prose_shielded = super::mermaid::neutralize_prose_media_html(&neutralized);
     crate::channels::telegram::suggest_options::enforce_button_fit(&prose_shielded)
 }
@@ -261,6 +353,15 @@ pub(crate) fn normalize_rich_markdown_with_media(text: &str, media: &[MediaEntry
 /// #1085 whack-a-mole retired). All passes are idempotent and fence-safe;
 /// pipe-free input returns unchanged.
 ///
+/// **Pass order (1-6 of 9 — the chain does NOT end here).** 1 `balance_code_fences`
+/// → 2 `shield_unresolvable_markdown_images` → 3 `shield_bare_leading_hashes`
+/// → 4 `reflow_collapsed_tables` → 5 `infer_missing_table_separators`
+/// → 6 `ensure_blank_line_before_tables`. The rich plane continues past this
+/// function in [`normalize_rich_markdown_with_media`], which runs
+/// **7 `ensure_blank_line_before_block_html` (#552)** followed by the two orphan
+/// guards (8 `neutralize_orphan_photo_refs`, 9 `neutralize_prose_media_html`).
+/// Read that entry for the complete order; this block covers passes 1-6 only.
+///
 /// Also shields unresolvable markdown images (`![alt](path)`) so Telegram's rich parser
 /// doesn't reject the whole message with `RICH_MESSAGE_PHOTO_URL_INVALID` (#289),
 /// and shields bare leading hashes (e.g. `#174`) so Telegram's rich parser doesn't
@@ -273,6 +374,10 @@ pub(crate) fn normalize_tables(text: &str) -> String {
 /// `media` reaching the image shield so `tg`/`attach` references are judged against
 /// the media array of the request this text belongs to. A caller with no media array
 /// uses [`normalize_tables`], which is this function with an empty slice.
+///
+/// This is passes **1-6 of 9** — the chain continues in
+/// [`normalize_rich_markdown_with_media`], which adds pass 7
+/// (`ensure_blank_line_before_block_html`, #552) and the two orphan guards.
 pub(crate) fn normalize_tables_with_media(text: &str, media: &[MediaEntry]) -> String {
     let balanced = balance_code_fences(text);
     let images_shielded = shield_unresolvable_markdown_images(&balanced, media);
