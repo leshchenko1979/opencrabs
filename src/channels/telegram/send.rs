@@ -904,6 +904,13 @@ pub(crate) async fn send_buttons_raw(
     }
     let url = format!("https://api.telegram.org/bot{token}/sendMessage");
     let client = reqwest::Client::new();
+    // #635 — the buttons path reached no permit either: it went straight to the
+    // reactive backstop. A live cooldown that outlasts the inline bound now
+    // refuses with an explicit error instead of attempting into it, so every
+    // outbound call reaches a permit and every refusal has a declared fallback.
+    if !super::governor::acquire_global_permit().await.may_proceed() {
+        return Err("refused by a live 429 cooldown".to_string());
+    }
     let mut attempt = 0u32;
     loop {
         let resp = client

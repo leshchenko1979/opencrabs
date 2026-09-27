@@ -139,6 +139,12 @@ pub(crate) async fn try_send_rich(
             false
         }
         Outcome::Transport => false,
+        // #635 — a declared refusal. Falls back to public like Transport, and
+        // deliberately does NOT cache RICH_UNSUPPORTED: a throttle is not the
+        // server declining `receiver_user_id`, and caching it as one would
+        // forfeit native rich rendering for the life of the process over a
+        // busy minute — the exact mistake `Outcome`'s doc warns about.
+        Outcome::Deferred => false,
     }
 }
 
@@ -202,6 +208,14 @@ enum Outcome {
     Sent,
     Rejected,
     Transport,
+    /// #635 — a declared refusal, not a failure: a live 429 cooldown means do
+    /// NOT send. The caller falls back to public, which is the same visible
+    /// outcome the throttled path already produced, but without sleeping
+    /// inline and retrying into the window that is still running.
+    ///
+    /// Kept distinct from `Rejected` for the reason `Outcome`'s own doc gives:
+    /// a throttle is not the server stating an opinion about the capability.
+    Deferred,
 }
 
 /// POST an ephemeral send to `method`, logging why it did not land.
@@ -218,8 +232,24 @@ enum Outcome {
 /// feature for the life of the process over a busy minute (the exact mistake
 /// `Outcome`'s doc warns about).
 async fn post(token: &str, method: &str, body: &serde_json::Value) -> Outcome {
-    const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(15);
+    /// Window assumed when the 429 body names none. NOT a cap: a cap on the
+    /// window is a truncation of it, and #556 established that truncating the
+    /// wait is what fires the retry inside the ban still running. The shared
+    /// inline bound in [`super::rate_limit`] is the one policy for the sleep.
+    const RETRY_AFTER_DEFAULT: std::time::Duration = std::time::Duration::from_secs(15);
     let url = format!("https://api.telegram.org/bot{token}/{method}");
+    // #635 — this was the ONE outbound path with no permit. Both body builders
+    // set chat_id, so the send can be attributed like every other path.
+    let chat = body.get("chat_id").and_then(serde_json::Value::as_i64);
+    // A live 429 cooldown means do not send at all: the caller falls back to
+    // public. Only `CooldownActive` refuses — a pacer hold is our own artifact
+    // and proceeds, which is the disposition stated once in `may_proceed`.
+    if !super::governor::acquire_global_permit().await.may_proceed() {
+        tracing::warn!(
+            "Telegram: ephemeral {method} refused by a live 429 cooldown, sending publicly"
+        );
+        return Outcome::Deferred;
+    }
     let mut resp = match reqwest::Client::new().post(&url).json(body).send().await {
         Ok(r) => r,
         Err(e) => {
@@ -229,15 +259,27 @@ async fn post(token: &str, method: &str, body: &serde_json::Value) -> Outcome {
     };
     if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
         let text = resp.text().await.unwrap_or_default();
+        // #635 — this was the one raw sleep in the crate: no permit, no cooldown
+        // record, and a 15s truncation of a window that may be minutes long, so
+        // every other path obeyed a deadline this one had not armed. Routing it
+        // through `wait_out` both records the 429 and applies the shared bound:
+        // a window over the bound DEFERS instead of sleeping into the ban.
         let retry_after = serde_json::from_str::<serde_json::Value>(&text)
             .ok()
             .and_then(|v| super::rate_limit::parse_retry_after_json(&v))
-            .unwrap_or(RETRY_AFTER_CAP)
-            .min(RETRY_AFTER_CAP);
+            .unwrap_or(RETRY_AFTER_DEFAULT);
         tracing::warn!(
             "Telegram: ephemeral {method} throttled, waiting {retry_after:?} and retrying once"
         );
-        tokio::time::sleep(retry_after).await;
+        if matches!(
+            super::rate_limit::wait_out(method, retry_after, "", chat).await,
+            super::rate_limit::WaitOutcome::Deferred,
+        ) {
+            tracing::warn!(
+                "Telegram: ephemeral {method} deferred by a long 429 window, sending publicly"
+            );
+            return Outcome::Deferred;
+        }
         resp = match reqwest::Client::new().post(&url).json(body).send().await {
             Ok(r) => r,
             Err(e) => {
