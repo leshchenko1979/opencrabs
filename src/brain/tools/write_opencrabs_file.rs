@@ -248,9 +248,9 @@ impl Tool for WriteOpenCrabsFileTool {
          Use this for brain files (MEMORY.md, USER.md, AGENTS.md, SOUL.md, etc.), \
          config files (commands.toml), memory logs, and any other app files. \
          The standard edit_file/write_file tools refuse the eight protected brain files by name \
-         (SOUL/USER/AGENTS/TOOLS/CODE/SECURITY/MEMORY/BOOT.md); on any other file under the home \
-         they write and leave a .bak pre-image, but they enforce none of this tool's append-only \
-         contract — use this instead. \
+         (SOUL/USER/AGENTS/TOOLS/CODE/SECURITY/MEMORY/BOOT.md); on any other existing file under \
+         the home they write and leave a .bak pre-image (16 MiB cap; above it the result says none \
+         was taken), but they enforce none of this tool's append-only contract — use this instead. \
          \
          **Path rules:** \
          - Pass a relative path from your home directory (e.g. \"MEMORY.md\", \"memory/note.md\", \"rsi/improvements.md\"). \
