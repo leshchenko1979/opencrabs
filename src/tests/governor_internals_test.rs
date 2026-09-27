@@ -309,15 +309,20 @@ async fn global_pacer_burst_smoothing_and_cooldown() {
 
     // 1. Initial 25 permits should be granted immediately (burst capacity 25)
     for _ in 0..25 {
-        assert!(
+        assert_eq!(
             crate::channels::telegram::governor::acquire_global_permit().await,
+            crate::channels::telegram::governor::GlobalPermit::Admitted,
             "burst permits must be immediately granted"
         );
     }
 
     // 2. 26th permit requires waiting ~40ms (1 token at 25 req/s)
     let acquired = crate::channels::telegram::governor::acquire_global_permit().await;
-    assert!(acquired, "26th permit must be granted after refill delay");
+    assert_eq!(
+        acquired,
+        crate::channels::telegram::governor::GlobalPermit::Admitted,
+        "26th permit must be granted after refill delay"
+    );
 
     // 3. Global 429 lock causes acquire_global_permit to wait full cooldown
     crate::channels::telegram::rate_limit::record_global_429(Duration::from_secs(5), Some(-1001));
