@@ -8,7 +8,7 @@
 
 use crate::channels::telegram::governor::{EditClass, RichAdmission};
 use super::mermaid;
-use super::render_html::markdown_to_html_mermaid;
+use super::render_html::markdown_to_html_mermaid_p;
 use crate::channels::telegram::suggest_options::enforce_button_fit;
 use teloxide::types::ThreadId;
 
@@ -1023,8 +1023,19 @@ pub(crate) async fn send_rich_with_media_target_id(
         Err(e) => {
             // Fallback: HTML dialect (Bot API < 10.2 or a media-field
             // rejection). Tables degrade there, but the message still lands.
+            //
+            // The `_p` renderer, NOT the bare one (#629). This is the rich
+            // HTML dialect, where a bare newline is INSIGNIFICANT whitespace:
+            // the bare renderer joins blocks with `\n\n` and emits a
+            // paragraph as bare inline text (render_html.rs:29 / :61), so
+            // every block of the reply collapsed into one wall of text —
+            // measured on a 4 483-char final reply, 3 newlines over 4 123
+            // chars of prose and 0 pipes. `render_html_p` gives each block its
+            // own `<p>` and renders soft breaks as `<br>`, which is what the
+            // plan-card prose path already uses for this same dialect, so the
+            // card survived a 429 fallback and the final reply did not.
             tracing::warn!("rich markdown+media send failed ({e}); falling back to html dialect");
-            let html = markdown_to_html_mermaid(markdown).await;
+            let html = markdown_to_html_mermaid_p(markdown).await;
             send_rich_html_id(
                 api_url,
                 token,

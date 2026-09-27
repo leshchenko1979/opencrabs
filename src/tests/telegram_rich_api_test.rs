@@ -240,3 +240,77 @@ async fn a_base_without_a_trailing_slash_still_works() {
 
     hit.assert_async().await;
 }
+
+/// #629 — the HTML fallback must render with the paragraph-wrapping variant.
+///
+/// The rich HTML dialect treats a bare newline as INSIGNIFICANT whitespace, so
+/// a fallback rendered by the bare `render_html` joins every block with a bare
+/// newline and the whole reply arrives as one wall of text. This drives the
+/// real fallback leg end to end: the primary markdown+media send is failed by
+/// the mock, and the assertion is on the body the fallback actually sent.
+///
+/// Two things about the setup are load-bearing:
+///
+/// * `local_media` is deliberately NON-EMPTY. `send_rich_with_media_target_id`
+///   early-returns to the no-media path when nothing is embeddable, and that
+///   path has no HTML fallback at all — a test written without media would
+///   pass while exercising nothing.
+/// * The primary mock returns **400**, not 429: `post_rich` retries only 429,
+///   so a 400 reports the failure on the first attempt and the `expect(1)` on
+///   each mock holds.
+#[tokio::test]
+async fn the_html_fallback_wraps_each_block_in_its_own_p_tag() {
+    let mut server = mockito::Server::new_async().await;
+
+    // Primary leg: identified by its `media` array, which the HTML body never
+    // carries. 400 (not 429) so `post_rich` reports it without retrying.
+    let primary = server
+        .mock("POST", "/botTESTTOKEN/sendRichMessage")
+        .match_body(mockito::Matcher::Regex(r#""media"\s*:\s*\["#.to_string()))
+        .with_status(400)
+        .with_body(r#"{"ok":false,"description":"Bad Request: can't parse rich message"}"#)
+        .expect(1)
+        .create_async()
+        .await;
+
+    // Fallback leg: its html body must carry one <p> per block.
+    let fallback = server
+        .mock("POST", "/botTESTTOKEN/sendRichMessage")
+        .match_body(mockito::Matcher::Regex(r#"<p>First paragraph\.</p>"#.to_string()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"ok":true,"result":{"message_id":7}}"#)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let media = [crate::channels::telegram::rich::mermaid::MediaEntry {
+        id: "img0".to_string(),
+        url: Some("https://example.test/img0.png".to_string()),
+        bytes: None,
+    }];
+
+    let id = api::send_rich_with_media_target_id(
+        &server.url(),
+        "TESTTOKEN",
+        12345,
+        None,
+        None,
+        "First paragraph.\n\nSecond paragraph.",
+        &media,
+        "test",
+        "-",
+    )
+    .await;
+
+    assert_eq!(
+        id.expect("the html fallback must deliver the message"),
+        7,
+        "the fallback leg must return its own message id"
+    );
+    // `expect(1)` on the fallback mock is the guard against the no-media early
+    // return: if that return is taken the fallback is never called and this
+    // assertion fails rather than the test passing vacuously.
+    fallback.assert_async().await;
+    primary.assert_async().await;
+}
