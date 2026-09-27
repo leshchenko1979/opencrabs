@@ -143,7 +143,8 @@ async fn cmd_add(
         trigger_on.clone(),
         set_goal,
         goal_template.clone(),
-        false, // run_once is the tool-side surface (#544); the CLI does not expose it
+        // #544 `run_once`: not a constructor param — like cron_manage, the CLI
+        // does not expose it, so the field keeps its `false` default.
     );
     job.next_run_at = crate::cron::next_run_utc(&cron, parsed_tz, chrono::Utc::now());
 
