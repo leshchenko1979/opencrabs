@@ -1050,9 +1050,16 @@ fn backticks_outside_fences(text: &str) -> usize {
 /// Detect whether `text` ends with a URL.
 fn ends_with_url(text: &str) -> bool {
     let trimmed = text.trim_end();
+    // Advance past the matched delimiter by ITS OWN width (#538). `rfind`
+    // returns a BYTE index, so `i + 1` assumes a 1-byte char and lands inside
+    // any multi-byte one — U+202F NARROW NO-BREAK SPACE (3 bytes, 234..237 in
+    // the recorded panic) *is* `is_whitespace`, so a plain `+ 1` sliced
+    // mid-codepoint and killed the tokio worker.
     let boundary = trimmed
-        .rfind(|c: char| c.is_whitespace() || matches!(c, '(' | '[' | '{' | '<' | '"' | '\''))
-        .map(|i| i + 1)
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| c.is_whitespace() || matches!(c, '(' | '[' | '{' | '<' | '"' | '\''))
+        .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0);
     let tail = &trimmed[boundary..];
     tail.contains("://")
@@ -1682,4 +1689,35 @@ pub fn is_structured_report(text: &str) -> bool {
         .filter(|line| line.trim_start().starts_with("## "))
         .count()
         >= 2
+}
+
+#[cfg(test)]
+mod char_boundary_regression_tests {
+    use super::ends_with_url;
+
+    /// #538 site 2 — `rfind(..).map(|i| i + 1)` advanced a byte offset by one
+    /// and landed inside the matched character. The recorded panic was `start
+    /// byte index 235 is not a char boundary; it is inside '\u{202f}' (bytes
+    /// 234..237)` — U+202F NARROW NO-BREAK SPACE, which `char::is_whitespace`
+    /// matches. Before the fix this panicked; now the delimiter's own width is
+    /// used.
+    #[test]
+    fn narrow_no_break_space_delimiter_does_not_panic() {
+        assert!(ends_with_url("обсудили\u{202f}https://example.com/x"));
+    }
+
+    #[test]
+    fn space_delimited_url_is_detected() {
+        assert!(ends_with_url("see https://example.com"));
+    }
+
+    #[test]
+    fn bare_url_is_detected() {
+        assert!(ends_with_url("https://example.com"));
+    }
+
+    #[test]
+    fn text_without_a_url_is_not_detected() {
+        assert!(!ends_with_url("no link here"));
+    }
 }

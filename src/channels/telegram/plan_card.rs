@@ -930,8 +930,16 @@ fn parse_section_header<'a>(trimmed: &'a str, marker: &str) -> Option<&'a str> {
         .trim();
 
     // Check if candidate starts with the marker (case-insensitive)
+    // `candidate` may begin with ANY character (leading markdown tokens were
+    // stripped above), so `marker.len()` is a BYTE length that can land inside
+    // a multi-byte codepoint (#538 — a 5-byte marker with `'→'` at bytes 4..7
+    // panicked the plan-card update task). `.get()` yields `None` instead of
+    // panicking, and a candidate that cannot be split at `marker.len()` cannot
+    // start with the ASCII marker either, so the semantics are unchanged.
     if candidate.len() >= marker.len()
-        && candidate[..marker.len()].eq_ignore_ascii_case(marker)
+        && candidate
+            .get(..marker.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(marker))
         && match candidate.as_bytes().get(marker.len()) {
             None => true,
             Some(b) => matches!(b, b':' | b'*' | b'_' | b' ' | b'-' | b'#'),
@@ -1831,5 +1839,32 @@ async fn remove_plan_card_locked(
             }
             Err(e) => tracing::warn!("Telegram plan card delete failed ({mid:?}): {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod char_boundary_regression_tests {
+    use super::parse_section_header;
+
+    /// #538 site 3 — `candidate[..marker.len()]` panicked when the marker's
+    /// BYTE length landed inside a multi-byte char. The recorded panic was
+    /// `end byte index 5 is not a char boundary; it is inside '→' (bytes
+    /// 4..7)` with a 5-byte marker, so `'→'` sits at 4..7 and the cut at 5 is
+    /// exactly that layout. `candidate` can begin with any character because
+    /// the leading markdown tokens are stripped first.
+    #[test]
+    fn marker_cut_inside_codepoint_does_not_panic() {
+        let header = "abcd→DELTA: body";
+        assert!(
+            !header.is_char_boundary(5),
+            "fixture must land mid-codepoint"
+        );
+        assert_eq!(parse_section_header(header, "DELTA"), None);
+    }
+
+    /// Positive control — a well-formed header still parses to its body.
+    #[test]
+    fn well_formed_header_still_parses() {
+        assert_eq!(parse_section_header("DELTA: body", "DELTA"), Some("body"));
     }
 }

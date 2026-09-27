@@ -1123,6 +1123,32 @@ pub(crate) async fn parse_session_target(
     crate::cli::session_resolve::resolve_job_session_target(&pool, target).await
 }
 
+/// Maximum bytes of cron output carried into a delivery message.
+const DELIVERY_BODY_MAX_BYTES: usize = 4000;
+
+/// Build the delivered body from a cron job's output, truncating the head at
+/// [`DELIVERY_BODY_MAX_BYTES`].
+///
+/// The cut MUST land on a UTF-8 char boundary (#538). `content.len()` counts
+/// BYTES, and cron output routinely carries multi-byte codepoints (Cyrillic
+/// bodies on this fleet, `→`, emoji), so a raw `&content[..max_len]` panics
+/// with `byte index 4000 is not a char boundary` and takes the whole delivery
+/// task down with it — the panic kills a `tokio-rt-worker` thread, the
+/// in-flight task dies silently and only a journal line remains.
+/// `utils::truncate_str` walks back to the nearest boundary.
+///
+/// Extracted so the truncation is unit-testable without a DB pool (#538).
+pub(crate) fn truncate_for_delivery(content: &str) -> String {
+    if content.len() > DELIVERY_BODY_MAX_BYTES {
+        format!(
+            "{}...\n\n(truncated — full output in session)",
+            crate::utils::truncate_str(content, DELIVERY_BODY_MAX_BYTES)
+        )
+    } else {
+        content.to_string()
+    }
+}
+
 /// Deliver a cron job result to the specified channel.
 /// Format: "telegram:chat_id", "telegram:chat_id:thread_id" (opt-in forum
 /// topic), "discord:channel_id", "slack:channel_id", "session:<id|prefix>"
@@ -1175,16 +1201,10 @@ pub(crate) async fn deliver_result(
 
     let (channel, target_id) = (parts[0], parts[1]);
 
-    // Truncate content for delivery (channels have message limits)
-    let max_len = 4000;
-    let msg = if content.len() > max_len {
-        format!(
-            "{}...\n\n(truncated — full output in session)",
-            &content[..max_len]
-        )
-    } else {
-        content.to_string()
-    };
+    // Truncate content for delivery (channels have message limits).
+    // The cut MUST land on a UTF-8 char boundary (#538) — see
+    // `truncate_for_delivery`.
+    let msg = truncate_for_delivery(content);
 
     let delivery_msg = format!("⏰ **Cron: {job_name}**\n\n{msg}");
 
@@ -1750,5 +1770,40 @@ async fn deliver_slack(channel_id: &str, message: &str) {
     }
     if delivered > 0 {
         tracing::info!("Cron result delivered to Slack channel {channel_id} ({delivered} part(s))");
+    }
+}
+
+#[cfg(test)]
+mod char_boundary_regression_tests {
+    use super::truncate_for_delivery;
+
+    /// #538 site 1 — a cron body whose 4000-byte cut lands inside a multi-byte
+    /// codepoint must not panic. The recorded panic was `end byte index 4000 is
+    /// not a char boundary; it is inside 'й' (bytes 3999..4001)`, so the
+    /// fixture reproduces that exact layout. Before the fix the raw
+    /// `&content[..4000]` panicked and killed the delivery task.
+    #[test]
+    fn delivery_truncation_lands_on_char_boundary() {
+        let mut content = "a".repeat(3999);
+        content.push('й'); // 2 bytes, at 3999..4001
+        content.push_str(&"b".repeat(100));
+        assert!(content.len() > 4000);
+        assert!(
+            !content.is_char_boundary(4000),
+            "fixture must land mid-codepoint"
+        );
+
+        let msg = truncate_for_delivery(&content);
+        assert!(msg.contains("(truncated — full output in session)"));
+        assert!(
+            msg.starts_with(&"a".repeat(3999)),
+            "the boundary-safe 3999-byte prefix is kept"
+        );
+    }
+
+    /// The truncation arm is not taken for a body that already fits.
+    #[test]
+    fn short_delivery_body_passes_through() {
+        assert_eq!(truncate_for_delivery("hello"), "hello");
     }
 }
