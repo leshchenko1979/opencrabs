@@ -857,9 +857,29 @@ impl CronManageTool {
             }
         };
 
+        // Resolve by ID first, then by name — the same resolution `delete`,
+        // `update` and `test` already use. Pre-fix this called `set_enabled`
+        // with the RAW handle, and `set_enabled` keys on the id column, so a
+        // job NAME could never match: it returned false and the caller was
+        // told the job does not exist (#549).
+        let job = match self.repo.find_by_id(job_id).await {
+            Ok(Some(j)) => j,
+            Ok(None) => match self.repo.find_by_name(job_id).await {
+                Ok(Some(j)) => j,
+                _ => {
+                    return Ok(ToolResult::error(format!(
+                        "No cron job found with ID or name '{job_id}'."
+                    )));
+                }
+            },
+            Err(e) => {
+                return Ok(ToolResult::error(format!("Error looking up cron job: {e}")));
+            }
+        };
+
         let updated = self
             .repo
-            .set_enabled(job_id, enabled)
+            .set_enabled(&job.id.to_string(), enabled)
             .await
             .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
 
@@ -867,8 +887,10 @@ impl CronManageTool {
             let state = if enabled { "enabled" } else { "disabled" };
             Ok(ToolResult::success(format!("Cron job {job_id} {state}.")))
         } else {
+            // Resolved above, so a false here is a genuine write failure
+            // (a concurrent delete), never a missing job.
             Ok(ToolResult::error(format!(
-                "No cron job found with ID '{job_id}'."
+                "Cron job '{job_id}' resolved but the update did not apply — it may have been deleted concurrently."
             )))
         }
     }
