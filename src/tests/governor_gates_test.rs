@@ -40,6 +40,107 @@ macro_rules! rl_config {
 }
 
 #[tokio::test(start_paused = true)]
+async fn global_permit_names_its_cause_and_only_a_cooldown_refuses() {
+    let _guard = ts::registry_guard().await;
+    ts::reset(0);
+
+    // 1. Clean: the fresh global pacer has a full bucket and no cooldown armed.
+    assert_eq!(
+        governor::acquire_global_permit().await,
+        governor::GlobalPermit::Admitted
+    );
+
+    // 2. CooldownActive: a window that outlasts the inline bound is never slept
+    //    through, so the permit names the cause instead of a bare refusal.
+    crate::channels::telegram::rate_limit::record_global_429(
+        Duration::from_secs(3_600),
+        Some(-100_333),
+    );
+    assert_eq!(
+        governor::acquire_global_permit().await,
+        governor::GlobalPermit::CooldownActive
+    );
+    assert!(
+        !governor::GlobalPermit::CooldownActive.may_proceed(),
+        "a cooldown is the ONE refusal that means do not send"
+    );
+    ts::reset(0);
+
+    // 3. PacerHeld: exhaust the global pacer (capacity 25) and keep asking. The
+    //    hold then exceeds GLOBAL_MAX_HOLD and the verdict is PacerHeld — whose
+    //    disposition is PROCEED. That is the whole point of naming the cause,
+    //    and what made pace_rich's old refusal on this variant an over-refusal.
+    for _ in 0..25 {
+        let _ = governor::acquire_global_permit().await;
+    }
+    assert_eq!(
+        governor::acquire_global_permit().await,
+        governor::GlobalPermit::PacerHeld
+    );
+    assert!(
+        governor::GlobalPermit::PacerHeld.may_proceed(),
+        "a pacer hold is our own artifact: the code documents it as failing open"
+    );
+    assert!(governor::GlobalPermit::Admitted.may_proceed());
+    ts::reset(0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pace_rich_admits_on_a_pacer_hold_and_refuses_only_a_cooldown() {
+    let _guard = ts::registry_guard().await;
+    ts::reset(0);
+    rl_config!(enabled: true, rich_per_minute: 60, rich_burst: 2);
+
+    const CHAT: ChatId = ChatId(-100_444);
+    ts::mark_forum(CHAT);
+
+    // Exhaust the global pacer so the permit reports PacerHeld, not Admitted.
+    for _ in 0..25 {
+        let _ = governor::acquire_global_permit().await;
+    }
+    assert!(
+        matches!(
+            governor::pace_rich(CHAT, Some(7), governor::EditClass::Final).await,
+            governor::RichAdmission::Now
+        ),
+        "a pacer hold is our own artifact, so the rich gate must ADMIT: refusing \
+         here drops or defers content on a condition the shared code documents as non-refusing"
+    );
+
+    // A server-issued cooldown, by contrast, still refuses a Final.
+    ts::reset(0);
+    crate::channels::telegram::rate_limit::record_global_429(
+        Duration::from_secs(3_600),
+        Some(-100_444),
+    );
+    assert!(
+        matches!(
+            governor::pace_rich(CHAT, Some(7), governor::EditClass::Final).await,
+            governor::RichAdmission::Deferred
+        ),
+        "a server-issued cooldown must still defer a Final"
+    );
+    ts::reset(0);
+}
+
+#[test]
+fn the_global_permit_is_a_named_verdict_not_a_bool() {
+    // #635 — the structural half of the fix. One bit carried two opposite
+    // policies; the cause is named now, and each refusal site names its own.
+    let src = include_str!("../channels/telegram/governor.rs");
+    assert!(src.contains("pub(crate) enum GlobalPermit"));
+    assert!(src.contains("pub(crate) async fn acquire_global_permit() -> GlobalPermit"));
+    assert!(
+        !src.contains("pub(crate) async fn acquire_global_permit() -> bool"),
+        "the single bit must be gone, not merely wrapped"
+    );
+    assert!(src.contains("GlobalPermit::CooldownActive"));
+    assert!(src.contains("GlobalPermit::PacerHeld"));
+    // And the disposition lives in exactly one place.
+    assert!(src.contains("pub(crate) fn may_proceed(self) -> bool"));
+}
+
+#[tokio::test(start_paused = true)]
 async fn dm_chat_ids_bypass_all_three_governors() {
     let _guard = ts::registry_guard().await;
     ts::reset(1_000);
