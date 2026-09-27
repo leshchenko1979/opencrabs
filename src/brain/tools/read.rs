@@ -198,7 +198,7 @@ impl Tool for ReadTool {
         let is_hashline = input.hashline.unwrap_or(false);
 
         // For large files or line-range requests, use buffered streaming
-        let (output, total_lines, warning, clamped_lines) = if input.start_line.is_some()
+        let (output, total_lines, warning, clamped_lines, raw_lines) = if input.start_line.is_some()
             || input.line_count.is_some()
             || is_large_file
         {
@@ -259,6 +259,7 @@ impl Tool for ReadTool {
                 // exhausted, then stop with an announced truncation and the
                 // exact resume offset.
                 let mut out = String::new();
+                let mut raw: Vec<String> = Vec::new();
                 let mut emitted = 0usize;
                 let mut clamped = 0usize;
                 for line in contents.lines() {
@@ -274,6 +275,7 @@ impl Tool for ReadTool {
                         out.push('\n');
                     }
                     out.push_str(&cl);
+                    raw.push(line.to_string());
                     emitted += 1;
                 }
                 let warning = format!(
@@ -286,10 +288,11 @@ impl Tool for ReadTool {
                     Some(w) => format!("{w} {warning}"),
                     None => warning,
                 };
-                (out, line_count, Some(merged), clamped)
+                (out, line_count, Some(merged), clamped, raw)
             } else {
                 let mut clamped = 0usize;
                 let mut out = String::new();
+                let mut raw: Vec<String> = Vec::new();
                 for line in contents.lines() {
                     let (cl, was_clamped) = clamp_line(line);
                     if was_clamped.is_some() {
@@ -299,8 +302,9 @@ impl Tool for ReadTool {
                         out.push('\n');
                     }
                     out.push_str(&cl);
+                    raw.push(line.to_string());
                 }
-                (out, line_count, encoding_warning, clamped)
+                (out, line_count, encoding_warning, clamped, raw)
             }
         };
 
@@ -319,14 +323,30 @@ impl Tool for ReadTool {
         let output = if is_hashline {
             let file_start_line = input.start_line.unwrap_or(0) + 1; // convert 0-indexed to 1-indexed
 
-            // First pass: compute all hashes and detect collisions
-            let lines_with_hashes: Vec<(usize, String, &str)> = output
-                .lines()
+            // First pass: compute hashes over the RAW lines — the clamped
+            // render is DISPLAY ONLY. Hashing the render would hash the
+            // truncation marker itself for any line over MAX_LINE_CHARS, so
+            // the returned hash could never be found in the file and the edit
+            // was refused with a false staleness diagnosis (#624).
+            let rendered: Vec<&str> = output.lines().collect();
+            // The synthesised empty-file note is emitted AFTER the line loop,
+            // so it has no raw counterpart to pair with. There is nothing to
+            // un-truncate in it, so the render is the correct hash source and
+            // hashline in an empty-file read keeps the #987 note instead of
+            // silently returning nothing.
+            let source: Vec<&str> = if raw_lines.len() == rendered.len() {
+                raw_lines.iter().map(|line| line.as_str()).collect()
+            } else {
+                rendered.clone()
+            };
+            let lines_with_hashes: Vec<(usize, String, &str)> = source
+                .iter()
                 .enumerate()
-                .map(|(i, line)| {
+                .map(|(i, raw)| {
                     let line_num = file_start_line + i;
-                    let hash = hash_line(line);
-                    (line_num, hash, line)
+                    let hash = hash_line(raw);
+                    let display = rendered.get(i).copied().unwrap_or(*raw);
+                    (line_num, hash, display)
                 })
                 .collect();
 
@@ -383,7 +403,7 @@ impl Tool for ReadTool {
         let warning = if clamped_lines > 0 {
             let clamp_note = if is_hashline {
                 format!(
-                    "{} line(s) exceeded {} chars and were truncated; their hashes cover only the visible prefix, so do not hashline_edit those lines.",
+                    "{} line(s) exceeded {} chars and were truncated for DISPLAY only; their hashes cover the full line, so hashline_edit still applies.",
                     clamped_lines, MAX_LINE_CHARS
                 )
             } else {
@@ -417,7 +437,7 @@ impl ReadTool {
         start_line: Option<usize>,
         line_count: Option<usize>,
         is_large_file: bool,
-    ) -> Result<(String, usize, Option<String>, usize)> {
+    ) -> Result<(String, usize, Option<String>, usize, Vec<String>)> {
         let file = fs::File::open(path).await.map_err(ToolError::Io)?;
         // Line source that never hard-fails on encoding: plain files stream
         // lossily per line; UTF-16 (BOM) files decode in memory when small
@@ -433,6 +453,10 @@ impl ReadTool {
         let mut total_lines = 0;
         let mut truncated = false;
         let mut clamped_lines = 0usize;
+        // Raw (unclamped) emitted lines, parallel to the clamped render: the
+        // hashline pass hashes THESE so a returned hash resolves against the
+        // file even when the line's render was truncated (#624).
+        let mut raw_lines: Vec<String> = Vec::new();
         let budgeted = start_line.is_none() && line_count.is_none();
         let mut budget_exceeded = false;
 
@@ -474,6 +498,7 @@ impl ReadTool {
                         output.push('\n');
                     }
                     output.push_str(&clamped_line);
+                    raw_lines.push(line);
                     lines_read += 1;
                     total_lines += 1;
                 }
@@ -525,7 +550,7 @@ impl ReadTool {
             (None, w) => w,
         };
 
-        Ok((output, total_lines, warning, clamped_lines))
+        Ok((output, total_lines, warning, clamped_lines, raw_lines))
     }
 
     /// Line source for [`read_with_buffer`] that never hard-fails on

@@ -537,6 +537,7 @@ pub mod owner_plus_normalization_test;
 pub mod rate_limit_global_cooldown_test;
 pub mod rate_limiter_test;
 pub mod read_empty_file_test;
+pub mod read_hashline_clamp_test;
 pub mod read_media_redirect_test;
 pub mod read_output_budget_test;
 pub mod read_resume_offset_test;
