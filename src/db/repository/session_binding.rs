@@ -473,7 +473,7 @@ impl SessionBindingRepository {
     ) -> Result<usize> {
         let ch = channel.to_string();
         let cid = chat_id.to_string();
-        self.pool
+        let rows = self.pool
             .get()
             .await
             .context("Failed to get connection")?
@@ -485,8 +485,10 @@ impl SessionBindingRepository {
             })
             .await
             .map_err(interact_err)?
-            .context("Failed to delete session binding by channel/chat_id/thread_id")?
+            .context("Failed to delete session binding by channel/chat_id/thread_id")?;
+        Ok(rows)
     }
+
     /// Find a binding by channel, chat_id, and thread_id.
     /// Returns the binding if found.
     pub async fn find_by_channel_chat_thread(
