@@ -309,6 +309,7 @@ pub mod goal_budget_test;
 pub mod goal_command_test;
 pub mod goal_criteria_derivation_test;
 pub mod goal_criteria_test;
+pub mod goal_driver_line_test;
 pub mod goal_evidence_test;
 pub mod goal_evidence_receipts_test;
 pub mod goal_judge_test;

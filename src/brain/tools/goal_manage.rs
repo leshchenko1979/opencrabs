@@ -161,12 +161,11 @@ impl Tool for GoalManageTool {
                     let criteria = parse_criteria(goal.criteria.as_deref().unwrap_or(""));
                     let evaluations = parse_evaluations(goal.criterion_evaluations.as_deref());
                     Ok(ToolResult::success(format!(
-                        "🎯 Active goal ({}):\n\n{}\n\nState: {} | Turns: {}/{} | Elapsed: {}m\n{}{}",
+                        "🎯 Active goal ({}):\n\n{}\n\nState: {} | {} | Elapsed: {}m\n{}{}",
                         goal.id,
                         goal.goal_text,
                         goal.state,
-                        goal.turns_used,
-                        goal.max_turns,
+                        crate::brain::goal::driver_line(&goal),
                         elapsed,
                         render_verdict(&goal),
                         render_criteria_status(&criteria, &evaluations),
