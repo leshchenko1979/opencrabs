@@ -408,6 +408,51 @@ pub(crate) fn is_split_candidate(text: &str) -> bool {
     text.encode_utf16().count() >= TELEGRAM_TEXT_LIMIT - SPLIT_MARGIN
 }
 
+/// Which topic lifecycle event reached [`apply_topic_teardown`] (#572).
+///
+/// Three variants, and the third is why this is an enum rather than a bool:
+/// Telegram emits **no deletion event** — verified against the pinned
+/// teloxide-core 0.13.0, whose message kinds are exactly created / edited /
+/// closed / reopened, with no `forum_topic_deleted` in the crate at all. A
+/// deleted topic is therefore discovered, never received: the boot
+/// reconciliation probe asks the Bot API about a topic the bot can no longer
+/// reach, and records `Deleted` through this same core so the store can tell a
+/// closure from a deletion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TopicEvent {
+    /// Closed: no new traffic. The lane is retired.
+    Closed,
+    /// Reopened: the topic takes traffic again. Nothing is torn down.
+    Reopened,
+    /// Gone (the Bot API rejects it). Same teardown as a closure, distinct fact.
+    Deleted,
+}
+
+impl TopicEvent {
+    /// Whether this event tears the topic's lane down. A reopen does not.
+    fn is_teardown(self) -> bool {
+        matches!(self, Self::Closed | Self::Deleted)
+    }
+
+    /// Human-readable label, used in the fact content and the log lines.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+            Self::Reopened => "reopened",
+            Self::Deleted => "deleted",
+        }
+    }
+
+    /// The `channel_messages.message_type` this event is recorded under.
+    fn message_type(self) -> &'static str {
+        match self {
+            Self::Closed => "topic_closed",
+            Self::Reopened => "topic_reopened",
+            Self::Deleted => "topic_deleted",
+        }
+    }
+}
+
 /// #572 — a closed forum topic must retire the lane bound to it.
 ///
 /// Telegram delivers topic lifecycle as service messages. Verified against the
@@ -444,16 +489,19 @@ async fn handle_topic_teardown(
     session_binding_repo: &SessionBindingRepository,
     session_svc: &SessionService,
 ) -> bool {
-    let closed = msg.forum_topic_closed().is_some();
-    if !closed && msg.forum_topic_reopened().is_none() {
+    let event = if msg.forum_topic_closed().is_some() {
+        TopicEvent::Closed
+    } else if msg.forum_topic_reopened().is_some() {
+        TopicEvent::Reopened
+    } else {
         return false;
-    }
+    };
     let Some(tid) = msg.thread_id else {
         // A topic event carrying no thread names no topic we could have bound.
         return false;
     };
     apply_topic_teardown(
-        closed,
+        event,
         msg.chat.id.0,
         tid.0.0,
         msg.id.0,
@@ -468,15 +516,16 @@ async fn handle_topic_teardown(
 }
 
 /// The teardown itself, over primitives so the DB effects are testable
-/// directly (#572). `closed` selects the leg: a closure records the fact,
-/// deletes the topic's binding row and retires the session it named; a
-/// reopen records the fact and touches no binding at all.
+/// directly (#572). `event` selects the leg: a closure — and a deletion
+/// discovered by the reconcile probe, which no inbound update can announce —
+/// records the fact, deletes the topic's binding row and retires the session it
+/// named; a reopen records the fact and touches no binding at all.
 ///
 /// The parameter count is the point — this signature IS the primitive boundary
 /// that makes the teardown testable without fabricating a teloxide `Message`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_topic_teardown(
-    closed: bool,
+    event: TopicEvent,
     chat_id: i64,
     thread: i32,
     msg_id: i32,
@@ -486,11 +535,8 @@ pub(crate) async fn apply_topic_teardown(
     session_binding_repo: &SessionBindingRepository,
     session_svc: &SessionService,
 ) {
-    let (event, message_type) = if closed {
-        ("closed", "topic_closed")
-    } else {
-        ("reopened", "topic_reopened")
-    };
+    let label = event.as_str();
+    let message_type = event.message_type();
 
     // Record the fact BEFORE the row is deleted. Once the binding is gone,
     // this store is the only durable evidence that the topic existed and when
@@ -502,20 +548,20 @@ pub(crate) async fn apply_topic_teardown(
         None,
         actor_id.map(|id| id.to_string()).unwrap_or_default(),
         actor_name.unwrap_or_default().to_string(),
-        format!("topic {event}"),
+        format!("topic {label}"),
         message_type.into(),
         Some(msg_id.to_string()),
     )
     .with_thread(Some(thread.to_string()), None);
     if let Err(e) = channel_msg_repo.insert(&row).await {
-        tracing::warn!("Failed to persist forum topic {event} fact: {e}");
+        tracing::warn!("Failed to persist forum topic {label} fact: {e}");
     }
 
-    if !closed {
+    if !event.is_teardown() {
         // A reopen revives the topic; nothing is torn down. That is the
         // assertion the reopen leg of the teardown test makes.
         tracing::info!(
-            "Telegram: forum topic {thread} in chat {chat_id} reopened — no binding touched"
+            "Telegram: forum topic {thread} in chat {chat_id} {label} — no binding touched"
         );
         return;
     }
@@ -534,10 +580,10 @@ pub(crate) async fn apply_topic_teardown(
         .await
     {
         Ok(n) => tracing::info!(
-            "Telegram: forum topic {thread} in chat {chat_id} closed — removed {n} binding row(s)"
+            "Telegram: forum topic {thread} in chat {chat_id} {label} — removed {n} binding row(s)"
         ),
         Err(e) => tracing::warn!(
-            "Telegram: failed to remove binding of closed topic {thread} in chat {chat_id}: {e}"
+            "Telegram: failed to remove binding of {label} topic {thread} in chat {chat_id}: {e}"
         ),
     }
 
@@ -546,12 +592,12 @@ pub(crate) async fn apply_topic_teardown(
             Ok(uuid) => {
                 if let Err(e) = session_svc.archive_session(uuid).await {
                     tracing::warn!(
-                        "Telegram: failed to retire session {uuid} of closed topic {thread}: {e}"
+                        "Telegram: failed to retire session {uuid} of {label} topic {thread}: {e}"
                     );
                 }
             }
             Err(e) => tracing::warn!(
-                "Telegram: session {sid} bound to closed topic {thread} is not a uuid: {e}"
+                "Telegram: session {sid} bound to {label} topic {thread} is not a uuid: {e}"
             ),
         }
     }
