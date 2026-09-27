@@ -344,6 +344,8 @@ pub mod memory_db_test;
 pub mod memory_embedding_key_test;
 pub mod memory_external_sweep_test;
 pub mod memory_external_test;
+#[cfg(feature = "code-graph")]
+pub mod memory_graph_semantics_stamp_test;
 pub mod memory_health_report_test;
 pub mod memory_local_engine_test;
 pub mod memory_maintenance_test;

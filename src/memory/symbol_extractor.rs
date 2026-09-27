@@ -56,6 +56,19 @@ pub struct CallEdge {
     pub line: usize,
 }
 
+/// The extractor semantics a file's graph was written with (#489).
+///
+/// Bump this whenever a change makes already-stored graph rows wrong: a line
+/// computation, a callee normalization, a symbol kind. The content hash cannot
+/// observe such a change, so without the stamp a file whose bytes are unchanged
+/// keeps rows written by the superseded semantics for as long as it exists.
+///
+/// 1 — everything before #489: a call site reported at the `call_expression`
+///     start, i.e. the receiver's line, and 0-based.
+/// 2 — #489: the callee expression's own line, 1-based.
+#[cfg(feature = "code-graph")]
+pub(crate) const GRAPH_SEMANTICS_VERSION: u32 = 2;
+
 /// Extracts symbols and call graphs from Rust source files using tree-sitter.
 #[cfg(feature = "code-graph")]
 pub struct SymbolExtractor {
@@ -370,6 +383,12 @@ pub(crate) fn extract_and_store(store: &super::db::Store, key: &str, body: &str)
                 if let Err(e) = store.insert_import(&sym.name, key, sym.start_line) {
                     tracing::debug!("code-graph: insert_import {key} {}: {e}", sym.name);
                 }
+            }
+            // Stamp only after the rows landed. A failed replace returns early
+            // above, and a stamp on a graph that was not written would hide the
+            // file from every later pass (#489).
+            if let Err(e) = store.stamp_graph_semantics(key, GRAPH_SEMANTICS_VERSION) {
+                tracing::debug!("code-graph: stamp_graph_semantics {key}: {e}");
             }
         }
         Err(e) => tracing::debug!("code-graph: failed to extract symbols from {key}: {e}"),

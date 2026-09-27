@@ -549,6 +549,19 @@ impl Store {
                 CREATE INDEX IF NOT EXISTS idx_imports_module ON imports(module_path);
                 CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file_path);
 
+                -- #489: which extractor semantics wrote a file's graph. The
+                -- content hash cannot answer that: bytes unchanged since the
+                -- last index say nothing about whether the rows on disk were
+                -- written by the semantics in force today, and the hash-skip in
+                -- index_file_sync_keyed never revisits such a file. An absent
+                -- stamp reads as stale, which is what makes rows written before
+                -- this table existed reachable again.
+                CREATE TABLE IF NOT EXISTS graph_semantics (
+                    file_path TEXT PRIMARY KEY,
+                    version INTEGER NOT NULL,
+                    stamped_at TEXT NOT NULL
+                );
+
                 -- #522: replace_file_graph deletes a file's graph rows by
                 -- file_path; without this index every such DELETE is a full
                 -- scan of the table that doubled to GiB.
@@ -604,6 +617,45 @@ impl Store {
         .map_err(|e| format!("replace_file_graph imports: {e}"))?;
         tx.commit()
             .map_err(|e| format!("replace_file_graph commit: {e}"))?;
+        Ok(())
+    }
+
+    /// The extractor semantics that last wrote `file_path`'s graph (#489).
+    ///
+    /// `None` means no stamp — which covers every row written before the stamp
+    /// existed, and reads as stale deliberately: an unstamped graph is one
+    /// whose semantics are unknown, so it is re-extracted rather than trusted.
+    #[cfg(feature = "code-graph")]
+    pub fn graph_semantics_version(&self, file_path: &str) -> Option<u32> {
+        self.conn
+            .query_row(
+                "SELECT version FROM graph_semantics WHERE file_path = ?1",
+                params![file_path],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok()
+            .map(|version| version as u32)
+    }
+
+    /// Record that `file_path`'s graph was written by `version` semantics.
+    #[cfg(feature = "code-graph")]
+    pub fn stamp_graph_semantics(&self, file_path: &str, version: u32) -> Result<(), String> {
+        self.conn
+            .execute(
+                r"
+                INSERT INTO graph_semantics (file_path, version, stamped_at)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(file_path) DO UPDATE SET
+                    version = excluded.version,
+                    stamped_at = excluded.stamped_at
+                ",
+                params![
+                    file_path,
+                    version as i64,
+                    crate::utils::string::utc_timestamp()
+                ],
+            )
+            .map_err(|e| format!("stamp_graph_semantics: {e}"))?;
         Ok(())
     }
 

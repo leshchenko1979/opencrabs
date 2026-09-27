@@ -148,7 +148,8 @@ fn index_file_sync(
 /// external collection uses absolute canonical paths so identically-named
 /// files in different directories never collide (#1051).
 ///
-/// Returns `true` if new content was indexed, `false` if hash-skipped.
+/// Returns `true` if content or graph was (re)indexed, `false` if the file was
+/// skipped entirely.
 pub(crate) fn index_file_sync_keyed(
     store: &Store,
     collection: &str,
@@ -160,6 +161,19 @@ pub(crate) fn index_file_sync_keyed(
     if let Ok(Some((_id, existing_hash, _title))) = store.find_active_document(collection, doc_key)
         && existing_hash == hash
     {
+        // Content is unchanged, so the document and FTS rows need no work — but
+        // the graph is versioned separately (#489). A stamp behind the current
+        // semantics means the rows on disk were written by an older extractor,
+        // and nothing else ever revisits an unchanged file, so re-extract the
+        // graph alone and report the write.
+        #[cfg(feature = "code-graph")]
+        if doc_key.ends_with(".rs")
+            && store.graph_semantics_version(doc_key)
+                != Some(super::symbol_extractor::GRAPH_SEMANTICS_VERSION)
+        {
+            super::symbol_extractor::extract_and_store(store, doc_key, body);
+            return Ok(true);
+        }
         return Ok(false);
     }
 
