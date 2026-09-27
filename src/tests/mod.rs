@@ -337,6 +337,8 @@ pub mod memory_archive_index_test;
 pub mod memory_backfill_sweep_test;
 pub mod memory_chunk_vector_test;
 pub mod memory_chunker_test;
+#[cfg(feature = "code-graph")]
+pub mod memory_code_graph_line_contract_test;
 pub mod memory_collection_routing_test;
 pub mod memory_db_test;
 pub mod memory_embedding_key_test;
