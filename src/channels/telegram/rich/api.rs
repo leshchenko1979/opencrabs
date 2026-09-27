@@ -401,11 +401,9 @@ async fn post_rich(
         }
 
         if status.as_u16() == 429 && attempt < RICH_MAX_RETRIES {
-            let retry_after = parsed
-                .get("parameters")
-                .and_then(|p| p.get("retry_after"))
-                .and_then(|r| r.as_u64())
-                .unwrap_or(5);
+            let retry_after =
+                crate::channels::telegram::rate_limit::parse_retry_after_json(&parsed)
+                    .map_or(5, |d| d.as_secs());
             attempt += 1;
             let (_, chat_id, _, _, _) = rich_send_fields(url, body);
             if matches!(
@@ -749,11 +747,9 @@ async fn post_rich_multipart(
         }
 
         if status.as_u16() == 429 && attempt < RICH_MAX_RETRIES {
-            let retry_after = parsed
-                .get("parameters")
-                .and_then(|p| p.get("retry_after"))
-                .and_then(|r| r.as_u64())
-                .unwrap_or(5);
+            let retry_after =
+                crate::channels::telegram::rate_limit::parse_retry_after_json(&parsed)
+                    .map_or(5, |d| d.as_secs());
             attempt += 1;
             let (_, chat_id, _, _, _) = rich_send_fields(url, body);
             if matches!(

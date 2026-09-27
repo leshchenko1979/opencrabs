@@ -27,30 +27,58 @@ use std::time::{Duration, Instant};
 /// pause until the cooldown expires, preventing penalty escalation loops.
 static GLOBAL_COOLDOWN: RwLock<Option<Instant>> = RwLock::new(None);
 
-/// Seconds Telegram asked us to wait, from an error string.
+/// Seconds Telegram asked us to wait, from an error string OR a 429 body.
 ///
 /// teloxide surfaces flood control as text containing `Retry after N`, so this
 /// matches on that rather than a typed variant, which keeps it working across
 /// the several error shapes the same condition arrives in.
 ///
+/// #635 — two shapes reach it. teloxide hands over a rendered error string
+/// (`Retry after N`); a direct Bot API call hands over the 429 BODY, which
+/// spells the window `parameters.retry_after` with an underscore. Both are read
+/// here so the four call sites that used to walk the JSON themselves have one
+/// home instead of four copies.
+///
 /// Returns `None` for anything else, so ordinary failures (a deleted message,
 /// bad markup) are not mistaken for throttling and do not suppress writes.
 pub(crate) fn parse_retry_after(error: &str) -> Option<Duration> {
     let lower = error.to_lowercase();
-    let idx = lower.find("retry after")?;
-    let rest = &lower[idx + "retry after".len()..];
-    let digits: String = rest
-        .chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(char::is_ascii_digit)
-        .collect();
-    if digits.is_empty() {
-        return None;
+    if let Some(idx) = lower.find("retry after") {
+        let rest = &lower[idx + "retry after".len()..];
+        let digits: String = rest
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if let Ok(secs) = digits.parse::<u64>() {
+            // A pause is only meaningful if it is positive; "Retry after 0" is
+            // not a reason to stop writing.
+            if secs > 0 {
+                return Some(Duration::from_secs(secs));
+            }
+        }
     }
-    let secs: u64 = digits.parse().ok()?;
-    // A pause is only meaningful if it is positive; "Retry after 0" is not a
-    // reason to stop writing.
-    (secs > 0).then(|| Duration::from_secs(secs))
+    // #635 — the structured arm. A Bot API 429 body states the window as JSON
+    // (`{"parameters":{"retry_after":30}}`), which the text arm cannot see: it
+    // matches the literal "retry after" WITH A SPACE, and Telegram spells the
+    // field `retry_after` with an underscore. Four call sites each carried a
+    // private copy of that walk; this is its one home.
+    serde_json::from_str::<serde_json::Value>(error)
+        .ok()
+        .and_then(|v| parse_retry_after_json(&v))
+}
+
+/// The structured-JSON arm of [`parse_retry_after`] — Telegram's own key path.
+///
+/// Split from the text arm because the callers differ: the text arm is handed a
+/// rendered error string (teloxide), this one an already-parsed response body.
+/// Returns `None` when the body carries no `parameters.retry_after`, so each
+/// caller applies its own default exactly as it did before #635.
+pub(crate) fn parse_retry_after_json(body: &serde_json::Value) -> Option<Duration> {
+    body.get("parameters")?
+        .get("retry_after")?
+        .as_u64()
+        .map(Duration::from_secs)
 }
 
 /// Extra margin added to the window Telegram gives.
