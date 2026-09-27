@@ -1640,26 +1640,14 @@ pub(crate) const NOTIFY_ROLL_LINE_MAX: usize = 160;
 /// carries the gist — the FULL notify text still reaches the session via
 /// the queue below; this line is only the announcement. Capped so one
 /// long title cannot blow out the roll block.
-/// Strip a leading self-echo from a notify body's first line: a sender
-/// (or a hand-typed probe) that pastes its own "📨 notify from …:" header
-/// into the payload would otherwise render the phrase twice — the envelope
-/// already carries the label (Alexey 2026-09-05, r4 smoke duplication).
-/// Strips the header-shaped prefix up to the first ':'; a matching line
-/// with no ':' is left alone (can't tell header from prose).
-fn strip_leading_notify_echo(first: &str) -> &str {
-    let Some(rest) = first.strip_prefix("📨 notify from") else {
-        return first;
-    };
-    match rest.find(':') {
-        Some(idx) => rest[idx + 1..].trim_start(),
-        None => first,
-    }
-}
-
+///
+/// The envelope predicate itself now lives in `flow` (#554): one home, shared
+/// with `queued_preview`. `flow` is the lower-level module, so importing the
+/// predicate the other way would invert the layering.
 pub(crate) fn build_notify_roll_line(label: &str, body: &str) -> String {
     let sanitized = label.replace('<', "‹").replace('>', "›");
     let first = body.lines().next().map(str::trim).unwrap_or("");
-    let first = strip_leading_notify_echo(first);
+    let first = super::flow::strip_leading_notify_echo(first);
     let line = format!("📨 notify from {sanitized}: {first}");
     if line.chars().count() > NOTIFY_ROLL_LINE_MAX {
         let mut cut: String = line.chars().take(NOTIFY_ROLL_LINE_MAX).collect();
