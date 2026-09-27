@@ -134,8 +134,12 @@ where
         }
         // No fact is written here on purpose: this pass APPLIES a fact that
         // already exists, and writing one would append a row per boot.
+        let recorded = fact.message_type.clone();
         if teardown_binding(bindings, session_svc, chat, thread).await {
             report.facts_applied += 1;
+            tracing::info!(
+                "#572 reconcile: applied recorded fact {recorded} — channel=telegram chat={chat} topic={thread}"
+            );
         }
     }
 
@@ -149,6 +153,9 @@ where
         report.probed += 1;
         match probe(chat, thread).await {
             ProbeOutcome::Gone => {
+                tracing::info!(
+                    "#572 reconcile: probe → GONE — channel=telegram chat={chat} topic={thread}, tearing down"
+                );
                 // Disappeared without an event we could receive, so THIS is the
                 // only place the fact can be written. Recorded through the same
                 // core as a closure, under its own message_type.
@@ -166,9 +173,19 @@ where
                 .await;
                 report.torn_down += 1;
             }
-            // NOT a verdict, and not nothing: each is counted so a boot log can
-            // show why a binding was left standing.
-            ProbeOutcome::Live | ProbeOutcome::Inconclusive(_) => {
+            // Neither of these decides anything, and the log line says so: a
+            // binding left standing with no reason visible is indistinguishable
+            // from a binding the sweep forgot.
+            ProbeOutcome::Live => {
+                tracing::info!(
+                    "#572 reconcile: probe → live — channel=telegram chat={chat} topic={thread}, binding kept"
+                );
+                report.inconclusive += 1;
+            }
+            ProbeOutcome::Inconclusive(why) => {
+                tracing::info!(
+                    "#572 reconcile: probe → inconclusive ({why}) — channel=telegram chat={chat} topic={thread}, binding kept"
+                );
                 report.inconclusive += 1;
             }
         }
@@ -237,7 +254,12 @@ pub(crate) fn spawn(pool: Pool, telegram_state: Arc<TelegramState>) {
     tokio::spawn(async move {
         tokio::time::sleep(BOOT_WARMUP).await;
         let Some(bot) = telegram_state.bot().await else {
-            tracing::debug!("#572 topic reconcile: no bot handle at boot, skipping probe pass");
+            // info!, not debug!: this is the one path where reconciliation
+            // silently does nothing, and an auditor must be able to see that it
+            // did not run.
+            tracing::info!(
+                "#572 topic reconcile: no bot handle at boot — recorded facts were skipped, probe pass not run"
+            );
             return;
         };
         let bindings = SessionBindingRepository::new(pool.clone());

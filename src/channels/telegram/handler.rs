@@ -609,13 +609,16 @@ pub(crate) async fn teardown_binding(
 
     if let Some(sid) = bound {
         match Uuid::parse_str(&sid) {
-            Ok(uuid) => {
-                if let Err(e) = session_svc.archive_session(uuid).await {
-                    tracing::warn!(
-                        "Telegram: failed to retire session {uuid} of topic {thread}: {e}"
-                    );
-                }
-            }
+            Ok(uuid) => match session_svc.archive_session(uuid).await {
+                // One line naming channel, chat, topic and the retired session:
+                // the whole action in one place, at a level the profile emits.
+                Ok(()) => tracing::info!(
+                    "Telegram: topic teardown — channel=telegram chat={chat_id} topic={thread} retired_session={uuid}"
+                ),
+                Err(e) => tracing::warn!(
+                    "Telegram: failed to retire session {uuid} of topic {thread}: {e}"
+                ),
+            },
             Err(e) => tracing::warn!(
                 "Telegram: session {sid} bound to topic {thread} is not a uuid: {e}"
             ),
