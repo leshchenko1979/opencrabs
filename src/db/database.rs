@@ -131,6 +131,11 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // gate, so a stale binding carrying a wait is still classified. NULL
     // `await_at` (pre-feature rows) == not awaiting.
     include_str!("../migrations/20260919000001_session_bindings_await.sql"),
+    // FORK (#544): the one-shot retirement flag. A cron job with
+    // `run_once = 1` is disabled by the same dispatch-time schedule advance
+    // that moves every job's `next_run_at`, so a spent one-shot reads
+    // `enabled = 0` instead of parking armed until the same date next year.
+    include_str!("../migrations/20260927000001_add_cron_run_once.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

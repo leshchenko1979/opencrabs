@@ -143,6 +143,7 @@ async fn cmd_add(
         trigger_on.clone(),
         set_goal,
         goal_template.clone(),
+        false, // run_once is the tool-side surface (#544); the CLI does not expose it
     );
     job.next_run_at = crate::cron::next_run_utc(&cron, parsed_tz, chrono::Utc::now());
 
@@ -208,6 +209,9 @@ async fn cmd_list(repo: &CronJobRepository) -> Result<()> {
         }
         if job.set_goal {
             println!("   Set goal: true");
+        }
+        if job.run_once {
+            println!("   Run once: true (retires itself on fire)");
         }
         println!("   Deliver: {deliver}");
         println!("   Last run: {last}");
