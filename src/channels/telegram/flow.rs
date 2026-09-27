@@ -1204,6 +1204,72 @@ pub(crate) fn starts_with_icon(s: &str) -> bool {
     }
 }
 
+/// Strip a leading self-echo from a notify body's first line: a sender (or a
+/// hand-typed probe) that pastes its own "📨 notify from …:" header into the
+/// payload would otherwise render the phrase twice — the envelope already
+/// carries the label (Alexey 2026-09-05, r4 smoke duplication). Strips the
+/// header-shaped prefix up to the first ':'; a matching line with no ':' is
+/// left alone (can't tell header from prose).
+///
+/// Moved here from `resume` (#554) so the envelope shape has ONE home shared
+/// by its two consumers — `build_notify_roll_line` and `queued_preview`.
+/// `flow` is the lower-level module; importing a text predicate out of
+/// `resume` would invert the layering.
+pub(crate) fn strip_leading_notify_echo(first: &str) -> &str {
+    let Some(rest) = first.strip_prefix("📨 notify from") else {
+        return first;
+    };
+    match rest.find(':') {
+        Some(idx) => rest[idx + 1..].trim_start(),
+        None => first,
+    }
+}
+
+/// #554: cap for the flow roll's queued-push preview (chars, not bytes).
+pub(crate) const QUEUED_PREVIEW_MAX: usize = 30;
+
+/// The first readable line of a queued push, for the flow roll's
+/// `📥 in: <tag> "<preview>"` line.
+///
+/// A cross-session `session_notify` prepends a machine transport envelope —
+/// `📨 notify from <short-id>:\n<message>` (built at `subagent/notify.rs:266`)
+/// — and quoting that line tells the user nothing while printing a raw
+/// session-uuid prefix on an owner-facing surface, which the standing naming
+/// law forbids. So the envelope is skipped for that ONE origin, which is the
+/// only arm that produces it; the skip is gated on the origin and never on
+/// text shape alone. The body's first non-empty line is then previewed.
+///
+/// Char-safe: the two inline copies this replaces tested `len()` in BYTES but
+/// sliced at char index [`QUEUED_PREVIEW_MAX`], so a 30-char Cyrillic preview
+/// (60 bytes) took the truncation arm, found nothing at the mixed index, and
+/// emitted the string UNCHANGED with `…` appended. `truncate_chars` counts
+/// characters, so the cut lands correctly in every script.
+pub(crate) fn queued_preview(text: &str, origin: &crate::brain::agent::PushOrigin) -> String {
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let first = lines.next().unwrap_or("");
+    let first = match origin {
+        crate::brain::agent::PushOrigin::SessionNotify => {
+            let stripped = strip_leading_notify_echo(first);
+            if stripped.is_empty() {
+                // The envelope's header line carries no payload — the body is
+                // the next readable line.
+                lines.next().unwrap_or("")
+            } else {
+                stripped
+            }
+        }
+        _ => first,
+    };
+    if first.chars().count() > QUEUED_PREVIEW_MAX {
+        format!(
+            "{}…",
+            crate::utils::string::truncate_chars(first, QUEUED_PREVIEW_MAX)
+        )
+    } else {
+        first.to_string()
+    }
+}
+
 /// Build the fully-styled header shared by all three renderers so the classic
 /// HTML, rich-details, and rich-markdown headers can never drift (#480, #509).
 /// The live header leads with the status message (bold), then the tool-call
