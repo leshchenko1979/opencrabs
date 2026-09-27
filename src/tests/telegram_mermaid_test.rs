@@ -161,6 +161,103 @@ fn error_note_caps_length() {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// error_note — markup reduction (#636)
+// ---------------------------------------------------------------------------
+
+/// The real nginx/Cloudflare error page mermaid.ink's fronting proxy returns
+/// when a render is throttled or the source is oversized: an HTML document
+/// whose only useful field is its `<title>`. Captured from the live renderer
+/// (400 bytes, `text/html`) and embedded verbatim.
+const REAL_HTML_ERROR_BODY: &str = "<html>\r\n<head><title>503 Service Temporarily Unavailable</title></head>\r\n<body>\r\n<center><h1>503 Service Temporarily Unavailable</h1></center>\r\n<hr><center>nginx/1.30.5</center>\r\n<script type=\"module\" src=\"https://static.cloudflareinsights.com/beacon.min.js/v31edd6df95cf4e85bb4c19e7a9bdbcba1788362987495\" integrity=\"sha512-iIg7k2xntmwu6/uSb5tpc/hySgZc4eoL31yB29W6tJFo2akwjPWcEqnCEdJvGexCL0KEQwVYv5Bl";
+
+#[test]
+fn error_note_reduces_a_markup_body_to_its_title() {
+    let note = error_note(503, REAL_HTML_ERROR_BODY);
+    assert_eq!(note, "503 Service Temporarily Unavailable");
+    // The whole point: no raw markup and no script URL reaches the user.
+    assert!(!note.contains('<'), "raw markup reached the note: {note}");
+    assert!(
+        !note.contains("cloudflareinsights"),
+        "a script URL reached the note: {note}"
+    );
+}
+
+#[test]
+fn error_note_markup_without_a_title_falls_back_to_the_status_line() {
+    assert_eq!(
+        error_note(502, "<html><body><p>Bad Gateway</p></body></html>"),
+        "diagram renderer returned HTTP 502"
+    );
+}
+
+#[test]
+fn error_note_markup_with_a_blank_title_falls_back_to_the_status_line() {
+    assert_eq!(
+        error_note(504, "<html><head><title></title></head></html>"),
+        "diagram renderer returned HTTP 504"
+    );
+    assert_eq!(
+        error_note(504, "<html><head><title>   </title></head></html>"),
+        "diagram renderer returned HTTP 504"
+    );
+}
+
+#[test]
+fn error_note_matches_the_title_tag_case_insensitively() {
+    assert_eq!(
+        error_note(503, "<HTML><HEAD><TITLE>Upstream boom</TITLE></HEAD></HTML>"),
+        "Upstream boom"
+    );
+    assert_eq!(
+        error_note(503, "<html><head><TiTlE>Mixed case</tItLe></head></html>"),
+        "Mixed case"
+    );
+}
+
+#[test]
+fn error_note_keeps_a_plain_text_body_verbatim() {
+    // The falsifying input for a naive fix: a plain-text body carrying '<'
+    // MID-string is not markup, and reducing it would destroy the diagnosis.
+    assert_eq!(
+        error_note(400, "Parse error: expected '<' but got '>' on line 4"),
+        "Parse error: expected '<' but got '>' on line 4"
+    );
+    // Leading whitespace is trimmed before the markup test, so a plain body
+    // that merely starts with a space still passes through as text.
+    assert_eq!(
+        error_note(400, "  Lexical error on line 1"),
+        "Lexical error on line 1"
+    );
+}
+
+#[test]
+fn error_note_caps_a_markup_title_too() {
+    let long_title = "T".repeat(1000);
+    let body = format!("<html><head><title>{long_title}</title></head></html>");
+    assert_eq!(error_note(503, &body).chars().count(), 400);
+}
+
+#[test]
+fn error_note_handles_non_ascii_without_panicking() {
+    // Multi-byte text INSIDE the title, and BEFORE it: the tag search runs on
+    // bytes and `str::get` refuses an off-boundary slice instead of
+    // panicking, so a Cyrillic or emoji body must degrade, never crash.
+    assert_eq!(
+        error_note(503, "<html><head><title>Ошибка</title></head></html>"),
+        "Ошибка"
+    );
+    assert_eq!(
+        error_note(503, "<html><body>ошибка</body><title>🔍 boom</title></html>"),
+        "🔍 boom"
+    );
+    // A body with no title at all still degrades to the status line.
+    assert_eq!(
+        error_note(503, "<html><body>ё</body></html>"),
+        "diagram renderer returned HTTP 503"
+    );
+}
+
 // image_html / failure_html
 // ---------------------------------------------------------------------------
 

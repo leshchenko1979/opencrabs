@@ -1041,12 +1041,56 @@ pub(crate) fn is_image_response(status: u16, content_type: &str) -> bool {
 }
 
 /// Build a short, legible failure note from the renderer's response body.
+///
+/// A proxy or CDN in front of the renderer answers an image request with an
+/// HTML error page (`<html><head><title>503 Service Temporarily
+/// Unavailable</title>…` — issue #636), and passing that through verbatim put
+/// raw markup in front of the user and into the failure WARN. Such a body
+/// carries exactly one useful field, its `<title>`, so a markup body is
+/// reduced to that; with no usable title it degrades to the bare status line,
+/// which is what an empty body already produces.
+///
+/// A non-markup body is kept as-is: there the text IS the diagnosis
+/// (mermaid.ink reports parse errors as plain text). The numeric status is
+/// logged as its own field beside this note, so reducing a markup body to its
+/// title loses nothing for triage.
 pub(crate) fn error_note(status: u16, body: &str) -> String {
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return format!("diagram renderer returned HTTP {status}");
     }
-    trimmed.chars().take(ERROR_NOTE_MAX_CHARS).collect()
+    if trimmed.starts_with('<') {
+        return match html_title(trimmed) {
+            Some(title) if !title.trim().is_empty() => cap_note(title.trim()),
+            _ => format!("diagram renderer returned HTTP {status}"),
+        };
+    }
+    cap_note(trimmed)
+}
+
+/// Apply the shared note length cap.
+fn cap_note(s: &str) -> String {
+    s.chars().take(ERROR_NOTE_MAX_CHARS).collect()
+}
+
+/// Contents of the first `<title>…</title>` element, matched
+/// ASCII-case-insensitively, or `None` when no complete title exists.
+///
+/// Searches the BYTES rather than a lowercased copy: `str::to_lowercase` can
+/// change a string's byte length, which would desynchronise the offsets and
+/// slice mid-character. Offsets here are only ever taken at ASCII tag
+/// boundaries, so the returned slice is always on `char` boundaries.
+fn html_title(s: &str) -> Option<&str> {
+    const OPEN: &[u8] = b"<title>";
+    const CLOSE: &[u8] = b"</title>";
+    let b = s.as_bytes();
+    let find_tag = |from: usize, tag: &[u8]| -> Option<usize> {
+        let last = b.len().checked_sub(tag.len())?;
+        (from..=last).find(|&i| b[i..i + tag.len()].eq_ignore_ascii_case(tag))
+    };
+    let start = find_tag(0, OPEN)? + OPEN.len();
+    let end = find_tag(start, CLOSE)?;
+    s.get(start..end)
 }
 
 /// Pure: given a pre-validation outcome, the fence's position, and its
