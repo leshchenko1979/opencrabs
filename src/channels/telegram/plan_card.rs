@@ -469,7 +469,10 @@ pub(crate) async fn handle_edit_failure(
         // A 429 learned here is a process-wide fact, not a per-card one: the
         // server is throttling this bot, and every other chat is about to hit
         // the same wall. Suppressing card writes locally teaches them nothing.
-        super::rate_limit::record_global_429(wait, Some(chat.0));
+        // #635 step 4: route through the governor's ONE entry point for "a 429
+        // happened" instead of writing the cooldown directly, so the process-wide
+        // deadline and the per-chat pause are armed by the same call.
+        super::governor::note_429_pause(chat, wait);
         tracing::warn!(
             "Telegram plan card edit throttled for session {session_id}: {error} — \
              pausing card writes for {}s",
@@ -565,7 +568,8 @@ pub(crate) async fn handle_create_failure(
         // Same as the edit path: record it globally before suppressing locally.
         // #556: the creating chat names the throttle — without it a 429 line
         // cannot be attributed to a chat after the fact.
-        super::rate_limit::record_global_429(wait, Some(chat.0));
+        // #635 step 4: same one entry point as the edit path above.
+        super::governor::note_429_pause(chat, wait);
         tracing::warn!(
             "Telegram plan card create throttled for session {session_id}: {error} — \
              pausing card writes for {}s",
