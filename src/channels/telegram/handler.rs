@@ -408,6 +408,155 @@ pub(crate) fn is_split_candidate(text: &str) -> bool {
     text.encode_utf16().count() >= TELEGRAM_TEXT_LIMIT - SPLIT_MARGIN
 }
 
+/// #572 — a closed forum topic must retire the lane bound to it.
+///
+/// Telegram delivers topic lifecycle as service messages. Verified against the
+/// pinned teloxide-core 0.13.0, the accessors on `Message` are exactly
+/// `forum_topic_created` / `forum_topic_edited` / `forum_topic_closed` /
+/// `forum_topic_reopened` — there is **no `forum_topic_deleted` anywhere in the
+/// crate** (0 files), so a deleted topic produces no inbound event at all and
+/// can only be recovered by the boot probe (task 5). Deletion is therefore
+/// absent from this helper by nature, not by omission.
+///
+/// Before this, `forum_topic_closed` arrived, was parsed, and was handled by
+/// nobody: the `session_bindings` row survived forever, so the dead topic kept
+/// resolving to a live session. That table's whole write surface is 2 INSERTs
+/// and 4 UPDATEs with **no DELETE**, which is how the row outlived its topic —
+/// by design of omission.
+///
+/// Returns `true` when `msg` was a teardown event, meaning the caller must
+/// stop: there is nothing to answer in a topic that no longer takes traffic.
+///
+/// Ordered deliberately BEFORE the `msg.from` extraction in `handle_message`.
+/// A service message is authored by whoever performed the action, and an
+/// anonymous group admin yields no `from` at all — placing this after that
+/// early return would let the least visible closures fall through the very
+/// crack this closes.
+///
+/// The event is stripped to primitives here and the work lives in
+/// [`apply_topic_teardown`]: a faithful teloxide `Message` fixture would drag
+/// in `ChatPublic`/`PublicChatKind`/`ChatGroup` to test nothing about the
+/// teardown, while the core is fully testable over an in-memory DB. The
+/// Message→core mapping below is what task 7's live probe exercises.
+async fn handle_topic_teardown(
+    msg: &Message,
+    channel_msg_repo: &ChannelMessageRepository,
+    session_binding_repo: &SessionBindingRepository,
+    session_svc: &SessionService,
+) -> bool {
+    let closed = msg.forum_topic_closed().is_some();
+    if !closed && msg.forum_topic_reopened().is_none() {
+        return false;
+    }
+    let Some(tid) = msg.thread_id else {
+        // A topic event carrying no thread names no topic we could have bound.
+        return false;
+    };
+    apply_topic_teardown(
+        closed,
+        msg.chat.id.0,
+        tid.0.0,
+        msg.id.0,
+        msg.from.as_ref().map(|u| u.id.0),
+        msg.from.as_ref().map(|u| u.first_name.as_str()),
+        channel_msg_repo,
+        session_binding_repo,
+        session_svc,
+    )
+    .await;
+    true
+}
+
+/// The teardown itself, over primitives so the DB effects are testable
+/// directly (#572). `closed` selects the leg: a closure records the fact,
+/// deletes the topic's binding row and retires the session it named; a
+/// reopen records the fact and touches no binding at all.
+///
+/// The parameter count is the point — this signature IS the primitive boundary
+/// that makes the teardown testable without fabricating a teloxide `Message`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_topic_teardown(
+    closed: bool,
+    chat_id: i64,
+    thread: i32,
+    msg_id: i32,
+    actor_id: Option<u64>,
+    actor_name: Option<&str>,
+    channel_msg_repo: &ChannelMessageRepository,
+    session_binding_repo: &SessionBindingRepository,
+    session_svc: &SessionService,
+) {
+    let (event, message_type) = if closed {
+        ("closed", "topic_closed")
+    } else {
+        ("reopened", "topic_reopened")
+    };
+
+    // Record the fact BEFORE the row is deleted. Once the binding is gone,
+    // this store is the only durable evidence that the topic existed and when
+    // it died — and boot reconciliation (task 5) reads these rows ahead of any
+    // probe, so a fact written here is a probe not owed.
+    let row = DbChannelMessage::new(
+        "telegram".into(),
+        chat_id.to_string(),
+        None,
+        actor_id.map(|id| id.to_string()).unwrap_or_default(),
+        actor_name.unwrap_or_default().to_string(),
+        format!("topic {event}"),
+        message_type.into(),
+        Some(msg_id.to_string()),
+    )
+    .with_thread(Some(thread.to_string()), None);
+    if let Err(e) = channel_msg_repo.insert(&row).await {
+        tracing::warn!("Failed to persist forum topic {event} fact: {e}");
+    }
+
+    if !closed {
+        // A reopen revives the topic; nothing is torn down. That is the
+        // assertion the reopen leg of the teardown test makes.
+        tracing::info!(
+            "Telegram: forum topic {thread} in chat {chat_id} reopened — no binding touched"
+        );
+        return;
+    }
+
+    // Resolve the bound session BEFORE the delete: afterwards the row naming
+    // it is gone, and a session with no binding is unreachable.
+    let bound = session_binding_repo
+        .find_by_channel_chat_thread("telegram", &chat_id.to_string(), Some(thread))
+        .await
+        .ok()
+        .flatten()
+        .map(|b| b.session_id);
+
+    match session_binding_repo
+        .delete_by_channel_chat_thread("telegram", &chat_id.to_string(), Some(thread))
+        .await
+    {
+        Ok(n) => tracing::info!(
+            "Telegram: forum topic {thread} in chat {chat_id} closed — removed {n} binding row(s)"
+        ),
+        Err(e) => tracing::warn!(
+            "Telegram: failed to remove binding of closed topic {thread} in chat {chat_id}: {e}"
+        ),
+    }
+
+    if let Some(sid) = bound {
+        match Uuid::parse_str(&sid) {
+            Ok(uuid) => {
+                if let Err(e) = session_svc.archive_session(uuid).await {
+                    tracing::warn!(
+                        "Telegram: failed to retire session {uuid} of closed topic {thread}: {e}"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                "Telegram: session {sid} bound to closed topic {thread} is not a uuid: {e}"
+            ),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_message(
     bot: Bot,
@@ -419,7 +568,7 @@ pub(crate) async fn handle_message(
     telegram_state: Arc<TelegramState>,
     config_rx: tokio::sync::watch::Receiver<Config>,
     channel_msg_repo: ChannelMessageRepository,
-    _session_binding_repo: SessionBindingRepository,
+    session_binding_repo: SessionBindingRepository,
 ) -> ResponseResult<()> {
     // #522: any inbound message is fleet activity — it resets the memory
     // reclaim's AFK clock. Placed before EVERY early return, like
@@ -431,6 +580,24 @@ pub(crate) async fn handle_message(
     // No branch on chat type, sender, ACL, mention or `is_bot`: a peer bot
     // posting means the chat is live, and the safe direction is to defer.
     crate::brain::agent::service::session_routes::note_activity();
+
+    // #572: a topic closure tears down its lane here, ahead of every early
+    // return below. Skipped on purpose are the two caches further down —
+    // `note_incoming_msg` (#451, re-sticking a flow block buried by newer
+    // chatter) and `note_thread_evidence` (#1220, forum-ness). A closed topic
+    // has no live flow block to bury, and its forum-ness is re-taught by the
+    // next real message in any of the chat's topics, so a reopen costs nothing
+    // by returning here.
+    if handle_topic_teardown(
+        &msg,
+        &channel_msg_repo,
+        &session_binding_repo,
+        &session_svc,
+    )
+    .await
+    {
+        return Ok(());
+    }
 
     let user = match msg.from {
         Some(ref u) => u,

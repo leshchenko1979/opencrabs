@@ -484,7 +484,7 @@ impl SessionBindingRepository {
             .map_err(interact_err)?
             .context("Failed to delete session binding by channel/chat_id/thread_id")?
     }
-/// Find a binding by channel, chat_id, and thread_id.
+    /// Find a binding by channel, chat_id, and thread_id.
     /// Returns the binding if found.
     pub async fn find_by_channel_chat_thread(
         &self,
