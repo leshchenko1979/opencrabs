@@ -7,6 +7,61 @@ use crate::channels::telegram::ephemeral::{build_body, build_rich_body, receiver
 use teloxide::types::{MessageId, ThreadId};
 
 #[test]
+fn outcome_carries_a_declared_refusal_distinct_from_rejection() {
+    // #635 — the structural half of step 3. A throttle is not the server
+    // stating an opinion, so the refusal must be its own variant: folding it
+    // into Rejected is what would cache a busy minute as a capability verdict.
+    let src = include_str!("../channels/telegram/ephemeral.rs");
+    assert!(
+        src.contains("Deferred,"),
+        "Outcome must carry a Deferred variant"
+    );
+    assert!(
+        !src.contains("tokio::time::sleep(retry_after)"),
+        "the raw ungated sleep must be gone - it slept without a permit and \
+         without arming the cooldown every other path obeys"
+    );
+    assert!(
+        src.contains("wait_out(method, retry_after"),
+        "the 429 must go through the shared bounded policy"
+    );
+    assert!(
+        src.contains("acquire_global_permit()"),
+        "the ephemeral path must reach a permit"
+    );
+    // The Deferred arm must not be folded into the capability cache.
+    assert!(
+        !src.contains("Outcome::Deferred => {\n            RICH_SCOPING"),
+        "a deferred send must never be cached as RICH_UNSUPPORTED"
+    );
+}
+
+#[test]
+fn a_deferred_ephemeral_send_falls_back_to_public_rather_than_dropping() {
+    // #635 step 3's done-when: a CooldownActive refusal on the ephemeral path
+    // must produce a public send, not a dropped message. Two halves hold that,
+    // and either alone would not: the mapping `Deferred => false` (the same
+    // value Transport returns) AND the caller's existing fall-through to the
+    // public HTML path. So both are pinned here.
+    let ephemeral = include_str!("../channels/telegram/ephemeral.rs");
+    let caller = include_str!("../channels/telegram/commands_tg.rs");
+    assert!(
+        ephemeral.contains("Outcome::Deferred => false,"),
+        "Deferred must map to false - the value the caller already treats as \
+         'not delivered, fall through'"
+    );
+    assert!(
+        caller.contains("try_send_rich("),
+        "the caller must still consult try_send_rich"
+    );
+    assert!(
+        caller.contains("send_html_chunks("),
+        "the caller must keep the public HTML fallback that a false return \
+         reaches - without it a deferred send would be dropped"
+    );
+}
+
+#[test]
 fn dm_never_scopes_a_reply() {
     // A DM has nobody to hide the reply from, and asking for an untested
     // parameter there would risk the one path that already works.
