@@ -393,3 +393,63 @@ mod filter_duplicate_append {
         assert!(matches!(result, AppendDedup::AllNew));
     }
 }
+
+/// The pre-image scheme's two new rules (#539): which paths it covers, and how
+/// large a file it will copy. Both are pure predicates so they can be pinned
+/// without touching a real home.
+mod home_predicate {
+    use super::*;
+    use crate::brain::tools::brain_file_safety::{
+        PRE_IMAGE_MAX_BYTES, is_snapshottable_size, is_under_home,
+    };
+    use crate::config::profile::with_home_override;
+    use tempfile::TempDir;
+
+    #[test]
+    fn path_under_an_overridden_home_is_under_home() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        with_home_override(home.clone(), || {
+            assert!(is_under_home(&home), "the home itself is under the home");
+            assert!(is_under_home(&home.join("AGENTS.md")));
+            assert!(is_under_home(&home.join("memory").join("2026-09-27.md")));
+        });
+    }
+
+    #[test]
+    fn path_outside_the_home_is_not_under_home() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        with_home_override(home, || {
+            assert!(!is_under_home(Path::new("/tmp/notes.md")));
+            assert!(!is_under_home(Path::new("/etc/hosts")));
+            // Component-wise, not a string prefix: a SIBLING directory whose
+            // name merely starts with the home's name is not inside it.
+            assert!(!is_under_home(&temp.path().join("home-evil").join("notes.md")));
+        });
+    }
+
+    #[test]
+    fn size_cap_boundary_is_pinned() {
+        let cap = PRE_IMAGE_MAX_BYTES;
+        assert!(is_snapshottable_size(cap - 1));
+        assert!(
+            is_snapshottable_size(cap),
+            "a file exactly at the cap is covered (`<=`)"
+        );
+        assert!(
+            !is_snapshottable_size(cap + 1),
+            "one byte over the cap is excluded"
+        );
+    }
+
+    #[test]
+    fn size_cap_separates_documents_from_stores() {
+        // The largest hand-edited document measured stays covered; every
+        // multi-gigabyte object under the home is excluded.
+        assert!(is_snapshottable_size(9_333_669), "largest document measured");
+        assert!(!is_snapshottable_size(184_529_533), "dated log file");
+        assert!(!is_snapshottable_size(490_127_360), "memory/memory.db");
+        assert!(!is_snapshottable_size(2_200_309_760), "opencrabs.db");
+    }
+}

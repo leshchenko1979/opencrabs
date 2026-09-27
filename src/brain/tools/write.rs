@@ -209,8 +209,10 @@ impl Tool for WriteTool {
         let write_lock = super::path_lock::acquire(&path);
         let contended = write_lock.as_ref().is_some_and(|l| !l.is_held());
 
-        // Write the file
-        super::fs_util::atomic_write_file(&path, input.content.as_bytes()).await?;
+        // Write the file. The pre-image outcome is kept so a snapshot skipped
+        // under the home can be reported instead of passing silently (#539).
+        let pre_image =
+            super::fs_util::atomic_write_file(&path, input.content.as_bytes()).await?;
         drop(write_lock);
 
         // The session now knows the file as what it just wrote, so its next
@@ -238,6 +240,11 @@ impl Tool for WriteTool {
         // An overlapping write is reported rather than swallowed.
         if contended {
             message.push_str(&super::path_lock::contention_notice(&path));
+        }
+        // A pre-image that was due and skipped is reported on the same terms
+        // (#539): the absence of a revert path must not pass silently.
+        if let Some(note) = pre_image.note() {
+            message.push_str(&note);
         }
 
         Ok(ToolResult::success(message)

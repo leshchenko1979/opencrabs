@@ -361,8 +361,10 @@ impl Tool for EditTool {
         }
 
         // Write modified content. The path lock was taken above, before the
-        // read, and is still held here (#593).
-        super::fs_util::atomic_write_file(&path, new_content.as_bytes()).await?;
+        // read, and is still held here (#593). The pre-image outcome is kept so
+        // a snapshot skipped under the home is reported, not silent (#539).
+        let pre_image =
+            super::fs_util::atomic_write_file(&path, new_content.as_bytes()).await?;
         drop(write_lock);
 
         // Track file in session (fire and forget, path-only)
@@ -389,6 +391,11 @@ impl Tool for EditTool {
         // neither writer's intent, and only the caller can decide what to do.
         if contended {
             output.push_str(&super::path_lock::contention_notice(&path));
+        }
+        // A pre-image that was due and skipped is reported on the same terms
+        // (#539): the absence of a revert path must not pass silently.
+        if let Some(note) = pre_image.note() {
+            output.push_str(&note);
         }
 
         Ok(ToolResult::success(output))

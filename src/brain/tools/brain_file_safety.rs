@@ -45,6 +45,42 @@ pub fn is_protected_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Largest existing file the generic write path will snapshot a pre-image of
+/// (#539).
+///
+/// The profile home is multi-gigabyte and holds objects that must never be
+/// copied: `opencrabs.db` at 2.2 GB, `memory/memory.db` at 490 MB, dated logs
+/// up to 185 MB, and `.git` pack files up to 50 MB. The largest hand-edited
+/// document measured is 9.3 MB (`memory/2026-09-20.md`). Since the pre-image
+/// scheme retains up to 5 copies per file, an unbounded leg would multiply a
+/// store by five — the disk leak AGENTS.md warns about. 16 MiB clears the
+/// largest document with margin and excludes every store, log and pack by a
+/// wide margin. The number is a heuristic: a larger file is skipped, and the
+/// skip is reported to the caller rather than passing silently.
+pub const PRE_IMAGE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// True if a file of `len` bytes is small enough to snapshot a pre-image of.
+///
+/// Boundary: a file exactly at the cap **is** snapshotted (`<=`), so the cap
+/// names the largest covered file rather than the first excluded one.
+pub fn is_snapshottable_size(len: u64) -> bool {
+    len <= PRE_IMAGE_MAX_BYTES
+}
+
+/// True if `path` lies under the active profile home.
+///
+/// Component-wise, so `/home/x/.opencrabs-evil/notes.md` is **not** under
+/// `/home/x/.opencrabs`. Deliberately not canonicalised: this decides where the
+/// pre-image convenience applies, not whether a write is allowed — a symlink
+/// pointing out of the home simply means no pre-image is taken, which is the
+/// behaviour that shipped before #539.
+pub fn is_under_home(path: &Path) -> bool {
+    // `resolve_profile_home`, not `opencrabs_home`: the latter creates the
+    // directory when missing, and a predicate that asks "is this path inside
+    // the home" must not have that side effect on every generic write.
+    path.starts_with(crate::config::profile::resolve_profile_home())
+}
+
 /// Snapshot `path` to `<path>.YYYY-MM-DDTHHMMSS.bak` before a mutation
 /// happens. No-op when `path` doesn't exist yet (nothing to back up).
 /// Returns the backup path on success.

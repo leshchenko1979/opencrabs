@@ -179,10 +179,13 @@ impl Tool for HashlineEditTool {
             new_content
         };
 
-        // Write
-        fs::write(&path, &new_content)
-            .await
-            .map_err(ToolError::Io)?;
+        // Write through the shared chokepoint, so all three generic tools carry
+        // one atomic-rename rule and one pre-image rule (#539). The raw tokio
+        // write that stood here was the third silent path: it neither renamed
+        // atomically nor left a pre-image under the profile home.
+        let pre_image =
+            crate::brain::tools::fs_util::atomic_write_file(&path, new_content.as_bytes())
+                .await?;
         // Release the path lock taken before the read (#593).
         drop(write_lock);
 
@@ -209,6 +212,11 @@ impl Tool for HashlineEditTool {
         // neither writer's intent, and only the caller can decide (#593).
         if contended {
             output.push_str(&crate::brain::tools::path_lock::contention_notice(&path));
+        }
+        // A pre-image that was due and skipped is reported on the same terms
+        // (#539): the absence of a revert path must not pass silently.
+        if let Some(note) = pre_image.note() {
+            output.push_str(&note);
         }
 
         Ok(ToolResult::success(output))

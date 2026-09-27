@@ -573,6 +573,7 @@ pub mod file_extract_test;
 pub mod force_default_test;
 pub mod handshake_timeout_test;
 pub mod hashline_test;
+pub mod home_pre_image_test;
 pub mod image_util_test;
 pub mod incident_log_dedup_test;
 pub mod provider_complete_retry_notice_test;
