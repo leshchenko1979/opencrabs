@@ -238,3 +238,116 @@ fn test_format_context_inventory_with_auxiliary() {
     assert!(table.contains("| `opencrabs-dev` | Skill |"));
     assert!(table.contains("| `opencrabs-dev/editor.md` | Skill aux |"));
 }
+
+// ---------------------------------------------------------------------
+// Issue #499 — the continuation document's section 0 carries an explicit
+// obligation status on its FIRST line, so a compaction can never present
+// a completed obligation as the live task.
+// ---------------------------------------------------------------------
+
+/// The section-0 spec is prose handed to the summariser model — there is
+/// no Rust generator to call, so the production artifact IS the spec text
+/// in `context.rs`. Asserting against a fixture this file builds would be
+/// a control arm that cannot fail (it would only restate its own input),
+/// so the status requirements are pinned on the real spec, house-style
+/// string sentinels: the wording may drift, the requirement may not.
+const CONTEXT_SRC: &str = include_str!("../brain/agent/service/context.rs");
+
+/// Section 0 must demand an explicit status on its FIRST LINE, naming all
+/// three tokens. A token the spec never names is a status the summariser
+/// cannot write.
+#[test]
+fn section_0_spec_requires_the_status_on_its_first_line() {
+    assert!(
+        CONTEXT_SRC.contains("FIRST LINE OF THIS SECTION"),
+        "section 0 must place the status on its first line"
+    );
+    for status in ["OPEN", "DONE", "UNKNOWN"] {
+        assert!(
+            CONTEXT_SRC.contains(&format!("**Obligation status: {status}**")),
+            "the spec must name the {status} token or the summariser cannot emit it"
+        );
+    }
+}
+
+/// The DONE branch must forbid restating the finished obligation as a
+/// directive — that re-blessing is the defect. The `CONTINUE THIS TASK`
+/// format must therefore be scoped to OPEN, never offered unconditionally.
+#[test]
+fn done_branch_forbids_restating_the_obligation_as_a_directive() {
+    let spec = CONTEXT_SRC;
+    let open_at = spec.find("- OPEN ").expect("the OPEN branch must exist");
+    let done_at = spec.find("- DONE ").expect("the DONE branch must exist");
+    let unknown_at = spec
+        .find("- UNKNOWN ")
+        .expect("the UNKNOWN branch must exist");
+    assert!(
+        open_at < done_at && done_at < unknown_at,
+        "the three status branches must appear in OPEN, DONE, UNKNOWN order"
+    );
+    let open_arm = &spec[open_at..done_at];
+    let done_arm = &spec[done_at..unknown_at];
+
+    // The DONE branch must forbid the re-blessing this issue is about.
+    assert!(
+        done_arm.contains("Do NOT restate the completed obligation as a directive"),
+        "the DONE branch must forbid the re-blessing this issue is about: {done_arm}"
+    );
+    // The defect in one assertion: a DONE obligation must NOT carry the
+    // continue directive, and must not be told to write one. Slice the arm
+    // on its own branch markers: the source separates branches with a
+    // line-continuation, so a bare newline search would return the whole
+    // file and the assertion would test nothing.
+    assert!(
+        !done_arm.contains("CONTINUE THIS TASK"),
+        "a DONE obligation must NOT carry the continue directive: {done_arm}"
+    );
+    assert!(
+        !done_arm.contains("Write the DIRECTIVE"),
+        "a DONE obligation must NOT be told to write a directive: {done_arm}"
+    );
+    // ...and the directive is scoped to OPEN, the one branch still owed.
+    assert!(
+        open_arm.contains("Write the DIRECTIVE exactly as specified below"),
+        "the directive must be scoped to the OPEN branch: {open_arm}"
+    );
+}
+
+/// A carried-forward status is the defect wearing a new coat: the summary
+/// would still be blessing yesterday's obligation. The spec must demand the
+/// status be derived from section 1's completion evidence, not inherited.
+#[test]
+fn status_must_be_derived_not_carried_forward() {
+    assert!(
+        CONTEXT_SRC.contains("do NOT carry a status forward from an earlier summary"),
+        "the status must be re-derived every compaction, never inherited"
+    );
+    assert!(
+        CONTEXT_SRC.contains("completion evidence you record in section 1"),
+        "the status must key off section 1's own completion field"
+    );
+}
+
+/// Behavioral half: a section 0 that carries the status line must not break
+/// manifest parsing — the status is inserted ahead of the fenced block, so a
+/// parser that keys on section offsets would silently lose the manifest.
+#[test]
+fn a_status_bearing_section_0_still_parses_its_manifest() {
+    for status in ["OPEN", "DONE", "UNKNOWN"] {
+        let doc = format!(
+            "## 0. IMMEDIATE TASK (CRITICAL — MOST IMPORTANT SECTION)\n\
+             **Obligation status: {status}**\n\
+             body text\n\n\
+             ## 10. Context Manifest\n\
+             ```context-manifest\n\
+             active_skills:\n  - opencrabs-dev\n\
+             ```\n"
+        );
+        let m = parse_context_manifest(&doc)
+            .unwrap_or_else(|| panic!("status={status}: the status line broke manifest parsing"));
+        assert!(
+            m.active_skills.iter().any(|s| s.contains("opencrabs-dev")),
+            "status={status}: manifest content must survive intact"
+        );
+    }
+}

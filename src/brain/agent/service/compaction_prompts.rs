@@ -100,6 +100,9 @@ pub fn build_continuation(
     } else {
         fun_body(kind).to_string()
     };
+    // Issue #499: section 0 carries an explicit status; every body
+    // defers to it, so a finished obligation is never re-blessed.
+    text.push_str(OBLIGATION_STATUS_RULE);
     // Session-recovery hint: applies to ALL variants (fun + silent).
     // Branches on plan state; the coding-standards hint rides along.
     match plan_recovery {
@@ -141,6 +144,26 @@ pub fn build_continuation(
     text
 }
 
+/// Status gate for the continuation document's section 0.
+///
+/// Issue #499: a continuation document re-blessed a COMPLETED task as the
+/// critical immediate task across five compactions, because section 0 was
+/// carried near-verbatim and every body told the model to continue it
+/// unconditionally. Section 0 now opens with an explicit status line, and
+/// every body defers to it. Appended to ALL variants (fun + silent, all 5
+/// kinds) like the session-recovery hint, so no body can re-bless a
+/// finished task.
+const OBLIGATION_STATUS_RULE: &str = "\n\nOBLIGATION STATUS (section 0 of the summary): section 0 opens with a status \
+     line reading 'Obligation status: OPEN|DONE|UNKNOWN'. Read it BEFORE acting:\n\
+     - OPEN - the obligation is genuinely unfinished: resume it exactly where it left off.\n\
+     - DONE - the obligation is finished (section 0 says so, and the work is committed, \
+     shipped or verified): do NOT redo it, do NOT re-run its steps. Say what remains; if \
+     nothing does, report completion and stop.\n\
+     - UNKNOWN - the status is missing, or section 0 disagrees with the rest of the \
+     document: resolve it against the live artifact (git state, files, tests) BEFORE \
+     acting, and never treat an unresolved obligation as a critical directive.\n\
+     An absent status line means UNKNOWN, never OPEN.";
+
 fn fun_body(kind: CompactionKind) -> &'static str {
     match kind {
         CompactionKind::Regular => {
@@ -155,7 +178,7 @@ fn fun_body(kind: CompactionKind) -> &'static str {
              query to recover the details.\n\
              3. If you need specific brain context, selectively load ONLY the relevant \
              brain file (e.g. TOOLS.md, SOUL.md, USER.md). NEVER use name=\"all\".\n\
-             4. IMMEDIATELY continue the task described in the \"IMMEDIATE TASK\" section \
+             4. If the Obligation status is OPEN, IMMEDIATELY continue the task described in the \"IMMEDIATE TASK\" section \
              of the compaction summary. This is NOT optional — you MUST pick up exactly \
              where you left off. Do NOT start a new topic. Do NOT ask what to do next. \
              Do NOT deviate to unrelated work. If the IMMEDIATE TASK section says \
@@ -167,7 +190,7 @@ fn fun_body(kind: CompactionKind) -> &'static str {
              1. Review the summary and snapshot to understand current task state.\n\
              2. Use `session_search` with keywords from the summary if you need older \
              context not in the snapshot.\n\
-             3. IMMEDIATELY continue the task described in the \"IMMEDIATE TASK\" section \
+             3. If the Obligation status is OPEN, IMMEDIATELY continue the task described in the \"IMMEDIATE TASK\" section \
              of the compaction summary. This is NOT optional — you MUST pick up exactly \
              where you left off. Do NOT start a new topic. Do NOT ask what to do next. \
              Do NOT deviate to unrelated work.]"
@@ -178,7 +201,7 @@ fn fun_body(kind: CompactionKind) -> &'static str {
              1. Review the summary to understand where you left off.\n\
              2. Use `session_search` with keywords if you need older context.\n\
              3. Briefly acknowledge the compaction with a fun/cheeky remark, \
-             then resume the task. Do NOT repeat completed work.]"
+             then resume it only if its Obligation status is OPEN; if it is DONE, do not redo it.]"
         }
         CompactionKind::PostTool => {
             "[SYSTEM: Mid-loop context compaction complete. The summary above has \
@@ -186,14 +209,14 @@ fn fun_body(kind: CompactionKind) -> &'static str {
              1. Review the summary to understand current task state.\n\
              2. Use `session_search` with keywords if you need older context.\n\
              Briefly acknowledge the compaction to the user with a fun/cheeky remark (be \
-             creative, surprise them — cursing allowed), then IMMEDIATELY continue the task \
+             creative, surprise them — cursing allowed), then - if the Obligation status is OPEN - IMMEDIATELY continue the task \
              described in the \"IMMEDIATE TASK\" section of the compaction summary. \
              Do NOT start a new topic. Do NOT deviate to unrelated work. \
              Do NOT re-do completed work.]"
         }
         CompactionKind::Manual => {
             "[SYSTEM: Context was manually compacted. The summary above is your memory of \
-             everything before this point. Resume the IMMEDIATE TASK from the summary. \
+             everything before this point. Resume the IMMEDIATE TASK from the summary, but only if its Obligation status is OPEN; if it is DONE, do not redo it and say what remains. \
              Do NOT acknowledge the compaction to the user — they already know.]"
         }
     }
@@ -204,7 +227,7 @@ fn silent_body(kind: CompactionKind) -> &'static str {
         CompactionKind::Regular => {
             "[SYSTEM: Context was auto-compacted. The summary above includes a snapshot \
              of recent messages before compaction.\n\n\
-             Silently continue the IMMEDIATE TASK from the summary as if nothing happened. \
+             Silently continue the IMMEDIATE TASK from the summary as if nothing happened, but only while its Obligation status is OPEN; if it is DONE, do not redo it and move to what remains. \
              Do NOT announce, narrate, apologise for, or acknowledge the compaction. The \
              user does not know it happened and does not need to. Any file you were about \
              to read or edit can simply be re-read on the next tool call — that's normal, \
@@ -219,7 +242,7 @@ fn silent_body(kind: CompactionKind) -> &'static str {
         CompactionKind::MidLoop => {
             "[SYSTEM: Context was auto-compacted mid-loop. The summary above includes \
              a snapshot of recent messages.\n\n\
-             Silently continue the IMMEDIATE TASK exactly where you left off. Do NOT \
+             Silently continue the IMMEDIATE TASK exactly where you left off, but only while its Obligation status is OPEN; if it is DONE, do not redo it. Do NOT \
              announce or narrate the compaction. Any file you were mid-edit on can be \
              silently re-read on the next tool call — that's normal, not worth \
              mentioning. Do NOT restart, ask what to do, or deviate.\n\n\
@@ -229,7 +252,7 @@ fn silent_body(kind: CompactionKind) -> &'static str {
         CompactionKind::Emergency => {
             "[SYSTEM: Emergency compaction — the prompt was too large and got \
              compacted. The summary above contains the recovered state.\n\n\
-             Silently resume from the IMMEDIATE TASK in the summary. Do NOT \
+             Silently resume from the IMMEDIATE TASK in the summary, but only if its Obligation status is OPEN; if it is DONE, do not redo it. Do NOT \
              acknowledge or apologise for the compaction — the user does not \
              know it happened. Re-read any file you were mid-edit on without \
              narrating it. Do NOT repeat completed work.\n\n\
@@ -242,14 +265,14 @@ fn silent_body(kind: CompactionKind) -> &'static str {
         CompactionKind::PostTool => {
             "[SYSTEM: Mid-loop context compaction complete. The summary above has \
              full context of everything done so far.\n\n\
-             Silently continue the IMMEDIATE TASK from the summary. Do NOT announce \
+             Silently continue the IMMEDIATE TASK from the summary, but only while its Obligation status is OPEN. Do NOT announce \
              or narrate the compaction. Do NOT start a new topic. Do NOT deviate to \
              unrelated work. Do NOT re-do completed work.\n\n\
              Use `session_search` with keywords if you need older context.]"
         }
         CompactionKind::Manual => {
             "[SYSTEM: Context was manually compacted. Silently resume the IMMEDIATE \
-             TASK from the summary. Do not acknowledge the compaction — the user \
+             TASK from the summary, but only while its Obligation status is OPEN. Do not acknowledge the compaction — the user \
              triggered it intentionally and already sees the confirmation.]"
         }
     }
