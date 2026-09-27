@@ -239,3 +239,138 @@ async fn session_binding_by_session_returns_an_archived_sessions_binding() {
     )
     .await;
 }
+/// Test delete_by_channel_chat_thread deletes the correct row.
+#[tokio::test]
+async fn test_delete_by_channel_chat_thread_deletes_correct_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    with_home_override_async(
+        dir.path().to_path_buf(),
+        async {
+            let db = test_db().await;
+            let sid = Uuid::new_v4();
+            create_session(&db, sid, false).await;
+            // Insert a binding
+            SessionBindingRepository::new(db.pool().clone())
+                .upsert(sid.to_string(), "telegram", "-1003936827469", Some(42), BindingOrigin::Text)
+                .await
+                .expect("upsert binding");
+            // Verify it exists
+            let repo = SessionBindingRepository::new(db.pool().clone());
+            let bound = repo.by_session(&sid.to_string()).await.expect("by_session read").expect("binding exists");
+            assert_eq!(bound.chat_id, "-1003936827469");
+            assert_eq!(bound.thread_id, Some(42));
+            // Delete by channel/chat_id/thread_id
+            let deleted = repo.delete_by_channel_chat_thread("telegram", "-1003936827469", Some(42)).await.expect("delete");
+            assert_eq!(deleted, 1, "expected one row deleted");
+            // Verify it's gone
+            let none = repo.by_session(&sid.to_string()).await.expect("by_session read");
+            assert!(none.is_none(), "binding should be deleted");
+        },
+    )
+    .await;
+
+/// Test upsert evicts previous binding for same (channel, chat_id, thread_id).
+#[tokio::test]
+async fn test_upsert_evicts_previous_binding_for_same_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    with_home_override_async(
+        dir.path().to_path_buf(),
+        async {
+            let db = test_db().await;
+            let sid1 = Uuid::new_v4();
+            let sid2 = Uuid::new_v4();
+            create_session(&db, sid1, false).await;
+            create_session(&db, sid2, false).await;
+            let repo = SessionBindingRepository::new(db.pool().clone());
+            // Insert first binding
+            repo.upsert(sid1.to_string(), "telegram", "-1003936827469", Some(42), BindingOrigin::Text)
+                .await
+                .expect("upsert sid1");
+            // Insert second binding for same key
+            repo.upsert(sid2.to_string(), "telegram", "-1003936827469", Some(42), BindingOrigin::Text)
+                .await
+                .expect("upsert sid2");
+            // Verify sid1 binding is gone
+            let none1 = repo.by_session(&sid1.to_string()).await.expect("by_session read");
+            assert!(none1.is_none(), "sid1 binding should be evicted");
+            // Verify sid2 binding exists with correct values
+            let bound2 = repo.by_session(&sid2.to_string()).await.expect("by_session read").expect("sid2 binding exists");
+            assert_eq!(bound2.chat_id, "-1003936827469");
+            assert_eq!(bound2.thread_id, Some(42));
+            assert_eq!(bound2.session_id, sid2.to_string());
+        },
+    )
+    .await;
+
+/// Test upsert does not delete binding for different chat_id (same session_id).
+#[tokio::test]
+async fn test_upsert_does_not_delete_different_chat_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    with_home_override_async(
+        dir.path().to_path_buf(),
+        async {
+            let db = test_db().await;
+            let sid = Uuid::new_v4();
+            create_session(&db, sid, false).await;
+            let repo = SessionBindingRepository::new(db.pool().clone());
+            // Insert binding for chat A, thread 42
+            repo.upsert(sid.to_string(), "telegram", "-1003936827469", Some(42), BindingOrigin::Text)
+                .await
+                .expect("upsert chat A");
+            // Insert binding for chat B, same thread (different chat_id)
+            repo.upsert(sid.to_string(), "telegram", "-1003889257179", Some(42), BindingOrigin::Text)
+                .await
+                .expect("upsert chat B");
+            // Verify both bindings exist (they have different chat_id, same session_id)
+            // Since by_session returns an arbitrary binding for the session, we need to check that a binding for chat A still exists.
+            // We'll do this by attempting to delete by channel/chat_id/thread_id for chat A and see if it deletes a row.
+            let deleted_a = repo.delete_by_channel_chat_thread("telegram", "-1003936827469", Some(42)).await.expect("delete chat A");
+            // After deleting chat A, the binding for chat B should still exist.
+            assert_eq!(deleted_a, 1, "expected one row deleted for chat A");
+            // Verify chat B binding still exists
+            let bound_b = repo.by_session(&sid.to_string()).await.expect("by_session read").expect("binding for chat B exists");
+            assert_eq!(bound_b.chat_id, "-1003889257179");
+            assert_eq!(bound_b.thread_id, Some(42));
+            // Now delete chat B binding
+            let deleted_b = repo.delete_by_channel_chat_thread("telegram", "-1003889257179", Some(42)).await.expect("delete chat B");
+            assert_eq!(deleted_b, 1, "expected one row deleted for chat B");
+            // Finally, no bindings should remain for this session
+            let none = repo.by_session(&sid.to_string()).await.expect("by_session read");
+            assert!(none.is_none(), "no bindings should remain");
+        },
+    )
+    .await;
+}
+/// Test find_by_channel_chat_thread returns correct binding or None.
+#[tokio::test]
+async fn test_find_by_channel_chat_thread() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    with_home_override_async(
+        dir.path().to_path_buf(),
+        async {
+            let db = test_db().await;
+            let sid = Uuid::new_v4();
+            create_session(&db, sid, false).await;
+            let repo = SessionBindingRepository::new(db.pool().clone());
+            // No binding yet
+            let none = repo.find_by_channel_chat_thread("telegram", "-1003936827469", Some(42)).await.expect("find");
+            assert!(none.is_none(), "expected no binding");
+            // Insert a binding
+            repo.upsert(sid.to_string(), "telegram", "-1003936827469", Some(42), BindingOrigin::Text)
+                .await
+                .expect("upsert");
+            // Find it
+            let bound = repo.find_by_channel_chat_thread("telegram", "-1003936827469", Some(42)).await.expect("find").expect("binding found");
+            assert_eq!(bound.chat_id, "-1003936827469");
+            assert_eq!(bound.thread_id, Some(42));
+            assert_eq!(bound.session_id, sid.to_string());
+            // Find non-existing thread
+            let none2 = repo.find_by_channel_chat_thread("telegram", "-1003936827469", Some(43)).await.expect("find");
+            assert!(none2.is_none(), "expected no binding for different thread");
+            // Find non-existing chat
+            let none3 = repo.find_by_channel_chat_thread("telegram", "-1003889257179", Some(42)).await.expect("find");
+            assert!(none3.is_none(), "expected no binding for different chat");
+        },
+    )
+    .await;
+}

@@ -143,6 +143,11 @@ impl SessionBindingRepository {
             .await
             .context("Failed to get connection")?
             .interact(move |conn| {
+                // Evict any existing binding for the same (channel, chat_id, thread_id)
+                conn.execute(
+                    "DELETE FROM session_bindings WHERE channel = ?1 AND chat_id = ?2 AND thread_id = ?3",
+                    params![ch, cid, thread_id],
+                )?;
                 if is_callback {
                     conn.execute(
                         "INSERT INTO session_bindings (session_id, channel, chat_id, thread_id, last_origin, turn_open_at) \
@@ -453,5 +458,56 @@ impl SessionBindingRepository {
             .map_err(interact_err)?
             .context("Failed to list recent session bindings")?;
         Ok(mapped)
+    }
+
+    /// Delete bindings by channel, chat_id, and thread_id.
+    /// Returns the number of rows deleted.
+    pub async fn delete_by_channel_chat_thread(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        thread_id: Option<i32>,
+    ) -> Result<usize> {
+        let ch = channel.to_string();
+        let cid = chat_id.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.execute(
+                    "DELETE FROM session_bindings WHERE channel = ?1 AND chat_id = ?2 AND thread_id IS ?3",
+                    params![ch, cid, thread_id],
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to delete session binding by channel/chat_id/thread_id")?
+    }
+/// Find a binding by channel, chat_id, and thread_id.
+    /// Returns the binding if found.
+    pub async fn find_by_channel_chat_thread(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        thread_id: Option<i32>,
+    ) -> Result<Option<SessionBinding>> {
+        let ch = channel.to_string();
+        let cid = chat_id.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.prepare(
+                    "SELECT {BINDING_COLUMNS} FROM session_bindings WHERE channel = ?1 AND chat_id = ?2 AND thread_id IS ?3",
+                )?
+                .query_map(params![ch, cid, thread_id], map_binding)?
+                .next()
+                .transpose()
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to find binding by channel/chat_id/thread_id")
     }
 }
