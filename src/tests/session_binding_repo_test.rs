@@ -351,41 +351,84 @@ async fn test_upsert_evicts_previous_binding_for_same_key_with_null_thread() {
     .await;
 }
 
-/// Test upsert does not delete binding for different chat_id (same session_id).
+/// The eviction is ROUTE-scoped: binding a second session into one chat must
+/// leave a third session's binding in a DIFFERENT chat untouched. The two legs
+/// above assert what must DISAPPEAR; this one asserts what must SURVIVE.
+///
+/// Two DISTINCT session ids, deliberately. An earlier revision of this test used
+/// ONE session across two chats and asserted two rows could coexist — which is
+/// impossible: `session_id` is the PRIMARY KEY and `upsert` carries
+/// `ON CONFLICT(session_id) DO UPDATE`, so the second call re-points the single
+/// row. That assertion measured the schema, not the eviction (CI run
+/// 36309971357: `expected one row deleted for chat A, left: 0`).
 #[tokio::test]
-async fn test_upsert_does_not_delete_different_chat_id() {
+async fn test_upsert_does_not_evict_a_binding_on_a_different_route() {
     let dir = tempfile::tempdir().expect("tempdir");
     with_home_override_async(
         dir.path().to_path_buf(),
         async {
             let db = test_db().await;
-            let sid = Uuid::new_v4();
-            create_session(&db, sid, false).await;
+            let sid1 = Uuid::new_v4();
+            let sid2 = Uuid::new_v4();
+            create_session(&db, sid1, false).await;
+            create_session(&db, sid2, false).await;
             let repo = SessionBindingRepository::new(db.pool().clone());
-            // Insert binding for chat A, thread 42
-            repo.upsert(sid.to_string(), "telegram", "-1003936827469", Some(42), BindingOrigin::Text)
+            // sid1 occupies chat A, thread 42.
+            repo.upsert(sid1.to_string(), "telegram", "-1003936827469", Some(42), BindingOrigin::Text)
                 .await
-                .expect("upsert chat A");
-            // Insert binding for chat B, same thread (different chat_id)
-            repo.upsert(sid.to_string(), "telegram", "-1003889257179", Some(42), BindingOrigin::Text)
+                .expect("upsert sid1 into chat A");
+            // sid2 binds a DIFFERENT route: chat B, same thread number.
+            repo.upsert(sid2.to_string(), "telegram", "-1003889257179", Some(42), BindingOrigin::Text)
                 .await
-                .expect("upsert chat B");
-            // Verify both bindings exist (they have different chat_id, same session_id)
-            // Since by_session returns an arbitrary binding for the session, we need to check that a binding for chat A still exists.
-            // We'll do this by attempting to delete by channel/chat_id/thread_id for chat A and see if it deletes a row.
-            let deleted_a = repo.delete_by_channel_chat_thread("telegram", "-1003936827469", Some(42)).await.expect("delete chat A");
-            // After deleting chat A, the binding for chat B should still exist.
-            assert_eq!(deleted_a, 1, "expected one row deleted for chat A");
-            // Verify chat B binding still exists
-            let bound_b = repo.by_session(&sid.to_string()).await.expect("by_session read").expect("binding for chat B exists");
-            assert_eq!(bound_b.chat_id, "-1003889257179");
-            assert_eq!(bound_b.thread_id, Some(42));
-            // Now delete chat B binding
-            let deleted_b = repo.delete_by_channel_chat_thread("telegram", "-1003889257179", Some(42)).await.expect("delete chat B");
-            assert_eq!(deleted_b, 1, "expected one row deleted for chat B");
-            // Finally, no bindings should remain for this session
-            let none = repo.by_session(&sid.to_string()).await.expect("by_session read");
-            assert!(none.is_none(), "no bindings should remain");
+                .expect("upsert sid2 into chat B");
+            // sid1's row must survive an upsert aimed at another route.
+            let bound1 = repo
+                .by_session(&sid1.to_string())
+                .await
+                .expect("by_session read")
+                .expect("sid1 binding must survive an upsert on a different route");
+            assert_eq!(bound1.chat_id, "-1003936827469");
+            assert_eq!(bound1.thread_id, Some(42));
+            let bound2 = repo
+                .by_session(&sid2.to_string())
+                .await
+                .expect("by_session read")
+                .expect("sid2 binding exists");
+            assert_eq!(bound2.chat_id, "-1003889257179");
+            // Now sid2 takes chat A's route: it evicts the occupant (sid1) and
+            // vacates chat B in the same move.
+            repo.upsert(sid2.to_string(), "telegram", "-1003936827469", Some(42), BindingOrigin::Text)
+                .await
+                .expect("upsert sid2 into chat A");
+            let none1 = repo.by_session(&sid1.to_string()).await.expect("by_session read");
+            assert!(none1.is_none(), "sid1 must be evicted from the route it held");
+            let moved2 = repo
+                .by_session(&sid2.to_string())
+                .await
+                .expect("by_session read")
+                .expect("sid2 binding exists");
+            assert_eq!(moved2.chat_id, "-1003936827469");
+            // Chat B is left with no occupant, read through the repository query
+            // the teardown path itself uses.
+            let vacated = repo
+                .find_by_channel_chat_thread("telegram", "-1003889257179", Some(42))
+                .await
+                .expect("find vacated route");
+            assert!(vacated.is_none(), "chat B must have no binding left");
+            let held = repo
+                .find_by_channel_chat_thread("telegram", "-1003936827469", Some(42))
+                .await
+                .expect("find held route")
+                .expect("chat A must still be bound");
+            assert_eq!(held.session_id, sid2.to_string());
+            // The teardown delete removes the route's occupant outright.
+            let deleted = repo
+                .delete_by_channel_chat_thread("telegram", "-1003936827469", Some(42))
+                .await
+                .expect("delete chat A");
+            assert_eq!(deleted, 1, "expected exactly the chat A row to be deleted");
+            let none2 = repo.by_session(&sid2.to_string()).await.expect("by_session read");
+            assert!(none2.is_none(), "no bindings should remain");
         },
     )
     .await;
