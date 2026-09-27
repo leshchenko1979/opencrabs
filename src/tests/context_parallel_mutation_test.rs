@@ -112,11 +112,15 @@ fn receipt_total_facts(receipt: &str) -> usize {
 ///
 /// Before the fix all three loaded the same baseline, the last save won, and two
 /// of three facts were gone while every call had already been handed a success
-/// receipt reporting the same stale count. Multi-threaded, and the legs are real
-/// `tokio::spawn`s rather than a `join!`, so they genuinely overlap: a `join!`
-/// polls every future on ONE task, where the lock's blocking wait cannot be
-/// driven to completion by the holder and each leg would time out and proceed
-/// unlocked — which would test nothing.
+/// receipt reporting the same stale count.
+///
+/// These legs are real `tokio::spawn`s on a multi-thread runtime, so each gets
+/// its own worker thread and a blocking wait cannot starve a sibling. That
+/// makes this the WEAKER of the two legs: it passed on the deployed build whose
+/// lock wait was still inline and still losing writes. The cooperative shape
+/// the daemon actually uses is covered by
+/// `parallel_mutations_all_persist_in_a_cooperative_batch` below — the leg that
+/// fails when the wait goes back inline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn parallel_mutations_all_persist() {
     let tp = TempProfile::new();
@@ -256,6 +260,84 @@ async fn a_contended_write_is_reported_not_swallowed() {
 
         drop(held);
         assert_eq!(facts_on_disk(sid).len(), 2);
+    })
+    .await;
+}
+
+/// The production scheduler: `parallel_tools.rs` drives a batch with
+/// `stream::iter(..).map(..).buffered(max_concurrent)`, which polls every
+/// future on ONE task.
+///
+/// The sibling leg above drives its legs on separate worker threads, so it
+/// cannot see a defect that only appears under cooperative scheduling — and
+/// the lock's wait IS such a defect: it is a blocking sleep, so on one task it
+/// stalls the sibling future holding the lock, the holder never finishes, and
+/// every waiter burns its full deadline and then proceeds unlocked.
+///
+/// Measured on the deployed `13342973e` (2026-09-27T00:19Z), which is why this
+/// leg exists: three mutations in one batch, all three read the same baseline
+/// and reported `Total facts: 4`, two facts lost, and the batch elapsed 1.72 s
+/// against a holder that could not progress. A regression to an inline wait
+/// fails here rather than in production.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn parallel_mutations_all_persist_in_a_cooperative_batch() {
+    use futures::StreamExt;
+
+    let tp = TempProfile::new();
+    tp.scoped(async {
+        let sid = Uuid::new_v4();
+
+        let seed = ContextTool
+            .execute(
+                serde_json::json!({ "operation": "add_fact", "fact": "SEED-BATCH" }),
+                &ToolExecutionContext::new(sid),
+            )
+            .await
+            .expect("seed add_fact");
+        assert!(seed.success, "seed failed: {:?}", seed.error);
+        assert_eq!(receipt_total_facts(&seed.output), 1);
+
+        const N: usize = 3;
+        // No barrier and no spawn: `buffered` polls all N futures in the first
+        // poll cycle, so their read-modify-write windows overlap by
+        // construction — the same way the daemon starts a batch.
+        let receipts: Vec<_> = futures::stream::iter(0..N)
+            .map(|i| async move {
+                ContextTool
+                    .execute(
+                        serde_json::json!({
+                            "operation": "add_fact",
+                            "fact": format!("BATCH-{i}"),
+                        }),
+                        &ToolExecutionContext::new(sid),
+                    )
+                    .await
+            })
+            .buffered(N)
+            .collect()
+            .await;
+
+        for r in &receipts {
+            let r = r.as_ref().expect("execute returned Err");
+            assert!(
+                r.success,
+                "a batched add_fact reported failure: {:?}",
+                r.error
+            );
+        }
+
+        let facts = facts_on_disk(sid);
+        assert_eq!(
+            facts.len(),
+            N + 1,
+            "{} of {N} batched mutations persisted (seed + winners = {:?})",
+            facts.len().saturating_sub(1),
+            facts
+        );
+        for i in 0..N {
+            let want = format!("BATCH-{i}");
+            assert!(facts.contains(&want), "{want} lost; store holds {facts:?}");
+        }
     })
     .await;
 }
