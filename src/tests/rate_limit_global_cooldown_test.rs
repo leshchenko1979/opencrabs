@@ -52,6 +52,12 @@ fn test_parse_retry_after_sees_the_structured_json_arm() {
         crate::channels::telegram::rate_limit::parse_retry_after_json(&missing),
         None
     );
+    // The TEXT arm through the same canonical parser, so ONE test pins both
+    // shapes and neither arm can regress behind the other's green.
+    assert_eq!(
+        parse_retry_after("Retry after 30"),
+        Some(Duration::from_secs(30))
+    );
     // A rendered error string is still not throttling on its own.
     assert_eq!(parse_retry_after("Other error"), None);
 }
