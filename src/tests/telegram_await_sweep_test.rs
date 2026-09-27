@@ -305,8 +305,15 @@ async fn an_await_on_another_channel_is_not_this_sweep_s_business() {
 
 // ------------------------------------------------------------- single flight
 
-#[test]
-fn a_second_pass_skips_while_the_first_holds_the_slot() {
+#[tokio::test]
+async fn a_second_pass_skips_while_the_first_holds_the_slot() {
+    // #531: the slot is process-global, so a sibling test mid-pass can hold it
+    // at the instant this one starts, reddening an unrelated lane's gate. Take
+    // the file guard first: `guard()` calls `leave()` on entry, so the slot is
+    // free by construction, and the four `run_once` callers above are excluded
+    // for the duration. The assertions below are unchanged — this fixes WHEN
+    // the test runs, not what it asserts.
+    let _g = guard().await;
     // Two passes over the same rows would select the same lane twice, and the
     // second selection would wake a lane the first one is already waking.
     assert!(try_enter(), "the slot must be free to begin with");

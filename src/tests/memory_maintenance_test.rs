@@ -14,6 +14,17 @@ use crate::services::maintenance::{
 use crate::services::session::SessionService;
 use tempfile::tempdir;
 
+/// #531: the single-flight flag is process-global, so a sibling test mid-sweep
+/// can hold the slot at the instant this one starts. Serialize the suite and
+/// release the slot on entry, so a test that failed while holding it cannot
+/// poison the rest.
+async fn guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let g = GUARD.lock().await;
+    leave();
+    g
+}
+
 #[tokio::test]
 async fn test_prune_expired_messages_via_session_service() {
     let db = Database::connect_in_memory().await.unwrap();
@@ -132,8 +143,12 @@ fn test_memory_gc_orphans() {
     assert!(!vacuumed);
 }
 
-#[test]
-fn test_maintenance_single_flight() {
+#[tokio::test]
+async fn test_maintenance_single_flight() {
+    // #531: take the file guard first. It releases the slot on entry, so the
+    // first assertion below is true by construction rather than by scheduler
+    // luck, and a sibling test cannot hold the slot across this test's start.
+    let _g = guard().await;
     assert!(try_enter());
     // Second entry fails while holding
     assert!(!try_enter());
@@ -148,8 +163,8 @@ fn test_maintenance_single_flight() {
     // reclaim ticker together. Dropping the permit must release the flag.
     //
     // These assertions live in THIS test rather than a second one on purpose:
-    // the flag is process-global, so two tests taking it would race under the
-    // parallel harness.
+    // they share one process-global flag, and (#531) the file guard now
+    // serializes this suite anyway, so a second test would buy nothing.
     let permit = enter_maintenance().expect("first permit");
     assert!(
         enter_maintenance().is_none(),

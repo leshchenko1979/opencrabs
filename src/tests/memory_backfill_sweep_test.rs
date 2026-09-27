@@ -13,6 +13,17 @@
 use crate::config::{EmbeddingConfig, MemoryConfig};
 use crate::memory::backfill_sweep::{interval_for, leave, try_enter};
 
+/// #531: the single-flight flag is process-global, so a sibling test mid-sweep
+/// can hold the slot at the instant this one starts. Serialize the suite and
+/// release the slot on entry, so a test that failed while holding it cannot
+/// poison the rest.
+async fn guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let g = GUARD.lock().await;
+    leave();
+    g
+}
+
 fn cfg(vector_enabled: bool, interval: u64) -> MemoryConfig {
     MemoryConfig {
         vector_enabled,
@@ -65,8 +76,12 @@ fn an_embedding_section_does_not_change_the_decision() {
     assert_eq!(interval_for(&with_api).map(|d| d.as_secs()), Some(120));
 }
 
-#[test]
-fn a_second_sweep_skips_while_the_first_holds_the_slot() {
+#[tokio::test]
+async fn a_second_sweep_skips_while_the_first_holds_the_slot() {
+    // #531: take the file guard first. It releases the slot on entry, so the
+    // assertion below is true by construction rather than by scheduler luck,
+    // and a sibling test cannot hold the slot across this test's start.
+    let _g = guard().await;
     // Not politeness. `freshness.rs` documents that llama-cpp GGML can segfault
     // under contention, and a sweep landing on a still-running one is exactly a
     // second embedder entering alongside the first.
