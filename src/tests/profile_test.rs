@@ -1601,6 +1601,72 @@ async fn current_profile_name_follows_the_task_local_scope() {
     );
 }
 
+/// `spawn_in_profile` re-enters BOTH task-local scopes inside the spawned task
+/// (#579). `tokio::spawn` does not inherit task-locals, so a leg spawned under
+/// `with_profile_home_async` silently resolves the REAL profile home — a
+/// fixture's seeded state becomes invisible and the failure reads as a product
+/// bug (that is how the #506 concurrency legs first failed in CI).
+///
+/// The second arm is the control: a bare spawn under the SAME scope must see
+/// neither override, which is the trap this helper exists to remove.
+#[tokio::test]
+async fn spawn_in_profile_scopes_home_and_name_inside_the_spawned_task() {
+    use crate::config::profile::{
+        current_profile_name, home_for_profile, profile_home_override, spawn_in_profile,
+        with_profile_home_async,
+    };
+
+    // A name that cannot collide with a real profile, and is never created:
+    // this test only derives paths.
+    const NAME: &str = "spawn-in-profile-579-probe";
+    let expect_home = home_for_profile(Some(NAME));
+    assert!(
+        !expect_home.exists(),
+        "precondition: {} must not exist",
+        expect_home.display()
+    );
+
+    // Arm 1 — through the helper, both scopes are live inside the spawned task,
+    // even though the parent's own scope does not cross the spawn boundary.
+    let (home_seen, name_seen) = with_profile_home_async(Some(NAME), async {
+        spawn_in_profile(Some(NAME), async { (profile_home_override(), current_profile_name()) })
+            .await
+            .expect("spawned leg panicked")
+    })
+    .await;
+
+    assert_eq!(
+        home_seen.as_deref(),
+        Some(expect_home.as_path()),
+        "spawn_in_profile must scope the home INSIDE the spawned task",
+    );
+    assert_eq!(
+        name_seen, NAME,
+        "spawn_in_profile must scope the profile name INSIDE the spawned task",
+    );
+
+    // Arm 2 — control. A bare `tokio::spawn` under the same scope inherits
+    // neither task-local; if this ever starts returning Some, the harness
+    // semantics changed and the helper is no longer load-bearing.
+    let control = with_profile_home_async(Some(NAME), async {
+        tokio::spawn(async { profile_home_override() })
+            .await
+            .expect("spawned leg panicked")
+    })
+    .await;
+
+    assert_eq!(
+        control, None,
+        "control arm: a bare tokio::spawn must NOT inherit the task-local home",
+    );
+
+    assert!(
+        !expect_home.exists(),
+        "test must not create a real profile dir at {}",
+        expect_home.display()
+    );
+}
+
 // ── #1381: rejection error names the char, codepoint, and position ─────────
 
 #[test]

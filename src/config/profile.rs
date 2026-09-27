@@ -72,6 +72,31 @@ where
         .await
 }
 
+/// Spawn a task that runs with `profile`'s home — the spawn counterpart of
+/// `with_profile_home_async`.
+///
+/// `tokio::spawn` does **not** inherit task-locals: the spawned task starts with
+/// an empty task-local set, so a bare `tokio::spawn` under
+/// `with_profile_home_async` resolves the REAL profile home rather than the one
+/// the caller scoped. A test that seeds a temp home and then spawns a leg
+/// therefore reads a different `session_dir` than the fixture wrote — which
+/// surfaces as the product losing data and reads exactly like a product bug.
+///
+/// Prefer this over re-entering the scope by hand inside the spawned body
+/// (#579). Both overrides are applied inside the spawned task, mirroring
+/// `with_profile_home_async`: the home, so `opencrabs_home()` resolves to
+/// `profile`; and the profile name, so `current_profile_name()` attributes to
+/// `profile` rather than the process global.
+pub fn spawn_in_profile<F, T>(profile: Option<&str>, fut: F) -> tokio::task::JoinHandle<T>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let home = home_for_profile(profile);
+    let name = profile.unwrap_or("default").to_string();
+    tokio::spawn(PROFILE_NAME_OVERRIDE.scope(name, PROFILE_HOME_OVERRIDE.scope(home, fut)))
+}
+
 /// The profile name for the CURRENT task. Returns the task-local name set by
 /// `with_profile_home_async`/`with_profile_home` when present, otherwise the
 /// process-global active profile (or "default"). Use this when stamping data

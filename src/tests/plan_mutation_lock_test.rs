@@ -16,14 +16,15 @@
 //! "never leaks to sibling tasks"). A spawned leg therefore starts with the REAL
 //! home and resolves a different session dir than the fixture seeded — which is
 //! exactly how these tests first failed in CI, with `load_plan` returning None
-//! for a plan written a moment earlier. Every spawned leg re-enters the scope
-//! through `in_profile`.
+//! for a plan written a moment earlier. Every spawned leg goes through
+//! `config::profile::spawn_in_profile`, which re-enters BOTH scopes inside the
+//! spawned task (#579).
 //!
 //! Fixtures are synthetic and carry no user identifiers.
 
 use crate::brain::tools::plan_tool::PlanTool;
 use crate::brain::tools::{Tool, ToolExecutionContext};
-use crate::config::profile::{home_for_profile, with_profile_home_async};
+use crate::config::profile::{home_for_profile, spawn_in_profile, with_profile_home_async};
 use crate::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus, TaskType};
 use crate::utils::plan_files::{
     load_plan, mutate_plan, plan_state_lock, save_plan, verify_persisted,
@@ -41,9 +42,9 @@ impl TempProfile {
         Self(format!("plan-mutation-lock-test-{}", Uuid::new_v4()))
     }
 
-    /// The profile name, owned so it can be moved into a spawned task.
-    fn name(&self) -> String {
-        self.0.clone()
+    /// The profile name, borrowed for the duration of a `spawn_in_profile` call.
+    fn name(&self) -> &str {
+        &self.0
     }
 
     /// Run `fut` with the profile home pointed at this profile.
@@ -59,14 +60,6 @@ impl Drop for TempProfile {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(home_for_profile(Some(&self.0)));
     }
-}
-
-/// Enter `profile`'s home inside a SPAWNED task — see the harness note above.
-async fn in_profile<F, T>(profile: String, fut: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    with_profile_home_async(Some(&profile), fut).await
 }
 
 /// Seed an `Active` checklist, the state `complete` and `start` both require
@@ -102,7 +95,7 @@ async fn concurrent_complete_and_start_both_persist() {
 
         // Two contexts, same session id: the tool resolves plan state from
         // `context.session_id`, which is what the race shares.
-        let complete = tokio::spawn(in_profile(tp.name(), async move {
+        let complete = spawn_in_profile(Some(tp.name()), async move {
             let ctx = ToolExecutionContext::new(sid);
             PlanTool
                 .execute(
@@ -115,8 +108,8 @@ async fn concurrent_complete_and_start_both_persist() {
                     &ctx,
                 )
                 .await
-        }));
-        let start = tokio::spawn(in_profile(tp.name(), async move {
+        });
+        let start = spawn_in_profile(Some(tp.name()), async move {
             let ctx = ToolExecutionContext::new(sid);
             PlanTool
                 .execute(
@@ -124,7 +117,7 @@ async fn concurrent_complete_and_start_both_persist() {
                     &ctx,
                 )
                 .await
-        }));
+        });
 
         let (complete, start) = tokio::join!(complete, start);
         let complete = complete.unwrap().unwrap();
@@ -173,7 +166,7 @@ async fn concurrent_mutations_serialise_and_all_persist() {
         let mut handles = Vec::new();
         for i in 0..N {
             let (inside, max_seen) = (inside.clone(), max_seen.clone());
-            handles.push(tokio::spawn(in_profile(tp.name(), async move {
+            handles.push(spawn_in_profile(Some(tp.name()), async move {
                 mutate_plan(sid, move |plan| {
                     let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
                     max_seen.fetch_max(now, Ordering::SeqCst);
@@ -194,7 +187,7 @@ async fn concurrent_mutations_serialise_and_all_persist() {
                 })
                 .await
                 .unwrap();
-            })));
+            }));
         }
         for h in handles {
             h.await.unwrap();
