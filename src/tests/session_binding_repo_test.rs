@@ -268,6 +268,7 @@ async fn test_delete_by_channel_chat_thread_deletes_correct_row() {
         },
     )
     .await;
+}
 
 /// Test upsert evicts previous binding for same (channel, chat_id, thread_id).
 #[tokio::test]
@@ -301,6 +302,7 @@ async fn test_upsert_evicts_previous_binding_for_same_key() {
         },
     )
     .await;
+}
 
 /// Test upsert does not delete binding for different chat_id (same session_id).
 #[tokio::test]
