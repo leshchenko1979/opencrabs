@@ -217,7 +217,7 @@ impl SymbolExtractor {
                         caller: caller.to_string(),
                         callee,
                         file_path: file_path.to_string(),
-                        line: node.start_position().row,
+                        line: Self::callee_line(node),
                     });
                 }
                 for child in node.children(&mut node.walk()) {
@@ -273,6 +273,23 @@ impl SymbolExtractor {
         node.child_by_field_name("argument")
             .map(|n| n.utf8_text(source.as_bytes()).unwrap_or("").to_string())
             .unwrap_or_else(|| "use".to_string())
+    }
+
+    /// The 1-based line a call edge reports (#489).
+    ///
+    /// This is the **callee expression's own** end, not the `call_expression`'s
+    /// start. A method chain's `call_expression` begins at the *receiver*, so
+    /// every link of `a.trim().trim_matches(x).trim()` shares that start: they
+    /// all report the receiver's line, which puts a citation on a line that
+    /// does not hold the call, and collapses same-name links onto one line so
+    /// they store as duplicate rows. The callee expression ends at its own
+    /// method name, which is the line a reader looking for the call needs.
+    ///
+    /// tree-sitter rows are 0-based; citations are 1-based.
+    fn callee_line(node: Node) -> usize {
+        node.child_by_field_name("function")
+            .map(|callee| callee.end_position().row + 1)
+            .unwrap_or_else(|| node.start_position().row + 1)
     }
 
     fn extract_callee(&self, node: Node, source: &str) -> Option<String> {
