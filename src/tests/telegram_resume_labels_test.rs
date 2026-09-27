@@ -1,6 +1,8 @@
 //! Telegram resume: sender label and short session id formatting.
 
+use crate::brain::agent::PushOrigin;
 use crate::channels::telegram::TelegramState;
+use crate::channels::telegram::flow::{QUEUED_PREVIEW_MAX, queued_preview};
 use crate::channels::telegram::resume::*;
 use uuid::Uuid;
 
@@ -161,5 +163,82 @@ fn notify_fingerprint_diverges_on_body_or_sender() {
         notify_fingerprint(&cli, "body"),
         notify_fingerprint(&cli, "body"),
         "cli label stable"
+    );
+}
+
+/// #554: the flow roll must quote the notify BODY, not the session_notify
+/// transport envelope. The envelope is built at `subagent/notify.rs:266` —
+/// machine header on line 1, body after it — so the old preview read
+/// `📨 notify from 8b1e2c3d:` and the user learned only that *something*
+/// arrived, plus a raw session-uuid prefix on an owner-facing surface.
+#[test]
+fn queued_preview_skips_the_session_notify_envelope() {
+    let display = "📨 notify from 8b1e2c3d:\nthe build broke";
+    let preview = queued_preview(display, &PushOrigin::SessionNotify);
+    assert_eq!(preview, "the build broke");
+    assert!(!preview.contains("notify from"), "envelope header must not leak");
+    assert!(!preview.contains("8b1e2c3d"), "raw session id must not leak");
+}
+
+/// Control: the skip is gated on the ORIGIN, never on text shape alone — a
+/// message that merely looks like an envelope is not silently gutted, because
+/// only the `SessionNotify` arm produces one.
+#[test]
+fn queued_preview_keeps_non_envelope_text_unchanged() {
+    assert_eq!(
+        queued_preview("first line\nsecond line", &PushOrigin::Ingress),
+        "first line",
+        "non-envelope text previews its first line"
+    );
+    assert_eq!(
+        queued_preview("📨 notify from 8b1e2c3d:\nbody", &PushOrigin::Ingress),
+        "📨 notify from 8b1e2c3d:",
+        "origin, not shape, decides the skip"
+    );
+}
+
+/// #554: the two inline copies this helper replaced tested `len()` in BYTES
+/// but sliced at char index 30 — so a 25-char Cyrillic line (50 bytes) took
+/// the truncation arm, found nothing at index 30, and emitted the text
+/// UNCHANGED with a spurious `…` appended. Both halves are pinned here.
+#[test]
+fn queued_preview_truncates_multibyte_on_char_boundary() {
+    let short_multibyte = "Ж".repeat(25);
+    assert_eq!(short_multibyte.chars().count(), 25);
+    assert!(
+        short_multibyte.len() > 30,
+        "must exceed 30 BYTES — that is what tripped the old byte/char mix"
+    );
+    assert_eq!(
+        queued_preview(&short_multibyte, &PushOrigin::SessionNotify),
+        short_multibyte,
+        "under the char cap: unchanged, and no spurious ellipsis"
+    );
+
+    let long_multibyte = "Ж".repeat(40);
+    let preview = queued_preview(&long_multibyte, &PushOrigin::SessionNotify);
+    assert_eq!(preview.chars().count(), QUEUED_PREVIEW_MAX + 1);
+    assert!(preview.ends_with('…'), "over the cap earns exactly one ellipsis");
+    assert_eq!(
+        preview.chars().take(QUEUED_PREVIEW_MAX).collect::<String>(),
+        "Ж".repeat(30),
+        "the cut lands on exactly QUEUED_PREVIEW_MAX chars"
+    );
+}
+
+/// Guards the roll's empty case: no body to preview must degrade to an empty
+/// string, never a panic or a dangling envelope header.
+#[test]
+fn queued_preview_degrades_on_empty_body() {
+    for text in ["", "\n  \n", "   ", "📨 notify from 8b1e2c3d:\n"] {
+        assert!(
+            queued_preview(text, &PushOrigin::SessionNotify).is_empty(),
+            "empty/whitespace-only input previews empty"
+        );
+    }
+    assert_eq!(
+        queued_preview("📨 notify from 8b1e2c3d:", &PushOrigin::SessionNotify),
+        "",
+        "header with no body leaves nothing to quote"
     );
 }
