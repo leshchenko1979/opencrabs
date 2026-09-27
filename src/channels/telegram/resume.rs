@@ -846,19 +846,10 @@ pub(crate) async fn resume_session_inner(
             ProgressEvent::QueuedUserMessage { text, origin } => {
                 detach_flow_for_followup(&st);
                 if let Ok(mut s) = st.lock() {
-                    let preview = text.lines().next().unwrap_or("").trim();
-                    let preview = if preview.len() > 30 {
-                        format!(
-                            "{}…",
-                            &preview[..preview
-                                .char_indices()
-                                .map(|(i, _)| i)
-                                .nth(30)
-                                .unwrap_or(preview.len())]
-                        )
-                    } else {
-                        preview.to_string()
-                    };
+                    // #554: same shared shaping as the live-turn site — skip
+                    // the session_notify transport envelope, then truncate
+                    // char-safely.
+                    let preview = super::flow::queued_preview(&text, &origin);
                     s.display_queue.push(DisplayItem::System(format!(
                         "📥 in: {} \"{}\"",
                         origin.tag(),

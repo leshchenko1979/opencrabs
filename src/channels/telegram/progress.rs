@@ -9,7 +9,7 @@ use teloxide::types::{ChatAction, ChatId, ThreadId};
 
 use super::flow::{
     COMPACTING_HEADER_TEXT, DisplayItem, StreamingState, ToolMsg, compacted_flow_line,
-    compacting_flow_line, detach_flow_for_followup,
+    compacting_flow_line, detach_flow_for_followup, queued_preview,
 };
 use super::handler::tool_context;
 use super::send::fire_chat_action;
@@ -136,19 +136,10 @@ pub(crate) fn build_progress_cb(
             ProgressEvent::QueuedUserMessage { text, origin } => {
                 detach_flow_for_followup(&st);
                 if let Ok(mut s) = st.lock() {
-                    let preview = text.lines().next().unwrap_or("").trim();
-                    let preview = if preview.len() > 30 {
-                        format!(
-                            "{}…",
-                            &preview[..preview
-                                .char_indices()
-                                .map(|(i, _)| i)
-                                .nth(30)
-                                .unwrap_or(preview.len())]
-                        )
-                    } else {
-                        preview.to_string()
-                    };
+                    // #554: skip the session_notify transport envelope and
+                    // truncate char-safely — the roll quotes the body, not a
+                    // machine header carrying a raw session uuid.
+                    let preview = queued_preview(&text, &origin);
                     s.display_queue.push(DisplayItem::System(format!(
                         "📥 in: {} \"{}\"",
                         origin.tag(),
