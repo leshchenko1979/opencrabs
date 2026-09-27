@@ -371,3 +371,71 @@ async fn the_fallback_leg_fetches_a_remote_reference_and_attaches_it() {
     text_mock.assert_async().await;
     photo_mock.assert_async().await;
 }
+
+/// A captioned reference reaches Telegram as RENDERED html with an explicit
+/// parse mode (#645).
+///
+/// The defect this pins: a caption was the one surface that declared no parse
+/// mode, so the markdown title a reference carries arrived literally — measured
+/// live as msg 82136, whose caption held `**bold**` and a pipe table verbatim.
+/// The unit half (`telegram_send_caption_test.rs`) proves the renderer; this leg
+/// proves the WIRE, because a correct renderer attached without a parse mode
+/// renders nothing at all.
+///
+/// The control is the second `SendPhoto` mock: it carries no body matcher and
+/// expects zero hits, so if the request loses either the parse mode or the
+/// rendered caption the assertion fails instead of passing vacuously.
+#[tokio::test]
+async fn a_caption_reaches_the_wire_rendered_and_with_a_parse_mode() {
+    use crate::channels::telegram::send::send_markdown_outbox;
+
+    let _guard = crate::channels::telegram::governor::test_support::registry_guard().await;
+    pin_rich(true);
+    let (_dir, png) = png_fixture();
+
+    let mut server = mockito::Server::new_async().await;
+    let text_mock = server
+        .mock("POST", "/botTESTTOKEN/SendMessage")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(SEND_MESSAGE_OK)
+        .expect(1)
+        .create_async()
+        .await;
+    // Both facts in one matcher, in either field order: the request declares a
+    // parse mode AND carries the rendered title rather than its markdown source.
+    // `[\s\S]` spans the multipart CRLFs (plain `.` would not).
+    let photo_mock = server
+        .mock("POST", "/botTESTTOKEN/SendPhoto")
+        .match_body(mockito::Matcher::Regex(
+            r"(parse_mode[\s\S]*<b>Caption</b>)|(<b>Caption</b>[\s\S]*parse_mode)".to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(SEND_PHOTO_OK)
+        .expect(1)
+        .create_async()
+        .await;
+    let photo_unrendered = server
+        .mock("POST", "/botTESTTOKEN/SendPhoto")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(SEND_PHOTO_OK)
+        .expect(0)
+        .create_async()
+        .await;
+
+    let bot = test_bot(&server);
+    // The title is the caption, and it carries markdown so the assertion cannot
+    // be satisfied by the raw string.
+    let body = format!("see ![chart]({} \"**Caption**\") for details", png.display());
+    let outbox = send_markdown_outbox(&bot, ChatId(CHAT), None, &body, "tool", "send", None)
+        .await
+        .expect("the fallback leg must deliver the message");
+
+    assert_eq!(outbox.sent.len(), 2, "one text chunk plus one image message");
+
+    text_mock.assert_async().await;
+    photo_mock.assert_async().await;
+    photo_unrendered.assert_async().await;
+}

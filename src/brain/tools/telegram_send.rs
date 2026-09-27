@@ -1005,11 +1005,8 @@ impl TelegramSendTool {
                 ChatId(chat_id),
                 thread_id,
                 file.clone(),
-                None,
+                caption.clone(),
             );
-            if let Some(ref c) = caption {
-                req = req.caption(c.clone());
-            }
             if let Some(mid) = reply_to {
                 req = req.reply_parameters(ReplyParameters::new(MessageId(mid as i32)));
             }
@@ -1092,11 +1089,8 @@ impl TelegramSendTool {
                 ChatId(chat_id),
                 thread_id,
                 file.clone(),
-                None,
+                caption.clone(),
             );
-            if let Some(ref c) = caption {
-                req = req.caption(c.clone());
-            }
             if let Some(mid) = reply_to {
                 req = req.reply_parameters(ReplyParameters::new(MessageId(mid as i32)));
             }

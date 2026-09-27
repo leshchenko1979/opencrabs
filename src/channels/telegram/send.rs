@@ -24,7 +24,9 @@ use teloxide::payloads::SendPhotoSetters;
 use teloxide::payloads::SendPollSetters;
 use teloxide::prelude::Requester;
 use teloxide::requests::JsonRequest;
-use teloxide::types::{ChatAction, ChatId, InlineKeyboardMarkup, InputFile, MessageId, ThreadId};
+use teloxide::types::{
+    ChatAction, ChatId, InlineKeyboardMarkup, InputFile, MessageId, ParseMode, ThreadId,
+};
 
 /// Look up the thread_id of the most recent Telegram message stored for
 /// `chat_id` in `channel_messages`. Returns `None` when no row exists,
@@ -122,6 +124,18 @@ where
     }
 }
 
+/// Render a media caption for Telegram's classic HTML dialect (#645).
+///
+/// A caption is content like any other, but it was the one surface that
+/// declared no parse mode, so markdown written into a caption arrived
+/// literally. `markdown_to_telegram_html` is the channel's canonical classic
+/// converter — the one every classic text send already uses — so a caption
+/// renders exactly like a message body, tables included (it hands the text to
+/// the rich AST itself when the content prefers it).
+pub(crate) fn caption_html(text: &str) -> String {
+    super::markdown::markdown_to_telegram_html(text)
+}
+
 /// `bot.send_photo(chat_id, photo)` with optional `message_thread_id` and
 /// caption. The caption is the markdown title the reference carried — sending
 /// the bytes without it is how a captioned reference arrived captionless (#487).
@@ -137,7 +151,7 @@ where
 {
     let req = bot.send_photo(chat_id.into(), photo);
     let req = match caption {
-        Some(text) => req.caption(text),
+        Some(text) => req.caption(caption_html(&text)).parse_mode(ParseMode::Html),
         None => req,
     };
     match thread_id {
@@ -162,7 +176,7 @@ where
 {
     let req = bot.send_document(chat_id.into(), document);
     let req = match caption {
-        Some(text) => req.caption(text),
+        Some(text) => req.caption(caption_html(&text)).parse_mode(ParseMode::Html),
         None => req,
     };
     match thread_id {

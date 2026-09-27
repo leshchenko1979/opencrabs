@@ -189,3 +189,54 @@ fn empty_caption_string_is_treated_as_present() {
     let caption = input.get("caption").and_then(|v| v.as_str());
     assert_eq!(caption, Some(""));
 }
+
+// ── Caption RENDERING (#645) ───────────────────────────────────────────
+//
+// A caption is content like any other, but it was the one surface that declared
+// no parse mode: every classic text send passes `ParseMode::Html`, while the
+// caption arms passed nothing — so markdown written into a caption arrived
+// literally. Measured live before the fix: msg 82136 carried `**bold**` and a
+// pipe table verbatim as the caption of a `send_document` upload.
+//
+// `caption_html` (src/channels/telegram/send.rs) is the shared renderer both
+// media legs now route through. Its WIRE-level half — that the request really
+// declares the parse mode — is asserted in `plain_outbox_image_test.rs`, where
+// a mock server sees the multipart body.
+
+/// A caption renders markdown the way a message body does. The expectations
+/// below are the ones already pinned for the classic text path in
+/// `telegram_resume_test.rs` (`markdown_to_html_bold` and siblings).
+#[test]
+fn caption_renders_markdown_like_a_message_body() {
+    assert!(crate::channels::telegram::send::caption_html("**Bold** title").contains("<b>Bold</b>"));
+    assert!(crate::channels::telegram::send::caption_html("Use `foo()` here")
+        .contains("<code>foo()</code>"));
+    assert!(crate::channels::telegram::send::caption_html("Click [here](https://example.com)")
+        .contains("<a href=\"https://example.com\">here</a>"));
+}
+
+/// Model-written text must reach Telegram escaped, never as markup.
+#[test]
+fn caption_escapes_html_entities() {
+    let html = crate::channels::telegram::send::caption_html("a < b & c > d");
+    assert!(html.contains("&lt;"), "{html}");
+    assert!(html.contains("&amp;"), "{html}");
+    assert!(html.contains("&gt;"), "{html}");
+}
+
+/// Telegram's classic HTML dialect has no paragraph element, so a `<p>` or
+/// `<br>` in a caption is a parse error rather than a layout choice. This is
+/// what fixes the renderer for the surface: the classic converter in
+/// `markdown.rs` emits neither tag anywhere in its body (the `<p>`/`<br>`
+/// variants belong to the rich dialect, which captions do not ride).
+#[test]
+fn caption_carries_no_paragraph_or_break_tag() {
+    for input in ["first para\n\nsecond para", "a soft\nbreak", "# Heading"] {
+        let html = crate::channels::telegram::send::caption_html(input);
+        assert!(!html.contains("<p>"), "<p> in caption for {input:?}: {html}");
+        assert!(
+            !html.contains("<br"),
+            "<br> in caption for {input:?}: {html}"
+        );
+    }
+}
