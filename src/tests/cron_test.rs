@@ -892,6 +892,57 @@ mod tool {
         assert!(result.output.contains("enabled"));
     }
 
+    // --- enable/disable by name (#549) ---
+
+    #[tokio::test]
+    async fn test_disable_and_enable_accept_name_as_job_id() {
+        let (db, tool) = setup().await;
+        let id = create_job(&tool, "Toggle By Name").await;
+        let repo = CronJobRepository::new(db.pool().clone());
+
+        // The #549 scenario: disable by NAME. Pre-fix, `toggle_job` passed the
+        // raw handle to `set_enabled`, which keys on the id column, so the name
+        // never matched and the caller was told the job did not exist.
+        let input = serde_json::json!({"action": "disable", "job_id": "Toggle By Name"});
+        let result = tool.execute(input, &ctx()).await.unwrap();
+        assert!(result.success, "disable by name failed: {:?}", result.error);
+        assert!(result.output.contains("disabled"));
+
+        // The write must be REAL, not merely reported: read the row back
+        // through the repository rather than trusting the tool's own message.
+        let job = repo.find_by_id(&id).await.unwrap().expect("job must exist");
+        assert!(!job.enabled, "job must actually be disabled");
+
+        // And back on, by name.
+        let input = serde_json::json!({"action": "enable", "job_id": "Toggle By Name"});
+        let result = tool.execute(input, &ctx()).await.unwrap();
+        assert!(result.success, "enable by name failed: {:?}", result.error);
+
+        let job = repo.find_by_id(&id).await.unwrap().expect("job must exist");
+        assert!(job.enabled, "job must actually be enabled");
+    }
+
+    #[tokio::test]
+    async fn test_toggle_missing_job_names_both_handles() {
+        let (_db, tool) = setup().await;
+
+        let input = serde_json::json!({"action": "disable", "job_id": "No Such Job"});
+        let result = tool.execute(input, &ctx()).await.unwrap();
+        assert!(!result.success);
+
+        // A failing verdict carries its text in `error`; `output` is empty
+        // by construction (ToolResult::error), so assert on the right field.
+        let msg = result.error.unwrap_or_default();
+        // Pre-fix the text claimed a missing ID for a value that was a NAME —
+        // which reads as "the job was deleted" and invites a re-create under
+        // the same name, the very collision the cron-naming law warns about.
+        assert!(
+            msg.contains("ID or name"),
+            "message must name both handles it tried, got: {msg}"
+        );
+        assert!(msg.contains("No Such Job"));
+    }
+
     #[tokio::test]
     async fn test_delete_nonexistent() {
         let (_db, tool) = setup().await;
