@@ -1746,7 +1746,7 @@ fn has_info_flag(args: &[&str]) -> bool {
 /// `nano -h` → 4365, `ed -h` → 2022, `pico -h` → 4365, all printing usage.
 /// The pager family cannot share this, because `less -h` prints nothing at all.
 fn has_editor_info_flag(args: &[&str]) -> bool {
-    has_info_flag(args) || args.iter().any(|t| *t == "-h")
+    has_info_flag(args) || args.contains(&"-h")
 }
 
 /// True when any argument is a non-flag operand — a file path, a manual topic.
