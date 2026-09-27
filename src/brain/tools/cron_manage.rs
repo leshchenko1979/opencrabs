@@ -381,17 +381,14 @@ impl CronManageTool {
             }
         };
 
-        // Resolve by ID first, then by name (same resolution as delete/test).
-        let job = match self.repo.find_by_id(job_id).await {
+        // Resolve by ID first, then by name (#626 — one shared resolution).
+        let job = match self.repo.resolve(job_id).await {
             Ok(Some(j)) => j,
-            Ok(None) => match self.repo.find_by_name(job_id).await {
-                Ok(Some(j)) => j,
-                _ => {
-                    return Ok(ToolResult::error(format!(
-                        "No cron job found with ID or name '{job_id}'."
-                    )));
-                }
-            },
+            Ok(None) => {
+                return Ok(ToolResult::error(format!(
+                    "No cron job found with ID or name '{job_id}'."
+                )));
+            }
             Err(e) => {
                 return Ok(ToolResult::error(format!("Error looking up cron job: {e}")));
             }
@@ -768,19 +765,14 @@ impl CronManageTool {
             }
         };
 
-        // Step 1: Look up the job to show what will be deleted
-        let job = match self.repo.find_by_id(job_id).await {
+        // Step 1: Look up the job to show what will be deleted. Resolution is
+        // the shared one (#626): id first, then name.
+        let job = match self.repo.resolve(job_id).await {
             Ok(Some(j)) => j,
             Ok(None) => {
-                // Try by name
-                match self.repo.find_by_name(job_id).await {
-                    Ok(Some(j)) => j,
-                    _ => {
-                        return Ok(ToolResult::error(format!(
-                            "No cron job found with ID or name '{job_id}'."
-                        )));
-                    }
-                }
+                return Ok(ToolResult::error(format!(
+                    "No cron job found with ID or name '{job_id}'."
+                )));
             }
             Err(e) => {
                 return Ok(ToolResult::error(format!("Error looking up cron job: {e}")));
@@ -884,21 +876,17 @@ impl CronManageTool {
             }
         };
 
-        // Resolve by ID first, then by name — the same resolution `delete`,
-        // `update` and `test` already use. Pre-fix this called `set_enabled`
-        // with the RAW handle, and `set_enabled` keys on the id column, so a
-        // job NAME could never match: it returned false and the caller was
-        // told the job does not exist (#549).
-        let job = match self.repo.find_by_id(job_id).await {
+        // Resolve by ID first, then by name — the shared resolution (#626).
+        // Pre-fix this passed the RAW handle to `set_enabled`, which keys on the
+        // id column, so a job NAME could never match: it returned false and the
+        // caller was told the job does not exist (#549).
+        let job = match self.repo.resolve(job_id).await {
             Ok(Some(j)) => j,
-            Ok(None) => match self.repo.find_by_name(job_id).await {
-                Ok(Some(j)) => j,
-                _ => {
-                    return Ok(ToolResult::error(format!(
-                        "No cron job found with ID or name '{job_id}'."
-                    )));
-                }
-            },
+            Ok(None) => {
+                return Ok(ToolResult::error(format!(
+                    "No cron job found with ID or name '{job_id}'."
+                )));
+            }
             Err(e) => {
                 return Ok(ToolResult::error(format!("Error looking up cron job: {e}")));
             }
@@ -923,39 +911,26 @@ impl CronManageTool {
     }
 
     async fn test_job(&self, input: &Value) -> Result<ToolResult> {
-        let job_id = match input.get("job_id").and_then(|v| v.as_str()) {
+        let handle = match input.get("job_id").and_then(|v| v.as_str()) {
             Some(id) if !id.is_empty() => id,
-            _ => {
-                // Also accept name
-                match input.get("name").and_then(|v| v.as_str()) {
-                    Some(name) if !name.is_empty() => {
-                        if let Ok(Some(job)) = self.repo.find_by_name(name).await {
-                            return self.trigger_by_id(&job.id.to_string(), &job.name).await;
-                        }
-                        return Ok(ToolResult::error(format!(
-                            "No cron job found with name '{name}'."
-                        )));
-                    }
-                    _ => {
-                        return Ok(ToolResult::error(
-                            "'job_id' or 'name' is required for test".to_string(),
-                        ));
-                    }
+            _ => match input.get("name").and_then(|v| v.as_str()) {
+                Some(name) if !name.is_empty() => name,
+                _ => {
+                    return Ok(ToolResult::error(
+                        "'job_id' or 'name' is required for test".to_string(),
+                    ));
                 }
-            }
+            },
         };
 
-        // Try ID first, then name
-        if let Ok(Some(job)) = self.repo.find_by_id(job_id).await {
-            return self.trigger_by_id(&job.id.to_string(), &job.name).await;
+        // The shared resolution (#626): id first, then name.
+        match self.repo.resolve(handle).await {
+            Ok(Some(job)) => self.trigger_by_id(&job.id.to_string(), &job.name).await,
+            Ok(None) => Ok(ToolResult::error(format!(
+                "No cron job found with ID or name '{handle}'."
+            ))),
+            Err(e) => Ok(ToolResult::error(format!("Error looking up cron job: {e}"))),
         }
-        if let Ok(Some(job)) = self.repo.find_by_name(job_id).await {
-            return self.trigger_by_id(&job.id.to_string(), &job.name).await;
-        }
-
-        Ok(ToolResult::error(format!(
-            "No cron job found with ID or name '{job_id}'."
-        )))
     }
 
     async fn trigger_by_id(&self, id: &str, name: &str) -> Result<ToolResult> {

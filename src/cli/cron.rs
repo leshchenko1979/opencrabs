@@ -226,7 +226,9 @@ async fn cmd_list(repo: &CronJobRepository) -> Result<()> {
 }
 
 async fn cmd_remove(repo: &CronJobRepository, id: &str) -> Result<()> {
-    let job_id = resolve_job_id(repo, id).await?;
+    let Some(job_id) = repo.resolve(id).await?.map(|j| j.id.to_string()) else {
+        anyhow::bail!("No cron job found with ID or name '{id}'");
+    };
     if repo.delete(&job_id).await? {
         println!("✅ Cron job removed: {job_id}");
     } else {
@@ -236,7 +238,9 @@ async fn cmd_remove(repo: &CronJobRepository, id: &str) -> Result<()> {
 }
 
 async fn cmd_toggle(repo: &CronJobRepository, id: &str, enabled: bool) -> Result<()> {
-    let job_id = resolve_job_id(repo, id).await?;
+    let Some(job_id) = repo.resolve(id).await?.map(|j| j.id.to_string()) else {
+        anyhow::bail!("No cron job found with ID or name '{id}'");
+    };
     if repo.set_enabled(&job_id, enabled).await? {
         let state = if enabled { "enabled" } else { "disabled" };
         let icon = if enabled { "✅" } else { "⏸️ " };
@@ -248,7 +252,9 @@ async fn cmd_toggle(repo: &CronJobRepository, id: &str, enabled: bool) -> Result
 }
 
 async fn cmd_test(repo: &CronJobRepository, id: &str) -> Result<()> {
-    let job_id = resolve_job_id(repo, id).await?;
+    let Some(job_id) = repo.resolve(id).await?.map(|j| j.id.to_string()) else {
+        anyhow::bail!("No cron job found with ID or name '{id}'");
+    };
     if repo.trigger_now(&job_id).await? {
         println!("🚀 Cron job triggered: {job_id}");
         println!("   It will execute on the next scheduler tick (within 60 seconds).");
@@ -256,15 +262,4 @@ async fn cmd_test(repo: &CronJobRepository, id: &str) -> Result<()> {
         println!("❌ Failed to trigger cron job: {id}");
     }
     Ok(())
-}
-
-/// Resolve a job identifier — accepts UUID or name.
-async fn resolve_job_id(repo: &CronJobRepository, id: &str) -> Result<String> {
-    if let Ok(Some(job)) = repo.find_by_id(id).await {
-        return Ok(job.id.to_string());
-    }
-    if let Ok(Some(job)) = repo.find_by_name(id).await {
-        return Ok(job.id.to_string());
-    }
-    anyhow::bail!("No cron job found with ID or name '{id}'")
 }

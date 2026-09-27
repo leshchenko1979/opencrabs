@@ -628,6 +628,56 @@ mod repository {
         let updated = repo.update_fields("no-such-id", patch).await.unwrap();
         assert!(!updated);
     }
+
+    // --- resolve: the one shared job-handle resolution (#626) ---
+
+    #[tokio::test]
+    async fn test_resolve_finds_job_by_id() {
+        let (_db, repo) = setup().await;
+        let job = make_job("resolve-by-id", "0 9 * * *");
+        let id = job.id.to_string();
+        repo.insert(&job).await.unwrap();
+
+        let found = repo
+            .resolve(&id)
+            .await
+            .expect("resolve must not error")
+            .expect("resolve must find the job by its id");
+        assert_eq!(found.id, job.id);
+        assert_eq!(found.name, "resolve-by-id");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_falls_back_to_name() {
+        let (_db, repo) = setup().await;
+        let job = make_job("resolve-by-name", "0 9 * * *");
+        repo.insert(&job).await.unwrap();
+
+        // The fallback that five callers used to re-implement by hand (#626).
+        // #549 is exactly what a missed copy of it costs: a valid name that
+        // silently disabled nothing.
+        let found = repo
+            .resolve("resolve-by-name")
+            .await
+            .expect("resolve must not error")
+            .expect("resolve must find the job by its name");
+        assert_eq!(found.id, job.id);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_miss_is_none_not_error() {
+        let (_db, repo) = setup().await;
+        repo.insert(&make_job("present", "0 9 * * *")).await.unwrap();
+
+        // "No such job" is a MISS, never a lookup failure — the callers render
+        // those two differently, so collapsing them would report a broken
+        // query as a missing job (#107).
+        let found = repo
+            .resolve("no-such-handle")
+            .await
+            .expect("a miss must be Ok(None), never Err");
+        assert!(found.is_none());
+    }
 }
 
 // --- Cron Expression Validation Tests ---
@@ -975,6 +1025,29 @@ mod tool {
             "message must name both handles it tried, got: {msg}"
         );
         assert!(msg.contains("No Such Job"));
+    }
+
+    #[tokio::test]
+    async fn test_test_action_missing_job_names_both_handles() {
+        let (_db, tool) = setup().await;
+
+        // #626 unified this miss for every surface. The `name`-only branch in
+        // particular used to emit its own third wording
+        // ("No cron job found with name '…'"), and both branches used to
+        // swallow a lookup error into that same "not found" text.
+        for input in [
+            serde_json::json!({"action": "test", "job_id": "No Such Job"}),
+            serde_json::json!({"action": "test", "name": "No Such Job"}),
+        ] {
+            let result = tool.execute(input.clone(), &ctx()).await.unwrap();
+            assert!(!result.success, "a missing job must not be a success");
+            let msg = result.error.unwrap_or_default();
+            assert!(
+                msg.contains("ID or name"),
+                "one miss, one wording — got for {input}: {msg}"
+            );
+            assert!(msg.contains("No Such Job"), "got: {msg}");
+        }
     }
 
     #[tokio::test]

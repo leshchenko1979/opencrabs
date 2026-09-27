@@ -254,6 +254,24 @@ impl CronJobRepository {
             .context("Failed to find cron job by name")
     }
 
+    /// Resolve a job handle — an id first, then a name (#626).
+    ///
+    /// Every surface that accepts "an id or a name" shares this one resolution,
+    /// so a sixth caller cannot forget the name fallback. Passing a RAW handle
+    /// to an id-keyed write is exactly how #549 shipped: `set_enabled` keys on
+    /// the id column, so a valid job NAME never matched, the write returned
+    /// false, and the caller was told the job did not exist.
+    ///
+    /// `Ok(None)` means neither the id nor the name matched. A lookup failure
+    /// (a dead pool, a broken query) stays an `Err`, so "not found" and "lookup
+    /// broke" are never conflated (#107).
+    pub async fn resolve(&self, handle: &str) -> Result<Option<CronJob>> {
+        if let Some(job) = self.find_by_id(handle).await? {
+            return Ok(Some(job));
+        }
+        self.find_by_name(handle).await
+    }
+
     pub async fn delete(&self, id: &str) -> Result<bool> {
         let id = id.to_string();
         let rows = self
