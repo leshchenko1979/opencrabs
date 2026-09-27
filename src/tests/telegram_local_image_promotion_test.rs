@@ -13,9 +13,12 @@
 //! - the parity pin: the stripped form is byte-identical to what
 //!   `strip_image_references` produces for the same input and base, so the fold
 //!   path and the final-response dedup see exactly what they see today.
+//! - `promoted_bubble_is_burial_evidence` — the #617 counter-case: a bubble
+//!   that carried media is a deliverable and must survive the supersession
+//!   cleanup that legitimately deletes the text-only ones.
 
 use crate::channels::telegram::intermediates::{
-    is_deliverable_rich_report, should_promote_intermediate,
+    is_deliverable_rich_report, promoted_bubble_is_burial_evidence, should_promote_intermediate,
 };
 use crate::utils::image::{
     LocalImageFailureReason, rewrite_local_images, strip_image_references,
@@ -282,4 +285,34 @@ fn the_stripped_twin_keeps_a_remote_link_like_the_strip_only_scanner() {
     assert!(rw.entries.is_empty());
     assert_eq!(rw.stripped, text);
     assert_eq!(rw.rich, text);
+}
+
+// ---------------------------------------------------------------------------
+// promoted_bubble_is_burial_evidence — #617
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_bubble_that_carried_a_picture_is_not_burial_evidence() {
+    // The filed shape (#617): the promoted bubble holds the only copy of the
+    // picture, and the rich-fallback cleanup deletes every id marked burial.
+    // The final leg has already skipped these paths, so a delete is permanent.
+    assert!(
+        !promoted_bubble_is_burial_evidence(1),
+        "a bubble carrying one picture must survive the supersession cleanup"
+    );
+    assert!(
+        !promoted_bubble_is_burial_evidence(2),
+        "…and the count does not matter: any media makes it a deliverable"
+    );
+}
+
+#[test]
+fn a_text_only_bubble_stays_burial_evidence() {
+    // The counter-case, and the reason the predicate is not a bare `false`: the
+    // cleanup exists to remove text the final rich message repeats. A fix that
+    // stopped populating the burial list at all would fail here.
+    assert!(
+        promoted_bubble_is_burial_evidence(0),
+        "a bubble with no media is superseded by the final rich message and stays deletable"
+    );
 }

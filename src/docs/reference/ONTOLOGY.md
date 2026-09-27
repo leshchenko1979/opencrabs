@@ -62,6 +62,8 @@
 
 **Tool result** — the output returned to the model after a tool call. The only evidence a tool executed.
 
+**Serialised read-modify-write** — a mutation that holds a per-target lock across the WHOLE read-then-write, not the write alone. The lock is taken BEFORE the read: taken after, two writers share one baseline, the later save replaces the target outright, and both callers still receive success — so the loss is silent (a *lost update*). Two mechanisms, one per store kind: `src/brain/tools/path_lock.rs` for path-addressed files (`edit`, `write`, `hashline`, `session_context`), and the `state` slot in `src/utils/plan_files.rs` for the plan sidecar (`mutate_plan`, "the single serialised read-modify-write for a session's plan", #506). Both are ADVISORY — a contended writer waits briefly, then proceeds and REPORTS the overlap rather than failing, so the notice is part of the contract, not decoration. **Not:** "atomic write" (that names the temp-file-plus-rename publish that `ContextStore::save` and `plan_files::save_plan` use — it prevents TORN writes and says nothing about lost updates), "file lock" alone (it names the mechanism, not the scope of the hold).
+
 ### Memory
 
 **Memory search** — retrieval over past daily logs (`memory` scope), brain files (`brain` scope), and indexed external paths (`external` scope). See `src/brain/tools/memory_search.rs`. **Not:** "recall" as a synonym for the tool (recall is the ranking subsystem inside it).
