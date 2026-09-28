@@ -13,6 +13,7 @@ use crate::brain::agent::service::background_tasks;
 use crate::brain::agent::{AgentService, ProgressCallback, ProgressEvent};
 use crate::config::Config;
 use crate::db::ChannelMessageRepository;
+use crate::utils::echo_budget::{ECHO_BODY_CAP_CHARS, ECHO_BODY_CAP_CHARS_RICH};
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use teloxide::prelude::*;
@@ -1318,20 +1319,6 @@ pub(crate) async fn resume_session_inner(
     Ok(())
 }
 
-/// Cap for the #1221 echo body on the **classic** wire: classic `sendMessage`
-/// caps a message at 4096 chars; header, tags and Telegram's own margin eat
-/// the rest of the budget. This governs the classic fallback only — a body
-/// bound for a rich wire takes [`BG_ECHO_BODY_CAP_CHARS_RICH`] instead (#490).
-const BG_ECHO_BODY_CAP_CHARS: usize = 3200;
-
-/// Cap for the same body on the **rich** wire (#490). `sendRichMessage`
-/// carries ~32K chars — eight times the classic cap — so the classic 3200
-/// budget was cutting the tail (the Disclosures and What-now/next blocks)
-/// off notify cards Telegram would have accepted whole. Sized just under the
-/// rich ceiling to leave room for the card's own `<details>`/`<summary>`
-/// chrome, matching the `flow` chrome's own 30000 guard.
-const BG_ECHO_BODY_CAP_CHARS_RICH: usize = 30_000;
-
 /// Producer stamped into a `[session-notify from=…]` header.
 ///
 /// Cross-session pushes name the real sender session uuid (the agent tool,
@@ -1454,7 +1441,7 @@ pub(crate) fn build_bg_echo_bubble(body: &str, title: &str) -> (BubbleWire, Stri
     // count that went, so the ending is visibly missing rather than silently.
     let (body, dropped) = crate::utils::string::truncate_chars_tail_preserving(
         body,
-        BG_ECHO_BODY_CAP_CHARS,
+        ECHO_BODY_CAP_CHARS,
     );
     // Plain suffix, deliberately WITHOUT the count: the body already carries
     // `… (truncated N chars) …` at the cut itself, and repeating N here would
@@ -1675,7 +1662,7 @@ pub(crate) async fn build_notify_receipt_card(
     // each leg gets exactly one cut, on the leg that needs it.
     let (rich_body, rich_dropped) = crate::utils::string::truncate_chars_tail_preserving(
         body,
-        BG_ECHO_BODY_CAP_CHARS_RICH,
+        ECHO_BODY_CAP_CHARS_RICH,
     );
     let rich_suffix = if rich_dropped > 0 { " (truncated)".to_string() } else { String::new() };
     // Body rendered from markdown with <p> wrapping — the rich HTML dialect

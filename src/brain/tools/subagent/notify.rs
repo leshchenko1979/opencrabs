@@ -576,6 +576,14 @@ impl Tool for SessionNotifyTool {
                 notify_receipts::record_queued(notify_id, target);
                 if confirm {
                     let (state, detail, reason) = confirm_route(target, CONFIRM_CAP).await;
+                    // #490: tell the sender its payload was shortened. The tail
+                    // is exactly where Disclosures / What-now/next live, so a
+                    // bare "Delivered" hid the loss of the blocks written FOR
+                    // the receiving lane. Empty when no leg would cut anything.
+                    let detail = format!(
+                        "{detail}{}",
+                        crate::utils::echo_budget::sender_over_cap_signal(message)
+                    );
                     notify_journal::record(
                         &caller_str,
                         &target_str,
@@ -606,7 +614,8 @@ impl Tool for SessionNotifyTool {
                     "delivered",
                     format!(
                         "Delivered to session {target}. It will process the message on its next \
-                         turn. Poll action:\"status\" with notify_id for the injection stamp."
+                         turn. Poll action:\"status\" with notify_id for the injection stamp.{}",
+                        crate::utils::echo_budget::sender_over_cap_signal(message)
                     ),
                     &[
                         ("notify_target", target.to_string()),

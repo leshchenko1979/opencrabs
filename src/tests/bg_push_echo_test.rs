@@ -621,3 +621,63 @@ async fn above_the_rich_budget_the_tail_still_survives() {
     // The classic fallback is cut harder, and still keeps its tail.
     assert!(classic.contains(tail), "classic fallback keeps its tail too");
 }
+
+/// #490 task 4 — the delivery verdict must TELL the sender its payload was
+/// shortened. Before this, a notify whose tail had been cut still answered a
+/// bare `Delivered`, so the sending lane could not learn that the blocks
+/// written FOR the receiving lane (Disclosures, What-now/next) never arrived.
+///
+/// The verdict names BOTH legs with their own budgets, because the leg is not
+/// known at verdict time: the card takes the rich wire and falls back to the
+/// classic one only if that call fails.
+#[tokio::test]
+async fn notify_verdict_reports_what_each_leg_would_drop() {
+    use crate::utils::echo_budget::{
+        ECHO_BODY_CAP_CHARS, ECHO_BODY_CAP_CHARS_RICH, sender_over_cap_signal,
+    };
+
+    // 4719 chars is the issue's own measured instance length (#490).
+    const TOTAL: usize = 4719;
+    // 4719 through the classic cap: 3200 budget less the 40-char marker
+    // reserve = 3160 kept as head+tail (head 2106 / tail 1054), so 1559 go.
+    // Pinned here so a drift in the reserve, the split or the budget fails
+    // loudly instead of quietly weakening the assertion.
+    const DROPPED_ON_CLASSIC: usize = 1559;
+
+    let body: String = "x".repeat(TOTAL);
+
+    // Drive it through the render path exactly as a notify push does.
+    let (wire, classic) = build_notify_receipt_card("Compiler", &body).await;
+    assert!(
+        matches!(wire, BubbleWire::Html(_)),
+        "the notify card rides the rich HTML wire — the leg whose budget #490 split"
+    );
+
+    // THE VERDICT: zero dropped on the rich leg, the real count on the classic
+    // fallback, and each leg named with the budget that governs it.
+    let signal = sender_over_cap_signal(&body);
+    let expected = format!(
+        " Payload {TOTAL} chars \u{2014} rich leg ({ECHO_BODY_CAP_CHARS_RICH} budget) drops 0; \
+         classic fallback ({ECHO_BODY_CAP_CHARS} budget) drops {DROPPED_ON_CLASSIC}."
+    );
+    assert_eq!(
+        signal, expected,
+        "the verdict must expose 0 dropped on the rich leg and the classic count, naming both legs"
+    );
+
+    // The warning must AGREE with the bytes the reader received — a warning
+    // that disagrees with the delivered payload is worse than no warning.
+    assert!(
+        classic.contains(&format!("(truncated {DROPPED_ON_CLASSIC} chars)")),
+        "the verdict's classic count must match the marker the fallback renders"
+    );
+
+    // NO CUT, NO NOISE. A body inside both budgets keeps the verdict it always
+    // had, so the warning stays a signal rather than chrome on every send.
+    assert_eq!(sender_over_cap_signal("short body"), "");
+    assert_eq!(
+        sender_over_cap_signal(&"y".repeat(ECHO_BODY_CAP_CHARS)),
+        "",
+        "a body exactly AT the classic budget is not over it"
+    );
+}
