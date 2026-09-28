@@ -1665,12 +1665,12 @@ pub(crate) async fn build_notify_receipt_card(
     // the classic budget itself — that call is handed the body UNCAPPED so
     // each leg gets exactly one cut, on the leg that needs it.
     let rich_truncated = body.chars().count() > BG_ECHO_BODY_CAP_CHARS_RICH;
-    let body = crate::utils::string::truncate_chars(body, BG_ECHO_BODY_CAP_CHARS_RICH);
+    let rich_body = crate::utils::string::truncate_chars(body, BG_ECHO_BODY_CAP_CHARS_RICH);
     let suffix = if rich_truncated { " (truncated)" } else { "" };
     // Body rendered from markdown with <p> wrapping — the rich HTML dialect
     // chrome surfaces use (#1142); mermaid fences resolve exactly like the
     // final-reply path, gated so a fence-less body costs no HTTP.
-    let body_html = super::rich::markdown_to_html_mermaid_p(body).await;
+    let body_html = super::rich::markdown_to_html_mermaid_p(rich_body).await;
     // The preview is body-derived: escape it, a `<` in the source must not
     // open a tag inside the summary.
     let rich_html = format!(
@@ -1679,7 +1679,11 @@ pub(crate) async fn build_notify_receipt_card(
         super::markdown::escape_html(&preview)
     );
     let flat_title = format!("📨 From {sender}: {preview}");
-    let (_, classic_html) = build_bg_echo_bubble(&format!("{body}{suffix}"), &flat_title);
+    // #490: the classic fallback takes the ORIGINAL body and applies the
+    // classic budget itself (inside `build_bg_echo_bubble`) — so THIS leg
+    // gets exactly one cut and one marker, instead of the old re-cap that
+    // fed an already-cut body back through the same guard.
+    let (_, classic_html) = build_bg_echo_bubble(body, &flat_title);
     (BubbleWire::Html(rich_html), classic_html)
 }
 

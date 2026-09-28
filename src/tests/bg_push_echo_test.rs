@@ -464,3 +464,74 @@ async fn notify_receipt_card_keeps_tables_native_inside_the_fold() {
     );
     assert!(rich.contains("</details>"), "wrapper closes");
 }
+
+/// #490: a notify past the classic 3200 budget used to lose its TAIL — which
+/// is exactly where the Disclosures and What-now/next blocks live, so the owner
+/// lost the part written for him while the sending lane still read
+/// `Delivered`. The rich Html wire carries ~32K, so it takes
+/// `BG_ECHO_BODY_CAP_CHARS_RICH`; only the classic fallback is cut, and it is
+/// cut exactly ONCE (the old re-cap fed an already-cut body back through the
+/// same guard, which could print a second `(truncated)` marker).
+///
+/// Three sentinels make the leg split observable without parsing markup:
+/// `INSIDE-CAP` at ~2000 (inside the classic budget), `OUTSIDE-CAP!` at ~3300
+/// (outside it), and the tail sentinel in the last 35 chars.
+#[tokio::test]
+async fn notify_receipt_card_keeps_a_4719_char_body_whole_on_the_rich_leg() {
+    // 4719 chars is the issue's own measured instance length (#490).
+    const TOTAL: usize = 4719;
+    let head = "a".repeat(2000);
+    let inside = "INSIDE-CAP";
+    let outside = "OUTSIDE-CAP!";
+    let tail = "TAIL-SENTINEL-#490-DISCLOSURES-HERE";
+    // Place the sentinels so `inside` sits above the classic budget and
+    // `outside` below it, then fill exactly to the measured length. The
+    // arithmetic is recomputed here and asserted below, so a drift in any
+    // piece fails the test loudly instead of silently weakening it.
+    let outside_at = 3300usize;
+    let tail_at = TOTAL - tail.len();
+    let gap1 = "b".repeat(outside_at - (head.len() + inside.len()));
+    let gap2 = "c".repeat(tail_at - (outside_at + outside.len()));
+    let body = format!("{head}{inside}{gap1}{outside}{gap2}{tail}");
+    assert_eq!(body.chars().count(), TOTAL, "fixture is the measured length");
+
+    let (wire, classic) = build_notify_receipt_card("Compiler", &body).await;
+    let BubbleWire::Html(rich) = &wire else {
+        panic!("notify card rides the HTML rich wire (#85)");
+    };
+
+    // RICH LEG — 4719 is under the 30000 rich budget, so no cut fires at all:
+    // the whole body survives, its last 40 characters included.
+    let last40: String = body.chars().skip(TOTAL - 40).collect();
+    assert!(
+        rich.contains(&last40),
+        "rich payload must carry the body's LAST 40 chars: {last40:?}"
+    );
+    assert!(
+        rich.contains(tail),
+        "the tail sentinel survives on the rich leg — this is the #490 defect"
+    );
+    assert!(
+        !rich.contains("(truncated)"),
+        "no cut fires under the rich budget, so the rich leg carries no marker"
+    );
+
+    // CLASSIC FALLBACK — its own budget still governs, and it is cut ONCE.
+    assert!(
+        classic.contains(inside),
+        "content inside the classic budget survives on the fallback"
+    );
+    assert!(
+        !classic.contains(outside),
+        "content past the classic budget is dropped on the fallback, proving the cap still binds at ~3200"
+    );
+    assert!(
+        !classic.contains(tail),
+        "the classic leg is the one that legitimately cuts the tail"
+    );
+    assert_eq!(
+        classic.matches("(truncated)").count(),
+        1,
+        "the classic fallback carries EXACTLY one truncation marker (the #490 re-cap printed a second)"
+    );
+}
