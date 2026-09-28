@@ -469,7 +469,7 @@ async fn notify_receipt_card_keeps_tables_native_inside_the_fold() {
 /// is exactly where the Disclosures and What-now/next blocks live, so the owner
 /// lost the part written for him while the sending lane still read
 /// `Delivered`. The rich Html wire carries ~32K, so it takes
-/// `BG_ECHO_BODY_CAP_CHARS_RICH`; only the classic fallback is cut, and it is
+/// `ECHO_BODY_CAP_CHARS_RICH`; only the classic fallback is cut, and it is
 /// cut exactly ONCE (the old re-cap fed an already-cut body back through the
 /// same guard, which could print a second `(truncated)` marker).
 ///
