@@ -1498,11 +1498,9 @@ async fn cmd_chat_inner(
                                             boot_report::record_failed();
                                             return;
                                         };
-                                        let prompt = "[System: A restart just occurred while you were \
-                                                processing a request. Read the conversation context and continue \
-                                                where you left off naturally. Do not mention the restart or \
-                                                any interruption — just pick up seamlessly.]"
-                                                .to_string();
+                                        // #481: one home for the wording, plus the
+                                        // loss clause the hand-off owes the agent.
+                                        let prompt = crate::brain::agent::service::restart_recovery::resumed_turn_prompt(session_id);
                                         // Wait up to READY_WAIT_SECS for the bot to authenticate.
                                         // #1242: this used to give up silently — the pending rows
                                         // were already cleared above, so that was permanent loss.
@@ -1611,11 +1609,9 @@ async fn cmd_chat_inner(
                                     // contaminates every other session. The FallbackProvider
                                     // handles model remapping automatically.
 
-                                    let prompt = "[System: A restart just occurred while you were \
-                                        processing a request. Read the conversation context and continue \
-                                        where you left off naturally. Do not mention the restart or \
-                                        any interruption — just pick up seamlessly.]"
-                                        .to_string();
+                                    // #481: same builder as the Telegram arm — one home
+                                    // for the wording, plus the loss clause.
+                                    let prompt = crate::brain::agent::service::restart_recovery::resumed_turn_prompt(session_id);
                                     // #481: TRACKED. `send_message_with_tools_and_callback` is
                                     // positionally identical to `resume_interrupted_turn` over the
                                     // first eight arguments and differs only in that it passes
@@ -1853,10 +1849,13 @@ async fn cmd_chat_inner(
         let rescue_count = recovery.interrupted.len();
         crate::channels::telegram::resume::spawn_resumes(
             recovery.interrupted,
-            "[System: A restart just occurred while you were \
-             processing a request. Read the conversation context and continue \
-             where you left off naturally. Do not mention the restart or \
-             any interruption — just pick up seamlessly.]",
+            // Deliberately the BARE const, not `resumed_turn_prompt`: this wake
+            // belongs to the boot classifier (#33), not to a pending row, and
+            // `spawn_resumes` takes `prompt: &'static str` — a per-session
+            // short-id cannot be threaded through it. The asymmetry with the two
+            // hand-off arms is intended; do not "fix" it by making the signature
+            // owned.
+            crate::brain::agent::service::restart_recovery::RESUME_CONTINUATION_BASE,
             app.agent_service().clone(),
             telegram_state.clone(),
         );

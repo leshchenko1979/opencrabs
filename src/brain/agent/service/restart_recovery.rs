@@ -411,6 +411,41 @@ pub async fn dispose_pending_row(
     }
 }
 
+/// The continuation prompt a boot-resumed `user` turn is framed with (#481).
+///
+/// One home for the wording: both hand-off arms that resume a pending row frame
+/// their wake with it, so the surface contract below cannot drift between them.
+/// The boot classifier's `spawn_resumes` uses this const too, but the *bare*
+/// const — its wake belongs to the classifier rather than to a pending row, and
+/// its signature takes `&'static str`, so a per-session id cannot be threaded
+/// through it.
+///
+/// **The wording is a contract, not copy.** *"Do not mention the restart or any
+/// interruption"* must survive: a resumed turn that announces the restart shows
+/// the user a restart notice on every swap.
+pub(crate) const RESUME_CONTINUATION_BASE: &str =
+    "[System: A restart just occurred while you were processing a request. Read the conversation \
+context and continue where you left off naturally. Do not mention the restart or any \
+interruption — just pick up seamlessly.]";
+
+/// Frame a boot-resumed `user` turn: the base continuation, then the one fact the
+/// agent cannot read off a transcript that looks complete (#481).
+///
+/// A turn killed mid-flight leaves a transcript whose last entry is frequently a
+/// finished tool call, so nothing in it separates *"the work completed"* from
+/// *"the process died between the work and the report"*. The appended clause
+/// states that ambiguity and puts the check on the side-effecting steps, where
+/// repeating one is expensive or destructive.
+pub(crate) fn resumed_turn_prompt(session_id: Uuid) -> String {
+    format!(
+        "{} The previous attempt (session {}) was killed mid-turn and did NOT finish; part of the \
+work may already have been completed. Before repeating a side-effecting step — a send, a write, \
+an install, a commit — verify from the world whether it already landed.",
+        RESUME_CONTINUATION_BASE,
+        &session_id.simple().to_string()[..8],
+    )
+}
+
 /// What the agent is told about a command a restart killed. Deliberately
 /// states that it did NOT finish and hands the decision back, rather than
 /// re-running something expensive on the agent's behalf.
