@@ -7,7 +7,9 @@
 //! need 20-45s when upstream is slow), while local HTTP keeps the longer
 //! 90s window for cold-loading models.
 
-use crate::brain::agent::service::helpers::handshake_timeout_for;
+use crate::brain::agent::service::helpers::{
+    handshake_timeout_for, provider_handshake_timeout_for,
+};
 use std::time::Duration;
 
 #[test]
@@ -78,4 +80,44 @@ fn missing_base_url_defaults_to_cloud_timeout() {
     // hardcode their endpoints internally) are always cloud — they
     // can't be a local LM server.
     assert_eq!(handshake_timeout_for(false, None), Duration::from_secs(60));
+}
+
+// ---------------------------------------------------------------------------
+// The PER-SEND budget (#680/#682).
+//
+// `handshake_timeout_for` is the class table. `provider_handshake_timeout_for`
+// is what each HTTP provider applies at its own `.send()`, and it must NOT
+// return a budget for a CLI provider: those spawn a subprocess rather than
+// sending HTTP, so a send budget is meaningless and the caller keeps its
+// process-startup wall at the class table instead.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_providers_get_no_per_send_budget() {
+    // None == "there is no HTTP send to bound". A value here would both be
+    // meaningless and silently drop the 600s process-startup wall the caller
+    // applies only while this is None.
+    assert_eq!(provider_handshake_timeout_for(true, None), None);
+    assert_eq!(
+        provider_handshake_timeout_for(true, Some("https://api.openai.com/v1/chat/completions")),
+        None,
+    );
+}
+
+#[test]
+fn http_providers_get_the_class_budget_per_send() {
+    assert_eq!(
+        provider_handshake_timeout_for(false, Some("https://api.openai.com/v1/chat/completions")),
+        Some(Duration::from_secs(60)),
+    );
+    assert_eq!(
+        provider_handshake_timeout_for(false, Some("http://127.0.0.1:8080/v1/chat/completions")),
+        Some(Duration::from_secs(90)),
+    );
+    // No base_url: the built-in Anthropic/Gemini providers hardcode cloud
+    // endpoints, so they take the cloud budget.
+    assert_eq!(
+        provider_handshake_timeout_for(false, None),
+        Some(Duration::from_secs(60)),
+    );
 }

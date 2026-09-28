@@ -538,17 +538,31 @@ impl Provider for GeminiProvider {
         let body = self.build_gemini_request(&request);
         let url = self.generate_url(&model, true);
         let retry_config = RetryConfig::default();
+        // Bound ONE send's connect + TLS + response headers (#680/#682). The
+        // budget is per attempt, so a retry's backoff sleep is charged to the
+        // retry policy and never to this clock.
+        let send_budget =
+            crate::brain::agent::service::helpers::provider_handshake_timeout_for(
+                false,
+                self.base_url(),
+            );
 
         let response = retry(
             || async {
-                let response = self
+                let send = self
                     .client
                     .post(&url)
                     .header("Content-Type", "application/json")
                     .header("x-goog-api-key", &self.api_key)
                     .json(&body)
-                    .send()
-                    .await?;
+                    .send();
+                let response = match send_budget {
+                    Some(budget) => match tokio::time::timeout(budget, send).await {
+                        Ok(res) => res,
+                        Err(_) => return Err(ProviderError::Timeout(budget.as_secs())),
+                    },
+                    None => send.await,
+                }?;
 
                 if !response.status().is_success() {
                     return Err(self.handle_error(response).await);

@@ -2557,6 +2557,37 @@ impl OpenAIProvider {
         self.base_url.clone()
     }
 
+    /// POST `url` with `headers` and a pre-encoded `body`, bounding **one
+    /// send's** connect + TLS + response headers (#680/#682).
+    ///
+    /// The budget is per ATTEMPT: a retry's backoff sleep belongs to the retry
+    /// policy, never to this clock — so a send budget that expires means the
+    /// send itself did not answer, not that we spent the interval on our own
+    /// backoff. Bound at the send (rather than around
+    /// `provider.stream(request)`, which also contains the rate-limit wait,
+    /// the retry backoff and the fallback walk) is what makes the resulting
+    /// `Timeout` mean what its name says.
+    async fn send_bounded(
+        &self,
+        url: &str,
+        headers: reqwest::header::HeaderMap,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response> {
+        let budget = crate::brain::agent::service::helpers::provider_handshake_timeout_for(
+            false,
+            Some(self.base_url.as_str()),
+        );
+        let send = self.client.post(url).headers(headers).json(body).send();
+        let response = match budget {
+            Some(budget) => match tokio::time::timeout(budget, send).await {
+                Ok(res) => res,
+                Err(_) => return Err(ProviderError::Timeout(budget.as_secs())),
+            },
+            None => send.await,
+        }?;
+        Ok(response)
+    }
+
     /// Returns true if a ProviderError represents an auth failure that
     /// should trigger an auth-refresh retry (401/403).
     fn is_auth_error(err: &ProviderError) -> bool {
@@ -3497,11 +3528,7 @@ impl Provider for OpenAIProvider {
                 tracing::debug!("Sending request to OpenAI API: {}", self.base_url);
                 let body = self.encode_body(&openai_request)?;
                 let response = self
-                    .client
-                    .post(self.send_url())
-                    .headers(self.headers_for(session)?)
-                    .json(&body)
-                    .send()
+                    .send_bounded(&self.send_url(), self.headers_for(session)?, &body)
                     .await?;
 
                 let status = response.status();
@@ -3575,11 +3602,7 @@ impl Provider for OpenAIProvider {
                     || async {
                         let body = self.encode_body(&openai_request)?;
                         let response = self
-                            .client
-                            .post(self.send_url())
-                            .headers(self.headers_for(session)?)
-                            .json(&body)
-                            .send()
+                            .send_bounded(&self.send_url(), self.headers_for(session)?, &body)
                             .await?;
                         if !response.status().is_success() {
                             return Err(self.handle_error(response).await);
@@ -3609,11 +3632,11 @@ impl Provider for OpenAIProvider {
                             || async {
                                 let body = self.encode_body(&openai_request)?;
                                 let response = self
-                                    .client
-                                    .post(self.send_url())
-                                    .headers(self.headers_for(session)?)
-                                    .json(&body)
-                                    .send()
+                                    .send_bounded(
+                                        &self.send_url(),
+                                        self.headers_for(session)?,
+                                        &body,
+                                    )
                                     .await?;
                                 if !response.status().is_success() {
                                     return Err(self.handle_error(response).await);
@@ -3684,50 +3707,8 @@ impl Provider for OpenAIProvider {
             include_usage: true,
         });
 
-        let tools_count = openai_request.tools.as_ref().map(|t| t.len()).unwrap_or(0);
-
-        // Count input tokens via tiktoken (cl100k_base) to monitor context window usage.
-        // Each message: content tokens + serialized tool_calls tokens + 4 overhead per message.
-        let message_tokens: usize = openai_request
-            .messages
-            .iter()
-            .map(|m| {
-                let content = m
-                    .content
-                    .as_ref()
-                    .map(|v| {
-                        let s = v.as_str().unwrap_or("");
-                        count_message_tokens(s)
-                    })
-                    .unwrap_or(4);
-                let tool_calls = m
-                    .tool_calls
-                    .as_ref()
-                    .map(|tc| count_tokens(&serde_json::to_string(tc).unwrap_or_default()))
-                    .unwrap_or(0);
-                content + tool_calls
-            })
-            .sum();
-        let tool_schema_tokens = openai_request
-            .tools
-            .as_ref()
-            .map(|tools| count_tokens(&serde_json::to_string(tools).unwrap_or_default()))
-            .unwrap_or(0);
-        let total_input_tokens = message_tokens + tool_schema_tokens;
-        // #1147: budget against the provider's actual window (configured
-        // context_window, then model heuristics) instead of a hardcoded 200k,
-        // which misreported a configured-1M provider as "36% of 200k".
-        let context_window = self.context_window(&model).unwrap_or(200_000);
-        let context_pct =
-            (total_input_tokens as f32 / context_window as f32 * 100.0).round() as u32;
-        tracing::debug!(
-            "OpenAI stream request: ~{} input tokens ({}% of {}-token window) — {} messages, {} tool schemas",
-            total_input_tokens,
-            context_pct,
-            context_window,
-            openai_request.messages.len(),
-            tools_count
-        );
+        // The input-token estimate is deliberately NOT computed here (#681).
+        // It runs after the send returns, just past the auth-refresh retries.
 
         let retry_config = self.retry_config(&model);
 
@@ -3740,11 +3721,7 @@ impl Provider for OpenAIProvider {
             || async {
                 let body = self.encode_body(&openai_request)?;
                 let response = self
-                    .client
-                    .post(self.send_url())
-                    .headers(self.headers_for(session)?)
-                    .json(&body)
-                    .send()
+                    .send_bounded(&self.send_url(), self.headers_for(session)?, &body)
                     .await?;
 
                 tracing::debug!("OpenAI response status: {}", response.status());
@@ -3784,11 +3761,7 @@ impl Provider for OpenAIProvider {
                 || async {
                     let body = self.encode_body(&openai_request)?;
                     let r = self
-                        .client
-                        .post(self.send_url())
-                        .headers(self.headers_for(session)?)
-                        .json(&body)
-                        .send()
+                        .send_bounded(&self.send_url(), self.headers_for(session)?, &body)
                         .await?;
                     if !r.status().is_success() {
                         return Err(self.handle_error(r).await);
@@ -3815,11 +3788,7 @@ impl Provider for OpenAIProvider {
                         || async {
                             let body = self.encode_body(&openai_request)?;
                             let r = self
-                                .client
-                                .post(self.send_url())
-                                .headers(self.headers_for(session)?)
-                                .json(&body)
-                                .send()
+                                .send_bounded(&self.send_url(), self.headers_for(session)?, &body)
                                 .await?;
                             if !r.status().is_success() {
                                 return Err(self.handle_error(r).await);
@@ -3847,6 +3816,56 @@ impl Provider for OpenAIProvider {
             }
         }
         let response = response?;
+        let tools_count = openai_request.tools.as_ref().map(|t| t.len()).unwrap_or(0);
+
+        // Input-token estimate, computed AFTER the send (#681). It has two
+        // consumers, and both belong after the response is in hand: the debug
+        // line below, and the fallback usage figure emitted when a provider
+        // reports no usage of its own (`[STREAM_USAGE]`). Computing it before
+        // the request put a full tiktoken pass over every message and tool
+        // schema on the connect path, burning guest CPU in the window the send
+        // budget exists to protect.
+        // Each message: content tokens + serialized tool_calls tokens + 4 overhead per message.
+        let message_tokens: usize = openai_request
+            .messages
+            .iter()
+            .map(|m| {
+                let content = m
+                    .content
+                    .as_ref()
+                    .map(|v| {
+                        let s = v.as_str().unwrap_or("");
+                        count_message_tokens(s)
+                    })
+                    .unwrap_or(4);
+                let tool_calls = m
+                    .tool_calls
+                    .as_ref()
+                    .map(|tc| count_tokens(&serde_json::to_string(tc).unwrap_or_default()))
+                    .unwrap_or(0);
+                content + tool_calls
+            })
+            .sum();
+        let tool_schema_tokens = openai_request
+            .tools
+            .as_ref()
+            .map(|tools| count_tokens(&serde_json::to_string(tools).unwrap_or_default()))
+            .unwrap_or(0);
+        let total_input_tokens = message_tokens + tool_schema_tokens;
+        // #1147: budget against the provider's actual window (configured
+        // context_window, then model heuristics) instead of a hardcoded 200k,
+        // which misreported a configured-1M provider as "36% of 200k".
+        let context_window = self.context_window(&model).unwrap_or(200_000);
+        let context_pct =
+            (total_input_tokens as f32 / context_window as f32 * 100.0).round() as u32;
+        tracing::debug!(
+            "[OI] stream request: ~{} input tokens ({}% of {}-token window) — {} messages, {} tool schemas",
+            total_input_tokens,
+            context_pct,
+            context_window,
+            openai_request.messages.len(),
+            tools_count
+        );
 
         // Extract OpenRouter cache status before consuming the stream
         let cache_status = response

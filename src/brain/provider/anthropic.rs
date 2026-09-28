@@ -327,17 +327,31 @@ impl Provider for AnthropicProvider {
         let mut anthropic_request = self.to_anthropic_request(request);
         anthropic_request.stream = Some(true);
         let retry_config = RetryConfig::default();
+        // Bound ONE send's connect + TLS + response headers (#680/#682). The
+        // budget is per attempt, so a retry's backoff sleep is charged to the
+        // retry policy and never to this clock.
+        let send_budget =
+            crate::brain::agent::service::helpers::provider_handshake_timeout_for(
+                false,
+                self.base_url(),
+            );
 
         // Retry the stream connection establishment
         let response = retry(
             || async {
-                let response = self
+                let send = self
                     .client
                     .post(ANTHROPIC_API_URL)
                     .headers(req_headers.clone())
                     .json(&anthropic_request)
-                    .send()
-                    .await?;
+                    .send();
+                let response = match send_budget {
+                    Some(budget) => match tokio::time::timeout(budget, send).await {
+                        Ok(res) => res,
+                        Err(_) => return Err(ProviderError::Timeout(budget.as_secs())),
+                    },
+                    None => send.await,
+                }?;
 
                 if !response.status().is_success() {
                     return Err(self.handle_error(response).await);
