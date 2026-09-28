@@ -752,6 +752,17 @@ pub struct RateLimiterConfig {
     /// G4 rich: burst capacity of the rich bucket. Default: 10.
     #[serde(default = "default_rich_burst")]
     pub rich_burst: u32,
+    /// Cross-surface per-chat spacing floor: the minimum elapsed time between
+    /// two admissions to the SAME forum peer, in milliseconds, applied across
+    /// all four gates (typing, edits, sends, rich) and charged before any
+    /// bucket. Telegram states the per-chat rule in per-SECOND terms ("avoid
+    /// sending more than one message per second" per chat), which no per-minute
+    /// bucket can express; measured refusals separate on this axis and not on
+    /// the per-minute one. Cosmetic chrome drops when armed, finals defer, taps
+    /// pass through. Default: 1000. **0 disables the floor** and restores the
+    /// pre-floor behaviour exactly.
+    #[serde(default = "default_spacing_floor_ms")]
+    pub spacing_floor_ms: u64,
     /// Spacing of the telemetry summary INFO line (one line per active forum:
     /// admissions, ladder drops per class, finals stats, throttled ms).
     /// Default: 300.
@@ -775,6 +786,7 @@ impl Default for RateLimiterConfig {
             sends_burst: default_sends_burst(),
             rich_per_minute: default_rich_per_minute(),
             rich_burst: default_rich_burst(),
+            spacing_floor_ms: default_spacing_floor_ms(),
             summary_log_secs: default_summary_log_secs(),
         }
     }
@@ -818,6 +830,10 @@ fn default_rich_per_minute() -> u32 {
 
 fn default_rich_burst() -> u32 {
     10
+}
+
+fn default_spacing_floor_ms() -> u64 {
+    1000
 }
 
 fn default_summary_log_secs() -> u64 {
