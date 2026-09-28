@@ -1455,7 +1455,7 @@ pub(crate) fn build_bg_echo_bubble(body: &str, title: &str) -> (BubbleWire, Stri
         "<blockquote expandable><b>{}{}</b>\n{}</blockquote>",
         super::markdown::escape_html(title),
         suffix,
-        super::rich::markdown_to_html(body),
+        super::rich::markdown_to_html(&body),
     );
     (BubbleWire::Markdown(markdown), html)
 }
