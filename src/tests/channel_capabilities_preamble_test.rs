@@ -29,6 +29,18 @@ fn test_inject_telegram_channel_capabilities_explicit() {
     assert!(injected.contains("- Markdown tables: GFM tables rendered natively"));
     assert!(injected.contains("- HTML glyphs / formatting"));
     assert!(injected.contains("- Image includes: Markdown syntax"));
+    // #487: the image line must document the format the daemon actually
+    // ships. The quoted title is the caption channel (alt is not rendered),
+    // and an inline reference loses its caption — a lane that writes the
+    // reference on a text line gets a bare image and no error to explain it.
+    assert!(
+        injected.contains("becomes the media caption"),
+        "the preamble must say the quoted title is what captions the image"
+    );
+    assert!(
+        injected.contains("alone on its own line"),
+        "the preamble must state the own-line rule: an inline reference renders with no caption"
+    );
 
     // Ensure it was placed before Runtime Info
     let cap_pos = injected

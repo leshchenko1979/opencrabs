@@ -770,7 +770,7 @@ const TELEGRAM_CHANNEL_CAPABILITIES_BODY: &str = "\
 - Mermaid diagrams: native rendering; prefer vertical layouts (tag the fence exactly ```mermaid, no suffix, then open the body with flowchart TD or sequenceDiagram for multi-actor flows).
 - Markdown tables: GFM tables rendered natively as rich Telegram tables (header on own line, blank line before, delimiter row).
 - HTML glyphs / formatting: rich HTML entities, blockquotes (<blockquote>), code, and emoji styling.
-- Image includes: Markdown syntax (![alt](path/or/url)) for local/remote image rendering.";
+- Image includes: Markdown syntax (![alt](path \"caption\")) - local path or http(s) URL. The quoted title becomes the media caption; the alt text is not shown. Put the reference alone on its own line, or the caption is dropped.";
 
 /// The Telegram channel capabilities preamble injected into the system brain of
 /// a session bound to the Telegram channel (#295).
