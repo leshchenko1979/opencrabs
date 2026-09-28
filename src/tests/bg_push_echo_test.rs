@@ -535,3 +535,80 @@ async fn notify_receipt_card_keeps_a_4719_char_body_whole_on_the_rich_leg() {
         "the classic fallback carries EXACTLY one truncation marker (the #490 re-cap printed a second)"
     );
 }
+
+/// #490: when a cap DOES fire, it keeps the tail. The head-only cut dropped the
+/// ending, which is where the Disclosures and What-now/next blocks live — the
+/// part written for the reader. Both legs have budgets, so both must preserve.
+#[test]
+fn a_firing_cap_keeps_the_tail_and_states_the_dropped_count_on_both_legs() {
+    const TOTAL: usize = 5000; // over the classic 3200, under the rich 30000
+    let head = "HEAD-SENTINEL";
+    let tail = "TAIL-SENTINEL-NEEDS-FROM-YOU";
+    let body = format!("{head}{}{tail}", "m".repeat(TOTAL - head.len() - tail.len()));
+    assert_eq!(body.chars().count(), TOTAL);
+
+    let (wire, html) = build_bg_echo_bubble(&body, "⚙️ background task result");
+    let BubbleWire::Markdown(markdown) = &wire else {
+        panic!("plain echo bubble rides the markdown outbox wire");
+    };
+
+    // 5000 in, 3160 kept as head+tail, so 1840 chars went — stated once.
+    for (leg, payload) in [("markdown", markdown), ("classic html", &html)] {
+        assert!(
+            payload.contains(head),
+            "{leg}: the opening survives: {}",
+            &payload[..payload.len().min(120)]
+        );
+        assert!(
+            payload.contains(tail),
+            "{leg}: the TAIL survives a firing cap — the #490 defect was this being dropped"
+        );
+        assert!(
+            payload.contains("(truncated 1840 chars)"),
+            "{leg}: the marker states the dropped COUNT"
+        );
+    }
+    // Wrapper safety: cutting RAW text before conversion is what keeps the
+    // classic wrapper well-formed (the plan_card lesson).
+    assert!(html.starts_with("<blockquote expandable>"));
+    assert!(html.ends_with("</blockquote>"));
+}
+
+/// #490, second case: a body ABOVE the rich budget (30000) is cut — and its
+/// tail STILL survives, which is the behaviour the head-only cut lost at every
+/// budget, not just the classic one.
+#[tokio::test]
+async fn above_the_rich_budget_the_tail_still_survives() {
+    const TOTAL: usize = 40000;
+    let head = "HEAD-SENTINEL";
+    let tail = "TAIL-SENTINEL-DISCLOSURES-BLOCK";
+    let body = format!("{head}{}{tail}", "m".repeat(TOTAL - head.len() - tail.len()));
+    assert_eq!(body.chars().count(), TOTAL);
+
+    let (wire, classic) = build_notify_receipt_card("Compiler", &body).await;
+    let BubbleWire::Html(rich) = &wire else {
+        panic!("notify card rides the HTML rich wire (#85)");
+    };
+
+    assert!(rich.contains(head), "the opening survives the rich cut");
+    assert!(
+        rich.contains(tail),
+        "the tail survives even above the rich budget — 40000 in, 29960 kept, 10040 dropped"
+    );
+    assert!(
+        rich.contains("(truncated 10040 chars)"),
+        "the rich leg states its own dropped count"
+    );
+    assert!(
+        rich.contains("(truncated)"),
+        "the card's headline suffix also flags the cut"
+    );
+    // The suffix states no count, so the number appears exactly ONCE.
+    assert_eq!(
+        rich.matches("(truncated ").count(),
+        1,
+        "one count, adjacent to the material it describes — not repeated as chrome"
+    );
+    // The classic fallback is cut harder, and still keeps its tail.
+    assert!(classic.contains(tail), "classic fallback keeps its tail too");
+}
