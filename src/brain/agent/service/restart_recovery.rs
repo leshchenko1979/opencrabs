@@ -356,18 +356,19 @@ pub enum RowOutcome {
     /// duplicate had no work of its own left to do.
     Superseded,
     /// No hand-off could be attempted: the row's `session_id` is not a UUID, so
-    /// there is no session to deliver it to. Cleared anyway so it cannot linger
-    /// forever, and the log says so.
+    /// there is no session to deliver it to. Reported and LEFT IN PLACE — it is
+    /// the only evidence that session was ever interrupted, and erasing a row no
+    /// boot can resume would hide the one fact worth keeping.
     NotDispatched,
 }
 
 impl RowOutcome {
     /// The stable spelling used in log lines and asserted by tests.
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::HandedOff => "handed-off",
+            Self::HandedOff => "handed_off",
             Self::Superseded => "superseded",
-            Self::NotDispatched => "not-dispatched",
+            Self::NotDispatched => "not_dispatched",
         }
     }
 }
@@ -393,21 +394,60 @@ fn log_field(value: &str) -> String {
 ///
 /// Takes the repository rather than holding one: the boot loop owns the
 /// connection, and recovery must not open a second one.
+///
+/// Emits exactly ONE line per row, carrying the row's identity and its outcome,
+/// so a boot's dispositions are readable afterwards from the log alone.
+/// `NotDispatched` is the exception to the deleting: it reports and leaves the
+/// row, and says so. No free-form text goes into the fields — the row's
+/// `user_message` is the whole agent input and does not belong on this line.
+///
+/// Returns whether the row was cleared, so a caller can tell a disposal from a
+/// report without re-querying the table.
 pub async fn dispose_pending_row(
     repo: &crate::db::repository::pending_request::PendingRequestRepository,
     row: &crate::db::repository::pending_request::PendingRequest,
     outcome: RowOutcome,
-) {
-    if let Err(e) = repo.delete_ids(vec![row.id.clone()]).await {
-        // The row is left for the next boot, which is the safe direction: the
-        // hand-off already happened, so re-seeing it is noise rather than loss.
-        tracing::error!(
+) -> bool {
+    if outcome == RowOutcome::NotDispatched {
+        // The never-resumable arm: no hand-off was possible, so the row is the
+        // only record that this session was interrupted. Reported, not erased.
+        tracing::warn!(
             target: "restart_recovery",
             row_id = %log_field(&row.id),
+            session_id = %log_field(&row.session_id),
+            origin = %log_field(&row.origin),
             outcome = outcome.as_str(),
-            error = %e,
-            "failed to clear an accounted-for interrupted row — it will be seen again next boot"
+            "boot recovery could not dispatch this row — session_id is not a UUID; left in place"
         );
+        return false;
+    }
+
+    match repo.delete_ids(vec![row.id.clone()]).await {
+        Ok(()) => {
+            tracing::info!(
+                target: "restart_recovery",
+                row_id = %log_field(&row.id),
+                session_id = %log_field(&row.session_id),
+                origin = %log_field(&row.origin),
+                outcome = outcome.as_str(),
+                "boot recovery accounted for an interrupted row"
+            );
+            true
+        }
+        Err(e) => {
+            // The row stays for the next boot, which is the safe direction: the
+            // hand-off already happened, so re-seeing it is noise, not loss.
+            tracing::error!(
+                target: "restart_recovery",
+                row_id = %log_field(&row.id),
+                session_id = %log_field(&row.session_id),
+                origin = %log_field(&row.origin),
+                outcome = outcome.as_str(),
+                error = %e,
+                "failed to clear an accounted-for interrupted row — it will be seen again next boot"
+            );
+            false
+        }
     }
 }
 

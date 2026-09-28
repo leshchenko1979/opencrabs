@@ -1767,10 +1767,11 @@ async fn cmd_chat_inner(
                     } else {
                         // Nothing could be attempted with this row: its
                         // `session_id` is not a UUID, so there is no session to
-                        // deliver it to. Cleared anyway so it cannot linger
-                        // forever, and the log says which outcome it got —
-                        // this arm did not exist before #481, and the blanket
-                        // wipe is what used to hide it.
+                        // deliver it to. The helper reports it and leaves it in
+                        // place — a row no boot can resume is worth seeing rather
+                        // than erasing. This arm did not exist before #481: the
+                        // if-let had no else, and the blanket wipe was what hid
+                        // those rows entirely.
                         crate::brain::agent::service::restart_recovery::dispose_pending_row(
                             &pending_repo,
                             &req,
