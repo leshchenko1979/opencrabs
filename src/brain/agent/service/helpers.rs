@@ -208,10 +208,10 @@ pub(crate) fn handshake_timeout_for(cli_handles_tools: bool, base_url: Option<&s
 /// interval it was sized for — so a log line stops reporting our own backoff as
 /// a connect failure.
 ///
-/// A `cli_handles_tools` provider spawns a subprocess instead of sending HTTP,
-/// so there is no send to bound and this returns `None`; the caller keeps the
-/// process-startup wall at `handshake_timeout_for` for those.
-pub(crate) fn provider_handshake_timeout_for(
+/// `cli_handles_tools` providers spawn a subprocess instead of sending HTTP, so
+/// there is no send to bound: `None`, and such a provider bounds its own
+/// subprocess instead.
+pub(crate) fn send_handshake_timeout_for(
     cli_handles_tools: bool,
     base_url: Option<&str>,
 ) -> Option<Duration> {
@@ -219,6 +219,29 @@ pub(crate) fn provider_handshake_timeout_for(
         None
     } else {
         Some(handshake_timeout_for(cli_handles_tools, base_url))
+    }
+}
+
+/// The **caller-level** handshake wall, for subprocess providers only.
+///
+/// `stream_complete` applies this around `provider.stream(request)`. That
+/// subtree is the wrong place for an HTTP budget (#680/#682): it also holds the
+/// provider-internal rate-limit wait, the retry backoff and the fallback chain
+/// walk, all of which stretch on a loaded host, so the wall fired while no
+/// single hop had failed. An HTTP provider now applies its own budget at each
+/// `.send()` instead, and returns `None` here.
+///
+/// A CLI provider spawns a subprocess, so its budget is a **process-startup**
+/// one and this level is the only one that can carry it — nothing inside those
+/// providers bounds startup on its own.
+pub(crate) fn cli_startup_timeout_for(
+    cli_handles_tools: bool,
+    base_url: Option<&str>,
+) -> Option<Duration> {
+    if cli_handles_tools {
+        Some(handshake_timeout_for(cli_handles_tools, base_url))
+    } else {
+        None
     }
 }
 
@@ -339,7 +362,7 @@ impl AgentService {
         // provider — a subprocess, not an HTTP send — keeps a wall at this
         // level, bounding process startup + auth refresh.
         let handshake_timeout =
-            provider_handshake_timeout_for(provider.cli_handles_tools(), provider.base_url());
+            cli_startup_timeout_for(provider.cli_handles_tools(), provider.base_url());
         // /stop must win over the pre-first-token window too (#1148): the
         // call below contains the provider-internal rate-limit retries and
         // the fallback chain walk, none of which observe the token. Racing

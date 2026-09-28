@@ -2573,7 +2573,7 @@ impl OpenAIProvider {
         headers: reqwest::header::HeaderMap,
         body: &serde_json::Value,
     ) -> Result<reqwest::Response> {
-        let budget = crate::brain::agent::service::helpers::provider_handshake_timeout_for(
+        let budget = crate::brain::agent::service::helpers::send_handshake_timeout_for(
             false,
             Some(self.base_url.as_str()),
         );

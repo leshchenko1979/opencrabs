@@ -542,7 +542,7 @@ impl Provider for GeminiProvider {
         // budget is per attempt, so a retry's backoff sleep is charged to the
         // retry policy and never to this clock.
         let send_budget =
-            crate::brain::agent::service::helpers::provider_handshake_timeout_for(
+            crate::brain::agent::service::helpers::send_handshake_timeout_for(
                 false,
                 self.base_url(),
             );
