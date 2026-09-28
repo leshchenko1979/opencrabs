@@ -1135,39 +1135,6 @@ impl App {
                 self.plan_document = None;
                 true
             }
-            "/rebuild" => {
-                // Schedule the build in the BACKGROUND via a one-shot cron job
-                // so the session isn't blocked for the minutes a release build
-                // takes. The scheduler builds from source and exec-restarts
-                // into the new binary when ready, resuming this session.
-                let sid = self
-                    .current_session
-                    .as_ref()
-                    .map(|s| s.id)
-                    .unwrap_or(Uuid::nil());
-                let pool = self.agent_service.context().pool();
-                let sender = self.event_sender();
-                tokio::spawn(async move {
-                    match crate::cron::schedule_background_rebuild(pool, sid, None).await {
-                        Ok(()) => {
-                            let _ = sender.send(TuiEvent::SystemMessage {
-                                session_id: sid,
-                                text: "🔨 Rebuild scheduled in the background — I'll reload \
-                                       into the new binary automatically when it's ready. \
-                                       Keep working."
-                                    .into(),
-                            });
-                        }
-                        Err(e) => {
-                            let _ = sender.send(TuiEvent::Error {
-                                session_id: sid,
-                                message: format!("Failed to schedule rebuild: {e}"),
-                            });
-                        }
-                    }
-                });
-                true
-            }
             "/exit" | "/quit" => {
                 // Same shutdown the runner already drives for Ctrl+C twice,
                 // just reachable by typing it (#923).

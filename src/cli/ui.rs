@@ -451,7 +451,7 @@ async fn cmd_chat_inner(
     // Core agent tools (file ops, shell, search, workflow, memory/brain,
     // session/channel/cron/a2a/config/slash, follow-up, discovery, sub-agents,
     // RSI) live in one place so the headless cron daemon shares the exact same
-    // set. Browser/channel-send/media/rebuild/evolve are added below.
+    // set. Browser/channel-send/media/evolve are added below.
     // `false` = interactive (#129): TUI + channel users see mid-task output,
     // so session_notify/suggest_options stay registered.
     let subagent_manager =
@@ -840,9 +840,6 @@ async fn cmd_chat_inner(
                 crate::brain::agent::QueuedUserMessage::join(&drained)
             })
         });
-
-    // Register rebuild tool (schedules a background build via cron)
-    tool_registry.register(Arc::new(crate::brain::tools::rebuild::RebuildTool::new()));
 
     // Register evolve tool (binary self-update from GitHub releases)
     tool_registry.register(Arc::new(crate::brain::tools::evolve::EvolveTool::new(
@@ -1272,7 +1269,7 @@ async fn cmd_chat_inner(
     // Update app with the configured agent service (preserve event channels!)
     app.set_agent_service(agent_service);
 
-    // Resume any in-flight requests that were interrupted by a restart/rebuild/evolve.
+    // Resume any in-flight requests that were interrupted by a restart or evolve.
     // Rows only exist if the process died mid-request (normal completions delete them).
     // Instead of replaying the original message, we send a continuation prompt so the
     // agent reads context and picks up naturally — no loops, no leaking restart signals.
@@ -2068,7 +2065,7 @@ async fn cmd_chat_inner(
         app.force_onboard = true;
     }
 
-    // Resume a specific session (e.g. after /rebuild restart). Accepts a full
+    // Resume a specific session (e.g. after a restart). Accepts a full
     // UUID or the prefix that `session list` shows, routed through the shared
     // resolver so every CLI session-id entry point resolves identically.
     if let Some(ref sid) = session_id {
@@ -2149,26 +2146,12 @@ async fn cmd_chat_inner(
         } else {
             let cron_repo = crate::db::CronJobRepository::new(db.pool().clone());
             let cron_run_repo = crate::db::CronJobRunRepository::new(db.pool().clone());
-            // Rebuild outcomes must reach the session that asked (#304): a
-            // failed background build used to be log-only while the TUI waited
-            // for a reload that never came.
-            let rebuild_notify_tx = app.event_sender();
-            let session_notifier: crate::cron::SessionNotifier =
-                std::sync::Arc::new(move |session_id, text| {
-                    if rebuild_notify_tx
-                        .send(crate::tui::events::TuiEvent::SystemMessage { session_id, text })
-                        .is_err()
-                    {
-                        tracing::warn!("rebuild notifier: TUI event channel closed");
-                    }
-                });
             let cron_scheduler = crate::cron::CronScheduler::new(
                 cron_repo,
                 cron_run_repo,
                 channel_factory.clone(),
                 service_context.clone(),
-            )
-            .with_session_notifier(session_notifier);
+            );
             // Detached task; the JoinHandle isn't awaited or aborted anywhere.
             cron_scheduler.spawn();
             tracing::info!("Cron scheduler spawned");
@@ -2376,7 +2359,7 @@ fn print_terminal_banner(
 
     println!("  {}Quick Commands{}", CYAN, RESET);
     println!(
-        "  {}/help  /sessions  /models  /skills  /usage  /approve  /rebuild  /doctor{}",
+        "  {}/help  /sessions  /models  /skills  /usage  /approve  /doctor{}",
         DIM, RESET
     );
     println!();

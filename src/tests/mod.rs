@@ -547,7 +547,6 @@ pub mod read_hashline_clamp_test;
 pub mod read_media_redirect_test;
 pub mod read_output_budget_test;
 pub mod read_resume_offset_test;
-pub mod rebuild_notify_test;
 pub mod recent_paths_test;
 pub mod bash_loop_nudge_test;
 pub mod redact_scope_test;
