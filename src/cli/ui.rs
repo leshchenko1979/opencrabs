@@ -1314,10 +1314,10 @@ async fn cmd_chat_inner(
                     requests.len()
                 );
                 boot_found.store(requests.len(), std::sync::atomic::Ordering::Relaxed);
-                // Clear the table so these don't resume again if THIS run also crashes
-                if let Err(e) = pending_repo.clear_all().await {
-                    tracing::warn!(error = %e, "failed to clear pending items");
-                }
+                // Rows are deliberately NOT wiped here. Each one is disposed of
+                // on its own arm below, once its disposition is known: wiping
+                // the table up front is what let a row vanish with nothing left
+                // to resume when its hand-off never reported (#481).
                 let agent = app.agent_service().clone();
                 let session_repo = crate::db::SessionRepository::new(db.pool().clone());
                 // Dedup by session_id — only resume each session once
@@ -1335,6 +1335,15 @@ async fn cmd_chat_inner(
                         // ledger dedups, so the summary counts sessions.
                         boot_report::record_interrupted(session_id);
                         if !seen.insert(session_id) {
+                            // A second row for a session already handled this
+                            // boot carries no work of its own: disposed of
+                            // here rather than dropped by the `continue`.
+                            crate::brain::agent::service::restart_recovery::dispose_pending_row(
+                                &pending_repo,
+                                &req,
+                                crate::brain::agent::service::restart_recovery::RowOutcome::Superseded,
+                            )
+                            .await;
                             continue;
                         }
                         resumed_session_ids.insert(session_id);
@@ -1362,6 +1371,12 @@ async fn cmd_chat_inner(
                                     bg_meta: None,
                                 },
                             );
+                            crate::brain::agent::service::restart_recovery::dispose_pending_row(
+                                &pending_repo,
+                                &req,
+                                crate::brain::agent::service::restart_recovery::RowOutcome::HandedOff,
+                            )
+                            .await;
                             continue;
                         }
                         boot_report::record_resumed(session_id);
@@ -1449,6 +1464,11 @@ async fn cmd_chat_inner(
                             let tg = tg.clone();
                             let boot_parked_tg = boot_parked.clone();
                             let permitted_targets = permitted_targets.clone();
+                            // #481: the row this arm is resuming, cloned in so
+                            // its disposition is recorded AFTER the hand-off
+                            // returns — a kill mid-recovery keeps the row.
+                            let pending_repo = pending_repo.clone();
+                            let row = req.clone();
                             tokio::spawn(async move {
                                 crate::cron::send_scope::with_send_scope(
                                     permitted_targets,
@@ -1546,7 +1566,15 @@ async fn cmd_chat_inner(
                                         )
                                         .await
                                         {
-                                            Ok(()) => boot_report::record_delivered(),
+                                            Ok(()) => {
+                                                boot_report::record_delivered();
+                                                crate::brain::agent::service::restart_recovery::dispose_pending_row(
+                                                    &pending_repo,
+                                                    &row,
+                                                    crate::brain::agent::service::restart_recovery::RowOutcome::HandedOff,
+                                                )
+                                                .await;
+                                            }
                                             Err(e) => {
                                                 tracing::error!(
                                                     "Telegram resume failed for session {}: {}",
@@ -1554,6 +1582,12 @@ async fn cmd_chat_inner(
                                                     e
                                                 );
                                                 boot_report::record_failed();
+                                                crate::brain::agent::service::restart_recovery::dispose_pending_row(
+                                                    &pending_repo,
+                                                    &row,
+                                                    crate::brain::agent::service::restart_recovery::RowOutcome::HandedOff,
+                                                )
+                                                .await;
                                             }
                                         }
                                     },
@@ -1563,6 +1597,10 @@ async fn cmd_chat_inner(
                             continue;
                         }
                         let permitted_targets = permitted_targets.clone();
+                        // #481: same as the Telegram arm — the row is cloned in
+                        // and disposed of only after the hand-off returns.
+                        let pending_repo = pending_repo.clone();
+                        let row = req.clone();
                         tokio::spawn(async move {
                             crate::cron::send_scope::with_send_scope(
                                 permitted_targets,
@@ -1611,6 +1649,12 @@ async fn cmd_chat_inner(
                                                 response.content.len()
                                             );
                                             boot_report::record_delivered();
+                                            crate::brain::agent::service::restart_recovery::dispose_pending_row(
+                                                &pending_repo,
+                                                &row,
+                                                crate::brain::agent::service::restart_recovery::RowOutcome::HandedOff,
+                                            )
+                                            .await;
                                             // A revived sub-agent session (#110): its
                                             // result belongs to the session that spawned
                                             // it, not to the surface-less default — route
@@ -1698,6 +1742,12 @@ async fn cmd_chat_inner(
                                                 e
                                             );
                                             boot_report::record_failed();
+                                            crate::brain::agent::service::restart_recovery::dispose_pending_row(
+                                                &pending_repo,
+                                                &row,
+                                                crate::brain::agent::service::restart_recovery::RowOutcome::HandedOff,
+                                            )
+                                            .await;
                                             // A revived sub-agent session whose resume
                                             // failed (#110): the parent is waiting on
                                             // this outcome either way — report and
@@ -1718,6 +1768,19 @@ async fn cmd_chat_inner(
                             )
                             .await;
                         });
+                    } else {
+                        // Nothing could be attempted with this row: its
+                        // `session_id` is not a UUID, so there is no session to
+                        // deliver it to. Cleared anyway so it cannot linger
+                        // forever, and the log says which outcome it got —
+                        // this arm did not exist before #481, and the blanket
+                        // wipe is what used to hide it.
+                        crate::brain::agent::service::restart_recovery::dispose_pending_row(
+                            &pending_repo,
+                            &req,
+                            crate::brain::agent::service::restart_recovery::RowOutcome::NotDispatched,
+                        )
+                        .await;
                     }
                 }
             }

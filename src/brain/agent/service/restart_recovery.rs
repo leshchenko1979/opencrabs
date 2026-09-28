@@ -340,6 +340,77 @@ pub async fn report_interrupted() -> usize {
     count
 }
 
+/// What happened to one interrupted boot row, so that clearing it is a
+/// decision rather than a blanket wipe (#481).
+///
+/// Every arm of the boot loop has to account for the row it is holding. Naming
+/// the outcome is what lets the log say *why* the row went, and what keeps the
+/// `NotDispatched` case — a row nothing could be done with — from looking
+/// exactly like a handed-off one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowOutcome {
+    /// The hand-off was attempted and returned: a system push was re-delivered,
+    /// or a user turn was resumed. The row has been accounted for.
+    HandedOff,
+    /// Another row for the same session was already handled this boot, so this
+    /// duplicate had no work of its own left to do.
+    Superseded,
+    /// No hand-off could be attempted: the row's `session_id` is not a UUID, so
+    /// there is no session to deliver it to. Cleared anyway so it cannot linger
+    /// forever, and the log says so.
+    NotDispatched,
+}
+
+impl RowOutcome {
+    /// The stable spelling used in log lines and asserted by tests.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HandedOff => "handed-off",
+            Self::Superseded => "superseded",
+            Self::NotDispatched => "not-dispatched",
+        }
+    }
+}
+
+/// A value with its newlines escaped, for use as a structured log field.
+///
+/// `id`/`session_id`/`origin` are read straight out of the database, and a
+/// `session_id` that does not parse as a UUID is precisely the row this module
+/// now has to account for — so the value is not assumed well-formed. An
+/// embedded newline would split the record and detach every field after it
+/// onto an orphan line.
+fn log_field(value: &str) -> String {
+    value.replace('\n', "\\n").replace('\r', "\\r")
+}
+
+/// Clear ONE interrupted row, once its disposition is known (#481).
+///
+/// The boot path used to wipe the whole table before it had resumed anything,
+/// so a row whose hand-off never produced a report was already gone: the work
+/// disappeared with nothing left to resume and nothing said about it. Deleting
+/// per row, after the arm has accounted for it, is the discipline the
+/// background-task leg already applies ([`report_interrupted`]).
+///
+/// Takes the repository rather than holding one: the boot loop owns the
+/// connection, and recovery must not open a second one.
+pub async fn dispose_pending_row(
+    repo: &crate::db::repository::pending_request::PendingRequestRepository,
+    row: &crate::db::repository::pending_request::PendingRequest,
+    outcome: RowOutcome,
+) {
+    if let Err(e) = repo.delete_ids(vec![row.id.clone()]).await {
+        // The row is left for the next boot, which is the safe direction: the
+        // hand-off already happened, so re-seeing it is noise rather than loss.
+        tracing::error!(
+            target: "restart_recovery",
+            row_id = %log_field(&row.id),
+            outcome = outcome.as_str(),
+            error = %e,
+            "failed to clear an accounted-for interrupted row — it will be seen again next boot"
+        );
+    }
+}
+
 /// What the agent is told about a command a restart killed. Deliberately
 /// states that it did NOT finish and hands the decision back, rather than
 /// re-running something expensive on the agent's behalf.
