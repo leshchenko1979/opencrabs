@@ -314,3 +314,26 @@ async fn the_html_fallback_wraps_each_block_in_its_own_p_tag() {
     fallback.assert_async().await;
     primary.assert_async().await;
 }
+
+/// #676 - a 429 refusal line must name the message it was editing, and a
+/// send (no `message_id` in the body) must still report a constant shape.
+#[test]
+fn refusal_line_carries_the_target_message_id() {
+    let edit = serde_json::json!({
+        "chat_id": -100123,
+        "message_id": 84439,
+        "rich_message": { "html": "x" },
+    });
+    assert_eq!(api::target_message_id(&edit), "84439");
+
+    let send = serde_json::json!({
+        "chat_id": -100123,
+        "rich_message": { "html": "x" },
+    });
+    assert_eq!(
+        api::target_message_id(&send),
+        "-",
+        "a sendRichMessage body carries no message_id; the field stays present \
+         so the line shape is constant"
+    );
+}
