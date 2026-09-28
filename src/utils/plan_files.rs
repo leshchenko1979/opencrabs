@@ -1105,17 +1105,18 @@ pub fn label_value_is_present(lines: &[&str], idx: usize, label: &str) -> bool {
     !rest.trim().is_empty() || field_continuation_is_present(lines, idx)
 }
 
-/// True when content follows the line at `idx` as its continuation: the first
-/// non-blank line after it, provided that line is neither a heading nor another
-/// bold `**Label:**` field. An iterator rather than a loop whose first pass
-/// always returns, which trips `clippy::never_loop` (deny-by-default).
+/// True when content follows the line at `idx` as its continuation: the next
+/// non-blank line, provided it is INDENTED. Indentation is markdown's own rule
+/// for a list item's continuation, and it is the whole discriminator — a
+/// sibling `- **Label:**` field and a `## heading` are both unindented, so
+/// neither can be mistaken for a value. An iterator rather than a loop whose
+/// first pass always returns, which trips `clippy::never_loop` (deny-by-default).
 pub fn field_continuation_is_present(lines: &[&str], idx: usize) -> bool {
     lines
         .iter()
         .skip(idx + 1)
-        .map(|l| l.trim())
-        .find(|t| !t.is_empty())
-        .is_some_and(|t| !t.starts_with('#') && !is_field_label_line(t))
+        .find(|l| !l.trim().is_empty())
+        .is_some_and(|l| l.starts_with(' ') || l.starts_with('\t'))
 }
 
 /// True when the line at `idx` is a bare bold `**Label:**` placeholder and
@@ -1133,19 +1134,6 @@ pub fn bare_field_has_continuation(lines: &[&str], idx: usize) -> bool {
             .unwrap_or(false)
     });
     is_bare_field && field_continuation_is_present(lines, idx)
-}
-
-/// True for a line carrying a bold `**Label:**` field marker, with or without a
-/// value after it. Accepts a list-bullet prefix and an embellished label name
-/// (`- **Intent (JTBD):** …`), so a field always terminates the previous
-/// field's continuation block.
-fn is_field_label_line(line: &str) -> bool {
-    let body = line
-        .strip_prefix("- ")
-        .or_else(|| line.strip_prefix("* "))
-        .unwrap_or(line);
-    body.strip_prefix("**")
-        .is_some_and(|rest| rest.contains(":**"))
 }
 
 /// Advisory light-template-B checks for the design `.md`: `## Context`

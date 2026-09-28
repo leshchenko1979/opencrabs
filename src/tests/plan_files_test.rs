@@ -436,9 +436,17 @@ fn label_value_is_present_reads_the_value_across_its_lines() {
     let scaffold = ["- **Problem:** ", "- **Target state:** fixed"];
     assert!(!label_value_is_present(&scaffold, 0, "**Problem:**"));
 
-    // A bare label followed by a blank line.
+    // A bare label followed by a blank line, then UNINDENTED prose: markdown
+    // reads that prose as a sibling line, not as this field's continuation.
     assert!(!label_value_is_present(
         &["- **Problem:**", "", "prose"],
+        0,
+        "**Problem:**"
+    ));
+
+    // Same, with the prose directly after the label.
+    assert!(!label_value_is_present(
+        &["- **Problem:**", "prose"],
         0,
         "**Problem:**"
     ));
@@ -453,9 +461,19 @@ fn label_value_is_present_reads_the_value_across_its_lines() {
     // The label is not on `idx` at all.
     assert!(!label_value_is_present(&["## Context"], 0, "**Problem:**"));
 
-    // An embellished label name still terminates the previous continuation.
+    // An embellished label name terminates the previous field: it is a sibling
+    // bullet, and unindented, so it is not a continuation.
     let embellished = ["- **Target state:**", "- **Intent (JTBD):** asked"];
     assert!(!label_value_is_present(&embellished, 0, "**Target state:**"));
+
+    // Indentation is the discriminator, not the bullet: a label whose value is
+    // an indented sub-bullet counts as filled.
+    let sub_bullet = ["- **Problem:**", "  - the gate refuses a ready design"];
+    assert!(label_value_is_present(&sub_bullet, 0, "**Problem:**"));
+
+    // A tab-indented continuation counts too.
+    let tabbed = ["- **Problem:**", "\tthe guard refuses a ready design"];
+    assert!(label_value_is_present(&tabbed, 0, "**Problem:**"));
 }
 
 #[tokio::test]
