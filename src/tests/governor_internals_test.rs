@@ -13,6 +13,7 @@ use crate::channels::telegram::governor::{
     ensure_bucket, format_summary, is_permanent_edit_error, note_429_pause, Bucket, Counters,
     EditClass, EditPayload, INTERACTIVE_RESERVE, MAX_429_PAUSE,
 };
+use crate::config::Config;
 
 #[test]
 fn bucket_allows_burst_then_throttles() {
@@ -234,6 +235,28 @@ fn rate_limiter_defaults_sized_below_group_limit() {
     assert_eq!(cfg.edits_per_minute, 18);
     assert_eq!(cfg.rich_per_minute, 18);
     assert_eq!(cfg.sends_ceiling_per_minute, 18);
+}
+
+/// #676 (D2): the cross-surface per-chat spacing floor defaults to the
+/// documented ~1/s interval, and the key is OPTIONAL in config. Every existing
+/// user's `config.toml` predates it and the template ships it commented out, so
+/// a missing `serde(default)` would fail the upgrade at PARSE time rather than
+/// merely defaulting — which is what the template parse below pins.
+#[test]
+fn spacing_floor_defaults_to_one_second_and_the_template_still_parses() {
+    assert_eq!(
+        crate::config::RateLimiterConfig::default().spacing_floor_ms,
+        1000,
+        "D2: the documented ~1/s per-chat floor"
+    );
+
+    let parsed: Config = toml::from_str(include_str!("../../config.toml.example"))
+        .expect("embedded config.toml.example must still parse with the floor commented out");
+    assert_eq!(
+        parsed.channels.telegram.rate_limiter.spacing_floor_ms,
+        1000,
+        "an ABSENT key must fall back to the default, not fail the parse"
+    );
 }
 
 /// #254: EditPayload enum variants and helper constructors construct expected wire shapes.
