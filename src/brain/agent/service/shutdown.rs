@@ -27,6 +27,21 @@ static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// Mark the process as shutting down. Called before any shutdown path
 /// cancels an in-flight turn.
+///
+/// **Invariant (#481) — call this BEFORE cancelling, never after.** The tool
+/// loop reads the flag at its delete site (`tool_loop.rs:901-910`) to tell
+/// *"the user abandoned this turn"* from *"the app is quitting under it"*. A
+/// cancellation that arrives with the flag still clear is indistinguishable
+/// from a user stop, so the turn's recovery row is deleted as abandoned and
+/// the work is lost — the exact failure #481 exists to prevent.
+///
+/// This holds **vacuously** for a `systemctl --user restart` today: SIGTERM
+/// has no handler (the daemon installs `tokio::signal::ctrl_c()`, SIGINT
+/// only), so the process takes the default action and dies without unwinding
+/// `run_tool_loop`, the delete never runs, and the row survives the swap.
+/// That is precisely *why* a mid-turn swap leaves a resumable row. The
+/// paragraph is here so it stays true the day someone adds a SIGTERM handler
+/// that cancels in-flight turns.
 pub(crate) fn mark_shutting_down() {
     SHUTTING_DOWN.store(true, Ordering::SeqCst);
 }

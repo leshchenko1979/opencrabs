@@ -1535,7 +1535,14 @@ async fn cmd_chat_inner(
                                             .await;
                                         match crate::channels::telegram::handler::resume_session(
                                             bot, chat, thread_id, session_id, prompt, agent, tg,
-                                            None, // boot replay of an EXISTING row: resume-of-resume must stay untracked (#729/#12)
+                                            // #481: TRACKED. A boot replay used to pass `None`
+                                            // (resume-of-resume stayed untracked, #729/#12), so a
+                                            // second kill during the recovery consumed the wake and
+                                            // lost the work with only a log line. Passing `User`
+                                            // re-inserts a row for the recovery turn — which also
+                                            // carries this topic's thread_id into it, something the
+                                            // untracked primitive cannot do (it has no thread param).
+                                            Some(crate::brain::agent::PendingOrigin::User),
                                         )
                                         .await
                                         {
@@ -1571,8 +1578,19 @@ async fn cmd_chat_inner(
                                         where you left off naturally. Do not mention the restart or \
                                         any interruption — just pick up seamlessly.]"
                                         .to_string();
+                                    // #481: TRACKED. `send_message_with_tools_and_callback` is
+                                    // positionally identical to `resume_interrupted_turn` over the
+                                    // first eight arguments and differs only in that it passes
+                                    // `Some(PendingOrigin::User)` to `run_tool_loop`, which inserts
+                                    // the pending row. The ninth argument is the channel thread:
+                                    // this arm serves tui/discord/whatsapp/slack, which have no
+                                    // topics, and the untracked primitive passes no thread either
+                                    // — so `None` preserves current routing exactly. (A Telegram row
+                                    // reaching this arm because its `channel_chat_id` was absent or
+                                    // unparseable also writes a NULL thread; unchanged from today,
+                                    // stated so it is a decision rather than an oversight.)
                                     match agent
-                                        .resume_interrupted_turn(
+                                        .send_message_with_tools_and_callback(
                                             session_id,
                                             prompt,
                                             None,
@@ -1581,6 +1599,7 @@ async fn cmd_chat_inner(
                                             None,
                                             &channel,
                                             channel_chat_id.as_deref(),
+                                            None,
                                         )
                                         .await
                                     {
