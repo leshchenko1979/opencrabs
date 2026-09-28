@@ -99,12 +99,13 @@ fn ladder_order_drops_clock_first_and_final_never_drops() {
         throttled_rich_ms: 3500,
         dropped_rich: 17,
         deferred_rich: 18,
+        dropped_spacing: 19,
     };
     let line = format_summary(-100123, &c, 2).expect("active peer must summarize");
     assert!(line.contains("chat=-100123"));
     assert!(line.contains("admitted{typing=12,edits=34,sends=5,rich=11}"));
     assert!(line.contains(
-        "dropped{clock=1,brain_preview=2,intermediary=3,status=4,typing=6,rich=17,deferred_rich=18}"
+        "dropped{clock=1,brain_preview=2,intermediary=3,status=4,typing=6,rich=17,deferred_rich=18,spacing=19}"
     ));
     assert!(line.contains("finals{queued=7,superseded=8,delivered=9,failed=10,pending=2}"));
     assert!(line.contains("interactive{admitted=13,overflow=14,pause429=15}"));
