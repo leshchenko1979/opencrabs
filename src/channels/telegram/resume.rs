@@ -1318,9 +1318,19 @@ pub(crate) async fn resume_session_inner(
     Ok(())
 }
 
-/// Cap for the #1221 echo body: classic `sendMessage` caps a message at 4096
-/// chars; header, tags and Telegram's own margin eat the rest of the budget.
+/// Cap for the #1221 echo body on the **classic** wire: classic `sendMessage`
+/// caps a message at 4096 chars; header, tags and Telegram's own margin eat
+/// the rest of the budget. This governs the classic fallback only — a body
+/// bound for a rich wire takes [`BG_ECHO_BODY_CAP_CHARS_RICH`] instead (#490).
 const BG_ECHO_BODY_CAP_CHARS: usize = 3200;
+
+/// Cap for the same body on the **rich** wire (#490). `sendRichMessage`
+/// carries ~32K chars — eight times the classic cap — so the classic 3200
+/// budget was cutting the tail (the Disclosures and What-now/next blocks)
+/// off notify cards Telegram would have accepted whole. Sized just under the
+/// rich ceiling to leave room for the card's own `<details>`/`<summary>`
+/// chrome, matching the `flow` chrome's own 30000 guard.
+const BG_ECHO_BODY_CAP_CHARS_RICH: usize = 30_000;
 
 /// Producer stamped into a `[session-notify from=…]` header.
 ///
@@ -1649,9 +1659,14 @@ pub(crate) async fn build_notify_receipt_card(
         return (BubbleWire::Markdown(markdown), classic);
     }
     let preview = first_line_preview(body);
-    let truncated = body.chars().count() > BG_ECHO_BODY_CAP_CHARS;
-    let body = crate::utils::string::truncate_chars(body, BG_ECHO_BODY_CAP_CHARS);
-    let suffix = if truncated { " (truncated)" } else { "" };
+    // #490: this body renders onto the RICH Html wire below (Telegram's ~32K
+    // `sendRichMessage`), so it takes the rich budget, not the classic one.
+    // The classic fallback is built by `build_bg_echo_bubble`, which applies
+    // the classic budget itself — that call is handed the body UNCAPPED so
+    // each leg gets exactly one cut, on the leg that needs it.
+    let rich_truncated = body.chars().count() > BG_ECHO_BODY_CAP_CHARS_RICH;
+    let body = crate::utils::string::truncate_chars(body, BG_ECHO_BODY_CAP_CHARS_RICH);
+    let suffix = if rich_truncated { " (truncated)" } else { "" };
     // Body rendered from markdown with <p> wrapping — the rich HTML dialect
     // chrome surfaces use (#1142); mermaid fences resolve exactly like the
     // final-reply path, gated so a fence-less body costs no HTTP.
