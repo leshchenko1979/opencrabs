@@ -8,9 +8,9 @@ use crate::config::profile::{home_for_profile, with_profile_home_async};
 use crate::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus, TaskType};
 use crate::utils::plan_files::{
     PlanModeState, archive_dir, create_design_md, discard_plan, heal_completed_active_plan,
-    is_plan_autonomy, is_pre_init_editing, load_plan, peek_plan_just_archived, plan_json_path,
-    plan_md_path, plan_mode_state, pre_init_marker_path, save_plan, set_plan_autonomy,
-    set_pre_init_editing, sync_md_to_json, template_section_warnings,
+    is_plan_autonomy, is_pre_init_editing, label_value_is_present, load_plan,
+    peek_plan_just_archived, plan_json_path, plan_md_path, plan_mode_state, pre_init_marker_path,
+    save_plan, set_plan_autonomy, set_pre_init_editing, sync_md_to_json, template_section_warnings,
 };
 use uuid::Uuid;
 
@@ -308,10 +308,14 @@ async fn sync_refuses_malformed_body_and_restores_previous_mirror() {
         std::fs::write(&md_path, valid).unwrap();
         sync_md_to_json(sid).await.unwrap();
 
-        let malformed = "# Guarded design\n\n## Context\n- **Problem:**\n  text moved to the next line\n- **Target state:** fixed\n- **Intent:** test\n\n## Implementation steps\n1. Keep old\n";
+        // #374: the continuation form is no longer the defect, so a refusal is
+        // driven by genuinely missing fields. Here Problem is continuation-
+        // filled while Target state and Intent are absent.
+        let malformed = "# Guarded design\n\n## Context\n- **Problem:**\n  text moved to the next line\n\n## Implementation steps\n1. Keep old\n";
         std::fs::write(&md_path, malformed).unwrap();
         let error = sync_md_to_json(sid).await.unwrap_err();
-        assert!(error.contains("`**Problem:**` needs non-empty text after the label"));
+        assert!(error.contains("`**Target state:**` needs non-empty text after the label"));
+        assert!(error.contains("`**Intent:**` needs non-empty text after the label"));
         assert!(error.contains("each `**Label:**` must be a single line: label + space + text"));
         assert_eq!(std::fs::read_to_string(&md_path).unwrap(), valid);
         assert_eq!(load_plan(sid).await.unwrap().description, valid);
@@ -338,6 +342,15 @@ async fn sync_refuses_malformed_body_and_restores_previous_mirror() {
         assert!(error.contains("Parse error on line 2"));
         assert_eq!(std::fs::read_to_string(&md_path).unwrap(), valid);
         assert_eq!(load_plan(sid).await.unwrap().description, valid);
+
+        // #374: a substantively complete body whose value sits on the line
+        // after its label is accepted and mirrored verbatim — the property the
+        // guard was previously refusing. Last, so the refusal cases above keep
+        // asserting against the `valid` mirror they restored.
+        let continued = "# Guarded design\n\n## Context\n- **Problem:**\n  text moved to the next line\n- **Target state:** fixed\n- **Intent:** test\n\n## Implementation steps\n1. Keep old\n";
+        std::fs::write(&md_path, continued).unwrap();
+        sync_md_to_json(sid).await.unwrap();
+        assert_eq!(load_plan(sid).await.unwrap().description, continued);
     })
     .await;
 }
@@ -388,6 +401,61 @@ fn template_warnings_flag_missing_sections() {
     let filled = "## Context\n- **Problem:** broken\n- **Target state:** fixed\n\
                   - **Intent:** asked\n\n## Implementation steps\n1. do the thing\n";
     assert!(template_section_warnings(filled).is_empty());
+
+    // #374: the same template with each value on the line after its label is
+    // equally quiet — completeness, not layout, is what the guard asks about.
+    let continued = "## Context\n- **Problem:**\n  X is broken\n- **Target state:**\n  X works\n\
+                     - **Intent:**\n  the user asked\n\n## Implementation steps\n1. do the thing\n";
+    assert!(template_section_warnings(continued).is_empty());
+}
+
+/// #374: a field's value may sit on the line after its label. The predicate
+/// answers completeness, so a continuation-form value counts as present while
+/// the scaffold's bare labels stay unfilled.
+#[test]
+fn label_value_is_present_reads_the_value_across_its_lines() {
+    // Inline value on the label's own line.
+    assert!(label_value_is_present(
+        &["- **Problem:** broken"],
+        0,
+        "**Problem:**"
+    ));
+
+    // Value on the continuation line — the form the guard refused.
+    let continued = ["- **Problem:**", "  the writer pushed the text down"];
+    assert!(label_value_is_present(&continued, 0, "**Problem:**"));
+
+    // A bare label with nothing after it, and nothing following.
+    assert!(!label_value_is_present(
+        &["- **Problem:**"],
+        0,
+        "**Problem:**"
+    ));
+
+    // The scaffold form: bare label, then the next field immediately.
+    let scaffold = ["- **Problem:** ", "- **Target state:** fixed"];
+    assert!(!label_value_is_present(&scaffold, 0, "**Problem:**"));
+
+    // A bare label followed by a blank line.
+    assert!(!label_value_is_present(
+        &["- **Problem:**", "", "prose"],
+        0,
+        "**Problem:**"
+    ));
+
+    // A bare label followed by a heading.
+    assert!(!label_value_is_present(
+        &["- **Problem:**", "## Context"],
+        0,
+        "**Problem:**"
+    ));
+
+    // The label is not on `idx` at all.
+    assert!(!label_value_is_present(&["## Context"], 0, "**Problem:**"));
+
+    // An embellished label name still terminates the previous continuation.
+    let embellished = ["- **Target state:**", "- **Intent (JTBD):** asked"];
+    assert!(!label_value_is_present(&embellished, 0, "**Target state:**"));
 }
 
 #[tokio::test]

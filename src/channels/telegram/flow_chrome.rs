@@ -679,12 +679,19 @@ pub(crate) fn prose_sections_from_md_body(body: &str) -> Option<Vec<ProseSection
     let sections: Vec<ProseSection> = split_plan_prose(body)
         .into_iter()
         .filter_map(|mut sec| {
-            let kept: Vec<&str> = sec
-                .body
-                .lines()
-                .filter(|l| !is_empty_scaffold_line(l))
-                .collect();
-            let new_body = kept.join("\n").trim().to_string();
+            // #374: the filter is index-aware, because a bare `**Label:**` whose
+            // value sits on the NEXT line is real content — dropping the label
+            // would render that value unlabelled.
+            let new_body = {
+                let src: Vec<&str> = sec.body.lines().collect();
+                let kept: Vec<&str> = src
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, _)| !is_empty_scaffold_line_at(&src, *idx))
+                    .map(|(_, l)| *l)
+                    .collect();
+                kept.join("\n").trim().to_string()
+            };
             (!new_body.is_empty()).then(|| {
                 sec.body = new_body;
                 sec
@@ -692,6 +699,16 @@ pub(crate) fn prose_sections_from_md_body(body: &str) -> Option<Vec<ProseSection
         })
         .collect();
     (!sections.is_empty()).then_some(sections)
+}
+
+/// Index-aware companion to [`is_empty_scaffold_line`]: a bare `**Label:**`
+/// placeholder whose value follows on the next line is kept, so the value
+/// renders with its label instead of arriving unlabelled (#374). Every other
+/// scaffold form is unchanged — the context is consulted only for a line that
+/// is already an empty placeholder.
+fn is_empty_scaffold_line_at(lines: &[&str], idx: usize) -> bool {
+    use crate::utils::plan_files::bare_field_has_continuation;
+    is_empty_scaffold_line(lines[idx]) && !bare_field_has_continuation(lines, idx)
 }
 
 /// True for an unfilled session-plan scaffold line: a bold `**Label:**` field

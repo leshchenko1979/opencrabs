@@ -1090,6 +1090,64 @@ pub async fn sync_md_to_json(session_id: Uuid) -> Result<(), String> {
     .await
 }
 
+/// True when a `**Label:**` field carries a value: text after the colon on the
+/// label's own line, or on its continuation lines before the next field.
+///
+/// `idx` is the index of the line holding the label. A continuation ends at a
+/// blank line, at a heading, or at the next bold `**Label:**` field — so a bare
+/// scaffold label (`- **Problem:**` with nothing after it) is still unfilled,
+/// while a value pushed to the following indented line counts as present
+/// (#374: the guard asks about completeness, not about layout).
+pub fn label_value_is_present(lines: &[&str], idx: usize, label: &str) -> bool {
+    let Some((_, rest)) = lines.get(idx).and_then(|l| l.split_once(label)) else {
+        return false;
+    };
+    !rest.trim().is_empty() || field_continuation_is_present(lines, idx)
+}
+
+/// True when content follows the line at `idx` as its continuation: the first
+/// non-blank line after it, provided that line is neither a heading nor another
+/// bold `**Label:**` field. An iterator rather than a loop whose first pass
+/// always returns, which trips `clippy::never_loop` (deny-by-default).
+pub fn field_continuation_is_present(lines: &[&str], idx: usize) -> bool {
+    lines
+        .iter()
+        .skip(idx + 1)
+        .map(|l| l.trim())
+        .find(|t| !t.is_empty())
+        .is_some_and(|t| !t.starts_with('#') && !is_field_label_line(t))
+}
+
+/// True when the line at `idx` is a bare bold `**Label:**` placeholder and
+/// content follows it. Only the label form has a continuation — `N.` and
+/// `Done when:` placeholders do not (#374).
+pub fn bare_field_has_continuation(lines: &[&str], idx: usize) -> bool {
+    let is_bare_field = lines.get(idx).is_some_and(|l| {
+        let t = l.trim();
+        let body = t
+            .strip_prefix("- ")
+            .or_else(|| t.strip_prefix("* "))
+            .unwrap_or(t);
+        body.strip_prefix("**")
+            .and_then(|rest| rest.find(":**").map(|i| rest[i + 3..].trim().is_empty()))
+            .unwrap_or(false)
+    });
+    is_bare_field && field_continuation_is_present(lines, idx)
+}
+
+/// True for a line carrying a bold `**Label:**` field marker, with or without a
+/// value after it. Accepts a list-bullet prefix and an embellished label name
+/// (`- **Intent (JTBD):** …`), so a field always terminates the previous
+/// field's continuation block.
+fn is_field_label_line(line: &str) -> bool {
+    let body = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .unwrap_or(line);
+    body.strip_prefix("**")
+        .is_some_and(|rest| rest.contains(":**"))
+}
+
 /// Advisory light-template-B checks for the design `.md`: `## Context`
 /// (with Problem / Target state / Intent) and at least one numbered
 /// `## Implementation steps` entry are required before Approve.
@@ -1098,11 +1156,15 @@ pub fn template_section_warnings(md: &str) -> Vec<String> {
     if !md.contains("## Context") {
         warnings.push("missing required `## Context` section".to_string());
     }
+    // #374: a field's value may sit on the line after its label. The predicate
+    // asks completeness, not layout, so a continuation-form field counts as
+    // filled while the scaffold's bare labels stay unfilled.
+    let lines: Vec<&str> = md.lines().collect();
     for label in ["**Problem:**", "**Target state:**", "**Intent:**"] {
-        let filled = md.lines().any(|l| {
-            l.split_once(label)
-                .is_some_and(|(_, rest)| !rest.trim().is_empty())
-        });
+        let filled = lines
+            .iter()
+            .enumerate()
+            .any(|(idx, l)| l.contains(label) && label_value_is_present(&lines, idx, label));
         if !filled {
             warnings.push(format!("`{label}` needs non-empty text after the label"));
         }

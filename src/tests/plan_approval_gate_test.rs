@@ -465,6 +465,26 @@ async fn interactive_design_init_still_waits_for_approval() {
             result.output
         );
 
+        // #374: the convention is stated BEFORE the write, not only in the
+        // refusal. A model that is never told the label rule has to fail at
+        // least once to learn it — and each failure discards the draft.
+        assert!(
+            result.output.contains("**Label:**"),
+            "the create response must name the label field form: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("SAME line"),
+            "the create response must state the single-line label rule: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("## Context")
+                && result.output.contains("## Implementation steps"),
+            "the create response must name the two required sections: {}",
+            result.output
+        );
+
         let plan = load_plan(ctx.session_id).await.unwrap();
         assert_eq!(
             plan.status,

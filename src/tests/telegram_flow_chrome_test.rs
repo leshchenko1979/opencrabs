@@ -527,6 +527,64 @@ async fn partially_filled_design_scaffold_keeps_only_real_content() {
     let _ = std::fs::remove_dir_all(home_for_profile(Some(&profile)));
 }
 
+// ── #374: the end-to-end property (mirror + render) ──
+
+/// The whole chain for a continuation-form COMPLETE design: the write-time
+/// guard accepts it, the Editing mirror persists it verbatim, and the render
+/// path returns its sections — so the card cannot come up empty for a design
+/// that is substantively complete. The pre-#374 behaviour was a refusal that
+/// reverted the `.md` and left the card carrying only the title.
+#[tokio::test]
+async fn continuation_form_design_is_mirrored_and_renders() {
+    use crate::channels::telegram::flow_chrome::load_plan_prose;
+    use crate::config::profile::{home_for_profile, with_profile_home_async};
+    use crate::utils::plan_files::{create_design_md, load_plan, plan_md_path, save_plan,
+        sync_md_to_json};
+    use uuid::Uuid;
+
+    let profile = format!("flow-chrome-test-{}", Uuid::new_v4());
+    with_profile_home_async(Some(&profile), async {
+        let sid = Uuid::new_v4();
+        let plan = crate::tui::plan::PlanDocument::new(sid, "T".to_string());
+        save_plan(&plan).await.unwrap();
+        create_design_md(sid, "T").await.unwrap();
+
+        // Every label's value sits on the line AFTER its label — the form the
+        // guard used to refuse.
+        let body = "# T\n\n\
+                    ## Context\n\
+                    - **Problem:**\n  the guard refuses a ready design\n\
+                    - **Target state:**\n  a complete design is accepted\n\
+                    - **Intent:**\n  stop losing drafts\n\n\
+                    ## Implementation steps\n\
+                    1. Widen the predicate\n";
+        std::fs::write(plan_md_path(sid).await, body).unwrap();
+
+        sync_md_to_json(sid).await.expect("complete design is accepted");
+        assert_eq!(
+            load_plan(sid).await.unwrap().description,
+            body,
+            "the mirror persists the body verbatim"
+        );
+
+        let secs = load_plan_prose(sid).await.expect("card has sections");
+        let ctx = secs
+            .iter()
+            .find(|s| s.heading.as_deref() == Some("Context"))
+            .expect("Context section");
+        assert!(
+            ctx.body.contains("**Problem:**"),
+            "the label is kept with its value: {ctx:?}"
+        );
+        assert!(
+            ctx.body.contains("the guard refuses a ready design"),
+            "the continuation value renders: {ctx:?}"
+        );
+    })
+    .await;
+    let _ = std::fs::remove_dir_all(home_for_profile(Some(&profile)));
+}
+
 // ── header-only renders (empty flow_entries): plain merged footer ──
 
 #[test]
@@ -1322,6 +1380,25 @@ fn empty_scaffold_lines_are_hidden_filled_ones_kept() {
     assert!(!is_empty_scaffold_line("1. Widen the hash to 4 chars"));
     assert!(!is_empty_scaffold_line("plain prose line"));
     assert!(!is_empty_scaffold_line(""));
+}
+
+#[test]
+fn prose_sections_keep_a_label_whose_value_follows() {
+    use crate::channels::telegram::flow_chrome::prose_sections_from_md_body;
+
+    // #374: a value on the line after its label is content, so the label must
+    // not be filtered away as an empty scaffold placeholder — otherwise the
+    // value renders without its label.
+    let continued = "# Design\n\n## Context\n- **Problem:**\n  the gate refuses a ready plan\n";
+    let sections = prose_sections_from_md_body(continued).expect("sections");
+    assert_eq!(sections.len(), 1);
+    let body = &sections[0].body;
+    assert!(body.contains("**Problem:**"), "label kept: {body}");
+    assert!(body.contains("the gate refuses a ready plan"), "value kept: {body}");
+
+    // A truly empty placeholder is still dropped, and with it the section.
+    let empty = "# Design\n\n## Context\n- **Problem:** \n- **Target state:** \n";
+    assert!(prose_sections_from_md_body(empty).is_none());
 }
 
 #[test]

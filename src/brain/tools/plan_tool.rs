@@ -2178,7 +2178,9 @@ impl Tool for PlanTool {
                             "📋 Created design plan: {title} (Editing)\n\n\
                              Plan document: {}\n\n\
                              Write the design there (fill ## Context and the numbered \
-                             ## Implementation steps), then WAIT for the user to approve \
+                             ## Implementation steps). Put each `**Label:**` and its text \
+                             on the SAME line — label, space, text — so the write is not \
+                             refused. Then WAIT for the user to approve \
                              the plan. Do NOT call 'start': checklist operations stay \
                              blocked until the plan is Active.",
                             md_path.display()
