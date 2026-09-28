@@ -237,20 +237,15 @@ impl NotifyQueueRepository {
             context_text.to_string(),
             display_text.to_string(),
         );
-        self.pool
-            .get()
-            .await
-            .context("Failed to get connection")?
-            .interact(move |conn| {
-                conn.execute(
-                    "DELETE FROM notify_queue \
-                     WHERE session_id = ?1 AND context_text = ?2 AND display_text = ?3",
-                    params![session_id, context_text, display_text],
-                )
-            })
-            .await
-            .map_err(interact_err)?
-            .context("Failed to clear matching notify queue rows")?;
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
+            conn.execute(
+                "DELETE FROM notify_queue \
+                 WHERE session_id = ?1 AND context_text = ?2 AND display_text = ?3",
+                params![session_id, context_text, display_text],
+            )
+        })
+        .await
+        .context("Failed to clear matching notify queue rows")?;
         Ok(())
     }
 

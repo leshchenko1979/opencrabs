@@ -319,6 +319,7 @@ pub mod group_history_test;
 pub mod headless_tool_surface_test;
 pub mod help_catalog_test;
 pub mod help_mode_entry_test;
+pub mod hot_write_paths_retry_test;
 pub mod image_reentry_test;
 #[cfg(any(feature = "slack", feature = "discord", feature = "whatsapp"))]
 pub mod image_reentry_wiring_test;

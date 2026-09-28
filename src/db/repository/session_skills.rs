@@ -12,6 +12,7 @@
 
 use crate::db::Pool;
 use crate::db::database::interact_err;
+use crate::db::retry::{write_retry_config, write_with_retry};
 use anyhow::{Context, Result};
 use rusqlite::params;
 use uuid::Uuid;
@@ -36,21 +37,16 @@ impl SessionSkillsRepository {
         let sid = session_id.to_string();
         let slug = slug.to_string();
         let epoch = epoch as i64;
-        self.pool
-            .get()
-            .await
-            .context("Failed to get connection")?
-            .interact(move |conn| {
-                conn.execute(
-                    "INSERT INTO session_seen_skills (session_id, slug, epoch) VALUES (?1, ?2, ?3) \
-                     ON CONFLICT(session_id, slug) DO UPDATE \
-                     SET seen_at = strftime('%s', 'now'), epoch = excluded.epoch",
-                    params![sid, slug, epoch],
-                )
-            })
-            .await
-            .map_err(interact_err)?
-            .context("Failed to record seen skill")?;
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
+            conn.execute(
+                "INSERT INTO session_seen_skills (session_id, slug, epoch) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(session_id, slug) DO UPDATE \
+                 SET seen_at = strftime('%s', 'now'), epoch = excluded.epoch",
+                params![sid, slug, epoch],
+            )
+        })
+        .await
+        .context("Failed to record seen skill")?;
         Ok(())
     }
 
