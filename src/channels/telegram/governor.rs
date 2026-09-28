@@ -1533,6 +1533,12 @@ pub(crate) async fn pace_send(chat: ChatId) {
             if !peer.forum_seen {
                 return;
             }
+            let now = gate_now();
+            // #676 - a plain send is content, so the spacing floor is
+            // WAITED out rather than dropped; the loop's existing
+            // SEND_MAX_HOLD arm bounds it exactly like a bucket hold. The
+            // wait is the REMAINDER of the interval, not the whole floor.
+            let spacing_hold = spacing_wait(peer, now, lim.spacing_floor);
             let sec = ensure_bucket(
                 &mut peer.sends_sec,
                 lim.send_burst,
@@ -1543,12 +1549,6 @@ pub(crate) async fn pace_send(chat: ChatId) {
                 lim.send_minute_ceiling,
                 f64::from(lim.send_minute_ceiling) / 60.0,
             );
-            let now = gate_now();
-            // #676 - a plain send is content, so the spacing floor is
-            // WAITED out rather than dropped; the loop's existing
-            // SEND_MAX_HOLD arm bounds it exactly like a bucket hold. The
-            // wait is the REMAINDER of the interval, not the whole floor.
-            let spacing_hold = spacing_wait(peer, now, lim.spacing_floor);
             let need = sec
                 .next_token_in_for(now, 0.0)
                 .max(min.next_token_in_for(now, 0.0))
