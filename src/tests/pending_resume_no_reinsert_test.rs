@@ -23,7 +23,9 @@
 //!   (`tracked_user_recovery_is_tracked`)
 //!
 //! Neither test alone is the guarantee: deleting or "fixing" either path breaks
-//! the other, which is exactly what the pair is here to catch.
+//! the other. And the pair cannot see WHICH entry point the boot loop calls —
+//! reverting the call sites would pass both — so that choice is pinned at the
+//! source by `boot_recovery_arms_ride_the_tracked_entry_point` below.
 //!
 //! The delete on the normal path runs even on graceful cancellation, so the
 //! difference is only observable *mid-turn*: was a row ever inserted at all?
@@ -365,5 +367,39 @@ async fn tracked_user_recovery_is_tracked() {
     assert!(
         repo.get_interrupted().await.unwrap().is_empty(),
         "a completed recovery turn must leave no row behind (#729 must still hold)"
+    );
+}
+
+/// #481 call-site invariant: the boot arms must ride the TRACKED entry point.
+///
+/// The two tests above pin what each entry point DOES; neither can see WHICH
+/// one the boot loop calls. That choice is an inline expression in
+/// `src/cli/ui.rs`'s boot block — a ~470-line loop no unit test can drive — so
+/// a revert of the call sites would pass both of them and #481 would come back
+/// silently. Pin the choice at the source, the way `nesting_gate_test.rs` pins
+/// its gate.
+///
+/// Both halves are false in the pre-#481 revision: the Telegram arm passed no
+/// origin, and the non-Telegram arm called the untracked primitive. Comment
+/// lines are filtered so prose that names a call cannot trip the guard.
+#[test]
+fn boot_recovery_arms_ride_the_tracked_entry_point() {
+    const UI_SRC: &str = include_str!("../cli/ui.rs");
+    let code: Vec<&str> = UI_SRC
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect();
+
+    assert!(
+        !code.iter().any(|line| line.contains("resume_interrupted_turn(")),
+        "the boot recovery must not re-drive a held row through the untracked \
+         primitive: that turn inserts no pending_requests row, so a second kill \
+         consumes the wake and loses the work (#481). Second-generation hand-offs \
+         keep it — the only remaining caller is src/channels/telegram/resume.rs"
+    );
+    assert!(
+        code.iter().any(|line| line.contains("PendingOrigin::User")),
+        "the Telegram boot arm must pass `Some(PendingOrigin::User)` to \
+         `resume_session`; without it the recovery turn is untracked (#481)"
     );
 }
