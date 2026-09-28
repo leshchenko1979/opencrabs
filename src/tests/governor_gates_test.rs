@@ -1356,37 +1356,47 @@ async fn spacing_floor_blocks_inside_the_interval_and_clears_after() {
     let chat = ChatId(-100_676_001);
     ts::mark_forum(chat);
 
-    // Nothing to be crowded against yet: the first admission always clears.
+    // Nothing to be crowded against yet: the first request always clears.
     assert!(
-        governor::admit_chat_action(chat, None).await,
+        matches!(
+            governor::pace_rich(chat, None, governor::EditClass::Clock).await,
+            governor::RichAdmission::Now
+        ),
         "the first request has no predecessor and must clear the floor"
     );
 
     // 200ms later is inside the 1s floor.
     ts::advance(200);
     assert!(
-        !governor::admit_chat_action(chat, None).await,
-        "a request inside the spacing floor must be refused"
+        matches!(
+            governor::pace_rich(chat, None, governor::EditClass::Clock).await,
+            governor::RichAdmission::Dropped(_)
+        ),
+        "a droppable request inside the spacing floor must be refused"
     );
+    let snap = ts::snapshot(chat).expect("peer exists");
     assert_eq!(
-        ts::snapshot(chat).expect("peer exists").dropped_spacing,
-        1,
-        "the refusal is counted on the spacing gate, not the typing bucket"
+        snap.dropped_spacing, 1,
+        "the refusal is counted on the spacing gate"
     );
+    assert_eq!(snap.admitted_rich, 1, "the blocked tick must not be admitted");
 
     // Past the floor: admitted again.
     ts::advance(900);
     assert!(
-        governor::admit_chat_action(chat, None).await,
+        matches!(
+            governor::pace_rich(chat, None, governor::EditClass::Clock).await,
+            governor::RichAdmission::Now
+        ),
         "past the floor the chat admits again — the floor is a gap, not a ban"
     );
 }
 
-/// #676 — inside the floor a cosmetic edit is DROPPED while a Final is
-/// DEFERRED: the two dispositions differ, and the drop is counted on the
-/// spacing gate rather than the ladder.
+/// #676 — inside the floor a cosmetic edit is DROPPED, and content is never
+/// gated by the floor at all: a Final takes its token as usual. The drop is
+/// counted on the spacing gate rather than the ladder.
 #[tokio::test(start_paused = true)]
-async fn spacing_floor_drops_cosmetic_and_defers_final() {
+async fn spacing_floor_drops_cosmetic_but_never_content() {
     let _guard = ts::registry_guard().await;
     rl_config!(enabled: true, spacing_floor_ms: 1_000);
     ts::reset(0);
@@ -1427,10 +1437,12 @@ async fn spacing_floor_drops_cosmetic_and_defers_final() {
         "the ladder counters must NOT absorb the spacing gate's drops"
     );
 
-    // Final inside the floor: deferred into the queue, never dropped.
+    // Final inside the floor: BYPASSES the floor and takes its token. The
+    // floor never gates content — content is already paced by the bucket,
+    // and deferring or dropping it would trade a throttle for a lost edit.
     ts::advance(100);
     assert!(
-        !governor::edit_admission(
+        governor::edit_admission(
             &bot,
             chat,
             MessageId(3),
@@ -1438,11 +1450,9 @@ async fn spacing_floor_drops_cosmetic_and_defers_final() {
             governor::EditPayload::classic_html("final"),
         )
         .await,
-        "a deferred final is not admitted on this pass"
+        "content is never gated by the spacing floor"
     );
     let snap = ts::snapshot(chat).expect("peer exists");
-    assert_eq!(snap.queued_finals, 1, "the final was deferred into the queue");
-    assert_eq!(snap.finals_pending, 1, "the deferred final is still owed");
     assert_eq!(
         snap.dropped_spacing, 1,
         "content must not add to the spacing drop count"
