@@ -17,7 +17,7 @@
 //! `session_seen_skills` row — `record()` for the seen path, `set_active()`
 //! for the active flag — and daemon boot hydrates BOTH registries from that
 //! table. Before the active flag existed, the active set was process-memory
-//! only, so a restart/rebuild left it born EMPTY: the re-injection driver
+//! only, so a restart or rebuild left it born EMPTY: the re-injection driver
 //! injected nothing and the inventory rendered skill-less, even though the
 //! session had those skills active a moment earlier. DB is the durability
 //! layer only — the in-memory sets stay the hot path, and any DB failure
