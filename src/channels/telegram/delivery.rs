@@ -243,11 +243,13 @@ pub(crate) async fn deliver_final_response(
                     }
                 }
             }
-            // A body that is ONLY an image keeps the extraction leg: it has no
-            // text bubble to carry a reference into a rich send, so routing it
-            // there would drop it.
+            // #487: an image-only body takes the rich plane too. The rich send
+            // carries the REWRITTEN markdown, so the reference itself is the
+            // body's content — there is no "text bubble" needed to carry it,
+            // and nothing is dropped: measured against the live API, an
+            // image-only body renders inline WITH its caption. The extraction
+            // leg below remains the floor when the rich send fails.
             let rich_owns_images = !rich_media.is_empty()
-                && !text_only.trim().is_empty()
                 && super::rich::should_send_native_rich_for_media(&rich_source, true);
 
             // Drop an echoed plan title (#837). The reminder shows the model
@@ -836,7 +838,11 @@ pub(crate) async fn deliver_final_response(
             // posting a separate "Suggested next" message. Rich and voice paths
             // deliberately leave it None — their bubbles are not re-editable as
             // plain HTML without breaking their rendering.
-            if !display_html.is_empty() {
+            // #487: an image-only body has an EMPTY `display_html` (the
+            // reference was lifted into the rewrite), so the rich block must be
+            // reachable on the image decision alone — otherwise the rich plane
+            // can never own a picture that has no prose around it.
+            if !display_html.is_empty() || rich_owns_images {
                 // Rich-first delivery: a structured reply (tables / headings /
                 // lists / math) is delivered as a native Telegram rich message
                 // regardless of length — Telegram renders the raw markdown into
@@ -1039,7 +1045,11 @@ pub(crate) async fn deliver_final_response(
                         }
                     }
                 }
-                if !delivered_rich {
+                // #487: there is nothing to chunk when the body was only an
+                // image and the rich send failed. The floor above already
+                // shipped the picture, and `split_message("")` yields a single
+                // EMPTY chunk that would otherwise be sent as an empty message.
+                if !delivered_rich && !display_html.is_empty() {
                     let chunks: Vec<String> = split_message(&display_html, 4096)
                         .into_iter()
                         .map(|s| s.to_string())
