@@ -525,9 +525,18 @@ async fn notify_receipt_card_keeps_a_4719_char_body_whole_on_the_rich_leg() {
         !classic.contains(outside),
         "content past the classic budget is dropped on the fallback, proving the cap still binds at ~3200"
     );
+    // Task 3 CHANGED THIS ASSERTION. It first read `!classic.contains(tail)`,
+    // pinning the old head-only cut; the tail-preserving helper now keeps both
+    // ends on BOTH legs, so the fallback retains the ending too. Asserting the
+    // new behaviour is the point — the old assertion would have locked the
+    // #490 defect in place on the leg with the smaller budget.
     assert!(
-        !classic.contains(tail),
-        "the classic leg is the one that legitimately cuts the tail"
+        classic.contains(tail),
+        "the classic leg now keeps its tail too; only the MIDDLE is dropped"
+    );
+    assert!(
+        classic.contains("(truncated 1559 chars)"),
+        "the classic leg states the count it dropped (4719 in, 3160 kept as head+tail: 1559 went)"
     );
     assert_eq!(
         classic.matches("(truncated)").count(),
