@@ -494,6 +494,16 @@ impl EditPayload {
     pub(crate) fn empty() -> Self {
         Self::classic_html(String::new())
     }
+
+    /// #676 - does this payload continue to the rich API layer, and so to
+    /// `pace_rich`? `edit_admission` uses this to leave the ring push to the
+    /// innermost gate: pushing there too would record the request twice (the
+    /// #676 instrument bug) and make `pace_rich`'s floor check compare
+    /// against this very request instead of the previous one - which drops
+    /// every cosmetic rich edit whose admission just pushed.
+    pub(crate) fn is_rich(&self) -> bool {
+        matches!(self, Self::RichHtml { .. } | Self::RichMarkdownMedia { .. })
+    }
 }
 
 /// A final edit Telegram refused transiently, held latest-wins per message id
@@ -566,6 +576,39 @@ impl Recent {
     }
 }
 
+/// #676 - how long must this chat wait before its next request?
+///
+/// Telegram's rule is per chat and sub-minute ("avoid sending more than one
+/// message per second"), which a per-minute bucket cannot express. [`Recent`]
+/// already records every admission instant for this peer, so the remainder of
+/// the interval is a direct read rather than a second ledger.
+///
+/// Takes `&Peer` by reference so it cannot lock: every caller already holds
+/// the peers map, and re-entering it would deadlock (std `Mutex` is not
+/// reentrant).
+pub(crate) fn spacing_wait(peer: &Peer, now: Instant, floor: Duration) -> Duration {
+    if floor.is_zero() {
+        return Duration::ZERO;
+    }
+    match peer.recent.gap_ms(now) {
+        Some(gap_ms) if gap_ms < floor.as_millis() => {
+            floor - Duration::from_millis(u64::try_from(gap_ms).unwrap_or(u64::MAX))
+        }
+        // No admission recorded yet for this chat, or the interval already
+        // elapsed: there is nothing to wait for.
+        _ => Duration::ZERO,
+    }
+}
+
+/// #676 - has this chat cleared its minimum inter-request interval?
+///
+/// Predicate form of [`spacing_wait`], which is the single source of truth:
+/// `pace_send` sleeps that remainder directly rather than a second expression
+/// of the same rule.
+pub(crate) fn spacing_ok(peer: &Peer, now: Instant, floor: Duration) -> bool {
+    spacing_wait(peer, now, floor).is_zero()
+}
+
 /// Counters behind the periodic summary line. Field-per-class instead of
 /// map so the summary formatting cannot silently miss a newly named class.
 #[derive(Default)]
@@ -603,6 +646,12 @@ pub(crate) struct Counters {
     /// G4 rich calls refused because the global 429 cooldown outlasted the
     /// inline bound and the class may not be dropped (#556).
     pub(crate) deferred_rich: u64,
+    /// #676 — requests shed by the cross-surface spacing floor. Its own
+    /// counter for the same reason [`Counters::dropped_rich`] has one:
+    /// this is a THIRD gate, and a summary that merged it into the ladder
+    /// drops could not tell a dry bucket from a request that arrived
+    /// inside the chat's interval.
+    pub(crate) dropped_spacing: u64,
 }
 
 impl Counters {
@@ -617,6 +666,15 @@ impl Counters {
     /// refused because a cooldown outlasted the inline bound.
     pub(crate) fn note_rich_defer(&mut self, _class: EditClass) {
         self.deferred_rich += 1;
+    }
+
+    /// #676 — record a spacing-floor drop. `_class` rides along for the
+    /// same reason [`Self::note_rich_drop`] carries one: the counter is
+    /// per-gate, not per-class, and this is a third gate — refused because
+    /// the request arrived inside the chat's interval, not because a
+    /// bucket was dry.
+    pub(crate) fn note_spacing_drop(&mut self, _class: EditClass) {
+        self.dropped_spacing += 1;
     }
 
     /// Record a ladder drop. The Final arm stays empty ON PURPOSE: finals are
@@ -657,6 +715,7 @@ impl Counters {
             && self.throttled_send_ms == 0
             && self.dropped_rich == 0
             && self.deferred_rich == 0
+            && self.dropped_spacing == 0
     }
 }
 
@@ -735,7 +794,7 @@ pub(crate) fn format_summary(chat_id: i64, c: &Counters, finals_pending: usize) 
     Some(format!(
         "Telegram rate-limiter chat={chat_id}: \
          admitted{{typing={},edits={},sends={},rich={}}} \
-         dropped{{clock={},brain_preview={},intermediary={},status={},typing={},rich={},deferred_rich={}}} \
+         dropped{{clock={},brain_preview={},intermediary={},status={},typing={},rich={},deferred_rich={},spacing={}}} \
          finals{{queued={},superseded={},delivered={},failed={},pending={}}} \
          interactive{{admitted={},overflow={},pause429={}}} \
          throttled_ms{{typing={},send={},rich={}}}",
@@ -750,6 +809,7 @@ pub(crate) fn format_summary(chat_id: i64, c: &Counters, finals_pending: usize) 
         c.dropped_typing,
         c.dropped_rich,
         c.deferred_rich,
+        c.dropped_spacing,
         c.queued_finals,
         c.superseded_finals,
         c.delivered_finals,
@@ -847,12 +907,19 @@ pub(crate) async fn admit_chat_action(chat: ChatId, thread_id: Option<i32>) -> b
             if !peer.forum_seen {
                 return true;
             }
+            let now = gate_now();
+            // #676 — the cross-surface spacing floor, checked ahead of the
+            // bucket so a request inside the interval spends no token (D4).
+            // Typing is cosmetic: it drops rather than queues.
+            if !spacing_ok(peer, now, lim.spacing_floor) {
+                peer.counters.note_spacing_drop(EditClass::Clock);
+                return false;
+            }
             let bucket = ensure_bucket(
                 &mut peer.typing,
                 lim.typing_burst,
                 1.0 / lim.typing_interval.as_secs_f64(),
             );
-            let now = gate_now();
             match bucket.take(now) {
                 Ok(()) => {
                     peer.counters.admitted_typing += 1;
@@ -1090,22 +1157,42 @@ pub(crate) async fn edit_admission(
         if !peer.forum_seen {
             return true;
         }
+        // #676 — the cross-surface spacing floor (D4: ahead of the bucket,
+        // so an in-interval request spends no token). Cosmetic chrome
+        // drops; content falls through to the existing arms, where a Final
+        // queues (deferred) and Interactive passes through — never lost.
+        let spaced = spacing_ok(peer, now, lim.spacing_floor);
+        if !spaced && class.is_droppable() {
+            peer.counters.note_spacing_drop(class);
+            return false;
+        }
         let bucket = ensure_bucket(&mut peer.edits, lim.edit_burst, lim.edit_rate_per_sec);
         bucket.set_reserve(INTERACTIVE_RESERVE);
         // #117: Interactive spends the FLOOR preferentially (take_any) — a tap
         // must not have to compete with bulk for the reserve-protected tokens.
         // Falls through to bulk take only when even the floor is dry.
         let is_interactive = class == EditClass::Interactive;
-        let interactive_direct = is_interactive && bucket.take_any(now).is_ok();
-        let verdict = if interactive_direct || (!is_interactive && bucket.take(now).is_ok()) {
+        // `spaced` gates BOTH takes: without it the interactive `take_any`
+        // would spend a reserved token before the interval was consulted.
+        let interactive_direct = is_interactive && spaced && bucket.take_any(now).is_ok();
+        let verdict = if interactive_direct
+            || (!is_interactive && spaced && bucket.take(now).is_ok())
+        {
             if is_interactive {
                 peer.counters.admitted_interactive += 1;
             } else {
                 peer.counters.admitted_edits += 1;
             }
-            // Both arms spend `peer.edits` and both land on `editMessageText`,
-            // so the ring records the surface once, whichever arm fired.
-            peer.recent.push(now, SURFACE_EDITS);
+            // Both arms spend `peer.edits`. A CLASSIC payload ends here, so
+            // this is the only gate that can record it; a RICH payload
+            // continues to `pace_rich`, which is the innermost gate and
+            // records it there. Pushing in both places would count one
+            // request twice (#676) - and `pace_rich` would then measure its
+            // interval against the admission it is part of, dropping every
+            // cosmetic rich edit on the flow and plan-card paths.
+            if !payload.is_rich() {
+                peer.recent.push(now, SURFACE_EDITS);
+            }
             Admission::Now
         } else if is_interactive {
             // Floor dry: a tap NEVER queues and NEVER drops — the acked token
@@ -1457,9 +1544,15 @@ pub(crate) async fn pace_send(chat: ChatId) {
                 f64::from(lim.send_minute_ceiling) / 60.0,
             );
             let now = gate_now();
+            // #676 - a plain send is content, so the spacing floor is
+            // WAITED out rather than dropped; the loop's existing
+            // SEND_MAX_HOLD arm bounds it exactly like a bucket hold. The
+            // wait is the REMAINDER of the interval, not the whole floor.
+            let spacing_hold = spacing_wait(peer, now, lim.spacing_floor);
             let need = sec
                 .next_token_in_for(now, 0.0)
-                .max(min.next_token_in_for(now, 0.0));
+                .max(min.next_token_in_for(now, 0.0))
+                .max(spacing_hold);
             if need.is_zero() {
                 let _ = sec.take(now);
                 let _ = min.take(now);
@@ -1593,8 +1686,21 @@ pub(crate) async fn pace_rich(
             if !peer.forum_seen {
                 return RichAdmission::Now;
             }
-            let bucket = ensure_bucket(&mut peer.rich, lim.rich_burst, lim.rich_rate_per_sec);
             let now = gate_now();
+            // #676 — the cross-surface spacing floor (D4: ahead of the
+            // bucket, so an in-interval request spends no token). Cosmetic
+            // chrome drops; content and taps pass through, because
+            // `Deferred` is defined as the cooldown verdict and this path
+            // has no queue to defer into — neither may be silently lost.
+            if !spacing_ok(peer, now, lim.spacing_floor) {
+                return if class.is_droppable() {
+                    peer.counters.note_spacing_drop(class);
+                    RichAdmission::Dropped(class)
+                } else {
+                    RichAdmission::Now
+                };
+            }
+            let bucket = ensure_bucket(&mut peer.rich, lim.rich_burst, lim.rich_rate_per_sec);
             let need = bucket.next_token_in_for(now, 0.0);
             if need.is_zero() {
                 // #580: `take` is the ONLY enforcement point for the per-chat
@@ -1847,6 +1953,7 @@ pub(crate) mod test_support {
         pub throttled_rich_ms: u64,
         pub dropped_rich: u64,
         pub deferred_rich: u64,
+        pub dropped_spacing: u64,
         pub throttled_send_ms: u64,
         pub finals_pending: usize,
     }
@@ -1876,6 +1983,7 @@ pub(crate) mod test_support {
             throttled_rich_ms: p.counters.throttled_rich_ms,
             dropped_rich: p.counters.dropped_rich,
             deferred_rich: p.counters.deferred_rich,
+            dropped_spacing: p.counters.dropped_spacing,
             throttled_send_ms: p.counters.throttled_send_ms,
             finals_pending: p.finals.len(),
         })
