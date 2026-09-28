@@ -30,6 +30,7 @@ fn open_roll() -> std::sync::Arc<std::sync::Mutex<StreamingState>> {
         flow_rich: false,
         response: String::new(),
         final_bubble: None,
+        published_answer: None,
         dirty: false,
         recreate: false,
         header_preview: None,

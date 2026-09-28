@@ -211,6 +211,7 @@ async fn resume_shape_loop_edits_tools_in_place_and_never_reacts() {
         applied_plan_kb: Default::default(),
         processing: true,
         final_bubble: None,
+        published_answer: None,
         is_cli: false,
     }));
 

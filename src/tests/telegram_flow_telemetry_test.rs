@@ -68,6 +68,7 @@ pub(crate) fn base_test_state() -> StreamingState {
         applied_plan_kb: Default::default(),
         processing: false,
         final_bubble: None,
+        published_answer: None,
     }
 }
 

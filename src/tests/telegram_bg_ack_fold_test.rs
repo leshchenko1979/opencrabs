@@ -53,6 +53,7 @@ fn base_state(with_card: bool) -> StreamingState {
         applied_plan_kb: Default::default(),
         processing: false,
         final_bubble: None,
+        published_answer: None,
         is_cli: false,
     }
 }
