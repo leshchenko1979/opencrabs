@@ -664,6 +664,20 @@ pub(crate) async fn resume_session_inner(
         session_id,
     );
 
+    // ── Quiet mode (#679): fold the previous turn's answer ──────────────────
+    // Parity with `handle_message`, which carries the same block: resume starts
+    // a real turn too, so a quiet group must not end up with two open bot
+    // messages just because the turn arrived through this path. The config read
+    // is the zero-disk mirror, which the watcher refreshes on every change.
+    if crate::config::Config::current()
+        .channels
+        .telegram
+        .is_quiet_for(&chat_id.0.to_string())
+    {
+        super::quiet::fold_previous_answer(&bot, chat_id, thread_id, session_id, &telegram_state)
+            .await;
+    }
+
     // ── Streaming setup ────────────────────────────────────────────────────
     let streaming = Arc::new(std::sync::Mutex::new(StreamingState {
         // Telegram: positive chat id = private/DM, negative = group (#677).
@@ -682,6 +696,7 @@ pub(crate) async fn resume_session_inner(
         flow_rich: false,
         response: String::new(),
         final_bubble: None,
+        published_answer: None,
         dirty: false,
         recreate: false,
         header_preview: None,

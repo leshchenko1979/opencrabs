@@ -30,6 +30,7 @@ pub(crate) mod outbound_dedup;
 pub(crate) mod picker_limits;
 pub(crate) mod plan_card;
 pub(crate) mod progress;
+pub(crate) mod quiet;
 pub(crate) mod rate_limit;
 pub(crate) mod raw_updates;
 pub(crate) mod reaction_prompt;

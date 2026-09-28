@@ -1209,10 +1209,12 @@ pub(crate) async fn deliver_final_response(
             // into render_suggestions. None (rich / voice / suppressed paths)
             // means suggestions fall back to their standalone block as before.
             if final_bubble.is_some() {
-                streaming
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .final_bubble = final_bubble;
+                let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+                // #679: retain a SECOND copy. `render_suggestions` TAKES
+                // `final_bubble`, so from the next turn only this field still
+                // describes the answer whose text quiet mode needs to fold.
+                s.published_answer = final_bubble.clone();
+                s.final_bubble = final_bubble;
             }
 
             // Record the bot's text reply into channel_messages.
@@ -1552,7 +1554,23 @@ pub(crate) async fn handle_intermediate(
     // 4. A fresh picture is report-shaped content on its own (#502); anything
     //    else keeps folding, with the failure notice carried along so a broken
     //    reference is named instead of vanishing.
-    if super::intermediates::should_promote_intermediate(&rw.stripped, rw.entries.len()) {
+    //
+    //    #679: a quiet group suppresses the REPORT arm only. The room scans its
+    //    scrollback, so a mid-turn status report is noise there and folds into
+    //    the collapsed block instead of opening a bubble. The MEDIA arm still
+    //    promotes even when quiet: the fold path strips image references, so
+    //    suppressing it would lose the picture outright (#502) — and a picture
+    //    is not narration. Passing 0 for `fresh_images` is exact here: media is
+    //    decided by the arm above, so the report predicate is asked about text
+    //    alone.
+    let quiet = crate::config::Config::current()
+        .channels
+        .telegram
+        .is_quiet_for(&chat.0.to_string());
+    let has_fresh_media = !rw.entries.is_empty();
+    let promote = has_fresh_media
+        || (!quiet && super::intermediates::should_promote_intermediate(&rw.stripped, 0));
+    if promote {
         super::intermediates::deliver_intermediate_message(
             session_id, bot, chat, thread_id, streaming, tg, &rw,
         )

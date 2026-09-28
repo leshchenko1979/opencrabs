@@ -276,6 +276,13 @@ pub(crate) struct StreamingState {
     /// next" message. Table-free rich deliveries capture their markdown;
     /// voice stays None. None = suggestions fall back to standalone.
     pub(crate) final_bubble: Option<super::state::MergeBubble>,
+    /// The latest delivered final answer, RETAINED past the suggestion path's
+    /// `take()` so quiet mode can fold the previous turn's answer in place when
+    /// the next turn starts (#679). `final_bubble` cannot serve that purpose:
+    /// the suggestion merge consumes it. Same plane-tagged shape, and `None`
+    /// whenever no foldable answer landed (voice, suppressed delivery, or a
+    /// turn with no answer at all).
+    pub(crate) published_answer: Option<super::state::MergeBubble>,
     pub(crate) dirty: bool,
     /// When true, the edit loop deletes the response message and creates a fresh one
     /// at the bottom of the chat (so it appears below tool/approval messages).

@@ -687,6 +687,15 @@ pub struct TelegramGroupConfig {
     /// false.
     #[serde(default)]
     pub open: bool,
+    /// Quiet mode for THIS group (#679): the room treats its scrollback as an
+    /// archive to be scanned, so the bot stops narrating its work there. Two
+    /// effects, both scoped to this group — mid-turn intermediates fold into
+    /// the collapsed processing log instead of opening extra bubbles, and the
+    /// PREVIOUS turn's answer is folded in place when the next turn starts.
+    /// Net: at most one open bot message per topic. `false` (the default)
+    /// keeps today's behaviour everywhere, DMs included.
+    #[serde(default)]
+    pub quiet: bool,
 }
 
 /// Proactive flood-governor knobs (#1211), `[channels.telegram.rate_limiter]`.
@@ -903,6 +912,14 @@ impl TelegramConfig {
             .get(chat_id)
             .and_then(|g| g.respond_to)
             .unwrap_or(self.respond_to)
+    }
+
+    /// Whether quiet mode is on for a chat (#679). Scoped to the GROUP, not to
+    /// a topic: the noise problem is the room's scrollback, and every topic in
+    /// a forum shares it. An unknown chat — every DM included — is never quiet,
+    /// so the default path is unchanged by construction.
+    pub fn is_quiet_for(&self, chat_id: &str) -> bool {
+        self.groups.get(chat_id).is_some_and(|g| g.quiet)
     }
 }
 

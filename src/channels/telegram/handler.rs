@@ -2748,6 +2748,28 @@ pub(crate) async fn handle_message(
         }
     };
 
+    // ── Quiet mode (#679): fold the previous turn's answer ──────────────────
+    // In an opting group the scrollback is an archive to be scanned, so the
+    // answer the reader has moved past collapses to one line. Runs HERE —
+    // after the turn guard proves this is a genuine new turn (a mid-turn
+    // follow-up returned above) and before the new answer lands, so the room
+    // never holds two open bot messages.
+    //
+    // Fire-and-forget is wrong here: the fold is one edit, it is cheap, and
+    // awaiting it keeps the "at most one open message" property true at the
+    // instant the next answer appears rather than some time after. The call
+    // itself never fails the turn — it returns false on every error path.
+    if tg_cfg.is_quiet_for(&chat_id_str) {
+        super::quiet::fold_previous_answer(
+            &bot,
+            msg.chat.id,
+            thread_id,
+            session_id,
+            &telegram_state,
+        )
+        .await;
+    }
+
     // ── Streaming setup ───────────────────────────────────────────────────────
     let streaming = Arc::new(std::sync::Mutex::new(StreamingState {
         is_dm,
@@ -2765,6 +2787,7 @@ pub(crate) async fn handle_message(
         flow_rich: false,
         response: String::new(),
         final_bubble: None,
+        published_answer: None,
         dirty: false,
         recreate: false,
         header_preview: None,
