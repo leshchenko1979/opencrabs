@@ -1,11 +1,29 @@
 //! Regression test for the perpetual-resume loop (#729).
 //!
 //! A genuine user turn is tracked in `pending_requests` while it runs so a
-//! crash/restart mid-turn can recover it. A *resume* turn — the recovery
-//! itself — must NOT be tracked: if it were, an interrupted resume (cancelled
-//! by a new message, killed on another restart, or a crash before the cleanup
-//! delete) would leave its own row behind and resume the same already-done
-//! session on every subsequent startup, with rows piling up.
+//! crash/restart mid-turn can recover it. The UNTRACKED primitive, the recovery
+//! path `resume_interrupted_turn`, must NOT be tracked: if it were, an
+//! interrupted resume (cancelled by a new message, killed on another restart,
+//! or a crash before the cleanup delete) would leave its own row behind and
+//! resume the same already-done session on every subsequent startup, with rows
+//! piling up.
+//!
+//! #481 refined that. A bare resume is not the whole picture: the boot hand-off
+//! arms resume a pending row they are themselves holding, and *that* recovery
+//! turn must be tracked — when it was not, a second kill during the recovery
+//! consumed the row and lost the work with only a log line. So there are two
+//! entry points with OPPOSITE requirements, and this file pins both sides of the
+//! discrimination:
+//!
+//! - `resume_interrupted_turn` — the untracked primitive, kept for
+//!   second-generation hand-offs → **no row**
+//!   (`normal_turn_is_tracked_resume_turn_is_not`)
+//! - `send_message_with_tools_and_callback` — the tracked path the two boot
+//!   hand-off arms use → **a row, origin `user`**
+//!   (`tracked_user_recovery_is_tracked`)
+//!
+//! Neither test alone is the guarantee: deleting or "fixing" either path breaks
+//! the other, which is exactly what the pair is here to catch.
 //!
 //! The delete on the normal path runs even on graceful cancellation, so the
 //! difference is only observable *mid-turn*: was a row ever inserted at all?
@@ -285,5 +303,67 @@ async fn push_turn_row_deleted_at_exit() {
     assert!(
         repo.get_interrupted().await.unwrap().is_empty(),
         "no pending rows should survive a completed push turn (#12)"
+    );
+}
+
+/// #481: a boot-resumed `user` turn IS tracked while it runs.
+///
+/// The tracked twin of the case above. Both boot hand-off arms re-drive a
+/// pending row through `send_message_with_tools_and_callback` (the ninth
+/// argument being the channel thread), and the recovery turn it starts must
+/// leave a row of its own: when it did not, a second kill during the recovery
+/// consumed the wake and lost the work with nothing left to resume.
+///
+/// This and `normal_turn_is_tracked_resume_turn_is_not` are one assertion in
+/// two halves — one entry point must insert a row, the other must not — so
+/// "fixing" `resume_interrupted_turn` to track everything, or reverting the
+/// hand-off arms to it, breaks one of them.
+#[tokio::test]
+async fn tracked_user_recovery_is_tracked() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let pool = db.pool().clone();
+    let context = ServiceContext::new(pool.clone());
+
+    let session_service = SessionService::new(context.clone());
+    let session = session_service
+        .create_session(Some("Tracked recovery".to_string()))
+        .await
+        .unwrap();
+
+    let (svc, observed, origin, ran) =
+        probe_service_with_origin(pool.clone(), context.clone()).await;
+
+    svc.send_message_with_tools_and_callback(
+        session.id,
+        "[System: restart]".to_string(),
+        None,
+        None,
+        None,
+        None,
+        "tui",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "probe should run once");
+    assert!(
+        observed.load(Ordering::SeqCst),
+        "a boot-resumed user turn must be tracked, or a second kill loses it (#481)"
+    );
+    assert_eq!(
+        origin.lock().unwrap().as_deref(),
+        Some("user"),
+        "the recovery turn's row must carry origin 'user', not 'system' (#481)"
+    );
+
+    // And it is still cleaned up at exit, so tracking the recovery does not
+    // reintroduce the perpetual-resume loop #729 closed.
+    let repo = PendingRequestRepository::new(pool);
+    assert!(
+        repo.get_interrupted().await.unwrap().is_empty(),
+        "a completed recovery turn must leave no row behind (#729 must still hold)"
     );
 }
