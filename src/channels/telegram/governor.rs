@@ -586,7 +586,7 @@ impl Recent {
 /// Takes `&Peer` by reference so it cannot lock: every caller already holds
 /// the peers map, and re-entering it would deadlock (std `Mutex` is not
 /// reentrant).
-pub(crate) fn spacing_wait(peer: &Peer, now: Instant, floor: Duration) -> Duration {
+fn spacing_wait(peer: &Peer, now: Instant, floor: Duration) -> Duration {
     if floor.is_zero() {
         return Duration::ZERO;
     }
@@ -605,7 +605,7 @@ pub(crate) fn spacing_wait(peer: &Peer, now: Instant, floor: Duration) -> Durati
 /// Predicate form of [`spacing_wait`], which is the single source of truth:
 /// `pace_send` sleeps that remainder directly rather than a second expression
 /// of the same rule.
-pub(crate) fn spacing_ok(peer: &Peer, now: Instant, floor: Duration) -> bool {
+fn spacing_ok(peer: &Peer, now: Instant, floor: Duration) -> bool {
     spacing_wait(peer, now, floor).is_zero()
 }
 
