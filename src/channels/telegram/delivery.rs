@@ -207,8 +207,14 @@ pub(crate) async fn deliver_final_response(
             // here, once, from the same rewrite the rich send will carry. The
             // bytes are read here rather than at the send so a read that fails
             // between validation and delivery joins the honest notice below.
+            // The rich plane is fed from the RAW content, so the
+            // `<<react:emoji>>` directive the text plane strips below still
+            // rides here. Stripped only there, it is delivered as literal
+            // text on every rich send — which is what an image-bearing
+            // react turn takes (#487), so strip it for this plane too.
+            let rich_source = crate::utils::extract_react_marker(&response.content).0;
             let rich_source =
-                redact_secrets(&crate::utils::sanitize::strip_llm_artifacts(&response.content));
+                redact_secrets(&crate::utils::sanitize::strip_llm_artifacts(&rich_source));
             let rich_rw = {
                 let delivered = {
                     let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
@@ -428,7 +434,15 @@ pub(crate) async fn deliver_final_response(
                 // not dropped — it shipped early as intermediate bubbles. That
                 // is delivery, not the failure mode #439 guards against, so no
                 // synthetic "Done — X/Y tool calls" summary on top of it.
-                if text_only.trim().is_empty() && turn_ran_tools && !suppressed_final {
+                // `!rich_owns_images` (#487): an image-bearing react turn is
+                // not summary-only. Returning here would drop the picture
+                // before the rich plane can rebuild it, and the image IS the
+                // answer — there is no prose summary to lose.
+                if text_only.trim().is_empty()
+                    && turn_ran_tools
+                    && !suppressed_final
+                    && !rich_owns_images
+                {
                     // Work turn with no completion text (#439): the model
                     // replaced its summary with a reaction. Deliver a
                     // fallback completion so the work is reported — the
@@ -489,7 +503,10 @@ pub(crate) async fn deliver_final_response(
                 // delivery, not a react-only turn — do not trigger the
                 // react-only early return or the spurious #546 incomplete-turn
                 // notice on top of delivered work.
-                if is_react_only_turn(suppressed_final, &text_only) {
+                // `!rich_owns_images` (#487): a react turn that carries an
+                // image has content to deliver, so it is not react-only in
+                // spirit — falling through lets the rich plane rebuild it.
+                if is_react_only_turn(suppressed_final, &text_only) && !rich_owns_images {
                     // Never-silent guard (#353): a reaction-only turn whose
                     // reaction FAILED must degrade to text, not to nothing.
                     if react_result.is_err() {
