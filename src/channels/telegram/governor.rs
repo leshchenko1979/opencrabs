@@ -249,6 +249,9 @@ struct Limits {
     rich_rate_per_sec: f64,
     /// G4 burst capacity.
     rich_burst: u32,
+    /// Cross-surface per-chat minimum spacing between two admissions.
+    /// `Duration::ZERO` disables the floor (#676).
+    spacing_floor: Duration,
     /// Spacing of the telemetry summary INFO line.
     summary_log_period: Duration,
 }
@@ -269,6 +272,7 @@ impl Limits {
             send_burst: rl.sends_burst.max(1),
             rich_rate_per_sec: (rl.rich_per_minute.max(1) as f64) / 60.0,
             rich_burst: rl.rich_burst.max(1),
+            spacing_floor: Duration::from_millis(rl.spacing_floor_ms),
             summary_log_period: Duration::from_secs(rl.summary_log_secs.max(30)),
         }
     }
