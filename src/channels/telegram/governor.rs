@@ -908,13 +908,13 @@ pub(crate) async fn admit_chat_action(chat: ChatId, thread_id: Option<i32>) -> b
                 return true;
             }
             let now = gate_now();
-            // #676 — the cross-surface spacing floor, checked ahead of the
-            // bucket so a request inside the interval spends no token (D4).
-            // Typing is cosmetic: it drops rather than queues.
-            if !spacing_ok(peer, now, lim.spacing_floor) {
-                peer.counters.note_spacing_drop(EditClass::Clock);
-                return false;
-            }
+            // #676 — typing is EXEMPT from the spacing floor. Measured: zero
+            // typing refusals across 8 days of logs while typing sits pinned
+            // at its own ~20/min ceiling, so Telegram does not meter it like
+            // a message (owner ruling 2026-09-08: the limits are per-surface,
+            // and the offending arm is the evidence). Two tests also pin this
+            // bucket — not spacing — as the gate governing the shared typing
+            // budget, which a floor would break.
             let bucket = ensure_bucket(
                 &mut peer.typing,
                 lim.typing_burst,
@@ -1157,12 +1157,12 @@ pub(crate) async fn edit_admission(
         if !peer.forum_seen {
             return true;
         }
-        // #676 — the cross-surface spacing floor (D4: ahead of the bucket,
-        // so an in-interval request spends no token). Cosmetic chrome
-        // drops; content falls through to the existing arms, where a Final
-        // queues (deferred) and Interactive passes through — never lost.
-        let spaced = spacing_ok(peer, now, lim.spacing_floor);
-        if !spaced && class.is_droppable() {
+        // #676 — the spacing floor governs DROPPABLE chrome only: an
+        // in-interval cosmetic tick is refused before it can spend a token
+        // (D4), while content falls through to the arms below untouched.
+        // Content is NEVER floored — it is already paced by the bucket, and
+        // deferring or dropping it would trade a throttle for a lost edit.
+        if class.is_droppable() && !spacing_ok(peer, now, lim.spacing_floor) {
             peer.counters.note_spacing_drop(class);
             return false;
         }
@@ -1172,11 +1172,9 @@ pub(crate) async fn edit_admission(
         // must not have to compete with bulk for the reserve-protected tokens.
         // Falls through to bulk take only when even the floor is dry.
         let is_interactive = class == EditClass::Interactive;
-        // `spaced` gates BOTH takes: without it the interactive `take_any`
-        // would spend a reserved token before the interval was consulted.
-        let interactive_direct = is_interactive && spaced && bucket.take_any(now).is_ok();
+        let interactive_direct = is_interactive && bucket.take_any(now).is_ok();
         let verdict = if interactive_direct
-            || (!is_interactive && spaced && bucket.take(now).is_ok())
+            || (!is_interactive && bucket.take(now).is_ok())
         {
             if is_interactive {
                 peer.counters.admitted_interactive += 1;
@@ -1687,18 +1685,17 @@ pub(crate) async fn pace_rich(
                 return RichAdmission::Now;
             }
             let now = gate_now();
-            // #676 — the cross-surface spacing floor (D4: ahead of the
-            // bucket, so an in-interval request spends no token). Cosmetic
-            // chrome drops; content and taps pass through, because
-            // `Deferred` is defined as the cooldown verdict and this path
-            // has no queue to defer into — neither may be silently lost.
-            if !spacing_ok(peer, now, lim.spacing_floor) {
-                return if class.is_droppable() {
-                    peer.counters.note_spacing_drop(class);
-                    RichAdmission::Dropped(class)
-                } else {
-                    RichAdmission::Now
-                };
+            // #676 — the spacing floor governs DROPPABLE chrome only (D4:
+            // ahead of the bucket, so an in-interval request spends no
+            // token). Content and taps bypass it entirely: this path has no
+            // queue to defer into, and returning `Now` without spending a
+            // token would send a request the pacer never admitted. The drop
+            // is counted on BOTH counters on purpose — `dropped_rich` is the
+            // G4 gate's count (any reason), `dropped_spacing` is the reason.
+            if class.is_droppable() && !spacing_ok(peer, now, lim.spacing_floor) {
+                peer.counters.note_rich_drop(class);
+                peer.counters.note_spacing_drop(class);
+                return RichAdmission::Dropped(class);
             }
             let bucket = ensure_bucket(&mut peer.rich, lim.rich_burst, lim.rich_rate_per_sec);
             let need = bucket.next_token_in_for(now, 0.0);
