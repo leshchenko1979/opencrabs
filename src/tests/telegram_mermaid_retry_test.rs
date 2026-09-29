@@ -194,7 +194,7 @@ fn failed_outcome_gets_transport_headline_and_svg_hatch() {
     );
     assert!(md.contains("your diagram was NOT modified"));
     assert!(
-        md.contains("[svg]("),
+        md.contains("[Open SVG vector]("),
         "transient keeps the svg escape hatch"
     );
     assert!(media.is_none());
@@ -212,7 +212,7 @@ fn markdown_failure_with_link_composes_transport_block_and_svg_link() {
         "error and source stay fenced under the headline: {out}"
     );
     assert!(
-        out.contains("[svg](https://mermaid.ink/svg/"),
+        out.contains("[Open SVG vector](https://mermaid.ink/svg/"),
         "the escape hatch link points at the svg endpoint: {out}"
     );
 }

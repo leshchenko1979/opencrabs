@@ -276,6 +276,15 @@ pub fn guard(conn: &Connection, dir: &Path) -> Result<()> {
 /// fail with SQLITE_CORRUPT instead of returning text, so `Err` is a verdict
 /// here and must refuse, never escape as if the plumbing broke.
 pub fn integrity_preflight(path: &str, dir: &Path) -> Result<()> {
+    // A path with no file behind it is a FRESH install, not a torn image.
+    // `deadpool_sqlite` opens lazily, so at this point in startup a brand-new
+    // database legitimately has no bytes yet — and `SQLITE_OPEN_READ_WRITE`
+    // refuses to create one, so the check would report "unable to open
+    // database file" and refuse every first boot. The check exists to catch a
+    // damaged image; there is nothing here to damage.
+    if !std::path::Path::new(path).exists() {
+        return Ok(());
+    }
     let cause = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE) {
         Err(e) => format!("the database could not be opened ({e})"),
         Ok(conn) => {

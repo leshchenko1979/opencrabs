@@ -52,12 +52,6 @@ pub(crate) fn build_progress_cb(
                     .await;
                 });
                 if let Ok(mut s) = st.lock() {
-                    s.compacting = true;
-                    s.header_preview = Some(COMPACTING_HEADER_TEXT.to_string());
-                    s.display_queue
-                        .push(DisplayItem::System(compacting_flow_line(
-                            usage_pct, predicted,
-                        )));
                     // The whole compaction surface is opt-in chrome (#1686),
                     // header pin included. Leaving the pin ungated was
                     // justified by a staleness worry that does not exist:
@@ -256,12 +250,6 @@ pub(crate) fn build_progress_cb(
                     // activity arrives (#29).
                     s.compacting = false;
                     s.header_preview = None;
-                    s.display_queue
-                        .push(DisplayItem::System(compacted_flow_line(
-                            before_pct,
-                            after_pct,
-                            elapsed,
-                        )));
                     // Lifting the pin stays unconditional while setting it is
                     // gated (#1686): set-gated / lift-ungated means a flag flip
                     // inside the compaction window can never strand a pin that

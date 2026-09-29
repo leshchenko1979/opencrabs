@@ -237,41 +237,6 @@ pub async fn handle_session_notify(
         );
     }
 
-    // #199 reserve-before-deliver: the receipt store IS the idempotency
-    // ledger. First sight of the id → this attempt owns the notify; a known id
-    // → an earlier attempt already handled it and only its RESPONSE was lost
-    // (a timeout is ambiguous, never a verdict), so report the prior outcome
-    // and do NOT deliver a second copy. `quiet` is the fan-out wave's default
-    // mode, so the guard covers that path too — a duplicate looks like
-    // `deferred` there, which is what the original attempt answered.
-    if !notify_receipts::reserve(notify_id, session_id) {
-        let detail = match notify_receipts::status(notify_id) {
-            Some(receipt) => format!(
-                "duplicate notify_id {notify_id}: an earlier attempt already handled this \
-                 notify for session {} (receipt {}, queued {}) — no re-delivery (#199)",
-                receipt.target,
-                receipt.state.as_str(),
-                receipt.queued_at.to_rfc3339()
-            ),
-            None => {
-                format!("duplicate notify_id {notify_id}: already handled — no re-delivery (#199)")
-            }
-        };
-        return JsonRpcResponse::success(
-            req_id,
-            serde_json::json!({
-                "outcome": if matches!(mode, DeliveryMode::Quiet { .. }) {
-                    "deferred"
-                } else {
-                    "delivered"
-                },
-                "detail": detail,
-                "notify_id": notify_id.to_string(),
-                "notify_duplicate": true,
-            }),
-        );
-    }
-
     // Same message shape as the agent's session_notify tool
     // (tools/subagent/notify.rs): SessionNotify origin so the topic-echo
     // surface renders the push (#1221), and a mechanical sender frame. The

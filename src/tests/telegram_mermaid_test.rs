@@ -583,9 +583,10 @@ fn markdown_failure_block_with_link_appends_a_tappable_svg_hatch() {
         "flowchart TD",
         &style(),
     );
-    assert!(md.contains("> ⚠️ **Mermaid diagram could not be rendered**"));
-    // real <a href> anchor — tappable rather than raw text. #1741: the
-    // transient headline now says renderer failure, not a syntax rejection.
+    // #1741: `markdown_failure_block_with_link` is the TRANSIENT variant, so
+    // it carries the transport headline, not the parse-rejection one.
+    assert!(md.contains("> ⚠️ **Renderer failure, not a syntax error"));
+    // real <a href> anchor — tappable rather than raw text.
     let md = markdown_failure_block_with_link(
         "diagram renderer dropped the image",
         "flowchart TD",

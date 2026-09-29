@@ -151,11 +151,6 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // gate, so a stale binding carrying a wait is still classified. NULL
     // `await_at` (pre-feature rows) == not awaiting.
     include_str!("../migrations/20260919000001_session_bindings_await.sql"),
-    // FORK (#544): the one-shot retirement flag. A cron job with
-    // `run_once = 1` is disabled by the same dispatch-time schedule advance
-    // that moves every job's `next_run_at`, so a spent one-shot reads
-    // `enabled = 0` instead of parking armed until the same date next year.
-    include_str!("../migrations/20260927000001_add_cron_run_once.sql"),
     // #1648: L1 exact-decision-reuse ring — versioned decision cache table.
     // Idempotent CREATE + index, so no heal pass needed for stamp drift
     // (same rationale as the #1529 entry above); nothing reads or writes it
@@ -176,6 +171,11 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // [features] audit_recording = true, and nothing reads them except the
     // /audit viewer. Appended last per the list invariant.
     include_str!("../migrations/20260926000001_add_audit_turn_retrievals.sql"),
+    // FORK (#544): the one-shot retirement flag. A cron job with
+    // `run_once = 1` is disabled by the same dispatch-time schedule advance
+    // that moves every job's `next_run_at`, so a spent one-shot reads
+    // `enabled = 0` instead of parking armed until the same date next year.
+    include_str!("../migrations/20260927000001_add_cron_run_once.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
@@ -949,6 +949,31 @@ impl Database {
             .context("Failed to run database migrations")?;
 
         tracing::info!("Database migrations completed");
+
+        // Run integrity check on startup
+        let integrity_ok = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection for integrity check")?
+            .interact(|conn| -> rusqlite::Result<bool> {
+                let result: String =
+                    conn.pragma_query_value(None, "integrity_check", |r| r.get(0))?;
+                Ok(result == "ok")
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to run integrity check")?;
+
+        if !integrity_ok {
+            tracing::error!(
+                "Database integrity check FAILED — data may be corrupted. \
+                 Consider backing up and recreating the database."
+            );
+            DB_INTEGRITY_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            tracing::debug!("Database integrity check passed");
+        }
 
         Ok(())
     }

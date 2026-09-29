@@ -786,12 +786,6 @@ pub(crate) async fn resume_session_inner(
                         .await;
                 });
                 if let Ok(mut s) = st.lock() {
-                    s.compacting = true;
-                    s.header_preview = Some(COMPACTING_HEADER_TEXT.to_string());
-                    s.display_queue
-                        .push(DisplayItem::System(compacting_flow_line(
-                            usage_pct, predicted,
-                        )));
                     // The whole compaction surface is opt-in chrome (#1686),
                     // header pin included. Leaving the pin ungated was
                     // justified by a staleness worry that does not exist:
@@ -980,12 +974,6 @@ pub(crate) async fn resume_session_inner(
                 if let Ok(mut s) = st.lock() {
                     s.compacting = false;
                     s.header_preview = None;
-                    s.display_queue
-                        .push(DisplayItem::System(compacted_flow_line(
-                            before_pct,
-                            after_pct,
-                            elapsed,
-                        )));
                     // Resumed turns get the same live-meter treatment (#135):
                     // post-compaction token count lands in the footer slot.
                     s.sections.ctx = Some(crate::utils::format_ctx_footer(

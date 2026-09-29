@@ -559,7 +559,7 @@ mod tests {
         }];
         let html = render_html(&blocks);
         assert!(
-            html.contains("Mermaid diagram could not be rendered"),
+            html.contains("Renderer failure, not a syntax error"),
             "the transient failure keeps the legible block. Got:\n{html}"
         );
         assert!(
