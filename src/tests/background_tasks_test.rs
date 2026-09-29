@@ -126,3 +126,63 @@ async fn spawn_command_enqueues_on_completion() {
     // Running count drops back to zero after completion.
     assert_eq!(mgr.running_for(sid), 0);
 }
+
+/// #692 gate 36516212395: a fire-and-forget spawn must reserve its roster row
+/// on the CALLER's thread, before the call returns.
+///
+/// `spawn_command` is called by paths that read the roster synchronously right
+/// afterwards — `build_goal_evidence` does, and so does `tasks_list`. A
+/// reservation taken inside the spawned task is invisible to that read until
+/// the task is first polled, so the run would exist but be unaddressable by the
+/// id, the output paths and the cancel surface this change adds.
+///
+/// The read below is deliberately synchronous and is the assertion: adding an
+/// `.await` between the call and the read would let the spawned task run and
+/// hide exactly the regression this pins. That regression cost a CI gate once,
+/// so the pin is worth more than the shape of the test looks.
+#[tokio::test]
+async fn spawn_command_reserves_the_run_before_it_returns() {
+    let mgr = Arc::new(BackgroundTaskManager::new());
+    let sid = Uuid::new_v4();
+
+    mgr.clone().spawn_command(
+        sid,
+        std::env::temp_dir(),
+        "reserve probe".to_string(),
+        "sleep 5".to_string(),
+    );
+
+    // No await between the call above and this read.
+    let live = mgr.handles_for(sid);
+    assert_eq!(
+        live.len(),
+        1,
+        "the run must be addressable the instant spawn_command returns, got: {live:?}"
+    );
+    assert_eq!(live[0].label, "reserve probe");
+
+    // One id addresses the whole run: it is the status-file stem and the stem of
+    // both captured streams, which is what `tasks_list` prints and what the
+    // cancel surface takes.
+    assert!(
+        live[0].output_out.to_string_lossy().contains(&live[0].id),
+        "the run's stdout path must carry its id, got: {:?}",
+        live[0].output_out
+    );
+    assert!(
+        live[0].output_err.to_string_lossy().contains(&live[0].id),
+        "the run's stderr path must carry its id, got: {:?}",
+        live[0].output_err
+    );
+
+    // Reservation is two-phase by design: the row is taken before the child
+    // exists, and the pid is back-filled by the task's first poll. A cancel in
+    // this window refuses ("no recorded pid yet") rather than reporting a kill
+    // it did not make. The task has not been polled here — no await above — so
+    // the pid must still be absent.
+    assert!(
+        live[0].pid.is_none(),
+        "a run reserved before its child exists carries no pid yet, got: {:?}",
+        live[0].pid
+    );
+}

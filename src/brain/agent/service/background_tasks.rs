@@ -66,6 +66,21 @@ pub struct RunHandle {
     pub output_err: PathBuf,
 }
 
+/// A run's identity, decided before any async work happens (#692).
+///
+/// Split out of [`BackgroundTaskManager::run_or_detach`] so a fire-and-forget
+/// caller can reserve on its own thread. The roster row has to exist the moment
+/// such a call returns: its callers read the roster synchronously afterwards
+/// (`build_goal_evidence`, `tasks_list`), and a reservation made inside the
+/// spawned task is invisible to that read until the task is first polled.
+struct Reservation {
+    run_uuid: Uuid,
+    id: String,
+    output_out: PathBuf,
+    output_err: PathBuf,
+    started: std::time::Instant,
+}
+
 /// Manages background commands and resumes their sessions on completion.
 pub struct BackgroundTaskManager {
     /// Live runs, keyed by run id (#692).
@@ -143,6 +158,20 @@ impl BackgroundTaskManager {
     pub fn finish_run(&self, id: &str) {
         if let Ok(mut m) = self.runs.lock() {
             m.remove(id);
+        }
+    }
+
+    /// Record the pid on a run reserved before it had one (#692).
+    ///
+    /// A reserved-but-unspawned run answers [`Self::cancel`] with "no recorded
+    /// pid yet" rather than with a false success — the window is microseconds,
+    /// but a cancel that reported killing nothing would be worse than one that
+    /// refused.
+    pub fn set_pid(&self, id: &str, pid: Option<u32>) {
+        if let Ok(mut m) = self.runs.lock()
+            && let Some(handle) = m.get_mut(id)
+        {
+            handle.pid = pid;
         }
     }
 
@@ -226,10 +255,20 @@ impl BackgroundTaskManager {
         command: String,
     ) {
         let cmd = build_command(&cwd, &command, session_id);
+        // Reserved HERE, on the caller's thread (#692), so the roster row and the
+        // run's status file exist the moment this returns. Every caller of this
+        // method reads the roster synchronously afterwards — `build_goal_evidence`
+        // does, and so does `tasks_list` — and a reservation taken inside the
+        // spawned task is invisible to that read until the task is first polled.
+        // The base registered on the caller's thread for exactly this reason; the
+        // rewrite that routed this through `run_or_detach` moved the registration
+        // behind the spawn and broke a passing test (#692 gate 36516212395).
+        let reserved = self.reserve_run(session_id, &label, &command, &cwd);
         let this = std::sync::Arc::clone(&self);
         tokio::spawn(async move {
             match this
-                .run_or_detach(
+                .run_reserved(
+                    reserved,
                     session_id,
                     cwd,
                     label.clone(),
@@ -278,41 +317,119 @@ impl BackgroundTaskManager {
         cwd: PathBuf,
         label: String,
         command: String,
-        mut cmd: tokio::process::Command,
+        cmd: tokio::process::Command,
         grace: Option<std::time::Duration>,
     ) -> std::io::Result<Handover> {
-        let started = std::time::Instant::now();
+        let reserved = self.reserve_run(session_id, &label, &command, &cwd);
+        self.run_reserved(reserved, session_id, cwd, label, command, cmd, grace)
+            .await
+    }
+
+    /// Take a run's id, stream paths and roster row on the CALLER's thread,
+    /// before any await (#692).
+    ///
+    /// The roster is the answer to "what is running?", and a caller that fires a
+    /// detached command reads it as soon as the call returns. Reserving inside
+    /// the spawned task would make that read report nothing until the task is
+    /// first polled, so the run would exist but be unaddressable — which is the
+    /// complaint this change exists to end, reproduced in our own plumbing.
+    ///
+    /// The pid is absent until the child exists; [`Self::set_pid`] fills it.
+    fn reserve_run(
+        &self,
+        session_id: Uuid,
+        label: &str,
+        command: &str,
+        cwd: &std::path::Path,
+    ) -> Reservation {
         let run_uuid = Uuid::new_v4();
         let id = run_uuid.to_string();
         let output_out = crate::brain::agent::service::work_status::command_output_path(&id, false);
         let output_err = crate::brain::agent::service::work_status::command_output_path(&id, true);
-        crate::brain::agent::service::work_status::ensure_runs_dir()?;
+        let started = std::time::Instant::now();
+        self.started_run(RunHandle {
+            id: id.clone(),
+            session_id,
+            label: label.to_string(),
+            command: command.to_string(),
+            cwd: cwd.to_path_buf(),
+            started,
+            pid: None,
+            output_out: output_out.clone(),
+            output_err: output_err.clone(),
+        });
+        Reservation {
+            run_uuid,
+            id,
+            output_out,
+            output_err,
+            started,
+        }
+    }
+
+    /// Spawn and supervise an already-reserved run — the body of
+    /// [`Self::run_or_detach`], whose doc owns the correctness argument,
+    /// including why the `Child` is moved here and never dropped.
+    async fn run_reserved(
+        self: std::sync::Arc<Self>,
+        reserved: Reservation,
+        session_id: Uuid,
+        cwd: PathBuf,
+        label: String,
+        command: String,
+        mut cmd: tokio::process::Command,
+        grace: Option<std::time::Duration>,
+    ) -> std::io::Result<Handover> {
+        let Reservation {
+            run_uuid,
+            id,
+            output_out,
+            output_err,
+            started,
+        } = reserved;
+
+        // Each fallible step below un-registers the reservation on failure: a
+        // row left behind by a command that never spawned would be listed as
+        // running forever, which is a worse lie than the one reserve_run fixes.
+        if let Err(e) = crate::brain::agent::service::work_status::ensure_runs_dir() {
+            self.finish_run(&id);
+            return Err(e);
+        }
 
         // Streams are created AT SPAWN, never by the first reader: an absent
         // file and an empty one are indistinguishable to a reader, and only one
         // of them means "this run never existed" (#692).
-        let out_file = tokio::fs::File::create(&output_out).await?;
-        let err_file = tokio::fs::File::create(&output_err).await?;
+        let out_file = match tokio::fs::File::create(&output_out).await {
+            Ok(f) => f,
+            Err(e) => {
+                self.finish_run(&id);
+                return Err(e);
+            }
+        };
+        let err_file = match tokio::fs::File::create(&output_err).await {
+            Ok(f) => f,
+            Err(e) => {
+                self.finish_run(&id);
+                return Err(e);
+            }
+        };
 
-        let mut child = cmd.spawn()?;
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                self.finish_run(&id);
+                return Err(e);
+            }
+        };
         let pid = child.id();
         let cap = run_output_cap_bytes();
         let out_reader = spawn_stream_reader(child.stdout.take(), out_file, cap);
         let err_reader = spawn_stream_reader(child.stderr.take(), err_file, cap);
 
-        // Registered BEFORE the wait, so the run is addressable from its first
-        // instant: a `task_cancel` issued moments after the spawn must find it.
-        self.started_run(RunHandle {
-            id: id.clone(),
-            session_id,
-            label: label.clone(),
-            command: command.clone(),
-            cwd: cwd.clone(),
-            started,
-            pid,
-            output_out: output_out.clone(),
-            output_err: output_err.clone(),
-        });
+        // The pid lands on the row that was reserved before this task ever ran,
+        // so the run has been addressable — by id, label, session and both
+        // stream paths — since the caller's call returned.
+        self.set_pid(&id, pid);
         if let Err(e) = WorkStatus::new_command(
             &id,
             &session_id.to_string(),
