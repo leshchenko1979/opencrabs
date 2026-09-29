@@ -158,7 +158,12 @@ pub(crate) fn build_body_markdown_media_edit(
             };
             serde_json::json!({
                 "id": m.id,
-                "media": { "type": "photo", "media": source },
+                // The type comes from the entry's own kind (#465). It used to
+                // be the literal "photo" for every entry, which is exactly the
+                // mistake the anim-lab MIX probe hit as
+                // `RICH_MESSAGE_VIDEO_INVALID` — a video reference generated
+                // by the photo helper.
+                "media": { "type": m.kind.as_str(), "media": source },
             })
         })
         .collect();
@@ -652,7 +657,19 @@ pub(crate) fn multipart_scalar_fields(body: &serde_json::Value) -> Vec<(String, 
 /// bytes is what stops a JPEG shipping as `<id>.png` with `image/png`, which
 /// the hardcoded version did for every format a local reference can point at
 /// (`is_supported_image` accepts PNG, JPEG, GIF, WEBP and BMP).
-pub(crate) fn media_part_identity(id: &str, bytes: &[u8]) -> (String, &'static str) {
+pub(crate) fn media_part_identity(
+    id: &str,
+    bytes: &[u8],
+    kind: super::mermaid::MediaKind,
+) -> (String, &'static str) {
+    // An entry's bytes reach the API as a multipart file part, so the part's
+    // own name and MIME have to agree with the `type` the entry declares
+    // (#465): a video uploaded as `image/bmp` (the image sniffer's fallback
+    // for bytes it cannot read) is a mislabelled part on the one path that
+    // carries video inline.
+    if kind == super::mermaid::MediaKind::Video {
+        return (format!("{id}.mp4"), "video/mp4");
+    }
     let ext = crate::utils::image::image_extension(bytes);
     let mime = match ext {
         "png" => "image/png",
@@ -681,7 +698,7 @@ fn build_multipart_form(
     }
     for m in media {
         if let Some(bytes) = &m.bytes {
-            let (file_name, mime) = media_part_identity(&m.id, bytes);
+            let (file_name, mime) = media_part_identity(&m.id, bytes, m.kind);
             let part = reqwest::multipart::Part::bytes(bytes.clone())
                 .file_name(file_name)
                 .mime_str(mime)
@@ -820,7 +837,9 @@ async fn post_rich_multipart(
 /// Build the `sendRichMessage` body with markdown input + a `media` array
 /// (Bot API 10.2+, #1044). Split out so the request shape is unit-testable
 /// without a live bot. Matches the validated prototype (message 1073):
-/// `rich_message: {markdown, media: [{id, media: {type:"photo", media:url}}]}`.
+/// `rich_message: {markdown, media: [{id, media: {type, media:url}}]}`,
+/// where `type` is the entry's own kind (#465) — `photo` for a picture,
+/// `video` for a video the rich plane carries inline.
 /// Carries `reply_parameters` when `reply_to` is set (#1230).
 pub(crate) fn build_body_markdown_media_target(
     chat_id: i64,
@@ -842,7 +861,12 @@ pub(crate) fn build_body_markdown_media_target(
             };
             serde_json::json!({
                 "id": m.id,
-                "media": { "type": "photo", "media": source },
+                // The type comes from the entry's own kind (#465). It used to
+                // be the literal "photo" for every entry, which is exactly the
+                // mistake the anim-lab MIX probe hit as
+                // `RICH_MESSAGE_VIDEO_INVALID` — a video reference generated
+                // by the photo helper.
+                "media": { "type": m.kind.as_str(), "media": source },
             })
         })
         .collect();

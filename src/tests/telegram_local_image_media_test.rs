@@ -21,7 +21,7 @@ use crate::channels::telegram::rich::api::{
     build_body_markdown_media_target, media_part_identity,
 };
 use crate::channels::telegram::rich::detect::rich_required;
-use crate::channels::telegram::rich::mermaid::MediaEntry;
+use crate::channels::telegram::rich::mermaid::{MediaEntry, MediaKind};
 
 const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x01\x02\x03\x04\x05\x06\x07";
 const JPEG_BYTES: &[u8] = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01";
@@ -31,6 +31,7 @@ const BMP_BYTES: &[u8] = b"BM\x36\x00\x00\x00\x00\x00\x00\x00";
 
 fn local_entry(id: &str, bytes: &[u8]) -> MediaEntry {
     MediaEntry {
+        kind: MediaKind::Photo,
         id: id.to_string(),
         url: None,
         bytes: Some(bytes.to_vec()),
@@ -68,6 +69,7 @@ fn a_fence_and_a_local_image_share_one_request_and_both_references_survive() {
     // only when its id names an entry in THIS request (#334).
     let media = vec![
         MediaEntry {
+            kind: MediaKind::Photo,
             id: "diag0".into(),
             url: None,
             bytes: Some(PNG_BYTES.to_vec()),
@@ -126,24 +128,24 @@ fn an_orphan_local_reference_is_neutralised_like_any_other() {
 #[test]
 fn the_multipart_part_identity_follows_the_bytes() {
     assert_eq!(
-        media_part_identity("img0", PNG_BYTES),
+        media_part_identity("img0", PNG_BYTES, MediaKind::Photo),
         ("img0.png".to_string(), "image/png")
     );
     assert_eq!(
-        media_part_identity("img1", JPEG_BYTES),
+        media_part_identity("img1", JPEG_BYTES, MediaKind::Photo),
         ("img1.jpg".to_string(), "image/jpeg"),
         "a JPEG must not ship as <id>.png with image/png"
     );
     assert_eq!(
-        media_part_identity("img2", GIF_BYTES),
+        media_part_identity("img2", GIF_BYTES, MediaKind::Photo),
         ("img2.gif".to_string(), "image/gif")
     );
     assert_eq!(
-        media_part_identity("img3", WEBP_BYTES),
+        media_part_identity("img3", WEBP_BYTES, MediaKind::Photo),
         ("img3.webp".to_string(), "image/webp")
     );
     assert_eq!(
-        media_part_identity("img4", BMP_BYTES),
+        media_part_identity("img4", BMP_BYTES, MediaKind::Photo),
         ("img4.bmp".to_string(), "image/bmp")
     );
 }
@@ -153,7 +155,7 @@ fn a_mermaid_part_keeps_its_own_id_and_png_identity() {
     // The existing diagram path is unchanged by #502: the sniffer reads PNG
     // bytes and returns exactly the name and mime the hardcoded version did.
     assert_eq!(
-        media_part_identity("diag0", PNG_BYTES),
+        media_part_identity("diag0", PNG_BYTES, MediaKind::Photo),
         ("diag0.png".to_string(), "image/png")
     );
 }

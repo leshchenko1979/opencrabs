@@ -350,6 +350,7 @@ pub(crate) async fn deliver_intermediate_message(
     for entry in &rw.entries {
         match tokio::fs::read(&entry.image.path).await {
             Ok(bytes) => media.push(super::rich::mermaid::MediaEntry {
+                kind: super::rich::mermaid::MediaKind::Photo,
                 id: entry.id.clone(),
                 url: None,
                 bytes: Some(bytes),

@@ -231,6 +231,7 @@ pub(crate) async fn deliver_final_response(
             for entry in &rich_rw.entries {
                 match tokio::fs::read(&entry.image.path).await {
                     Ok(bytes) => rich_media.push(super::rich::mermaid::MediaEntry {
+                        kind: super::rich::mermaid::MediaKind::Photo,
                         id: entry.id.clone(),
                         url: None,
                         bytes: Some(bytes),

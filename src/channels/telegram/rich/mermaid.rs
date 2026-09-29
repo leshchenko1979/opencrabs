@@ -494,6 +494,36 @@ const BODY_RETRY_DELAY_MS: u64 = 300;
 /// error page can't blow up the message.
 const ERROR_NOTE_MAX_CHARS: usize = 400;
 
+/// The Bot API media `type` an entry declares.
+///
+/// The rich-body validator already accepts `photo | video | audio`
+/// (`rich/table.rs:1049`) and the orphan shield already names
+/// `tg://video?id=` — so the *write* side was the only photo-only component in
+/// the chain, and it reproduced the exact mistake that produced
+/// `RICH_MESSAGE_VIDEO_INVALID` in the anim-lab MIX probe (the video reference
+/// had been generated with the photo helper). Emitting the string from the
+/// entry's own kind is what makes that mistake unrepresentable (#465).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum MediaKind {
+    /// `sendPhoto`-class bytes — a mermaid render, a local picture.
+    #[default]
+    Photo,
+    /// A video in a container Telegram's clients play. The entry's bytes are
+    /// uploaded as `video/mp4`; a file that is not MPEG4 belongs on the send
+    /// floor as a document instead (D3), so it never becomes this kind.
+    Video,
+}
+
+impl MediaKind {
+    /// The string the API expects in `media[].media.type`.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            MediaKind::Photo => "photo",
+            MediaKind::Video => "video",
+        }
+    }
+}
+
 /// One media reference embedded via the markdown `media` field (#1044).
 /// `id` matches the `tg://photo?id=<id>` reference in the markdown text.
 ///
@@ -508,6 +538,9 @@ pub(crate) struct MediaEntry {
     pub(crate) id: String,
     pub(crate) url: Option<String>,
     pub(crate) bytes: Option<Vec<u8>>,
+    /// Which `type` this entry declares. Defaults to `Photo` because every
+    /// producer until #465 was an image; a video producer sets it explicitly.
+    pub(crate) kind: MediaKind,
 }
 
 /// Encode `input` as base64url (RFC 4648 §5, no padding), the alphabet
@@ -1085,6 +1118,7 @@ pub(crate) fn replacement_for(
             (
                 md,
                 Some(MediaEntry {
+                    kind: MediaKind::Photo,
                     id,
                     url: Some(url.clone()),
                     bytes: None,
@@ -1104,6 +1138,7 @@ pub(crate) fn replacement_for(
             (
                 md,
                 Some(MediaEntry {
+                    kind: MediaKind::Photo,
                     id,
                     url: None,
                     bytes: Some(bytes.clone()),

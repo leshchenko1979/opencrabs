@@ -14,7 +14,7 @@ use crate::channels::telegram::rich::api::{
 use crate::channels::telegram::rich::ast::{Block, Inline, MermaidResult};
 use crate::channels::telegram::rich::{markdown_to_html_mermaid, markdown_to_html_mermaid_p};
 use crate::channels::telegram::rich::mermaid::{
-    MediaEntry, MermaidStyle, PREVALIDATE_CONNECT_TIMEOUT_SECS, PREVALIDATE_TIMEOUT_SECS, base64url,
+    MediaEntry, MediaKind, MermaidStyle, PREVALIDATE_CONNECT_TIMEOUT_SECS, PREVALIDATE_TIMEOUT_SECS, base64url,
     cache_get, cache_put, classify_render_failure, error_note, failure_html, find_mermaid_fences,
     has_mermaid_fence, image_html, ink_url, ink_url_svg, is_diagram_capped, is_image_response,
     looks_like_mermaid_source, markdown_failure_block,
@@ -656,6 +656,7 @@ fn prevalidate_budgets_split_connect_from_total() {
 #[test]
 fn build_body_markdown_media_target_matches_prototype_shape() {
     let media = vec![MediaEntry {
+        kind: MediaKind::Photo,
         id: "diag0".into(),
         url: Some("https://mermaid.ink/img/abc".into()),
         bytes: None,
@@ -690,6 +691,7 @@ fn build_body_markdown_media_target_includes_thread_id_when_present() {
 #[test]
 fn build_body_markdown_media_target_bytes_entry_uses_attach_reference() {
     let media = vec![MediaEntry {
+        kind: MediaKind::Photo,
         id: "diag1".into(),
         url: None,
         bytes: Some(vec![0x89, b'P']),
@@ -710,6 +712,7 @@ fn build_body_markdown_media_target_bytes_entry_uses_attach_reference() {
 #[test]
 fn build_body_markdown_media_target_neutralises_orphan_refs() {
     let media = vec![MediaEntry {
+        kind: MediaKind::Photo,
         id: "diag1".into(),
         url: None,
         bytes: Some(vec![0x89, b'P']),
@@ -741,6 +744,7 @@ fn build_body_markdown_media_target_neutralises_orphan_refs() {
 #[test]
 fn build_body_markdown_media_edit_carries_message_id_and_media() {
     let media = vec![MediaEntry {
+        kind: MediaKind::Photo,
         id: "diag0".into(),
         url: Some("https://mermaid.ink/img/abc".into()),
         bytes: None,
@@ -762,6 +766,7 @@ fn build_body_markdown_media_edit_carries_message_id_and_media() {
 #[test]
 fn build_body_markdown_media_edit_bytes_entry_uses_attach_reference() {
     let media = vec![MediaEntry {
+        kind: MediaKind::Photo,
         id: "diag1".into(),
         url: None,
         bytes: Some(vec![0x89, b'P']),
@@ -1115,6 +1120,7 @@ fn prose_media_tags_are_escaped_and_other_html_survives() {
 #[test]
 fn orphan_photo_refs_are_neutralised_but_resolved_ones_survive() {
     let media = vec![MediaEntry {
+        kind: MediaKind::Photo,
         id: "diag0".to_string(),
         url: Some("https://example.invalid/d0.png".to_string()),
         bytes: None,
@@ -1145,6 +1151,7 @@ fn orphan_photo_refs_are_neutralised_but_resolved_ones_survive() {
 #[test]
 fn attach_and_tg_refs_are_neutralised_by_media_presence() {
     let media = vec![MediaEntry {
+        kind: MediaKind::Photo,
         id: "diag1".to_string(),
         url: None,
         bytes: Some(vec![1, 2, 3]),
@@ -1261,6 +1268,7 @@ fn rich_body_offenders_name_the_unresolved_refs() {
 #[test]
 fn unresolved_ref_extractors_agree_across_both_forms() {
     let media = vec![MediaEntry {
+        kind: MediaKind::Photo,
         id: "diag1".to_string(),
         url: None,
         bytes: Some(vec![1, 2, 3]),

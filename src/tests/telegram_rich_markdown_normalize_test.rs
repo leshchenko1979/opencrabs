@@ -9,7 +9,7 @@
 use crate::channels::telegram::rich::api::{
     build_body_markdown_media_edit, build_body_markdown_media_target, build_body_target,
 };
-use crate::channels::telegram::rich::mermaid::MediaEntry;
+use crate::channels::telegram::rich::mermaid::{MediaEntry, MediaKind};
 use crate::channels::telegram::rich::normalize_rich_markdown;
 use crate::channels::telegram::rich::{
     normalize_rich_markdown_with_media, table::shield_unresolvable_markdown_images,
@@ -75,6 +75,7 @@ fn test_build_body_target_normalizes_markdown() {
 fn test_build_body_markdown_media_target_normalizes_markdown() {
     let raw_md = "Result &rarr; Success\n\n| X | Y |\n| a | b |";
     let media = vec![MediaEntry {
+        kind: MediaKind::Photo,
         id: "diag1".to_string(),
         url: Some("https://example.com/diag.png".to_string()),
         bytes: None,
@@ -149,6 +150,7 @@ fn test_shield_tg_and_attach_refs_are_media_aware() {
 
     // Non-matching media array -> still an orphan.
     let other_media = vec![MediaEntry {
+        kind: MediaKind::Photo,
         id: "diag9".to_string(),
         url: None,
         bytes: Some(vec![1, 2, 3]),
@@ -161,6 +163,7 @@ fn test_shield_tg_and_attach_refs_are_media_aware() {
 
     // Matching media array -> preserved, so a real diagram still renders.
     let matching_media = vec![MediaEntry {
+        kind: MediaKind::Photo,
         id: "diag1".to_string(),
         url: None,
         bytes: Some(vec![1, 2, 3]),
@@ -212,6 +215,7 @@ fn test_shield_is_fence_and_code_span_safe_for_media_refs() {
 
     // A matching entry keeps the ref live even in prose.
     let matching = vec![MediaEntry {
+        kind: MediaKind::Photo,
         id: "absent".to_string(),
         url: None,
         bytes: Some(vec![1, 2, 3]),
@@ -226,6 +230,7 @@ fn test_shield_is_fence_and_code_span_safe_for_media_refs() {
 
 fn photo_entry(id: &str) -> MediaEntry {
     MediaEntry {
+        kind: MediaKind::Photo,
         id: id.to_string(),
         url: None,
         bytes: Some(vec![0x89, b'P', b'N', b'G']),

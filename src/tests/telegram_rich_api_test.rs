@@ -120,6 +120,7 @@ async fn edit_rich_markdown_media_url_entry_uses_custom_api_url() {
         7,
         "![diagram](tg://photo?id=diag0)",
         &[crate::channels::telegram::rich::mermaid::MediaEntry {
+            kind: crate::channels::telegram::rich::mermaid::MediaKind::Photo,
             id: "diag0".to_string(),
             url: Some("https://mermaid.ink/img/abc".to_string()),
             bytes: None,
@@ -157,6 +158,7 @@ async fn send_rich_markdown_media_target_id_uses_custom_api_url() {
         None,
         "![img](tg://photo?id=1)",
         &[crate::channels::telegram::rich::mermaid::MediaEntry {
+            kind: crate::channels::telegram::rich::mermaid::MediaKind::Photo,
             id: "1".to_string(),
             url: Some("https://example.com/img.png".to_string()),
             bytes: None,
@@ -285,6 +287,7 @@ async fn the_html_fallback_wraps_each_block_in_its_own_p_tag() {
         .await;
 
     let media = [crate::channels::telegram::rich::mermaid::MediaEntry {
+        kind: crate::channels::telegram::rich::mermaid::MediaKind::Photo,
         id: "img0".to_string(),
         url: Some("https://example.test/img0.png".to_string()),
         bytes: None,
