@@ -153,7 +153,7 @@ impl Tool for SessionNotifyTool {
                 },
                 "target_session": {
                     "type": "string",
-                    "description": "UUID of the target session (from session_search list/query, or the from=<id> header of a session_notify you received)"
+                    "description": "UUID of the target session (from session_search list/query, or the from=<id> header of a session_notify you received). Same process and profile only: a target on another instance/profile returns the no_route refusal. Cross-profile targets go through a2a_send (accepts a local profile name or a url) or the CLI's global --profile flag."
                 },
                 "message": {
                     "type": "string",
