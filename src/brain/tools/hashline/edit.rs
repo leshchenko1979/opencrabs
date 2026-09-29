@@ -188,6 +188,12 @@ impl Tool for HashlineEditTool {
                 .await?;
         // Release the path lock taken before the read (#593).
         drop(write_lock);
+        // Write
+        fs::write(&path, &new_content)
+            .await
+            .map_err(ToolError::Io)?;
+        // Release the path lock taken before the read (#593).
+        drop(write_lock);
 
         // Track file in session (fire and forget, path-only)
         if let Some(ref sc) = context.service_context {
@@ -217,6 +223,11 @@ impl Tool for HashlineEditTool {
         // (#539): the absence of a revert path must not pass silently.
         if let Some(note) = pre_image.note() {
             output.push_str(&note);
+        }
+        // An overlapping write is reported, not swallowed: the file may hold
+        // neither writer's intent, and only the caller can decide (#593).
+        if contended {
+            output.push_str(&crate::brain::tools::path_lock::contention_notice(&path));
         }
 
         Ok(ToolResult::success(output))

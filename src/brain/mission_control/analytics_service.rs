@@ -12,12 +12,13 @@
 //! pre-fetches once (like the other panels) rather than per `draw`.
 
 use super::types::{
-    McAnalytics, McBrainFile, McBrainVerifyStats, McModelToolStat, McPhantomStats,
+    McAnalytics, McBrainFile, McBrainVerifyStats, McDecisionStat, McModelToolStat, McPhantomStats,
     McStreamingStats, McToolStat, TimeWindow,
 };
 use crate::db::Pool;
 use crate::db::repository::{
-    AnalyticsEventRepository, FeedbackLedgerRepository, ToolExecutionRepository,
+    AnalyticsEventRepository, DecisionStatsRepository, FeedbackLedgerRepository,
+    ToolExecutionRepository,
 };
 
 /// How many rows to surface in each ranked list.
@@ -48,6 +49,7 @@ pub async fn summary(pool: Pool, window: TimeWindow) -> McAnalytics {
     let brain_verify = brain_verify_stats(pool.clone(), window).await;
     let model_tools = tool_stats_by_model(pool.clone(), window).await;
     let (rsi_last_call_ts, tool_events_since_rsi) = rsi_staleness(pool.clone()).await;
+    let decisions = decision_stats(pool.clone()).await;
     let (rsi_applied_total, rsi_top_dimensions) = rsi_stats(pool).await;
     let brain_files = collect_brain_sizes();
     let brain_total_kb = round1(brain_files.iter().map(|b| b.kb).sum::<f64>());
@@ -83,7 +85,31 @@ pub async fn summary(pool: Pool, window: TimeWindow) -> McAnalytics {
         streaming,
         brain_verify,
         model_tools,
+        decisions,
     }
+}
+
+/// Decision-reuse counters per tier (#1648 PR3). Cumulative and
+/// point-in-time like the RSI counts, so `window` deliberately does not
+/// apply: the release-day evaluation wants the whole shadow period, not a
+/// slice. Empty (never error) keeps the panel honest: no counters means no
+/// block, which is also the kill-rule evidence of non-use.
+async fn decision_stats(pool: Pool) -> Vec<McDecisionStat> {
+    let rows = DecisionStatsRepository::new(pool)
+        .all()
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("analytics_service: decision stats query failed: {e:#}");
+            Vec::new()
+        });
+    rows.into_iter()
+        .map(|r| McDecisionStat {
+            tier_id: r.tier_id,
+            calls: r.calls,
+            would_hit: r.would_hit,
+            live_hit: r.live_hit,
+        })
+        .collect()
 }
 
 /// Per-tool usage with fail rate, most-used first. `window` bounds the query

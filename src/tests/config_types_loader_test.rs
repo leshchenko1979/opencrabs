@@ -366,3 +366,84 @@ fn test_agent_config_save_with_default_provider() {
         Some("mimo-v2.5-pro".to_string())
     );
 }
+
+// ── compaction_notice: the numbered pair is opt-in chrome (#1686) ──
+
+#[test]
+fn compaction_notice_defaults_off() {
+    assert!(
+        !AgentConfig::default().compaction_notice,
+        "the numbered pair must not render for a user who never asked for it"
+    );
+}
+
+#[test]
+fn absent_compaction_notice_key_is_off() {
+    // The contract that actually ships: a config file with no such key at all
+    // has to land off, not merely a Default impl that says so.
+    let config: Config = toml::from_str("[agent]\ndefault_model = \"mimo-v2.5-pro\"\n").unwrap();
+    assert!(!config.agent.compaction_notice);
+}
+
+#[test]
+fn compaction_notice_opt_in_is_honoured() {
+    let config: Config = toml::from_str("[agent]\ncompaction_notice = true\n").unwrap();
+    assert!(config.agent.compaction_notice, "true restores the pair");
+}
+
+#[test]
+fn compaction_notice_leaves_the_roast_alone() {
+    // Two different surfaces. Muting the chrome by default must not silence the
+    // model's narration, which is what users forward to friends and the reason
+    // silent_compaction defaults false.
+    let agent = AgentConfig::default();
+    assert!(!agent.compaction_notice, "chrome off");
+    assert!(!agent.silent_compaction, "voice still on");
+}
+
+#[test]
+fn every_compaction_surface_reads_the_flag() {
+    // The whole compaction chrome is opt-in (#1686): the two numbered lines
+    // AND the header pin. Structural pin only. These arms are closures built
+    // inside handle_message, and no test in this repo constructs a Telegram
+    // StreamingState, so this proves the source shape rather than behaviour.
+    // The containment window is measured from the enclosing `st.lock()` block
+    // rather than by bare index order, so a guard that opens elsewhere in the
+    // file cannot satisfy it.
+    const GUARD: &str = "if Config::current().agent.compaction_notice {";
+    const LOCK: &str = "if let Ok(mut s) = st.lock() {";
+    const SET: &str = "s.compacting = true;";
+    const LIFT: &str = "s.compacting = false;";
+    const PROGRESS: &str = include_str!("../channels/telegram/progress.rs");
+    const RESUME: &str = include_str!("../channels/telegram/resume.rs");
+    for (name, src) in [("progress.rs", PROGRESS), ("resume.rs", RESUME)] {
+        assert_eq!(
+            src.matches("compacting_flow_line(").count()
+                + src.matches("compacted_flow_line(").count(),
+            2,
+            "{name} renders exactly two numbered flow lines, both gated"
+        );
+        assert_eq!(
+            src.matches(GUARD).count(),
+            2,
+            "{name} has exactly two gated surfaces"
+        );
+        assert_eq!(src.matches(SET).count(), 1, "{name} sets the pin once");
+        assert_eq!(src.matches(LIFT).count(), 1, "{name} lifts the pin once");
+
+        let set = src.find(SET).expect("pin set");
+        let set_block = src[..set].rfind(LOCK).expect("enclosing lock");
+        assert!(
+            src[set_block..set].contains(GUARD),
+            "{name}: the pin set must sit inside the compaction_notice guard"
+        );
+
+        let lift = src.find(LIFT).expect("pin lift");
+        let lift_block = src[..lift].rfind(LOCK).expect("enclosing lock");
+        assert!(
+            !src[lift_block..lift].contains(GUARD),
+            "{name}: the pin lift must stay unconditional, or a flag flip \
+             mid-window strands the pin"
+        );
+    }
+}

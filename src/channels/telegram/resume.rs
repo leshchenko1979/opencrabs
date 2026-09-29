@@ -792,6 +792,25 @@ pub(crate) async fn resume_session_inner(
                         .push(DisplayItem::System(compacting_flow_line(
                             usage_pct, predicted,
                         )));
+                    // The whole compaction surface is opt-in chrome (#1686),
+                    // header pin included. Leaving the pin ungated was
+                    // justified by a staleness worry that does not exist:
+                    // tick_flow_header advances flow_status from
+                    // turn_started_at outside the `compacting` branch, so the
+                    // clock keeps counting through the silent window and the
+                    // header keeps its last real preview. With the flag off
+                    // the pin is never set, so a compaction leaves no trace on
+                    // the block at all. The CompactionSummary arm's lift stays
+                    // unconditional, so a flag flip mid-window cannot strand
+                    // a pin.
+                    if Config::current().agent.compaction_notice {
+                        s.compacting = true;
+                        s.header_preview = Some(COMPACTING_HEADER_TEXT.to_string());
+                        s.display_queue
+                            .push(DisplayItem::Intermediate(compacting_flow_line(
+                                usage_pct, predicted,
+                            )));
+                    }
                 }
             }
             // Live ctx meter (#135): TokenCount fires after every API
@@ -904,6 +923,10 @@ pub(crate) async fn resume_session_inner(
                 if let Ok(mut s) = st.lock() {
                     s.display_queue
                         .push(DisplayItem::System(format!("🛡️ guard: {}", message)));
+                        .push(DisplayItem::System(format!(
+                            "🔧 {}",
+                            crate::utils::sanitize::normalize_dashes(&message)
+                        )));
                 }
             }
             ProgressEvent::RetryAttempt {
@@ -972,6 +995,17 @@ pub(crate) async fn resume_session_inner(
                         None,
                     ));
                     s.dirty = true;
+                    // Lifting the pin stays unconditional while setting it is
+                    // gated (#1686): set-gated / lift-ungated means a flag flip
+                    // inside the compaction window can never strand a pin that
+                    // nothing will clear. The lift is what lets the next tick
+                    // recompute the header from live data.
+                    if Config::current().agent.compaction_notice {
+                        s.display_queue
+                            .push(DisplayItem::Intermediate(compacted_flow_line(
+                                before_pct, after_pct, elapsed,
+                            )));
+                    }
                 }
             }
             _ => {}

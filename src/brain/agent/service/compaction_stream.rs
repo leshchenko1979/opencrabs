@@ -68,7 +68,9 @@ pub(crate) async fn collect_stream_with_timeout(
                 ..
             } => text.push_str(&delta),
             StreamEvent::ContentBlockDelta { .. } => {}
-            StreamEvent::ContentBlockStop { .. } | StreamEvent::Ping => {}
+            StreamEvent::ContentBlockStop { .. }
+            | StreamEvent::Ping
+            | StreamEvent::BackgroundTask { .. } => {}
             StreamEvent::MessageDelta {
                 delta,
                 usage: final_usage,

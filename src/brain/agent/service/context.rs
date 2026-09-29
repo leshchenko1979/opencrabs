@@ -1401,6 +1401,15 @@ impl AgentService {
         // (`apply_compaction_summary_after`) covers continuation mechanically.
         let brain_context = Self::build_recovered_brain_context_for(context);
         let summary_with_context = format!("{}\n\n{}", brain_context, summary);
+        // No brain files are welded on either: SOUL.md, USER.md and AGENTS.md
+        // are injected into the system prompt on EVERY turn
+        // (`prompt_builder::CORE_BRAIN_FILES` / `ALWAYS_LOADED_FILES`), and
+        // `system_brain` survives compaction untouched. Welding them here
+        // duplicated ~16k tokens onto the in-memory marker while the marker
+        // persisted to the DB carried none, so the confirmation reported a
+        // size the next request never had, and the background path re-sent
+        // the duplicate on every turn until the next reload (#1676).
+        let marker_body = summary.to_string();
 
         match scope {
             CompactionScope::FullWindow => {
@@ -1412,18 +1421,18 @@ impl AgentService {
                 // window and defeat the whole purpose of compacting. Pass 0
                 // so `compact_with_summary` clears everything and prepends
                 // just the summary.
-                context.compact_with_summary(summary_with_context, 0);
+                context.compact_with_summary(marker_body, 0);
             }
             CompactionScope::DeltaSinceMarker => {
                 // The prior frozen segments stay in force verbatim; only the
                 // messages the delta summary described are replaced by this
                 // new segment marker.
-                context.compact_with_delta_summary(summary_with_context);
+                context.compact_with_delta_summary(marker_body);
             }
             CompactionScope::SegmentConsolidation => {
                 // The segments merge into ONE superseding marker; the tail
                 // after the segment run is untouched.
-                context.consolidate_segments(summary_with_context);
+                context.consolidate_segments(marker_body);
             }
         }
 

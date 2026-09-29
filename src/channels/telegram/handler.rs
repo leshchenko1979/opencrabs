@@ -18,6 +18,7 @@ use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{
     ChatKind, FileId, InlineKeyboardMarkup, MessageId, MessageKind, ParseMode, ReplyParameters,
+    ChatKind, FileId, InlineKeyboardMarkup, MessageId, ParseMode, ReplyParameters, ThreadId,
 };
 
 use super::send::{best_effort_delete, message_in_thread};
@@ -451,7 +452,20 @@ async fn persist_group_message(
     }
 }
 
+/// Fire a cosmetic "seen" reaction on a message.
+///
+/// Dropped while a global 429 cooldown is active (#1778): the API rejects
+/// the call with `Retry after` and each rejection risks extending the ban,
+/// for feedback the final response supersedes anyway. Mirrors the cosmetic
+/// drop in `admit_chat_action`; reactions resume once the cooldown clears.
 pub(crate) async fn fire_reaction(bot: &Bot, chat_id: ChatId, msg_id: MessageId, emoji: &str) {
+    if !super::rate_limit::reaction_ack_permitted() {
+        tracing::debug!(
+            "Telegram: dropping ack reaction {emoji} for msg {} during global 429 cooldown",
+            msg_id.0
+        );
+        return;
+    }
     let reaction = teloxide::types::ReactionType::Emoji {
         emoji: map_to_allowed_reaction(emoji),
     };
@@ -770,12 +784,15 @@ pub(crate) async fn handle_message(
     // return, since the burying messages are usually not addressed to the bot.
     telegram_state.note_incoming_msg(msg.chat.id.0, msg.id.0);
 
-    // Forum-ness evidence (#1220): any thread-scoped message proves this chat
-    // is a forum group. Recorded for EVERY message before early returns, so
-    // chatter not addressed to the bot still feeds the cache.
+    // Forum-ness evidence (#1220, gated per #1708): only a thread id that
+    // Telegram itself flagged is_topic_message proves this chat is a forum
+    // group. Recorded for EVERY message before early returns, so chatter not
+    // addressed to the bot still feeds the cache. A bare thread id from an
+    // ordinary reply chain in a non-forum group must stay inert — trusting
+    // it flipped real chats to "forum" and orphaned their sessions.
     let raw_thread = thread_id.map(|t| t.0.0);
     telegram_state
-        .note_thread_evidence(msg.chat.id.0, raw_thread)
+        .note_thread_evidence(msg.chat.id.0, msg.is_topic_message, raw_thread)
         .await;
 
     // Forum-topic rename capture (#143). A rename fires `forum_topic_edited`
@@ -2710,8 +2727,16 @@ pub(crate) async fn handle_message(
     // so it should NOT use telegram_send for simple text replies.
     // Surface the chat_id (and forum thread_id) so the agent can target THIS
     // conversation for cron reports / cross-surface sends without guessing or
-    // asking (#533, mirror of upstream #510).
-    let chan_ids = channel_id_hint(msg.chat.id.0, thread_id.map(|t| t.0.0));
+    // asking (#533, mirror of upstream #510). The thread id shown must be the
+    // SAME one session routing uses (#1708): topic_session_id-gated, so an
+    // ordinary reply chain in a non-forum group no longer displays a per-reply
+    // "thread_id: 215/220" that invites the model to bind phantom topics —
+    // and General stays unnamed, because writing 1 on the wire is refused
+    // (#1319).
+    let chan_ids = channel_id_hint(
+        msg.chat.id.0,
+        session_resolve::topic_session_id(msg.is_topic_message, thread_id.map(|t| t.0.0)),
+    );
     let agent_input = format!(
         "[Channel: Telegram ({chan_ids}) — your text response is automatically sent to this chat. \
          Do NOT call telegram_send to deliver your answer. Only use telegram_send for: \
@@ -3511,6 +3536,21 @@ pub(crate) async fn handle_reaction(
     let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
     let text_only = redact_secrets(&text_only);
     let (text_only, react_emoji) = crate::utils::extract_react_marker_lenient(&text_only);
+    // #1670: a malformed marker (empty `<<react:>>`, word payload) survives
+    // extraction as visible text. On a reaction turn any marker shape is a
+    // directive, never prose — strip the debris so it can never ship as a
+    // bubble, and log when the turn degrades to silence (no emoji fired and
+    // the whole text was debris).
+    let stripped = crate::utils::strip_invalid_react_markers(&text_only);
+    if stripped.len() != text_only.len() {
+        tracing::warn!(
+            "Telegram reaction: stripped {} chars of malformed react-marker debris \
+             (emoji fired: {})",
+            text_only.len() - stripped.len(),
+            react_emoji.is_some(),
+        );
+    }
+    let text_only = stripped;
     let text_only = if react_emoji.is_some()
         && super::reaction_prompt::classify_reaction(&emoji)
             != super::reaction_prompt::ReactionSentiment::Negative
@@ -3551,7 +3591,17 @@ pub(crate) async fn handle_reaction(
         // and must not grow a notice.
         let text_only = crate::utils::append_failure_notice(&text_only, &image_scan.failures);
         let html = md_to_html(&text_only);
-        if let Err(e) = message_in_thread(&bot, chat_id, None, html).await {
+        // #1670: the reply belongs in the topic the reacted message lives in —
+        // step 6 resolved it to key the session, and `None` here used to
+        // deliver every reaction-path text reply to the group's General.
+        if let Err(e) = message_in_thread(
+            &bot,
+            chat_id,
+            topic_id.map(|t| ThreadId(MessageId(t))),
+            html,
+        )
+        .await
+        {
             tracing::warn!("Telegram reaction: failed to send text reply: {}", e);
             return Ok(());
         }
@@ -3572,7 +3622,11 @@ pub(crate) async fn handle_reaction(
             text_only,
             "text".to_string(),
             None,
-        );
+        )
+        // #1670: the row must carry the topic it was delivered in — a later
+        // reaction on this reply looks up its thread here to key the session,
+        // and a NULL would route that reaction to the chat's main session.
+        .with_thread(reacted_thread_id, None);
         if let Err(e) = channel_msg_repo.insert(&cm).await {
             tracing::warn!("Telegram reaction: failed to record bot reply: {}", e);
         }

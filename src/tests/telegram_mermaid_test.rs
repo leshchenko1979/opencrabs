@@ -457,12 +457,16 @@ fn is_diagram_capped_checks_dimensions_and_aspect_ratio() {
 fn replacement_for_failed_emits_failure_block_and_no_entry() {
     let outcome = MermaidResult::Failed("Parse error".into());
     let (md, entry) = replacement_for(&outcome, 0, "graph TD;", &style());
+    let outcome = MermaidResult::Failed("diagram renderer timed out".into());
+    let (md, entry) = replacement_for(&outcome, 0, "graph TD;");
     assert!(
         entry.is_none(),
         "failed outcome must not carry a media entry"
     );
-    assert!(md.contains("Mermaid diagram could not be rendered"));
-    assert!(md.contains("Parse error"));
+    // #1741: a Failed outcome is transient, so the block says the renderer
+    // failed and the diagram was not the problem.
+    assert!(md.contains("your diagram was NOT modified"));
+    assert!(md.contains("diagram renderer timed out"));
     assert!(md.contains("graph TD;"));
 }
 
@@ -631,6 +635,10 @@ fn markdown_failure_block_with_link_appends_a_tappable_svg_hatch() {
         &style(),
     );
     assert!(md.contains("> ⚠️ **Mermaid diagram could not be rendered**"));
+    // real <a href> anchor — tappable rather than raw text. #1741: the
+    // transient headline now says renderer failure, not a syntax rejection.
+    let md = markdown_failure_block_with_link("diagram renderer dropped the image", "flowchart TD");
+    assert!(md.contains("your diagram was NOT modified"));
     assert!(md.contains("diagram renderer dropped the image"));
     assert!(md.contains("flowchart TD"));
     assert!(

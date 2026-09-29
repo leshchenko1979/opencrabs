@@ -144,6 +144,32 @@ pub fn build_continuation(
     text
 }
 
+/// Advisory skill-inventory stamp (#125): names the skills that were
+/// active (slash-invoked) in this session before the compaction, framed
+/// as CONSIDER-not-RELOAD — the session's focus may have shifted while
+/// the context was compacting, so the waking agent weighs each skill's
+/// relevance against the IMMEDIATE TASK instead of blindly re-reading
+/// bodies it may no longer need. An empty slice produces NO stamp at
+/// all: zero marginal tokens for sessions that never touched a skill.
+///
+/// The list rides the continuation prompt (mechanically composed from
+/// in-memory session state at build time), so it is immune to the
+/// summarizer's token-budget drops — the durable-state property the
+/// research phase identified as the gap.
+pub fn append_skill_stamp(mut text: String, active_skills: &[String]) -> String {
+    if active_skills.is_empty() {
+        return text;
+    }
+    let mut names: Vec<&str> = active_skills.iter().map(|s| s.as_str()).collect();
+    names.sort();
+    text.push_str(&format!(
+        "\n\nSKILLS LOADED PRE-COMPACTION: {}. Session focus may have \
+         shifted — consider whether each is still relevant to the \
+         IMMEDIATE TASK; reload only those that are.",
+        names.join(", ")
+    ));
+    text
+}
 /// Status gate for the continuation document's section 0.
 ///
 /// Issue #499: a continuation document re-blessed a COMPLETED task as the
@@ -178,7 +204,11 @@ fn fun_body(kind: CompactionKind) -> &'static str {
              query to recover the details.\n\
              3. If you need specific brain context, selectively load ONLY the relevant \
              brain file (e.g. TOOLS.md, SOUL.md, USER.md). NEVER use name=\"all\".\n\
-             4. If the Obligation status is OPEN, IMMEDIATELY continue the task described in the \"IMMEDIATE TASK\" section \
+             4. Open your reply with ONE short ROAST about the compaction — roast yourself, \
+             the context you just lost, or the situation. Be creative and surprise them; \
+             cursing allowed. This is part of the protocol, not a detour: one line, then \
+             straight on.\n\
+             5. If the Obligation status is OPEN, IMMEDIATELY continue the task described in the \"IMMEDIATE TASK\" section \
              of the compaction summary. This is NOT optional — you MUST pick up exactly \
              where you left off. Do NOT start a new topic. Do NOT ask what to do next. \
              Do NOT deviate to unrelated work. If the IMMEDIATE TASK section says \
@@ -190,7 +220,11 @@ fn fun_body(kind: CompactionKind) -> &'static str {
              1. Review the summary and snapshot to understand current task state.\n\
              2. Use `session_search` with keywords from the summary if you need older \
              context not in the snapshot.\n\
-             3. If the Obligation status is OPEN, IMMEDIATELY continue the task described in the \"IMMEDIATE TASK\" section \
+             3. Open your reply with ONE short ROAST about the compaction — roast yourself, \
+             the context you just lost, or the situation. Be creative and surprise them; \
+             cursing allowed. Part of the protocol, not a detour: one line, then straight \
+             on.\n\
+             4. If the Obligation status is OPEN, IMMEDIATELY continue the task described in the \"IMMEDIATE TASK\" section \
              of the compaction summary. This is NOT optional — you MUST pick up exactly \
              where you left off. Do NOT start a new topic. Do NOT ask what to do next. \
              Do NOT deviate to unrelated work.]"
@@ -200,16 +234,18 @@ fn fun_body(kind: CompactionKind) -> &'static str {
              too large. Context has been compacted. POST-COMPACTION PROTOCOL:\n\
              1. Review the summary to understand where you left off.\n\
              2. Use `session_search` with keywords if you need older context.\n\
-             3. Briefly acknowledge the compaction with a fun/cheeky remark, \
-             then resume it only if its Obligation status is OPEN; if it is DONE, do not redo it.]"
+             3. Briefly acknowledge the compaction with a fun/cheeky ROAST — roast yourself, \
+             the lost context, or the situation; be creative, cursing allowed — then resume \
+             it only if its Obligation status is OPEN; if it is DONE, do not redo it.]"
         }
         CompactionKind::PostTool => {
             "[SYSTEM: Mid-loop context compaction complete. The summary above has \
              full context of everything done so far. POST-COMPACTION PROTOCOL:\n\
              1. Review the summary to understand current task state.\n\
              2. Use `session_search` with keywords if you need older context.\n\
-             Briefly acknowledge the compaction to the user with a fun/cheeky remark (be \
-             creative, surprise them — cursing allowed), then - if the Obligation status is OPEN - IMMEDIATELY continue the task \
+             Briefly acknowledge the compaction to the user with a fun/cheeky ROAST (roast \
+             yourself, the lost context, or the situation; be creative, surprise them — \
+             cursing allowed), then - if the Obligation status is OPEN - IMMEDIATELY continue the task \
              described in the \"IMMEDIATE TASK\" section of the compaction summary. \
              Do NOT start a new topic. Do NOT deviate to unrelated work. \
              Do NOT re-do completed work.]"

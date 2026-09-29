@@ -21,9 +21,12 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::brain::agent::{AgentService, QueuedUserMessage};
+use crate::brain::provider::create_provider_by_name;
 use crate::cli::session_resolve::resolve_or_create_session;
-use crate::services::SessionService;
+use crate::services::{MessageService, SessionService};
+use crate::utils::provider_pair::parse_pair;
 
+use super::catalog;
 use super::protocol::{self, ClientMessage};
 use super::transport::{Transport, TransportHandle};
 use super::turn;
@@ -43,6 +46,8 @@ pub struct SessionState {
     pub id: Uuid,
     /// Model override from `--model` or `session/set_model`/`session/set_mode`.
     pub model: Mutex<Option<String>>,
+    /// Permission policy from `session/set_mode` (default supervised).
+    pub mode: Mutex<protocol::AcpMode>,
     /// Cancel token of the in-flight turn; None when idle.
     pub active_cancel: Mutex<Option<CancellationToken>>,
 }
@@ -52,9 +57,11 @@ pub struct ServerState {
     pub handle: TransportHandle,
     pub agent: Arc<AgentService>,
     pub sessions: SessionService,
+    pub messages: MessageService,
     pub states: Mutex<HashMap<String, Arc<SessionState>>>,
     pub steer: SteerMap,
     pub default_model: Option<String>,
+    pub config: Arc<crate::config::Config>,
 }
 
 /// The server: owns the transport, dispatches to shared state.
@@ -67,17 +74,21 @@ impl AcpServer {
     pub fn new(
         agent: Arc<AgentService>,
         sessions: SessionService,
+        messages: MessageService,
         default_model: Option<String>,
         steer: SteerMap,
+        config: Arc<crate::config::Config>,
     ) -> Self {
         let transport = Transport::spawn();
         let state = Arc::new(ServerState {
             handle: transport.handle(),
             agent,
             sessions,
+            messages,
             states: Mutex::new(HashMap::new()),
             steer,
             default_model,
+            config,
         });
         Self { state, transport }
     }
@@ -125,8 +136,14 @@ impl AcpServer {
                     ),
                 }
             }
-            protocol::SESSION_SET_MODEL | protocol::SESSION_SET_MODE => {
+            protocol::SESSION_SET_MODEL => {
                 Self::session_set_model(state, id, params).await;
+            }
+            protocol::SESSION_SET_MODE => {
+                Self::session_set_mode(state, id, params).await;
+            }
+            protocol::SESSION_COMPACT => {
+                Self::session_compact(state, id, params).await;
             }
             protocol::SESSION_PROMPT => {
                 Self::session_prompt(state, id, params).await;
@@ -150,7 +167,7 @@ impl AcpServer {
                     token.cancel();
                 }
             }
-            protocol::SESSION_STEER => {
+            protocol::SESSION_STEER | protocol::SESSION_STEER_LEGACY => {
                 if let (Some(st), Some(text)) = (
                     Self::lookup(state, &params).await,
                     protocol::prompt_text(&params),
@@ -187,10 +204,66 @@ impl AcpServer {
                 let st = Arc::new(SessionState {
                     id: session.id,
                     model: Mutex::new(state.default_model.clone()),
+                    mode: Mutex::new(protocol::AcpMode::default()),
                     active_cancel: Mutex::new(None),
                 });
-                state.states.lock().await.insert(acp_id.clone(), st);
-                state.handle.respond(id, json!({ "sessionId": acp_id }));
+                state.states.lock().await.insert(acp_id.clone(), st.clone());
+                // The agent service's per-session model maps are in-memory,
+                // so a fresh acp process starts blank while the session row
+                // still knows the user's pick — rehydrate from the row.
+                if resume.is_some() {
+                    Self::restore_session_model(&state, &session, &st).await;
+                }
+                // ACP: an agent advertising loadSession replays the stored
+                // transcript as session/update notifications BEFORE answering
+                // the load, so clients without their own transcript store
+                // (Zed et al.) render history. MonoCode mutes these — it
+                // restores its own persisted blocks — but the replay is the
+                // protocol contract, not a client favor.
+                if resume.is_some()
+                    && let Ok(history) = state.messages.list_messages_for_session(session.id).await
+                {
+                    for update in protocol::replay_updates(&history) {
+                        state.handle.send(protocol::session_update(&acp_id, update));
+                    }
+                    // Restore the context meter: the provider's own last
+                    // measurement, falling back to the session row's
+                    // lifetime total. A real count beats silence; both beat
+                    // a tokenized estimate of raw content.
+                    let used = protocol::replay_usage(&history)
+                        .or((session.token_count > 0).then_some(session.token_count));
+                    if let Some(used) = used {
+                        state.handle.send(protocol::session_update(
+                            &acp_id,
+                            json!({
+                                "sessionUpdate": "usage",
+                                "usage": {
+                                    "used": used,
+                                    "size": state.agent.context_limit_for_session(session.id),
+                                },
+                            }),
+                        ));
+                    }
+                }
+                let current = st.model.lock().await.clone();
+                let models = catalog::models_payload(&state.config, current.as_deref());
+                let modes = protocol::modes_payload(*st.mode.lock().await);
+                state.handle.respond(
+                    id,
+                    json!({ "sessionId": acp_id, "models": models, "modes": modes }),
+                );
+                // Slash-command discovery pushes after the response so the
+                // client's picker fills in as soon as the session exists.
+                let commands = catalog::commands_payload();
+                if !commands.is_empty() {
+                    state.handle.send(protocol::session_update(
+                        &acp_id,
+                        json!({
+                            "sessionUpdate": "available_commands_update",
+                            "availableCommands": commands,
+                        }),
+                    ));
+                }
             }
             Err(e) => {
                 state
@@ -201,25 +274,125 @@ impl AcpServer {
     }
 
     async fn session_set_model(state: Arc<ServerState>, id: Value, params: Value) {
-        let model = params
-            .get("modelId")
-            .or_else(|| params.get("modeId"))
-            .and_then(Value::as_str);
-        match (Self::lookup(&state, &params).await, model) {
-            (Some(st), Some(model)) => {
-                *st.model.lock().await = Some(model.to_string());
+        let model = params.get("modelId").and_then(Value::as_str);
+        let (Some(st), Some(model)) = (Self::lookup(&state, &params).await, model) else {
+            let msg = if model.is_none() {
+                "session/set_model requires modelId"
+            } else {
+                "session/set_model: unknown session"
+            };
+            state
+                .handle
+                .respond_error(id, protocol::INVALID_PARAMS, msg);
+            return;
+        };
+        // A `provider/model` pair switches the session's provider too; a bare
+        // model name re-serves through the session's current provider.
+        if let Ok((provider_name, bare_model)) = parse_pair(model) {
+            match create_provider_by_name(&state.config, &provider_name).await {
+                Ok(provider) => {
+                    state
+                        .agent
+                        .swap_provider_for_session(st.id, provider, bare_model.clone());
+                    state.agent.mark_manual_switch(st.id, bare_model);
+                    // st.model holds the pair form — models_payload matches
+                    // currentModelId against available pair ids.
+                    *st.model.lock().await = Some(model.to_string());
+                }
+                Err(e) => {
+                    state.handle.respond_error(
+                        id,
+                        protocol::INVALID_PARAMS,
+                        format!("session/set_model: {e}"),
+                    );
+                    return;
+                }
+            }
+        } else {
+            state.agent.set_session_model(st.id, model.to_string());
+            *st.model.lock().await = Some(model.to_string());
+        }
+        // Persist the pick on the session row so session/load in a future
+        // process can rehydrate it — the agent service maps are in-memory.
+        match state.sessions.get_session_required(st.id).await {
+            Ok(mut row) => {
+                match parse_pair(model) {
+                    Ok((provider_name, bare_model)) => {
+                        row.provider_name = Some(provider_name);
+                        row.model = Some(bare_model);
+                    }
+                    Err(_) => row.model = Some(model.to_string()),
+                }
+                if let Err(e) = state.sessions.update_session(&row).await {
+                    tracing::warn!("acp: model pick not persisted for {}: {e}", st.id);
+                }
+            }
+            Err(e) => tracing::warn!("acp: model pick not persisted for {}: {e}", st.id),
+        }
+        state.handle.respond(id, json!({}));
+    }
+
+    /// `session/set_mode`: validate the advertised id and store it. Unknown
+    /// modes are a hard error — silently accepting one would leave client and
+    /// server disagreeing about the approval policy.
+    async fn session_set_mode(state: Arc<ServerState>, id: Value, params: Value) {
+        let mode_id = params.get("modeId").and_then(Value::as_str);
+        let (Some(st), Some(mode_id)) = (Self::lookup(&state, &params).await, mode_id) else {
+            let msg = if mode_id.is_none() {
+                "session/set_mode requires modeId"
+            } else {
+                "session/set_mode: unknown session"
+            };
+            state
+                .handle
+                .respond_error(id, protocol::INVALID_PARAMS, msg);
+            return;
+        };
+        match protocol::AcpMode::parse(mode_id) {
+            Some(mode) => {
+                *st.mode.lock().await = mode;
                 state.handle.respond(id, json!({}));
             }
-            (None, _) => state.handle.respond_error(
+            None => state.handle.respond_error(
                 id,
                 protocol::INVALID_PARAMS,
-                "session/set_model: unknown session",
+                format!("session/set_mode: unknown modeId '{mode_id}'"),
             ),
-            (_, None) => state.handle.respond_error(
-                id,
-                protocol::INVALID_PARAMS,
-                "session/set_model requires modelId (modeId accepted)",
-            ),
+        }
+    }
+
+    /// Rehydrate the per-session model/provider override from the session row
+    /// on `session/load`. Failure degrades down the chain: a provider that no
+    /// longer exists in config falls back to a bare model pin, and a session
+    /// with no stored pick keeps the default.
+    async fn restore_session_model(
+        state: &Arc<ServerState>,
+        session: &crate::db::models::Session,
+        st: &Arc<SessionState>,
+    ) {
+        let model = session.model.clone().filter(|m| !m.trim().is_empty());
+        let provider_name = session
+            .provider_name
+            .clone()
+            .filter(|p| !p.trim().is_empty());
+        if let (Some(provider_name), Some(model)) = (provider_name, model.clone()) {
+            match create_provider_by_name(&state.config, &provider_name).await {
+                Ok(provider) => {
+                    state
+                        .agent
+                        .swap_provider_for_session(session.id, provider, model.clone());
+                    state.agent.mark_manual_switch(session.id, model.clone());
+                    *st.model.lock().await = Some(format!("{provider_name}/{model}"));
+                    return;
+                }
+                Err(e) => {
+                    tracing::debug!("acp: provider restore skipped ({provider_name}): {e}");
+                }
+            }
+        }
+        if let Some(model) = model {
+            state.agent.set_session_model(session.id, model.clone());
+            *st.model.lock().await = Some(model);
         }
     }
 
@@ -260,5 +433,41 @@ impl AcpServer {
         *guard = Some(cancel.clone());
         drop(guard);
         tokio::spawn(turn::run_turn(state, st, id, text, cancel));
+    }
+    /// `session/compact`: drive the loop's own manual-compaction path — the
+    /// `[SYSTEM: Compact context now.]` marker the TUI and channels use. The
+    /// turn streams and answers like any other; the marker keeps the magic
+    /// string out of the client's chat because prompts are never echoed.
+    /// Claims the in-flight slot exactly like `session/prompt` so a compact
+    /// cannot race a live turn on the same session.
+    async fn session_compact(state: Arc<ServerState>, id: Value, params: Value) {
+        let Some(st) = Self::lookup(&state, &params).await else {
+            state.handle.respond_error(
+                id,
+                protocol::INVALID_PARAMS,
+                "session/compact: unknown session — call session/new first",
+            );
+            return;
+        };
+        let cancel = CancellationToken::new();
+        let mut guard = st.active_cancel.lock().await;
+        if guard.is_some() {
+            state.handle.respond_error(
+                id,
+                protocol::INVALID_REQUEST,
+                "turn already in progress for this session",
+            );
+            return;
+        }
+        *guard = Some(cancel.clone());
+        drop(guard);
+        tokio::spawn(turn::run_turn(
+            state,
+            st,
+            id,
+            "[SYSTEM: Compact context now. Summarize this conversation for continuity.]"
+                .to_string(),
+            cancel,
+        ));
     }
 }

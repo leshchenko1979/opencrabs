@@ -239,6 +239,38 @@ impl SlashCommandTool {
             lines.push(format!("  {line}"));
         }
 
+        // Config keys (#1725) — report unrecognized keys so the agent-side
+        // /doctor matches what the Telegram config alert already caught.
+        lines.push(String::new());
+        lines.push("Config:".to_string());
+        {
+            let config_path = crate::config::opencrabs_home().join("config.toml");
+            if config_path.exists() {
+                match std::fs::read_to_string(&config_path) {
+                    Ok(raw) => match crate::config::sections::ignored_key_paths(&raw) {
+                        Ok(paths) if paths.is_empty() => {
+                            lines.push("  ✅ All keys recognized".to_string());
+                        }
+                        Ok(paths) => {
+                            lines.push(format!(
+                                "  ❌ {} unrecognized key(s): {}",
+                                paths.len(),
+                                paths.join(", ")
+                            ));
+                        }
+                        Err(e) => {
+                            lines.push(format!("  ❌ Could not parse config.toml: {e}"));
+                        }
+                    },
+                    Err(e) => {
+                        lines.push(format!("  ❌ Could not read config.toml: {e}"));
+                    }
+                }
+            } else {
+                lines.push("  ⬚ No config.toml found (using defaults)".to_string());
+            }
+        }
+
         // Last known good config
         let has_good = crate::config::opencrabs_home()
             .join("config.last_good.toml")
@@ -731,6 +763,30 @@ impl SlashCommandTool {
                     "  {} — {} tokens, ${:.4}",
                     stats.model, stats.total_tokens, stats.total_cost
                 ));
+            }
+        }
+
+        // Decision reuse (#1648 PR3): per-tier counters, silent until
+        // something has been measured.
+        {
+            use crate::db::repository::{DecisionCacheRepository, DecisionStatsRepository};
+            let pool = session_svc.pool();
+            let stats = DecisionStatsRepository::new(pool.clone())
+                .all()
+                .await
+                .unwrap_or_default();
+            let cached_rows = DecisionCacheRepository::new(pool)
+                .count_by_tier()
+                .await
+                .unwrap_or_default();
+            let cfg = crate::config::Config::current();
+            if let Some(block) = crate::decisions::report::render_usage_lines(
+                &stats,
+                &cached_rows,
+                &cfg.decisions.tiers,
+            ) {
+                lines.push(String::new());
+                lines.extend(block);
             }
         }
 

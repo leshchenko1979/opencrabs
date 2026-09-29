@@ -18,6 +18,22 @@ pub fn global_pool() -> Option<&'static Pool> {
     GLOBAL_POOL.get()
 }
 
+/// Returns true (once) if the last startup integrity check detected corruption.
+pub fn db_integrity_failed() -> bool {
+    DB_INTEGRITY_FAILED.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Non-consuming read of the same flag (#1779 defect 4).
+///
+/// `db_integrity_failed()` SWAPS, so the first reader wins and every later
+/// reader sees `false`. The startup path in `cmd_chat_inner` runs before the TUI
+/// is built, so a consuming read there would silence the banner for the one user
+/// actually looking at a screen. Logging surfaces (daemon startup, `doctor`)
+/// peek; the TUI banner keeps the consuming read.
+pub fn db_integrity_failed_now() -> bool {
+    DB_INTEGRITY_FAILED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Type alias for database pool
 pub type Pool = DeadPool;
 
@@ -136,6 +152,26 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // that moves every job's `next_run_at`, so a spent one-shot reads
     // `enabled = 0` instead of parking armed until the same date next year.
     include_str!("../migrations/20260927000001_add_cron_run_once.sql"),
+    // #1648: L1 exact-decision-reuse ring — versioned decision cache table.
+    // Idempotent CREATE + index, so no heal pass needed for stamp drift
+    // (same rationale as the #1529 entry above); nothing reads or writes it
+    // until the [decisions] tooling lands (PR2). Appended last per the list
+    // invariant.
+    include_str!("../migrations/20260921000001_add_decision_cache.sql"),
+    // #1648 PR2: per-tier counters behind the release-day keep-or-cut call
+    // (shadow would-hits, live reuses). Idempotent CREATE, so no heal pass;
+    // appended last per the list invariant.
+    include_str!("../migrations/20260921000002_add_decision_stats.sql"),
+    // #1721: stable chat identity on sessions (column + backfill + dedup +
+    // unique index). Column add is idempotent-safe; the dedup must run
+    // before the unique index or duplicated keys fail the migration.
+    include_str!("../migrations/20260925220000_add_session_channel_chat_key.sql"),
+    // #1705: audit-trail READ + OUTCOME columns — turn_retrievals (one row
+    // per read-class retrieval) and turn_outcomes (mechanical per-turn
+    // verdict). Idempotent CREATE + indexes; both stay empty until
+    // [features] audit_recording = true, and nothing reads them except the
+    // /audit viewer. Appended last per the list invariant.
+    include_str!("../migrations/20260926000001_add_audit_turn_retrievals.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
@@ -217,6 +253,13 @@ pub(crate) fn heal_analytics_migration_33(conn: &rusqlite::Connection) -> rusqli
 /// Database connection manager
 pub struct Database {
     pub(crate) pool: Pool,
+    /// The file the pool is backed by, or `None` for an in-memory database.
+    ///
+    /// Kept next to the pool rather than read off a connection because the
+    /// pre-migration integrity check must reach the image *without* borrowing a
+    /// pooled connection (#1779 defect 2): on a torn image `post_create` fails
+    /// and the pool never yields one.
+    pub(crate) db_path: Option<String>,
 }
 
 /// Apply PRAGMA settings to a rusqlite connection.
@@ -705,7 +748,10 @@ impl Database {
         // provider streaming persistence) can still write to the DB. Safe to
         // ignore the error — only the first connect wins.
         let _ = GLOBAL_POOL.set(pool.clone());
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            db_path: Some(path_str),
+        })
     }
 
     /// Connect to an in-memory database (for testing)
@@ -741,7 +787,10 @@ impl Database {
             .context("Failed to create in-memory pool")?;
 
         tracing::debug!("Connected to in-memory database");
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            db_path: None,
+        })
     }
 
     /// Get a reference to the connection pool
@@ -786,6 +835,44 @@ impl Database {
     /// Run database migrations
     pub async fn run_migrations(&self) -> Result<()> {
         let migrations = build_migrations();
+
+        // #1779: snapshot the image BEFORE any migration can write to it.
+        //
+        // Deliberately a separate `interact` with its own anyhow error, not a
+        // step inside the migration closure below: that closure's error type is
+        // `rusqlite_migration::Error`, so a snapshot refusal returned from there
+        // would be wrapped in "Failed to run database migrations", the exact
+        // misleading receipt that made the rpi5 corruption unreadable for two
+        // days. Here the message the operator reads is the one that explains the
+        // restore path.
+        //
+        // `snapshot_dir()` is resolved on THIS task and moved into the closure:
+        // `interact` runs its closure on a `spawn_blocking` thread (deadpool-sync
+        // 0.2.0 `Scope::interact`), where the task-local profile-home override is
+        // not set, so resolving it inside would silently write snapshots into the
+        // default profile's home no matter which profile is starting.
+        let snapshot_dir = crate::db::migration_snapshot::snapshot_dir();
+
+        // #1779 defect 2: this used to be the check *after* the migrations, so
+        // on a corrupt image it never ran and the operator died on the
+        // migration error with no restore path. It goes first, ahead of the
+        // snapshot guard, because on the rpi5 shape `VACUUM INTO` fails too
+        // (verified: SQLITE_CORRUPT while stepping), so snapshotting a torn
+        // image buys nothing and only spends a write attempt.
+        //
+        // Skipped when there is no file to check (in-memory database), which is
+        // every test that uses `connect_in_memory`.
+        if let Some(path) = self.db_path.as_deref() {
+            crate::db::migration_snapshot::integrity_preflight(path, &snapshot_dir)?;
+        }
+
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection for pre-migration snapshot")?
+            .interact(move |conn| crate::db::migration_snapshot::guard(conn, &snapshot_dir))
+            .await
+            .map_err(interact_err)??;
 
         self.pool
             .get()

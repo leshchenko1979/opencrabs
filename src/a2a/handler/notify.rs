@@ -181,7 +181,7 @@ pub async fn handle_session_notify(
                 serde_json::json!({
                     "outcome": "no_route",
                     "detail": format!(
-                        "session {session_id} does not exist — nothing sent, nothing created"
+                        "session {session_id} does not exist: nothing sent, nothing created"
                     ),
                 }),
             );
@@ -222,6 +222,41 @@ pub async fn handle_session_notify(
             0,
             &detail,
         );
+        return JsonRpcResponse::success(
+            req_id,
+            serde_json::json!({
+                "outcome": if matches!(mode, DeliveryMode::Quiet { .. }) {
+                    "deferred"
+                } else {
+                    "delivered"
+                },
+                "detail": detail,
+                "notify_id": notify_id.to_string(),
+                "notify_duplicate": true,
+            }),
+        );
+    }
+
+    // #199 reserve-before-deliver: the receipt store IS the idempotency
+    // ledger. First sight of the id → this attempt owns the notify; a known id
+    // → an earlier attempt already handled it and only its RESPONSE was lost
+    // (a timeout is ambiguous, never a verdict), so report the prior outcome
+    // and do NOT deliver a second copy. `quiet` is the fan-out wave's default
+    // mode, so the guard covers that path too — a duplicate looks like
+    // `deferred` there, which is what the original attempt answered.
+    if !notify_receipts::reserve(notify_id, session_id) {
+        let detail = match notify_receipts::status(notify_id) {
+            Some(receipt) => format!(
+                "duplicate notify_id {notify_id}: an earlier attempt already handled this \
+                 notify for session {} (receipt {}, queued {}) — no re-delivery (#199)",
+                receipt.target,
+                receipt.state.as_str(),
+                receipt.queued_at.to_rfc3339()
+            ),
+            None => {
+                format!("duplicate notify_id {notify_id}: already handled — no re-delivery (#199)")
+            }
+        };
         return JsonRpcResponse::success(
             req_id,
             serde_json::json!({
@@ -320,6 +355,13 @@ pub async fn handle_session_notify(
             "deferred",
             0,
             &detail_str,
+        );
+        notify_receipts::record_queued(notify_id, session_id);
+        let detail_str = format!(
+            "deferred for session {session_id}: delivers once the session has been \
+             quiet for {}s (hard cap {}s): notification id {notify_id}",
+            quiet_for.as_secs(),
+            max_delay.as_secs()
         );
         return JsonRpcResponse::success(
             req_id,
@@ -450,6 +492,14 @@ pub async fn handle_session_notify(
         &detail,
     );
 
+    // #199: a non-delivery banked NOTHING, so release the id as well — a retry
+    // carrying the same notify_id must stay free to deliver. The id is worth
+    // keeping only where an attempt actually accepted the notify (delivered,
+    // redirected, parked, deferred).
+    if matches!(outcome, "refused_in_flight" | "no_route") {
+        notify_receipts::forget(notify_id);
+    }
+
     JsonRpcResponse::success(req_id, {
         let mut body = serde_json::json!({ "outcome": outcome, "detail": detail });
         if let (Some(obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
@@ -515,7 +565,7 @@ pub fn handle_notify_status(
                         "injected",
                         format!(
                             "notification {id} was INJECTED into session {}'s model \
-                             context at {at} — the receiving machinery consumed it",
+                             context at {at}: the receiving machinery consumed it",
                             receipt.target
                         ),
                     )
@@ -524,7 +574,7 @@ pub fn handle_notify_status(
                     "queued",
                     format!(
                         "notification {id} is routed to session {} but NOT yet observed \
-                         at a tool-loop drain point — delivery != queue acceptance",
+                         at a tool-loop drain point: delivery != queue acceptance",
                         receipt.target
                     ),
                 ),

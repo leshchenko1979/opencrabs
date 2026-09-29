@@ -786,3 +786,13 @@ async fn test_ownership_mirror_keys_dm_and_general_buckets_separately() {
         }
     );
 }
+
+#[test]
+fn test_an_unroutable_session_is_reported_as_such() {
+    let _guard = test_guard();
+    // No local route is registered in tests, so nothing can take it.
+    assert_eq!(
+        deliver_to_session(Uuid::new_v4(), msg(), false),
+        Delivery::NoRoute
+    );
+}

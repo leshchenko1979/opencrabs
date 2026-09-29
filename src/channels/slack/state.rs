@@ -52,6 +52,12 @@ pub struct SlackState {
     /// user message (`handler.rs`). `pub(crate)` so the wiring test in
     /// `src/tests/` can exercise it.
     pub(crate) image_reentry: crate::channels::image_reentry::ImageReentryLatch,
+    /// The most recent group that settled with detached background tasks
+    /// still running (#1797): (channel id, group message ts, owning
+    /// session). Its "Finished" flip fires when a completion arrives, which
+    /// is the channel's next inbound event, so the flip hook reads this at
+    /// the top of handle_message.
+    pub(super) waiting_group: Mutex<Option<(String, String, Uuid)>>,
 }
 
 impl Default for SlackState {
@@ -73,6 +79,7 @@ impl SlackState {
             cancel_tokens: Mutex::new(HashMap::new()),
             tool_groups: Mutex::new((Vec::new(), HashMap::new())),
             image_reentry: crate::channels::image_reentry::ImageReentryLatch::new(),
+            waiting_group: Mutex::new(None),
         }
     }
 }

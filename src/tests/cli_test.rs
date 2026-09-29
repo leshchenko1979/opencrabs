@@ -44,6 +44,7 @@ fn test_cli_parse_run_command() {
             prompt,
             auto_approve,
             format,
+            ..
         }) => {
             assert_eq!(prompt, "Hello, how are you?");
             assert!(!auto_approve);
@@ -61,6 +62,7 @@ fn test_cli_parse_run_with_json_format() {
             prompt,
             auto_approve,
             format,
+            ..
         }) => {
             assert_eq!(prompt, "Test prompt");
             assert!(!auto_approve);
@@ -79,6 +81,7 @@ fn test_cli_parse_run_with_markdown_format() {
             prompt,
             auto_approve,
             format,
+            ..
         }) => {
             assert_eq!(prompt, "Test prompt");
             assert!(!auto_approve);
@@ -95,12 +98,29 @@ fn test_cli_parse_run_with_auto_approve() {
         Some(Commands::Run {
             prompt,
             auto_approve,
-            format: _,
+            ..
         }) => {
             assert_eq!(prompt, "Test prompt");
             assert!(auto_approve);
         }
         _ => panic!("Expected Run command with auto-approve"),
+    }
+}
+
+#[test]
+fn test_cli_parse_run_quiet_defaults_false_and_flag_sets_true() {
+    // --quiet (#1673): machine-pure stdout for one-shot callers. Parse-level
+    // pin: off unless asked, on when asked; stdout purity itself is covered
+    // by the issue's NDJSON smoke, not a unit test.
+    let cli = Cli::try_parse_from(["opencrabs", "run", "Test prompt"]).unwrap();
+    match cli.command {
+        Some(Commands::Run { quiet, .. }) => assert!(!quiet),
+        _ => panic!("Expected Run command"),
+    }
+    let cli = Cli::try_parse_from(["opencrabs", "run", "--quiet", "Test prompt"]).unwrap();
+    match cli.command {
+        Some(Commands::Run { quiet, .. }) => assert!(quiet),
+        _ => panic!("Expected Run command"),
     }
 }
 
@@ -111,7 +131,7 @@ fn test_cli_parse_run_with_yolo_alias() {
         Some(Commands::Run {
             prompt,
             auto_approve,
-            format: _,
+            ..
         }) => {
             assert_eq!(prompt, "Test prompt");
             assert!(auto_approve);
@@ -233,6 +253,7 @@ fn test_cli_parse_combined_flags() {
             prompt,
             auto_approve,
             format,
+            ..
         }) => {
             assert_eq!(prompt, "Test prompt");
             assert!(auto_approve);

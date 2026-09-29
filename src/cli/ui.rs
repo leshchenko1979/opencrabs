@@ -23,7 +23,7 @@ pub(crate) fn register_config_dependent_tools(
     use crate::brain::tools::{
         analyze_video::AnalyzeVideoTool, brave_search::BraveSearchTool, exa_search::ExaSearchTool,
         generate_image::GenerateImageTool, provider_vision::ProviderVisionTool,
-        web_search::WebSearchTool,
+        serper_search::SerperSearchTool, web_search::WebSearchTool,
     };
 
     // EXA: always available (free via MCP; direct API when a key is set).
@@ -54,11 +54,36 @@ pub(crate) fn register_config_dependent_tools(
         None
     };
 
-    // Re-register web_search with engine references so it fans out to
-    // DDG + Exa (+ Brave) in parallel instead of DDG-only.
-    registry.register(Arc::new(WebSearchTool::new(Some(exa_tool), brave_tool)));
+    // Serper (Google SERP): same contract as Brave — `enabled = true` AND a
+    // non-empty key (#1731). Paid API, so it never registers implicitly.
+    let serper_tool = if let Some(serper_cfg) = config
+        .providers
+        .web_search
+        .as_ref()
+        .and_then(|ws| ws.serper.as_ref())
+        && serper_cfg.enabled
+        && let Some(serper_key) = serper_cfg.api_key.clone().filter(|k| !k.is_empty())
+    {
+        let st = Arc::new(SerperSearchTool::new(serper_key));
+        registry.register(st.clone());
+        Some(st)
+    } else {
+        registry.unregister("serper_search");
+        None
+    };
 
-    // Image generation — active provider override or the global Gemini config.
+    // Re-register web_search with engine references so it fans out to
+    // DDG + Exa (+ Brave, + Serper) in parallel instead of DDG-only.
+    registry.register(Arc::new(WebSearchTool::new(
+        Some(exa_tool),
+        brave_tool,
+        serper_tool,
+    )));
+
+    // Image generation — per-request chain (session provider →
+    // [providers.fallback] generation → global Gemini last, #1672). The
+    // registration only checks that SOME route exists; the roll itself is
+    // resolved from live config at call time, like analyze_image (#1318).
     if let Some(tool) = GenerateImageTool::from_config(config) {
         registry.register(Arc::new(tool));
     } else {
@@ -103,14 +128,25 @@ pub(crate) fn register_config_dependent_tools(
 
 /// Start the headless daemon.
 ///
-/// Multi-profile: this one process covers EVERY profile's scheduled jobs. The
-/// active profile is run in full by `cmd_chat_inner` below (which also spawns
-/// its own cron scheduler); every OTHER profile under `~/.opencrabs/profiles/`
-/// gets a lightweight cron-only scheduler. No need to run N separate daemons.
+/// Multi-profile: a DEFAULT launch (no `-p`) covers EVERY profile's scheduled
+/// jobs. The active profile is run in full by `cmd_chat_inner` below (which
+/// also spawns its own cron scheduler); every OTHER profile under
+/// `~/.opencrabs/profiles/` gets a lightweight cron-only scheduler. No need to
+/// run N separate daemons.
+///
+/// #1723: an explicitly selected profile (`-p <name>`) scopes this daemon to
+/// THAT profile only: it runs `cmd_chat_inner` for its profile and adopts
+/// nothing. Cross-profile adoption is a default-launch behavior: a
+/// `-p hermes` daemon opening every other profile's DB, running their
+/// migrations, and racing the daemon that already owns them is exactly the
+/// multi-instance mess the scheduler locks exist to prevent.
 pub(crate) async fn cmd_daemon(config: &crate::config::Config) -> Result<()> {
-    let active = crate::config::profile::active_profile()
-        .unwrap_or("default")
-        .to_string();
+    let selected = crate::config::profile::active_profile();
+    let active = selected.unwrap_or("default").to_string();
+    // #1723: -p flows through ACTIVE_PROFILE; OPENCRABS_PROFILE reaches
+    // resolve_profile_home without it, so both count as explicit selection.
+    let explicitly_scoped = selected.is_some()
+        || std::env::var("OPENCRABS_PROFILE").is_ok_and(|v| !v.trim().is_empty());
 
     // Pre-acquire active profile's scheduler lock first (#194).
     // This ensures this daemon owns its own scheduler before attempting to adopt
@@ -118,31 +154,18 @@ pub(crate) async fn cmd_daemon(config: &crate::config::Config) -> Result<()> {
     // The guard is passed into cmd_chat_inner so it is not re-acquired (flock self-denial).
     let active_lock = crate::config::profile::acquire_scheduler_lock(&active);
 
-    // Only adopt secondary profiles if running the default profile and adoption is enabled (#184).
-    // An explicit `-p <name>` daemon is dedicated to that profile and does not adopt foreign profiles.
-    let is_default_profile = crate::config::profile::active_profile().is_none()
-        || crate::config::profile::active_profile() == Some("default");
-    let should_adopt = is_default_profile && config.daemon.adopt_profiles;
-
-    if should_adopt {
+    if explicitly_scoped {
+        tracing::info!(
+            "Daemon scoped to profile '{active}' (-p given): not adopting other profiles' schedulers"
+        );
+    } else if config.daemon.adopt_profiles {
         match crate::config::profile::list_profiles() {
             Ok(entries) => {
-                for entry in entries {
-                    // The active profile is already covered by cmd_chat_inner's
-                    // scheduler. Skipping it here avoids running its jobs twice.
-                    if entry.name == active {
-                        continue;
-                    }
-                    // #194: Don't adopt a profile's scheduler if that profile already has a
-                    // live daemon or TUI instance running.
-                    if crate::config::profile::instance_running(&entry.name) {
-                        tracing::info!(
-                            "Multi-profile daemon: '{}' has a live instance — not adopting its scheduler",
-                            entry.name
-                        );
-                        continue;
-                    }
-                    tokio::spawn(spawn_cron_scheduler_for_profile(entry.name));
+                let instance_locks = crate::config::profile::base_opencrabs_dir()
+                    .join("locks")
+                    .join("instance");
+                for name in profiles_to_adopt(entries, &active, &instance_locks, false) {
+                    tokio::spawn(spawn_cron_scheduler_for_profile(name));
                 }
             }
             Err(e) => {
@@ -158,6 +181,31 @@ pub(crate) async fn cmd_daemon(config: &crate::config::Config) -> Result<()> {
     cmd_chat_inner(config, None, false, true, active_lock).await
 }
 
+/// #1723: adoption candidates from a profile listing, in listing order.
+///
+/// `explicitly_scoped` (a `-p <name>` launch) short-circuits to empty: a
+/// scoped daemon covers ONLY its own profile. Unscoped adoption skips the
+/// active profile (`cmd_chat_inner` already runs its scheduler) and any
+/// profile with a live instance (#194).
+pub(crate) fn profiles_to_adopt(
+    entries: Vec<crate::config::profile::ProfileEntry>,
+    active: &str,
+    instance_locks: &std::path::Path,
+    explicitly_scoped: bool,
+) -> Vec<String> {
+    if explicitly_scoped {
+        return Vec::new();
+    }
+    entries
+        .into_iter()
+        .filter(|e| {
+            e.name != active
+                && !crate::config::profile::instance_running_in(instance_locks, &e.name)
+        })
+        .map(|e| e.name)
+        .collect()
+}
+
 /// Spawn a cron-only scheduler for one profile, pinned to that profile's home.
 ///
 /// Builds the minimal resources (this profile's DB, provider, brain, channel
@@ -165,7 +213,7 @@ pub(crate) async fn cmd_daemon(config: &crate::config::Config) -> Result<()> {
 /// loop there, so the scheduler's own setup (cron session, config reads) and
 /// every job it runs resolve to the right profile home. Logs and returns on any
 /// setup failure so one half-initialized profile never takes the daemon down.
-async fn spawn_cron_scheduler_for_profile(profile_name: String) {
+pub(crate) async fn spawn_cron_scheduler_for_profile(profile_name: String) {
     use crate::channels::ChannelFactory;
     use crate::db::{CronJobRepository, CronJobRunRepository, Database};
     use crate::services::ServiceContext;
@@ -173,9 +221,6 @@ async fn spawn_cron_scheduler_for_profile(profile_name: String) {
     let name = profile_name.clone();
     let result: anyhow::Result<()> =
         crate::config::profile::with_profile_home_async(Some(&profile_name), async move {
-            // Non-active profiles never ran the onboarding wizard — ensure
-            // they still carry a brain before their cron jobs fire (#1382).
-            crate::config::profile::ensure_brain_seeded();
             // One scheduler per profile machine-wide (#444). If another process
             // (a `-p <name>` daemon, or the TUI running this profile) already
             // owns this profile's scheduler, skip — polling the same cron_jobs
@@ -188,6 +233,13 @@ async fn spawn_cron_scheduler_for_profile(profile_name: String) {
                 );
                 return Ok(());
             };
+            // #1723: seeding happens AFTER the lock is won. A profile whose
+            // scheduler is owned elsewhere gets its brain seeded by that
+            // owner (this function, in the winning process); a losing
+            // adopter must not write another profile's home behind its back.
+            // Non-active profiles never ran the onboarding wizard, so ensure
+            // they still carry a brain before their cron jobs fire (#1382).
+            crate::config::profile::ensure_brain_seeded();
             // Each profile has its own config.toml, so it needs its own
             // migration pass — `load()` no longer does this implicitly (#912).
             crate::config::Config::migrate_config_files();
@@ -389,10 +441,32 @@ async fn cmd_chat_inner(
         .await
         .context("Failed to connect to database")?;
 
-    // Run migrations
-    db.run_migrations()
-        .await
-        .context("Failed to run database migrations")?;
+    // Run migrations.
+    //
+    // No `.context()` here on purpose (#1779): `run_migrations` already returns
+    // the operator-facing refusal when it declines to migrate, and wrapping it
+    // re-added the bare "Failed to run database migrations" prefix at the head
+    // of the chain. That prefix is exactly what made the rpi5 receipt unreadable
+    // for two days, and this is the line a daemon operator actually reads.
+    db.run_migrations().await?;
+
+    // #1779 defect 4: the integrity flag had exactly one consumer, the TUI
+    // banner, so a headless daemon (the rpi5 shape) detected the corruption,
+    // stored the verdict, and said nothing at all. Log it where an operator can
+    // find it without a screen: journald, or the daemon err log.
+    //
+    // Non-consuming read on purpose. This runs before the TUI is built, and
+    // `db_integrity_failed()` SWAPS, so reading it here would rob the banner.
+    if crate::db::db_integrity_failed_now() {
+        let snapshot_dir = crate::db::migration_snapshot::snapshot_dir();
+        let newest = crate::db::migration_snapshot::newest_snapshot(&snapshot_dir);
+        tracing::error!(
+            "Database integrity check FAILED after migrations: data may be corrupted. \
+             Newest pre-migration snapshot: {}. \
+             Your brain files and config are untouched.",
+            crate::db::migration_snapshot::newest_snapshot_note(newest.as_deref())
+        );
+    }
 
     // #1114: optional startup self-repair (kill-switch: [doctor] auto_fix).
     // Repairs stuck cron rows, stale pre-init plan markers, loose brain/log
@@ -531,8 +605,11 @@ async fn cmd_chat_inner(
     // Spawn RSI background engine (digest + periodic analysis). #1063: the
     // engine task always spawns and gates itself per cycle from the live
     // config mirror (headless daemons default OFF, TUI default ON).
+    // #1696: no `Config` is handed in. The engine reads `Config::current()`
+    // per cycle, so a key rotation or a fallback-chain edit reaches RSI on the
+    // next boundary instead of on the next restart.
     let (rsi_tx, mut rsi_rx) = tokio::sync::mpsc::unbounded_channel();
-    crate::brain::rsi::spawn_rsi_engine(db.pool().clone(), config, rsi_tx, headless);
+    crate::brain::rsi::spawn_rsi_engine(db.pool().clone(), rsi_tx, headless);
 
     // Resolve RTK in the background (auto-downloads on first use if missing) so
     // the first bash command never blocks on it.
@@ -766,7 +843,10 @@ async fn cmd_chat_inner(
                 ProgressEvent::SelfHealingAlert { message } => {
                     progress_sender.send(TuiEvent::SystemMessage {
                         session_id,
-                        text: format!("🔧 {}", message),
+                        text: format!(
+                            "🔧 {}",
+                            crate::utils::sanitize::normalize_dashes(&message)
+                        ),
                     })
                 }
                 ProgressEvent::StripStreamedContent { bytes, reason } => {
@@ -1245,6 +1325,38 @@ async fn cmd_chat_inner(
     crate::services::maintenance::MaintenanceService::spawn_memory_reclaim(
         crate::services::maintenance::MEMORY_RECLAIM_TICK,
     );
+
+    // Decision-cache sweep (#1648 PR3): rows past a tier's `ttl_hours` are
+    // stale by the tier's own definition, and rows for tiers no longer in
+    // `[decisions.tiers]` can never be read again (lookup starts from
+    // config), so an unconfigured table is pure leftover from the kill
+    // switch. Startup-only, like the sub-agent sweep above; never fatal:
+    // a failed sweep costs disk, not correctness.
+    {
+        use crate::db::repository::DecisionCacheRepository;
+        let cache = DecisionCacheRepository::new(db.pool().clone());
+        let mut swept = 0usize;
+        let mut sweep_err: Option<anyhow::Error> = None;
+        for (tier, tc) in &config.decisions.tiers {
+            if let Some(ttl) = tc.ttl_hours {
+                match cache.prune_expired(tier, ttl).await {
+                    Ok(n) => swept += n,
+                    Err(e) => sweep_err = Some(e),
+                }
+            }
+        }
+        let known: Vec<String> = config.decisions.tiers.keys().cloned().collect();
+        match cache.delete_unknown_tiers(&known).await {
+            Ok(n) => swept += n,
+            Err(e) => sweep_err = Some(e),
+        }
+        if let Some(e) = sweep_err {
+            tracing::warn!("Decision-cache sweep failed: {e:#}");
+        }
+        if swept > 0 {
+            tracing::info!("Pruned {swept} stale decision_cache row(s)");
+        }
+    }
 
     let agent_service = Arc::new(
         AgentService::new(provider.clone(), service_context.clone(), config)
@@ -1999,6 +2111,7 @@ async fn cmd_chat_inner(
         {
             let agent = app.agent_service().clone();
             let sender = app.event_sender();
+            let factory = Arc::clone(&channel_factory);
             callbacks.push(Arc::new(move |cfg: crate::config::Config| {
                 // Broadcast full config to all channels via watch channel
                 let _ = config_tx.send(cfg.clone());
@@ -2006,18 +2119,26 @@ async fn cmd_chat_inner(
                 // Provider swap still needs explicit call
                 let agent = agent.clone();
                 let sender = sender.clone();
+                let factory = Arc::clone(&factory);
                 tokio::spawn(async move {
-                    match crate::brain::provider::create_provider(&cfg).await {
+                    // Rebuilt ONCE and handed to both surfaces (#1700). Two
+                    // `create_provider` calls would pay two constructions and
+                    // could disagree with each other on a config that races.
+                    let primary = match crate::brain::provider::create_provider(&cfg).await {
                         Ok(new_provider) => {
-                            agent.swap_provider(new_provider);
                             tracing::info!("ConfigWatcher: LLM provider reloaded from new keys");
+                            Some(new_provider)
                         }
                         Err(e) => {
                             tracing::warn!(
                                 "ConfigWatcher: provider rebuild failed, keeping current: {}",
                                 e
                             );
+                            None
                         }
+                    };
+                    if let Some(p) = primary.as_ref() {
+                        agent.swap_provider(p.clone());
                     }
                     // #1249: the chain half of `[providers.fallback]` reloads
                     // here too. Swapping only the primary above left a chain
@@ -2027,6 +2148,13 @@ async fn cmd_chat_inner(
                     // independent, and a stale chain is exactly the state
                     // being fixed.
                     agent.reload_fallback_providers(&cfg).await;
+                    // #1700: the same two halves for every agent the channel
+                    // factory built. Until this line `reload_fallback_providers`
+                    // had exactly ONE production caller — the line above — so
+                    // channel agents, the A2A agent and the cron agents kept
+                    // the chain from their spawn config, and the factory kept
+                    // handing new agents the pre-rotation provider instance.
+                    factory.reload_providers(&cfg, primary).await;
                     // Fire AFTER the swap so the TUI refresh (commands, approval
                     // policy, and the context-budget footer) reads the new
                     // provider's context window, not the old one.
@@ -2231,26 +2359,12 @@ async fn cmd_chat_inner(
         } else {
             let cron_repo = crate::db::CronJobRepository::new(db.pool().clone());
             let cron_run_repo = crate::db::CronJobRunRepository::new(db.pool().clone());
-            // Rebuild outcomes must reach the session that asked (#304): a
-            // failed background build used to be log-only while the TUI waited
-            // for a reload that never came.
-            let rebuild_notify_tx = app.event_sender();
-            let session_notifier: crate::cron::SessionNotifier =
-                std::sync::Arc::new(move |session_id, text| {
-                    if rebuild_notify_tx
-                        .send(crate::tui::events::TuiEvent::SystemMessage { session_id, text })
-                        .is_err()
-                    {
-                        tracing::warn!("rebuild notifier: TUI event channel closed");
-                    }
-                });
             let cron_scheduler = crate::cron::CronScheduler::new(
                 cron_repo,
                 cron_run_repo,
                 channel_factory.clone(),
                 service_context.clone(),
-            )
-            .with_session_notifier(session_notifier);
+            );
             // Detached task; the JoinHandle isn't awaited or aborted anywhere.
             cron_scheduler.spawn();
             tracing::info!("Cron scheduler spawned");

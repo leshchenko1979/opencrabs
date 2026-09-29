@@ -2,6 +2,7 @@ use super::builder::AgentService;
 use super::compaction::CompactionOutcome;
 use super::compaction_notice::CompactionNotifier;
 use super::compaction_prompts::CompactionKind;
+use super::failure_window;
 use super::types::*;
 use crate::brain::agent::context::AgentContext;
 use crate::brain::agent::error::{AgentError, Result};
@@ -13,17 +14,36 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-/// How many consecutive primary-provider failures (each rescued by
-/// a successful fallback) before the fallback gets persisted into
-/// the session as the new active provider. Below this, every primary
-/// failure triggers a one-shot rescue and the primary is restored for
-/// the next request — so a brief outage doesn't permanently demote
-/// the primary. User-stated intent (2026-05-30): "if fallback 3
-/// times consecutively successfully, the 4th it sticks".
+/// How many primary-provider failures (each rescued by a successful
+/// fallback) inside `failure_window::STICKY_FALLBACK_WINDOW` before the
+/// fallback gets persisted into the session as the new active provider.
+/// Below this, every primary failure triggers a one-shot rescue and the
+/// primary is restored for the next request — so a brief outage doesn't
+/// permanently demote the primary. User-stated intent (2026-05-30): "if
+/// fallback 3 times successfully, the 4th it sticks"; counted over a
+/// recent window rather than strictly back-to-back, because a primary
+/// that alternates fail/ok never builds a run and was therefore immune
+/// to the gate entirely (#1667).
 const STICKY_FALLBACK_THRESHOLD: u32 = 4;
 
 /// Default interval in seconds between mid-turn intra-loop time markers (#153).
 pub const DEFAULT_TIME_MARKER_INTERVAL_SECS: u64 = 900;
+
+/// Self-healing alert texts that reach channel posts verbatim (#1745
+/// follow-up): user-facing, so they carry no em dashes. The renderer arms
+/// normalize dashes anyway; `em_dash_guard_test` pins these constants.
+pub(crate) const PHANTOM_RETRY_ENFORCEMENT_ALERT: &str =
+    "Phantom tool calls detected: retrying with enforcement";
+pub(crate) const SELF_HEAL_BUDGET_ROLLED_ALERT: &str =
+    "Self-heal retry budget rolled: forcing another retry";
+pub(crate) const SELF_HEAL_EXHAUSTED_ALERT: &str =
+    "Self-heal exhausted: the model kept narrating without calling tools; ending the turn.";
+pub(crate) const ACCOUNT_ROTATION_ALERT: &str =
+    "Account rotation mid-task: retrying with continuation context";
+pub(crate) const CONTINUATION_EMPTY_ALERT: &str =
+    "Continuation added nothing: retrying with an anchored prompt";
+pub(crate) const EMPTY_ANSWER_ANALYSIS_ALERT: &str =
+    "Empty answer after data fetch: nudging the model to write the analysis";
 
 /// Check whether the intra-turn elapsed time warrants injecting a new time notice (#153).
 /// Returns `Some((notice_string, now))` if the interval has passed, or `None`.
@@ -1026,6 +1046,16 @@ impl AgentService {
         // "compacting every turn" from "compacted twice over a long session".
         self.bump_turns_since_compaction(session_id);
 
+        // #1776 seam 3: a fresh turn invalidates the claude-task turn
+        // markers. Notifications arriving this turn for tasks NOT started
+        // this turn are post-exit survivors and get delivered synthetically;
+        // tasks started this turn stay silent (claude sees those natively).
+        // retain, not remove: other sessions' in-flight turns keep theirs.
+        self.claude_turn_tasks
+            .lock()
+            .expect("claude turn-task lock")
+            .retain(|(sid, _)| *sid != session_id);
+
         // Snapshot the manual-switch epoch at turn start. If the user
         // switches provider/model while this turn is in flight, an automatic
         // fallback the turn takes could otherwise stick over their pick. We
@@ -1544,7 +1574,10 @@ impl AgentService {
                     }
 
                     // Return a brief confirmation to the user — not the full internal summary.
-                    let pct = context.usage_percentage() as u32;
+                    // `.round()`, not a truncating cast: the compaction log
+                    // line formats the same figure with `{:.0}`, and the two
+                    // printed different percentages for one event (#1676).
+                    let pct = context.usage_percentage().round() as u32;
                     let confirmation = format!(
                         "✅ Context compacted — now at {}% ({} tokens).",
                         pct, context.token_count
@@ -1680,8 +1713,15 @@ impl AgentService {
         // (#703): resolve THIS session's own handle so a `cd` here mutates only
         // this session's cwd, and a concurrent session's `cd` can never move it.
         let session_cwd = self.working_dir_handle_for_session(session_id);
+        // `tool_context.auto_approve` seeds from the POLICY, but a per-call
+        // override callback means this surface CAN ask (ACP, channels) — the
+        // override must win over `auto_approve_tools=true`, or config
+        // `approval_policy = "auto-always"` silently suppresses the ask the
+        // override exists to make. The loop gate below already honours the
+        // override; this mirror must not un-do it.
+        let context_auto_approve = self.auto_approve_tools && !has_override_approval;
         let mut tool_context = ToolExecutionContext::new(session_id)
-            .with_auto_approve(self.auto_approve_tools)
+            .with_auto_approve(context_auto_approve)
             .with_working_directory(
                 session_cwd
                     .read()
@@ -1774,6 +1814,11 @@ impl AgentService {
             .agent
             .time_marker_interval_secs;
         let mut total_input_tokens = 0u32;
+        // Provider-reported dollars summed across counted iterations, and a
+        // count of iterations that reported no cost. The sum may price the
+        // ledger only when nothing is missing from it (#1707).
+        let mut reported_cost_sum: Option<f64> = None;
+        let mut cost_missing_iters = 0u32;
         let mut total_output_tokens = 0u32;
         let mut total_cache_creation = 0u32;
         let mut total_cache_read = 0u32;
@@ -1884,9 +1929,11 @@ impl AgentService {
         // Local reasoning models (notably Qwen3.6-35B on MLX) periodically
         // emit an EOS token mid-sentence — the response looks complete from
         // a protocol standpoint (proper finish_reason=stop + usage chunk)
-        // but the visible text ends mid-word ("Standard Get I"). One-shot
-        // nudge to continue from where they left off.
-        let mut truncated_mid_sentence_retry_used: bool = false;
+        // but the visible text ends mid-word ("Standard Get I"). Bounded
+        // continuation budget (#1737): the original anchored nudge plus one
+        // anchored retry when a continuation degenerates into echoing the
+        // tail or merely closing dangling markup.
+        let mut truncation_continue_attempts: u32 = 0;
         // Mermaid regen attempts spent (#37): each spend echoes the broken
         // text as an assistant message and injects the renderer's error as
         // a user-role [System: ...] nudge — same shape as the empty-answer
@@ -2213,15 +2260,13 @@ impl AgentService {
                 .await
             {
                 Ok(resp) => {
-                    // Primary succeeded on first try (no retry / no
-                    // fallback rescue needed). Reset the consecutive-
-                    // failure streak so a future hiccup starts fresh
-                    // at 1 instead of inheriting a count from an
-                    // unrelated earlier outage. Without this, a
-                    // primary that hit 3 transient failures days ago
-                    // would stick the fallback on the NEXT failure
-                    // even though it's been working flawlessly since.
-                    self.reset_primary_failure_streak(session_id);
+                    // Primary succeeded on first try. Deliberately does NOT
+                    // clear the rescue history (#1667): wiping it here made
+                    // STICKY_FALLBACK_THRESHOLD unreachable for a flapping
+                    // primary, which is precisely what sticky fallback is
+                    // for. Rescues age out of STICKY_FALLBACK_WINDOW on
+                    // their own, so an unrelated outage long ago still
+                    // cannot stick the fallback today.
                     resp
                 }
                 // /stop beats every recovery path (#1148): if the token fired
@@ -2989,11 +3034,15 @@ impl AgentService {
                 {
                     // Timeout covers the new handshake-timeout path: a wedged
                     // local server that accepts TCP but never emits headers.
-                    // Funnel it into the same 3-retry + fallback chain as
+                    // Funnel it into the same MAX_STREAM_RETRIES + fallback chain as
                     // mid-stream StreamError so the user sees recovery
                     // activity instead of a dead turn.
                     let err_msg = e.to_string();
-                    tracing::warn!("Mid-stream error: {} — retrying up to 3 times", err_msg);
+                    tracing::warn!(
+                        "Mid-stream error: {} — retrying up to {} times",
+                        err_msg,
+                        MAX_STREAM_RETRIES
+                    );
                     let primary_from_name = self.provider_name_for_session(session_id);
                     let actual_model = {
                         let p = self.provider_for_session(session_id);
@@ -3233,6 +3282,7 @@ impl AgentService {
                             // the earlier "Switching to fallback provider..."
                             // banner named the origin but not the destination,
                             // so after the full retry budget users saw a provider swap
+                            // so once the retries were exhausted users saw a provider swap
                             // with no hint what they're now talking to.
                             if let Some(ref cb) = progress_callback {
                                 cb(
@@ -3296,18 +3346,19 @@ impl AgentService {
                             match fb_result {
                                 Ok(resp) => {
                                     // Streak gate: only stick the fallback as
-                                    // the session's persistent provider after
-                                    // STICKY_FALLBACK_THRESHOLD consecutive
-                                    // rescues. Most primary outages are
-                                    // transient (network blip, model warm-up,
-                                    // brief 5xx), so making the first rescue
-                                    // sticky meant a 5-second hiccup
-                                    // permanently demoted the primary until
-                                    // the user noticed and reset via /models.
-                                    // 4-rescues-in-a-row matches the user's
-                                    // intent: "if fallback rescues 3 times
-                                    // consecutively successfully, the 4th it
-                                    // sticks".
+                                    // the session's persistent provider once
+                                    // STICKY_FALLBACK_THRESHOLD rescues land
+                                    // inside STICKY_FALLBACK_WINDOW. Most
+                                    // primary outages are transient (network
+                                    // blip, model warm-up, brief 5xx), so
+                                    // making the first rescue sticky meant a
+                                    // 5-second hiccup permanently demoted the
+                                    // primary until the user noticed and
+                                    // reset via /models. Recent-window rather
+                                    // than consecutive because a primary that
+                                    // alternates fail/ok never accumulates a
+                                    // run, and that is the provider most
+                                    // worth demoting (#1667).
                                     let streak = self.bump_primary_failure_streak(session_id);
                                     let sticky = streak >= STICKY_FALLBACK_THRESHOLD;
                                     if sticky {
@@ -3329,16 +3380,24 @@ impl AgentService {
                                             ProgressEvent::SelfHealingAlert {
                                                 message: if sticky {
                                                     format!(
-                                                        "Stream error → switched to {}/{} (sticky after {} consecutive rescues)",
-                                                        fb_name, fb_model, streak
-                                                    )
-                                                } else {
-                                                    format!(
-                                                        "Stream error → rescued by {}/{} ({}/{} consecutive; primary will be tried again next turn)",
+                                                        "Stream error → switched to {}/{} (sticky after {} rescues within {}m)",
                                                         fb_name,
                                                         fb_model,
                                                         streak,
-                                                        STICKY_FALLBACK_THRESHOLD
+                                                        failure_window::STICKY_FALLBACK_WINDOW
+                                                            .as_secs()
+                                                            / 60
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "Stream error → rescued by {}/{} ({}/{} within {}m; primary will be tried again next turn)",
+                                                        fb_name,
+                                                        fb_model,
+                                                        streak,
+                                                        STICKY_FALLBACK_THRESHOLD,
+                                                        failure_window::STICKY_FALLBACK_WINDOW
+                                                            .as_secs()
+                                                            / 60
                                                     )
                                                 },
                                             },
@@ -3424,11 +3483,15 @@ impl AgentService {
                 Err(e) if matches!(&e, crate::brain::provider::ProviderError::ApiError { status, .. } if *status >= 500 && *status < 600) =>
                 {
                     // 5xx upstream errors (500/502/503/504) are transient — retry
-                    // up to 3 times with backoff before falling back, same as
+                    // up to MAX_STREAM_RETRIES times with backoff before falling back, same as
                     // StreamError/Timeout. Without this the user sees a hard
                     // failure on every blip from the provider.
                     let err_msg = e.to_string();
-                    tracing::warn!("Upstream 5xx error: {} — retrying up to 3 times", err_msg);
+                    tracing::warn!(
+                        "Upstream 5xx error: {} — retrying up to {} times",
+                        err_msg,
+                        MAX_STREAM_RETRIES
+                    );
                     let primary_from_name = self.provider_name_for_session(session_id);
                     let actual_model = {
                         let p = self.provider_for_session(session_id);
@@ -3682,16 +3745,24 @@ impl AgentService {
                                             ProgressEvent::SelfHealingAlert {
                                                 message: if sticky {
                                                     format!(
-                                                        "5xx error → switched to {}/{} (sticky after {} consecutive rescues)",
-                                                        fb_name, fb_model, streak
-                                                    )
-                                                } else {
-                                                    format!(
-                                                        "5xx error → rescued by {}/{} ({}/{} consecutive; primary will be tried again next turn)",
+                                                        "5xx error → switched to {}/{} (sticky after {} rescues within {}m)",
                                                         fb_name,
                                                         fb_model,
                                                         streak,
-                                                        STICKY_FALLBACK_THRESHOLD
+                                                        failure_window::STICKY_FALLBACK_WINDOW
+                                                            .as_secs()
+                                                            / 60
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "5xx error → rescued by {}/{} ({}/{} within {}m; primary will be tried again next turn)",
+                                                        fb_name,
+                                                        fb_model,
+                                                        streak,
+                                                        STICKY_FALLBACK_THRESHOLD,
+                                                        failure_window::STICKY_FALLBACK_WINDOW
+                                                            .as_secs()
+                                                            / 60
                                                     )
                                                 },
                                             },
@@ -4122,6 +4193,15 @@ impl AgentService {
             // The "did the provider report anything" guard is `context_input()`,
             // not `input_tokens`: a fully cached prefix is a legitimate zero in
             // the billing field, and that is not the same as silence.
+            // Claude CLI reports its OWN internal cache in
+            // `context_input()`, not the prompt we sent. The calibration
+            // branch below already refuses that field for this provider;
+            // the ctx meter and the compaction budget read the same field
+            // and have to refuse it here too. Anchoring on the cache
+            // figure pushed the budget to 118% of the window on one turn
+            // and collapsed it to 2 tokens on another, so compaction both
+            // fired unprompted and stopped firing at all (#1677).
+            let is_claude_cli = self.provider_for_session(session_id).name() == "claude-cli";
             let reported_usage = response.usage.context_input() > 0;
             let tiktoken_estimate = || {
                 let baseline = self.base_context_tokens();
@@ -4143,7 +4223,7 @@ impl AgentService {
             // local-tokenizer calibration and no learned ratio. The ctx footer
             // reads `response.context_tokens` downstream and shows the user the
             // exact same prompt size the API just told us about.
-            let call_context_tokens = if reported_usage {
+            let call_context_tokens = if reported_usage && !is_claude_cli {
                 response.usage.context_input()
             } else {
                 tiktoken_estimate()
@@ -4156,6 +4236,7 @@ impl AgentService {
             // flat overhead to every call must not drag the budget up and
             // compact a context that was never close to full.
             if reported_usage
+                && !is_claude_cli
                 && !is_implausible_token_report(
                     context.token_count,
                     self.base_context_tokens() as usize,
@@ -4181,6 +4262,13 @@ impl AgentService {
             } else {
                 response.usage.cache_read_tokens
             };
+            // Fold the provider's reported dollars for this iteration into
+            // the turn total; iterations that report none disqualify the sum
+            // and the turn falls back to table math (#1707).
+            match response.usage.cost_usd {
+                Some(c) => reported_cost_sum = Some(reported_cost_sum.unwrap_or(0.0) + c),
+                None => cost_missing_iters += 1,
+            };
 
             // Calibrate context token count from the provider's reported usage.
             //
@@ -4196,7 +4284,6 @@ impl AgentService {
             //
             // Other CLI providers (qwen-code) re-spawn cold each turn — their
             // reported context_input() IS what we sent and is calibration-worthy.
-            let is_claude_cli = self.provider_for_session(session_id).name() == "claude-cli";
             if is_cli_provider && !is_claude_cli {
                 let cli_context = response.usage.context_input() as usize;
                 if cli_context > 0 {
@@ -4505,6 +4592,12 @@ impl AgentService {
                         total_cache_creation.saturating_sub(response.usage.cache_creation_tokens);
                     total_cache_read =
                         total_cache_read.saturating_sub(response.usage.cache_read_tokens);
+                    // Mirror the token subtraction for the cost accumulator:
+                    // this iteration will be re-counted on the retry.
+                    match response.usage.cost_usd {
+                        Some(c) => reported_cost_sum = reported_cost_sum.map(|s| s - c),
+                        None => cost_missing_iters = cost_missing_iters.saturating_sub(1),
+                    }
                     // Don't increment iteration — this is a retry, not a new turn
                     iteration -= 1;
                     continue;
@@ -4566,6 +4659,12 @@ impl AgentService {
                             .saturating_sub(response.usage.cache_creation_tokens);
                         total_cache_read =
                             total_cache_read.saturating_sub(response.usage.cache_read_tokens);
+                        // Cost accumulator mirrors the token subtraction —
+                        // the fallback provider will re-report this call.
+                        match response.usage.cost_usd {
+                            Some(c) => reported_cost_sum = reported_cost_sum.map(|s| s - c),
+                            None => cost_missing_iters = cost_missing_iters.saturating_sub(1),
+                        }
                         iteration -= 1;
                         continue;
                     }
@@ -5495,8 +5594,7 @@ impl AgentService {
                         cb(
                             session_id,
                             ProgressEvent::SelfHealingAlert {
-                                message: "Phantom tool calls detected — retrying with enforcement"
-                                    .into(),
+                                message: PHANTOM_RETRY_ENFORCEMENT_ALERT.into(),
                             },
                         );
                     }
@@ -5569,9 +5667,7 @@ impl AgentService {
                             cb(
                                 session_id,
                                 ProgressEvent::SelfHealingAlert {
-                                    message:
-                                        "Self-heal retry budget rolled — forcing another retry"
-                                            .to_string(),
+                                    message: SELF_HEAL_BUDGET_ROLLED_ALERT.to_string(),
                                 },
                             );
                         }
@@ -5601,9 +5697,7 @@ impl AgentService {
                         cb(
                             session_id,
                             ProgressEvent::SelfHealingAlert {
-                                message: "Self-heal exhausted — the model kept narrating without \
-                                          calling tools; ending the turn."
-                                    .to_string(),
+                                message: SELF_HEAL_EXHAUSTED_ALERT.to_string(),
                             },
                         );
                     }
@@ -5669,9 +5763,7 @@ impl AgentService {
                         cb(
                             session_id,
                             ProgressEvent::SelfHealingAlert {
-                                message:
-                                    "Account rotation mid-task — retrying with continuation context"
-                                        .into(),
+                                message: ACCOUNT_ROTATION_ALERT.into(),
                             },
                         );
                     }
@@ -6086,7 +6178,7 @@ impl AgentService {
                 // truncation by looking at the last non-whitespace character
                 // — if it's not a terminal token (punctuation, close-tag,
                 // table pipe, code fence) we ask the model to continue once.
-                if !truncated_mid_sentence_retry_used
+                if truncation_continue_attempts < super::truncation::MAX_CONTINUATION_ATTEMPTS
                     && iteration > 0
                     && !is_cli_provider
                     && matches!(
@@ -6099,6 +6191,7 @@ impl AgentService {
                         &response.usage,
                         &mut context,
                         session_id,
+                        truncation_continue_attempts + 1,
                         &progress_callback,
                     )
                 {
@@ -6106,7 +6199,7 @@ impl AgentService {
                     // response only, so without this the continuation replaces
                     // the answer instead of extending it (#859).
                     truncation_partial = Some(iteration_text.clone());
-                    truncated_mid_sentence_retry_used = true;
+                    truncation_continue_attempts += 1;
                     // Mark the next iteration so the stream-error path skips
                     // cross-provider fallback for the continuation request.
                     current_iter_is_truncation_continue = true;
@@ -6140,6 +6233,67 @@ impl AgentService {
                 // degrade-to-block behaviour. The verdict comes from the
                 // channel-agnostic seam: a channel that can render diagrams
                 // installs a probe; with none installed this is a no-op.
+                // Mermaid regen nudge (#37): if any fence in the reply fails
+                // ── Degenerate continuation retry (#1737) ─────────────────
+                // The previous iteration WAS a truncation continuation and
+                // its result added nothing: join_continuation classifies it
+                // as Echoed (returned only the tail, or just closed dangling
+                // markup — the 2026-09-25 qwen case answered an unclosed code
+                // span with a single backtick, 774 tokens billed). One
+                // anchored retry, bounded by MAX_CONTINUATION_ATTEMPTS; a
+                // second degenerate result falls through to the normal close
+                // and the post-loop join appends the incomplete marker,
+                // unchanged.
+                if iter_is_truncation_continue
+                    && truncation_continue_attempts < super::truncation::MAX_CONTINUATION_ATTEMPTS
+                    && let Some(partial) = truncation_partial.as_deref()
+                    && matches!(
+                        super::truncation::join_continuation(partial, &iteration_text),
+                        super::truncation::Continuation::Echoed(_)
+                    )
+                {
+                    truncation_continue_attempts += 1;
+                    let attempt = truncation_continue_attempts;
+                    tracing::warn!(
+                        "[TRUNCATION] verdict=retry-again attempt={}/{}: {} char continuation \
+                         added nothing to the {} char partial (echoed tail / closed markup \
+                         only) — retrying with anchored prompt",
+                        attempt,
+                        super::truncation::MAX_CONTINUATION_ATTEMPTS,
+                        iteration_text.trim().chars().count(),
+                        partial.trim_end().chars().count(),
+                    );
+                    if let Some(ref cb) = progress_callback {
+                        cb(
+                            session_id,
+                            ProgressEvent::SelfHealingAlert {
+                                message: CONTINUATION_EMPTY_ALERT.into(),
+                            },
+                        );
+                    }
+                    // The degenerate response itself stays in context (the
+                    // model must see what it already returned and had
+                    // rejected), then the anchored nudge replaces the vague
+                    // original.
+                    context.add_message(Message::assistant(iteration_text.clone()));
+                    context.add_message(Message::user(super::truncation::continuation_nudge(
+                        partial,
+                        Some(&iteration_text),
+                    )));
+                    current_iter_is_truncation_continue = true;
+                    continue;
+                }
+
+                // to parse DETERMINISTICALLY, hand the model the renderer's
+                // own error text before the reply goes final — same shape as
+                // the empty-answer ladder: echo the broken text as an
+                // assistant message, inject the correction as a user-role
+                // [System: ...] nudge, re-run the iteration. Transient
+                // renderer failures stay silent here (preflight reports parse
+                // errors only) and keep the delivery path's degrade-to-block
+                // behaviour. Gated to channel sessions — the CLI has no
+                // mermaid delivery, so there is nothing to regenerate.
+                #[cfg(feature = "telegram")]
                 if mermaid_regen_retries < MERMAID_REGEN_MAX_NUDGES
                     && !is_cli_provider
                     && progress_callback.is_some()
@@ -6315,8 +6469,7 @@ impl AgentService {
                             cb(
                                 session_id,
                                 ProgressEvent::SelfHealingAlert {
-                                    message: "Empty answer after data fetch — nudging the model to write the analysis"
-                                        .to_string(),
+                                    message: EMPTY_ANSWER_ANALYSIS_ALERT.to_string(),
                                 },
                             );
                         }
@@ -6451,6 +6604,43 @@ impl AgentService {
                 }
                 break;
             }
+
+            // ── Mixed-iteration fact check (#1693) ──────────────────────────
+            // The 1,341-line block above runs only when `tool_uses` is empty, so
+            // one real call bought immunity for whatever sentence rode in with
+            // it: at 19:14:10 on 2026-09-22 a response asserted `Gate died on
+            // 2× E0603 "this item is private"` while the same response's tool
+            // call was LAUNCHING that gate. Nothing checked the claim, and the
+            // clippy log it refers to had exited 0.
+            //
+            // These three checks are content-vs-evidence, so they do not need
+            // the zero-tool precondition. The shape-based tells stay inside the
+            // block above on purpose — after a call, "Running fmt, then clippy"
+            // is a legitimate recap (#1506, #1172).
+            //
+            // Carried, not acted on: the calls are real work and still run, so
+            // this cannot discard the iteration the way the phantom path above
+            // does. It lands as a correction after the results, the same shape
+            // as the repeat verdict (#1030).
+            let mixed_fact_verdict =
+                if is_cli_provider || tool_uses.is_empty() || iteration_text.trim().is_empty() {
+                    None
+                } else {
+                    // This iteration's own calls count as executed for the command
+                    // check, or "Running `gh pr list`" plus a `gh pr list` call
+                    // would flag the work it is about to do. The OUTPUTS stay
+                    // prior-only: an in-flight call has produced nothing and so
+                    // cannot vouch for a past-tense claim.
+                    let mut executed = turn_tool_input.clone();
+                    executed.extend(tool_uses.iter().map(|(_, _, input)| input.to_string()));
+                    let evidence = Self::conversation_evidence(&context, &turn_tool_output);
+                    super::phantom::mixed_iteration_facts(
+                        &iteration_text,
+                        &executed,
+                        &turn_tool_output,
+                        &evidence,
+                    )
+                };
 
             // Emit intermediate text to TUI so it appears before the tool calls.
             //
@@ -7176,6 +7366,47 @@ impl AgentService {
                                                     );
                                                 }
                                             });
+
+                                            // Audit READ row (#1705): only when the
+                                            // operator enabled recording AND this tool
+                                            // actually pulls external content into
+                                            // context. Gated BEFORE any repo work, so a
+                                            // disabled flag costs a bool check per call.
+                                            if self.audit_recording
+                                                && let Some(kind) = crate::db::repository::turn_retrieval::retrieval_kind(&tool_name)
+                                            {
+                                                let repo = crate::db::repository::TurnRetrievalRepository::new(pool.clone());
+                                                let rid = uuid::Uuid::new_v4().to_string();
+                                                let sid = session_id.to_string();
+                                                let mid = assistant_db_msg.id.to_string();
+                                                let tname = tool_name.clone();
+                                                let target = crate::db::repository::turn_retrieval::audit_target(
+                                                    &tool_name,
+                                                    &tool_input_for_progress,
+                                                )
+                                                .unwrap_or_else(|| "unknown".to_string());
+                                                let hash = {
+                                                    use sha2::{Digest, Sha256};
+                                                    let mut h = Sha256::new();
+                                                    h.update(content.as_bytes());
+                                                    format!("{:x}", h.finalize())
+                                                };
+                                                let preview: String =
+                                                    content.chars().take(128).collect();
+                                                tokio::spawn(async move {
+                                                    if let Err(e) = repo
+                                                        .record_retrieval(
+                                                            &rid, &sid, &mid, &tname, kind,
+                                                            &target, Some(&hash), Some(&preview),
+                                                        )
+                                                        .await
+                                                    {
+                                                        tracing::error!(
+                                                            "[AUDIT] Failed to record turn retrieval: {e}"
+                                                        );
+                                                    }
+                                                });
+                                            }
                                         }
 
                                         let output_summary: String = strip_ansi_output(&content)
@@ -7808,6 +8039,50 @@ impl AgentService {
             // nothing, and the shed (A5) never punishes a healthy session.
             self.reset_compaction_streak(session_id);
 
+            // A fabrication that rode in the same response as a real tool call
+            // (#1693). The calls above were real work and ran; only the claim
+            // attached to them was unsupported, so this suppresses nothing and
+            // ends nothing — it cites the unsupported assertion back and the
+            // loop continues, exactly like the repeat correction beside it.
+            //
+            // #1506 still governs: a structured completion report is never
+            // nagged into a retry, so its branches go to the WARN and stop.
+            if let Some(violation) = mixed_fact_verdict {
+                if violation.structured_report {
+                    tracing::warn!(
+                        target: "phantom",
+                        branches = ?violation.branches,
+                        "mixed-iteration fabrication inside a structured report — delivered, not nagged (#1506)",
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "phantom",
+                        branches = ?violation.branches,
+                        commands = ?violation.uncalled_commands,
+                        facts = ?violation.unbacked_facts,
+                        "Fabricated claim rode a real tool call — correcting in-turn (#1693)",
+                    );
+                    let prov = self.provider_name_for_session(session_id);
+                    let mdl = Some(self.provider_model_for_session(session_id));
+                    crate::db::repository::AnalyticsEventRepository::emit_phantom(
+                        &session_id.to_string(),
+                        Some(&prov),
+                        mdl.as_deref(),
+                    );
+                    // Naming the fabricated command or invented fact outranks
+                    // the generic wording: it cites a fact instead of a
+                    // category, so the model cannot rationalise it (#797, #1423).
+                    let nudge = if !violation.uncalled_commands.is_empty() {
+                        super::nudge::uncalled_commands_nudge(&violation.uncalled_commands)
+                    } else if !violation.unbacked_facts.is_empty() {
+                        super::nudge::unbacked_facts_nudge(&violation.unbacked_facts)
+                    } else {
+                        super::nudge::no_tool_calls_nudge(is_local_provider)
+                    };
+                    context.add_message(Message::user(nudge));
+                }
+            }
+
             // The repeat correction goes AFTER the results, so the model sees
             // the identical output it just got and then why repeating it
             // cannot help. Never suppresses the call and never ends the turn:
@@ -8004,8 +8279,8 @@ impl AgentService {
                 }
                 Continuation::Echoed(still_partial) => {
                     // The continuation recovered nothing — the model echoed the
-                    // tail it was asked to continue from. Only one attempt is
-                    // made (`truncated_mid_sentence_retry_used`), so this answer
+                    // tail it was asked to continue from. The attempt budget is
+                    // spent (`truncation_continue_attempts`), so this answer
                     // is as complete as it will get. Delivering it unmarked told
                     // the user a sentence ending at a colon was finished (#956).
                     tracing::warn!(
@@ -8146,7 +8421,7 @@ impl AgentService {
         // input_tokens = non-cached, cache_creation/read tracked separately.
         let billable_input = total_input_tokens + total_cache_creation + total_cache_read;
         let total_tokens = billable_input + total_output_tokens;
-        let cost = self
+        let table_cost = self
             .provider_for_session(session_id)
             .calculate_cost_with_cache(
                 &response.model,
@@ -8155,6 +8430,22 @@ impl AgentService {
                 total_cache_creation,
                 total_cache_read,
             );
+        // The provider's own dollar figure is the invoice; the pricing table
+        // is only a guess about it. Use the reported sum only when every
+        // counted iteration reported one — a partial sum would under-bill the
+        // rest (#1707).
+        let cost = crate::brain::provider::types::authoritative_cost(
+            reported_cost_sum,
+            cost_missing_iters,
+            table_cost,
+        );
+        if cost != table_cost {
+            tracing::info!(
+                "ledger uses provider-reported cost {:.6} over table estimate {:.6}",
+                cost,
+                table_cost
+            );
+        }
 
         // Update message with usage info. The stashed prompt-token count
         // drives the UI ctx meter, which must show the LAST iteration's
@@ -8240,6 +8531,31 @@ impl AgentService {
         self.finalize_manual_switch(session_id, start_switch_epoch, &session_service)
             .await;
 
+        // Audit OUTCOME row (#1705): the settled turn's mechanical verdict,
+        // classified from the tool outputs only (test receipts / rustc
+        // errors). Recording off → no write at all, the /audit viewer stays
+        // ACTION-only. A turn that died on an error path never reaches this
+        // settle point and honestly has no OUTCOME row: the viewer renders
+        // those with a dash, not a guess.
+        if self.audit_recording
+            && let Some(pool) = crate::db::global_pool()
+        {
+            let (outcome, evidence) =
+                crate::db::repository::turn_retrieval::turn_outcome_from_outputs(&turn_tool_output);
+            let repo = crate::db::repository::TurnRetrievalRepository::new(pool.clone());
+            let rid = uuid::Uuid::new_v4().to_string();
+            let sid = session_id.to_string();
+            let mid = assistant_db_msg.id.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = repo
+                    .record_outcome(&rid, &sid, &mid, outcome, evidence.as_deref())
+                    .await
+                {
+                    tracing::error!("[AUDIT] Failed to record turn outcome: {e}");
+                }
+            });
+        }
+
         // Plan archive at turn settle (ADR 0005 Decision 9): the completing
         // turn keeps its live plan and full all-☑ checklist through delivery;
         // once the turn settles here the finished plan archives and the session
@@ -8302,6 +8618,24 @@ impl AgentService {
             // Err here would discard the very signal #506 added.
             Err(e) => {
                 tracing::warn!("Failed to persist plan at turn settle: {e}");
+            }
+        }
+
+        // Channel-safe suggest_options recovery (#1774): a model that fails
+        // to emit the structured call sometimes writes it as TEXT —
+        // <<suggest_options>> markers around a JSON options array (see
+        // utils::directives). Recover at the settle point: strip the block
+        // from the delivered text and fire the real SuggestedOptions event
+        // so every surface renders native buttons. An unparseable block
+        // still loses its markers: raw markers and raw JSON never ship.
+        if let Some(cb) = self.progress_callback.as_ref() {
+            let (cleaned, recovered) =
+                crate::utils::directives::extract_leaked_suggestions(&final_text);
+            if cleaned != final_text {
+                final_text = cleaned;
+            }
+            if let Some(items) = recovered {
+                cb(session_id, ProgressEvent::SuggestedOptions(items));
             }
         }
 

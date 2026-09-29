@@ -16,6 +16,7 @@ use super::send::{
     TelegramMediaKind, best_effort_delete, document_in_thread, message_in_thread, photo_in_thread,
     telegram_media_kind,
 };
+use super::send::{best_effort_delete, message_in_thread, photo_in_thread, voice_in_thread};
 use crate::brain::agent::AgentService;
 use crate::db::ChannelMessageRepository;
 use crate::db::models::ChannelMessage as DbChannelMessage;
@@ -1298,9 +1299,13 @@ pub(crate) async fn deliver_final_response(
                             audio_bytes.len(),
                             chat_id
                         );
-                        match bot
-                            .send_voice(chat_id, InputFile::memory(audio_bytes))
-                            .await
+                        match voice_in_thread(
+                            bot,
+                            chat_id,
+                            thread_id,
+                            InputFile::memory(audio_bytes),
+                        )
+                        .await
                         {
                             Ok(m) => {
                                 tracing::info!(

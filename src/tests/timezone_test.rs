@@ -236,3 +236,9 @@ fn table_row_followed_by_prose_keeps_label_bounded() {
     assert_eq!(info.tz, Tz::Europe__Moscow);
     assert_eq!(info.label.as_deref(), Some("МСК, UTC+3"));
 }
+
+#[test]
+
+#[test]
+
+#[test]

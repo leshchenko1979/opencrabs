@@ -11,6 +11,7 @@
 use crate::brain::agent::service::notify_policy::{
     CONFIRM_CAP, DeliveryMode, URGENT_FRAME, confirm_route, resolve_mode,
 };
+use crate::brain::agent::service::session_routes::session_route;
 use crate::brain::tools::error::{Result, ToolError};
 use crate::brain::tools::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
 use crate::db::{SessionBindingRepository, SessionRepository};
@@ -398,6 +399,8 @@ impl Tool for SessionNotifyTool {
             }
         }
 
+        let target_str = target.to_string();
+
         let goal = input
             .get("goal")
             .and_then(Value::as_str)
@@ -424,6 +427,85 @@ impl Tool for SessionNotifyTool {
                         error = %e,
                         session_id = %target_id,
                         "failed to dispatch goal via session_notify"
+                    );
+                }
+            }
+        }
+
+        // #498: a target absent from this daemon's session store can never
+        // claim a route. Reject it before any delivery path can park durable
+        // residue that the boot reaper must later discard. Contextless
+        // surfaces deliberately fail open: without a pool they retain the
+        // daemon's existing notifyability posture. Quiet delivery is checked
+        // after this branch so it cannot bank an impossible target either.
+        if let Some(service_context) = &context.service_context {
+            let pool = service_context.pool().clone();
+            let sessions = SessionRepository::new(pool.clone());
+            match sessions.find_by_id(target).await {
+                Ok(None) => {
+                    return Ok(verdict(
+                        false,
+                        "undeliverable",
+                        format!(
+                            "Cannot deliver to session {target}: this UUID is not a session in \
+                             this daemon, so no local channel can ever claim it. For another \
+                             profile or daemon, use a2a_send."
+                        ),
+                        &[
+                            ("notify_target", target.to_string()),
+                            ("notify_reason", "no_such_session".into()),
+                        ],
+                    ));
+                }
+                Ok(Some(_)) => {
+                    // #574: the tool already computed whether the target has
+                    // a durable binding, but used it only to pick message
+                    // text — parking an unclaimable target and reporting
+                    // success. Refuse that case here, BEFORE any delivery
+                    // path, so no durable queue row is ever written for a
+                    // target that cannot consume it. The bound-but-unclaimed
+                    // park is untouched (see the `Delivery::Parked` arm).
+                    match SessionBindingRepository::new(pool).by_session(&target_str).await {
+                        Ok(Some(_)) => {}
+                        // #574: no durable binding means no channel can claim
+                        // this session ACROSS A RESTART. A channel may still
+                        // hold it right now through an in-memory route, and
+                        // such a target is reachable, so delivery proceeds
+                        // normally — refusing on the binding alone would
+                        // reject a live, deliverable session. Only a target
+                        // with NEITHER a binding nor a live route is genuinely
+                        // undeliverable.
+                        Ok(None) if session_route(target).is_none() => {
+                            return Ok(verdict(
+                                false,
+                                "undeliverable",
+                                format!(
+                                    "Cannot deliver to session {target}: it exists in this \
+                                     daemon but no channel has ever claimed it, so a headless \
+                                     or cron session can never drain the queue. Address a \
+                                     channel-bound session, or use a2a_send for another \
+                                     profile or daemon."
+                                ),
+                                &[
+                                    ("notify_target", target.to_string()),
+                                    ("notify_reason", "unclaimed_no_binding".into()),
+                                ],
+                            ));
+                        }
+                        // Reachable right now: fall through to delivery.
+                        Ok(None) => {}
+                        Err(error) => tracing::warn!(
+                            error = %error,
+                            session_id = %target,
+                            "session_notify could not verify target binding; failing open"
+                        ),
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        session_id = %target,
+                        "session_notify could not verify target existence; failing open"
                     );
                 }
             }
@@ -537,6 +619,10 @@ impl Tool for SessionNotifyTool {
             // be waiting for its channel to claim it after a restart. The
             // unbound case never reaches this arm — #574 refuses it in the
             // resolution block above, before any delivery path can run.
+            // Queued, not lost: an existing session WITH a binding may still be
+            // waiting for its channel to claim it after a restart. The unbound
+            // case never reaches this arm — #574 refuses it in the resolution
+            // block above, before any delivery path can run.
             Delivery::Parked => {
                 maybe_set_goal(target, goal, goal_max_turns, context).await;
                 notify_receipts::record_queued(notify_id, target);

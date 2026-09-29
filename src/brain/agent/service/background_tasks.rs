@@ -22,6 +22,23 @@ pub struct CmdResult {
     pub output: String,
 }
 
+/// Everything a completion hook learns about a finished command: the result
+/// plus the wall-clock runtime the generic receipt carries (#15).
+pub struct HookContext {
+    pub result: CmdResult,
+    pub elapsed_secs: f32,
+}
+
+/// Post-completion action run INSTEAD of the generic session delivery
+/// (#1748). The detached rebuild uses it to exec-restart into the fresh
+/// binary: an in-memory enqueue would be orphaned the moment exec()
+/// replaces the process, so the hook delivers its own outcome text through
+/// the routes it needs (session route, channel targets).
+pub type CompletionHook = Box<
+    dyn FnOnce(HookContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send,
+>;
+
 /// One in-flight background command.
 #[derive(Debug, Clone)]
 pub struct RunningTask {
@@ -93,6 +110,25 @@ impl BackgroundTaskManager {
         }
     }
 
+    /// Mirror an EXTERNAL task's lifecycle into the tracker (#1776 seam 2):
+    /// a claude-cli background task never runs as our spawned process, but
+    /// surfaces still need to show it as in-flight work for the session —
+    /// a backgrounded CLI task takes the turn idle and, without a row here,
+    /// the wait looks like a hang (#762 is the same disease, spawned flavor).
+    /// `label` is the mirror's identity: [`Self::mirror_finished`] removes
+    /// the oldest row carrying it, exactly like [`Self::mark_finished`].
+    pub fn mirror_started(&self, session_id: Uuid, label: &str) {
+        self.mark_started(session_id, label);
+    }
+
+    /// Remove a mirrored external task row (see [`Self::mirror_started`]).
+    /// No-op when nothing matches: a `task_notification` may name a task we
+    /// never saw started (mid-session attach, log replay) — that is not an
+    /// error, there is just nothing to clean up.
+    pub fn mirror_finished(&self, session_id: Uuid, label: &str) {
+        self.mark_finished(session_id, label);
+    }
+
     /// Spawn `command` (via `sh -c`) in `cwd`, detached; on completion enqueue a
     /// system message into `session_id` summarizing the result. Returns
     /// immediately — the caller's turn is free to end.
@@ -102,6 +138,31 @@ impl BackgroundTaskManager {
         cwd: PathBuf,
         label: String,
         command: String,
+    ) {
+        self.spawn_inner(session_id, cwd, label, command, None);
+    }
+
+    /// Spawn like [`Self::spawn_command`], but hand the outcome to `hook`
+    /// instead of the generic session delivery (#1748). Identical lifecycle:
+    /// timer, status file, DB accounting; only the completion route differs.
+    pub fn spawn_command_with_hook(
+        self: std::sync::Arc<Self>,
+        session_id: Uuid,
+        cwd: PathBuf,
+        label: String,
+        command: String,
+        hook: CompletionHook,
+    ) {
+        self.spawn_inner(session_id, cwd, label, command, Some(hook));
+    }
+
+    fn spawn_inner(
+        self: std::sync::Arc<Self>,
+        session_id: Uuid,
+        cwd: PathBuf,
+        label: String,
+        command: String,
+        hook: Option<CompletionHook>,
     ) {
         self.mark_started(session_id, &label);
         let this = std::sync::Arc::clone(&self);
@@ -185,7 +246,6 @@ impl BackgroundTaskManager {
                     "Could not write detached status for {task_id}: {e}"
                 );
             }
-            let msg = completion_message(&label, &command, &result, elapsed_secs);
             if let Some(repo) = task_repo()
                 && let Err(e) = repo.clear(task_id).await
             {
@@ -207,6 +267,18 @@ impl BackgroundTaskManager {
             // Only touches the in-memory map, so moving it earlier cannot
             // affect what gets delivered.
             this.mark_finished(session_id, &label);
+            if let Some(hook) = hook {
+                // A hook replaces the generic delivery entirely (#1748): the
+                // rebuild exec-replaces the process on success, so an
+                // in-memory enqueue would be orphaned mid-flight. The hook
+                // delivers its own outcome text through the routes it needs.
+                hook(HookContext {
+                    result,
+                    elapsed_secs,
+                })
+                .await;
+                return;
+            }
             // Deliver through the ONE gated route (fork #19): the same
             // `deliver_to_session` that sub-agent completions and the
             // session_notify tool use, so channel-ownership, mid-turn and
@@ -219,6 +291,7 @@ impl BackgroundTaskManager {
             // (#940). interrupt=true: a completion is the origin's own
             // awaited work, exactly like a sub-agent's; it must reach it even
             // mid-turn (fork #13).
+            let msg = completion_message(&label, &command, &result, elapsed_secs);
             let outcome = super::session_routes::deliver_to_session(session_id, msg, true);
             match outcome {
                 super::session_routes::Delivery::Redirected { to } => {
@@ -324,6 +397,68 @@ pub(crate) fn short_label(command: &str) -> String {
     } else {
         label
     }
+}
+
+/// The mirror row's label for a claude-cli background task (#1776 seam 2):
+/// the source tag plus the CLI's own task id, so a surface can tell a
+/// mirrored CLI task from a spawned command at a glance and the removal
+/// side can key on the identical string.
+pub(crate) fn claude_task_label(task_id: &str) -> String {
+    format!("claude-cli {task_id}")
+}
+
+/// Per-turn marker set for claude-cli background tasks (#1776 seam 3):
+/// `(session_id, task_id)` pairs started during the CURRENT turn. Cleared at
+/// `run_tool_loop_inner` entry, so a notification for a task absent from the
+/// set is a post-exit survivor and must be delivered synthetically, while a
+/// task present stays silent (claude sees those natively mid-turn).
+pub(crate) type ClaudeTurnTasks = std::collections::HashSet<(Uuid, String)>;
+
+/// The seam-3 discriminator (#1776): a notification whose task was NOT
+/// started during this turn is a post-exit survivor — the turn (and its
+/// claude process) that spawned the task already ended, so nobody but this
+/// synthetic delivery will carry the result to the user.
+pub(crate) fn claude_needs_survival_delivery(
+    turn_started: &ClaudeTurnTasks,
+    session_id: Uuid,
+    task_id: &str,
+) -> bool {
+    !turn_started.contains(&(session_id, task_id.to_string()))
+}
+
+/// The synthetic completion message for a post-exit claude task
+/// notification (#1776 seam 3). Mechanical context only: the summary text is
+/// the CLI's own, never model-judged. No `BgTaskMeta`: there is no
+/// `CmdResult` for a task we never spawned, and a fabricated duration would
+/// lie on the receipt card — the echo falls back to the display line.
+pub(crate) fn claude_completion_message(
+    task_id: &str,
+    status: &str,
+    summary: Option<&str>,
+) -> QueuedUserMessage {
+    let label = claude_task_label(task_id);
+    let context = format!(
+        "[System: a background claude task reported completion after the turn \
+         that started it already ended.\n\
+         Task: {label}\n\
+         Status: {status}\n\
+         Summary: {}\n\n\
+         Deliver this result to the user and continue anything that was \
+         waiting on it. Do not re-run the task.]",
+        summary.unwrap_or("(no summary provided)"),
+    );
+    let display = format!(
+        "🔧 background task {}: {label}",
+        if status == "completed" {
+            "finished"
+        } else {
+            "failed"
+        }
+    );
+    let mut msg = QueuedUserMessage::system(context, display);
+    // #1221: marks this delivery for the Telegram collapsible echo bubble.
+    msg.origin = PushOrigin::BackgroundTask;
+    msg
 }
 
 /// Keep only the last `n` lines of `text`.

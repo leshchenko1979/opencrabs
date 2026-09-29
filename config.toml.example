@@ -296,6 +296,14 @@ providers = ["openrouter", "anthropic"]  # Tried in order on failure
 # Empty or absent = scan all providers as before.
 # vision = ["minimax", "anthropic"]
 
+# Image-generation provider priority (#1672) — ordered chain tried by
+# generate_image after the session's current provider. Each entry is a
+# provider name (e.g. "openrouter", or the key of a [providers.custom.<name>]
+# section); the model is that provider's `generation_model`, endpoints are
+# derived and never guessed. The global Gemini [image.generation] section
+# stays the LAST resort and is the only leg gated by its `enabled` flag.
+# generation = ["qwen-image", "openrouter"]
+
 # ========================================
 # STT (Speech-to-Text) Providers
 # ========================================
@@ -354,6 +362,22 @@ profile_id = ""
 [cron]
 # default_provider = "minimax"
 # default_model = "MiniMax-M3"
+
+# ========================================
+# Tiered decision cache (#1648)
+# ========================================
+# A tier is a decision-shaped question worth reusing answers for.
+# Shadow mode (the default) changes nothing the agent experiences: it
+# only counts identical repeat decisions as would-hits so a deployment
+# can decide keep-or-cut with data. Set mode = "live" per tier to
+# actually reuse cached decisions; mode = "off" disables a tier.
+# policy_version is required; bump it whenever the semantics of the
+# tier's answer change, which keys every old row out.
+# [decisions.tiers.triage]
+# policy_version = "p1"
+# mode = "shadow"
+# ttl_hours = 168
+# margin_floor = 0.2
 
 # ========================================
 # Agent / Sub-Agent Defaults
@@ -450,13 +474,41 @@ profile_id = ""
 # restart. Effective state is `--debug OR debug_logs`, so the flag always wins.
 debug_logs = false
 
-# Thinking-loop timeout in seconds (#890). If the model streams for this long
-# without emitting a single tool call, the stream is killed and retried with
-# multi-language phantom enforcement injected into the prompt. Catches the
+# Thinking-loop guard in seconds (#890, scoped and disarming per #1690). How
+# long a model may stream without emitting a single tool call. Catches the
 # failure mode where a reasoning model loops internally (thinking tokens
 # flowing, 0 tool calls) for an hour or more. Default 600 = 10 min.
+#
+# A stream that is still DELIVERING chunks is not cut: the guard stands itself
+# down and lets the answer finish, because discarding in-flight content and
+# replaying the whole conversation was the worse bug. Only a stream that has
+# delivered nothing is killed and retried with multi-language phantom
+# enforcement. Inter-chunk silence stays governed by stream_idle_timeout_secs.
+#
+# `[agent]` is the global tier; any provider may override it with
+# `thinking_loop_timeout_secs` in its own `[providers.<name>]` section (#1690),
+# which is the knob to reach for when one long-reasoning model needs 900s and
+# the rest of the fleet should keep the default.
 # Set to 0 to disable. Hot-reloads with no restart.
 thinking_loop_timeout_secs = 600
+
+# Global non-streaming request ceiling, in seconds (#1688, #1689). The fallback
+# for `[providers.<name>].timeout_secs`: a provider naming no value of its own
+# inherits this one, and if neither is set the family's compiled 300s applies.
+# Every family honours it — OpenAI-compatible and custom providers, anthropic,
+# gemini.
+# Like the per-provider key, it has NO effect on streaming — streams run on an
+# HTTP client built without a total timeout, so a healthy long turn is never cut
+# by a wall clock (#1687). Unset by default.
+#timeout_secs = 120
+
+# Global inter-chunk streaming inactivity timeout, in seconds (#1688). The
+# fallback for `[providers.<name>].stream_idle_timeout_secs`, and the only timer
+# a stream ever meets. Deliberately no compiled default: silence tolerance is
+# picked at stream time (3600s for CLI and local providers, 45s for z.ai on
+# api.z.ai, 20s for every other remote), so leaving this unset defers to that
+# runtime choice instead of overriding it.
+#stream_idle_timeout_secs = 45
 
 # Cadence (in seconds) for injecting periodic wall-clock notices during
 # long-running tool execution turns. Keeps autonomous multi-step loops
@@ -469,11 +521,14 @@ enabled = false
 model = "gemini-3.1-flash-image-preview"   # Gemini image-gen model ("Nano Banana")
 # Override the model per-provider by setting `generation_model` under
 # `[providers.<name>]` — e.g. `imagen-4.0-generate-001` on gemini, or
-# `gpt-image-1` / `black-forest-labs/flux-1.1-pro` on any OpenAI-
-# compatible provider (openai, openrouter, custom, …). When the active
-# provider has the field set, generate_image picks the right wire
-# backend automatically: Gemini host → Gemini API, anything else →
-# `/v1/images/generations` with Bearer auth.
+# `gpt-image-1` / `black-forest-labs/flux-1.1-pro` / `qwen-image` on any
+# OpenAI-compatible provider (openai, openrouter, DashScope-backed custom
+# sections, …). Provider candidates are tried in order: the session's
+# current provider first, then `[providers.fallback] generation` above;
+# the backend wire is picked automatically (Gemini host → Gemini API,
+# anything else → `/v1/images/generations` with Bearer auth). This
+# `enabled` flag gates ONLY the global Gemini fallback below — a provider
+# route registers generate_image even with it off (#1672).
 
 # ========================================
 # Vision setup — two paths, pick one
@@ -742,13 +797,18 @@ port = 18790            # A2A gateway port
 enabled = true
 # MCP is enabled by default as its free. If want through API its free up to 1000 requests. API key goes in keys.toml: [providers.web_search.exa] api_key = "..."
 
-[providers.web_search.duckduckgo]
-enabled = true
-# Completely free, enabled by default"
+# Duck Duck Go needs no section of its own: it is built into web_search,
+# always available and free. A table for it is not part of the schema, so one
+# here would be discarded and reported back as an unrecognized config key.
 
 [providers.web_search.brave]
 enabled = false
 # Its free up to 1000 requests. API key goes in keys.toml: [providers.web_search.brave] api_key = "..."
+
+# Serper (Google SERP via serper.dev, #1731): paid per-query, 2500 free
+# starter credits. Flip enabled = true AND put the key in keys.toml
+# ([providers.web_search.serper] api_key = "...") to add Google results
+# to the web_search fan-out. Supports gl/hl locale targeting per query.
 
 # ========================================
 # Memory / Embeddings

@@ -283,12 +283,24 @@ impl AgentService {
         &self,
         session_id: uuid::Uuid,
     ) -> Vec<crate::brain::provider::Tool> {
-        if self.lazy_tools {
+        let mut defs = if self.lazy_tools {
             let active = self.tool_registry.active_tools(session_id);
             self.tool_registry.get_tool_definitions_filtered(&active)
         } else {
             self.tool_registry.get_tool_definitions()
+        };
+        // #1706: append recorded-success-rate warnings to the descriptions
+        // the model routes on, so a dead tool's schema can no longer outrank
+        // reality. Cache-backed, never blocks the request path.
+        let health = self.tool_health_annotations();
+        if !health.is_empty() {
+            for def in defs.iter_mut() {
+                if let Some(warning) = health.get(&def.name) {
+                    def.description.push_str(warning);
+                }
+            }
         }
+        defs
     }
 
     /// Stream a request and accumulate into an LLMResponse.
@@ -438,6 +450,10 @@ impl AgentService {
         let mut cache_read_tokens = 0u32;
         let mut billing_cache_creation = 0u32;
         let mut billing_cache_read = 0u32;
+        // Provider-reported dollars: the LAST report wins — OpenRouter and
+        // friends put the authoritative total on the final usage chunk, and
+        // MiniMax-style double deltas start at zero (#1707).
+        let mut cost_usd: Option<f64> = None;
 
         // --- Active-streaming-time accumulator ---
         // Tracks the wall-clock time spent actually receiving output
@@ -543,18 +559,35 @@ impl AgentService {
             std::time::Duration::from_secs(20)
         };
 
-        // --- Thinking-loop timeout (#890) ---
+        // --- Thinking-loop guard (#890, scoped and disarming per #1690) ---
         // If the model streams for `thinking_loop_timeout_secs` without
-        // emitting a single tool call, kill the stream and signal the
-        // tool loop to retry with phantom enforcement. Disabled (0) for
-        // CLI providers (they run tools internally) and when the config
-        // sets it to 0.
+        // emitting a single tool call, the guard fires. Two things changed
+        // here:
+        //
+        // 1. SCOPE. The ceiling resolves [providers.<name>] → [agent], asked
+        //    of the provider that is actually streaming, so a long-reasoning
+        //    model no longer inherits the global number and a phantom-prone
+        //    one can be tightened without touching every other provider.
+        //    `0` disables the guard for that provider (CLI providers force 0:
+        //    they run tools internally, so a tool-less stream is normal).
+        //
+        // 2. DISARM ON DELIVERY. The guard used to `return Err` unconditionally,
+        //    which threw away whatever the model had already written and made
+        //    the tool loop replay the whole turn. Now it only kills a stream
+        //    that delivered NOTHING — the genuine "thinking forever, saying
+        //    nothing" signature. A stream that is delivering tokens but emitting
+        //    no tool calls stands the clock down and finishes its answer:
+        //    silence is `stream_idle_timeout`'s job, narrated tool intent is the
+        //    post-success phantom detector's job (#1672), and a runaway
+        //    repetition is caught by the windows below.
         let thinking_loop_timeout_secs = if is_cli {
             0
         } else {
-            crate::config::Config::current()
-                .agent
-                .thinking_loop_timeout_secs
+            provider.thinking_loop_timeout().unwrap_or_else(|| {
+                crate::config::Config::current()
+                    .agent
+                    .thinking_loop_timeout_secs
+            })
         };
         let thinking_loop_deadline = if thinking_loop_timeout_secs > 0 {
             Some(
@@ -564,6 +597,9 @@ impl AgentService {
         } else {
             None
         };
+        // Separate from `thinking_loop_deadline` because the select future above
+        // borrows the deadline; this flag is what the arm is allowed to clear.
+        let mut thinking_loop_armed = thinking_loop_deadline.is_some();
         let mut has_tool_call = false;
 
         loop {
@@ -587,15 +623,34 @@ impl AgentService {
                         Some(deadline) => tokio::time::sleep_until(deadline).await,
                         None => std::future::pending::<()>().await,
                     }
-                }, if !has_tool_call => {
-                    tracing::warn!(
-                        "🧠 Thinking-loop timeout (#890): {}s elapsed with zero tool calls. \
-                         Killing stream for phantom enforcement retry.",
-                        thinking_loop_timeout_secs
-                    );
-                    return Err(crate::brain::provider::ProviderError::ThinkingLoopTimeout(
-                        thinking_loop_timeout_secs,
-                    ));
+                }, if !has_tool_call && thinking_loop_armed => {
+                    if last_delta_at.is_some() {
+                        // #1690: the clock expired on a stream that IS delivering.
+                        // Discarding it would throw away the answer the user waited
+                        // for and make the tool loop replay the whole turn, so stand
+                        // the guard down and keep consuming. Silence is still
+                        // bounded by `stream_idle_timeout` below.
+                        tracing::warn!(
+                            "🧠 Thinking-loop guard (#890/#1690): {}s elapsed with zero tool calls, \
+                             but the stream has delivered content — standing the clock down \
+                             instead of discarding the answer.",
+                            thinking_loop_timeout_secs
+                        );
+                        thinking_loop_armed = false;
+                    } else {
+                        tracing::warn!(
+                            "🧠 Thinking-loop timeout (#890): {}s elapsed with zero tool calls and \
+                             nothing delivered. Killing stream for phantom enforcement retry.",
+                            thinking_loop_timeout_secs
+                        );
+                        return Err(crate::brain::provider::ProviderError::ThinkingLoopTimeout(
+                            thinking_loop_timeout_secs,
+                        ));
+                    }
+                    // Disarmed on a delivering stream. `biased` above means the
+                    // stream branch was never polled for this iteration, so
+                    // re-polling without a value loses no chunk.
+                    continue;
                 }
                 result = tokio::time::timeout(stream_idle_timeout, stream.next()) => {
                     match result {
@@ -979,6 +1034,9 @@ impl AgentService {
                     if usage.billing_cache_read > billing_cache_read {
                         billing_cache_read = usage.billing_cache_read;
                     }
+                    if usage.cost_usd.is_some() {
+                        cost_usd = usage.cost_usd;
+                    }
                 }
                 StreamEvent::MessageStop => break,
                 StreamEvent::Ping => {
@@ -1015,6 +1073,77 @@ impl AgentService {
                                 *t = retain_react_directive(t);
                             }
                         }
+                    }
+                }
+                // #1776 seams 2+3: mirror the CLI's background-task lifecycle
+                // into the session's background manager (surfaces show a
+                // backgrounded claude task as in-flight work), and deliver
+                // post-exit survivor notifications synthetically: a
+                // notification for a task started THIS turn is claude's to
+                // see natively (silent); one for an earlier turn's task is a
+                // survivor — the spawning process is gone — so it rides the
+                // ONE gated route (fork #19, interrupt=true per fork #13).
+                // Cosmetic mirror / missing id = skip silently, never fail a
+                // turn over it.
+                StreamEvent::BackgroundTask {
+                    subtype,
+                    task_id,
+                    status,
+                    description,
+                    ..
+                } => {
+                    let Some(id) = task_id.as_deref() else {
+                        continue;
+                    };
+                    let label = super::background_tasks::claude_task_label(id);
+                    match (subtype.as_str(), status.as_deref()) {
+                        ("task_started", _) => {
+                            self.claude_turn_tasks
+                                .lock()
+                                .expect("claude turn-task lock")
+                                .insert((session_id, id.to_string()));
+                            if let Some(mgr) = self.background_manager() {
+                                mgr.mirror_started(session_id, &label);
+                            }
+                        }
+                        ("task_notification", Some(s @ ("completed" | "failed"))) => {
+                            if let Some(mgr) = self.background_manager() {
+                                mgr.mirror_finished(session_id, &label);
+                            }
+                            if super::background_tasks::claude_needs_survival_delivery(
+                                &self
+                                    .claude_turn_tasks
+                                    .lock()
+                                    .expect("claude turn-task lock"),
+                                session_id,
+                                id,
+                            ) {
+                                let msg = super::background_tasks::claude_completion_message(
+                                    id,
+                                    s,
+                                    description.as_deref(),
+                                );
+                                match super::session_routes::deliver_to_session(
+                                    session_id, msg, true,
+                                ) {
+                                    super::session_routes::Delivery::NoRoute => {
+                                        tracing::warn!(
+                                            target: "background_task",
+                                            "claude task '{label}' completion for session \
+                                             {session_id} had nowhere to go"
+                                        );
+                                    }
+                                    _ => {
+                                        tracing::info!(
+                                            target: "background_task",
+                                            "delivered post-exit claude task '{label}' \
+                                             completion for session {session_id}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 StreamEvent::Error { error } => {
@@ -1139,7 +1268,7 @@ impl AgentService {
                             trimmed
                         };
                         let msg = format!(
-                            "Self-heal: provider sent stop after only {} output tokens — \
+                            "Self-heal: provider sent stop after only {} output tokens: \
                              response appears truncated: \"{}\"",
                             output_tokens, preview,
                         );
@@ -1207,12 +1336,14 @@ impl AgentService {
         Ok((
             LLMResponse {
                 id,
-                // Some providers (e.g. MiniMax) don't include the model name in stream chunks.
-                // Fall back to the request model so pricing lookup never gets an empty string.
-                model: if model.is_empty() {
-                    request_model
-                } else {
+                // OpenAI-compatible gateways may return a backend-local model
+                // ID in stream chunks (for example, without the provider
+                // prefix). Keep the requested ID for the persisted session
+                // pair, just like the non-streaming response path does.
+                model: if request_model.is_empty() {
                     model
+                } else {
+                    request_model
                 },
                 content: content_blocks,
                 stop_reason,
@@ -1223,6 +1354,7 @@ impl AgentService {
                     cache_read_tokens,
                     billing_cache_creation,
                     billing_cache_read,
+                    cost_usd,
                     ..Default::default()
                 },
                 streaming_active_secs,

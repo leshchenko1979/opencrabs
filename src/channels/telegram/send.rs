@@ -22,6 +22,7 @@ use teloxide::payloads::SendLocationSetters;
 use teloxide::payloads::SendMessageSetters;
 use teloxide::payloads::SendPhotoSetters;
 use teloxide::payloads::SendPollSetters;
+use teloxide::payloads::SendVoiceSetters;
 use teloxide::prelude::Requester;
 use teloxide::requests::JsonRequest;
 use teloxide::types::{
@@ -206,6 +207,25 @@ pub fn telegram_media_kind(len: u64) -> TelegramMediaKind {
         TelegramMediaKind::Photo
     } else {
         TelegramMediaKind::Document
+    }
+}
+
+/// `bot.send_voice(chat_id, voice)` with optional `message_thread_id` (#1683):
+/// TTS voice notes landed in General in forum groups because this was the
+/// last send path calling the bare `bot.send_voice`.
+pub fn voice_in_thread<C>(
+    bot: &Bot,
+    chat_id: C,
+    thread_id: Option<ThreadId>,
+    voice: InputFile,
+) -> teloxide::requests::MultipartRequest<teloxide::payloads::SendVoice>
+where
+    C: Into<ChatId>,
+{
+    let req = bot.send_voice(chat_id.into(), voice);
+    match thread_id {
+        Some(t) => req.message_thread_id(t),
+        None => req,
     }
 }
 

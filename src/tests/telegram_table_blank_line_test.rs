@@ -170,8 +170,7 @@ fn pass_reaches_the_canonical_rich_entry() {
     // funnels through, not only from the pass itself. A body carrying the shape
     // comes back normalized.
     let input = "> quoted line here\n<details><summary>s</summary>\n\nbody\n\n</details>";
-    let normalized =
-        crate::channels::telegram::rich::table::normalize_rich_markdown_with_media(input, &[]);
+    let normalized = crate::channels::telegram::rich::table::normalize_tables(input);
     assert!(
         normalized.contains("> quoted line here\n\n<details>"),
         "canonical entry did not terminate the quote run: {normalized:?}"

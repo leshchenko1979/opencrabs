@@ -50,6 +50,8 @@ Skill pointers, command/tool/skill distinction, profile-aware paths, custom rout
 
 Tool = function the agent calls (`bash`, `grep`); command = slash shortcut in commands.toml (`/check`); skill = workflow template loaded on demand (`/browser-cdp`).
 
+`decide_cached` (built-in tool, #1648): decision-shaped questions through the L1 reuse cache, tiers configured in `[decisions.tiers.<name>]`; default `shadow` always calls the model and counts would-hits, `live` serves fresh exact repeats, `off` is the kill switch; promotion to `live` is an operator call. Full reference: `src/docs/reference/DECISIONS.md`.
+
 ## Skill `globs:` frontmatter (path-scoped skill gate, #150)
 
 A `SKILL.md` may declare `globs:` so its topic is ENFORCED, not advisory: a tool call referencing a matching path is rejected (the rejection carries the skill body and names a durable route to the complete text — `read_file` on the skill's source path, or `load_brain_file` with the slug; tool output is capped at 16 KB, so a longer body arrives as a head/tail preview) when the skill body is not in the current session context (fresh session or after compaction); the identical retry succeeds. Accepted forms — Cursor comma-string `globs: a/**, b.md`, inline flow `globs: [a/**, b.md]`, block list — quotes stripped; `metadata.globs` is ignored.

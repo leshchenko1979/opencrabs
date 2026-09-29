@@ -39,8 +39,13 @@ pub async fn run_turn(
 ) {
     let acp_session_id = session.id.to_string();
 
-    let progress = progress_callback(state.handle.clone(), acp_session_id.clone());
-    let approval = approval_callback(state.handle.clone(), acp_session_id, cancel.clone());
+    let progress = progress_callback(
+        state.handle.clone(),
+        acp_session_id.clone(),
+        state.agent.clone(),
+    );
+    let mode = *session.mode.lock().await;
+    let approval = approval_callback(state.handle.clone(), acp_session_id, mode, cancel.clone());
 
     let model = session.model.lock().await.clone();
     let result = state
@@ -101,21 +106,59 @@ pub(crate) fn stop_reason(reason: Option<StopReason>) -> &'static str {
     }
 }
 
+/// Whether an `IntermediateText` round aggregate repeats the text live
+/// streaming already delivered this round. Whitespace is ignored on both
+/// sides: providers disagree about trailing newlines between the delta
+/// stream and the round summary. An empty aggregate is never a duplicate —
+/// emitting it would only add noise.
+pub(crate) fn round_text_is_duplicate(streamed: &str, aggregate: &str) -> bool {
+    !aggregate.trim().is_empty() && streamed.trim() == aggregate.trim()
+}
+
 /// Map loop progress to `session/update` notifications.
 ///
 /// Tool-call ids are invented here: `ProgressEvent` carries tool names but
 /// no call ids, so each `ToolStarted` mints a UUID and the matching
 /// `ToolCompleted` pops it FIFO per tool name. Parallel same-name tools pair
 /// in start order, which is the only honest pairing the events support.
-fn progress_callback(handle: TransportHandle, acp_session_id: String) -> ProgressCallback {
+fn progress_callback(
+    handle: TransportHandle,
+    acp_session_id: String,
+    agent: Arc<crate::brain::agent::AgentService>,
+) -> ProgressCallback {
     let open_calls: Arc<StdMutex<HashMap<String, VecDeque<String>>>> =
         Arc::new(StdMutex::new(HashMap::new()));
+    // Text streamed since the last round boundary. The loop emits live
+    // deltas via `StreamingChunk` and then the round's full text again via
+    // `IntermediateText` — both map to `agent_message_chunk`, so without a
+    // guard every streamed answer renders twice on the client. Same rule as
+    // the WhatsApp handler's pre-send dedup: skip the aggregate when it
+    // repeats what streaming already delivered; emit it when it carries
+    // text the stream did not (CLI providers stream nothing).
+    let streamed: Arc<StdMutex<String>> = Arc::new(StdMutex::new(String::new()));
 
-    Arc::new(move |_session_id, event| {
+    Arc::new(move |session_id, event| {
         let update = match event {
-            ProgressEvent::StreamingChunk { text }
-            | ProgressEvent::IntermediateText { text, .. } => {
+            ProgressEvent::StreamingChunk { text } => {
+                if let Ok(mut buf) = streamed.lock() {
+                    buf.push_str(&text);
+                }
                 Some(text_chunk("agent_message_chunk", &text))
+            }
+            ProgressEvent::IntermediateText { text, .. } => {
+                let duplicate = streamed
+                    .lock()
+                    .map(|mut buf| {
+                        let dup = round_text_is_duplicate(&buf, &text);
+                        buf.clear();
+                        dup
+                    })
+                    .unwrap_or(false);
+                if duplicate {
+                    None
+                } else {
+                    Some(text_chunk("agent_message_chunk", &text))
+                }
             }
             ProgressEvent::ReasoningChunk { text } => {
                 Some(text_chunk("agent_thought_chunk", &text))
@@ -124,6 +167,11 @@ fn progress_callback(handle: TransportHandle, acp_session_id: String) -> Progres
                 tool_name,
                 tool_input,
             } => {
+                // A tool call ends the text round; round 2's stream starts
+                // fresh so its aggregate dedups against its own chunks.
+                if let Ok(mut buf) = streamed.lock() {
+                    buf.clear();
+                }
                 let call_id = Uuid::new_v4().to_string();
                 if let Ok(mut calls) = open_calls.lock() {
                     calls
@@ -160,7 +208,10 @@ fn progress_callback(handle: TransportHandle, acp_session_id: String) -> Progres
             }
             ProgressEvent::TokenCount(used) => Some(json!({
                 "sessionUpdate": "usage",
-                "usage": { "used": used },
+                "usage": {
+                    "used": used,
+                    "size": agent.context_limit_for_session(session_id),
+                },
             })),
             // Everything else (compaction notices, retry ticker, provider
             // switches, suggestions, stream strips) has no ACP vocabulary —
@@ -179,13 +230,17 @@ fn progress_callback(handle: TransportHandle, acp_session_id: String) -> Progres
 /// that a wedged client cannot stall the agent forever.
 const PERMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Route approval-gated tools to the client as `session/request_permission`.
-/// Any transport failure denies — a client that cannot answer must never
-/// become an approval. The round-trip also races `session/cancel` and the
-/// permission timeout, both resolving to a deny.
+/// Route approval-gated tools according to the session's mode. Only
+/// `supervised` (and non-edit kinds under `auto-accept-edits`) reach the
+/// client as `session/request_permission`; `plan` denies mutations outright
+/// so the agent learns the boundary from the denial instead of a silent
+/// client-side veto. Any transport failure denies — a client that cannot
+/// answer must never become an approval. The round-trip also races
+/// `session/cancel` and the permission timeout, both resolving to a deny.
 fn approval_callback(
     handle: TransportHandle,
     acp_session_id: String,
+    mode: protocol::AcpMode,
     cancel: CancellationToken,
 ) -> ApprovalCallback {
     Arc::new(move |info: ToolApprovalInfo| {
@@ -193,12 +248,26 @@ fn approval_callback(
         let acp_session_id = acp_session_id.clone();
         let cancel = cancel.clone();
         Box::pin(async move {
+            let kind = protocol::tool_kind(&info.tool_name);
+            match mode {
+                protocol::AcpMode::Plan => {
+                    tracing::info!("acp plan mode: denied {} without asking", info.tool_name);
+                    return Ok((false, false));
+                }
+                protocol::AcpMode::Auto | protocol::AcpMode::FullAccess => {
+                    return Ok((true, false));
+                }
+                protocol::AcpMode::AutoAcceptEdits if kind == "edit" => {
+                    return Ok((true, false));
+                }
+                _ => {}
+            }
             let params = json!({
                 "sessionId": acp_session_id,
                 "toolCall": {
                     "toolCallId": Uuid::new_v4().to_string(),
                     "title": info.tool_name,
-                    "kind": protocol::tool_kind(&info.tool_name),
+                    "kind": kind,
                     "rawInput": info.tool_input,
                 },
                 "options": permission_options(),

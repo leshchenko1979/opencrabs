@@ -75,6 +75,13 @@ pub fn has_phantom_tool_intent_no_tools(text: &str) -> bool {
         if matches_plan_announcement(window) {
             return true;
         }
+        // Marker-less bare-participle announcement carrying its own object
+        // pronoun ("Reading them, with mtimes so I know each postdates the
+        // tree it claims to cover.") — no now / … / : and no then / before,
+        // so all three arms above miss it (#1694).
+        if matches_participle_object(window) {
+            return true;
+        }
         if too_short_for_phrases {
             continue;
         }
@@ -676,12 +683,23 @@ pub(crate) fn matches_work_announcement(lead: &str) -> bool {
     })
 }
 
-/// Run an anchored announcement regex against every sentence start in the
-/// lead, tolerating a short lead clause before the gerund. The live escapes
-/// (#464) were all anchor evasions: "Internet's back, pushing now." (clause
-/// prefix), "Apologies Adolfo, you're right. Pushing now." (sentence
-/// prefix). Suffix slices keep the terminal imminence markers intact.
-fn announcement_matches_anywhere(re: &Regex, lead: &str) -> bool {
+/// Candidate clause starts inside `lead`: position 0, every position that
+/// begins a sentence or follows a clause introducer, and (in the caller) the
+/// short ", " lead-in. Shared by the boolean arms and by
+/// `matches_participle_object`, which needs the same tolerance but must see
+/// the CAPTURE rather than just a match.
+///
+/// Sentence enders, plus the clause introducers that carry an announcement
+/// just as often (#1192). "That's ten issues — fetching all specs fresh…:"
+/// placed both gerunds after an em dash, so neither was ever offered to the
+/// ^-anchored regex and a zero-tool turn shipped as a finished answer. The
+/// comma-window fallback in the callers was the earlier acknowledgement that
+/// a lead clause can precede the announcement; it only ever covered ", "
+/// inside 48 bytes.
+///
+/// Purely additive: every start the old scan produced is still produced, so
+/// nothing that matched before stops matching.
+fn announcement_clause_starts(lead: &str) -> Vec<usize> {
     let mut starts: Vec<usize> = vec![0];
     let mut after_ender = false;
     for (idx, ch) in lead.char_indices() {
@@ -689,28 +707,23 @@ fn announcement_matches_anywhere(re: &Regex, lead: &str) -> bool {
             starts.push(idx);
             after_ender = false;
         }
-        // Sentence enders, plus the clause introducers that carry an
-        // announcement just as often (#1192). "That's ten issues — fetching
-        // all specs fresh…:" placed both gerunds after an em dash, so neither
-        // was ever offered to the ^-anchored regex and a zero-tool turn
-        // shipped as a finished answer. The comma-window fallback below was
-        // the earlier acknowledgement that a lead clause can precede the
-        // announcement; it only ever covered ", " inside 48 bytes.
-        //
-        // Purely additive: every start the old scan produced is still
-        // produced, so nothing that matched before stops matching. The
-        // widening is bounded by the regex's own marker requirement — a
-        // suffix still has to reach " now", an ellipsis, or a colon at its
-        // very end, which ordinary prose after a colon does not.
         if matches!(ch, '.' | '!' | '?' | '\n' | '…' | '—' | '–' | ':' | ';') {
             after_ender = true;
         }
     }
-    for &start in &starts {
+    starts
+}
+
+/// Every slice of `lead` an anchored announcement regex should be offered:
+/// each clause start from `announcement_clause_starts`, plus the short ", "
+/// lead-in window ("Internet's back, pushing now.", #464). Order is per start,
+/// full suffix first. Purely additive — the same slices, in the same order,
+/// that the scan inside `announcement_matches_anywhere` used to visit.
+fn announcement_candidate_slices(lead: &str) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    for &start in &announcement_clause_starts(lead) {
         let suffix = &lead[start..];
-        if re.is_match(suffix) {
-            return true;
-        }
+        out.push(suffix);
         // Short lead clause before the announcement ("internet's back, ").
         let window_end = suffix
             .char_indices()
@@ -718,13 +731,22 @@ fn announcement_matches_anywhere(re: &Regex, lead: &str) -> bool {
             .last()
             .map(|(i, c)| i + c.len_utf8())
             .unwrap_or(0);
-        if let Some(comma) = suffix[..window_end].find(", ")
-            && re.is_match(&suffix[comma + 2..])
-        {
-            return true;
+        if let Some(comma) = suffix[..window_end].find(", ") {
+            out.push(&suffix[comma + 2..]);
         }
     }
-    false
+    out
+}
+
+/// Run an anchored announcement regex against every sentence start in the
+/// lead, tolerating a short lead clause before the gerund. The live escapes
+/// (#464) were all anchor evasions: "Internet's back, pushing now." (clause
+/// prefix), "Apologies Adolfo, you're right. Pushing now." (sentence
+/// prefix). Suffix slices keep the terminal imminence markers intact.
+fn announcement_matches_anywhere(re: &Regex, lead: &str) -> bool {
+    announcement_candidate_slices(lead)
+        .iter()
+        .any(|slice| re.is_match(slice))
 }
 
 /// Does `text` contain a "Now &lt;gerund&gt;" work announcement at a sentence
@@ -766,6 +788,76 @@ pub(crate) fn matches_plan_announcement(text: &str) -> bool {
                 .map(|re| re.is_match(text))
                 .unwrap_or(false)
     })
+}
+
+/// Does `text` announce work with a bare participle carrying its OWN object
+/// pronoun, with no imminence marker and no sequencing?
+///
+/// "Reading them, with mtimes so I know each postdates the tree it claims to
+/// cover." — the #1694 incident, delivered as a finished answer by a turn that
+/// called nothing. Every existing arm needs a token this clause does not carry:
+/// `work_announcement_re` and `gerund_re` a trailing now / … / :,
+/// `plan_announcement_re` a then / before / after.
+///
+/// The regex alone cannot make the call, because the same construction is also
+/// an ordinary subject: "Reading them is straightforward." and "Getting them
+/// took a while." Only the second lacks a copula, so NO copula list separates
+/// the two — what separates them is the word class the pronoun is followed by.
+/// An announcement is followed by nothing, by a clause introducer, or by a
+/// closed-class modifier; a statement is followed by the finite verb its
+/// participle subject governs. Hence `announcement_tail_words`, a closed class
+/// (prepositions, conjunctions, numerals, ordinals, modals, fixed adverbials)
+/// rather than a verb list, which is the open class that never converges
+/// (#1122).
+///
+/// Zero-tool path only, for the reason `matches_plan_announcement` gives: after
+/// a real call the shape is a legitimate recap (#1506/#1172).
+pub(crate) fn matches_participle_object(text: &str) -> bool {
+    let text = strip_inline_directives(text);
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    phantom_lang::all_langs().iter().any(|lang| {
+        !lang.participle_object_re.is_empty()
+            && Regex::new(&lang.participle_object_re)
+                .map(|re| {
+                    announcement_candidate_slices(text).iter().any(|slice| {
+                        re.captures(slice).is_some_and(|caps| {
+                            tail_reads_as_announcement(
+                                caps.get(1).map_or("", |m| m.as_str()),
+                                &lang.announcement_tail_words,
+                            )
+                        })
+                    })
+                })
+                .unwrap_or(false)
+    })
+}
+
+/// Whether the clause tail after the pronoun reads as an announcement.
+///
+/// Empty (the announcement is the last thing said), or opening on a clause
+/// introducer, or headed by a closed-class word. Everything else is the
+/// predicate of a participial subject.
+fn tail_reads_as_announcement(tail: &str, closed: &[String]) -> bool {
+    let tail = tail.trim_start();
+    if tail.is_empty() {
+        return true;
+    }
+    if matches!(tail.chars().next(), Some(',' | ':' | ';' | '…' | '(')) {
+        return true;
+    }
+    // Accented letters are word characters here, so a plain `split` on
+    // non-letters would chop "difícil" and hand the predicate test a fragment.
+    let head: String = tail
+        .chars()
+        .take_while(|c| c.is_alphabetic() || c.is_ascii_digit() || *c == '\'')
+        .collect();
+    if head.is_empty() {
+        return true;
+    }
+    closed.iter().any(|w| w == &head.to_lowercase())
 }
 
 /// Check if `lower` contains any completion claim.
@@ -1015,12 +1107,16 @@ pub fn looks_truncated_mid_sentence(text: &str) -> bool {
     if last.is_alphanumeric() {
         return true;
     }
-    // A trailing single backtick is legitimate ONLY when it CLOSES inline
-    // code (even backtick parity outside fenced blocks). Odd parity means
-    // the stream died on an OPENING backtick mid-code — the #36 incident
-    // shape, which this function previously read as complete.
-    if last == '`' {
-        return backticks_outside_fences(trimmed) % 2 == 1;
+    // Inline-code parity is a LAST-CHAR-AGNOSTIC structural signal: no
+    // complete markdown reply leaves an inline code span open, so odd
+    // backticks outside fences means the stream died mid-span whichever
+    // char it died on. Old code only consulted parity when the last char
+    // WAS the backtick (#36 shape); the 2026-09-26 incident (#1753) died
+    // one char deeper on an opening quote — `... gated on `content.`
+    // contains("` with a provider EndTurn lie — and shipped unmarked to
+    // Telegram and TUI alike. This branch subsumes the #36 case.
+    if backticks_outside_fences(trimmed) % 2 == 1 {
+        return true;
     }
     matches!(
         last,
@@ -1030,8 +1126,9 @@ pub fn looks_truncated_mid_sentence(text: &str) -> bool {
 
 /// Count backticks on lines outside fenced code blocks. Fence delimiter
 /// lines themselves don't count — their backticks delimit blocks, they
-/// are not inline code. Used for the trailing-backtick parity check in
-/// [`looks_truncated_mid_sentence`] (#36).
+/// are not inline code. Used for the inline-code parity check in
+/// [`looks_truncated_mid_sentence`] (#36, generalized for #1753: last-char
+/// agnostic, a dangling span is the signal, not the char it ends on).
 fn backticks_outside_fences(text: &str) -> usize {
     let mut in_fence = false;
     let mut count = 0;
@@ -1205,6 +1302,7 @@ pub fn asserted_facts(text: &str) -> Vec<String> {
     const MAX_FACTS: usize = 20;
     let mut out = asserted_shas(text);
     out.extend(asserted_tallies(text));
+    out.extend(asserted_diagnostics(text));
     out.sort();
     out.dedup();
     out.truncate(MAX_FACTS);
@@ -1218,6 +1316,78 @@ pub fn unbacked_facts(facts: &[String], known: &str) -> Vec<String> {
         .filter(|fact| !fact_is_backed(fact, known))
         .cloned()
         .collect()
+}
+
+/// Which fact checks an iteration that ALSO carried tool calls failed (#1693).
+///
+/// Every detector in the phantom block sits behind `if tool_uses.is_empty()`, so
+/// a fabrication glued to a legitimate tool call was never evaluated by any of
+/// them — the gate at `tool_loop.rs:4823` skipped the whole 1341-line block on
+/// the strength of one real call. The checks here are content-vs-evidence: they
+/// compare what the text asserts against what the turn actually produced, and
+/// that comparison does not depend on the iteration having zero tool calls.
+///
+/// The shape-based tells (`work_announcement_re`, `gerund_re`,
+/// `plan_announcement_re`) deliberately stay zero-tool-only. After a real call
+/// "Running fmt, then clippy" is a legitimate recap of work in progress, which
+/// is exactly what the post-success exemption exists to protect (#1506, #1172).
+pub(crate) struct MixedFactViolation {
+    /// Branch names for the WARN and telemetry, in detection order.
+    pub(crate) branches: Vec<&'static str>,
+    /// Commands named as already run that no call contained (#789).
+    pub(crate) uncalled_commands: Vec<String>,
+    /// Shas, tallies and diagnostic codes absent from the evidence (#1423, #1693).
+    pub(crate) unbacked_facts: Vec<String>,
+    /// Whether the text is a #1506 structured completion report. Carried on the
+    /// verdict so the call site can honour the directive without holding the
+    /// iteration text alive until the tool results land.
+    pub(crate) structured_report: bool,
+}
+
+/// Run the fact-based checks over an iteration that carried tool calls.
+///
+/// `executed_inputs` must include this iteration's OWN calls: the text "Running
+/// `gh pr list` now" accompanied by a `gh pr list` call is the call doing the
+/// thing, and scoring it against prior inputs alone would flag the work it is
+/// about to do. `tool_outputs` and `evidence` are deliberately the PRIOR
+/// iterations only — the in-flight calls have produced nothing yet, so they
+/// cannot vouch for a claim stated in the past tense. That asymmetry is the
+/// whole point: a gate claimed to have already died is checkable against what
+/// ran before, not against what is about to run.
+///
+/// Returns `None` when nothing is asserted that the evidence cannot support.
+pub(crate) fn mixed_iteration_facts(
+    text: &str,
+    executed_inputs: &[String],
+    tool_outputs: &[String],
+    evidence: &str,
+) -> Option<MixedFactViolation> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let uncalled_commands = claims_uncalled_commands(text, executed_inputs);
+    let facts = unbacked_facts(&asserted_facts(text), evidence);
+    let unbacked_evidence = claims_unbacked_evidence(text, tool_outputs);
+
+    let mut branches = Vec::new();
+    if !uncalled_commands.is_empty() {
+        branches.push("mixed_uncalled_commands");
+    }
+    if !facts.is_empty() {
+        branches.push("mixed_unbacked_facts");
+    }
+    if unbacked_evidence {
+        branches.push("mixed_unbacked_evidence");
+    }
+    if branches.is_empty() {
+        return None;
+    }
+    Some(MixedFactViolation {
+        branches,
+        uncalled_commands,
+        unbacked_facts: facts,
+        structured_report: is_structured_report(text),
+    })
 }
 
 /// Git object ids the text states.
@@ -1305,6 +1475,53 @@ fn asserted_tallies(text: &str) -> Vec<String> {
             out.push(format!("{digits} {kw}"));
         }
     }
+    out
+}
+
+/// Compiler and linter diagnostic codes the text states as already obtained.
+///
+/// Neither existing extractor reaches a rustc code. `asserted_shas` needs a run
+/// of at least seven hex characters and `E0603` is five; `asserted_tallies`
+/// recognises only `passed` / `failed` / `ignored`, so `2× E0603` is not a tally
+/// either. A turn can therefore assert a specific compiler error and quote its
+/// message, and no fact check in this module has anything to compare against —
+/// which is how "Gate died on 2× E0603 \"this item is private\"" reached the user
+/// in a response whose own tool call was launching that gate (#1693).
+///
+/// The token is the check, not the wording around it. `E0603` is not English
+/// prose, so unlike the shape-based tells it cannot be evaded by rephrasing,
+/// and unlike a sha it is never an incidental substring of ordinary text. The
+/// boundary rules mirror `asserted_shas`: a run that touches a word character,
+/// `_`, `-` or `.` is part of something else (a path, a longer hash) and is not
+/// a diagnostic.
+fn asserted_diagnostics(text: &str) -> Vec<String> {
+    /// A pathological iteration names a handful of diagnostics.
+    const MAX_DIAGNOSTICS: usize = 8;
+    /// rustc codes are `E` followed by exactly four digits.
+    const CODE_LEN: usize = 5;
+    let chars: Vec<char> = text.chars().collect();
+    let touches_word = |c: Option<&char>| {
+        c.is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-' || *c == '.')
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + CODE_LEN <= chars.len() {
+        if chars[i] != 'E'
+            || !chars[i + 1..i + CODE_LEN]
+                .iter()
+                .all(|c| c.is_ascii_digit())
+        {
+            i += 1;
+            continue;
+        }
+        if !touches_word(i.checked_sub(1).map(|p| &chars[p]))
+            && !touches_word(chars.get(i + CODE_LEN))
+        {
+            out.push(chars[i..i + CODE_LEN].iter().collect());
+        }
+        i += CODE_LEN;
+    }
+    out.truncate(MAX_DIAGNOSTICS);
     out
 }
 

@@ -597,6 +597,7 @@ fn full_provider_sentinel() -> serde_json::Value {
         retry_backoff_multiplier: Some(2.0),
         retry_jitter: Some(0.1),
         retry_quota_exhausted: Some(true),
+        thinking_loop_timeout_secs: Some(600),
     };
     serde_json::to_value(cfg).expect("ProviderConfig serializes")
 }
@@ -619,6 +620,7 @@ fn full_retry_sentinel() -> serde_json::Value {
 
 fn full_fallback_sentinel() -> serde_json::Value {
     let cfg = FallbackProviderConfig {
+        generation: vec![],
         enabled: true,
         provider: Some("p".into()),
         providers: vec!["p".into()],

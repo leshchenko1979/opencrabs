@@ -236,11 +236,51 @@ pub(crate) async fn cmd_doctor(config: &crate::config::Config, fix: bool) -> Res
     if db_path.exists() {
         match Database::connect(db_path).await {
             Ok(db) => {
-                db.run_migrations().await.ok();
-                println!("  ✅ Database: {}", db_path.display());
-                pass += 1;
-                if fix {
-                    apply_fixes(config, db.pool()).await;
+                // #1779: the pre-migration guard refuses on a damaged image, and
+                // `.ok()` threw that refusal away, so doctor printed
+                // "✅ Database" over a corrupt file. That is precisely the
+                // blindness the rpi5 operator hit while looking for a signal, so
+                // the refusal is reported here instead of discarded.
+                //
+                // Note what this does NOT fix: `doctor` still returns Ok and
+                // still exits 0 with failures counted, so a script cannot gate on
+                // it. That is a separate defect about the whole command, not
+                // about the database check.
+                match db.run_migrations().await {
+                    Ok(()) => {
+                        println!("  ✅ Database: {}", db_path.display());
+                        pass += 1;
+                        // #1779 defect 4: doctor reported the image as healthy and
+                        // nothing about whether a copy of it existed to restore.
+                        // The snapshot line makes the recovery asset visible on the
+                        // one command an operator reaches for mid-incident.
+                        let snapshot_dir = crate::db::migration_snapshot::snapshot_dir();
+                        let newest = crate::db::migration_snapshot::newest_snapshot(&snapshot_dir);
+                        if crate::db::db_integrity_failed_now() {
+                            println!(
+                                "  ⚠️  Database integrity: check FAILED after migrations; \
+                                 newest snapshot: {}",
+                                crate::db::migration_snapshot::newest_snapshot_note(
+                                    newest.as_deref()
+                                )
+                            );
+                            warn += 1;
+                        } else {
+                            println!(
+                                "  📸 Database snapshot: {}",
+                                crate::db::migration_snapshot::newest_snapshot_note(
+                                    newest.as_deref()
+                                )
+                            );
+                        }
+                        if fix {
+                            apply_fixes(config, db.pool()).await;
+                        }
+                    }
+                    Err(e) => {
+                        println!("  ❌ Database: {e:#}");
+                        fail += 1;
+                    }
                 }
             }
             Err(e) => {
@@ -412,7 +452,45 @@ pub(crate) async fn cmd_doctor(config: &crate::config::Config, fix: bool) -> Res
         println!("    {marker} {line}");
     }
 
-    // 8. CLI tools in PATH
+    // 8. Config keys (#1725). Reads config.toml through the compiled struct
+    // with serde_ignored — any key the struct discards is reported. A user
+    // who follows the Telegram alert's "Run /doctor" advice is no longer told
+    // everything is fine when the file has stale or typoed keys.
+    println!();
+    println!("  Config:");
+    {
+        let config_path = crate::config::opencrabs_home().join("config.toml");
+        if config_path.exists() {
+            match std::fs::read_to_string(&config_path) {
+                Ok(raw) => match crate::config::sections::ignored_key_paths(&raw) {
+                    Ok(paths) if paths.is_empty() => {
+                        println!("    ✅ All keys recognized");
+                        pass += 1;
+                    }
+                    Ok(paths) => {
+                        println!(
+                            "    ❌ {} unrecognized key(s): {}",
+                            paths.len(),
+                            paths.join(", ")
+                        );
+                        fail += 1;
+                    }
+                    Err(e) => {
+                        println!("    ❌ Could not parse config.toml: {e}");
+                        fail += 1;
+                    }
+                },
+                Err(e) => {
+                    println!("    ❌ Could not read config.toml: {e}");
+                    fail += 1;
+                }
+            }
+        } else {
+            println!("    ⬚  No config.toml found (using defaults)");
+        }
+    }
+
+    // 9. CLI tools in PATH
     println!();
     println!("  CLI tools:");
     for (name, desc) in [
@@ -683,6 +761,7 @@ pub(crate) async fn cmd_run(
     auto_approve: bool,
     format: OutputFormat,
     session_id: Option<String>,
+    quiet: bool,
 ) -> Result<()> {
     use crate::{
         brain::{agent::AgentService, tools::registry::ToolRegistry},
@@ -763,18 +842,21 @@ pub(crate) async fn cmd_run(
     // Send through the full tool loop so headless runs actually execute tools
     // (#492). Plain send_message() is a single completion with no tool
     // execution — run/agent must invoke tools like every other surface.
-    println!("🤔 Processing...\n");
+    // --quiet: stdout is the payload — no processing line, no progress
+    // narration, no stats footer (machine callers parse stdout directly).
+    if !quiet {
+        println!("🤔 Processing...\n");
+    }
+    let progress = if quiet {
+        None
+    } else {
+        Some(crate::cli::headless_callbacks::cli_progress_callback())
+    };
     let response = agent_service
         .send_message_with_tools_and_callback(
-            session.id,
-            prompt,
-            None,
-            None,
+            session.id, prompt, None, None,
             None, // no stdin prompt for single-shot run; auto_approve_tools gates it
-            Some(crate::cli::headless_callbacks::cli_progress_callback()),
-            "cli",
-            None,
-            None,
+            progress, "cli", None, None,
         )
         .await?;
 
@@ -782,13 +864,15 @@ pub(crate) async fn cmd_run(
     match format {
         OutputFormat::Text => {
             println!("{}", response.content);
-            println!();
-            println!(
-                "📊 Tokens: {}",
-                response.usage.input_tokens + response.usage.output_tokens
-            );
-            println!("💰 Cost: ${:.6}", response.cost);
-            println!("🆔 Session: {short_id} (resume: opencrabs agent --session {short_id})");
+            if !quiet {
+                println!();
+                println!(
+                    "📊 Tokens: {}",
+                    response.usage.input_tokens + response.usage.output_tokens
+                );
+                println!("💰 Cost: ${:.6}", response.cost);
+                println!("🆔 Session: {short_id} (resume: opencrabs agent --session {short_id})");
+            }
         }
         OutputFormat::Json => {
             let output = serde_json::json!({
@@ -806,13 +890,15 @@ pub(crate) async fn cmd_run(
         OutputFormat::Markdown => {
             println!("# Response\n");
             println!("{}\n", response.content);
-            println!("---");
-            println!(
-                "**Tokens:** {}",
-                response.usage.input_tokens + response.usage.output_tokens
-            );
-            println!("**Cost:** ${:.6}", response.cost);
-            println!("**Session:** {short_id}");
+            if !quiet {
+                println!("---");
+                println!(
+                    "**Tokens:** {}",
+                    response.usage.input_tokens + response.usage.output_tokens
+                );
+                println!("**Cost:** ${:.6}", response.cost);
+                println!("**Session:** {short_id}");
+            }
         }
     }
 
@@ -881,8 +967,16 @@ pub(crate) async fn cmd_acp(config: &crate::config::Config, model: Option<String
         .with_subagent_manager(subagent_manager)
         .with_message_queue_callback(Some(queue_callback));
 
-    let session_service = SessionService::new(service_context);
-    let server = crate::acp::AcpServer::new(Arc::new(agent_service), session_service, model, steer);
+    let session_service = SessionService::new(service_context.clone());
+    let message_service = crate::services::MessageService::new(service_context);
+    let server = crate::acp::AcpServer::new(
+        Arc::new(agent_service),
+        session_service,
+        message_service,
+        model,
+        steer,
+        Arc::new(config.clone()),
+    );
     server.run().await
 }
 

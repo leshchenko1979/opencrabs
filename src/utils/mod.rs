@@ -5,6 +5,7 @@ pub mod command_label;
 pub(crate) mod config_reload_reason;
 pub mod config_watcher;
 pub mod cwd;
+pub mod directives;
 pub mod drop_agent;
 pub mod drop_landing;
 pub mod drop_transfer;
@@ -32,15 +33,19 @@ pub mod stop_intent;
 pub mod string;
 pub mod text_complete;
 mod tool_context;
+pub mod tree_view;
 
 pub use approval::{
     check_approval_policy, persist_auto_always_policy, persist_auto_session_policy,
 };
+pub use directives::extract_leaked_suggestions;
 pub use file_extract::{FileContent, classify_file, inject_file_content, process_file_with_vision};
 pub use image::{
     ImageTarget, LocalImage, LocalImageFailure, LocalImageFailureReason, LocalImageScan,
     append_failure_notice, extract_img_markers, extract_local_images, extract_react_marker,
     extract_react_marker_lenient, extract_vid_markers, failure_notice, strip_image_references,
+    extract_img_markers, extract_react_marker, extract_react_marker_lenient, extract_vid_markers,
+    strip_invalid_react_markers,
 };
 pub use image_fetch::resolve_remote_images;
 pub use prompt_analyzer::PromptAnalyzer;
