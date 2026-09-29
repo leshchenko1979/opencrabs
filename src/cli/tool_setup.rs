@@ -128,6 +128,9 @@ pub(crate) fn register_core_agent_tools(
     // Task wait — block on a detached run until a line matches or it finishes (#692)
     tool_registry.register(Arc::new(
         crate::brain::tools::task_wait::TaskWaitTool::new(),
+    ));
+    // Task output — read a detached run's capture mid-run or after it finishes (#692)
+    tool_registry.register(Arc::new(
         crate::brain::tools::task_output::TaskOutputTool::new(),
     ));
     // Config management (read/write config.toml, commands.toml)
