@@ -5413,9 +5413,31 @@ impl AgentService {
                 // for forensics, so #1423's fabricated-table shape trades a
                 // silent discard for a visible delivery with a trail.
                 let structured_report = super::phantom::is_structured_report(&iteration_text);
+                // #541: `option_surface_halt_seen` is the arm that keeps a
+                // post-halt sign-off alive. Halting on the options surface is a
+                // TURN-STRUCTURE fact — the halt arms `break` the tool loop, so
+                // the next iteration is the model's sign-off. Eligibility is
+                // decided from PROSE, and `has_forward_intent_post_success`
+                // matches a sign-off narrating what happens next ("pick A or
+                // B"), so a turn with thirty completed tool calls still reads as
+                // phantom-eligible and the sign-off was discarded before the
+                // user saw it. Measured 09-24..09-28: 218 halts, 115 kills, 30
+                // of them within 120 s of the halt, 79 of 115 on
+                // `intent_no_tools` alone.
+                //
+                // Before this the flag was read only inside `if
+                // !phantom_eligible` — and this predicate requires
+                // `phantom_eligible`, so the two were mutually exclusive by
+                // construction and the #31 exemption could never fire on the
+                // one iteration it was written to describe.
+                //
+                // Deliberately NOT gating `phantom_eligible` itself: the phantom
+                // block is the loop's termination mechanism (#746), and
+                // `max_tool_iterations == 0` means it is also a bound.
                 let kill = phantom_retries_used < MAX_PHANTOM_RETRIES
                     && phantom_detections_total < MAX_PHANTOM_DETECTIONS_TOTAL
                     && phantom_eligible
+                    && !option_surface_halt_seen
                     && !fired_branches.is_empty();
                 if kill && structured_report {
                     tracing::warn!(

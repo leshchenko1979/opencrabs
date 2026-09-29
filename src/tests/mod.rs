@@ -382,6 +382,7 @@ pub mod pending_request_thread_test;
 pub mod pending_resume_no_reinsert_test;
 pub mod phantom_generic_intent_test;
 pub mod phantom_going_to_test;
+pub mod phantom_halt_exemption_test;
 pub mod phantom_issue_action_test;
 pub mod phantom_null_effect_test;
 pub mod phantom_oven_claim_test;
