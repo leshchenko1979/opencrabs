@@ -23,6 +23,10 @@ pub mod plan_mode;
 pub mod prompt_analyzer;
 pub mod provider_pair;
 pub mod providers;
+/// Pseudo-terminal allocation (#692). Unix-only: it is built on
+/// `posix_openpt`/`grantpt`/`unlockpt`/`ptsname_r`.
+#[cfg(unix)]
+pub mod pty;
 pub mod retry;
 pub mod sanitize;
 pub mod shell;
