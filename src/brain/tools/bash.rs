@@ -936,7 +936,7 @@ impl Tool for BashTool {
                             ),
                         };
                         return Ok(ToolResult::success(format!(
-                            "Still running {waited} — handed to the background manager instead of being killed: {label}\n\nrun id: {id}{gid_line}\nstdout: {out}\nstderr: {err}\n\nIt keeps running, and I'll be told when it finishes.\nTo watch it from here: task_wait with the run id (give a pattern and it returns the moment a matching line appears, or omit one to wait for it to finish). To read what it has said so far: read_file on the two paths above. {stop} tasks_list shows every run in this session.",
+                            "Still running {waited} — handed to the background manager instead of being killed: {label}\n\nrun id: {id}{gid_line}\nstdout: {out}\nstderr: {err}\n\nIt keeps running, and I'll be told when it finishes.\nTo watch it from here: task_wait with the run id (give a pattern and it returns the moment a matching line appears, or omit one to wait for it to finish). To read what it has said so far, live: task_output with the run id (the two paths above are its captures, if you would rather read them directly). {stop} tasks_list shows every run in this session.",
                             out = output_out.display(),
                             err = output_err.display(),
                         )));
