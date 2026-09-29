@@ -116,6 +116,86 @@ pub(crate) fn mentions_other_bot(text: &str, our_username: Option<&str>) -> bool
     })
 }
 
+/// True when `kind` is a chat-SERVICE notice rather than content someone sent.
+///
+/// Telegram records the bot as the sender of these by construction: whoever
+/// creates a forum topic, pins a message, or changes the member list is
+/// recorded as the author. So the sender id cannot distinguish "the bot spoke"
+/// from "the chat service notified us".
+///
+/// **The exclusions are chat-service kinds; everything else is content the bot
+/// could have sent.** That distinction is the `#661` fix. The predecessor shape
+/// (`#527`, `457ff4ffc`) accepted only `MessageKind::Common`, reasoning that
+/// "anything Telegram adds later is simply not `Common`, so it never counts as
+/// the bot speaking". That invariant held for service kinds and silently broke
+/// for CONTENT: `sendRichMessage` is Bot API 10.1 with no teloxide binding, so a
+/// rich-rendered bot message carries `rich_message` and no key any `MediaKind`
+/// variant accepts; the untagged `MessageKind` parse falls through `Common` to
+/// `Empty {}`, and every reply to a rich-rendered bot message was rejected as
+/// "not directed at the bot" - silently dropping user replies for four days
+/// before it was reported.
+///
+/// **No wildcard arm, deliberately.** The `match` is exhaustive by the
+/// compiler, so a teloxide bump that adds a variant fails the BUILD until
+/// someone classifies it. Without that, a new variant lands in a catch-all and
+/// this list rots in exactly the way the `Common` test did.
+fn is_chat_service_notice(kind: &MessageKind) -> bool {
+    match kind {
+        // The bot spoke, or sent something the typed parse cannot name.
+        // `Empty {}` is where an unnameable rich payload lands (#661) and must
+        // count as content, NOT as a service notice.
+        MessageKind::Common(_) | MessageKind::Empty {} => false,
+
+        // Content-bearing named variants: the bot could have sent these.
+        MessageKind::ChatShared(_)
+        | MessageKind::UsersShared(_)
+        | MessageKind::Invoice(_)
+        | MessageKind::SuccessfulPayment(_)
+        | MessageKind::RefundedPayment(_)
+        | MessageKind::PassportData(_)
+        | MessageKind::Dice(_) => false,
+
+        // Chat-service notices: bot-authored by construction, so replying to
+        // one is not addressing the bot (#527).
+        MessageKind::NewChatMembers(_)
+        | MessageKind::LeftChatMember(_)
+        | MessageKind::NewChatTitle(_)
+        | MessageKind::NewChatPhoto(_)
+        | MessageKind::DeleteChatPhoto(_)
+        | MessageKind::GroupChatCreated(_)
+        | MessageKind::SupergroupChatCreated(_)
+        | MessageKind::ChannelChatCreated(_)
+        | MessageKind::MessageAutoDeleteTimerChanged(_)
+        | MessageKind::Pinned(_)
+        | MessageKind::ConnectedWebsite(_)
+        | MessageKind::WriteAccessAllowed(_)
+        | MessageKind::ProximityAlertTriggered(_)
+        | MessageKind::ChatBoostAdded(_)
+        | MessageKind::ChatBackground(_)
+        | MessageKind::ChecklistTasksDone(_)
+        | MessageKind::ChecklistTasksAdded(_)
+        | MessageKind::DirectMessagePriceChanged(_)
+        | MessageKind::ForumTopicCreated(_)
+        | MessageKind::ForumTopicEdited(_)
+        | MessageKind::ForumTopicClosed(_)
+        | MessageKind::ForumTopicReopened(_)
+        | MessageKind::GeneralForumTopicHidden(_)
+        | MessageKind::GeneralForumTopicUnhidden(_)
+        | MessageKind::Giveaway(_)
+        | MessageKind::GiveawayCompleted(_)
+        | MessageKind::GiveawayCreated(_)
+        | MessageKind::GiveawayWinners(_)
+        | MessageKind::PaidMessagePriceChanged(_)
+        | MessageKind::GiftInfo(_)
+        | MessageKind::UniqueGiftInfo(_)
+        | MessageKind::VideoChatScheduled(_)
+        | MessageKind::VideoChatStarted(_)
+        | MessageKind::VideoChatEnded(_)
+        | MessageKind::VideoChatParticipantsInvited(_)
+        | MessageKind::WebAppData(_) => true,
+    }
+}
+
 /// True when `msg` replies to a message the bot sent AS AN INTERLOCUTOR.
 ///
 /// A reply to the bot is one way of addressing it - but not every bot-authored
@@ -128,10 +208,11 @@ pub(crate) fn mentions_other_bot(text: &str, our_username: Option<&str>) -> bool
 /// set for - any member replying to the topic root gets an answer they never
 /// asked for.
 ///
-/// So the replied-to message must be a real (common) message. Testing the kind
-/// rather than enumerating service kinds is exhaustive by construction and
-/// cannot drift: anything Telegram adds later is simply not `Common`, so it
-/// never counts as the bot speaking.
+/// So the replied-to message must be one the bot sent as CONTENT. The test is
+/// therefore on chat-service kinds rather than on `Common`: the service set is
+/// closed and enumerable, while content is open-ended, and a bot message whose
+/// type the typed parse cannot name is still content the bot sent (#661). See
+/// `is_chat_service_notice` for the exclusions and why they are compiler-checked.
 ///
 /// Shared by all three gate paths (ACL reply, `respond_to = mention`,
 /// `respond_to = auto`) so they cannot drift apart again.
@@ -141,7 +222,7 @@ pub(crate) fn replied_to_bot_as_interlocutor(msg: &Message, bot_uid: Option<i64>
             .from
             .as_ref()
             .is_some_and(|u| bot_uid.is_some_and(|bid| u.id.0 as i64 == bid));
-        from_bot && matches!(reply.kind, MessageKind::Common(_))
+        from_bot && !is_chat_service_notice(&reply.kind)
     })
 }
 

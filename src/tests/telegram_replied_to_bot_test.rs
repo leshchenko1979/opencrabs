@@ -12,12 +12,23 @@
 //! so these tests exercise the same types the handler receives off the wire
 //! rather than a hand-built struct that could drift from the wire shape.
 //!
-//! Negative half: the two `!asserts` on service notices are the cases that FAIL
-//! on the pre-fix tree (an unguarded sender-id comparison returns `true` for
-//! both), so the tests discriminate rather than merely pass.
+//! Both halves discriminate, and they fail on DIFFERENT trees — that is what
+//! makes this file a regression guard rather than a passing suite:
+//!
+//! * **Negative half** — the two `!asserts` on service notices FAIL on the
+//!   **pre-`#527` tree**: an unguarded sender-id comparison returns `true` for
+//!   a reply to the topic root.
+//! * **Positive half** — the rich-message and dice cases FAIL on the **`#527`
+//!   tree** (`457ff4ffc`): its `matches!(kind, MessageKind::Common(_))` test
+//!   returns `false` for a rich-rendered bot message, which is the `#661`
+//!   regression. They pass again once the kind test is inverted.
+//!
+//! So neither direction can be satisfied by reverting the other: the fix must
+//! accept content the typed parse cannot name (#661) WITHOUT re-accepting
+//! service notices (#527).
 
 use crate::channels::telegram::handler::replied_to_bot_as_interlocutor;
-use teloxide::types::{Message, Update, UpdateKind};
+use teloxide::types::{Message, MessageKind, Update, UpdateKind};
 
 /// The bot that owns the topic in the report.
 const BOT_ID: i64 = 7357853620;
@@ -149,4 +160,77 @@ fn a_message_with_no_reply_does_not_address_the_bot() {
         }
     }));
     assert!(!replied_to_bot_as_interlocutor(&m, Some(BOT_ID)));
+}
+
+/// `#661`: the bot's reply went out via `sendRichMessage`, which is Bot API 10.1
+/// and has NO teloxide 0.17 binding — the daemon calls it over raw HTTP and
+/// Telegram normalises the source into `rich_message.blocks` server-side. So the
+/// wire message carries `rich_message` and no `text`/media key.
+///
+/// That payload matches no `MediaKind` variant (each demands its own key), so
+/// `MessageKind::Common` fails to deserialize and the untagged enum settles on
+/// its LAST variant, `Empty {}`. `#527` rejected `Empty` outright, so every
+/// reply to a rich-rendered bot message read as "not directed at the bot" and
+/// the reply was silently dropped.
+#[test]
+fn a_reply_to_a_rich_rendered_bot_message_addresses_the_bot() {
+    // Official Bot API rich shape: `rich_message.blocks`, and no `text` field.
+    let outer = member_reply(serde_json::json!({
+        "message_id": 7931,
+        "message_thread_id": TOPIC_ROOT_ID,
+        "date": 1758635770,
+        "chat": chat(),
+        "from": bot(),
+        "rich_message": { "blocks": [
+            { "type": "paragraph", "text": "Deploy finished: all green" }
+        ]},
+    }));
+
+    // Pin the MECHANISM, not merely the outcome. If a future teloxide gains a
+    // binding for rich messages the payload lands elsewhere and this assertion
+    // says so, rather than letting the predicate pass for an unknown reason.
+    let landed = outer.reply_to_message().expect("reply target is present");
+    assert!(
+        matches!(&landed.kind, MessageKind::Empty {}),
+        "a rich payload must land on Empty {{}} — no MediaKind variant accepts \
+         `rich_message`, so the untagged parse falls through Common; landed on {:?}",
+        landed.kind
+    );
+
+    assert!(
+        replied_to_bot_as_interlocutor(&outer, Some(BOT_ID)),
+        "#661: a reply to a rich-rendered bot message addresses the bot; the \
+         #527 tree returns false here, which is the regression"
+    );
+}
+
+/// The wider class `#661` closes: `Dice`, `Invoice`, `SuccessfulPayment` and
+/// `PassportData` are NAMED variants, not `Common`, so the `#527` test rejected
+/// them too. No `sendDice` sender exists in this tree yet, so the case is
+/// unreachable live today — it is pinned because the predicate must classify by
+/// what a message IS, not by whether the typed parse happened to name it.
+#[test]
+fn a_reply_to_a_bot_dice_message_addresses_the_bot() {
+    let outer = member_reply(serde_json::json!({
+        "message_id": 7933,
+        "message_thread_id": TOPIC_ROOT_ID,
+        "date": 1758635772,
+        "chat": chat(),
+        "from": bot(),
+        "dice": {"emoji": "🎲", "value": 4},
+    }));
+
+    // The named variant, unlike the rich payload, IS representable — so this
+    // case pins the other half of the class rather than repeating the first.
+    let landed = outer.reply_to_message().expect("reply target is present");
+    assert!(
+        matches!(&landed.kind, MessageKind::Dice(_)),
+        "a `dice` payload must land on MessageKind::Dice, not Empty; landed on {:?}",
+        landed.kind
+    );
+
+    assert!(
+        replied_to_bot_as_interlocutor(&outer, Some(BOT_ID)),
+        "a bot-authored named content variant is the bot speaking, not a service notice"
+    );
 }
