@@ -46,10 +46,12 @@ pub use approval::{
 pub use directives::extract_leaked_suggestions;
 pub use file_extract::{FileContent, classify_file, inject_file_content, process_file_with_vision};
 pub use image::{
-    ImageTarget, LocalImage, LocalImageFailure, LocalImageFailureReason, LocalImageScan,
-    append_failure_notice, extract_img_markers, extract_local_images, extract_react_marker,
-    extract_react_marker_lenient, extract_vid_markers, failure_notice, strip_image_references,
-    strip_invalid_react_markers,
+    IMG_ID_PREFIX, ImageTarget, LocalImage, LocalImageFailure, LocalImageFailureReason,
+    LocalImageScan, LocalVideo, LocalVideoRewrite, LocalVideoScan, ResolvedVideoRef, VID_ID_PREFIX,
+    append_failure_notice, extract_img_markers, extract_local_images, extract_local_videos,
+    extract_react_marker, extract_react_marker_lenient, extract_vid_markers, failure_notice,
+    rewrite_local_videos, strip_image_references, strip_invalid_react_markers,
+    validate_local_video,
 };
 pub use image_fetch::resolve_remote_images;
 pub use prompt_analyzer::PromptAnalyzer;

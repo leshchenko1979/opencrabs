@@ -11,7 +11,7 @@ pub fn extract_img_markers(text: &str) -> (String, Vec<String>) {
 /// bot replies before display (the agent shouldn't normally echo it back, but
 /// strip defensively so a leaking marker never lands in front of the user).
 pub fn extract_vid_markers(text: &str) -> (String, Vec<String>) {
-    extract_markers_with_prefix(text, "<<VID:")
+    extract_markers_with_prefix(text, VID_PREFIX)
 }
 
 /// Extract `<<react:emoji>>` directive from text.
@@ -370,7 +370,34 @@ use std::path::{Path, PathBuf};
 /// Marker prefix for the proprietary image form.
 const IMG_PREFIX: &str = "<<IMG:";
 
-/// Why a local image candidate could not become an attachment.
+/// Marker prefix for the proprietary video form (#465) — one home for the
+/// literal, so the bare extractor above and the validated video scanner below
+/// cannot drift apart on what a video marker is.
+const VID_PREFIX: &str = "<<VID:";
+
+/// The media-id prefix the image family gives a rewritten reference: the
+/// `imgN` in `tg://photo?id=imgN`.
+///
+/// Named here rather than spelled at the call sites because the rich request's
+/// `media` entries are matched to references BY ID (`rich/table.rs`), so this
+/// prefix and [`VID_ID_PREFIX`] must never be able to produce the same id
+/// inside one message — a collision would bind a reference to the wrong entry.
+/// Two distinct literals in one place is the whole mitigation.
+pub const IMG_ID_PREFIX: &str = "img";
+
+/// The media-id prefix the video family gives a rewritten reference: the
+/// `vidN` in `tg://video?id=vidN`. See [`IMG_ID_PREFIX`] for why the two live
+/// side by side.
+pub const VID_ID_PREFIX: &str = "vid";
+
+/// Why a local media candidate could not become an attachment.
+///
+/// One enum for both families: the reasons a video cannot be delivered are the
+/// ones listed here (a missing path, a directory, an empty file, an unreadable
+/// file), so a second near-identical enum would be a second home for the same
+/// question. The image-only variants — `UnsupportedFormat`, `DownloadFailed`,
+/// `TooLarge`, `TooMany`, `BadUrl` — are never emitted for video: there is no
+/// container gate on the video path and no remote fetch arm to fail (#465).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalImageFailureReason {
     /// No filesystem entry at the resolved path.
@@ -1105,4 +1132,375 @@ pub fn append_failure_notice(body: &str, failures: &[LocalImageFailure]) -> Stri
             }
         }
     }
+}
+
+// ── Local video extraction (#465) ─────────────────────────────────────────
+//
+// The video family is the image family's sibling, deliberately. A reply can
+// carry a video in the same two forms (`<<VID:path>>` and the markdown
+// reference), it resolves against the same session working directory, and it
+// feeds the same two consumers: a scan for the call sites that only sanitise
+// text, and a validated rewrite for the rich media plane.
+//
+// Before #465 the marker had a parser and no delivery. `extract_vid_markers`
+// returned bare paths that every caller discarded, and on Telegram the marker
+// was not even stripped — `strip_image_references` reads only `<<IMG:` — so a
+// `<<VID:…>>` in a reply shipped to the user as literal text while the video
+// never arrived.
+//
+// Two rules are INHERITED from the image scanner rather than re-decided here,
+// so one question keeps one home:
+//   * the MARKER form has no code-span guard — a marker is machine syntax,
+//     never prose (pinned for images by
+//     `img_marker_inside_a_code_span_is_still_extracted`);
+//   * the MARKDOWN form does — a fenced or backticked reference stays
+//     byte-identical, because it may be documentation rather than a live
+//     reference.
+//
+// One rule genuinely differs, and it is the family's declared non-goal: there
+// is NO remote arm. A remote video would need a fetch step, a size policy and a
+// container probe this plane does not have, so a remote target is left in the
+// text as written — deleting a link nobody replaces is the #286 loss.
+
+/// A resolved local video together with the markdown title that captioned it.
+///
+/// Path and caption travel as ONE value for the reason [`LocalImage`] states:
+/// the title belongs to the video written above it, and parallel vectors would
+/// desync the first time a candidate is dropped from one and not the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalVideo {
+    /// Absolute path to the video on disk.
+    pub path: PathBuf,
+    /// The markdown title — `![alt](target "title")` — to ship as the media
+    /// caption. `None` when the reference carried no title, and always `None`
+    /// for the marker form, which has no title syntax.
+    pub caption: Option<String>,
+}
+
+/// Result of scanning a reply for video references.
+///
+/// There is no `remote` field, unlike [`LocalImageScan`]: this plane has no
+/// fetch step, so a remote video reference is left in the text rather than
+/// recorded as awaited (the non-goal above).
+#[derive(Debug, Clone, Default)]
+pub struct LocalVideoScan {
+    /// Reply text with every live local video reference removed. Remote targets
+    /// and markdown references inside code spans are left untouched.
+    pub text: String,
+    /// Resolved and validated local videos, in order of appearance.
+    pub attachments: Vec<LocalVideo>,
+    /// Rejected local candidates, in order of appearance.
+    pub failures: Vec<LocalImageFailure>,
+}
+
+/// One resolved video reference and the media id assigned to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedVideoRef {
+    /// The id the rewritten reference points at: `tg://video?id=<id>`.
+    pub id: String,
+    /// The validated video, path and caption bound in one value as everywhere
+    /// else in this module.
+    pub video: LocalVideo,
+}
+
+/// A text prepared for the rich media plane's video half (#465).
+///
+/// The same two-buffer contract as [`LocalImageRewrite`], and for the same
+/// reason: one walk decides each reference once, so `rich` and `stripped`
+/// cannot disagree about which references were videos.
+#[derive(Debug, Clone, Default)]
+pub struct LocalVideoRewrite {
+    /// Input with every resolvable local reference replaced IN PLACE by
+    /// `![<alt>](tg://video?id=<prefix><n>)`. Refs inside code spans, remote
+    /// targets and existing Telegram media refs are left byte-identical. The
+    /// id prefix is passed by the caller (`vid` at the delivery site) so the
+    /// video namespace cannot collide with the image one inside a single
+    /// message's `media` array, where entries are matched to references BY ID.
+    pub rich: String,
+    /// Input with every resolvable local reference removed — the shape the
+    /// strip path produces, for the fold path and for the HTML fallback, which
+    /// has no media array and would otherwise ship a `tg://` reference as dead
+    /// visible markdown.
+    pub stripped: String,
+    /// Resolved videos in order of appearance, with the id each got.
+    pub entries: Vec<ResolvedVideoRef>,
+    /// Rejected candidates, in order of appearance.
+    pub failures: Vec<LocalImageFailure>,
+}
+
+/// The markdown form's ownership test: ours only when the target resolves to a
+/// file whose leading bytes are NOT a supported image.
+///
+/// A markdown reference is the one form the image family also reads, so exactly
+/// one family must claim each reference or one file is judged twice and
+/// delivered in the wrong plane. The partition is by CONTENT, not by extension
+/// — an extension is a claim the bytes may not honour.
+///
+/// The unreadable/absent case answers `false` on purpose, which is the stricter
+/// direction than the marker form takes: a missing target must stay the image
+/// family's to report, or one dead reference would produce two failure notices.
+/// A marker is read by nobody else, so it is always ours (see
+/// [`record_video_candidate`]).
+fn markdown_target_is_video(path: &Path) -> bool {
+    match std::fs::File::open(path) {
+        Ok(mut file) => {
+            let mut head = [0u8; 12];
+            let read = std::io::Read::read(&mut file, &mut head).unwrap_or(0);
+            !is_supported_image(&head[..read])
+        }
+        Err(_) => false,
+    }
+}
+
+/// Validate a resolved local video candidate: it must exist, be a regular file,
+/// hold at least one byte, and be openable.
+///
+/// There is deliberately NO container gate here, where [`validate_local_image`]
+/// has a format gate. A video's container decides WHICH send arm it takes — a
+/// playable MPEG4 inside the ceiling goes as `sendVideo` and anything else as a
+/// document (`telegram_video_media_kind`, D3) — never whether it can be
+/// delivered at all. Rejecting an unplayable container here would delete a
+/// referenced file from the reply and deliver nothing, which is the #286 loss;
+/// the container is probed at the send site, where the arm is chosen.
+pub fn validate_local_video(path: &Path) -> Result<(), LocalImageFailureReason> {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LocalImageFailureReason::NotFound);
+        }
+        Err(_) => return Err(LocalImageFailureReason::Unreadable),
+    };
+    if !meta.is_file() {
+        return Err(LocalImageFailureReason::NotAFile);
+    }
+    if meta.len() == 0 {
+        return Err(LocalImageFailureReason::Empty);
+    }
+    std::fs::File::open(path).map_err(|_| LocalImageFailureReason::Unreadable)?;
+    Ok(())
+}
+
+/// File one parsed video reference into the scan accumulators. Returns `true`
+/// when the reference was consumed and must leave the reply text.
+///
+/// `is_marker` carries the family's ownership split. A marker (`<<VID:…>>`) is
+/// video machine syntax that no other reader parses, so it is always ours: it
+/// leaves the text whether it resolves or not, and an unresolvable one is
+/// reported rather than shipped as a bare directive. A markdown reference is
+/// contested with the image family, so it is ours only when
+/// [`markdown_target_is_video`] says so — otherwise it stays verbatim for that
+/// family, or as the prose it may simply be.
+fn record_video_candidate(
+    raw: String,
+    caption: Option<String>,
+    base_dir: Option<&Path>,
+    is_marker: bool,
+    scan: &mut LocalVideoScan,
+) -> bool {
+    match classify_image_target(&raw, base_dir) {
+        ImageTarget::Local(path) => {
+            if !is_marker && !markdown_target_is_video(&path) {
+                return false;
+            }
+            match validate_local_video(&path) {
+                Ok(()) => scan.attachments.push(LocalVideo { path, caption }),
+                Err(reason) => scan.failures.push(LocalImageFailure {
+                    raw,
+                    resolved: Some(path),
+                    reason,
+                }),
+            }
+            true
+        }
+        // No remote arm (#465 non-goal): leaving the target in the text keeps
+        // the link the user would otherwise lose to a deletion nobody replaces.
+        // A `tg://`/`attach://` ref is resolved by Telegram against the rich
+        // request's media array (#334), never against the filesystem.
+        ImageTarget::Remote(_) | ImageTarget::MediaRef(_) => false,
+        ImageTarget::Unresolved => {
+            // Markers only: a markdown reference with no base directory to
+            // resolve against stays verbatim, because it may be prose.
+            if is_marker {
+                scan.failures.push(LocalImageFailure {
+                    raw,
+                    resolved: None,
+                    reason: LocalImageFailureReason::NotFound,
+                });
+            }
+            is_marker
+        }
+    }
+}
+
+/// Scan a reply for local video references and hand back the text without them,
+/// the validated videos, and the rejected candidates.
+///
+/// Unlike the image family there is no strip-only twin: video has no remote
+/// arm, so a scan that collects attachments and a scan that only sanitises text
+/// are one operation. A strip-only call site uses `.text` and ignores
+/// `attachments` — the delivery path re-runs extraction on the final reply,
+/// exactly as [`strip_image_references`]'s own doc states.
+///
+/// `base_dir` is the session working directory. A relative target resolves
+/// against it; with no base directory a relative markdown target stays verbatim
+/// while `~`-prefixed, absolute and marked targets still resolve (#286).
+pub fn extract_local_videos(text: &str, base_dir: Option<&Path>) -> LocalVideoScan {
+    let regions = code_regions(text);
+    let mut scan = LocalVideoScan {
+        text: String::with_capacity(text.len()),
+        ..LocalVideoScan::default()
+    };
+    let mut i = 0;
+
+    while i < text.len() {
+        if text[i..].starts_with(VID_PREFIX)
+            && let Some((end, raw)) = parse_marker_at(text, i, VID_PREFIX)
+        {
+            // An empty marker is dropped without a failure, matching the image
+            // scanner: there is no path to report and nothing to deliver.
+            if raw.is_empty() || record_video_candidate(raw, None, base_dir, true, &mut scan) {
+                i = end;
+                continue;
+            }
+        }
+        if !regions[i]
+            && text[i..].starts_with("![")
+            && let Some((end, raw, caption)) = parse_markdown_image(text, i)
+            && record_video_candidate(raw, caption, base_dir, false, &mut scan)
+        {
+            i = end;
+            continue;
+        }
+        let ch = text[i..].chars().next().expect("i lies on a char boundary");
+        scan.text.push(ch);
+        i += ch.len_utf8();
+    }
+
+    scan.text = scan.text.trim().to_string();
+    scan
+}
+
+/// Walk state for [`rewrite_local_videos`], the video twin of [`Rewriter`],
+/// holding the per-reference policy so the walk stays a single readable loop.
+struct VideoRewriter<'a> {
+    base_dir: Option<&'a Path>,
+    id_prefix: &'a str,
+    already_delivered: &'a [PathBuf],
+    out: LocalVideoRewrite,
+}
+
+impl VideoRewriter<'_> {
+    /// File one parsed reference. Returns `true` when it was consumed and must
+    /// leave BOTH text buffers — the same split [`record_video_candidate`]
+    /// draws for the scan, so a reference verbatim in one is verbatim in all.
+    fn file(&mut self, raw: &str, alt: &str, caption: Option<String>, is_marker: bool) -> bool {
+        let ImageTarget::Local(path) = classify_image_target(raw, self.base_dir) else {
+            // Remote target (no fetch arm), Telegram media ref (resolved
+            // server-side, #334) or an unresolvable relative target: all three
+            // stay in the text as written.
+            return false;
+        };
+        if !is_marker && !markdown_target_is_video(&path) {
+            return false;
+        }
+        match validate_local_video(&path) {
+            Ok(()) => {
+                // Comparison is on the RESOLVED ABSOLUTE path, which is what
+                // `classify_image_target` returns, so two spellings of one file
+                // (`~/clip.mp4` and `/root/clip.mp4`) dedup correctly.
+                if self.already_delivered.contains(&path) {
+                    // The video is already in the chat. Consume the reference,
+                    // record nothing, report no failure: a delivered video is
+                    // not a lost one, and a second bubble for a video the
+                    // reader has would be noise.
+                    return true;
+                }
+                let id = format!("{}{}", self.id_prefix, self.out.entries.len());
+                let alt = if alt.trim().is_empty() { "video" } else { alt };
+                let title = rich_title(caption.as_deref());
+                self.out
+                    .rich
+                    .push_str(&format!("![{alt}](tg://video?id={id}{title})"));
+                self.out.entries.push(ResolvedVideoRef {
+                    id,
+                    video: LocalVideo { path, caption },
+                });
+            }
+            Err(reason) => self.out.failures.push(LocalImageFailure {
+                raw: raw.to_string(),
+                resolved: Some(path),
+                reason,
+            }),
+        }
+        true
+    }
+}
+
+/// Rewrite a reply for the rich media plane's video half (#465).
+///
+/// The sibling of [`rewrite_local_images`]: same walk, same `code_regions`
+/// guard on the markdown form, same classification, so a reference is judged by
+/// exactly one rule set no matter which family asks. What differs is the
+/// NAMESPACE — a resolved video becomes `![alt](tg://video?id=<prefix><n>)`
+/// rather than a `tg://photo?id=…` reference — because the rich request's media
+/// entry carries its own type and a video reference must point at a video
+/// entry. Reference and entry come out of ONE pass for the reason the orphan
+/// shield makes load-bearing: `neutralize_orphan_photo_refs` defuses a
+/// `tg://video?id=` whose id is absent from `media`, so a ref built by a
+/// different pass than its entry would degrade the video to a dead reference
+/// silently.
+///
+/// `already_delivered` is a snapshot of the paths this turn has already put in
+/// the chat. It is a plain slice rather than turn state so this module stays
+/// channel-agnostic.
+pub fn rewrite_local_videos(
+    text: &str,
+    base_dir: Option<&Path>,
+    id_prefix: &str,
+    already_delivered: &[PathBuf],
+) -> LocalVideoRewrite {
+    let regions = code_regions(text);
+    let mut rw = VideoRewriter {
+        base_dir,
+        id_prefix,
+        already_delivered,
+        out: LocalVideoRewrite {
+            rich: String::with_capacity(text.len()),
+            stripped: String::with_capacity(text.len()),
+            entries: Vec::new(),
+            failures: Vec::new(),
+        },
+    };
+    let mut i = 0;
+
+    while i < text.len() {
+        if text[i..].starts_with(VID_PREFIX)
+            && let Some((end, raw)) = parse_marker_at(text, i, VID_PREFIX)
+        {
+            if raw.is_empty() || rw.file(&raw, "", None, true) {
+                i = end;
+                continue;
+            }
+        }
+        if !regions[i]
+            && text[i..].starts_with("![")
+            && let Some((end, raw, caption)) = parse_markdown_image(text, i)
+        {
+            let alt = markdown_alt(text, i);
+            if rw.file(&raw, &alt, caption, false) {
+                i = end;
+                continue;
+            }
+            // Not consumed: fall through and copy the reference verbatim, one
+            // char at a time, exactly as the image rewriter does.
+        }
+        let ch = text[i..].chars().next().expect("i lies on a char boundary");
+        rw.out.rich.push(ch);
+        rw.out.stripped.push(ch);
+        i += ch.len_utf8();
+    }
+
+    rw.out.rich = rw.out.rich.trim().to_string();
+    rw.out.stripped = rw.out.stripped.trim().to_string();
+    rw.out
 }
