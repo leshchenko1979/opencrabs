@@ -342,6 +342,9 @@ fn review_clock_anchors_on_the_spawn_stamp() {
         state: WorkState::Running,
         progress: None,
         finish: None,
+        output_out: None,
+        output_err: None,
+        pid: None,
     };
     assert_eq!(
         base.elapsed_secs(),

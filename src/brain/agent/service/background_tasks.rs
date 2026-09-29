@@ -13,7 +13,6 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 use super::types::{BgTaskMeta, PushOrigin, QueuedUserMessage};
-use super::work_status::CommandPaths;
 
 /// Result of a finished background command.
 #[derive(Debug, Clone)]
@@ -84,7 +83,7 @@ pub struct BackgroundTaskManager {
     runs: Mutex<HashMap<String, RunHandle>>,
 }
 
-use super::work_status::{CommandExit, WorkStatus};
+use super::work_status::{CommandExit, CommandPaths, WorkStatus};
 
 impl BackgroundTaskManager {
     pub fn new() -> Self {
@@ -278,7 +277,7 @@ impl BackgroundTaskManager {
         cwd: PathBuf,
         label: String,
         command: String,
-        cmd: tokio::process::Command,
+        mut cmd: tokio::process::Command,
         grace: Option<std::time::Duration>,
     ) -> std::io::Result<Handover> {
         let started = std::time::Instant::now();

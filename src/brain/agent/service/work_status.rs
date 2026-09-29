@@ -760,6 +760,13 @@ pub fn migrate_legacy_dir(legacy: &Path) -> usize {
                 finish.error = old.error.clone();
                 finish
             }),
+            // A legacy record is an AGENT's, and agents have neither capture
+            // streams nor a process group (#692). `None`, not an empty string:
+            // an empty path reads as a path and fails at open time with an
+            // error indistinguishable from a swept run.
+            output_out: None,
+            output_err: None,
+            pid: None,
         };
         match status.write() {
             Ok(()) => {

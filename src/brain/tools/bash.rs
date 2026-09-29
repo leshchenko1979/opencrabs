@@ -843,6 +843,11 @@ impl Tool for BashTool {
             #[cfg(not(feature = "rtk"))]
             let execution_command = input.command.clone();
 
+            // The trait must be in scope HERE rather than in the async block
+            // that used to own the spawn: the child is now built outside it so
+            // the grace arm and the kill arm spawn from one Command.
+            use crate::utils::shell::PushShellCommand as _;
+
             // Build the child ONCE, so the grace arm and the kill arm spawn
             // from an identical command: same shell, same env, same setsid.
             let mut cmd = Command::new(shell);
