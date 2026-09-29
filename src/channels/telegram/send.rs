@@ -22,6 +22,7 @@ use teloxide::payloads::SendLocationSetters;
 use teloxide::payloads::SendMessageSetters;
 use teloxide::payloads::SendPhotoSetters;
 use teloxide::payloads::SendPollSetters;
+use teloxide::payloads::SendVideoSetters;
 use teloxide::payloads::SendVoiceSetters;
 use teloxide::prelude::Requester;
 use teloxide::requests::JsonRequest;
@@ -186,6 +187,35 @@ where
     }
 }
 
+/// `bot.send_video(chat_id, video)` with optional `message_thread_id` and
+/// caption (#465).
+///
+/// Completes the `*_in_thread` family for video the way `document_in_thread`
+/// did for documents (#1079): the tool arm used to build its own request and
+/// the media landed in General. `duration` / `width` / `height` are left unset
+/// deliberately — Telegram probes an uploaded file itself, so declaring them
+/// would only be a second source of truth that can disagree with the bytes.
+pub fn video_in_thread<C>(
+    bot: &Bot,
+    chat_id: C,
+    thread_id: Option<ThreadId>,
+    video: InputFile,
+    caption: Option<String>,
+) -> teloxide::requests::MultipartRequest<teloxide::payloads::SendVideo>
+where
+    C: Into<ChatId>,
+{
+    let req = bot.send_video(chat_id.into(), video);
+    let req = match caption {
+        Some(text) => req.caption(caption_html(&text)).parse_mode(ParseMode::Html),
+        None => req,
+    };
+    match thread_id {
+        Some(t) => req.message_thread_id(t),
+        None => req,
+    }
+}
+
 /// Telegram's upload ceiling for `sendPhoto` is 10 MB — a larger file is
 /// rejected outright, while `sendDocument` carries it up to 50 MB. The kind is
 /// therefore a property of the byte length, not of the file: the same picture
@@ -226,6 +256,109 @@ where
     match thread_id {
         Some(t) => req.message_thread_id(t),
         None => req,
+    }
+}
+
+/// Telegram's upload ceiling for `sendVideo` is 50 MB (Bot API, verified
+/// 2026-09-29 against <https://core.telegram.org/bots/api#sendvideo>), and the
+/// same doc carries a second constraint the photo pair has no analogue for:
+/// "Telegram clients support MPEG4 videos (other formats may be sent as
+/// Document)". So a video's kind is a property of `(byte length, container)`
+/// — the same file is a video when it is playable MP4 inside the ceiling, and
+/// a document when it is not (#465).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelegramVideoKind {
+    /// `sendVideo` — inline preview, inside the ceiling and in a container the
+    /// clients play.
+    Video,
+    /// `sendDocument` — no inline preview, but it arrives (with a play button
+    /// only if the container happens to be one clients recognise).
+    Document,
+}
+
+/// `sendVideo` upload ceiling in bytes (Telegram Bot API).
+pub const TELEGRAM_VIDEO_MAX_BYTES: u64 = 50 * 1024 * 1024;
+
+/// How many leading bytes `sniff_video_format` needs to classify a container.
+pub const VIDEO_FORMAT_HEAD_BYTES: usize = 64;
+
+/// The container a local video actually carries.
+///
+/// Sniffed from the file's own leading bytes rather than its filename
+/// extension, because an extension is a claim the bytes may not honour: a
+/// `.mp4` name over an AVI payload would take the video arm and settle as a
+/// bubble that never plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoFormat {
+    /// An ISO base-media container (an `ftyp` box) whose major brand is in the
+    /// MPEG-4 family Telegram's clients play.
+    Mpeg4,
+    /// Anything else — a different container, an unreadable file, or a brand
+    /// this sniffer does not recognise.
+    Other,
+}
+
+/// Box brands (bytes `8..12` of an `ftyp` box) that identify an MPEG-4 family
+/// file rather than a sibling ISO base-media container such as QuickTime
+/// (`qt  `) or a bare audio track (`M4A `).
+const MPEG4_FAMILY_BRANDS: [&[u8; 4]; 11] = [
+    b"isom", b"iso2", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"dash", b"M4V ",
+    b"mmp4",
+];
+
+/// Classify a video container from its leading bytes.
+///
+/// The instrument errs **restrictively**: a brand it does not recognise
+/// answers [`VideoFormat::Other`], which routes the file to the document arm.
+/// The failure it can therefore produce is a video that arrives without an
+/// inline preview; the failure it rules out is a bubble Telegram's clients
+/// will not play at all.
+pub fn sniff_video_format(head: &[u8]) -> VideoFormat {
+    // Walk box-aligned `ftyp` markers within the head: some writers emit a
+    // leading `free`/`wide` box before the type box, so the marker is not
+    // guaranteed to sit at offset 4.
+    let mut i = 4usize;
+    while i + 8 <= head.len() {
+        if &head[i..i + 4] == b"ftyp" {
+            let brand: &[u8] = &head[i + 4..i + 8];
+            let known = MPEG4_FAMILY_BRANDS
+                .iter()
+                .any(|b| b.as_slice() == brand);
+            return if known {
+                VideoFormat::Mpeg4
+            } else {
+                VideoFormat::Other
+            };
+        }
+        i += 1;
+    }
+    VideoFormat::Other
+}
+
+/// Read the leading bytes of `path` and classify its container. Any IO error
+/// answers [`VideoFormat::Other`] — the restrictive direction described on
+/// [`sniff_video_format`]: an unreadable or unrecognised file goes as a
+/// document rather than as a video that will not play.
+pub fn video_format_of_path(path: &std::path::Path) -> VideoFormat {
+    use std::io::Read;
+    let mut head = [0u8; VIDEO_FORMAT_HEAD_BYTES];
+    match std::fs::File::open(path).and_then(|mut f| f.read(&mut head)) {
+        Ok(n) => sniff_video_format(&head[..n]),
+        Err(_) => VideoFormat::Other,
+    }
+}
+
+/// Which send method a video of `len` bytes in `format` needs.
+///
+/// Past [`TELEGRAM_VIDEO_MAX_BYTES`] neither `sendVideo` nor `sendDocument`
+/// can carry the file, so the document arm is the one that reports the
+/// failure to the user rather than swallowing it (D3) — the kind stays a pure
+/// function of its inputs and the send site owns the reporting.
+pub fn telegram_video_media_kind(len: u64, format: VideoFormat) -> TelegramVideoKind {
+    if len <= TELEGRAM_VIDEO_MAX_BYTES && format == VideoFormat::Mpeg4 {
+        TelegramVideoKind::Video
+    } else {
+        TelegramVideoKind::Document
     }
 }
 

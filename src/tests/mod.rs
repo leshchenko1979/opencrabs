@@ -528,6 +528,8 @@ pub mod telegram_userbot_reconcile_test;
 pub mod telegram_userbot_runner_test;
 #[cfg(feature = "telegram-userbot")]
 pub mod telegram_userbot_session_test;
+#[cfg(feature = "telegram")]
+pub mod telegram_video_send_test;
 pub mod telegram_voice_thread_test;
 pub mod timeout_resolution_test;
 pub mod tool_search_child_registry_test;
