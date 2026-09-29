@@ -132,7 +132,7 @@ fn command_spawns_running_and_carries_its_kind() {
     // #1160 mid-run visibility: the file exists from spawn, in the shared
     // dir, reading as live work of the Command kind.
     isolate("command_spawn");
-    let s = WorkStatus::new_command("task-1", "sess-1", "cargo test", "cargo test --lib").unwrap();
+    let s = WorkStatus::new_command("task-1", "sess-1", "cargo test", "cargo test --lib", CommandPaths::none()).unwrap();
     assert_eq!(s.state, WorkState::Running);
     assert_eq!(s.kind, WorkKind::Command);
     assert!(s.finish.is_none(), "mid-run must be unfinished");
@@ -145,7 +145,7 @@ fn command_spawns_running_and_carries_its_kind() {
 #[test]
 fn command_finish_success_stamps_exit_info() {
     isolate("command_finish_ok");
-    WorkStatus::new_command("task-2", "sess-1", "cargo test", "cargo test --lib").unwrap();
+    WorkStatus::new_command("task-2", "sess-1", "cargo test", "cargo test --lib", CommandPaths::none()).unwrap();
     WorkStatus::finish_command(
         "task-2",
         "sess-1",
@@ -172,7 +172,7 @@ fn command_finish_success_stamps_exit_info() {
 #[test]
 fn command_finish_failure_reads_failed() {
     isolate("command_finish_err");
-    WorkStatus::new_command("task-3", "sess-1", "build", "make").unwrap();
+    WorkStatus::new_command("task-3", "sess-1", "build", "make", CommandPaths::none()).unwrap();
     WorkStatus::finish_command(
         "task-3",
         "sess-1",
@@ -223,7 +223,7 @@ fn interrupted_error_text_is_kind_aware() {
     isolate("interrupted_text");
     let mut agent = WorkStatus::new_agent("agt-i", "a", "sess-1", "p", None).unwrap();
     agent.mark_interrupted().unwrap();
-    let mut command = WorkStatus::new_command("cmd-i", "sess-1", "c", "sleep 9").unwrap();
+    let mut command = WorkStatus::new_command("cmd-i", "sess-1", "c", "sleep 9", CommandPaths::none()).unwrap();
     command.mark_interrupted().unwrap();
 
     assert_eq!(

@@ -4,7 +4,7 @@
 //! the file must carry the spawning session: without that binding the
 //! resumed result routes to the surface-less default and vanishes.
 
-use crate::brain::agent::service::work_status::{WorkKind, WorkState, WorkStatus};
+use crate::brain::agent::service::work_status::{CommandPaths, WorkKind, WorkState, WorkStatus};
 use uuid::Uuid;
 
 fn temp_status_dir(tag: &str) -> std::path::PathBuf {
@@ -90,7 +90,7 @@ fn lookup_skips_commands_and_terminal_agents() {
     let child = Uuid::new_v4();
 
     // A detached command sharing the session id must not look like an agent.
-    WorkStatus::new_command("cmd-1", &child.to_string(), "a command", "ls")
+    WorkStatus::new_command("cmd-1", &child.to_string(), "a command", "ls", CommandPaths::none())
         .expect("write command status");
     assert!(WorkStatus::find_agent_by_session(&child.to_string()).is_none());
 

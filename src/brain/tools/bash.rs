@@ -136,7 +136,7 @@ pub(crate) fn evaluate_blocklist(blocklist: &TomlBlocklist, command: &str) -> Op
 /// program either errors out cleanly or falls back to a non-TTY path
 /// (e.g. SSH consults `SSH_ASKPASS`). The TUI is never touched.
 #[cfg(unix)]
-fn detach_session_pre_exec(cmd: &mut Command) {
+pub(crate) fn detach_session_pre_exec(cmd: &mut Command) {
     unsafe {
         cmd.pre_exec(|| {
             if libc::setsid() == -1 {
@@ -148,7 +148,7 @@ fn detach_session_pre_exec(cmd: &mut Command) {
 }
 
 #[cfg(not(unix))]
-fn detach_session_pre_exec(_cmd: &mut Command) {
+pub(crate) fn detach_session_pre_exec(_cmd: &mut Command) {
     // No-op on Windows — the TTY-bleed problem doesn't apply (different
     // console model) and pre_exec is a Unix-only API.
 }
@@ -280,6 +280,17 @@ struct BashInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     background: Option<bool>,
 
+    /// Optional per-call grace in seconds before an inline run is handed to the
+    /// background manager instead of being killed (#692).
+    ///
+    /// `0` hands over immediately; a positive integer is the grace; absent
+    /// takes `agent.bash_detach_after_secs`. This is the per-call form of the
+    /// same lever as `timeout_secs`: an explicit `timeout_secs` is a statement
+    /// that the caller WANTS the deadline enforced, so that path still kills
+    /// rather than handing over.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detach_after_secs: Option<u64>,
+
     /// Optional: Maximum inline byte limit before truncation or disk spilling (default: 16000)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_bytes: Option<usize>,
@@ -343,6 +354,10 @@ impl Tool for BashTool {
                 "background": {
                     "type": "boolean",
                     "description": "Optional: Set to true to run the command in the background (detached), or false to force inline execution. If omitted, uses automatic heuristic detection."
+                },
+                "detach_after_secs": {
+                    "type": "integer",
+                    "description": "Optional: seconds an inline run may hold the turn before it is handed to the background manager instead of being killed. 0 detaches immediately. Omitted uses the configured default."
                 },
                 "max_output_bytes": {
                     "type": "integer",
@@ -828,47 +843,112 @@ impl Tool for BashTool {
             #[cfg(not(feature = "rtk"))]
             let execution_command = input.command.clone();
 
-            // Tree-kill anchor for the timeout arm (H-02).
-            let exec_child_pid = std::sync::atomic::AtomicU32::new(0);
-            let command_future = async {
-                use crate::utils::shell::PushShellCommand;
-                let mut cmd = Command::new(shell);
-                // Reap the child if this future is dropped. A timeout drops it, and
-                // tokio leaves the process running unless told otherwise (#1046).
-                cmd.kill_on_drop(true);
-                // Verbatim command line (H-05). This is the main execution path:
-                // every quoted command the model sends flows through here.
-                cmd.push_shell_command(shell_arg, &execution_command)
-                    .current_dir(&working_dir)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped());
-                apply_context_env(&mut cmd, context);
-                detach_session_pre_exec(&mut cmd);
-                let child = cmd.spawn()?;
-                exec_child_pid.store(
-                    child.id().unwrap_or(0),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                child.wait_with_output().await
-            };
+            // Build the child ONCE, so the grace arm and the kill arm spawn
+            // from an identical command: same shell, same env, same setsid.
+            let mut cmd = Command::new(shell);
+            // Reap the child if this future is dropped. A timeout drops it, and
+            // tokio leaves the process running unless told otherwise (#1046).
+            // The grace arm does NOT drop it — it moves the child into the
+            // continuation — so this reaper only fires on the kill arm.
+            cmd.kill_on_drop(true);
+            // Verbatim command line (H-05). This is the main execution path:
+            // every quoted command the model sends flows through here.
+            cmd.push_shell_command(shell_arg, &execution_command)
+                .current_dir(&working_dir)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            apply_context_env(&mut cmd, context);
+            detach_session_pre_exec(&mut cmd);
 
-            match timeout(Duration::from_secs(effective_timeout), command_future).await {
-                Ok(Ok(output)) => output,
-                Ok(Err(e)) => {
-                    return Ok(ToolResult::error(format!(
-                        "Command execution failed: {}",
-                        e
-                    )));
+            // Grace handover (#692). An inline run that would have been KILLED
+            // at its deadline is instead handed to the background manager and
+            // keeps running, with the turn returning its run id and both
+            // capture paths.
+            //
+            // Three deliberate exclusions, each because the alternative is
+            // worse than today's behaviour: sudo (password flow needs the
+            // inline tty handshake), an explicit `timeout_secs` (an explicit
+            // deadline IS an instruction to enforce it, so it still kills), and
+            // a `"never"` config (the operator's escape hatch).
+            let grace: Option<u64> = match input.detach_after_secs {
+                Some(v) => Some(v),
+                None => crate::config::Config::current().agent.bash_detach_after_secs,
+            };
+            let handover_manager = context
+                .background_manager
+                .clone()
+                .filter(|_| grace.is_some() && !is_sudo && input.timeout_secs.is_none())
+                .filter(|_| nesting_ok);
+
+            if let Some(mgr) = handover_manager {
+                let label =
+                    crate::brain::agent::service::background_tasks::short_label(&input.command);
+                match mgr
+                    .run_or_detach(
+                        context.session_id,
+                        working_dir.clone(),
+                        label.clone(),
+                        input.command.clone(),
+                        cmd,
+                        grace.map(Duration::from_secs),
+                    )
+                    .await
+                {
+                    Ok(crate::brain::agent::service::background_tasks::Handover::Inline(output)) => {
+                        output
+                    }
+                    Ok(crate::brain::agent::service::background_tasks::Handover::Detached {
+                        id,
+                        output_out,
+                        output_err,
+                    }) => {
+                        return Ok(ToolResult::success(format!(
+                            "Still running after {grace}s — handed to the background manager \
+                             instead of being killed: {label}\n\n                             run id: {id}\n                             stdout: {out}\n                             stderr: {err}\n\n                             It keeps running and I'll be told when it finishes. Read the \
+                             live output with read_file on the two paths above at any time, \
+                             or stop it with cancel_run using the run id.",
+                            grace = grace.unwrap_or(0),
+                            out = output_out.display(),
+                            err = output_err.display(),
+                        )));
+                    }
+                    Err(e) => {
+                        return Ok(ToolResult::error(format!(
+                            "Command could not be started: {e}"
+                        )));
+                    }
                 }
-                Err(_) => {
-                    // kill_on_drop reaped cmd.exe; cargo/cmake/clang-style
-                    // grandchildren survive it and keep holding file locks
-                    // (target/, .cargo cache) — sweep the tree (H-02).
-                    crate::utils::shell::kill_process_tree(
-                        exec_child_pid.load(std::sync::atomic::Ordering::Relaxed),
+            } else {
+                // Today's behaviour: the run holds the turn, and is killed at
+                // its deadline.
+                let exec_child_pid = std::sync::atomic::AtomicU32::new(0);
+                let command_future = async {
+                    let child = cmd.spawn()?;
+                    exec_child_pid.store(
+                        child.id().unwrap_or(0),
+                        std::sync::atomic::Ordering::Relaxed,
                     );
-                    return Err(ToolError::Timeout(effective_timeout));
+                    child.wait_with_output().await
+                };
+
+                match timeout(Duration::from_secs(effective_timeout), command_future).await {
+                    Ok(Ok(output)) => output,
+                    Ok(Err(e)) => {
+                        return Ok(ToolResult::error(format!(
+                            "Command execution failed: {}",
+                            e
+                        )));
+                    }
+                    Err(_) => {
+                        // kill_on_drop reaped cmd.exe; cargo/cmake/clang-style
+                        // grandchildren survive it and keep holding file locks
+                        // (target/, .cargo cache) — sweep the tree (H-02).
+                        crate::utils::shell::kill_process_tree(
+                            exec_child_pid.load(std::sync::atomic::Ordering::Relaxed),
+                        );
+                        return Err(ToolError::Timeout(effective_timeout));
+                    }
                 }
             }
         };

@@ -38,15 +38,26 @@ fn render_lists_both_systems_with_states_and_pointers() {
         status_file: Some("/tmp/subagents/agt-1.json".into()),
     }];
     let det = vec![DetachedRow {
+        id: "run-1".into(),
         label: "cargo test".into(),
         elapsed_secs: 42,
+        output_out: Some("/tmp/runs/run-1.out".into()),
+        output_err: Some("/tmp/runs/run-1.err".into()),
+        status_file: Some("/tmp/detached/run-1.json".into()),
     }];
     let out = render_tasks(&subs, &det);
     assert!(out.contains("Sub-agents (1)"), "was: {out}");
     assert!(out.contains("- agt-1 [research] running"), "was: {out}");
     assert!(out.contains("status file: /tmp/subagents/agt-1.json"));
     assert!(out.contains("Detached commands (1)"), "was: {out}");
-    assert!(out.contains("- cargo test (elapsed 42s)"), "was: {out}");
+    assert!(out.contains("- run-1 [cargo test] 42s"), "was: {out}");
+    // A row must carry the run's ADDRESS, not just its label: the id is the
+    // handle `task_output`/`task_wait`/`task_cancel` take, and the paths are
+    // where the live streams are. A label-only row left the model able to see
+    // that something ran and unable to look at or stop it (#692).
+    assert!(out.contains("stdout: /tmp/runs/run-1.out"), "was: {out}");
+    assert!(out.contains("stderr: /tmp/runs/run-1.err"), "was: {out}");
+    assert!(out.contains("status file: /tmp/detached/run-1.json"), "was: {out}");
 }
 
 /// The path `tasks_list` hands the model must be a file a writer really

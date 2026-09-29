@@ -9,7 +9,7 @@
 //! by construction.
 
 use crate::brain::agent::service::work_status::{
-    CommandExit, WorkState, WorkStatus, test_override,
+    CommandExit, CommandPaths, WorkState, WorkStatus, test_override,
 };
 
 /// Point the status dir at a throwaway temp dir for one test.
@@ -44,11 +44,11 @@ fn running_command_file_is_finalized_and_completed_one_is_spared() {
     let _guard = TempStatusDir::new();
 
     // A command killed by a restart: written Running, process now gone.
-    WorkStatus::new_command("stale-cmd", "sess-1", "gh run watch", "gh run watch 1")
+    WorkStatus::new_command("stale-cmd", "sess-1", "gh run watch", "gh run watch 1", CommandPaths::none())
         .expect("write running command");
 
     // A command that finished normally must be left untouched.
-    WorkStatus::new_command("done-cmd", "sess-2", "true", "true").expect("write command");
+    WorkStatus::new_command("done-cmd", "sess-2", "true", "true", CommandPaths::none()).expect("write command");
     WorkStatus::finish_command(
         "done-cmd",
         "sess-2",

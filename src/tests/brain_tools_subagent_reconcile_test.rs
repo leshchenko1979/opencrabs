@@ -4,7 +4,7 @@
 //! still `Pending`, `Running`, or `AwaitingInput` at startup belongs to an
 //! agent that no longer exists, and must stop reading as live.
 
-use crate::brain::agent::service::work_status::{self, WorkState, WorkStatus};
+use crate::brain::agent::service::work_status::{self, CommandPaths, WorkState, WorkStatus};
 use crate::brain::tools::subagent::reconcile::reconcile_orphaned_agents;
 use std::fs;
 
@@ -169,7 +169,7 @@ fn unparseable_files_do_not_abort_the_pass() {
 #[test]
 fn commands_are_not_reconciled_by_agent_pass() {
     isolate("commands");
-    WorkStatus::new_command("cmd-1", "test cmd", "sess-c", "cargo test").unwrap();
+    WorkStatus::new_command("cmd-1", "test cmd", "sess-c", "cargo test", CommandPaths::none()).unwrap();
     assert!(reconcile_orphaned_agents().is_empty());
 }
 

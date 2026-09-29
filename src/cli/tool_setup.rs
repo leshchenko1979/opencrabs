@@ -125,6 +125,10 @@ pub(crate) fn register_core_agent_tools(
     tool_registry.register(Arc::new(
         crate::brain::tools::tasks_list::TasksListTool::new(),
     ));
+    // Cancel run — signal a detached run's process group (#692)
+    tool_registry.register(Arc::new(
+        crate::brain::tools::cancel_run::CancelRunTool::new(),
+    ));
     // Config management (read/write config.toml, commands.toml)
     tool_registry.register(Arc::new(ConfigTool));
     // Slash command invocation (agent can call any slash command)

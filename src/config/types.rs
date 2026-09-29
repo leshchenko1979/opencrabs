@@ -1427,6 +1427,28 @@ pub struct AgentConfig {
     #[serde(default)]
     pub subagent_model: Option<String>,
 
+    /// How long an inline bash call holds the turn before its run is handed to
+    /// the background manager instead of being killed (#692).
+    ///
+    /// `"never"` restores today's behaviour — the run is killed at its deadline
+    /// and never handed over. `0` detaches immediately. A positive integer is
+    /// the grace in seconds, and an absent key takes the default. The three-way
+    /// shape exists because `0` cannot mean both "detach now" and "never detach";
+    /// see `default_bash_detach_after_secs` for why the default equals the
+    /// inline timeout rather than replacing it.
+    #[serde(
+        default = "default_bash_detach_after_secs",
+        deserialize_with = "deser_detach_after_compat"
+    )]
+    pub bash_detach_after_secs: Option<u64>,
+
+    /// Per-stream cap, in bytes, on a detached run's captured output (#692).
+    /// Past it the stream is still drained — a stopped reader blocks the child
+    /// on a full pipe — but no longer written, and the excess is reported as a
+    /// truncation rather than dropped silently.
+    #[serde(default = "default_run_output_cap_bytes")]
+    pub run_output_cap_bytes: u64,
+
     /// Provider to use while a plan is being drafted, between `/plan` and
     /// approval (#792). Unset means planning runs on whatever the session is
     /// already using, which is the default and a true no-op.
@@ -1743,6 +1765,66 @@ fn default_approval_policy() -> String {
     "auto-always".to_string()
 }
 
+/// How long an inline bash call holds the turn before the run is handed to the
+/// background manager (#692).
+///
+/// Equal to the inline `timeout_secs` default on purpose: at this instant the
+/// turn was going to end anyway, so detaching here costs no extra latency and
+/// converts a guaranteed kill into a surviving run. Raising it buys the agent
+/// more synchronous output at the price of a longer stall per long command;
+/// lowering it returns the turn sooner but sends more commands through the
+/// status-file path.
+fn default_bash_detach_after_secs() -> Option<u64> {
+    Some(120)
+}
+
+/// Parse `bash_detach_after_secs`, which is three-valued by design (#692):
+/// `"never"` (or `false`) kills the run at its deadline as before, `0` hands it
+/// over immediately, and a positive integer is the grace in seconds. TOML has
+/// no `Option`, and a bare `0` cannot carry both "detach now" and "never
+/// detach", so the sentinel is a word rather than a number.
+fn deser_detach_after_compat<'de, D>(d: D) -> std::result::Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+
+    let value: toml::Value = toml::Value::deserialize(d)?;
+    match &value {
+        toml::Value::Integer(n) if *n >= 0 => Ok(Some(*n as u64)),
+        toml::Value::Integer(n) => Err(serde::de::Error::custom(format!(
+            "bash_detach_after_secs: expected 0 or a positive integer, got {n}"
+        ))),
+        toml::Value::Boolean(false) => Ok(None),
+        toml::Value::Boolean(true) => Ok(default_bash_detach_after_secs()),
+        toml::Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "never" | "none" | "off" => Ok(None),
+            other => Err(serde::de::Error::custom(format!(
+                "bash_detach_after_secs: expected \"never\", 0, or a positive integer; got {other:?}"
+            ))),
+        },
+        _ => Err(serde::de::Error::custom(
+            "bash_detach_after_secs: expected \"never\", 0, or a positive integer",
+        )),
+    }
+}
+
+/// Per-stream cap on a detached run's captured output (#692).
+///
+/// The stream keeps being DRAINED past the cap — a reader that stops reading
+/// blocks the child on a full pipe — but stops being written, and the excess is
+/// recorded as a truncation rather than silently dropped.
+///
+/// 8 MiB, not the 32 MiB first proposed: measured 2026-09-28 the box had 15 GB
+/// free at 75 % used, and 32 MiB x 2 streams x ~230 runs would fill it. Real
+/// detached runs measured median 86 B and max 15.5 KB, so this is ~540x the
+/// observed maximum — but `cargo test --all-features` legitimately reaches a few
+/// MB, and truncating THAT is the one case that hurts, because those logs are
+/// read to find the failures.
+fn default_run_output_cap_bytes() -> u64 {
+    8_388_608
+}
+
 fn default_component_ttl_hours() -> f64 {
     24.0
 }
@@ -1807,6 +1889,8 @@ impl Default for AgentConfig {
             max_tokens: default_max_tokens(),
             subagent_provider: None,
             subagent_model: None,
+            bash_detach_after_secs: default_bash_detach_after_secs(),
+            run_output_cap_bytes: default_run_output_cap_bytes(),
             plan_provider: None,
             plan_model: None,
             execute_provider: None,

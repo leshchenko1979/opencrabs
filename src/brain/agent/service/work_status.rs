@@ -83,6 +83,61 @@ pub fn status_path(id: &str) -> PathBuf {
     status_dir().join(format!("{}.json", id))
 }
 
+/// Path to a run's captured stream (#692).
+///
+/// A sibling stem of the status file — same `id` — so every surface prints one
+/// handle for the whole run, while the FILE lives in `tmp/runs/` beside its
+/// peers rather than among the status JSON. Both streams exist from the moment
+/// the child is spawned: a reader that hits `ENOENT` cannot tell "nothing
+/// written yet" from "never existed", and the second reading is the one that
+/// gets mistaken for a dead run.
+///
+/// Captured separately rather than merged. The in-memory capture has always
+/// merged them (`CmdResult.output`), and merging into a file is lossier than
+/// merging at read time: once interleaved, the writer cannot be taken back
+/// apart. A reader wanting the historical merged view concatenates them, which
+/// is exactly what `CmdResult` does.
+pub fn command_output_path(id: &str, stderr: bool) -> PathBuf {
+    let ext = if stderr { "err" } else { "out" };
+    runs_dir().join(format!("{id}.{ext}"))
+}
+
+/// Directory holding captured run streams (#692).
+///
+/// Deliberately separate from [`status_dir`]: the status JSON is a few hundred
+/// bytes of metadata, while streams grow with the run's output and need their
+/// own retention. Keeping them together would put unbounded files under a
+/// directory the sweeper was never told about — the exact shape of the 183-file
+/// accumulation measured on #692.
+pub fn runs_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        if let Some(p) = test_override::get() {
+            return p;
+        }
+    }
+    crate::config::opencrabs_home().join("tmp").join("runs")
+}
+
+/// Ensure the stream directory exists.
+pub fn ensure_runs_dir() -> std::io::Result<()> {
+    let dir = runs_dir();
+    if !dir.exists() {
+        fs::create_dir_all(&dir)?;
+    }
+    Ok(())
+}
+
+/// Map an empty path string to `None` (#692).
+///
+/// A record that names no file is honest; one that names `""` reads as a path
+/// and fails at open time with an error indistinguishable from a missing run.
+/// Agent records have no stream paths, and pre-#692 command records have none
+/// either — both must be `None`, never an empty string.
+fn recorded_path(p: String) -> Option<String> {
+    if p.is_empty() { None } else { Some(p) }
+}
+
 // ── Status data types ────────────────────────────────────────────────
 
 /// What produced one unit of detached work.
@@ -189,6 +244,35 @@ pub struct CommandExit {
     pub output_bytes: usize,
 }
 
+/// Where a command run's live artifacts are, plus its pid (#692).
+///
+/// Bundled rather than passed as three more arguments for the same reason
+/// [`CommandExit`] is: it keeps the constructors under the clippy argument
+/// limit. Everything here is known at spawn, before the child has produced a
+/// byte — which is the point, because a reader that arrives mid-run must find
+/// the paths already recorded rather than wait for the run to finish and
+/// describe itself.
+#[derive(Debug, Clone, Default)]
+pub struct CommandPaths {
+    /// Absolute path of the run's captured stdout stream.
+    pub output_out: String,
+    /// Absolute path of the run's captured stderr stream.
+    pub output_err: String,
+    /// The spawned shell's pid, when the platform gave us one.
+    pub pid: Option<u32>,
+}
+
+impl CommandPaths {
+    /// No recorded artifacts.
+    ///
+    /// The honest shape for a record created before #692, or for a caller with
+    /// no streams to point at — an empty path would read as a path and fail at
+    /// open time with an error indistinguishable from a missing run.
+    pub fn none() -> Self {
+        Self::default()
+    }
+}
+
 fn finish_now() -> WorkFinish {
     WorkFinish {
         completed_at: now_rfc3339(),
@@ -228,6 +312,23 @@ pub struct WorkStatus {
     pub progress: Option<ProgressSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish: Option<WorkFinish>,
+    /// Absolute path of the run's captured stdout (#692). `None` for agents
+    /// and for records written before the field existed.
+    ///
+    /// The path is what makes a live run reachable: before it, a detached
+    /// command had a status file under a UUID the agent was never told, so
+    /// nothing could read the output while it was still being produced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_out: Option<String>,
+    /// Absolute path of the run's captured stderr (#692). Same contract as
+    /// [`Self::output_out`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_err: Option<String>,
+    /// The spawned shell's pid (#692), so a reader can tell a live run from a
+    /// dead one without a registry lookup — the registry is in-memory and does
+    /// not survive a restart, the status file does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
 }
 
 impl WorkStatus {
@@ -252,6 +353,9 @@ impl WorkStatus {
             state: WorkState::Pending,
             progress: None,
             finish: None,
+            output_out: None,
+            output_err: None,
+            pid: None,
         };
         status.write()?;
         Ok(status)
@@ -265,8 +369,14 @@ impl WorkStatus {
         session_id: &str,
         label: &str,
         command: &str,
+        paths: CommandPaths,
     ) -> std::io::Result<Self> {
         ensure_dir()?;
+        // The stream directory is created on the spawn path, not by the first
+        // reader, so the recorded paths are valid from the instant they are
+        // recorded. An absent file and an empty one are indistinguishable to a
+        // reader, and only one of them means "this run never existed" (#692).
+        ensure_runs_dir()?;
         let status = Self {
             id: id.to_string(),
             kind: WorkKind::Command,
@@ -277,6 +387,9 @@ impl WorkStatus {
             state: WorkState::Running,
             progress: None,
             finish: None,
+            output_out: recorded_path(paths.output_out),
+            output_err: recorded_path(paths.output_err),
+            pid: paths.pid,
             parent_session_id: None,
         };
         status.write()?;
@@ -302,6 +415,14 @@ impl WorkStatus {
             state: WorkState::Running,
             progress: None,
             finish: None,
+            // The spawn write may have failed (best-effort by design), and the
+            // stream paths are not recoverable from the exit information. Left
+            // `None` rather than guessed: a fabricated path that 404s is worse
+            // than an explicit absence, because the reader cannot tell it apart
+            // from a run whose files were swept (#692).
+            output_out: None,
+            output_err: None,
+            pid: None,
             parent_session_id: None,
         });
         status.state = if exit.success {
@@ -706,6 +827,47 @@ pub fn cleanup_stale(max_age: Duration) -> std::io::Result<(usize, usize)> {
         if should_delete {
             fs::remove_file(&path)?;
             removed += 1;
+        }
+    }
+
+    // Captured streams of finished runs (#692). Streams live in `runs_dir()`, a
+    // SIBLING of the status dir, so the loop above never sees them — and the
+    // temp purge deliberately does not recurse into subdirectories (see
+    // `logging::cleanup_old_temp_files`, which excludes `tmp/detached` for the
+    // same reason). Without this leg a stream would outlive its status file
+    // forever, which is the one file class in this feature that grows unbounded.
+    let runs = runs_dir();
+    if runs.exists() {
+        for entry in fs::read_dir(&runs)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            scanned += 1;
+
+            let run_id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+
+            // The status record is the authority on liveness. Never unlink a
+            // stream under a run that has not finished: a run writes
+            // continuously, and unlinking under it would silently truncate
+            // output the agent is still reading.
+            let live = fs::read_to_string(status_path(&run_id))
+                .ok()
+                .and_then(|data| serde_json::from_str::<WorkStatus>(&data).ok())
+                .is_some_and(|status| status.finish.is_none());
+            if live {
+                continue;
+            }
+
+            if file_stale(&path, &cutoff) {
+                fs::remove_file(&path)?;
+                removed += 1;
+            }
         }
     }
 
