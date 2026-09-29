@@ -18,7 +18,7 @@ use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{
     ChatKind, FileId, InlineKeyboardMarkup, MessageId, MessageKind, ParseMode, ReplyParameters,
-    ChatKind, FileId, InlineKeyboardMarkup, MessageId, ParseMode, ReplyParameters, ThreadId,
+    ThreadId,
 };
 
 use super::send::{best_effort_delete, message_in_thread};
