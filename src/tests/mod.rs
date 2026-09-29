@@ -457,6 +457,7 @@ pub mod sqlite_maintenance_test;
 pub mod start_gate_allowed_user_test;
 pub mod stored_key_test;
 pub mod systemd_unit_test;
+pub mod task_wait_test;
 pub mod tasks_list_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_await_sweep_test;

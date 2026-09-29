@@ -47,9 +47,10 @@ pub mod a2a_send;
 pub mod analyze_image;
 pub mod analyze_video;
 pub mod await_external;
-pub mod cancel_run;
 pub mod mission_control_report;
 pub mod profile_list;
+pub mod task_cancel;
+pub mod task_wait;
 pub mod tasks_list;
 
 // Tool implementations - Recursive Self-Improvement

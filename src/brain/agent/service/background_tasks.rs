@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use regex::Regex;
 use uuid::Uuid;
 
 use super::types::{BgTaskMeta, PushOrigin, QueuedUserMessage};
@@ -569,6 +570,105 @@ async fn collect_capture(mut handle: tokio::task::JoinHandle<()>, path: &std::pa
         handle.abort();
     }
     tokio::fs::read(path).await.unwrap_or_default()
+}
+
+/// Largest chunk one poll of a run's stream reads (#692).
+///
+/// A safety valve, not a normal path: at a 250 ms poll this is 4 MB/s of
+/// sustained output. Reaching it means bytes between polls are passed over, and
+/// a match inside them is lost — so the skip is *reported* (`StreamScan::
+/// skipped_bytes`) rather than absorbed silently.
+const SCAN_CHUNK_CAP: u64 = 1 << 20;
+
+/// How many trailing characters a scan keeps for reporting.
+const TAIL_CHARS: usize = 2000;
+
+/// What one incremental scan of a run's stream produced (#692).
+#[derive(Default)]
+pub(crate) struct StreamScan {
+    /// Offset to hand to the next scan: every COMPLETE line has been consumed.
+    pub next_offset: u64,
+    /// Complete lines matching the caller's pattern, in file order.
+    pub matches: Vec<String>,
+    /// Tail of the scanned bytes, partial line included, for a status report.
+    pub tail: String,
+    /// Bytes passed over unscanned because the chunk cap bit.
+    pub skipped_bytes: u64,
+}
+
+/// Scan a run's stream file for complete lines added since `offset` (#692).
+///
+/// Incremental on purpose: the stream is append-only, so rescanning from zero
+/// every poll would re-read megabytes of a long build to find the same lines it
+/// saw last time. `matcher` is `None` for a caller that only wants the tail.
+///
+/// A line is matched only once it is COMPLETE — terminated by a newline. The
+/// trailing partial line stays unconsumed so the next poll sees it whole, which
+/// is what makes "a line matched" mean a line and not a fragment of one.
+///
+/// An unreadable file yields an empty scan rather than an error: an absent
+/// stream and a silent one are told apart by the status file, which the caller
+/// reads anyway.
+pub(crate) async fn scan_stream_from(
+    path: &std::path::Path,
+    offset: u64,
+    matcher: Option<&Regex>,
+) -> StreamScan {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut scan = StreamScan {
+        next_offset: offset,
+        ..Default::default()
+    };
+    let Ok(meta) = tokio::fs::metadata(path).await else {
+        return scan;
+    };
+    let size = meta.len();
+    if size <= offset {
+        return scan;
+    }
+    let mut start = offset;
+    if size - offset > SCAN_CHUNK_CAP {
+        scan.skipped_bytes = size - offset - SCAN_CHUNK_CAP;
+        start = size - SCAN_CHUNK_CAP;
+    }
+    let len = (size - start) as usize;
+
+    let Ok(mut file) = tokio::fs::File::open(path).await else {
+        return scan;
+    };
+    if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+        return scan;
+    }
+    let mut buf = Vec::with_capacity(len.min(SCAN_CHUNK_CAP as usize));
+    if file.take(len as u64).read_to_end(&mut buf).await.is_err() {
+        return scan;
+    }
+
+    let text = String::from_utf8_lossy(&buf);
+    scan.tail = tail_chars(&text, TAIL_CHARS);
+    // Consume up to and including the last newline; leave any remainder for the
+    // next poll so a match is always on a whole line.
+    if let Some(idx) = text.rfind('\n') {
+        scan.next_offset = start + (idx + 1) as u64;
+        if let Some(re) = matcher {
+            scan.matches = text[..idx + 1]
+                .lines()
+                .filter(|line| re.is_match(line))
+                .map(str::to_string)
+                .collect();
+        }
+    }
+    scan
+}
+
+/// The last `n` characters of `s`, on a char boundary.
+fn tail_chars(s: &str, n: usize) -> String {
+    let total = s.chars().count();
+    if total <= n {
+        return s.to_string();
+    }
+    s.chars().skip(total - n).collect()
 }
 
 /// The [`CmdResult`] view of a captured run (#692).

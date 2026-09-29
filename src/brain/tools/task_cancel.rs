@@ -1,4 +1,4 @@
-//! Cancel Run Tool (#692)
+//! Task Cancel Tool (#692)
 //!
 //! Stop a detached run. Before #692 a detached command could not be signalled
 //! at all: the manager held a label and a start time, no pid, and the process
@@ -24,18 +24,18 @@ const SETTLE_MS: u64 = 2000;
 
 /// Signal a detached run's process group.
 #[derive(Default)]
-pub struct CancelRunTool;
+pub struct TaskCancelTool;
 
-impl CancelRunTool {
+impl TaskCancelTool {
     pub fn new() -> Self {
         Self
     }
 }
 
 #[async_trait]
-impl Tool for CancelRunTool {
+impl Tool for TaskCancelTool {
     fn name(&self) -> &str {
-        "cancel_run"
+        "task_cancel"
     }
 
     fn description(&self) -> &str {

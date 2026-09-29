@@ -125,9 +125,13 @@ pub(crate) fn register_core_agent_tools(
     tool_registry.register(Arc::new(
         crate::brain::tools::tasks_list::TasksListTool::new(),
     ));
-    // Cancel run — signal a detached run's process group (#692)
+    // Task cancel — signal a detached run's process group (#692)
     tool_registry.register(Arc::new(
-        crate::brain::tools::cancel_run::CancelRunTool::new(),
+        crate::brain::tools::task_cancel::TaskCancelTool::new(),
+    ));
+    // Task wait — block on a detached run until a line matches or it finishes (#692)
+    tool_registry.register(Arc::new(
+        crate::brain::tools::task_wait::TaskWaitTool::new(),
     ));
     // Config management (read/write config.toml, commands.toml)
     tool_registry.register(Arc::new(ConfigTool));

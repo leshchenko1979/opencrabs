@@ -908,12 +908,15 @@ impl Tool for BashTool {
                         output_out,
                         output_err,
                     }) => {
+                        // Only reachable when grace is Some — `handover_manager`
+                        // above is filtered on `grace.is_some()` — so the
+                        // fallback never renders; it exists rather than to
+                        // assert a number this branch cannot lack.
+                        let waited = grace
+                            .map(|s| format!("after {s}s"))
+                            .unwrap_or_else(|| "after its grace window".to_string());
                         return Ok(ToolResult::success(format!(
-                            "Still running after {grace}s — handed to the background manager \
-                             instead of being killed: {label}\n\n                             run id: {id}\n                             stdout: {out}\n                             stderr: {err}\n\n                             It keeps running and I'll be told when it finishes. Read the \
-                             live output with read_file on the two paths above at any time, \
-                             or stop it with cancel_run using the run id.",
-                            grace = grace.unwrap_or(0),
+                            "Still running {waited} — handed to the background manager instead of being killed: {label}\n\nrun id: {id}\nstdout: {out}\nstderr: {err}\n\nIt keeps running, and I'll be told when it finishes.\nTo watch it from here: task_wait with the run id (give a pattern and it returns the moment a matching line appears, or omit one to wait for it to finish). To read what it has said so far: read_file on the two paths above. To stop it: task_cancel with the run id. tasks_list shows every run in this session.",
                             out = output_out.display(),
                             err = output_err.display(),
                         )));
