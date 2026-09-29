@@ -1,14 +1,21 @@
-//! Quiet mode for groups (#679).
+//! Quiet mode for groups (#679, #696).
 //!
-//! Two effects, both scoped to an opting group: mid-turn intermediates stop
-//! opening their own bubbles, and the previous turn's answer is folded in place
-//! when the next turn starts. This file pins the second half — the fold
-//! wrappers, the fold guard, the summary line, and the per-group config key.
+//! Three effects, all scoped to an opting group: mid-turn intermediates stop
+//! opening their own bubbles, the previous turn's answer is folded in place
+//! when the next turn starts, and the previous turn's flow card is removed at
+//! the same moment. This file pins the fold wrappers, the fold guard, the
+//! summary line, the card-take contract, and the per-group config key.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use crate::channels::telegram::quiet::{fold_html, fold_markdown, should_fold, summary_line};
+use teloxide::types::MessageId;
+
+use crate::channels::telegram::quiet::{
+    fold_html, fold_markdown, should_fold, summary_line, take_previous_card,
+};
 use crate::config::types::{TelegramConfig, TelegramGroupConfig};
+use crate::tests::telegram_flow_telemetry_test::base_test_state;
 
 // ── the fold wrappers ──────────────────────────────────────────────────────
 
@@ -142,4 +149,38 @@ fn quiet_parses_from_toml() {
     .expect("group quiet key parses");
     assert!(c.channels.telegram.is_quiet_for("-100123"));
     assert!(!c.channels.telegram.is_quiet_for("-100999"));
+}
+
+// ── the previous-card take (#696) ──────────────────────────────────────────
+
+#[test]
+fn previous_card_is_taken_exactly_once() {
+    // The contract the sweep depends on: the retained card id is available to
+    // the delete ONCE, and the field is empty afterwards.
+    //
+    // Both halves are load-bearing. A read that left the field set would let a
+    // retry, or #1377's background-ack fold, act on a message already deleted —
+    // and because `deleteMessage` is capped at 48 h with no bot exception, an
+    // ancient card would fail that delete on EVERY subsequent turn.
+    let state = Arc::new(Mutex::new(base_test_state()));
+    assert_eq!(
+        take_previous_card(&state),
+        Some(MessageId(42)),
+        "the retained card id is handed to the delete"
+    );
+    assert_eq!(
+        take_previous_card(&state),
+        None,
+        "and the field is empty afterwards: no reader acts on a deleted message"
+    );
+}
+
+#[test]
+fn previous_card_take_is_a_no_op_without_a_card() {
+    // A turn that opened no flow card retains no id, so the sweep must decline
+    // rather than delete an unrelated message.
+    let mut s = base_test_state();
+    s.open_group_msg_id = None;
+    let state = Arc::new(Mutex::new(s));
+    assert_eq!(take_previous_card(&state), None);
 }

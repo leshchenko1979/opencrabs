@@ -676,6 +676,17 @@ pub(crate) async fn resume_session_inner(
     {
         super::quiet::fold_previous_answer(&bot, chat_id, thread_id, session_id, &telegram_state)
             .await;
+        // #696: parity with `handle_message` — the settled card is removed too,
+        // so a quiet group never accumulates one per turn whichever path the
+        // turn arrived through.
+        super::quiet::sweep_previous_flow_card(
+            &bot,
+            chat_id,
+            thread_id,
+            session_id,
+            &telegram_state,
+        )
+        .await;
     }
 
     // ── Streaming setup ────────────────────────────────────────────────────

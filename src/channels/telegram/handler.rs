@@ -2768,6 +2768,19 @@ pub(crate) async fn handle_message(
             &telegram_state,
         )
         .await;
+        // #696: and remove the chrome that sat beside it. The card is per-turn
+        // scaffolding — tool roll, narration, context footer — so leaving one
+        // behind per turn re-accumulates exactly what quiet mode suppresses.
+        // Ordered AFTER the fold: both read the one retained state, and the
+        // fold needs the answer before this takes the card id out of it.
+        super::quiet::sweep_previous_flow_card(
+            &bot,
+            msg.chat.id,
+            thread_id,
+            session_id,
+            &telegram_state,
+        )
+        .await;
     }
 
     // ── Streaming setup ───────────────────────────────────────────────────────
