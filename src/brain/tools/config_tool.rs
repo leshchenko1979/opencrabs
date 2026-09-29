@@ -167,20 +167,46 @@ impl ConfigTool {
             Some("tui") => format_toml(&config.tui),
             Some(other) => {
                 return Ok(ToolResult::error(format!(
-                    "Unknown config section: '{}'. Valid: {}. Nested paths and child names \
-                     resolve to their parent (e.g. 'providers.stt' or 'stt' -> providers, \
-                     'telegram' -> channels).",
+                    "Unknown config section: '{}'. Valid: {}. A section name resolves as itself; \
+                     one level into a section, or a known child name, resolves to the section that \
+                     owns it (e.g. 'providers.stt' -> providers, 'stt' -> providers, 'telegram' -> \
+                     channels). A path deeper than one level is refused rather than widened to a \
+                     parent, because the render view only has the section to offer (#689).",
                     other,
                     known_sections().join(", ")
                 )));
             }
             None => {
-                // Full config — skip api_keys for safety
+                // Full config: every section, rendered as-is. The comment here
+                // used to claim the api_keys were withheld for safety — no such
+                // withholding existed. `format_toml` (:411) is a bare
+                // `to_string_pretty` with no redaction of its own, and this arm
+                // renders credential fields exactly like any other. What makes
+                // the read safe is the scrub at the common exit below (#689),
+                // not anything omitted here.
                 format_toml(&config)
             }
         };
 
-        Ok(ToolResult::success(output))
+        // The read view is a credential boundary, so it is scrubbed here rather
+        // than at any channel edge (#689, #408). Everything above renders live
+        // config, and this string is what enters the model context and the
+        // session message store — no display-side redaction has been applied at
+        // this point, and `redact_tool_input` only ever covers what the model
+        // SENDS to a tool, never what a tool RETURNS.
+        //
+        // Deliberately the log writer's UNCONDITIONAL scrub, not the
+        // display-gated `redact_secrets`/`redact_secrets_scoped` wrappers: a
+        // credential that persists is a credential on disk regardless of a
+        // DISPLAY flag (their own rationale, `utils/sanitize.rs`). Gating this on
+        // `agent.redact_sensitive_data` would re-open the hole for any operator
+        // who turned display redaction off — which is the config this tool reads.
+        //
+        // One call site covers every arm above, including the full-config `None`
+        // arm. It borrows when nothing matched, so a clean read allocates nothing.
+        Ok(ToolResult::success(
+            crate::utils::sanitize::redact_secrets_for_logs(&output).into_owned(),
+        ))
     }
 
     fn write_config(&self, input: &Value) -> Result<ToolResult> {
