@@ -83,11 +83,11 @@ async fn read_tail(path: &Path, tail_bytes: u64) -> std::io::Result<Tail> {
     // though it were output.
     let mut partial_first_line = false;
     let mut text = String::from_utf8_lossy(&raw).into_owned();
-    if start > 0 {
-        if let Some(pos) = text.find('\n') {
-            text.drain(..=pos);
-            partial_first_line = true;
-        }
+    if start > 0
+        && let Some(pos) = text.find('\n')
+    {
+        text.drain(..=pos);
+        partial_first_line = true;
     }
 
     let (text, collapsed) = collapse_frames(&text);
@@ -347,15 +347,15 @@ impl Tool for TaskOutputTool {
             ));
         }
 
-        let paths: Vec<(&str, bool)> = vec![("stdout", false), ("stderr", true)]
-            .into_iter()
-            .filter(|(n, _)| match *n {
-                "stdout" => stream.wants_out(),
-                _ => stream.wants_err(),
-            })
-            .collect();
-
-        for (name, is_err) in paths {
+        for (name, is_err) in [("stdout", false), ("stderr", true)] {
+            let wanted = if is_err {
+                stream.wants_err()
+            } else {
+                stream.wants_out()
+            };
+            if !wanted {
+                continue;
+            }
             let path = record
                 .as_ref()
                 .and_then(|r| {
