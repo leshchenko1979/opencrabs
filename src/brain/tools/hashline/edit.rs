@@ -188,12 +188,6 @@ impl Tool for HashlineEditTool {
                 .await?;
         // Release the path lock taken before the read (#593).
         drop(write_lock);
-        // Write
-        fs::write(&path, &new_content)
-            .await
-            .map_err(ToolError::Io)?;
-        // Release the path lock taken before the read (#593).
-        drop(write_lock);
 
         // Track file in session (fire and forget, path-only)
         if let Some(ref sc) = context.service_context {

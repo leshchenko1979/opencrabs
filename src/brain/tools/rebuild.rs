@@ -146,6 +146,7 @@ pub(crate) fn rebuild_completion_hook(
                         "✅ Rebuilt from source — reloading into the new binary now.",
                         None,
                         None,
+                        None,
                     )
                     .await
                     && let Err(e) = h.await
@@ -193,6 +194,7 @@ pub(crate) fn rebuild_completion_hook(
                         target,
                         "opencrabs rebuild",
                         &msg,
+                        None,
                         None,
                         None,
                     )

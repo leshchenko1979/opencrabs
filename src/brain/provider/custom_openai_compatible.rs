@@ -3793,11 +3793,6 @@ impl Provider for OpenAIProvider {
                 let body = self.encode_body(&openai_request)?;
                 let response = self
                     .send_bounded(&self.send_url(), self.headers_for(session)?, &body)
-                    .stream_client
-                    .post(self.send_url())
-                    .headers(self.headers_for(session)?)
-                    .json(&body)
-                    .send()
                     .await?;
 
                 tracing::debug!("OpenAI response status: {}", response.status());
@@ -3838,11 +3833,6 @@ impl Provider for OpenAIProvider {
                     let body = self.encode_body(&openai_request)?;
                     let r = self
                         .send_bounded(&self.send_url(), self.headers_for(session)?, &body)
-                        .stream_client
-                        .post(self.send_url())
-                        .headers(self.headers_for(session)?)
-                        .json(&body)
-                        .send()
                         .await?;
                     if !r.status().is_success() {
                         return Err(self.handle_error(r).await);
@@ -3870,11 +3860,6 @@ impl Provider for OpenAIProvider {
                             let body = self.encode_body(&openai_request)?;
                             let r = self
                                 .send_bounded(&self.send_url(), self.headers_for(session)?, &body)
-                                .stream_client
-                                .post(self.send_url())
-                                .headers(self.headers_for(session)?)
-                                .json(&body)
-                                .send()
                                 .await?;
                             if !r.status().is_success() {
                                 return Err(self.handle_error(r).await);
@@ -3979,7 +3964,14 @@ impl Provider for OpenAIProvider {
         }
 
         // Parse Server-Sent Events stream - return Vec to emit multiple events like Anthropic
-        let byte_stream = response.bytes_stream();
+        // Stringify the transport error at the boundary so the stream's item
+        // type is concrete. The only consumer is the `Err(e)` arm below, which
+        // already reports `e.to_string()`, so nothing is lost — and a concrete
+        // item type keeps the closure's inference independent of anything that
+        // happens to poison it upstream.
+        let byte_stream = response
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(|e| e.to_string()));
         let buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
 
         // Accumulated state for a single streamed tool call

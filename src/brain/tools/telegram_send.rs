@@ -1776,7 +1776,7 @@ impl TelegramSendTool {
 
         if local_only {
             self.telegram_state
-                .note_thread_evidence(chat_id, Some(thread_id_raw as i32))
+                .note_thread_evidence(chat_id, true, Some(thread_id_raw as i32))
                 .await;
             crate::channels::telegram::record_topic_created(
                 None,

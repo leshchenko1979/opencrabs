@@ -10,10 +10,19 @@
 
 use crate::channels::telegram::rich::ast::MermaidResult;
 use crate::channels::telegram::rich::mermaid::{
-    failure_html, failure_html_transport, is_image_response, is_transient_status,
+    MermaidStyle, failure_html, failure_html_transport, is_image_response, is_transient_status,
     markdown_failure_block, markdown_failure_block_transport, markdown_failure_block_with_link,
     replacement_for, send_with_retry,
 };
+
+/// The render style every test in this module threads through the mermaid
+/// builders. `auto`/`auto` resolves against the ACTIVE theme, which is
+/// `crab-dark` until a test calls `theme::set` — so these tests stay
+/// deterministic without touching the process-global config, and they pin the
+/// defaults a stock install ships.
+fn style() -> MermaidStyle {
+    MermaidStyle::from_values("auto", "auto")
+}
 
 const PNG_1PX: &[u8] = &[
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
@@ -181,6 +190,7 @@ fn failed_outcome_gets_transport_headline_and_svg_hatch() {
         &MermaidResult::Failed("diagram renderer timed out".into()),
         0,
         SRC,
+        &style(),
     );
     assert!(md.contains("your diagram was NOT modified"));
     assert!(
@@ -192,7 +202,7 @@ fn failed_outcome_gets_transport_headline_and_svg_hatch() {
 
 #[test]
 fn markdown_failure_with_link_composes_transport_block_and_svg_link() {
-    let out = markdown_failure_block_with_link("diagram renderer timed out", SRC);
+    let out = markdown_failure_block_with_link("diagram renderer timed out", SRC, &style());
     assert!(
         out.contains("Renderer failure, not a syntax error: your diagram was NOT modified"),
         "the with-link variant inherits the transport headline: {out}"
@@ -213,6 +223,7 @@ fn parse_error_outcome_gets_old_headline_without_hatch() {
         &MermaidResult::ParseError("Parse error on line 2".into()),
         0,
         SRC,
+        &style(),
     );
     assert!(md.contains("could not be rendered"));
     assert!(

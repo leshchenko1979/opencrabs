@@ -30,6 +30,7 @@ use crate::brain::prompt_builder::{
     inject_telegram_channel_capabilities, telegram_channel_capabilities,
 };
 use tempfile::TempDir;
+use uuid::Uuid;
 
 #[test]
 fn test_inject_telegram_channel_capabilities_explicit() {

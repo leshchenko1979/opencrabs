@@ -258,8 +258,6 @@ pub(crate) fn build_progress_cb(
                         .push(DisplayItem::System(compacted_flow_line(
                             before_pct,
                             after_pct,
-                            before_tokens,
-                            after_tokens,
                             elapsed,
                         )));
                     // Lifting the pin stays unconditional while setting it is

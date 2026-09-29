@@ -11,7 +11,6 @@
 use crate::brain::agent::service::notify_policy::{
     CONFIRM_CAP, DeliveryMode, URGENT_FRAME, confirm_route, resolve_mode,
 };
-use crate::brain::agent::service::session_routes::session_route;
 use crate::brain::tools::error::{Result, ToolError};
 use crate::brain::tools::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
 use crate::db::{SessionBindingRepository, SessionRepository};

@@ -982,8 +982,6 @@ pub(crate) async fn resume_session_inner(
                         .push(DisplayItem::System(compacted_flow_line(
                             before_pct,
                             after_pct,
-                            before_tokens,
-                            after_tokens,
                             elapsed,
                         )));
                     // Resumed turns get the same live-meter treatment (#135):

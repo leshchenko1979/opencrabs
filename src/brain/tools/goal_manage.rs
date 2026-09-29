@@ -162,7 +162,6 @@ impl Tool for GoalManageTool {
                     let evaluations = parse_evaluations(goal.criterion_evaluations.as_deref());
                     Ok(ToolResult::success(format!(
                         "🎯 Active goal ({}):\n\n{}\n\nState: {} | {} | Elapsed: {}m\n{}{}",
-                        "🎯 Active goal ({}):\n\n{}\n\nState: {} | {} | Elapsed: {}m",
                         goal.id,
                         goal.goal_text,
                         goal.state,

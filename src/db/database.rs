@@ -703,7 +703,10 @@ fn is_busy_or_locked(err: &rusqlite::Error) -> bool {
 impl Database {
     /// Create a Database instance wrapping an existing connection pool.
     pub fn new_with_pool(pool: Pool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            db_path: None,
+        }
     }
 
     /// Connect to a SQLite database file.

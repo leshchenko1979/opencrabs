@@ -1410,8 +1410,8 @@ pub(crate) fn markdown_failure_block_with_link(
     style: &MermaidStyle,
 ) -> String {
     format!(
-        "{}{}"
-        markdown_failure_block_transport(err, source)
+        "{}{}",
+        markdown_failure_block_transport(err, source),
         svg_link_md(style, source)
     )
 }

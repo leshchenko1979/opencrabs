@@ -25,7 +25,7 @@ async fn ack_suppressed_while_global_cooldown_active() {
     assert!(reaction_ack_permitted(), "clear state must permit acks");
 
     // Activate the same flood state the send path records on a 429.
-    record_global_429(Duration::from_secs(5));
+    record_global_429(Duration::from_secs(5), Some(-1001));
     assert!(
         !reaction_ack_permitted(),
         "ack reactions must be suppressed while the global 429 cooldown is active"
@@ -41,7 +41,7 @@ async fn ack_permitted_again_after_cooldown_expires() {
     reset_global_cooldown();
 
     // 1s requested + 2s margin = 3s deadline on the virtual clock.
-    record_global_429(Duration::from_secs(1));
+    record_global_429(Duration::from_secs(1), Some(-1001));
     assert!(!reaction_ack_permitted());
 
     // Advance the virtual clock past the deadline: reactions resume without
@@ -61,7 +61,7 @@ async fn ack_gate_tracks_reset() {
     test_support::reset(0);
     reset_global_cooldown();
 
-    record_global_429(Duration::from_secs(5));
+    record_global_429(Duration::from_secs(5), Some(-1001));
     assert!(!reaction_ack_permitted());
 
     reset_global_cooldown();

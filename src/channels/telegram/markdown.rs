@@ -479,7 +479,7 @@ fn map_named_entity(name: &str) -> Option<&'static str> {
 /// Callers measuring a label's display width must measure THIS text, not the
 /// escaped form: entities inflate the character count (`&` costs 5, `<` and
 /// `>` cost 4), so measuring escaped text rejects labels that fit.
-
+///
 /// Apply inline formatting: `code`, **bold**, *italic*, _italic_, ~~strikethrough~~, [text](url)
 pub(crate) fn format_inline(text: &str) -> String {
     // First pass: convert markdown links [text](url) → <a href="url">text</a>

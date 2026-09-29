@@ -458,7 +458,7 @@ fn replacement_for_failed_emits_failure_block_and_no_entry() {
     let outcome = MermaidResult::Failed("Parse error".into());
     let (md, entry) = replacement_for(&outcome, 0, "graph TD;", &style());
     let outcome = MermaidResult::Failed("diagram renderer timed out".into());
-    let (md, entry) = replacement_for(&outcome, 0, "graph TD;");
+    let (md, entry) = replacement_for(&outcome, 0, "graph TD;", &style());
     assert!(
         entry.is_none(),
         "failed outcome must not carry a media entry"
@@ -637,7 +637,11 @@ fn markdown_failure_block_with_link_appends_a_tappable_svg_hatch() {
     assert!(md.contains("> ⚠️ **Mermaid diagram could not be rendered**"));
     // real <a href> anchor — tappable rather than raw text. #1741: the
     // transient headline now says renderer failure, not a syntax rejection.
-    let md = markdown_failure_block_with_link("diagram renderer dropped the image", "flowchart TD");
+    let md = markdown_failure_block_with_link(
+        "diagram renderer dropped the image",
+        "flowchart TD",
+        &style(),
+    );
     assert!(md.contains("your diagram was NOT modified"));
     assert!(md.contains("diagram renderer dropped the image"));
     assert!(md.contains("flowchart TD"));
