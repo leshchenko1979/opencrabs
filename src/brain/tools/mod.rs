@@ -49,7 +49,6 @@ pub mod analyze_video;
 pub mod await_external;
 pub mod mission_control_report;
 pub mod profile_list;
-pub mod task_cancel;
 pub mod task_wait;
 pub mod tasks_list;
 

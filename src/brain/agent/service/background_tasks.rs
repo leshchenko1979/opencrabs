@@ -30,8 +30,8 @@ pub struct RunningTask {
     pub label: String,
     /// When it was spawned, for the elapsed time a surface displays.
     pub started: std::time::Instant,
-    /// Stable run id (#692) — the handle `tasks_list`, `task_output`,
-    /// `task_wait` and `task_cancel` all address the run by.
+    /// Stable run id (#692) — the handle `tasks_list`, `task_output` and
+    /// `task_wait` all address the run by.
     pub id: String,
 }
 
@@ -210,46 +210,6 @@ impl BackgroundTaskManager {
             .unwrap_or_default();
         out.sort_by_key(|r| r.started);
         out
-    }
-
-    /// Signal a run's whole process group (#692).
-    ///
-    /// Group-first, because `setsid` made the child a leader: `killpg` reaches
-    /// every descendant, including one that re-parented to init before the
-    /// signal — precisely the case a tree-walk by pid cannot see.
-    ///
-    /// `Ok(())` means the signal was *delivered*, not that the process is
-    /// already gone; the caller re-reads the roster (or the status file) to
-    /// confirm. A refusal is returned rather than swallowed: a cancel the agent
-    /// believes landed but did not is worse than no cancel at all.
-    pub fn cancel(&self, id: &str) -> std::result::Result<(), String> {
-        let Some(handle) = self.handle(id) else {
-            return Err(format!("no live run with id {id}"));
-        };
-        let Some(pid) = handle.pid else {
-            return Err(format!("run {id} has no recorded pid yet"));
-        };
-        #[cfg(unix)]
-        {
-            // SAFETY: `pid` came from `Child::id()` for a child this process
-            // spawned, so it is a live pid we are entitled to signal. Even if
-            // it has since exited, `killpg` on a dead pid is `ESRCH` — reported
-            // below rather than assumed away.
-            let rc = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGTERM) };
-            if rc == 0 {
-                Ok(())
-            } else {
-                Err(format!(
-                    "killpg({pid}) failed: {}",
-                    std::io::Error::last_os_error()
-                ))
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            crate::utils::shell::kill_process_tree(pid);
-            Ok(())
-        }
     }
 
     /// Spawn `command` (via `sh -c`) in `cwd`, detached; on completion enqueue a
@@ -502,6 +462,7 @@ impl BackgroundTaskManager {
             });
             return Ok(Handover::Detached {
                 id,
+                pid,
                 output_out,
                 output_err,
             });
@@ -554,6 +515,7 @@ impl BackgroundTaskManager {
                 });
                 Ok(Handover::Detached {
                     id,
+                    pid,
                     output_out,
                     output_err,
                 })
@@ -576,9 +538,15 @@ pub enum Handover {
     Inline(std::process::Output),
     /// Outlived the window; the run continues in the background.
     Detached {
-        /// The run's handle for `tasks_list` / `task_output` / `task_wait` /
-        /// `task_cancel`.
+        /// The run's handle for `tasks_list` / `task_output` / `task_wait`.
         id: String,
+        /// The run's process-GROUP id, when the platform gave us one.
+        ///
+        /// Carried so the handover message can name the number the agent
+        /// signals. There is no cancel tool (owner directive 2026-09-29): the
+        /// group is a pid, and signalling a pid is what `kill` already does, so
+        /// the harness reports the number instead of wrapping it.
+        pid: Option<u32>,
         /// Live stdout capture.
         output_out: PathBuf,
         /// Live stderr capture.

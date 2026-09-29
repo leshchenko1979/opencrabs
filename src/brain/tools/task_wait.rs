@@ -310,7 +310,7 @@ fn report(
         ),
         TimedOut => format!(
             "STILL RUNNING run {run_id} ({}) after the wait expired — state {state_word}. \
-             It is live and addressable: wait again, read its capture, or task_cancel it.\n",
+             It is live and addressable: wait again, or read its capture.\n",
             paths.label
         ),
     };

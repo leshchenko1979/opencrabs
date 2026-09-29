@@ -170,7 +170,6 @@ pub const EXTENDED_TOOL_INVENTORY: &[(&str, &[&str])] = &[
             "a2a_send",
             "profile_list",
             "tasks_list",
-            "task_cancel",
             "task_wait",
             "execute_code",
             "notebook_edit",
@@ -265,7 +264,6 @@ pub fn is_protected_builtin(name: &str) -> bool {
                 | "a2a_send"
                 | "profile_list"
                 | "tasks_list"
-                | "task_cancel"
                 | "task_wait"
                 | "tool_manage"
                 | "execute_code"
@@ -336,7 +334,6 @@ pub fn tool_category(name: &str) -> &'static str {
             || n == "a2a_send"
             || n == "profile_list"
             || n == "tasks_list"
-            || n == "task_cancel"
             || n == "task_wait" =>
         {
             "utility"

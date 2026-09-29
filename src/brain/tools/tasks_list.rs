@@ -47,14 +47,20 @@ pub(crate) fn subagent_status_file(id: &str) -> String {
 
 /// One detached-command roster row.
 ///
-/// Carries the run's address, not just its label: the id is what `task_output`,
-/// `task_wait` and `task_cancel` take, and the two paths are where the live
+/// Carries the run's address, not just its label: the id is what `task_output`
+/// and `task_wait` take, the pgid is what stop it (owner directive 2026-09-29 —
+/// the harness reports the number, the skill signals it), and the two paths are
+/// where the live
 /// streams are. A row with a label alone told the model WHAT was running but
 /// left it no way to look at it or stop it (#692).
 pub(crate) struct DetachedRow {
     pub id: String,
     pub label: String,
     pub elapsed_secs: u64,
+    /// The run's process-GROUP id, when the platform gave us one. This is the
+    /// stop handle: `setsid` made the child a leader, so `kill -- -<pgid>`
+    /// reaps the whole tree, including a descendant that re-parented away.
+    pub pid: Option<u32>,
     /// Live stdout capture. Present from spawn — a run that has produced no
     /// output yet still has an empty file, which is distinguishable from a run
     /// that never existed.
@@ -87,6 +93,9 @@ pub(crate) fn render_tasks(subagents: &[SubagentRow], detached: &[DetachedRow]) 
         out.push_str(&format!("\n\nDetached commands ({}):", detached.len()));
         for d in detached {
             out.push_str(&format!("\n- {} [{}] {}s", d.id, d.label, d.elapsed_secs));
+            if let Some(p) = d.pid {
+                out.push_str(&format!("\n  pgid: {p}"));
+            }
             if let Some(f) = &d.output_out {
                 out.push_str(&format!("\n  stdout: {f}"));
             }
@@ -124,8 +133,8 @@ impl Tool for TasksListTool {
          elapsed, stdout path, stderr path, status-file path). Read-only. Use \
          it to check what is running instead of re-spawning or busy-waiting; \
          results are pushed to you on completion either way. The run id works \
-         with task_output (read live output), task_wait (block on it) and \
-         task_cancel (stop it)."
+         with task_output (read live output) and task_wait (block on it); the \
+         pgid is what you signal to stop one."
     }
 
     fn input_schema(&self) -> Value {
@@ -179,6 +188,7 @@ impl Tool for TasksListTool {
                     id: h.id.clone(),
                     label: h.label,
                     elapsed_secs: h.started.elapsed().as_secs(),
+                    pid: h.pid,
                     output_out: Some(h.output_out.display().to_string()),
                     output_err: Some(h.output_err.display().to_string()),
                     // Same resolver every writer persists through, called

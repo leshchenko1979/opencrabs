@@ -905,6 +905,7 @@ impl Tool for BashTool {
                     }
                     Ok(crate::brain::agent::service::background_tasks::Handover::Detached {
                         id,
+                        pid,
                         output_out,
                         output_err,
                     }) => {
@@ -915,8 +916,27 @@ impl Tool for BashTool {
                         let waited = grace
                             .map(|s| format!("after {s}s"))
                             .unwrap_or_else(|| "after its grace window".to_string());
+                        // The group id IS the stop mechanism: `setsid` made the
+                        // child a leader, so signalling the group reaps the tree
+                        // — including a descendant that re-parented to init.
+                        // There is no cancel tool (owner directive 2026-09-29):
+                        // the harness reports the number, the skill does the
+                        // kill.
+                        let (gid_line, stop) = match pid {
+                            Some(p) => (
+                                format!("\npgid: {p}"),
+                                format!(
+                                    "To stop it, signal that process group: kill -TERM -- -{p} (the leading minus targets the group)."
+                                ),
+                            ),
+                            None => (
+                                String::new(),
+                                "This run recorded no pgid, so signal it by pid if you need to stop it."
+                                    .to_string(),
+                            ),
+                        };
                         return Ok(ToolResult::success(format!(
-                            "Still running {waited} — handed to the background manager instead of being killed: {label}\n\nrun id: {id}\nstdout: {out}\nstderr: {err}\n\nIt keeps running, and I'll be told when it finishes.\nTo watch it from here: task_wait with the run id (give a pattern and it returns the moment a matching line appears, or omit one to wait for it to finish). To read what it has said so far: read_file on the two paths above. To stop it: task_cancel with the run id. tasks_list shows every run in this session.",
+                            "Still running {waited} — handed to the background manager instead of being killed: {label}\n\nrun id: {id}{gid_line}\nstdout: {out}\nstderr: {err}\n\nIt keeps running, and I'll be told when it finishes.\nTo watch it from here: task_wait with the run id (give a pattern and it returns the moment a matching line appears, or omit one to wait for it to finish). To read what it has said so far: read_file on the two paths above. {stop} tasks_list shows every run in this session.",
                             out = output_out.display(),
                             err = output_err.display(),
                         )));

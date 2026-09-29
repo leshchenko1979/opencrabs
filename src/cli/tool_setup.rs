@@ -125,10 +125,6 @@ pub(crate) fn register_core_agent_tools(
     tool_registry.register(Arc::new(
         crate::brain::tools::tasks_list::TasksListTool::new(),
     ));
-    // Task cancel — signal a detached run's process group (#692)
-    tool_registry.register(Arc::new(
-        crate::brain::tools::task_cancel::TaskCancelTool::new(),
-    ));
     // Task wait — block on a detached run until a line matches or it finishes (#692)
     tool_registry.register(Arc::new(
         crate::brain::tools::task_wait::TaskWaitTool::new(),

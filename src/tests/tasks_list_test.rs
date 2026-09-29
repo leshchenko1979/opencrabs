@@ -41,6 +41,7 @@ fn render_lists_both_systems_with_states_and_pointers() {
         id: "run-1".into(),
         label: "cargo test".into(),
         elapsed_secs: 42,
+        pid: Some(4242),
         output_out: Some("/tmp/runs/run-1.out".into()),
         output_err: Some("/tmp/runs/run-1.err".into()),
         status_file: Some("/tmp/detached/run-1.json".into()),
@@ -52,9 +53,16 @@ fn render_lists_both_systems_with_states_and_pointers() {
     assert!(out.contains("Detached commands (1)"), "was: {out}");
     assert!(out.contains("- run-1 [cargo test] 42s"), "was: {out}");
     // A row must carry the run's ADDRESS, not just its label: the id is the
-    // handle `task_output`/`task_wait`/`task_cancel` take, and the paths are
-    // where the live streams are. A label-only row left the model able to see
-    // that something ran and unable to look at or stop it (#692).
+    // handle `task_output`/`task_wait` take, the pgid is what stops it, and the
+    // paths are where the live streams are. A label-only row left the model
+    // able to see that something ran and unable to look at or stop it (#692).
+    //
+    // The pgid is asserted explicitly because it became the ONLY stop handle
+    // when the cancel tool was removed (owner directive 2026-09-29): if a row
+    // stops printing it, the skill-side `kill -- -<pgid>` has nothing to read
+    // and the run becomes unstoppable again — the exact defect this row exists
+    // to close.
+    assert!(out.contains("pgid: 4242"), "was: {out}");
     assert!(out.contains("stdout: /tmp/runs/run-1.out"), "was: {out}");
     assert!(out.contains("stderr: /tmp/runs/run-1.err"), "was: {out}");
     assert!(out.contains("status file: /tmp/detached/run-1.json"), "was: {out}");
