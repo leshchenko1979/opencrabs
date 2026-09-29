@@ -100,10 +100,8 @@ fn render_block(block: &Block, wrap_p: bool, style: &mermaid::MermaidStyle) -> S
             // headline also says the failure is the renderer's, not the
             // diagram's syntax.
             MermaidResult::Failed(err) => {
-                super::mermaid::failure_html(err, source)
-                    + &super::mermaid::svg_link_html(style, source)
                 super::mermaid::failure_html_transport(err, source)
-                    + &super::mermaid::svg_link_html(source)
+                    + &super::mermaid::svg_link_html(style, source)
             }
             MermaidResult::ParseError(err) => super::mermaid::failure_html(err, source),
         },

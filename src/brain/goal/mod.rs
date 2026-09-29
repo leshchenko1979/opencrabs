@@ -20,7 +20,6 @@
 pub mod criteria;
 pub mod driver;
 pub mod evidence;
-pub mod driver;
 pub mod judge;
 pub mod manager;
 pub mod prompt;

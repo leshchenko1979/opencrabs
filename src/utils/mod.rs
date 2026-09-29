@@ -44,7 +44,6 @@ pub use image::{
     ImageTarget, LocalImage, LocalImageFailure, LocalImageFailureReason, LocalImageScan,
     append_failure_notice, extract_img_markers, extract_local_images, extract_react_marker,
     extract_react_marker_lenient, extract_vid_markers, failure_notice, strip_image_references,
-    extract_img_markers, extract_react_marker, extract_react_marker_lenient, extract_vid_markers,
     strip_invalid_react_markers,
 };
 pub use image_fetch::resolve_remote_images;

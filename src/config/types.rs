@@ -113,6 +113,11 @@ pub struct Config {
     /// exactly the pre-#346 behaviour.
     #[serde(default)]
     pub retry: RetrySection,
+    /// Runtime feature flags (#1705): opt-in capabilities that default
+    /// OFF so per-use cost and storage only appear when the operator
+    /// asks for them. Empty section = everything off.
+    #[serde(default)]
+    pub features: FeaturesConfig,
 }
 
 /// Global retry tuning for provider requests (#346).
@@ -147,12 +152,6 @@ pub struct RetrySection {
     /// Random jitter fraction applied to each delay (0.0 = none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jitter: Option<f64>,
-
-    /// Runtime feature flags (#1705): opt-in capabilities that default
-    /// OFF so per-use cost and storage only appear when the operator
-    /// asks for them. Empty section = everything off.
-    #[serde(default)]
-    pub features: FeaturesConfig,
 }
 
 /// Opt-in runtime feature flags (#1705).

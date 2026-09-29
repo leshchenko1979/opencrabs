@@ -12,6 +12,10 @@ use std::sync::OnceLock;
 /// waiting for tool_loop to batch-write at end of iteration).
 static GLOBAL_POOL: OnceLock<Pool> = OnceLock::new();
 
+/// Set once at startup when the integrity check finds corruption (#1779).
+static DB_INTEGRITY_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Get the global DB pool if it has been set. Returns `None` before the
 /// first `Database::connect` call (e.g. in unit tests).
 pub fn global_pool() -> Option<&'static Pool> {

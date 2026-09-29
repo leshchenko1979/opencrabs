@@ -13,10 +13,7 @@ pub use database::{
     Database, MaintenanceKnobs, Pool, PoolExt, WAL_TRUNCATE_MIN_BYTES,
     execute_safe_maintenance, global_pool, interact_err,
 };
-pub use database::{
-    Database, Pool, PoolExt, db_integrity_failed, db_integrity_failed_now, global_pool,
-    interact_err,
-};
+pub use database::{db_integrity_failed, db_integrity_failed_now};
 pub use models::*;
 pub use repository::*;
 pub use retry::{

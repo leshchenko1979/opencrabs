@@ -428,8 +428,6 @@ impl Provider for AnthropicProvider {
         let response = retry(
             || async {
                 let send = self
-                    .client
-                let response = self
                     .stream_client
                     .post(ANTHROPIC_API_URL)
                     .headers(req_headers.clone())

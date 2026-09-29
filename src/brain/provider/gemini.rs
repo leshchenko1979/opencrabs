@@ -627,8 +627,6 @@ impl Provider for GeminiProvider {
         let response = retry(
             || async {
                 let send = self
-                    .client
-                let response = self
                     .stream_client
                     .post(&url)
                     .header("Content-Type", "application/json")
