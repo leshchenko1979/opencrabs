@@ -161,8 +161,13 @@ impl tokio::io::AsyncRead for PtyMaster {
             }
             let e = io::Error::last_os_error();
             match e.raw_os_error() {
-                // Nothing buffered yet — wait for readability instead of spinning.
-                Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK) => {
+                // Nothing buffered yet — wait for readability instead of
+                // spinning. `EWOULDBLOCK` is deliberately absent: on every
+                // unix it is the same value as `EAGAIN` (both 11 on Linux), so
+                // an alternation is an unreachable pattern, and `-D warnings`
+                // rejects it — the "portability" it looks like is a lie the
+                // compiler catches.
+                Some(libc::EAGAIN) => {
                     guard.clear_ready();
                     continue;
                 }
