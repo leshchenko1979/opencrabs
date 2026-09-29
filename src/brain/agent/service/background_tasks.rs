@@ -381,6 +381,9 @@ impl BackgroundTaskManager {
             }
         };
 
+        // A pty per stream, installed BEFORE the spawn (see `stream_over_pty`).
+        let masters = stream_over_pty(&mut cmd);
+
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -390,8 +393,20 @@ impl BackgroundTaskManager {
         };
         let pid = child.id();
         let cap = run_output_cap_bytes();
-        let out_reader = spawn_stream_reader(child.stdout.take(), out_file, cap);
-        let err_reader = spawn_stream_reader(child.stderr.take(), err_file, cap);
+        // The masters and the pipes are two ways to fill the SAME two files, so
+        // everything downstream — the inline `collect_capture`, `task_output`,
+        // `task_wait`'s scanner — is indifferent to which one this run got.
+        let (out_reader, err_reader) = match masters {
+            #[cfg(unix)]
+            Some((mo, me)) => (
+                spawn_stream_reader(Some(mo), out_file, cap),
+                spawn_stream_reader(Some(me), err_file, cap),
+            ),
+            _ => (
+                spawn_stream_reader(child.stdout.take(), out_file, cap),
+                spawn_stream_reader(child.stderr.take(), err_file, cap),
+            ),
+        };
 
         // The pid lands on the row that was reserved before this task ever ran,
         // so the run has been addressable — by id, label, session and both
@@ -587,6 +602,42 @@ fn build_command(cwd: &std::path::Path, command: &str, session_id: Uuid) -> toki
     // shell, which is exactly the miss `kill_process_tree` documents.
     crate::brain::tools::bash::detach_session_pre_exec(&mut cmd);
     cmd
+}
+
+/// The two pty masters for one run — `()` where the platform has no pty here.
+#[cfg(unix)]
+type PtyMasters = (crate::utils::pty::PtyMaster, crate::utils::pty::PtyMaster);
+#[cfg(not(unix))]
+type PtyMasters = ();
+
+/// Give `cmd` one pty per stream, so the child line-buffers and each line is
+/// readable while it runs (#692).
+///
+/// `None` means "this run stays on the pipes it already had", which is a
+/// **degraded** stream rather than a failed command: what a pty buys is
+/// liveness, and a run that cannot allocate one must still run and still be
+/// captured — just in one burst at exit, as before this feature.
+///
+/// Must be called BEFORE the spawn. A child's stdio cannot be switched from a
+/// pipe to a terminal once the child exists, so a pty installed after the fact
+/// would be a pty the command never sees.
+#[cfg(unix)]
+fn stream_over_pty(cmd: &mut tokio::process::Command) -> Option<PtyMasters> {
+    match crate::utils::pty::install_pty(cmd) {
+        Ok(pair) => Some(pair),
+        Err(e) => {
+            tracing::warn!(
+                target: "background_task",
+                "pty unavailable ({e}); this run streams over pipes, so its output is not live mid-run"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn stream_over_pty(_cmd: &mut tokio::process::Command) -> Option<PtyMasters> {
+    None
 }
 
 /// Copy a child's stream to `file` until EOF, honouring `cap`.
