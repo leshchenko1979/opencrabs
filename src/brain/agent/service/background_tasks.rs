@@ -79,6 +79,18 @@ struct Reservation {
     output_out: PathBuf,
     output_err: PathBuf,
     started: std::time::Instant,
+    /// The run's descriptive identity, owned here rather than passed beside the
+    /// reservation (#692).
+    ///
+    /// These four are already exactly what `reserve_run` takes and what
+    /// `started_run` records: the reservation *is* the run, so carrying them in
+    /// one value keeps both spawn paths from restating the same list. It also
+    /// keeps `run_reserved` inside clippy's argument ceiling — passing them
+    /// again took it to eight.
+    session_id: Uuid,
+    cwd: PathBuf,
+    label: String,
+    command: String,
 }
 
 /// Manages background commands and resumes their sessions on completion.
@@ -267,15 +279,7 @@ impl BackgroundTaskManager {
         let this = std::sync::Arc::clone(&self);
         tokio::spawn(async move {
             match this
-                .run_reserved(
-                    reserved,
-                    session_id,
-                    cwd,
-                    label.clone(),
-                    command.clone(),
-                    cmd,
-                    Some(std::time::Duration::ZERO),
-                )
+                .run_reserved(reserved, cmd, Some(std::time::Duration::ZERO))
                 .await
             {
                 // A command that somehow finished within the zero-length window
@@ -321,8 +325,7 @@ impl BackgroundTaskManager {
         grace: Option<std::time::Duration>,
     ) -> std::io::Result<Handover> {
         let reserved = self.reserve_run(session_id, &label, &command, &cwd);
-        self.run_reserved(reserved, session_id, cwd, label, command, cmd, grace)
-            .await
+        self.run_reserved(reserved, cmd, grace).await
     }
 
     /// Take a run's id, stream paths and roster row on the CALLER's thread,
@@ -364,6 +367,10 @@ impl BackgroundTaskManager {
             output_out,
             output_err,
             started,
+            session_id,
+            cwd: cwd.to_path_buf(),
+            label: label.to_string(),
+            command: command.to_string(),
         }
     }
 
@@ -373,10 +380,6 @@ impl BackgroundTaskManager {
     async fn run_reserved(
         self: std::sync::Arc<Self>,
         reserved: Reservation,
-        session_id: Uuid,
-        cwd: PathBuf,
-        label: String,
-        command: String,
         mut cmd: tokio::process::Command,
         grace: Option<std::time::Duration>,
     ) -> std::io::Result<Handover> {
@@ -386,6 +389,10 @@ impl BackgroundTaskManager {
             output_out,
             output_err,
             started,
+            session_id,
+            cwd,
+            label,
+            command,
         } = reserved;
 
         // Each fallible step below un-registers the reservation on failure: a
