@@ -2622,8 +2622,16 @@ impl OpenAIProvider {
     /// `provider.stream(request)`, which also contains the rate-limit wait,
     /// the retry backoff and the fallback walk) is what makes the resulting
     /// `Timeout` mean what its name says.
+    ///
+    /// `client` is the caller's choice of transport: `self.client` for the
+    /// non-streaming paths (it carries the total request ceiling), and
+    /// `self.stream_client` for `stream()` (no total ceiling by construction,
+    /// #1687 — a wall clock over an SSE body kills healthy long streams). The
+    /// handshake budget applies on either, so a stream is bounded on the
+    /// handshake while its body stays unbounded.
     async fn send_bounded(
         &self,
+        client: &Client,
         url: &str,
         headers: reqwest::header::HeaderMap,
         body: &serde_json::Value,
@@ -2632,7 +2640,7 @@ impl OpenAIProvider {
             false,
             Some(self.base_url.as_str()),
         );
-        let send = self.client.post(url).headers(headers).json(body).send();
+        let send = client.post(url).headers(headers).json(body).send();
         let response = match budget {
             Some(budget) => match tokio::time::timeout(budget, send).await {
                 Ok(res) => res,
@@ -3596,7 +3604,7 @@ impl Provider for OpenAIProvider {
                 tracing::debug!("Sending request to OpenAI API: {}", self.base_url);
                 let body = self.encode_body(&openai_request)?;
                 let response = self
-                    .send_bounded(&self.send_url(), self.headers_for(session)?, &body)
+                    .send_bounded(&self.client, &self.send_url(), self.headers_for(session)?, &body)
                     .await?;
 
                 let status = response.status();
@@ -3671,7 +3679,7 @@ impl Provider for OpenAIProvider {
                     || async {
                         let body = self.encode_body(&openai_request)?;
                         let response = self
-                            .send_bounded(&self.send_url(), self.headers_for(session)?, &body)
+                            .send_bounded(&self.client, &self.send_url(), self.headers_for(session)?, &body)
                             .await?;
                         if !response.status().is_success() {
                             return Err(self.handle_error(response).await);
@@ -3703,6 +3711,7 @@ impl Provider for OpenAIProvider {
                                 let body = self.encode_body(&openai_request)?;
                                 let response = self
                                     .send_bounded(
+                                        &self.client,
                                         &self.send_url(),
                                         self.headers_for(session)?,
                                         &body,
@@ -3792,7 +3801,7 @@ impl Provider for OpenAIProvider {
             || async {
                 let body = self.encode_body(&openai_request)?;
                 let response = self
-                    .send_bounded(&self.send_url(), self.headers_for(session)?, &body)
+                    .send_bounded(&self.stream_client, &self.send_url(), self.headers_for(session)?, &body)
                     .await?;
 
                 tracing::debug!("OpenAI response status: {}", response.status());
@@ -3832,7 +3841,7 @@ impl Provider for OpenAIProvider {
                 || async {
                     let body = self.encode_body(&openai_request)?;
                     let r = self
-                        .send_bounded(&self.send_url(), self.headers_for(session)?, &body)
+                        .send_bounded(&self.stream_client, &self.send_url(), self.headers_for(session)?, &body)
                         .await?;
                     if !r.status().is_success() {
                         return Err(self.handle_error(r).await);
@@ -3859,7 +3868,7 @@ impl Provider for OpenAIProvider {
                         || async {
                             let body = self.encode_body(&openai_request)?;
                             let r = self
-                                .send_bounded(&self.send_url(), self.headers_for(session)?, &body)
+                                .send_bounded(&self.stream_client, &self.send_url(), self.headers_for(session)?, &body)
                                 .await?;
                             if !r.status().is_success() {
                                 return Err(self.handle_error(r).await);

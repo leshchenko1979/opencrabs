@@ -970,7 +970,9 @@ pub(crate) async fn resume_session_inner(
             ProgressEvent::CompactionSummary {
                 before_pct,
                 after_pct,
-                before_tokens,
+                // Not rendered (the ✅ line carries percentages only, #29);
+                // `after_tokens` is read below for the footer slot.
+                before_tokens: _,
                 after_tokens,
                 elapsed,
                 ..

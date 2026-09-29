@@ -1008,21 +1008,6 @@ pub(crate) fn classify_render_failure(status: u16, body: &str) -> MermaidResult 
     }
 }
 
-/// Whether a non-image renderer response is worth ONE retry at the request
-/// rung (#516). The exact mirror of [`classify_render_failure`]: whatever that
-/// function calls a deterministic PARSE rejection of this source is final —
-/// re-sending the same bytes to the same renderer earns the same answer — and
-/// everything else (5xx, the transient 408/429, odd non-image responses) is
-/// infra and earns one cheap re-request. Derived from the classifier rather
-/// than restating its status ranges, so the retry gate and the failure kind can
-/// never disagree. Pure, so it is unit-testable without a network call.
-pub(crate) fn is_transient_render_failure(status: u16) -> bool {
-    !matches!(
-        classify_render_failure(status, ""),
-        MermaidResult::ParseError(_)
-    )
-}
-
 /// Whether an HTTP response represents a usable rendered image. Split out so
 /// the accept/reject branching is unit-testable without a network call.
 pub(crate) fn is_image_response(status: u16, content_type: &str) -> bool {

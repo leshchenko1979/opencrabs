@@ -243,8 +243,10 @@ pub(crate) fn build_progress_cb(
             ProgressEvent::CompactionSummary {
                 before_pct,
                 after_pct,
-                before_tokens,
-                after_tokens,
+                // The token counts are not rendered: the ✅ line carries the
+                // percentages only (the header is number-free by design, #29).
+                before_tokens: _,
+                after_tokens: _,
                 elapsed,
                 ..
             } => {
