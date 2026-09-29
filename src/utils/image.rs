@@ -1474,13 +1474,15 @@ pub fn rewrite_local_videos(
     let mut i = 0;
 
     while i < text.len() {
+        // Advances only on a consumption: an empty marker is dropped without a
+        // failure (the scan's policy above), and a reference `file` declines
+        // stays verbatim in both buffers.
         if text[i..].starts_with(VID_PREFIX)
             && let Some((end, raw)) = parse_marker_at(text, i, VID_PREFIX)
+            && (raw.is_empty() || rw.file(&raw, "", None, true))
         {
-            if raw.is_empty() || rw.file(&raw, "", None, true) {
-                i = end;
-                continue;
-            }
+            i = end;
+            continue;
         }
         if !regions[i]
             && text[i..].starts_with("![")

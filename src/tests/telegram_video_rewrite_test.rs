@@ -344,7 +344,10 @@ fn an_already_delivered_video_is_consumed_without_a_second_entry() {
         &format!("![again]({})", clip.display()),
         None,
         PREFIX,
-        &[clip.clone()],
+        // `from_ref` rather than `&[clip.clone()]`: clippy's
+        // `cloned_ref_to_slice_refs` declines the cloning form (the image plane
+        // carries the same note at its twin call site).
+        std::slice::from_ref(&clip),
     );
 
     assert!(
