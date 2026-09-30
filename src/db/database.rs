@@ -860,10 +860,30 @@ impl Database {
         // default profile's home no matter which profile is starting.
         let snapshot_dir = crate::db::migration_snapshot::snapshot_dir();
 
-        // #714: the snapshot and the preflight exist to protect a write. A
-        // database already at the latest migration, with every heal's
-        // precondition satisfied, has nothing to protect. `VACUUM INTO` of
-        // that image is what filled the disk. The probe is a read.
+        // #1779 defect 2: this used to be the check *after* the migrations, so
+        // on a corrupt image it never ran and the operator died on the
+        // migration error with no restore path. It goes first — ahead of
+        // anything that touches the pool — because on the rpi5 shape the pool
+        // cannot produce a connection at all: `post_create` applies
+        // `PRAGMA journal_mode = WAL`, a write, and on a torn image it fails
+        // with "post_create hook failed: database disk image is malformed"
+        // before a single line of migration code runs. A check that needs the
+        // pool is unreachable in the exact incident it exists to catch, so
+        // this opens its own connection to the file instead. It also runs
+        // ahead of the snapshot guard, because on the rpi5 shape `VACUUM INTO`
+        // fails too (verified: SQLITE_CORRUPT while stepping), so snapshotting
+        // a torn image buys nothing and only spends a write attempt.
+        //
+        // Skipped when there is no file to check (in-memory database), which is
+        // every test that uses `connect_in_memory`.
+        if let Some(path) = self.db_path.as_deref() {
+            crate::db::migration_snapshot::integrity_preflight(path, &snapshot_dir)?;
+        }
+
+        // #714: the snapshot exists to protect a write. A database already at
+        // the latest migration, with every heal's precondition satisfied, has
+        // nothing to protect. `VACUUM INTO` of that image is what filled the
+        // disk. The probe is a read.
         let migration_count = Self::MIGRATION_COUNT as i64;
         let needs_snapshot = self
             .pool
@@ -876,22 +896,7 @@ impl Database {
             .await
             .map_err(interact_err)??;
 
-        // #1779 defect 2: this used to be the check *after* the migrations, so
-        // on a corrupt image it never ran and the operator died on the
-        // migration error with no restore path. It goes first, ahead of the
-        // snapshot guard, because on the rpi5 shape `VACUUM INTO` fails too
-        // (verified: SQLITE_CORRUPT while stepping), so snapshotting a torn
-        // image buys nothing and only spends a write attempt.
-        //
-        // Skipped when there is no file to check (in-memory database), which is
-        // every test that uses `connect_in_memory`. Also skipped when nothing
-        // will write (#714): the preflight opens the file read-write and walks
-        // every page.
         if needs_snapshot {
-            if let Some(path) = self.db_path.as_deref() {
-                crate::db::migration_snapshot::integrity_preflight(path, &snapshot_dir)?;
-            }
-
             self.pool
                 .get()
                 .await
