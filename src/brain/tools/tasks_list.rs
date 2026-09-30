@@ -28,6 +28,14 @@ pub(crate) struct SubagentRow {
     /// Path of the agent's JSON status file, as built by
     /// [`subagent_status_file`], so the model can read live progress directly.
     pub status_file: Option<String>,
+    /// Stdout capture of the child's most recent detached run (#692 D6).
+    ///
+    /// A child's runs are NOT in the detached list below: a run is scoped to
+    /// the session that spawned it, and the child's session is its own. Without
+    /// this leg a sub-agent that detached a command rendered as a row with no
+    /// way to reach what it was producing — the caller could see that its child
+    /// was working and not what it was working on.
+    pub output_out: Option<String>,
 }
 
 /// Advertised status-file path for a sub-agent — the same path writers use.
@@ -86,6 +94,9 @@ pub(crate) fn render_tasks(subagents: &[SubagentRow], detached: &[DetachedRow]) 
             out.push_str(&format!("\n- {} [{}] {}", a.id, a.label, a.state));
             if let Some(sf) = &a.status_file {
                 out.push_str(&format!("\n  status file: {sf}"));
+            }
+            if let Some(f) = &a.output_out {
+                out.push_str(&format!("\n  output: {f}"));
             }
         }
     }
@@ -169,11 +180,34 @@ impl Tool for TasksListTool {
             // noise. The detached half below is already scoped the same way.
             for (id, label, state) in mgr.list_for_parent(context.session_id) {
                 let status_file = subagent_status_file(&id);
+                // The child's own runs, read through the SAME registry the
+                // detached half below reads (`handles_for`), keyed by the
+                // child's session rather than the caller's — which is the whole
+                // reason this leg has to exist here and cannot fall out of the
+                // caller's own detached list (#692 D6).
+                //
+                // `handles_for` sorts by start time ascending, so the last
+                // handle is the child's MOST RECENT run: the one a caller asking
+                // "what is it doing now" wants, and the newest-first reading the
+                // rest of this row's pointers follow. A child with no run of its
+                // own — most of them, most of the time — renders no line at all,
+                // which is what an absent pointer should look like.
+                let output_out = match (
+                    context.background_manager.as_ref(),
+                    mgr.get_session_id(&id),
+                ) {
+                    (Some(bm), Some(child_session)) => bm
+                        .handles_for(child_session)
+                        .last()
+                        .map(|h| h.output_out.display().to_string()),
+                    _ => None,
+                };
                 subagents.push(SubagentRow {
                     id,
                     label,
                     state: state_label(&state).to_string(),
                     status_file: Some(status_file),
+                    output_out,
                 });
             }
         }

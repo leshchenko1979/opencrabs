@@ -36,6 +36,7 @@ fn render_lists_both_systems_with_states_and_pointers() {
         label: "research".into(),
         state: "running".into(),
         status_file: Some("/tmp/subagents/agt-1.json".into()),
+        output_out: Some("/tmp/runs/child-run-1.out".into()),
     }];
     let det = vec![DetachedRow {
         id: "run-1".into(),
@@ -50,6 +51,12 @@ fn render_lists_both_systems_with_states_and_pointers() {
     assert!(out.contains("Sub-agents (1)"), "was: {out}");
     assert!(out.contains("- agt-1 [research] running"), "was: {out}");
     assert!(out.contains("status file: /tmp/subagents/agt-1.json"));
+    // A sub-agent row must carry a path to what the CHILD is producing, not
+    // only to its own status record: a child's detached runs are scoped to the
+    // child's session, so they never appear in the caller's detached list
+    // below — without this line the model sees a child at work and has no way
+    // to look at the work (#692 D6).
+    assert!(out.contains("output: /tmp/runs/child-run-1.out"), "was: {out}");
     assert!(out.contains("Detached commands (1)"), "was: {out}");
     assert!(out.contains("- run-1 [cargo test] 42s"), "was: {out}");
     // A row must carry the run's ADDRESS, not just its label: the id is the
@@ -203,6 +210,87 @@ async fn execute_lists_only_the_callers_subagents() {
     assert!(
         !out.output.contains("theirs01"),
         "another session's child leaked into the roster: {}",
+        out.output
+    );
+}
+
+/// #692 D6: a sub-agent's row carries a path to the CHILD's own runs.
+///
+/// Pins the CALL SITE, not the renderer: `render_tasks` renders rows the caller
+/// built, so it cannot see whether `execute` looked the child's runs up under
+/// the child's session or the caller's. The regression this catches is silent —
+/// `handles_for(caller)` returns an empty list rather than an error, so the row
+/// would simply lose its output line and every fixture-rendering test would
+/// stay green while the feature did nothing.
+#[tokio::test]
+async fn execute_points_a_subagent_row_at_the_childs_own_run() {
+    use crate::brain::agent::service::background_tasks::{BackgroundTaskManager, RunRequest};
+    use crate::brain::tools::ToolExecutionContext;
+    use crate::brain::tools::subagent::{SubAgent, SubAgentManager};
+    use std::sync::Arc;
+
+    let me = Uuid::from_u128(0x692);
+    let child_session = Uuid::new_v4();
+
+    // The spawn path creates its capture files IMMEDIATELY (`ensure_runs_dir`
+    // then `File::create`), and `runs_dir()` falls back to `<home>/tmp/runs`
+    // when no override is set — so without this the test writes into the home
+    // the daemon is using. Pinned to a TempDir for the same reason the
+    // neighbouring tests are.
+    let dir = TempDir::new().unwrap();
+    crate::brain::agent::service::work_status::test_override::set(dir.path().to_path_buf());
+
+    let mgr = Arc::new(SubAgentManager::new());
+    mgr.insert(SubAgent::new(
+        "child001",
+        "child-research",
+        child_session,
+        me,
+    ));
+
+    // A run the CHILD spawned: its session is the child's, not the caller's.
+    // That is the whole point — a run is scoped to the session that spawned it,
+    // so this one is invisible to the caller's own detached list.
+    let bm = Arc::new(BackgroundTaskManager::new());
+    bm.clone().spawn_command(RunRequest::new(
+        child_session,
+        std::env::temp_dir(),
+        "child run".to_string(),
+        "sleep 5".to_string(),
+    ));
+
+    let mut ctx = ToolExecutionContext::new(me);
+    ctx.subagent_manager = Some(mgr);
+    ctx.background_manager = Some(bm.clone());
+
+    let out = TasksListTool::new()
+        .execute(serde_json::json!({}), &ctx)
+        .await
+        .unwrap();
+    // The child's run is addressable through the child's row...
+    let expected = bm.handles_for(child_session)[0]
+        .output_out
+        .display()
+        .to_string();
+
+    // Nothing below touches the filesystem — `expected` comes from the same
+    // in-memory handle `execute` read — so the override is cleared BEFORE the
+    // assertions: a failing assert must not leave a thread-local pointing at a
+    // TempDir that is about to be deleted, for the next test on this thread.
+    crate::brain::agent::service::work_status::test_override::clear();
+
+    assert!(out.success, "tasks_list failed: {:?}", out.error);
+    assert!(
+        out.output.contains(&format!("output: {expected}")),
+        "child's run path missing from its row: {}\nwant: {expected}",
+        out.output
+    );
+    // ...and the caller's detached section stays empty, because the run belongs
+    // to the child. Had the lookup keyed on the caller, the path would appear
+    // under the wrong heading and this assertion would fail instead.
+    assert!(
+        !out.output.contains("Detached commands"),
+        "a child's run leaked into the caller's detached list: {}",
         out.output
     );
 }
