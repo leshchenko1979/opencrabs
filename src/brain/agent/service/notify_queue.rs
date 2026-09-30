@@ -72,17 +72,18 @@ pub(crate) fn strip_busy_wrapper(text: &str) -> &str {
     rest
 }
 
-/// Prepend the busy-lane framing at most once.
+/// Prepend the busy-lane framing, normalising to EXACTLY one.
 ///
-/// Idempotent so a push that already carries the framing — a row re-offered at
-/// boot, or an item re-queued after a lost turn race — cannot accumulate a
+/// The postcondition is "at most once", so input that already carries the
+/// framing must come back with ONE wrapper, not with its original count. A
+/// plain `starts_with` guard is not enough: it passes 0 and 1 through
+/// correctly but leaves two or more untouched, and rows written before the
+/// framing was excluded from the durable text do carry two or more (measured
+/// live 2026-09-30: `wrappers=2`). A push re-offered at boot, or an item
+/// re-queued after a lost turn race, must neither keep nor accumulate a
 /// second one.
 pub(crate) fn wrap_busy_once(context_text: &str) -> String {
-    if context_text.starts_with(BUSY_LANE_WRAPPER) {
-        context_text.to_string()
-    } else {
-        format!("{BUSY_LANE_WRAPPER}{context_text}")
-    }
+    format!("{BUSY_LANE_WRAPPER}{}", strip_busy_wrapper(context_text))
 }
 
 fn repo() -> Option<NotifyQueueRepository> {
