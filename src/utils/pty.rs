@@ -217,6 +217,21 @@ pub fn install_pty(
     cmd.stdout(std::process::Stdio::from(std::fs::File::from(slave_out)));
     cmd.stderr(std::process::Stdio::from(std::fs::File::from(slave_err)));
 
+    // A tty changes what a child FORMATS, not only how it buffers. Before this
+    // feature every child saw pipes, so `grep --color=auto` stayed plain and no
+    // pager ever engaged; with a terminal on stdout they start emitting ANSI
+    // escapes and waiting on input the harness will never send. The stream is
+    // compared byte-for-byte against the pre-change framing, so the tty is
+    // handed a deliberately dumb environment instead.
+    //
+    // `TERM=dumb` is the portable signal; `NO_COLOR` is what newer tools honour
+    // when they ignore TERM; the pagers are pinned because a pager that decided
+    // to page on a tty would block the capture it was asked to produce.
+    cmd.env("TERM", "dumb")
+        .env("NO_COLOR", "1")
+        .env("PAGER", "cat")
+        .env("GIT_PAGER", "cat");
+
     Ok((mo, me))
 }
 
@@ -248,6 +263,39 @@ mod tests {
             0,
             "OPOST must be clear, or \\n is rewritten as \\r\\n"
         );
+    }
+
+    #[test]
+    fn a_pty_child_is_given_a_dumb_terminal() {
+        // A tty changes what a child FORMATS, not only how it buffers:
+        // `grep --color=auto` only colours when it sees a terminal, and a pager
+        // that decided to page would block the very capture it was asked for.
+        // Without this the streamed bytes stop matching the pre-change framing.
+        let mut cmd = tokio::process::Command::new("true");
+        let _pair = install_pty(&mut cmd).expect("install_pty");
+
+        let envs: Vec<(String, String)> = cmd
+            .as_std_mut()
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().into_owned(),
+                    v?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect();
+
+        for (key, want) in [
+            ("TERM", "dumb"),
+            ("NO_COLOR", "1"),
+            ("PAGER", "cat"),
+            ("GIT_PAGER", "cat"),
+        ] {
+            assert!(
+                envs.iter().any(|(k, v)| k == key && v == want),
+                "{key}={want} must be set on a pty child, got {envs:?}"
+            );
+        }
     }
 
     #[test]
