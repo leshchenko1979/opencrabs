@@ -461,3 +461,190 @@ async fn a_delivery_retires_the_row_its_own_write_produced() {
         "pre-fix: the framed clear misses the row — the defect this pins"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Ordering — the clear must not precede the write it retires (#439/#366,
+// shape A).
+//
+// `route` is `Arc<dyn Fn(Uuid, QueuedUserMessage)>` returning `()`: the
+// delivery — and therefore its `enqueue_item` → `persist` INSERT — is deferred
+// into a spawn behind a transport wait. A clear issued at the same chokepoint
+// reaches the pool FIRST and retires nothing, and the row the delivery then
+// writes survives to the next boot: one byte-identical duplicate per boot,
+// forever. These tests pin the wait that closes it.
+// ---------------------------------------------------------------------------
+
+use crate::brain::agent::service::notify_queue::retire_rows_until;
+
+/// The discriminating leg: a persist that lands AFTER the clear has started
+/// must still be retired.
+#[tokio::test]
+async fn clear_waits_for_the_write_it_must_retire() {
+    let (repo, _db) = setup().await;
+    let session = Uuid::new_v4();
+    let (body, display) = ("a work order body", "work order");
+
+    // The row the push parked at its first hand-off.
+    repo.record(
+        Uuid::new_v4(),
+        session,
+        body,
+        display,
+        PushOrigin::SessionNotify,
+        None,
+    )
+    .await
+    .expect("record original");
+
+    // The delivering route's OWN write, deferred exactly as the spawned
+    // callback defers it — landing 600ms after the clear begins.
+    let late = repo.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        late.record(
+            Uuid::new_v4(),
+            session,
+            body,
+            display,
+            PushOrigin::SessionNotify,
+            None,
+        )
+        .await
+        .expect("record deferred");
+    });
+
+    let retired = retire_rows_until(
+        &repo,
+        session,
+        body,
+        display,
+        std::time::Duration::from_secs(3),
+        std::time::Duration::from_millis(250),
+    )
+    .await
+    .expect("retire");
+
+    assert_eq!(
+        retired, 2,
+        "the parked row AND the deferred write must both be retired"
+    );
+    assert!(
+        repo.all().await.expect("all").is_empty(),
+        "a row surviving this is the duplicate the next boot re-delivers"
+    );
+}
+
+/// Pre-fix rows carry the busy-lane framing (the normalisation landed after
+/// them), so an exact-content match can never retire them: they were immortal
+/// until the 72h reaper.
+#[tokio::test]
+async fn clear_retires_a_pre_fix_row_that_still_carries_the_framing() {
+    let (repo, _db) = setup().await;
+    let session = Uuid::new_v4();
+    let (body, display) = ("a durable twin body", "twin");
+    let framed = format!("{BUSY_LANE_WRAPPER}{body}");
+
+    repo.record(
+        Uuid::new_v4(),
+        session,
+        &framed,
+        display,
+        PushOrigin::SessionNotify,
+        None,
+    )
+    .await
+    .expect("record framed");
+
+    let retired = retire_rows_until(
+        &repo,
+        session,
+        body,
+        display,
+        std::time::Duration::from_millis(50),
+        std::time::Duration::from_millis(25),
+    )
+    .await
+    .expect("retire");
+
+    assert_eq!(
+        retired, 1,
+        "the framing must not shield a row from its own delivery"
+    );
+    assert!(repo.all().await.expect("all").is_empty());
+}
+
+/// Positive control for the match: a DIFFERENT undelivered push for the same
+/// session must survive, or the clear is a blanket session wipe.
+#[tokio::test]
+async fn clear_leaves_a_different_undelivered_push_alone() {
+    let (repo, _db) = setup().await;
+    let session = Uuid::new_v4();
+    repo.record(
+        Uuid::new_v4(),
+        session,
+        "delivered",
+        "delivered",
+        PushOrigin::SessionNotify,
+        None,
+    )
+    .await
+    .expect("record delivered");
+    repo.record(
+        Uuid::new_v4(),
+        session,
+        "never delivered",
+        "never delivered",
+        PushOrigin::SessionNotify,
+        None,
+    )
+    .await
+    .expect("record pending");
+
+    let retired = retire_rows_until(
+        &repo,
+        session,
+        "delivered",
+        "delivered",
+        std::time::Duration::from_millis(50),
+        std::time::Duration::from_millis(25),
+    )
+    .await
+    .expect("retire");
+
+    assert_eq!(retired, 1);
+    let rows = repo.all().await.expect("all");
+    assert_eq!(rows.len(), 1, "the never-delivered push must survive");
+    assert_eq!(rows[0].context_text, "never delivered");
+}
+
+/// Negative control: retiring nothing reports zero and deletes nothing — the
+/// instrument can observe the absence it is aimed at.
+#[tokio::test]
+async fn clear_of_an_absent_row_reports_zero_and_deletes_nothing() {
+    let (repo, _db) = setup().await;
+    let session = Uuid::new_v4();
+    repo.record(
+        Uuid::new_v4(),
+        session,
+        "unrelated",
+        "unrelated",
+        PushOrigin::SessionNotify,
+        None,
+    )
+    .await
+    .expect("record");
+
+    let retired = retire_rows_until(
+        &repo,
+        session,
+        "no such body",
+        "no such display",
+        std::time::Duration::from_millis(50),
+        std::time::Duration::from_millis(25),
+    )
+    .await
+    .expect("retire");
+
+    assert_eq!(retired, 0, "nothing matched, so nothing may be deleted");
+    assert_eq!(repo.all().await.expect("all").len(), 1);
+}
