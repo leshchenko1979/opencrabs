@@ -26,8 +26,8 @@
 //! asserts a call site that exists rather than one anticipated here.
 
 use crate::channels::telegram::send::{
-    TELEGRAM_VIDEO_MAX_BYTES, TelegramVideoKind, VideoFormat, sniff_video_format,
-    telegram_video_media_kind, video_format_of_path, video_in_thread,
+    TELEGRAM_VIDEO_MAX_BYTES, TelegramVideoKind, VIDEO_FORMAT_HEAD_BYTES, VideoFormat,
+    sniff_video_format, telegram_video_media_kind, video_in_thread,
 };
 use std::path::Path;
 
@@ -175,25 +175,29 @@ fn a_truncated_or_empty_head_errs_towards_document() {
     assert_eq!(sniff_video_format(b"\x00\x00\x00\x18fty"), VideoFormat::Other);
 }
 
+/// Classify a file the way the delivery floor does: read the bytes, slice the
+/// head, sniff the container — `sniff_video_format(&bytes[..VIDEO_FORMAT_HEAD_BYTES.min(len)])`,
+/// exactly as `delivery.rs` does it.
+///
+/// The composition lives here rather than in `send.rs` because the floor
+/// already holds the bytes it uploads, so a path-taking wrapper would have no
+/// production caller — and an unused `pub fn` on the lib unit is a clippy
+/// error. The instrument under test is still the production one.
+fn format_of_path(path: &Path) -> VideoFormat {
+    let bytes = std::fs::read(path).expect("read fixture");
+    sniff_video_format(&bytes[..VIDEO_FORMAT_HEAD_BYTES.min(bytes.len())])
+}
+
 #[test]
-fn video_format_of_path_reads_the_real_container() {
+fn the_container_is_read_from_the_bytes_not_the_name() {
     // The extension is a claim the bytes may not honour: this fixture is NAMED
     // .mp4 and carries AVI bytes, and it must NOT take the video arm.
     let dir = tempfile::tempdir().expect("tempdir");
     let honest = write_fixture(dir.path(), "clip.mp4", MP4_BYTES);
     let renamed = write_fixture(dir.path(), "liar.mp4", AVI_BYTES);
 
-    assert_eq!(video_format_of_path(&honest), VideoFormat::Mpeg4);
-    assert_eq!(video_format_of_path(&renamed), VideoFormat::Other);
-}
-
-#[test]
-fn an_unreadable_path_errs_towards_document() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    assert_eq!(
-        video_format_of_path(&dir.path().join("absent.mp4")),
-        VideoFormat::Other
-    );
+    assert_eq!(format_of_path(&honest), VideoFormat::Mpeg4);
+    assert_eq!(format_of_path(&renamed), VideoFormat::Other);
 }
 
 // ---------------------------------------------------------------------------

@@ -335,19 +335,6 @@ pub fn sniff_video_format(head: &[u8]) -> VideoFormat {
     VideoFormat::Other
 }
 
-/// Read the leading bytes of `path` and classify its container. Any IO error
-/// answers [`VideoFormat::Other`] — the restrictive direction described on
-/// [`sniff_video_format`]: an unreadable or unrecognised file goes as a
-/// document rather than as a video that will not play.
-pub fn video_format_of_path(path: &std::path::Path) -> VideoFormat {
-    use std::io::Read;
-    let mut head = [0u8; VIDEO_FORMAT_HEAD_BYTES];
-    match std::fs::File::open(path).and_then(|mut f| f.read(&mut head)) {
-        Ok(n) => sniff_video_format(&head[..n]),
-        Err(_) => VideoFormat::Other,
-    }
-}
-
 /// Which send method a video of `len` bytes in `format` needs.
 ///
 /// Past [`TELEGRAM_VIDEO_MAX_BYTES`] neither `sendVideo` nor `sendDocument`
