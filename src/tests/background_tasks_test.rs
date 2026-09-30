@@ -247,13 +247,14 @@ fn apply_context_env_sets_the_noninteractive_defaults() {
     use crate::brain::tools::ToolExecutionContext;
     use crate::brain::tools::bash::apply_context_env;
     use std::ffi::OsStr;
-    use std::process::Command;
+    use tokio::process::Command;
 
     let mut ctx = ToolExecutionContext::new(Uuid::new_v4());
     let mut cmd = Command::new("true");
     apply_context_env(&mut cmd, &ctx);
 
     let envs: Vec<(String, Option<String>)> = cmd
+        .as_std()
         .get_envs()
         .map(|(k, v)| {
             (
@@ -284,7 +285,8 @@ fn apply_context_env_sets_the_noninteractive_defaults() {
     let mut cmd2 = Command::new("true");
     apply_context_env(&mut cmd2, &ctx);
     assert!(
-        cmd2.get_envs()
+        cmd2.as_std()
+            .get_envs()
             .any(|(k, v)| k == OsStr::new("PAGER") && v == Some(OsStr::new("less"))),
         "a caller's own PAGER must survive the defaults"
     );
