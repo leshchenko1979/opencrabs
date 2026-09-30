@@ -1096,6 +1096,8 @@ fn deliver_wake(
             target: "background_task",
             "Wake for run {id} was refused by the mid-turn gate despite interrupt=true"
         ),
+        // Went out. Nothing to say, exactly as in `deliver_completion`.
+        super::session_routes::Delivery::Delivered => {}
     }
 }
 
