@@ -12,7 +12,15 @@ use regex::Regex;
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
 
-/// Append bytes to a path, creating it if absent.
+/// Append bytes to a path, creating it if absent, and make them VISIBLE.
+///
+/// The flush is load-bearing, not hygiene. tokio's `File::poll_write` copies
+/// into an internal buffer, hands the real `write(2)` to a blocking thread and
+/// returns `Ready(Ok(n))` immediately — and `File` has no `Drop` impl, so
+/// dropping it neither flushes nor waits. Without this call the bytes can still
+/// be in flight when the scan that follows stats the file, and a scan of a
+/// 0-byte file is an empty scan: a race that passes by timing and fails under
+/// load, which is worse than a deterministic failure.
 async fn append(path: &std::path::Path, text: &str) {
     let mut f = tokio::fs::OpenOptions::new()
         .create(true)
@@ -21,6 +29,7 @@ async fn append(path: &std::path::Path, text: &str) {
         .await
         .expect("open stream");
     f.write_all(text.as_bytes()).await.expect("write stream");
+    f.flush().await.expect("flush stream");
 }
 
 #[test]
