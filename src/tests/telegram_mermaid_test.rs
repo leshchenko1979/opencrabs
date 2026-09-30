@@ -17,7 +17,7 @@ use crate::channels::telegram::rich::mermaid::{
     MediaEntry, MediaKind, MermaidStyle, PREVALIDATE_CONNECT_TIMEOUT_SECS, PREVALIDATE_TIMEOUT_SECS, base64url,
     cache_get, cache_put, classify_render_failure, error_note, failure_html, find_mermaid_fences,
     has_mermaid_fence, image_html, ink_url, ink_url_svg, is_diagram_capped, is_image_response,
-    looks_like_mermaid_source, markdown_failure_block,
+    is_transient_status, looks_like_mermaid_source, markdown_failure_block,
     markdown_failure_block_with_link,
     neutralize_orphan_photo_refs, neutralize_prose_media_html, replacement_for, resolve_blocks,
     resolve_markdown_media, svg_link_md, unresolved_media_refs, unresolved_media_refs_by,
@@ -489,11 +489,180 @@ fn replacement_for_parse_error_matches_failed_block_shape() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn classify_render_failure_4xx_is_parse_error() {
+fn classify_render_failure_400_is_parse_error() {
+    // #37. Named for the status it actually pins: the 4xx bucket is no longer
+    // uniformly a parse rejection (#658 carved 413/414 out), so the old name
+    // — "4xx is parse error" — claimed more than this test asserts.
     match classify_render_failure(400, "Parse error on line 3: syntax error") {
         MermaidResult::ParseError(note) => assert!(note.contains("Parse error on line 3")),
         other => panic!("expected ParseError, got {other:?}"),
     }
+}
+
+#[test]
+fn classify_render_failure_remaining_4xx_stay_parse_errors() {
+    // #658: only 413/414 were carved out. Every other deterministic 4xx keeps
+    // BOTH the parse classification and the renderer's own plain-text
+    // diagnosis, which is the actionable part for the model.
+    for status in [404u16, 422, 451] {
+        match classify_render_failure(status, "Parse error on line 2") {
+            MermaidResult::ParseError(note) => assert!(note.contains("Parse error on line 2")),
+            other => panic!("status {status}: expected ParseError, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn classify_render_failure_413_and_414_are_too_large() {
+    // #658. Both statuses mean the same thing — our request line is over the
+    // limit — and it is nginx that answers, with an HTML page rather than the
+    // renderer's plain text. Each status is paired with its OWN realistic
+    // body: a markup body's number comes from its <title>, not from the
+    // `status` argument, so a shared fixture would pin the wrong string.
+    for (status, body, title) in [
+        (
+            414u16,
+            "<html>\r\n<head><title>414 Request-URI Too Large</title></head>\r\n\
+             <body><center><h1>414 Request-URI Too Large</h1></center></body>\r\n</html>",
+            "414 Request-URI Too Large",
+        ),
+        (
+            413,
+            "<html>\r\n<head><title>413 Request Entity Too Large</title></head>\r\n\
+             <body><center><h1>413 Request Entity Too Large</h1></center></body>\r\n</html>",
+            "413 Request Entity Too Large",
+        ),
+    ] {
+        match classify_render_failure(status, body) {
+            MermaidResult::TooLarge(note) => {
+                assert!(
+                    !note.contains('<'),
+                    "status {status}: the proxy's markup must never reach the \
+                     note. Got:\n{note}"
+                );
+                assert!(
+                    note.contains(title),
+                    "status {status}: the renderer's own status line must \
+                     survive. Got:\n{note}"
+                );
+            }
+            other => panic!("status {status}: expected TooLarge, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn is_transient_status_never_retries_the_too_large_class() {
+    // #658: identical bytes through the same request line earn the same 414
+    // however healthy the node is, so the retry rung must not fire — the
+    // verdict is decided by our own request line, and a second request cannot
+    // change it. #1741's `transient_status_split_mirrors_classify_convention`
+    // pins the transient split but skips this pair — which is exactly the
+    // pair #658 carved out — so the property is asserted here.
+    for status in [413u16, 414] {
+        assert!(
+            !is_transient_status(status),
+            "status {status} is deterministic for this source and must NOT be retried"
+        );
+    }
+    // Positive control: the predicate must still say yes to the transient
+    // class, so this test cannot pass by the predicate returning false for
+    // everything.
+    assert!(
+        is_transient_status(503),
+        "a 5xx stays transient and must still earn its one retry"
+    );
+    assert!(
+        is_transient_status(408) && is_transient_status(429),
+        "the transient 4xx pair stays retryable"
+    );
+}
+
+#[test]
+fn too_large_note_names_the_real_remedy_not_a_syntax_repair() {
+    // #658 is about the NOTE, not the variant: the source is valid, so a note
+    // that read like the parse arm's would send the model to repair syntax
+    // that was already correct.
+    let note = match classify_render_failure(
+        414,
+        "<html><head><title>414 Request-URI Too Large</title></head></html>",
+    ) {
+        MermaidResult::TooLarge(note) => note,
+        other => panic!("expected TooLarge, got {other:?}"),
+    };
+    assert!(
+        note.contains("too large"),
+        "the note must name the actual condition. Got:\n{note}"
+    );
+    assert!(
+        note.contains("shorten or split"),
+        "the note must name the remedy. Got:\n{note}"
+    );
+    assert!(
+        note.contains("syntax is valid"),
+        "the note must warn AGAINST a syntax repair. Got:\n{note}"
+    );
+    assert!(
+        note.contains("414 Request-URI Too Large"),
+        "the renderer's own status line must survive. Got:\n{note}"
+    );
+}
+
+#[test]
+fn too_large_note_keeps_the_remedy_inside_the_shared_cap() {
+    // The remedy is the reason the class exists, so it must be ordered so a
+    // verbose renderer body cannot push it past the shared 400-char cap.
+    //
+    // A PLAIN-TEXT body is the case that reaches the cap. A markup body never
+    // gets near it: `error_note` reduces markup to its `<title>` first (#636),
+    // so a renderer page of any length contributes ~26 chars. The markup case
+    // is asserted separately below.
+    let note = match classify_render_failure(414, &"x".repeat(4000)) {
+        MermaidResult::TooLarge(note) => note,
+        other => panic!("expected TooLarge, got {other:?}"),
+    };
+    assert_eq!(
+        note.chars().count(),
+        400,
+        "the shared cap must still bound the note. Got {} chars",
+        note.chars().count()
+    );
+    assert!(
+        note.contains("shorten or split"),
+        "the remedy must survive the cap — it is the whole point of the \
+         class. Got:\n{note}"
+    );
+}
+
+#[test]
+fn too_large_note_reduces_proxy_markup_before_capping() {
+    // #636 + #658 together: nginx answers a too-large request with a full HTML
+    // page, and the 4000-char body underneath its <title> must be discarded
+    // rather than counted against the cap. Without the reduction the remedy
+    // would still survive (it leads the note), but the renderer's own status
+    // line would be pushed out of the block.
+    let body = format!(
+        "<html><head><title>414 Request-URI Too Large</title></head><body>{}</body></html>",
+        "x".repeat(4000)
+    );
+    let note = match classify_render_failure(414, &body) {
+        MermaidResult::TooLarge(note) => note,
+        other => panic!("expected TooLarge, got {other:?}"),
+    };
+    assert!(
+        note.chars().count() < 400,
+        "a markup body is reduced to its title, so the note stays well under \
+         the cap. Got {} chars",
+        note.chars().count()
+    );
+    assert!(
+        note.contains("414 Request-URI Too Large"),
+        "the renderer's own status line must survive the reduction. Got:\n{note}"
+    );
+    assert!(
+        !note.contains("xxxx"),
+        "the proxy body must not leak into the note. Got:\n{note}"
+    );
 }
 
 #[test]
@@ -628,6 +797,37 @@ fn replacement_for_failed_offers_the_hatch_but_parse_error_does_not() {
     assert!(
         !parse_md.contains("mermaid.ink/svg/"),
         "a parse rejection must NOT carry the hatch. Got:\n{parse_md}"
+    );
+}
+
+#[test]
+fn replacement_for_too_large_offers_no_hatch_and_no_media() {
+    // #658: no hatch, for a STRONGER reason than the parse arm's — the svg
+    // link is built from the SAME oversized request URL the renderer has just
+    // rejected, so it cannot open however the source reads. A parse rejection
+    // merely has no diagram behind it; here the link itself is dead.
+    let (md, media) = replacement_for(
+        &MermaidResult::TooLarge("diagram source is too large".into()),
+        0,
+        "flowchart TD",
+        &style(),
+    );
+    assert!(
+        md.contains("> ⚠️ **Mermaid diagram could not be rendered**"),
+        "the too-large class must still render a legible failure block. Got:\n{md}"
+    );
+    assert!(
+        md.contains("diagram source is too large"),
+        "the remedy-bearing note must survive into the block. Got:\n{md}"
+    );
+    assert!(
+        !md.contains("mermaid.ink/svg/"),
+        "the hatch is built from the rejected URL and must NOT be offered. \
+         Got:\n{md}"
+    );
+    assert!(
+        media.is_none(),
+        "no media entry can exist for a render that never happened. Got:\n{media:?}"
     );
 }
 
