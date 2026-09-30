@@ -37,6 +37,54 @@ const STALE_ROW_SECS: i64 = 24 * 60 * 60;
 /// and only after the current boot has made its own offer.
 pub(crate) const MAX_ROW_AGE_SECS: i64 = 3 * STALE_ROW_SECS; // 72h (259,200s)
 
+/// The busy-lane framing prepended to a push that lands while its target is
+/// mid-turn (fork #13). It lives here, beside the durable-queue text
+/// normalisation it has to survive, because the two are one contract.
+pub(crate) const BUSY_LANE_WRAPPER: &str =
+    "[queued while you were working — re-anchor to your current task after reading this]\n\n";
+
+/// The text a durable row must carry for a push (#439/#366).
+///
+/// The row holds the push's OWN text: the busy-lane framing is presentation
+/// applied when the push is handed to a turn, never part of the push's
+/// identity. Two measured reasons (2026-09-30):
+///
+/// 1. The framing was re-applied on every re-offer, so the stored text grew by
+///    one wrapper per boot — two live rows read `wrappers=2`.
+/// 2. `clear_matching` is content-exact, so a clear issued with the
+///    pre-framing text could never match a framed row. The row then survived
+///    the very delivery that should have retired it, and the next boot
+///    re-delivered it: one duplicate per boot, forever.
+pub(crate) fn durable_context_text(context_text: &str) -> String {
+    strip_busy_wrapper(context_text).to_string()
+}
+
+/// Strip every leading busy-lane framing wrapper.
+///
+/// Repeated, not single-pass: rows written before the framing was excluded
+/// from the durable text can carry two or more, and leaving one behind would
+/// defeat the content-exact match this exists to restore.
+pub(crate) fn strip_busy_wrapper(text: &str) -> &str {
+    let mut rest = text;
+    while let Some(stripped) = rest.strip_prefix(BUSY_LANE_WRAPPER) {
+        rest = stripped;
+    }
+    rest
+}
+
+/// Prepend the busy-lane framing at most once.
+///
+/// Idempotent so a push that already carries the framing — a row re-offered at
+/// boot, or an item re-queued after a lost turn race — cannot accumulate a
+/// second one.
+pub(crate) fn wrap_busy_once(context_text: &str) -> String {
+    if context_text.starts_with(BUSY_LANE_WRAPPER) {
+        context_text.to_string()
+    } else {
+        format!("{BUSY_LANE_WRAPPER}{context_text}")
+    }
+}
+
 fn repo() -> Option<NotifyQueueRepository> {
     crate::db::global_pool().map(|p| NotifyQueueRepository::new(p.clone()))
 }
@@ -76,7 +124,13 @@ pub(crate) fn persist(session_id: Uuid, msg: &QueuedUserMessage) {
     let Some(repo) = repo() else {
         return;
     };
-    let (context_text, display_text) = (msg.context_text.clone(), msg.display_text.clone());
+    // The row carries the push's OWN text, never the busy-lane framing: see
+    // `durable_context_text`. Without this the framing stacks once per boot and
+    // the content-exact clear can never match the row it must retire.
+    let (context_text, display_text) = (
+        durable_context_text(&msg.context_text),
+        msg.display_text.clone(),
+    );
     let (origin, bg_meta) = (msg.origin, msg.bg_meta.clone());
     spawn_if_runtime(
         async move {
@@ -270,7 +324,13 @@ pub(crate) fn clear_on_delivery(session_id: Uuid, msg: &QueuedUserMessage) {
     let Some(repo) = repo() else {
         return;
     };
-    let (context_text, display_text) = (msg.context_text.clone(), msg.display_text.clone());
+    // Match on the same normalised text `persist` wrote (#439/#366): the
+    // in-memory item carries the busy-lane framing, the row does not, so an
+    // un-normalised clear would silently miss the row it is retiring.
+    let (context_text, display_text) = (
+        durable_context_text(&msg.context_text),
+        msg.display_text.clone(),
+    );
     spawn_if_runtime(
         async move {
             if let Err(e) = repo

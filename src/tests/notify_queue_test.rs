@@ -356,3 +356,108 @@ async fn clear_batch_removes_multiple_rows_atomically() {
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].id, id_2);
 }
+
+// ---------------------------------------------------------------------------
+// #439 / #366 — the durable twin must not survive the delivery that wrote it.
+//
+// Measured defect (2026-09-30): a delivery re-persisted the push it was
+// delivering, while the dispatcher's content-exact clear had already fired
+// with the PRE-framing text and so could not match the framed row. The row
+// survived, the next boot re-delivered it, and the busy-lane framing stacked
+// one wrapper per boot — two live rows read `wrappers=2`.
+//
+// The invariant these pin: the durable row carries the push's OWN text, and
+// the framing is applied to the in-memory item only. That is what lets the
+// clear match the row its own delivery wrote.
+// ---------------------------------------------------------------------------
+
+use crate::brain::agent::service::notify_queue::{
+    durable_context_text, strip_busy_wrapper, wrap_busy_once, BUSY_LANE_WRAPPER,
+};
+
+#[test]
+fn busy_framing_never_reaches_the_durable_row() {
+    let body = "session-notify from=lane-x\n\nbody text";
+    let in_memory = wrap_busy_once(body);
+    assert_ne!(in_memory, body, "the in-memory item carries the framing");
+
+    let stored = durable_context_text(&in_memory);
+    assert_eq!(stored, body, "the durable row carries the push's own text");
+    assert!(!stored.contains(BUSY_LANE_WRAPPER));
+}
+
+#[test]
+fn repeated_busy_framing_is_stripped_to_none() {
+    // Rows written before the framing was excluded from the durable text can
+    // carry two or more (measured live: `wrappers=2`). A single-pass strip
+    // would leave one behind, and the content-exact match would still miss.
+    let stacked = format!("{BUSY_LANE_WRAPPER}{BUSY_LANE_WRAPPER}payload");
+    assert_eq!(strip_busy_wrapper(&stacked), "payload");
+    assert_eq!(strip_busy_wrapper("payload"), "payload");
+    assert_eq!(strip_busy_wrapper(""), "");
+}
+
+#[test]
+fn busy_framing_is_applied_at_most_once() {
+    let once = wrap_busy_once("payload");
+    assert_eq!(once, format!("{BUSY_LANE_WRAPPER}payload"));
+    assert_eq!(
+        wrap_busy_once(&once),
+        once,
+        "a re-offer must not stack a second wrapper"
+    );
+    assert_eq!(wrap_busy_once(&format!("{BUSY_LANE_WRAPPER}{once}")), once);
+}
+
+#[tokio::test]
+async fn a_delivery_retires_the_row_its_own_write_produced() {
+    let (repo, _db) = setup().await;
+    let session = Uuid::new_v4();
+    let (body, display) = ("the push body", "the push body");
+    let in_memory = wrap_busy_once(body); // what the turn hands around
+
+    // `persist` writes the normalised text.
+    let stored = durable_context_text(&in_memory);
+    repo.record(
+        Uuid::new_v4(),
+        session,
+        &stored,
+        display,
+        PushOrigin::SessionNotify,
+        None,
+    )
+    .await
+    .expect("record");
+
+    // `clear_on_delivery` clears with the normalised text.
+    repo.clear_matching(session, &durable_context_text(&in_memory), display)
+        .await
+        .expect("clear_matching");
+    assert!(
+        repo.all().await.expect("all").is_empty(),
+        "the delivery must retire the row its own write produced"
+    );
+
+    // Counterfactual — the pre-fix behaviour this exists to prevent. Clearing
+    // with the FRAMED text (what the in-memory item carries, and what every
+    // clear site passed before the normalisation) does not match the row, so
+    // the row survived its own delivery: the boot re-delivery loop.
+    repo.record(
+        Uuid::new_v4(),
+        session,
+        &stored,
+        display,
+        PushOrigin::SessionNotify,
+        None,
+    )
+    .await
+    .expect("record");
+    repo.clear_matching(session, &in_memory, display)
+        .await
+        .expect("clear_matching framed");
+    assert_eq!(
+        repo.all().await.expect("all").len(),
+        1,
+        "pre-fix: the framed clear misses the row — the defect this pins"
+    );
+}
