@@ -1889,7 +1889,16 @@ pub(crate) async fn handle_intermediate(
         || (!quiet && super::intermediates::should_promote_intermediate(&rw.stripped, 0));
     if promote {
         super::intermediates::deliver_intermediate_message(
-            session_id, bot, chat, thread_id, streaming, tg, &rw, &vw,
+            session_id,
+            bot,
+            chat,
+            thread_id,
+            streaming,
+            tg,
+            super::intermediates::IntermediateMedia {
+                images: &rw,
+                videos: &vw,
+            },
         )
         .await;
     } else {

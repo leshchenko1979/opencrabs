@@ -307,22 +307,37 @@ pub(crate) fn superseded_ids(bubbles: &[SentBubble], rich_text: &str) -> Vec<Mes
         .collect()
 }
 
+/// The two halves of one intermediate turn's media partition (#465).
+///
+/// The image and video walks are one partition, not two independent scans: a
+/// reference belongs to exactly one family, and only the pair can say which.
+/// They travel as one value for that reason — and because taking them as two
+/// more positional parameters would push the delivery below to eight
+/// arguments, past the point a positional list stays readable
+/// (`clippy::too_many_arguments`).
+pub(crate) struct IntermediateMedia<'a> {
+    /// The image family's rewrite: `rich` for the rich plane, `stripped` for
+    /// the HTML plane and the dedup record.
+    pub(crate) images: &'a crate::utils::image::LocalImageRewrite,
+    /// The video family's rewrite. Its entries ship as their own bubbles
+    /// through the delivery floor rather than through the media array.
+    pub(crate) videos: &'a crate::utils::image::LocalVideoRewrite,
+}
+
 /// Deliver a promoted intermediate as its own message (rich-first, HTML
 /// fallback) and record it in `sent_bubbles` so the final-response dedup will
 /// not resend it and the supersession cleanup knows which ids it occupies.
 /// Returns true when something was delivered.
 ///
-/// Takes the WHOLE [`LocalImageRewrite`] rather than a `&str` (#502) so no call
-/// site can hand this function the wrong text form. That matters: the rich form
-/// carries `tg://photo?id=imgN` references that only resolve against the media
-/// array sent with it, while the stripped form is the shape the HTML fallback
-/// and the dedup record need — the HTML plane has no media array and would ship
-/// a `tg://` reference as dead visible markdown.
+/// Takes the rewrites WHOLE rather than as `&str`s (#502) so no call site can
+/// hand this function the wrong text form. That matters: the rich form carries
+/// `tg://photo?id=imgN` references that only resolve against the media array
+/// sent with it, while the stripped form is the shape the HTML fallback and the
+/// dedup record need — the HTML plane has no media array and would ship a
+/// `tg://` reference as dead visible markdown.
 ///
-/// `vw` is the video family's rewrite. It is passed rather than folded into
-/// `rw` because the two families keep separate id namespaces and separate
-/// failure lists, and because on this path the video family delivers through
-/// its own floor helper rather than through the rich media array (#465).
+/// [`IntermediateMedia`] carries both walks — see that type for why they travel
+/// as one value rather than as two more parameters.
 pub(crate) async fn deliver_intermediate_message(
     session_id: Uuid,
     bot: &Bot,
@@ -330,9 +345,10 @@ pub(crate) async fn deliver_intermediate_message(
     thread_id: Option<teloxide::types::ThreadId>,
     streaming: &Arc<std::sync::Mutex<StreamingState>>,
     tg: &super::state::TelegramState,
-    rw: &crate::utils::image::LocalImageRewrite,
-    vw: &crate::utils::image::LocalVideoRewrite,
+    walks: IntermediateMedia<'_>,
 ) -> bool {
+    let rw = walks.images;
+    let vw = walks.videos;
     // #690 follow-up (#980): re-expand a collapsed table once, up front, so the
     // dedup record, the rich send and the HTML fallback all see the same
     // expanded shape. The HTML path reflows again internally but is idempotent.

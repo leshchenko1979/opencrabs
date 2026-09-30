@@ -228,7 +228,7 @@ fn the_intermediate_delivery_is_handed_both_walks() {
     let args = &call[..end];
 
     assert!(
-        args.contains("&rw, &vw"),
+        args.contains("images: &rw") && args.contains("videos: &vw"),
         "the delivery needs BOTH families' rewrites — handing it only `rw` \
          would ship a `<<VID:…>>` marker as literal text: {args}"
     );
