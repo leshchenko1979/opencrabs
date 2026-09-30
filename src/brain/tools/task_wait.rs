@@ -199,6 +199,14 @@ impl Tool for TaskWaitTool {
                 && let Some(p) = &paths.out
             {
                 let scan = scan_stream_from(p, out_off, pattern.as_ref()).await;
+                // A stream that exists and cannot be READ is not a quiet run.
+                // Reporting it as "no output yet" would be a zero from a broken
+                // instrument, which is the conflation this field exists to end.
+                if let Some(e) = scan.io_error {
+                    return Ok(ToolResult::error(format!(
+                        "Cannot read run {run_id}'s stdout: {e}"
+                    )));
+                }
                 out_off = scan.next_offset;
                 skipped += scan.skipped_bytes;
                 if !scan.tail.is_empty() {
@@ -219,6 +227,11 @@ impl Tool for TaskWaitTool {
                 && let Some(p) = &paths.err
             {
                 let scan = scan_stream_from(p, err_off, pattern.as_ref()).await;
+                if let Some(e) = scan.io_error {
+                    return Ok(ToolResult::error(format!(
+                        "Cannot read run {run_id}'s stderr: {e}"
+                    )));
+                }
                 err_off = scan.next_offset;
                 skipped += scan.skipped_bytes;
                 if !scan.tail.is_empty() {

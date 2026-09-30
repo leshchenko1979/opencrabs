@@ -737,6 +737,13 @@ pub(crate) struct StreamScan {
     pub tail: String,
     /// Bytes passed over unscanned because the chunk cap bit.
     pub skipped_bytes: u64,
+    /// Why the stream could not be read, when it could not.
+    ///
+    /// An ABSENT stream is not an error: a run that has not written yet is the
+    /// normal case, and the status file tells the two apart. A stream that
+    /// exists and cannot be read is a different fact, and rendering it as "no
+    /// output yet" is a silent zero — a caller cannot tell it from a quiet run.
+    pub io_error: Option<String>,
 }
 
 /// Scan a run's stream file for complete lines added since `offset` (#692).
@@ -749,9 +756,11 @@ pub(crate) struct StreamScan {
 /// trailing partial line stays unconsumed so the next poll sees it whole, which
 /// is what makes "a line matched" mean a line and not a fragment of one.
 ///
-/// An unreadable file yields an empty scan rather than an error: an absent
-/// stream and a silent one are told apart by the status file, which the caller
-/// reads anyway.
+/// An ABSENT stream yields an empty scan: a run that has not written yet is the
+/// normal case, and the status file tells the two apart. A stream that exists
+/// but cannot be READ is reported in `StreamScan::io_error` instead, because
+/// "no output yet" and "I could not read the output" are different answers and
+/// only one of them means the run is quiet.
 pub(crate) async fn scan_stream_from(
     path: &std::path::Path,
     offset: u64,
@@ -763,8 +772,14 @@ pub(crate) async fn scan_stream_from(
         next_offset: offset,
         ..Default::default()
     };
-    let Ok(meta) = tokio::fs::metadata(path).await else {
-        return scan;
+    let meta = match tokio::fs::metadata(path).await {
+        Ok(meta) => meta,
+        // Absent is the normal case: nothing has been written yet.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return scan,
+        Err(e) => {
+            scan.io_error = Some(format!("stat {}: {e}", path.display()));
+            return scan;
+        }
     };
     let size = meta.len();
     if size <= offset {
@@ -777,14 +792,23 @@ pub(crate) async fn scan_stream_from(
     }
     let len = (size - start) as usize;
 
-    let Ok(mut file) = tokio::fs::File::open(path).await else {
-        return scan;
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        // The stream can be swept between the stat and the open: that is still
+        // the normal "nothing written yet" case, not a read failure.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return scan,
+        Err(e) => {
+            scan.io_error = Some(format!("open {}: {e}", path.display()));
+            return scan;
+        }
     };
-    if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+    if let Err(e) = file.seek(std::io::SeekFrom::Start(start)).await {
+        scan.io_error = Some(format!("seek {}: {e}", path.display()));
         return scan;
     }
     let mut buf = Vec::with_capacity(len.min(SCAN_CHUNK_CAP as usize));
-    if file.take(len as u64).read_to_end(&mut buf).await.is_err() {
+    if let Err(e) = file.take(len as u64).read_to_end(&mut buf).await {
+        scan.io_error = Some(format!("read {}: {e}", path.display()));
         return scan;
     }
 
