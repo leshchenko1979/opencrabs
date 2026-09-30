@@ -167,10 +167,11 @@ fn publish_latest(dated: &Path, latest: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if let (Ok(src), Ok(dst)) = (std::fs::metadata(dated), std::fs::metadata(latest)) {
-            if src.dev() == dst.dev() && src.ino() == dst.ino() {
-                return Ok(());
-            }
+        if let (Ok(src), Ok(dst)) = (std::fs::metadata(dated), std::fs::metadata(latest))
+            && src.dev() == dst.dev()
+            && src.ino() == dst.ino()
+        {
+            return Ok(());
         }
     }
     if latest.exists() {
