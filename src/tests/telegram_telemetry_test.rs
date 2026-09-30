@@ -1,6 +1,8 @@
 //! Send-correlation telemetry for the Telegram surface (#1085).
 
 use crate::channels::telegram::telemetry::*;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
 
 #[test]
 fn hash8_is_stable_and_8_hex_chars() {
@@ -122,3 +124,98 @@ fn request_line_prefix_cannot_be_confused_with_a_landing_line() {
     assert!(!line.contains("Telegram send failed:"), "got: {line}");
 }
 
+
+// ---------------------------------------------------------------------------
+// Emitted half: the line must actually reach the log at INFO.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct EventCapture {
+    events: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+impl EventCapture {
+    fn events(&self) -> Vec<(String, String)> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+impl<S: tracing::Subscriber> Layer<S> for EventCapture {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut visitor = MessageVisitor::default();
+        event.record(&mut visitor);
+        self.events.lock().unwrap().push((
+            event.metadata().level().to_string(),
+            visitor.message.unwrap_or_default(),
+        ));
+    }
+}
+
+#[derive(Default)]
+struct MessageVisitor {
+    message: Option<String>,
+}
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = Some(format!("{value:?}"));
+        }
+    }
+}
+
+/// INFO, not DEBUG — and the reason is the READER, not the file: `oc-log-search`
+/// stages `grep -E ' (INFO|WARN|ERROR) '` by default, so a `debug!` request line
+/// would be invisible to the ordinary read and E1 would swap one blind spot for
+/// another (owner challenge 2026-09-30, re-derived at source).
+#[test]
+fn log_request_emits_exactly_one_info_line_under_the_request_prefix() {
+    let capture = EventCapture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+    tracing::subscriber::with_default(subscriber, || {
+        // Another test in this binary installs a process-wide subscriber capped
+        // at WARN (`governor_gates_test.rs::ensure_tracing_capture`), which
+        // would disable an INFO callsite if that dispatcher were the only one
+        // consulted. It is not: building this thread's dispatch runs
+        // `Dispatch::new` -> `callsite::register_dispatch`, which pushes THIS
+        // subscriber into the dispatcher list and rebuilds the interest cache
+        // over all of them. Two dispatchers that disagree combine to
+        // `Interest::sometimes` (tracing-core `Interest::and`: differing
+        // interests -> sometimes), never `never`, so the event is offered to
+        // this thread's subscriber and captured. No manual interest rebuild is
+        // needed -- and none is reachable from `tracing` 0.1 anyway.
+        log_request(
+            "turn",
+            "typing loop",
+            "-",
+            "typing",
+            "sendChatAction",
+            -1001234567890,
+            None,
+            None,
+        );
+    });
+
+    let events = capture.events();
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly one request line must be emitted; got {events:?}"
+    );
+    assert_eq!(
+        events[0].0, "INFO",
+        "the request line must be emitted at INFO"
+    );
+    assert!(
+        events[0]
+            .1
+            .contains("Telegram request: origin=turn detail=typing loop"),
+        "the emitted line must carry the request prefix and its fields; got: {}",
+        events[0].1
+    );
+}
