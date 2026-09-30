@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use deadpool_sqlite::{Config, Hook, InteractError, Pool as DeadPool, Runtime};
-use rusqlite_migration::{M, Migrations};
+use rusqlite_migration::{Migrations, M};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -860,6 +860,22 @@ impl Database {
         // default profile's home no matter which profile is starting.
         let snapshot_dir = crate::db::migration_snapshot::snapshot_dir();
 
+        // #714: the snapshot and the preflight exist to protect a write. A
+        // database already at the latest migration, with every heal's
+        // precondition satisfied, has nothing to protect. `VACUUM INTO` of
+        // that image is what filled the disk. The probe is a read.
+        let migration_count = Self::MIGRATION_COUNT as i64;
+        let needs_snapshot = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection for pre-migration snapshot")?
+            .interact(move |conn| {
+                crate::db::migration_snapshot::needs_pre_migration_snapshot(conn, migration_count)
+            })
+            .await
+            .map_err(interact_err)??;
+
         // #1779 defect 2: this used to be the check *after* the migrations, so
         // on a corrupt image it never ran and the operator died on the
         // migration error with no restore path. It goes first, ahead of the
@@ -868,18 +884,22 @@ impl Database {
         // image buys nothing and only spends a write attempt.
         //
         // Skipped when there is no file to check (in-memory database), which is
-        // every test that uses `connect_in_memory`.
-        if let Some(path) = self.db_path.as_deref() {
-            crate::db::migration_snapshot::integrity_preflight(path, &snapshot_dir)?;
-        }
+        // every test that uses `connect_in_memory`. Also skipped when nothing
+        // will write (#714): the preflight opens the file read-write and walks
+        // every page.
+        if needs_snapshot {
+            if let Some(path) = self.db_path.as_deref() {
+                crate::db::migration_snapshot::integrity_preflight(path, &snapshot_dir)?;
+            }
 
-        self.pool
-            .get()
-            .await
-            .context("Failed to get connection for pre-migration snapshot")?
-            .interact(move |conn| crate::db::migration_snapshot::guard(conn, &snapshot_dir))
-            .await
-            .map_err(interact_err)??;
+            self.pool
+                .get()
+                .await
+                .context("Failed to get connection for pre-migration snapshot")?
+                .interact(move |conn| crate::db::migration_snapshot::guard(conn, &snapshot_dir))
+                .await
+                .map_err(interact_err)??;
+        }
 
         self.pool
             .get()

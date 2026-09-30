@@ -11,16 +11,26 @@
 //! database means the image is either unreadable or the disk is unusable, and
 //! both cases migrating is the worst possible next action.
 //!
-//! Retention is 7 dated copies (owner directive 2026-09-28: "rolling 7 days"),
-//! plus one stable `-latest` name so a message, a script or a panicked user can
-//! always point at exactly one file instead of globbing for the newest.
+//! Retention is 7 dated copies for small databases (owner directive 2026-09-28:
+//! "rolling 7 days"), and also a byte budget so a multi-gigabyte profile cannot
+//! keep seven full images (#717). At least one dated copy is always kept.
+//! `-latest` is a hard link to the newest dated file, not a second full copy
+//! (#716), so a message, a script or a panicked user can always point at
+//! exactly one name.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
 
 /// Dated snapshots kept before the oldest is pruned.
 pub const RETENTION: usize = 7;
+
+/// Byte budget for the dated copies (#717).
+///
+/// Seven copies of the ops profile (about 2.44 GiB each) are a third of a
+/// 58 GiB disk. 3 GiB admits one such image and not a second. One file larger
+/// than the budget is kept: the floor is a single known-good copy.
+pub const RETENTION_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 
 /// Prefix shared by every snapshot name, so rotation can recognise its own.
 pub const PREFIX: &str = "opencrabs.db.pre-migration-";
@@ -80,6 +90,99 @@ fn is_empty_or_transient(conn: &Connection) -> Result<bool> {
     Ok(tables == 0)
 }
 
+/// `(YYYYMMDD, HHMMSS, same-second suffix)` from a dated snapshot name.
+///
+/// The version sits in front of the stamp (`{version}-{date}-{time}`), so a
+/// lexical sort of the filename is not chronological once `user_version`
+/// changes (#717). Unparseable names sort first and are pruned first.
+fn chronological_key(path: &Path) -> (u64, u64, u64) {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return (0, 0, 0);
+    };
+    let Some(rest) = name.strip_prefix(PREFIX) else {
+        return (0, 0, 0);
+    };
+    let parts: Vec<&str> = rest.split('-').collect();
+    if parts.len() < 3 || parts[2].len() != 6 {
+        return (0, 0, 0);
+    }
+    let date = parts[1].parse().unwrap_or(0);
+    let time = parts[2].parse().unwrap_or(0);
+    let collision = parts.get(3).and_then(|n| n.parse().ok()).unwrap_or(0);
+    if date == 0 {
+        return (0, 0, 0);
+    }
+    (date, time, collision)
+}
+
+fn is_dated_snapshot(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.starts_with(PREFIX) && n != LATEST)
+        .unwrap_or(false)
+}
+
+/// Dated snapshots, oldest first by the stamp embedded in the name (#717).
+fn collect_dated(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dated: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| is_dated_snapshot(p))
+        .collect();
+    dated.sort_by_key(|p| chronological_key(p));
+    dated
+}
+
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Drop oldest dated copies until both the count window and the byte budget
+/// hold. Never drops the last copy.
+fn prune_dated(mut dated: Vec<PathBuf>, retention: usize, byte_budget: u64) -> usize {
+    let mut removed = 0;
+    while dated.len() > 1
+        && (dated.len() > retention || dated.iter().map(|p| file_len(p)).sum::<u64>() > byte_budget)
+    {
+        let old = dated.remove(0);
+        match std::fs::remove_file(&old) {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                tracing::warn!("Could not prune stale snapshot {}: {e}", old.display());
+                break;
+            }
+        }
+    }
+    removed
+}
+
+/// Point `-latest` at `dated` without a second full image (#716).
+///
+/// A hard link shares the dated file's bytes. A cross-device filesystem
+/// cannot link, and falls back to a copy so the alias still exists.
+fn publish_latest(dated: &Path, latest: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(src), Ok(dst)) = (std::fs::metadata(dated), std::fs::metadata(latest)) {
+            if src.dev() == dst.dev() && src.ino() == dst.ino() {
+                return Ok(());
+            }
+        }
+    }
+    if latest.exists() {
+        std::fs::remove_file(latest)?;
+    }
+    match std::fs::hard_link(dated, latest) {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(18) => std::fs::copy(dated, latest).map(|_| ()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Copy the whole image into `dir` before any migration touches it.
 ///
 /// Returns the dated snapshot path, or `None` when the database is empty or
@@ -115,10 +218,10 @@ pub fn snapshot_before_migrations(conn: &Connection, dir: &Path) -> Result<Optio
     conn.execute("VACUUM INTO ?1", [&dated.to_string_lossy()])
         .with_context(|| format!("VACUUM INTO {}", dated.display()))?;
 
-    // Stable alias for the newest snapshot. A copy, not a rename: the dated file
-    // is the retention unit and must stay put.
+    // Stable alias for the newest snapshot. A hard link, not a second copy:
+    // the dated file is the retention unit and must stay put (#716).
     let latest = dir.join(LATEST);
-    if let Err(e) = std::fs::copy(&dated, &latest) {
+    if let Err(e) = publish_latest(&dated, &latest) {
         tracing::warn!(
             "Snapshot {} written, but the -latest alias could not be updated: {e}",
             dated.display()
@@ -135,34 +238,11 @@ pub fn snapshot_before_migrations(conn: &Connection, dir: &Path) -> Result<Optio
 /// the snapshot is already safe, and a cleanup problem is not a reason to
 /// refuse a migration.
 pub fn rotate(dir: &Path) -> Result<usize> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(0),
-    };
-    let mut dated: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with(PREFIX) && n != LATEST)
-                .unwrap_or(false)
-        })
-        .collect();
-    // Names embed a sortable timestamp, so lexical order is chronological order.
-    dated.sort();
-    let mut removed = 0;
-    if dated.len() > RETENTION {
-        for old in &dated[..dated.len() - RETENTION] {
-            match std::fs::remove_file(old) {
-                Ok(_) => removed += 1,
-                Err(e) => {
-                    tracing::warn!("Could not prune stale snapshot {}: {e}", old.display())
-                }
-            }
-        }
+    let dated = collect_dated(dir);
+    if dated.is_empty() {
+        return Ok(0);
     }
-    Ok(removed)
+    Ok(prune_dated(dated, RETENTION, RETENTION_BYTES))
 }
 
 /// The newest dated snapshot in `dir`, or `None` when nothing has been kept.
@@ -170,22 +250,13 @@ pub fn rotate(dir: &Path) -> Result<usize> {
 /// Same enumeration as [`rotate`], so the two cannot disagree about what counts
 /// as a snapshot: the `-latest` alias is excluded because it is a pointer and
 /// not a retention unit, and a report naming it would send an operator to copy
-/// a file that silently outlives whatever it points at. Names embed a sortable
-/// timestamp, so lexical order is chronological order.
+/// a file that silently outlives whatever it points at. Order is the stamp in
+/// the name, not the raw filename (#717).
 pub fn newest_snapshot(dir: &Path) -> Option<PathBuf> {
-    let mut dated: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with(PREFIX) && n != LATEST)
-                .unwrap_or(false)
-        })
-        .collect();
-    dated.sort();
-    dated.pop()
+    // Same enumeration as [`rotate`], ordered by the embedded stamp rather
+    // than the filename: a higher `user_version` is not a later snapshot
+    // (#717).
+    collect_dated(dir).pop()
 }
 
 /// What an operator can restore from, in one clause, for `doctor` and the
@@ -245,6 +316,27 @@ pub fn refusal_message(dir: &Path, cause: &str) -> String {
 /// an `interact` closure on a blocking thread where that override is not set, so
 /// resolving it in here would silently write snapshots into the default
 /// profile's home no matter which profile is starting up.
+/// Whether this process will write the schema, so a snapshot is worth taking.
+///
+/// The copy exists to protect a migration (#1779). When `user_version` is
+/// already at the list length and no heal would `ALTER` or stamp, there is
+/// nothing to protect and `VACUUM INTO` only fills the disk (#714). The heal
+/// probe is required: a stamp that says latest while a skipped migration's
+/// column is still absent is exactly the database the snapshot is for.
+pub fn needs_pre_migration_snapshot(conn: &Connection, migration_count: i64) -> Result<bool> {
+    if is_empty_or_transient(conn)? {
+        return Ok(false);
+    }
+    let user_version: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .context("read user_version")?;
+    if user_version < migration_count {
+        return Ok(true);
+    }
+    crate::db::migration_heal::heals_would_write(conn, user_version)
+        .context("probe schema heals before deciding on a snapshot")
+}
+
 pub fn guard(conn: &Connection, dir: &Path) -> Result<()> {
     match snapshot_before_migrations(conn, dir) {
         Ok(Some(p)) => {
@@ -322,5 +414,57 @@ mod tests {
     #[test]
     fn retention_is_the_directed_window() {
         assert_eq!(RETENTION, 7, "owner directive 2026-09-28: rolling 7 days");
+    }
+
+    #[test]
+    fn retention_bytes_admit_one_ops_sized_image_and_not_two() {
+        // Measured 2026-09-30 on the ops profile (issue #717).
+        let ops_image = 2_440_159_232u64;
+        assert!(
+            RETENTION_BYTES >= ops_image,
+            "one known-good copy of the ops image must fit"
+        );
+        assert!(
+            RETENTION_BYTES < ops_image * 2,
+            "a second full copy must exceed the budget"
+        );
+    }
+
+    #[test]
+    fn byte_budget_keeps_the_newest_by_time_not_by_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in [
+            format!("{PREFIX}55-20260930-010101"),
+            format!("{PREFIX}60-20260930-020202"),
+            format!("{PREFIX}59-20260930-030303"),
+        ] {
+            let file = std::fs::File::create(tmp.path().join(&name)).unwrap();
+            file.set_len(100).unwrap();
+        }
+        std::fs::write(tmp.path().join(LATEST), b"alias").unwrap();
+
+        let dated = collect_dated(tmp.path());
+        assert!(
+            dated
+                .last()
+                .unwrap()
+                .ends_with("opencrabs.db.pre-migration-59-20260930-030303"),
+            "03:03 is newer than the version-60 file from 02:02: {dated:?}"
+        );
+
+        // 100+100 = 200 > 150, so the two older files go. Count window is 7
+        // and would have kept all three.
+        let removed = prune_dated(dated, RETENTION, 150);
+        assert_eq!(removed, 2);
+        let left = collect_dated(tmp.path());
+        assert_eq!(left.len(), 1);
+        assert!(
+            left[0].ends_with("opencrabs.db.pre-migration-59-20260930-030303"),
+            "kept {left:?}"
+        );
+        assert!(
+            tmp.path().join(LATEST).exists(),
+            "alias is not a dated copy"
+        );
     }
 }

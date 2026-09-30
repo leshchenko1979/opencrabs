@@ -7,10 +7,10 @@
 //! snapshot that cannot be taken STOPS the migration.
 
 use crate::config::profile::with_home_override_async;
-use crate::db::Database;
 use crate::db::migration_snapshot::{
-    LATEST, PREFIX, RETENTION, rotate, snapshot_before_migrations,
+    rotate, snapshot_before_migrations, LATEST, PREFIX, RETENTION,
 };
+use crate::db::Database;
 use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
 
@@ -106,7 +106,40 @@ async fn non_empty_db_is_snapshotted_before_migrations_run() {
     assert_eq!(
         std::fs::read(&latest).unwrap().len(),
         std::fs::read(&snaps[0]).unwrap().len(),
-        "-latest must be a copy of the newest snapshot"
+        "-latest must name the same bytes as the newest snapshot"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let alias = std::fs::metadata(&latest).unwrap();
+        let dated_meta = std::fs::metadata(&snaps[0]).unwrap();
+        assert_eq!(
+            (alias.dev(), alias.ino()),
+            (dated_meta.dev(), dated_meta.ino()),
+            "-latest must be a hard link to the dated snapshot, not a second copy"
+        );
+    }
+}
+
+#[tokio::test]
+async fn second_startup_does_not_write_another_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join(".opencrabs");
+    std::fs::create_dir_all(&home).unwrap();
+    let db_path = seeded_db(&home);
+
+    with_home_override_async(home.clone(), async {
+        let db = Database::connect(&db_path).await.unwrap();
+        db.run_migrations().await.unwrap();
+        db.run_migrations().await.unwrap();
+    })
+    .await;
+
+    let snaps = dated_snapshots(&home.join("backups"));
+    assert_eq!(
+        snaps.len(),
+        1,
+        "a database already at the latest migration must not VACUUM INTO again: {snaps:?}"
     );
 }
 
