@@ -265,8 +265,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_pty_child_is_given_a_dumb_terminal() {
+    #[tokio::test]
+    async fn a_pty_child_is_given_a_dumb_terminal() {
         // A tty changes what a child FORMATS, not only how it buffers:
         // `grep --color=auto` only colours when it sees a terminal, and a pager
         // that decided to page would block the very capture it was asked for.
