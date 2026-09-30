@@ -102,6 +102,22 @@ pub fn command_output_path(id: &str, stderr: bool) -> PathBuf {
     runs_dir().join(format!("{id}.{ext}"))
 }
 
+/// Marker file recording that a run's capture hit its cap (#692, D7).
+///
+/// A separate file rather than a line in the stream on purpose: the stream is
+/// the RUN's bytes, and appending harness bookkeeping to it means a reader that
+/// has already consumed the cap cannot tell which trailing bytes were the
+/// program's. Written once, on the first over-cap write, and swept with the
+/// captures it describes — same directory, same leg, same window.
+///
+/// Per-stream, not per-run: stdout and stderr cap independently, and a single
+/// marker would report a truncated run as truncated on a stream that never
+/// reached the limit.
+pub fn truncation_marker_path(id: &str, stderr: bool) -> PathBuf {
+    let ext = if stderr { "err" } else { "out" };
+    runs_dir().join(format!("{id}.{ext}.cap"))
+}
+
 /// Directory holding captured run streams (#692).
 ///
 /// Deliberately separate from [`status_dir`]: the status JSON is a few hundred
@@ -839,42 +855,77 @@ pub fn cleanup_stale(max_age: Duration) -> std::io::Result<(usize, usize)> {
 
     // Captured streams of finished runs (#692). Streams live in `runs_dir()`, a
     // SIBLING of the status dir, so the loop above never sees them — and the
-    // temp purge deliberately does not recurse into subdirectories (see
-    // `logging::cleanup_old_temp_files`, which excludes `tmp/detached` for the
-    // same reason). Without this leg a stream would outlive its status file
-    // forever, which is the one file class in this feature that grows unbounded.
+    // temp purge deliberately does not recurse into subdirectories. Without this
+    // leg a stream would outlive its status file forever, which is the one file
+    // class in this feature that grows unbounded.
+    //
+    // The sweep itself lives in `sweep_stale_runs` because it has TWO callers:
+    // this function (the TUI's startup path) and `logging::cleanup_old_temp_files`
+    // (the every-surface path `main.rs` runs). A second copy of the liveness
+    // rule below is a copy that can be forgotten.
+    let (runs_scanned, runs_removed) = sweep_stale_runs(cutoff)?;
+    scanned += runs_scanned;
+    removed += runs_removed;
+
+    Ok((scanned, removed))
+}
+
+/// Sweep expired captures (and their cap markers) out of [`runs_dir`] (#692).
+///
+/// Returns `(scanned, removed)`, counting only what this leg saw.
+///
+/// The status record is the authority on liveness, and that is the whole reason
+/// this cannot be a plain mtime sweep: a run writes CONTINUOUSLY, so unlinking
+/// a stream under a run that has not finished would silently truncate output the
+/// agent is still reading — and it would do so on the one file class where the
+/// writer never reopens the file to notice. A missing or unreadable status
+/// record counts as NOT live, or a stream whose record was already aged out
+/// would be stranded forever.
+///
+/// Cap markers are swept by the same rule and in the same pass: they share the
+/// captures' directory and their run's liveness, and a marker that outlived its
+/// capture would report a truncation for a stream that no longer exists.
+pub fn sweep_stale_runs(cutoff: SystemTime) -> std::io::Result<(usize, usize)> {
     let runs = runs_dir();
-    if runs.exists() {
-        for entry in fs::read_dir(&runs)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            scanned += 1;
+    if !runs.exists() {
+        return Ok((0, 0));
+    }
 
-            let run_id = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_string();
+    let mut scanned = 0usize;
+    let mut removed = 0usize;
 
-            // The status record is the authority on liveness. Never unlink a
-            // stream under a run that has not finished: a run writes
-            // continuously, and unlinking under it would silently truncate
-            // output the agent is still reading.
-            let live = fs::read_to_string(status_path(&run_id))
-                .ok()
-                .and_then(|data| serde_json::from_str::<WorkStatus>(&data).ok())
-                .is_some_and(|status| status.finish.is_none());
-            if live {
-                continue;
-            }
+    for entry in fs::read_dir(&runs)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        scanned += 1;
 
-            if file_stale(&path, &cutoff) {
-                fs::remove_file(&path)?;
-                removed += 1;
-            }
+        // `<id>.out`, `<id>.err` and the markers `<id>.out.cap` / `<id>.err.cap`
+        // all resolve to `<id>`: the stem is everything before the FIRST dot, so
+        // a two-dot name still yields the run it belongs to. That is also why a
+        // marker is written per stream rather than as one `<id>.cap` file —
+        // `file_stem`-style derivation would collapse both streams onto one id
+        // and the marker could not say which one truncated.
+        let run_id = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.split('.').next().unwrap_or_default())
+            .unwrap_or_default()
+            .to_string();
+
+        let live = fs::read_to_string(status_path(&run_id))
+            .ok()
+            .and_then(|data| serde_json::from_str::<WorkStatus>(&data).ok())
+            .is_some_and(|status| status.finish.is_none());
+        if live {
+            continue;
+        }
+
+        if file_stale(&path, &cutoff) {
+            fs::remove_file(&path)?;
+            removed += 1;
         }
     }
 

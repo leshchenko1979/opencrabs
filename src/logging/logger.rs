@@ -612,10 +612,20 @@ fn sweep_aged_files(dir: &std::path::Path, max_age: std::time::Duration) -> usiz
 /// - `/tmp/opencrabs/tool_output` — tool results spilled to disk when a result
 ///   exceeds the inline budget. A fixed absolute path shared by every profile
 ///   on the host, hence swept by path rather than by home.
+/// - `<home>/tmp/runs` — captured run streams and their `.cap` markers (#692).
+///   Reached through `work_status::sweep_stale_runs`, NOT through a bare
+///   `sweep_aged_files` call, because a run writes continuously and a plain
+///   mtime sweep would unlink the stream of a still-running child. That leg
+///   lives here rather than only in `work_status::cleanup_stale` because
+///   `cleanup_stale` is called from the TUI alone (`cli/ui.rs`), while this
+///   function runs on every surface (`main.rs`) — so a daemon-produced run,
+///   which is most of them, had its stream swept by nothing.
 ///
 /// `<home>/tmp/detached` is deliberately absent: it already has its own 7-day
 /// startup sweep (`work_status::cleanup_stale`). Subdirectories are never
-/// recursed into, so sweeping `<home>/tmp` cannot double-count them.
+/// recursed into, so sweeping `<home>/tmp` cannot double-count them; the two
+/// directories that DO have their own owner are listed above explicitly, for
+/// exactly that reason.
 ///
 /// A window of `0` disables the purge. It cannot fall out of the comparison on
 /// its own: the test is `age > max_age`, which a zero window satisfies for
@@ -643,6 +653,19 @@ pub fn cleanup_old_temp_files(max_age_days: u64) -> usize {
         std::path::Path::new(crate::brain::agent::service::tool_loop::TOOL_OUTPUT_DIR),
         max_age,
     );
+
+    // The runs leg is delegated, not reimplemented: its rule includes a
+    // liveness check that a bare mtime sweep cannot express (see the doc block).
+    // A failure here is warned about like any other sweep failure rather than
+    // propagated — an unreadable runs directory must not cost the other three
+    // legs, and this function is documented as infallible.
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(max_age)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    match crate::brain::agent::service::work_status::sweep_stale_runs(cutoff) {
+        Ok((_scanned, runs_removed)) => removed += runs_removed,
+        Err(e) => tracing::warn!("Failed to sweep run captures for aged temp files: {e}"),
+    }
 
     removed
 }

@@ -478,15 +478,37 @@ impl BackgroundTaskManager {
         // The masters and the pipes are two ways to fill the SAME two files, so
         // everything downstream — the inline `collect_capture`, `task_output`,
         // `task_wait`'s scanner — is indifferent to which one this run got.
+        // Each reader also carries its own cap MARKER path: per-stream, because
+        // the two streams cap independently (#692 D7).
         let (out_reader, err_reader) = match masters {
             #[cfg(unix)]
             Some((mo, me)) => (
-                spawn_stream_reader(Some(mo), out_file, cap),
-                spawn_stream_reader(Some(me), err_file, cap),
+                spawn_stream_reader(
+                    Some(mo),
+                    out_file,
+                    cap,
+                    crate::brain::agent::service::work_status::truncation_marker_path(&id, false),
+                ),
+                spawn_stream_reader(
+                    Some(me),
+                    err_file,
+                    cap,
+                    crate::brain::agent::service::work_status::truncation_marker_path(&id, true),
+                ),
             ),
             _ => (
-                spawn_stream_reader(child.stdout.take(), out_file, cap),
-                spawn_stream_reader(child.stderr.take(), err_file, cap),
+                spawn_stream_reader(
+                    child.stdout.take(),
+                    out_file,
+                    cap,
+                    crate::brain::agent::service::work_status::truncation_marker_path(&id, false),
+                ),
+                spawn_stream_reader(
+                    child.stderr.take(),
+                    err_file,
+                    cap,
+                    crate::brain::agent::service::work_status::truncation_marker_path(&id, true),
+                ),
             ),
         };
 
@@ -739,6 +761,7 @@ fn spawn_stream_reader<R>(
     reader: Option<R>,
     mut file: tokio::fs::File,
     cap: u64,
+    marker: std::path::PathBuf,
 ) -> tokio::task::JoinHandle<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -761,11 +784,26 @@ where
                         written += n as u64;
                     } else if !truncated {
                         truncated = true;
+                        // Two records, one act: the note is IN the stream so a
+                        // reader looking at the run's own bytes sees where they
+                        // stop, and the marker is a FILE so `task_output` can
+                        // report truncation without reading to the cap to find
+                        // out. Written once — `truncated` latches — so the file
+                        // does not grow with every over-cap write.
                         let note = format!(
                             "\n[output truncated: cap {cap} bytes reached; the run is still \
                              draining, further bytes are not captured]\n"
                         );
                         let _ = file.write_all(note.as_bytes()).await;
+                        // The stream this describes is in the marker's own name
+                        // (`<id>.out.cap` / `<id>.err.cap`), so the body does not
+                        // repeat it: a self-referential path would be the only
+                        // thing on the line that a reader did not already know.
+                        let body = format!(
+                            "cap {cap} bytes reached; further bytes are not captured \
+                             (the run itself keeps running)\n"
+                        );
+                        let _ = tokio::fs::write(&marker, body.as_bytes()).await;
                     }
                 }
                 Err(_) => break,
