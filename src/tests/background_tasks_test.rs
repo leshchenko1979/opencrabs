@@ -4,7 +4,8 @@
 use crate::brain::agent::service::MessageEnqueueCallback;
 use crate::brain::agent::service::QueuedUserMessage;
 use crate::brain::agent::service::background_tasks::{
-    BackgroundTaskManager, CmdResult, completion_message, format_elapsed, short_label, tail_lines,
+    BackgroundTaskManager, CmdResult, RunRequest, completion_message, format_elapsed, short_label,
+    tail_lines, wake_message,
 };
 use crate::brain::agent::service::restart_recovery;
 use crate::brain::agent::service::session_routes;
@@ -104,12 +105,12 @@ async fn spawn_command_enqueues_on_completion() {
     session_routes::register_session_route(sid, enqueue);
     let cwd = std::env::temp_dir();
 
-    mgr.clone().spawn_command(
+    mgr.clone().spawn_command(RunRequest::new(
         sid,
         cwd,
         "echo probe".to_string(),
         "echo BG_DONE_MARKER".to_string(),
-    );
+    ));
 
     // Wait (bounded) for the detached command to finish and enqueue.
     let mut waited = 0;
@@ -145,12 +146,12 @@ async fn spawn_command_reserves_the_run_before_it_returns() {
     let mgr = Arc::new(BackgroundTaskManager::new());
     let sid = Uuid::new_v4();
 
-    mgr.clone().spawn_command(
+    mgr.clone().spawn_command(RunRequest::new(
         sid,
         std::env::temp_dir(),
         "reserve probe".to_string(),
         "sleep 5".to_string(),
-    );
+    ));
 
     // No await between the call above and this read.
     let live = mgr.handles_for(sid);
@@ -185,4 +186,47 @@ async fn spawn_command_reserves_the_run_before_it_returns() {
         "a run reserved before its child exists carries no pid yet, got: {:?}",
         live[0].pid
     );
+}
+
+/// #692: a `wake_on_output` match must not read like a result.
+///
+/// The agent asked to be told when a line appeared, NOT when the run ended. A
+/// message that could be mistaken for a completion would stop it watching the
+/// thing it asked about — the run is still going, and the two verbs that
+/// continue watching it have to be named.
+#[test]
+fn wake_message_says_the_run_is_still_going() {
+    let msg = wake_message(
+        "cargo build",
+        "run-42",
+        "the first error line",
+        &["error[E0308]: mismatched types".to_string()],
+        false,
+    );
+    assert!(
+        msg.context_text.contains("the first error line"),
+        "the caller's reason must come back verbatim, got: {}",
+        msg.context_text
+    );
+    assert!(
+        msg.context_text.contains("STILL RUNNING"),
+        "a wake must not read as a completion, got: {}",
+        msg.context_text
+    );
+    assert!(
+        msg.context_text.contains("error[E0308]"),
+        "the matching line is the point of the wake, got: {}",
+        msg.context_text
+    );
+    // The verbs that continue watching, so the agent does not have to re-derive
+    // them or (worse) re-run the command.
+    assert!(msg.context_text.contains("task_output"));
+    assert!(msg.context_text.contains("task_wait"));
+    assert!(
+        msg.context_text.contains("Do not re-run"),
+        "a wake must not invite a re-run of a command that is still running"
+    );
+    // stderr vs stdout is reported, because the two mean different things.
+    let err = wake_message("b", "run-43", "r", &["boom".to_string()], true);
+    assert!(err.context_text.contains("Matched on stderr"));
 }

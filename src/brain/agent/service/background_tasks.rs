@@ -66,6 +66,74 @@ pub struct RunHandle {
     pub output_err: PathBuf,
 }
 
+/// How long a wake suppresses the next one, when the caller does not say (#692).
+///
+/// A minute is long enough that a line repeating hundreds of times in a burst
+/// wakes once, and short enough that a genuinely new occurrence later in the
+/// run still wakes. The debounce is measured from the wake that FIRED, not
+/// from the last match, so a run that keeps matching does not postpone the
+/// wake indefinitely.
+pub const DEFAULT_WAKE_DEBOUNCE_SECS: u64 = 60;
+
+/// A pattern that wakes the session while a run is still going (#692).
+///
+/// A detached run could previously only report its COMPLETION, so an agent
+/// waiting on "server listening", "migration done" or the first `error` line
+/// was blind until exit — the run was survivable but not steerable.
+///
+/// The three parts are each load-bearing:
+/// - `pattern` is the trigger.
+/// - `reason` is what the agent reads when it wakes. Without it the agent has
+///   to re-derive why it cared about this run, which is work it already did
+///   when it set the watch.
+/// - `debounce_secs` stops one chatty matcher queueing a wake per line: a
+///   build that prints the same warning 400 times is one event, not 400.
+#[derive(Debug, Clone)]
+pub struct WakeSpec {
+    pub pattern: Regex,
+    pub reason: String,
+    pub debounce_secs: u64,
+}
+
+/// What to run, and how to watch it (#692).
+///
+/// One value rather than a loose list. These five fields are what both entry
+/// points take, what the reservation records, and what the wake watcher needs;
+/// passing them individually took `run_or_detach` to clippy's argument ceiling
+/// the moment `wake` joined it. They are also a single concept — the request —
+/// so bundling them says what the code means rather than merely silencing a
+/// lint.
+pub struct RunRequest {
+    pub session_id: Uuid,
+    pub cwd: PathBuf,
+    pub label: String,
+    pub command: String,
+    /// Set by the owner's `wake_on_output` (#692): wake the session on a line
+    /// matching this pattern instead of waiting for the run to exit.
+    pub wake: Option<WakeSpec>,
+}
+
+impl RunRequest {
+    /// A request with no watch on it (#692).
+    ///
+    /// The shape every caller had before `wake_on_output` existed. Test-only
+    /// (like [`super::session_routes::resolve_route`]): production callers go
+    /// through the struct literal in the bash tool, because each of them has a
+    /// `wake` to pass and a constructor with a fixed `None` would only obscure
+    /// that. Gated rather than merely unused, so the clippy leg — which compiles
+    /// without `cfg(test)` and denies warnings — does not see a dead function.
+    #[cfg(test)]
+    pub fn new(session_id: Uuid, cwd: PathBuf, label: String, command: String) -> Self {
+        Self {
+            session_id,
+            cwd,
+            label,
+            command,
+            wake: None,
+        }
+    }
+}
+
 /// A run's identity, decided before any async work happens (#692).
 ///
 /// Split out of [`BackgroundTaskManager::run_or_detach`] so a fire-and-forget
@@ -91,6 +159,12 @@ struct Reservation {
     cwd: PathBuf,
     label: String,
     command: String,
+    /// The owner's `wake_on_output` (#692), when the caller set one.
+    ///
+    /// Carried on the reservation rather than passed beside it: the watcher
+    /// starts from the same value the spawn does, and a second parameter would
+    /// take `run_reserved` back over clippy's argument ceiling.
+    wake: Option<WakeSpec>,
 }
 
 /// Manages background commands and resumes their sessions on completion.
@@ -219,13 +293,14 @@ impl BackgroundTaskManager {
     /// This is the "detach now" form: the caller has already decided the run
     /// outlives its turn (explicit `background: true`, or the long-command
     /// classifier). The grace handover is [`Self::run_or_detach`].
-    pub fn spawn_command(
-        self: std::sync::Arc<Self>,
-        session_id: Uuid,
-        cwd: PathBuf,
-        label: String,
-        command: String,
-    ) {
+    pub fn spawn_command(self: std::sync::Arc<Self>, req: RunRequest) {
+        let RunRequest {
+            session_id,
+            cwd,
+            label,
+            command,
+            wake,
+        } = req;
         let cmd = build_command(&cwd, &command, session_id);
         // Reserved HERE, on the caller's thread (#692), so the roster row and the
         // run's status file exist the moment this returns. Every caller of this
@@ -235,7 +310,7 @@ impl BackgroundTaskManager {
         // The base registered on the caller's thread for exactly this reason; the
         // rewrite that routed this through `run_or_detach` moved the registration
         // behind the spawn and broke a passing test (#692 gate 36516212395).
-        let reserved = self.reserve_run(session_id, &label, &command, &cwd);
+        let reserved = self.reserve_run(session_id, &label, &command, &cwd, wake);
         let this = std::sync::Arc::clone(&self);
         tokio::spawn(async move {
             match this
@@ -277,14 +352,18 @@ impl BackgroundTaskManager {
     /// keeps today's kill-at-deadline behaviour.
     pub async fn run_or_detach(
         self: std::sync::Arc<Self>,
-        session_id: Uuid,
-        cwd: PathBuf,
-        label: String,
-        command: String,
+        req: RunRequest,
         cmd: tokio::process::Command,
         grace: Option<std::time::Duration>,
     ) -> std::io::Result<Handover> {
-        let reserved = self.reserve_run(session_id, &label, &command, &cwd);
+        let RunRequest {
+            session_id,
+            cwd,
+            label,
+            command,
+            wake,
+        } = req;
+        let reserved = self.reserve_run(session_id, &label, &command, &cwd, wake);
         self.run_reserved(reserved, cmd, grace).await
     }
 
@@ -304,6 +383,7 @@ impl BackgroundTaskManager {
         label: &str,
         command: &str,
         cwd: &std::path::Path,
+        wake: Option<WakeSpec>,
     ) -> Reservation {
         let run_uuid = Uuid::new_v4();
         let id = run_uuid.to_string();
@@ -331,6 +411,7 @@ impl BackgroundTaskManager {
             cwd: cwd.to_path_buf(),
             label: label.to_string(),
             command: command.to_string(),
+            wake,
         }
     }
 
@@ -353,6 +434,7 @@ impl BackgroundTaskManager {
             cwd,
             label,
             command,
+            wake,
         } = reserved;
 
         // Each fallible step below un-registers the reservation on failure: a
@@ -472,6 +554,7 @@ impl BackgroundTaskManager {
                     child,
                     out_reader,
                     err_reader,
+                    wake,
                 )
                 .await;
             });
@@ -525,6 +608,7 @@ impl BackgroundTaskManager {
                         child,
                         out_reader,
                         err_reader,
+                        wake,
                     )
                     .await;
                 });
@@ -581,8 +665,8 @@ fn run_output_cap_bytes() -> u64 {
 /// TTY, piped stdio.
 ///
 /// `detach_session_pre_exec`'s `setsid()` is why a run's recorded pid doubles
-/// as a process-group id, which is in turn why [`BackgroundTaskManager::cancel`]
-/// can reach a descendant that re-parented to init.
+/// as a process-group id, which is in turn why the pgid the handover reports is
+/// a stop handle that reaches a descendant re-parented to init.
 fn build_command(cwd: &std::path::Path, command: &str, session_id: Uuid) -> tokio::process::Command {
     use crate::utils::shell::PushShellCommand;
     use tokio::process::Command;
@@ -922,6 +1006,136 @@ async fn clear_row(run_uuid: Uuid, label: &str) {
     }
 }
 
+/// How often the wake watcher polls a detached run's streams (#692).
+///
+/// 250 ms is the same cadence `task_wait` polls at, so a wake and a wait
+/// watching the same run see a line at the same moment. Faster would burn CPU
+/// re-statting a file that a build writes in bursts; slower would let a
+/// prompt-worthy line sit unread long enough for the agent to have moved on.
+const WAKE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Watch a detached run's streams and wake its session on a matching line (#692).
+///
+/// Reads the stream FILES the capture readers are filling, never the child's
+/// pipes: the watcher therefore holds no handle on the process and can be
+/// aborted at any instant without disturbing it. It loops until its caller
+/// aborts it — the run's own exit is the only stop signal that matters, and a
+/// wake arriving after the completion would be noise the completion already
+/// covers.
+async fn watch_for_wake(id: String, session_id: Uuid, label: String, spec: WakeSpec) {
+    let out_path = crate::brain::agent::service::work_status::command_output_path(&id, false);
+    let err_path = crate::brain::agent::service::work_status::command_output_path(&id, true);
+    let mut out_offset = 0u64;
+    let mut err_offset = 0u64;
+    // Measured from the wake that FIRED, not from the last match (#692): a run
+    // that keeps matching must not postpone its own wake indefinitely, which is
+    // what resetting on every match would do.
+    let mut last_wake: Option<std::time::Instant> = None;
+    let debounce = std::time::Duration::from_secs(spec.debounce_secs);
+    loop {
+        tokio::time::sleep(WAKE_POLL_INTERVAL).await;
+        for (path, offset, is_err) in [
+            (&out_path, &mut out_offset, false),
+            (&err_path, &mut err_offset, true),
+        ] {
+            let scan = scan_stream_from(path, *offset, Some(&spec.pattern)).await;
+            *offset = scan.next_offset;
+            if scan.matches.is_empty() {
+                continue;
+            }
+            let now = std::time::Instant::now();
+            let within_debounce = last_wake
+                .map(|fired| now.duration_since(fired) < debounce)
+                .unwrap_or(false);
+            if within_debounce {
+                tracing::debug!(
+                    target: "background_task",
+                    "Wake for run {id} suppressed: {} matching line(s) inside the {}s \
+                     debounce window since the last wake",
+                    scan.matches.len(),
+                    spec.debounce_secs
+                );
+                continue;
+            }
+            last_wake = Some(now);
+            deliver_wake(session_id, &label, &id, &spec.reason, &scan.matches, is_err);
+        }
+    }
+}
+
+/// Deliver a `wake_on_output` match into the run's originating session (#692).
+///
+/// Same route as a completion, for the same reasons: one gated `deliver_to_session`
+/// (fork #19) resolving the owner by SESSION, `interrupt=true` because this is
+/// the origin's own awaited work (fork #13) — the agent asked to be told, so
+/// parking it behind a turn boundary would defeat the request. The debounce in
+/// [`watch_for_wake`], not this gate, is what bounds the rate.
+fn deliver_wake(
+    session_id: Uuid,
+    label: &str,
+    id: &str,
+    reason: &str,
+    matched: &[String],
+    is_err: bool,
+) {
+    let msg = wake_message(label, id, reason, matched, is_err);
+    match super::session_routes::deliver_to_session(session_id, msg, true) {
+        super::session_routes::Delivery::Redirected { to } => tracing::info!(
+            target: "background_task",
+            "Wake for run {id} was redirected to session {to}, which now owns its channel"
+        ),
+        super::session_routes::Delivery::Parked => tracing::info!(
+            target: "background_task",
+            "Wake for run {id} is parked until its channel claims the session"
+        ),
+        super::session_routes::Delivery::NoRoute => tracing::warn!(
+            target: "background_task",
+            "Wake for run {id} had nowhere to go; the session will not hear about it"
+        ),
+        super::session_routes::Delivery::RefusedInFlight { .. } => tracing::warn!(
+            target: "background_task",
+            "Wake for run {id} was refused by the mid-turn gate despite interrupt=true"
+        ),
+    }
+}
+
+/// The message a `wake_on_output` match delivers into its session (#692).
+///
+/// It must NOT read like a completion. The run is still going, and an agent
+/// that mistook this for a result would stop watching the thing it asked to be
+/// told about — so the text says so outright, and names the two verbs that
+/// continue watching it.
+pub(crate) fn wake_message(
+    label: &str,
+    id: &str,
+    reason: &str,
+    matched: &[String],
+    is_err: bool,
+) -> QueuedUserMessage {
+    let stream = if is_err { "stderr" } else { "stdout" };
+    // Bounded: a pattern matching a chatty line yields hundreds of matches in
+    // one poll, and the point of the wake is to say "this happened", not to
+    // reproduce the run's output.
+    let shown = tail_lines(&matched.join("\n"), 10);
+    let context = format!(
+        "[System: the background task you started printed a line you asked to be told about.\n\
+         Task: {label}\n\
+         Run: {id}\n\
+         Why you asked: {reason}\n\
+         Matched on {stream}:\n{shown}\n\n\
+         The task is STILL RUNNING — this is not its result. Read more with \
+         task_output (run {id}), or wait on it with task_wait. Do not re-run the command.]"
+    );
+    let display = format!("👀 {label}: output matched");
+    let mut msg = QueuedUserMessage::system(context, display);
+    // No `bg_meta`: the receipt card renders a FINISHED run (exit code, final
+    // tail), and this run has neither. `BackgroundTask` + no meta is the shape
+    // the echo already handles — it titles the bubble from `display_text`,
+    // which is why that line names the event rather than the task.
+    msg.origin = PushOrigin::BackgroundTask;
+    msg
+}
+
 /// Deliver a run's completion into its originating session.
 ///
 /// The ONE gated route (fork #19): the same `deliver_to_session` that sub-agent
@@ -989,9 +1203,21 @@ async fn continue_detached(
     mut child: tokio::process::Child,
     out_reader: tokio::task::JoinHandle<()>,
     err_reader: tokio::task::JoinHandle<()>,
+    wake: Option<WakeSpec>,
 ) {
     let out_path = crate::brain::agent::service::work_status::command_output_path(&id, false);
     let err_path = crate::brain::agent::service::work_status::command_output_path(&id, true);
+    // The wake watcher (#692) reads the same stream FILES the readers above are
+    // filling, so it holds nothing the process owns and can be aborted without
+    // disturbing the run. Started here rather than inside `run_reserved` because
+    // a run that finishes inside its grace window never reaches this function:
+    // it has already reported itself, and a watch on it would be a watch on a
+    // run that no longer exists.
+    let wake_task = wake.map(|spec| {
+        let wake_id = id.clone();
+        let wake_label = label.clone();
+        tokio::spawn(async move { watch_for_wake(wake_id, session_id, wake_label, spec).await })
+    });
     let result = match child.wait().await {
         Ok(status) => {
             let stdout = collect_capture(out_reader, &out_path).await;
@@ -1033,6 +1259,13 @@ async fn continue_detached(
     // agent reporting a finished task as still running.
     this.finish_run(&id);
     deliver_completion(session_id, &label, &command, &result, elapsed_secs);
+    // The run is over, so its watcher has nothing left to report. Aborted
+    // rather than left to observe a terminal stream: a wake that arrived after
+    // this completion would tell the agent to keep watching work that is
+    // already finished, which is worse than no wake at all.
+    if let Some(task) = wake_task {
+        task.abort();
+    }
 }
 
 /// The background-task repository, when a pool exists.

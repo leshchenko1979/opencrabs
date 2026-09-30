@@ -7,7 +7,7 @@
 //! reminder and the evidence pack must never disagree about whether a plan is
 //! finished.
 
-use crate::brain::agent::service::background_tasks::BackgroundTaskManager;
+use crate::brain::agent::service::background_tasks::{BackgroundTaskManager, RunRequest};
 use crate::brain::agent::service::{format_plan_reminder, unresolved_tasks};
 use crate::brain::goal::evidence::{GoalEvidence, build_goal_evidence};
 use crate::config::profile::{home_for_profile, with_profile_home_async};
@@ -330,12 +330,12 @@ async fn evidence_agrees_with_the_reminder_on_a_pre_init_plan() {
 async fn a_running_detached_command_is_reported() {
     let sid = Uuid::new_v4();
     let mgr = Arc::new(BackgroundTaskManager::new());
-    mgr.clone().spawn_command(
+    mgr.clone().spawn_command(RunRequest::new(
         sid,
         std::env::temp_dir(),
         "sleep probe".to_string(),
         "sleep 5".to_string(),
-    );
+    ));
 
     let evidence = build_goal_evidence(Some(mgr.as_ref()), sid, Vec::new(), Vec::new()).await;
     assert_eq!(

@@ -4,6 +4,9 @@
 
 use super::error::{Result, ToolError, expand_tilde};
 use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
+use crate::brain::agent::service::background_tasks::{
+    DEFAULT_WAKE_DEBOUNCE_SECS, RunRequest, WakeSpec,
+};
 use crate::utils::long_command::Detach;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -291,6 +294,15 @@ struct BashInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     detach_after_secs: Option<u64>,
 
+    /// Optional: wake this session when a line of a detached run's output
+    /// matches a pattern, instead of waiting for the run to exit (#692).
+    ///
+    /// Owner directive 2026-09-28, adopted from Cursor's `notify_on_output`.
+    /// Only meaningful for a run that outlives the turn: a run that finished
+    /// inline has already reported itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wake_on_output: Option<WakeOnOutputInput>,
+
     /// Optional: Maximum inline byte limit before truncation or disk spilling (default: 16000)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_bytes: Option<usize>,
@@ -298,6 +310,23 @@ struct BashInput {
     /// Optional: When true (default), spills full output exceeding byte limit to disk. When false, clamps inline.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spill_to_disk: Option<bool>,
+}
+
+/// The owner's `wake_on_output` (#692), as the tool receives it.
+///
+/// Compiled into a [`WakeSpec`] before the run starts, so a malformed pattern
+/// is refused at the call rather than discovered by a watcher that can no
+/// longer tell the caller.
+#[derive(Debug, Deserialize, Serialize)]
+struct WakeOnOutputInput {
+    /// Regex matched against each COMPLETE line of the run's output.
+    pattern: String,
+    /// What the agent reads when it wakes. Without it the agent has to
+    /// re-derive why it cared about this run.
+    reason: String,
+    /// Suppress further wakes for this many seconds after one fires.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debounce_secs: Option<u64>,
 }
 
 #[async_trait]
@@ -358,6 +387,26 @@ impl Tool for BashTool {
                 "detach_after_secs": {
                     "type": "integer",
                     "description": "Optional: seconds an inline run may hold the turn before it is handed to the background manager instead of being killed. 0 detaches immediately. Omitted uses the configured default."
+                },
+                "wake_on_output": {
+                    "type": "object",
+                    "description": "Optional: wake this session when a line of a detached run's output matches a pattern, instead of waiting for the run to exit. Use it when you are waiting for a specific event ('server listening', 'migration done', a first error line) rather than for the command to finish.",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Regex matched against each complete line of the run's output."
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "What you want to be reminded of when the wake fires. It is shown back to you verbatim, so state why this match matters."
+                        },
+                        "debounce_secs": {
+                            "type": "integer",
+                            "description": "Suppress further wakes for this many seconds after one fires (default 60). Stops a line that repeats hundreds of times queueing hundreds of wakes.",
+                            "minimum": 0
+                        }
+                    },
+                    "required": ["pattern", "reason"]
                 },
                 "max_output_bytes": {
                     "type": "integer",
@@ -497,6 +546,29 @@ impl Tool for BashTool {
             .map(|m| m.nesting_allowed_for_session(context.session_id))
             .unwrap_or(true);
 
+        // Compile the owner's `wake_on_output` pattern HERE, before any path can
+        // start a run (#692). A malformed regex is the caller's mistake and has
+        // to be refused at the call: a watcher that discovers it later has no
+        // way to tell the caller, and the run would proceed unwatched while the
+        // caller believed it was being watched. Compiled once, above the branch,
+        // because all three detach paths (explicit `background: true`, the
+        // long-command marker, and the grace handover) carry the same watch.
+        let wake: Option<WakeSpec> = match input.wake_on_output.as_ref() {
+            Some(w) => match regex::Regex::new(&w.pattern) {
+                Ok(pattern) => Some(WakeSpec {
+                    pattern,
+                    reason: w.reason.clone(),
+                    debounce_secs: w.debounce_secs.unwrap_or(DEFAULT_WAKE_DEBOUNCE_SECS),
+                }),
+                Err(e) => {
+                    return Ok(ToolResult::error(format!(
+                        "wake_on_output.pattern is not a valid regex: {e}"
+                    )));
+                }
+            },
+            None => None,
+        };
+
         // Check explicit background override or heuristic auto-detection
         match input.background {
             Some(false) => {
@@ -533,12 +605,13 @@ impl Tool for BashTool {
                     "Explicitly detaching '{label}' for session {} (background: true)",
                     context.session_id
                 );
-                mgr.clone().spawn_command(
-                    context.session_id,
-                    context.working_directory.clone(),
-                    label.clone(),
-                    input.command.clone(),
-                );
+                mgr.clone().spawn_command(RunRequest {
+                    session_id: context.session_id,
+                    cwd: context.working_directory.clone(),
+                    label: label.clone(),
+                    command: input.command.clone(),
+                    wake: wake.clone(),
+                });
                 return Ok(ToolResult::success(format!(
                     "Started in the background: {label}\n\nThis is a long-running task, so it \
                      is running detached. I'll continue this session automatically when it \
@@ -561,12 +634,13 @@ impl Tool for BashTool {
                                 "Detaching '{label}' for session {}: '{marker}' starts a command",
                                 context.session_id
                             );
-                            mgr.clone().spawn_command(
-                                context.session_id,
-                                context.working_directory.clone(),
-                                label.clone(),
-                                input.command.clone(),
-                            );
+                            mgr.clone().spawn_command(RunRequest {
+                                session_id: context.session_id,
+                                cwd: context.working_directory.clone(),
+                                label: label.clone(),
+                                command: input.command.clone(),
+                                wake: wake.clone(),
+                            });
                             return Ok(ToolResult::success(format!(
                                 "Started in the background: {label}\n\nThis is a long-running task, so it \
                                  is running detached. I'll continue this session automatically when it \
@@ -891,10 +965,13 @@ impl Tool for BashTool {
                     crate::brain::agent::service::background_tasks::short_label(&input.command);
                 match mgr
                     .run_or_detach(
-                        context.session_id,
-                        working_dir.clone(),
-                        label.clone(),
-                        input.command.clone(),
+                        RunRequest {
+                            session_id: context.session_id,
+                            cwd: working_dir.clone(),
+                            label: label.clone(),
+                            command: input.command.clone(),
+                            wake,
+                        },
                         cmd,
                         grace.map(Duration::from_secs),
                     )
