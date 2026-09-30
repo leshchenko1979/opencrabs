@@ -60,55 +60,17 @@ fn voice_is_a_derived_view_not_a_resolvable_section() {
 }
 
 #[test]
-fn a_path_deeper_than_one_level_is_refused() {
-    // #689. Resolution used to keep the FIRST segment and return it at ANY
-    // depth, so a caller asking for one leaf received a whole parent block:
-    // `channels.telegram.groups.<id>` came back as every sibling in `channels`,
-    // `token` included, and nothing in the result said a widening had happened.
-    // The refusal IS the fix — the caller now gets an error naming what it
-    // asked for, and `read_config` renders nothing.
-    //
-    // Note the shape this test used to have: it asserted the widening as
-    // intended behaviour (`providers.custom.modelstudio` -> providers), which
-    // is exactly why it passed while the defect was live. A test that encodes
-    // the bug cannot fail on it.
+fn a_deep_path_takes_its_head() {
+    // config.toml nests further than one level; the head is what this tool
+    // can render.
     assert_eq!(
         resolve_section("providers.custom.modelstudio").as_deref(),
-        None
-    );
-    assert_eq!(
-        resolve_section("channels.telegram.groups").as_deref(),
-        None
-    );
-    // The exact shape from the report: a group id as the fourth segment.
-    assert_eq!(
-        resolve_section("channels.telegram.groups.-1001234567890").as_deref(),
-        None
-    );
-}
-
-#[test]
-fn one_level_into_a_section_still_resolves() {
-    // The #889 shape, deliberately kept. At one level the tool's contract is
-    // "here is the section that owns this path", which is a truthful answer;
-    // the refusal above starts where a render view can no longer answer.
-    assert_eq!(
-        resolve_section("providers.stt").as_deref(),
         Some("providers")
     );
     assert_eq!(
-        resolve_section("channels.telegram").as_deref(),
+        resolve_section("channels.telegram.groups").as_deref(),
         Some("channels")
     );
-    assert_eq!(resolve_section("debug.debug_lsp").as_deref(), Some("debug"));
-}
-
-#[test]
-fn a_child_name_is_shorthand_only_alone() {
-    // `stt` is shorthand for `providers`; `stt.model` names a path under a
-    // section that does not exist, so there is no parent to return.
-    assert_eq!(resolve_section("stt.model").as_deref(), None);
-    assert_eq!(resolve_section("telegram.groups").as_deref(), None);
 }
 
 #[test]

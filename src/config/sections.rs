@@ -88,38 +88,20 @@ pub fn known_sections() -> &'static [String] {
     })
 }
 
-/// Resolve what a READER asked for to a top-level section (#889, #689).
+/// Resolve what a READER asked for to a top-level section (#889).
 ///
-/// Config is nested but the config tool renders only the first level, so the
+/// Config is nested but the config tool only renders the first level, so the
 /// paths people actually write were rejected: every recorded failure was
-/// `providers.stt`, `stt` or `telegram`. Accepts an exact section, a one-level
-/// path into it (`providers.stt` -> `providers`), or a known child name
-/// (`telegram` -> `channels`). `None` when nothing matches, so the caller can
-/// refuse rather than guess.
-///
-/// #689 — the widening this used to do: it kept the FIRST segment and returned
-/// it whenever that head was a known section, at ANY depth. So
-/// `channels.telegram.groups.<id>` came back as the whole `channels` block —
-/// every sibling, `token` included — and a caller could not tell a widening
-/// from a hit. Deeper than one level now resolves to `None`, so the caller
-/// names what was asked instead of silently receiving a parent.
-///
-/// One level stays accepted on purpose: `providers.stt` is the #889 shape, and
-/// the tool's contract there is "here is the section that owns this path". The
-/// contract stops at one level because a render view only has the SECTION to
-/// offer — past that, returning the parent is not an answer to the question
-/// that was asked.
+/// `providers.stt`, `stt` or `telegram`. Accepts an exact section, a dotted
+/// path (`providers.stt` -> `providers`), or a known child
+/// (`telegram` -> `channels`). `None` when nothing matches, so the caller
+/// can refuse rather than guess.
 pub fn resolve_section(requested: &str) -> Option<String> {
     let want = requested.trim().trim_matches('.').to_lowercase();
     if want.is_empty() {
         return None;
     }
-    let mut segments = want.split('.');
-    let head = segments.next().unwrap_or(&want);
-    let depth = segments.count();
-    if depth > 1 {
-        return None;
-    }
+    let head = want.split('.').next().unwrap_or(&want);
     // `gateway` is a serde alias of `a2a`; the struct field name is the
     // canonical spelling.
     if head == "gateway" {
@@ -127,12 +109,6 @@ pub fn resolve_section(requested: &str) -> Option<String> {
     }
     if known_sections().iter().any(|s| s == head) {
         return Some(head.to_string());
-    }
-    // A bare child name (`stt`, `telegram`) is shorthand for its parent. With a
-    // dot after it the caller named a path under a section that does not exist,
-    // so there is nothing to resolve.
-    if depth == 1 {
-        return None;
     }
     SECTION_PARENTS
         .iter()

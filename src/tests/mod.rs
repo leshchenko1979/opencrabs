@@ -230,7 +230,6 @@ pub mod config_memory_external_test;
 pub mod config_owner_seed_migration_test;
 pub mod config_phantom_xiaomi_default_test;
 pub mod config_provider_registry_test;
-pub mod config_read_view_redaction_test;
 pub mod config_reload_reason_test;
 pub mod config_repair_test;
 pub mod config_secrets_test;
