@@ -533,6 +533,8 @@ pub mod telegram_rich_media_kind_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_video_delivery_test;
 #[cfg(feature = "telegram")]
+pub mod telegram_video_intermediate_test;
+#[cfg(feature = "telegram")]
 pub mod telegram_video_send_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_video_strip_test;

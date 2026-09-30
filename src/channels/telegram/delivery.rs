@@ -253,26 +253,44 @@ pub(crate) async fn deliver_final_response(
                     let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
                     s.delivered_image_paths.clone()
                 };
-                let rw = crate::utils::image::rewrite_local_images(
+                // #465: the VIDEO family walks first, and the image family
+                // runs on the video family's rich form. The order is
+                // load-bearing and it is the order the text floor below already
+                // uses (`extract_local_videos` then `extract_local_images`):
+                //
+                //  * Both families read the markdown reference form, and the
+                //    image walk CONSUMES a reference whose bytes fail image
+                //    validation (`Rewriter::file` pushes the failure and
+                //    returns `true`). A clip is exactly that — `UnsupportedFormat`
+                //    — so an image-first order eats a `![clip](x.mp4)` reference
+                //    before the video family can claim it: the clip is never
+                //    delivered and the reader is told "Image not attached"
+                //    instead. Claiming it here means the image walk never sees
+                //    it.
+                //  * The video walk is the SELECTIVE one — it declines a
+                //    reference that is not video-ish by content, and leaves
+                //    every `<<IMG:…>>` marker, picture reference and `tg://`
+                //    ref verbatim — so running it first cannot starve the image
+                //    family of anything it owns.
+                //
+                // Running the image walk on `vw.rich` (not `vw.stripped`) keeps
+                // the rich body whole: a `![video](tg://video?id=vidN)`
+                // reference classifies as a media ref, so the image walk leaves
+                // it verbatim and BOTH families' references survive in
+                // `rich_rw.rich` for the media array to answer. `vid` is its own
+                // id prefix: entries are matched to references BY ID inside one
+                // message's media array, so a shared prefix would let an image
+                // entry answer a video reference.
+                let vw = crate::utils::image::rewrite_local_videos(
                     &rich_source,
                     Some(image_cwd.as_path()),
-                    "img",
+                    crate::utils::VID_ID_PREFIX,
                     &delivered,
                 );
-                // #465: the video family reads the same two reference forms the
-                // image family does, so its rewrite runs on the IMAGE family's
-                // rich form rather than on `rich_source`. What the image walk
-                // already lifted into a `tg://photo` reference must not be
-                // re-resolved, and what it deliberately left — a `<<VID:…>>`
-                // marker, or a markdown reference to a video — is exactly this
-                // walk's input. `vid` is its own id prefix: entries are matched
-                // to references BY ID inside one message's media array, so a
-                // shared prefix would let an image entry answer a video
-                // reference.
-                let vw = crate::utils::image::rewrite_local_videos(
-                    &rw.rich,
+                let rw = crate::utils::image::rewrite_local_images(
+                    &vw.rich,
                     Some(image_cwd.as_path()),
-                    crate::utils::VID_ID_PREFIX,
+                    "img",
                     &delivered,
                 );
                 (rw, vw)
@@ -1017,15 +1035,16 @@ pub(crate) async fn deliver_final_response(
                     // markdown, whose `tg://photo` references only resolve
                     // against the media array sent with it; every other body
                     // keeps today's text, byte for byte.
-                    // #465: `rich_vw.rich` is the same form one family further
-                    // on — the image walk's output fed through the video walk —
-                    // so it carries `tg://photo` AND `tg://video` references and
-                    // is the correct body for either family. Selecting on the
-                    // union is what keeps the two consistent: the array below is
-                    // shared, and a body whose references are not in it would
-                    // ship dead markdown.
+                    // #465: `rich_rw.rich` is the LAST walk's output — the
+                    // video walk's form fed through the image walk — so it
+                    // carries `tg://photo` AND `tg://video` references and is
+                    // the correct body for either family. It must be the final
+                    // walk's form, not a named family's: the earlier walk's
+                    // output is missing the later family's references, and the
+                    // array below is shared, so a body whose references are not
+                    // in it would ship dead markdown.
                     let rich_md = if rich_owns_media {
-                        rich_vw.rich.clone()
+                        rich_rw.rich.clone()
                     } else {
                         text_only.clone()
                     };
@@ -1821,12 +1840,33 @@ pub(crate) async fn handle_intermediate(
         fire_reaction(bot, chat, target, emoji).await;
     }
 
-    // 3. ONE walk for both text forms: the rich form embeds each resolvable
-    //    reference as `tg://photo?id=imgN`, the stripped form drops it, and the
-    //    fresh entries and failures come out of the same pass. `Some(cwd)` is
-    //    the session working directory — the same base the final leg resolves
-    //    against.
-    let rw = crate::utils::image::rewrite_local_images(&text, Some(cwd), "img", &delivered);
+    // 3. TWO walks, VIDEO first. The order is load-bearing, and it is the same
+    //    order the delivery floor uses (`extract_local_videos` then
+    //    `extract_local_images`): both families read the markdown reference
+    //    form, so a reference left to the image walk is judged
+    //    `UnsupportedFormat`, CONSUMED, and lost — the clip would never be
+    //    delivered and the reader would be told "Image not attached" instead.
+    //    Claiming it here means the image walk never sees it. What the video
+    //    walk deliberately leaves — a markdown reference to a picture, an
+    //    `<<IMG:…>>` marker, a remote target — is exactly the image walk's
+    //    input, and the image walk runs on the video family's STRIPPED form so
+    //    its own rich/stripped pair is complete on both planes: `rw.rich` is
+    //    the body with pictures embedded in place, `rw.stripped` is the body
+    //    with both families' references gone.
+    //
+    //    `vid` is its own id prefix, though only the image family embeds here:
+    //    the prefix is the video plane's identity, and a shared one would let
+    //    an image entry answer a `tg://video` reference wherever both arrays
+    //    are built.
+    let vw = crate::utils::image::rewrite_local_videos(
+        &text,
+        Some(cwd),
+        crate::utils::VID_ID_PREFIX,
+        &delivered,
+    );
+    // `Some(cwd)` is the session working directory — the same base the final
+    // leg resolves against.
+    let rw = crate::utils::image::rewrite_local_images(&vw.stripped, Some(cwd), "img", &delivered);
 
     // 4. A fresh picture is report-shaped content on its own (#502); anything
     //    else keeps folding, with the failure notice carried along so a broken
@@ -1844,18 +1884,46 @@ pub(crate) async fn handle_intermediate(
         .channels
         .telegram
         .is_quiet_for(&chat.0.to_string());
-    let has_fresh_media = !rw.entries.is_empty();
+    let has_fresh_media = !(rw.entries.is_empty() && vw.entries.is_empty());
     let promote = has_fresh_media
         || (!quiet && super::intermediates::should_promote_intermediate(&rw.stripped, 0));
     if promote {
         super::intermediates::deliver_intermediate_message(
-            session_id, bot, chat, thread_id, streaming, tg, &rw,
+            session_id, bot, chat, thread_id, streaming, tg, &rw, &vw,
         )
         .await;
     } else {
-        let folded = crate::utils::append_failure_notice(&rw.stripped, &rw.failures);
+        // The FOLDED form is the image walk's stripped output, not the video
+        // walk's: `vw.stripped` has the clips' references gone but still
+        // carries every picture reference and `<<IMG:…>>` marker verbatim,
+        // because the image walk has not run on it. `rw.stripped` is the one
+        // form with both families' references removed — the only correct text
+        // for a plane that carries no media at all (#465).
+        let folded = crate::utils::append_failure_notice(
+            &rw.stripped,
+            &intermediate_failures(&rw, &vw),
+        );
         append_intermediate_to_flow(bot, chat, thread_id, streaming, &folded).await;
     }
+}
+
+/// The intermediate path's failure list: both families' refusals, in the order
+/// the walks ran.
+///
+/// A merge rather than a filter, because the video walk runs FIRST: it claims
+/// every reference it can deliver, so the image walk that follows never judges a
+/// clip's bytes and never answers a reference the video plane owns. The two
+/// lists are therefore disjoint by construction — an image failure is a
+/// genuinely broken picture and a video failure a genuinely broken clip, which
+/// is why the notice names the family and the reader is never told "Image not
+/// attached" about a video (#465).
+pub(crate) fn intermediate_failures(
+    rw: &crate::utils::image::LocalImageRewrite,
+    vw: &crate::utils::image::LocalVideoRewrite,
+) -> Vec<LocalImageFailure> {
+    let mut failures: Vec<LocalImageFailure> = vw.failures.clone();
+    failures.extend(rw.failures.iter().cloned());
+    failures
 }
 
 /// Drain the display items left queued after the edit loop stopped,

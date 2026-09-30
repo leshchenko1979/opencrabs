@@ -318,6 +318,11 @@ pub(crate) fn superseded_ids(bubbles: &[SentBubble], rich_text: &str) -> Vec<Mes
 /// array sent with it, while the stripped form is the shape the HTML fallback
 /// and the dedup record need — the HTML plane has no media array and would ship
 /// a `tg://` reference as dead visible markdown.
+///
+/// `vw` is the video family's rewrite. It is passed rather than folded into
+/// `rw` because the two families keep separate id namespaces and separate
+/// failure lists, and because on this path the video family delivers through
+/// its own floor helper rather than through the rich media array (#465).
 pub(crate) async fn deliver_intermediate_message(
     session_id: Uuid,
     bot: &Bot,
@@ -326,6 +331,7 @@ pub(crate) async fn deliver_intermediate_message(
     streaming: &Arc<std::sync::Mutex<StreamingState>>,
     tg: &super::state::TelegramState,
     rw: &crate::utils::image::LocalImageRewrite,
+    vw: &crate::utils::image::LocalVideoRewrite,
 ) -> bool {
     // #690 follow-up (#980): re-expand a collapsed table once, up front, so the
     // dedup record, the rich send and the HTML fallback all see the same
@@ -345,7 +351,44 @@ pub(crate) async fn deliver_intermediate_message(
     // Read the resolved bytes ONCE for the rich media array. A read that fails
     // here is an honest failure for the notice, never a panic — the reference
     // validated seconds ago, but a file can disappear between the two.
-    let mut failures = rw.failures.clone();
+    //
+    // The failure list is the SHARED one (`intermediate_failures`), not
+    // `rw.failures`: the two walks are two halves of one partition, and only
+    // the pair knows which reference each family actually claimed (#465).
+    // #465: video goes out as its OWN bubble on this path, before the text, on
+    // both planes — the design's send-site anchoring. It is deliberately not
+    // lifted into the rich media array beside the pictures:
+    //
+    //  * The array is the RICH plane's, and a video in it needs a
+    //    `tg://video?id=vidN` reference in the rich body to answer. The body
+    //    here is `rw.rich`, which is built from `vw.stripped` — the video
+    //    family's references are already gone from that form, because the HTML
+    //    plane ships `rw.stripped` and a `tg://` reference that plane cannot
+    //    resolve must not survive into it. An entry whose reference is absent
+    //    is exactly what `neutralize_orphan_photo_refs` defuses
+    //    (`mermaid.rs:1249`), so the clip would silently degrade to a dead
+    //    reference.
+    //  * Sending it here means ONE site covers both exits: the rich attempt
+    //    below returns early on success, and the HTML fallback would otherwise
+    //    be the only place a clip could leave.
+    //
+    // The floor helper is the same one the final leg uses, so kind selection,
+    // captions, telemetry and failure reasons cannot drift between the two
+    // (#502). `vw.entries` already excludes anything this turn has delivered,
+    // so a repeated intermediate cannot ship a clip twice.
+    let videos: Vec<crate::utils::image::LocalVideo> =
+        vw.entries.iter().map(|e| e.video.clone()).collect();
+    let (delivered_videos, refused_videos) =
+        super::delivery::send_local_videos(session_id, bot, chat, thread_id, &videos).await;
+    if !delivered_videos.is_empty() {
+        let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+        s.delivered_image_paths.extend(delivered_videos);
+    }
+
+    let mut failures = super::delivery::intermediate_failures(rw, vw);
+    // A clip the channel refused is an honest failure of the same turn, and it
+    // rides the text bubble the reader is about to get — never a silent drop.
+    failures.extend(refused_videos);
     let mut media: Vec<super::rich::mermaid::MediaEntry> = Vec::new();
     for entry in &rw.entries {
         match tokio::fs::read(&entry.image.path).await {
@@ -369,6 +412,9 @@ pub(crate) async fn deliver_intermediate_message(
             }
         }
     }
+    // #465: video does NOT ride this array — see the send above. The array is
+    // the rich plane's, and an entry here without a matching reference in
+    // `body` is what the orphan shield defuses into a dead `tg://video` ref.
 
     // An image the bubble announced must not vanish silently when it cannot be
     // read: the notice rides the same bubble the model wrote (#502).
@@ -397,9 +443,14 @@ pub(crate) async fn deliver_intermediate_message(
             ids,
         });
         // Record the paths that just rode this bubble, so neither a later
-        // intermediate nor the final leg ships the same picture twice (#502).
+        // intermediate nor the final leg ships the same media twice (#502).
         // The API's own success is the receipt here: the bytes went out with
         // this request.
+        //
+        // One list for both families (#465): a path is either already in the
+        // chat or it is not, whichever plane put it there, so the delivered-media
+        // record is not split by kind. The videos were recorded by the send
+        // above; only the pictures rode this request.
         for entry in &rw.entries {
             s.delivered_image_paths.push(entry.image.path.clone());
         }
@@ -412,9 +463,11 @@ pub(crate) async fn deliver_intermediate_message(
     // verbatim (it classifies as MediaRef), so rendering the rich form here
     // would show the user dead markdown where the picture should be.
     //
-    // The picture is not lost on this plane either (#502): each resolved image
+    // The media is not lost on this plane either (#502): each resolved image
     // ships as its own bubble through the SAME helper the final leg uses, so
-    // the two cannot drift on kind selection, captions or failure reasons.
+    // the two cannot drift on kind selection, captions or failure reasons. The
+    // videos are not here — they left as their own bubbles before the rich
+    // attempt, so this plane owes only the pictures (#465).
     let mut plain = crate::utils::append_failure_notice(text, &failures);
     let images: Vec<crate::utils::image::LocalImage> =
         rw.entries.iter().map(|e| e.image.clone()).collect();
