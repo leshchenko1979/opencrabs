@@ -3556,7 +3556,20 @@ pub(crate) async fn handle_reaction(
     // and a relative target in it is prose, not an attachment. An image that
     // WAS named and could not be delivered is reported below (#502) — this is
     // the third strip site the issue names, and it is no longer silent.
-    let image_scan = crate::utils::strip_image_references(&response.content, None);
+    // #465: the video family reads the same two reference forms the image
+    // family does, so it runs FIRST and consumes what it claims — exactly the
+    // partition the delivery path documents. Without this order the image strip
+    // below would classify a clip's bytes as an unsupported image and answer
+    // the same reference with a second, false notice ("Image not attached") on
+    // the turn the clip arrives. Strip-only: this path has no fetch and no send
+    // step, so a relative markdown target stays verbatim (`None` base_dir, the
+    // same deliberate choice the image strip makes below) while a `<<VID:…>>`
+    // marker and an absolute target still leave the text.
+    //
+    // Before this, the path knew only `<<IMG:`: a `<<VID:…>>` the model echoed
+    // shipped to the user as literal marker text, because nothing here read it.
+    let video_scan = crate::utils::extract_local_videos(&response.content, None);
+    let image_scan = crate::utils::strip_image_references(&video_scan.text, None);
     let text_only = image_scan.text;
     let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
     let text_only = redact_secrets(&text_only);
