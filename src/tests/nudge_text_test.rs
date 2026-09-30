@@ -132,6 +132,58 @@ fn mermaid_regen_nudge_quotes_renderer_errors_and_counts_attempts() {
     assert!(nudge.ends_with(']'), "{nudge}");
 }
 
+#[cfg(feature = "telegram")]
+#[test]
+fn mermaid_regen_nudge_carries_a_too_large_remedy() {
+    // #658: the preflight collector reports the too-large class beside the
+    // parse class now, and this nudge is where it reaches the model — so the
+    // note is DERIVED from the classifier rather than transcribed here, and
+    // the two cannot drift.
+    use crate::channels::telegram::rich::ast::MermaidResult;
+    use crate::channels::telegram::rich::mermaid::classify_render_failure;
+
+    let MermaidResult::TooLarge(note) = classify_render_failure(
+        414,
+        "<html><head><title>414 Request-URI Too Large</title></head></html>",
+    ) else {
+        panic!("a 414 must classify as TooLarge");
+    };
+    // Checked BEFORE the note is moved into the nudge call below.
+    assert!(
+        !note.contains('<'),
+        "the note itself must be markup-free: {note}"
+    );
+    let nudge = mermaid_regen_nudge(&[note], 1, 3);
+    assert!(
+        nudge.contains("shorten or split"),
+        "the REAL remedy must reach the model — that is the whole point of the \
+         class: {nudge}"
+    );
+    assert!(
+        nudge.contains("syntax is valid"),
+        "the note must warn against the syntax repair the old note implied: {nudge}"
+    );
+    // #658: the nudge embeds `unified_mermaid_rules()`, whose pre-existing prose
+    // carries a literal '<br/>' ("only '<br/>' is allowed for line breaks").
+    // So `!nudge.contains('<')` is unsatisfiable and would have failed CI — it
+    // did. Scope the markup check to the QUOTED region (everything between the
+    // header line and the correction rules), which is where a renderer body
+    // would land. `html_title` already stripped it, so this asserts the seam.
+    let quoted = nudge
+        .split_once('\n')
+        .and_then(|(_, rest)| rest.split_once("Correction rules:"))
+        .map(|(quoted, _)| quoted.to_string())
+        .expect("the nudge must carry a quoted region before the correction rules");
+    assert!(
+        !quoted.contains('<'),
+        "no renderer markup may reach the model in the quoted region: {quoted}"
+    );
+    assert!(
+        !nudge.contains("<html"),
+        "no proxy markup may reach the model anywhere in the nudge: {nudge}"
+    );
+}
+
 // ── Local image nudges (#286) ──
 
 #[test]

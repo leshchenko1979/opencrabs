@@ -61,10 +61,18 @@ pub enum MermaidResult {
     /// source may render fine on a later attempt.
     Failed(String),
     /// The renderer rejected the diagram with a deterministic PARSE error
-    /// (HTTP 4xx carrying the renderer's own error text). The source is
-    /// broken as written; the note names the offending construct so the
-    /// model can fix the fence and re-emit it (#37 regen nudge).
+    /// (HTTP 4xx carrying the renderer's own error text — other than the
+    /// transient 408/429 pair and the too-large 413/414 pair, which is
+    /// [`Self::TooLarge`]). The source is broken as written; the note names
+    /// the offending construct so the model can fix the fence and re-emit it
+    /// (#37 regen nudge).
     ParseError(String),
+    /// The diagram SOURCE is too large for the renderer's request URL
+    /// (HTTP 413/414). The source itself is valid, so neither re-sending it
+    /// nor repairing its syntax can help; the note names the real remedy
+    /// (shorten or split the diagram) so the regen nudge asks for the right
+    /// repair (#658).
+    TooLarge(String),
 }
 
 /// A bulleted or numbered list.

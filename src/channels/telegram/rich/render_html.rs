@@ -104,6 +104,11 @@ fn render_block(block: &Block, wrap_p: bool, style: &mermaid::MermaidStyle) -> S
                     + &super::mermaid::svg_link_html(style, source)
             }
             MermaidResult::ParseError(err) => super::mermaid::failure_html(err, source),
+            // #658: no hatch, for a STRONGER reason than the parse arm's. The
+            // svg link is built from the SAME oversized request URL the
+            // renderer has just rejected, so it cannot open however the source
+            // reads; a parse rejection merely has no diagram behind it.
+            MermaidResult::TooLarge(err) => super::mermaid::failure_html(err, source),
         },
         Block::Quote(inner) => format!(
             "<blockquote>{}</blockquote>",
@@ -544,6 +549,34 @@ mod tests {
         assert!(
             !html.contains("mermaid.ink/svg/"),
             "no svg link for a render that never happened. Got:\n{html}"
+        );
+    }
+
+    #[test]
+    fn too_large_arm_yields_the_failure_block_without_the_hatch() {
+        // #658: the HTML plane needs its own arm, or the build fails on a
+        // non-exhaustive match — and the right behaviour is the parse arm's
+        // (block, no link) for a stronger reason: the hatch URL is the very
+        // oversized request the renderer rejected.
+        let blocks = vec![Block::Mermaid {
+            source: "flowchart TD\n    A --> B".into(),
+            result: MermaidResult::TooLarge(
+                "diagram source is too large for the renderer's request URL".into(),
+            ),
+        }];
+        let html = render_html(&blocks);
+        assert!(
+            html.contains("Mermaid diagram could not be rendered"),
+            "the too-large class keeps the legible failure block. Got:\n{html}"
+        );
+        assert!(
+            html.contains("too large"),
+            "the remedy-bearing note must survive into the block. Got:\n{html}"
+        );
+        assert!(
+            !html.contains("mermaid.ink/svg/"),
+            "the hatch is built from the rejected URL and must NOT be offered. \
+             Got:\n{html}"
         );
     }
 

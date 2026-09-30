@@ -711,14 +711,19 @@ pub(crate) fn cache_get(style: &MermaidStyle, source: &str) -> Option<MermaidRes
 }
 
 /// Store a deterministic render outcome for `style` and `source` (#37). Only
-/// [`MermaidResult::ImageBytes`] and [`MermaidResult::ParseError`] are
-/// stored; transient failures are skipped so a retryable outage is never
-/// pinned as a stuck failure block. Evicts the oldest entry at the cap.
+/// [`MermaidResult::ImageBytes`], [`MermaidResult::ParseError`] and
+/// [`MermaidResult::TooLarge`] are stored; transient failures are skipped so a
+/// retryable outage is never pinned as a stuck failure block. The too-large
+/// case is deterministic for a given source — same bytes, same URL, same proxy
+/// request-line limit — so caching it saves a request that cannot succeed
+/// (#658). Evicts the oldest entry at the cap.
 pub(crate) fn cache_put(style: &MermaidStyle, source: &str, outcome: &MermaidResult) {
     let key = style.cache_key(source); // #100: shared normalized key
     if !matches!(
         outcome,
-        MermaidResult::ImageBytes(_) | MermaidResult::ParseError(_)
+        MermaidResult::ImageBytes(_)
+            | MermaidResult::ParseError(_)
+            | MermaidResult::TooLarge(_)
     ) {
         return;
     }
@@ -1048,33 +1053,57 @@ pub(crate) async fn resolve(style: &MermaidStyle, source: &str) -> MermaidResult
     finish(style, source, classify_render_failure(status, &body))
 }
 
-/// Pre-render every mermaid fence in `text` and collect the PARSE errors
-/// (#37). Called from the tool loop before the reply is final: each fence
-/// is resolved through [`resolve`] — which populates the render cache, so
-/// the delivery path reuses every outcome instead of re-asking the
-/// renderer — and only deterministic parse rejections are reported.
-/// Transient failures stay silent here; the delivery path degrades them
-/// to legible failure blocks as before. An empty `Vec` means every fence
-/// rendered.
+/// Pre-render every mermaid fence in `text` and collect the DETERMINISTIC
+/// rejections (#37, #658). Called from the tool loop before the reply is
+/// final: each fence is resolved through [`resolve`] — which populates the
+/// render cache, so the delivery path reuses every outcome instead of
+/// re-asking the renderer — and only outcomes that cannot be cured by a
+/// re-request are reported. That is TWO kinds, and the second is the whole
+/// point of #658: a parse rejection, whose note names the offending construct,
+/// and a too-large rejection, whose source is valid and needs shortening.
+/// Reporting only the first meant a 414 reached the model as silence from this
+/// leg while the delivery block still read as a syntax problem. Transient
+/// failures stay silent here; the delivery path degrades them to legible
+/// failure blocks as before. An empty `Vec` means every fence rendered.
 pub(crate) async fn preflight_parse_errors(style: &MermaidStyle, text: &str) -> Vec<String> {
     let mut errors = Vec::new();
     for fence in find_mermaid_fences(text) {
-        if let MermaidResult::ParseError(note) = resolve(style, &fence.source).await {
-            errors.push(note);
+        match resolve(style, &fence.source).await {
+            MermaidResult::ParseError(note) | MermaidResult::TooLarge(note) => errors.push(note),
+            _ => {}
         }
     }
     errors
 }
 
-/// Classify a non-image renderer response (#37): HTTP 4xx — except the
-/// transient 408/429 — is a deterministic PARSE rejection of this exact
-/// source; mermaid.ink answers it with plain-text error text naming the
-/// offending construct, which the model can act on (regen nudge). Anything
-/// else (server errors, odd non-image responses) is transient/infra and
-/// keeps the plain note. Pure, so the branching is unit-testable without a
-/// network call.
+/// Classify a non-image renderer response (#37, #658): HTTP 4xx — except the
+/// transient 408/429 and the too-large 413/414 — is a deterministic PARSE
+/// rejection of this exact source; mermaid.ink answers it with plain-text
+/// error text naming the offending construct, which the model can act on
+/// (regen nudge). 413/414 is its own kind: the source is VALID but too long
+/// for the request URL, so the remedy is to shorten it, never to repair
+/// syntax. Anything else (server errors, odd non-image responses) is
+/// transient/infra and keeps the plain note. Pure, so the branching is
+/// unit-testable without a network call.
+///
+/// Measured against mermaid.ink (#658): the request URL runs ~1.46x the
+/// source, so a source beyond roughly 5.5 KB crosses nginx's 8 KB request
+/// line and the proxy answers 414 with `text/html`, not the renderer's own
+/// plain-text diagnosis. That proxy body is why the kind cannot be inferred
+/// from the status bucket alone — the source's doc comment previously claimed
+/// every 4xx here carried the renderer's plain-text error text.
+///
+/// Do NOT harmonise this with the provider-side rule in
+/// `brain/provider/error.rs` (an HTML-bodied 4xx is a CDN page and IS
+/// retryable). The two read as contradictory and are not: that rule uses the
+/// body's shape as a heuristic for WHO answered, whereas a 414 is determined
+/// by WHY it answered — our own request line — so re-sending identical bytes
+/// cannot succeed however healthy the node is. Status causation decides
+/// retryability here, not response shape.
 pub(crate) fn classify_render_failure(status: u16, body: &str) -> MermaidResult {
-    if (400..500).contains(&status) && !matches!(status, 408 | 429) {
+    if matches!(status, 413 | 414) {
+        MermaidResult::TooLarge(too_large_note(status, body))
+    } else if (400..500).contains(&status) && !matches!(status, 408 | 429) {
         MermaidResult::ParseError(error_note(status, body))
     } else {
         MermaidResult::Failed(error_note(status, body))
@@ -1113,6 +1142,21 @@ pub(crate) fn error_note(status: u16, body: &str) -> String {
         };
     }
     cap_note(trimmed)
+}
+
+/// Note for the too-large class (#658). The remedy comes FIRST and the
+/// renderer's own status line LAST: a proxy answers this class with its error
+/// page, so [`error_note`] supplies the legible status, and a note leading with
+/// it would have the clause a model most needs eaten first by the shared cap.
+/// The source is VALID, so repairing its syntax cannot help — saying so is the
+/// point of the note, not a gloss on it.
+fn too_large_note(status: u16, body: &str) -> String {
+    cap_note(&format!(
+        "diagram source is too large for the renderer's request URL — shorten \
+         or split the diagram; its syntax is valid, so repairing it will not \
+         help (renderer said: {})",
+        error_note(status, body)
+    ))
 }
 
 /// Apply the shared note length cap.
@@ -1190,6 +1234,11 @@ pub(crate) fn replacement_for(
         // the renderer produced no diagram to link to.
         MermaidResult::Failed(err) => (markdown_failure_block_with_link(err, source, style), None),
         MermaidResult::ParseError(err) => (markdown_failure_block(err, source), None),
+        // #658: no hatch either, for a stronger reason than the parse arm's —
+        // the svg link is built from the SAME oversized request URL the
+        // renderer has just rejected, so it cannot open however the source
+        // reads. Handing it over would advertise a repair that is impossible.
+        MermaidResult::TooLarge(err) => (markdown_failure_block(err, source), None),
     }
 }
 

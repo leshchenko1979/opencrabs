@@ -6221,16 +6221,19 @@ impl AgentService {
                 }
 
                 // Mermaid regen nudge (#37, #326): if any fence in the reply
-                // fails to parse DETERMINISTICALLY, hand the model the
+                // fails to render DETERMINISTICALLY, hand the model the
                 // renderer's own error text before the reply goes final —
                 // same shape as the empty-answer ladder: echo the broken text
                 // as an assistant message, inject the correction as a
                 // user-role [System: ...] nudge, re-run the iteration.
-                // Transient renderer failures stay silent here (preflight
-                // reports parse errors only) and keep the delivery path's
-                // degrade-to-block behaviour. The verdict comes from the
-                // channel-agnostic seam: a channel that can render diagrams
-                // installs a probe; with none installed this is a no-op.
+                // Transient renderer failures stay silent here; the preflight
+                // reports only the deterministic classes — a parse rejection
+                // (#37) and a too-large rejection (#658), whose notes name
+                // different remedies — and the delivery path keeps the
+                // degrade-to-block behaviour for everything else. The verdict
+                // comes from the channel-agnostic seam: a channel that can
+                // render diagrams installs a probe; with none installed this
+                // is a no-op.
                 // Mermaid regen nudge (#37): if any fence in the reply fails
                 // ── Degenerate continuation retry (#1737) ─────────────────
                 // The previous iteration WAS a truncation continuation and
@@ -6304,7 +6307,7 @@ impl AgentService {
                             fences_broken = parse_errors.len(),
                             attempt,
                             budget = MERMAID_REGEN_MAX_NUDGES,
-                            "mermaid preflight parse errors; nudging regen"
+                            "mermaid preflight deterministic rejections; nudging regen"
                         );
                         if let Some(ref cb) = progress_callback {
                             cb(
