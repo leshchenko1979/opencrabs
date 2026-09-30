@@ -397,7 +397,8 @@ impl TelegramAgent {
                                                         // ever existed on this bubble.
                                                         // Markdown-plane hosts (#79 piece 4)
                                                         // ride the markdown strip source so
-                                                        // tables survive the strip (#679).
+                                                        // tables survive the strip
+                                                        // (ex-upstream adolfousier/opencrabs#679).
                                                         if let Some(md) = &h.markdown {
                                                             let body =
                                                                 super::suggest_options::strip_button_rows(md);

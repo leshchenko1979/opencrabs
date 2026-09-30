@@ -297,6 +297,17 @@ fn channel_owner_probe(session_id: Uuid) -> Option<ChannelOwnerProbe> {
     }
 }
 
+/// True when any channel registered an ownership probe for `session_id` and
+/// that probe no longer reads `Unknown` (#1773, per-session channel
+/// awareness for the capabilities preamble). A failed probe read counts as
+/// NOT bound: a missing capabilities block is cosmetic, a false one is not.
+pub(super) fn session_is_channel_bound(session_id: Uuid) -> bool {
+    match channel_owner_probe(session_id) {
+        Some(probe) => !matches!(probe(), ChannelOwnership::Unknown),
+        None => false,
+    }
+}
+
 /// What happened to a message handed to [`deliver_to_session`].
 ///
 /// A bare bool used to be enough, because the only two outcomes were "went
@@ -414,10 +425,14 @@ pub fn deliver_to_session(session_id: Uuid, msg: QueuedUserMessage, interrupt: b
     if let Some(route) = session_route(target) {
         // Retire the durable twin at the delivery chokepoint itself (#111
         // follow-up, Part A): every successful route clears its own row,
-        // instead of relying on each consume site to remember. Clear BEFORE
-        // the move — `route` takes `msg` by value.
+        // instead of relying on each consume site to remember.
+        //
+        // ORDER IS THE FIX (#439/#366, shape A): the delivery is issued first,
+        // the delete follows it. `route` takes `msg` by value, so the clear
+        // reads a clone — cheap against a row that would otherwise outlive its
+        // own delivery and be re-pushed at every boot.
+        route(target, msg.clone());
         super::notify_queue::clear_on_delivery(target, &msg);
-        route(target, msg);
         return if hops > 0 {
             Delivery::Redirected { to: target }
         } else {
@@ -444,9 +459,11 @@ pub fn deliver_to_session(session_id: Uuid, msg: QueuedUserMessage, interrupt: b
     match local {
         Some(LocalRouteDestination::Interactive(route)) => {
             // Same chokepoint rule as the `session_route` arm above (#111
-            // follow-up, Part A): a local delivery retires its durable twin.
+            // follow-up, Part A): a local delivery retires its durable twin —
+            // and the same order binds (#439/#366, shape A): issue the
+            // delivery, then clear the row that delivery replaces.
+            route(target, msg.clone());
             super::notify_queue::clear_on_delivery(target, &msg);
-            route(target, msg);
             if hops > 0 {
                 Delivery::Redirected { to: target }
             } else {

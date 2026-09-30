@@ -21,8 +21,7 @@
 //! HARNESS NOTE. `with_profile_home_async` scopes a `tokio::task_local!`, and a
 //! task-local is NOT inherited by `tokio::spawn`. A spawned leg therefore starts
 //! with the REAL home and resolves a different store than the fixture seeded, so
-//! every spawned leg goes through `config::profile::spawn_in_profile`, which
-//! re-enters BOTH scopes inside the spawned task (#579). Same trap
+//! every spawned leg re-enters the scope through `in_profile`. Same trap
 //! `plan_mutation_lock_test.rs` documents for #506.
 //!
 //! Fixtures are synthetic and carry no user identifiers.
@@ -30,7 +29,7 @@
 use crate::brain::tools::Tool;
 use crate::brain::tools::ToolExecutionContext;
 use crate::brain::tools::context::ContextTool;
-use crate::config::profile::{home_for_profile, spawn_in_profile, with_profile_home_async};
+use crate::config::profile::{home_for_profile, with_profile_home_async};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -44,9 +43,9 @@ impl TempProfile {
         Self(format!("ctx-parallel-mutation-test-{}", Uuid::new_v4()))
     }
 
-    /// The profile name, borrowed for the duration of a `spawn_in_profile` call.
-    fn name(&self) -> &str {
-        &self.0
+    /// The profile name, owned so it can be moved into a spawned task.
+    fn name(&self) -> String {
+        self.0.clone()
     }
 
     /// Run `fut` with the profile home pointed at this profile.
@@ -62,6 +61,14 @@ impl Drop for TempProfile {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(home_for_profile(Some(&self.0)));
     }
+}
+
+/// Enter `profile`'s home inside a SPAWNED task — see the harness note above.
+async fn in_profile<F, T>(profile: String, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    with_profile_home_async(Some(&profile), fut).await
 }
 
 /// The store path `get_store_path` derives.
@@ -141,7 +148,7 @@ async fn parallel_mutations_all_persist() {
         let mut handles = Vec::new();
         for i in 0..N {
             let gate = gate.clone();
-            handles.push(spawn_in_profile(Some(tp.name()), async move {
+            handles.push(tokio::spawn(in_profile(tp.name(), async move {
                 gate.wait().await;
                 let ctx = ToolExecutionContext::new(sid);
                 ContextTool
@@ -153,7 +160,7 @@ async fn parallel_mutations_all_persist() {
                         &ctx,
                     )
                     .await
-            }));
+            })));
         }
 
         let mut receipts = Vec::new();

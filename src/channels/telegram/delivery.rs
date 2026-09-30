@@ -14,7 +14,7 @@ use super::intermediates::send_html_or_plain;
 use super::markdown::{markdown_to_telegram_html, split_message};
 use super::send::{
     TelegramMediaKind, best_effort_delete, document_in_thread, message_in_thread, photo_in_thread,
-    telegram_media_kind,
+    telegram_media_kind, voice_in_thread,
 };
 use crate::brain::agent::AgentService;
 use crate::db::ChannelMessageRepository;
@@ -695,7 +695,8 @@ pub(crate) async fn deliver_final_response(
                         // table-bearing answers ride the markdown plane,
                         // whose server-side render keeps tables intact
                         // (#79 piece 4; the html plane flattened them,
-                        // #679, which is why they used to be excluded).
+                        // ex-upstream adolfousier/opencrabs#679, which is
+                        // why they used to be excluded).
                         final_bubble = Some(super::state::MergeBubble {
                             message_id: teloxide::types::MessageId(rich_msg_id),
                             body: super::state::BubbleBody::Markdown(pre_dedup_text.clone()),
@@ -872,7 +873,8 @@ pub(crate) async fn deliver_final_response(
                 // that ends on a suggest_options surface (#45): the tap rewrite
                 // preserves the host plane, so button-bearing prose rides rich
                 // too and the pick record edits back in rendered form.
-                // #679: for TABLE messages, skip only the doomed native-BLOCKS
+                // ex-upstream adolfousier/opencrabs#679: for TABLE
+                // messages, skip only the doomed native-BLOCKS
                 // attempt — Telegram's InputRichBlock rejects our header/rows/align
                 // shape (its schema wants cells/size), so a table always 400s the
                 // block send and wastes a round-trip. But the rich-MARKDOWN send
@@ -992,8 +994,9 @@ pub(crate) async fn deliver_final_response(
                                 // answers included: the merge edit goes back out
                                 // on the markdown plane, whose server-side
                                 // render keeps tables intact (#79 piece 4; the
-                                // old html-plane merge flattened them, #679,
-                                // which is why tables used to be excluded).
+                                // old html-plane merge flattened them,
+                                // ex-upstream adolfousier/opencrabs#679, which is
+                                // why tables used to be excluded).
                                 final_bubble = Some(super::state::MergeBubble {
                                     message_id: teloxide::types::MessageId(id),
                                     body: super::state::BubbleBody::Markdown(rich_md.clone()),
@@ -1295,9 +1298,13 @@ pub(crate) async fn deliver_final_response(
                             audio_bytes.len(),
                             chat_id
                         );
-                        match bot
-                            .send_voice(chat_id, InputFile::memory(audio_bytes))
-                            .await
+                        match voice_in_thread(
+                            bot,
+                            chat_id,
+                            thread_id,
+                            InputFile::memory(audio_bytes),
+                        )
+                        .await
                         {
                             Ok(m) => {
                                 tracing::info!(

@@ -1059,8 +1059,6 @@ pub(crate) fn compacting_flow_line(
 pub(crate) fn compacted_flow_line(
     before_pct: f64,
     after_pct: f64,
-    _before_tokens: usize,
-    _after_tokens: usize,
     _elapsed: std::time::Duration,
 ) -> String {
     format!("🧹 compact: {:.0}% → {:.0}% 🧠", before_pct, after_pct)

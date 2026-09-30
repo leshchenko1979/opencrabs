@@ -761,6 +761,74 @@ async fn read_body_with_retry(
     }
 }
 
+/// Whether a renderer status is transient enough to be worth exactly one
+/// re-send (#1741): server errors plus the two 4xx classes
+/// [`classify_render_failure`] already treats as transient. Any other 4xx
+/// is a deterministic parse rejection of this exact source and is returned
+/// untouched for classification. Kept next to `classify_render_failure` so
+/// the two transient splits stay mirrorable.
+pub(crate) fn is_transient_status(status: u16) -> bool {
+    status >= 500 || status == 408 || status == 429
+}
+
+/// Legible note for a transport-level send failure, matching the split the
+/// connect stage has always logged (timeout vs unreachable).
+pub(crate) fn transport_note(e: &reqwest::Error) -> &'static str {
+    if e.is_timeout() {
+        "diagram renderer timed out"
+    } else {
+        "diagram renderer unreachable"
+    }
+}
+
+/// Send the render request with ONE bounded retry (#1741). The body stage
+/// has had this since #189; the connect stage did not, so a single stalled
+/// handshake degraded a valid diagram to the failure block: 3 of 4 renders
+/// in one 6-minute window failed at `connect` with `timed_out=true` while a
+/// manual GET seconds later returned HTTP 200. The GET is idempotent and
+/// the render deterministic, so one re-send costs an RTT and recovers the
+/// intermittent-stall pattern. A deterministic 4xx (other than 408/429) is
+/// NOT retried: the renderer rejected this exact source and will reject it
+/// again. `stage` labels the rung (`connect` / `connect-clamp`); the retry
+/// rung logs and fails as `{stage}-retry` so the ladder stays legible.
+/// Takes the full URL so tests can point it at a local mock server without
+/// exposing [`MERMAID_INK_BASE`].
+pub(crate) async fn send_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    source: &str,
+    stage: &str,
+) -> Result<reqwest::Response, MermaidResult> {
+    let retry_stage = format!("{stage}-retry");
+    match client.get(url).send().await {
+        Ok(r) if !is_transient_status(r.status().as_u16()) => return Ok(r),
+        Ok(r) => {
+            tracing::warn!(
+                stage,
+                retry_stage = %retry_stage,
+                status = r.status().as_u16(),
+                source_len = source.len(),
+                "mermaid render request failed transiently; retrying once"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                stage,
+                retry_stage = %retry_stage,
+                timed_out = e.is_timeout(),
+                source_len = source.len(),
+                error = %e,
+                "mermaid render request failed transiently; retrying once"
+            );
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(BODY_RETRY_DELAY_MS)).await;
+    match client.get(url).send().await {
+        Ok(r) => Ok(r),
+        Err(e) => Err(fail(&retry_stage, source, transport_note(&e), Some(&e))),
+    }
+}
+
 /// Pre-validate a single mermaid diagram against the renderer. On HTTP 200
 /// with an `image/*` content type it DOWNLOADS the rendered PNG and returns
 /// [`MermaidResult::ImageBytes`] — Telegram never fetches a URL from us
@@ -937,100 +1005,6 @@ pub(crate) fn classify_render_failure(status: u16, body: &str) -> MermaidResult 
         MermaidResult::ParseError(error_note(status, body))
     } else {
         MermaidResult::Failed(error_note(status, body))
-    }
-}
-
-/// Whether a non-image renderer response is worth ONE retry at the request
-/// rung (#516). The exact mirror of [`classify_render_failure`]: whatever that
-/// function calls a deterministic PARSE rejection of this source is final —
-/// re-sending the same bytes to the same renderer earns the same answer — and
-/// everything else (5xx, the transient 408/429, odd non-image responses) is
-/// infra and earns one cheap re-request. Derived from the classifier rather
-/// than restating its status ranges, so the retry gate and the failure kind can
-/// never disagree. Pure, so it is unit-testable without a network call.
-pub(crate) fn is_transient_render_failure(status: u16) -> bool {
-    !matches!(
-        classify_render_failure(status, ""),
-        MermaidResult::ParseError(_)
-    )
-}
-
-/// One attempt at the render request rung: either a response whose status and
-/// content type are worth examining, or a TRANSIENT failure carrying the note
-/// the reader would see, whether it was a timeout, and the transport error when
-/// there was one.
-///
-/// A deterministic rejection (4xx other than 408/429) comes back as a
-/// RESPONSE, not a failure — the caller classifies it to a
-/// [`MermaidResult::ParseError`] exactly as before — so only the transient
-/// class can drive a retry.
-async fn attempt_render_request(
-    client: &reqwest::Client,
-    url: &str,
-) -> Result<reqwest::Response, (String, bool, Option<reqwest::Error>)> {
-    match client.get(url).send().await {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            let content_type = resp
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string();
-            if is_image_response(status, &content_type) || !is_transient_render_failure(status) {
-                return Ok(resp);
-            }
-            let body = resp.text().await.unwrap_or_default();
-            Err((error_note(status, &body), false, None))
-        }
-        Err(e) => {
-            let timeout = e.is_timeout();
-            let note = if timeout {
-                "diagram renderer timed out"
-            } else {
-                "diagram renderer unreachable"
-            };
-            Err((note.to_string(), timeout, Some(e)))
-        }
-    }
-}
-
-/// #516: send the render request, and on a TRANSIENT failure retry exactly
-/// once after the same backoff the body leg uses. Mirrors
-/// [`read_body_with_retry`]'s once-only discipline — one cheap re-request,
-/// never a loop — and labels the retry rung `{stage}-retry` the same way, so
-/// the ladder reads consistently in the daemon log.
-///
-/// The pre-fix path made exactly one attempt, which is why a single transient
-/// connect hiccup permanently degraded a diagram the renderer would have served
-/// on the next try.
-async fn send_with_retry(
-    client: &reqwest::Client,
-    url: &str,
-    source: &str,
-    stage: &str,
-) -> Result<reqwest::Response, MermaidResult> {
-    let (note, timed_out, err) = match attempt_render_request(client, url).await {
-        Ok(resp) => return Ok(resp),
-        Err(failure) => failure,
-    };
-    tracing::warn!(
-        stage,
-        source_len = source.len(),
-        timed_out,
-        error = %err.as_ref().map(|e| e.to_string()).unwrap_or_default(),
-        note = %note,
-        "mermaid render request failed; retrying once"
-    );
-    tokio::time::sleep(Duration::from_millis(BODY_RETRY_DELAY_MS)).await;
-    match attempt_render_request(client, url).await {
-        Ok(resp) => Ok(resp),
-        Err((retry_note, _, retry_err)) => Err(fail(
-            &format!("{stage}-retry"),
-            source,
-            retry_note,
-            retry_err.as_ref(),
-        )),
     }
 }
 
@@ -1393,6 +1367,20 @@ pub(crate) fn markdown_failure_block(err: &str, source: &str) -> String {
     )
 }
 
+/// Markdown for a TRANSIENT failure (#1741): the renderer stalled, 5xx'd,
+/// or dropped the image, which says nothing about the diagram's syntax.
+/// The shared old headline ("could not be rendered") reads as a parse
+/// rejection and sent an agent rewriting a valid diagram three times in
+/// one session (2026-09-25 daemon log) before anyone curled the renderer.
+/// The deterministic [`MermaidResult::ParseError`] path keeps the old
+/// headline via [`markdown_failure_block`] because there the diagram IS
+/// the problem.
+pub(crate) fn markdown_failure_block_transport(err: &str, source: &str) -> String {
+    format!(
+        "> ⚠️ **Renderer failure, not a syntax error: your diagram was NOT modified**\n\n```\n{err}\n\nSource:\n{source}\n```"
+    )
+}
+
 /// #189: the markdown failure block plus the shared svg escape hatch, for a
 /// TRANSIENT failure ([`MermaidResult::Failed`]) only. In that case the
 /// response had already passed the `2xx + image/*` check before the body was
@@ -1408,7 +1396,7 @@ pub(crate) fn markdown_failure_block_with_link(
 ) -> String {
     format!(
         "{}{}",
-        markdown_failure_block(err, source),
+        markdown_failure_block_transport(err, source),
         svg_link_md(style, source)
     )
 }
@@ -1427,6 +1415,17 @@ pub(crate) fn rendered_image_note(message: &str, source: &str) -> String {
     format!(
         "<b>🖼️ Diagram rendered as image</b>\n<blockquote>{}</blockquote>\n<pre><code>{}</code></pre>",
         escape_html(message),
+        escape_html(source)
+    )
+}
+
+/// HTML headline for a TRANSIENT failure (#1741): same split as
+/// [`markdown_failure_block_transport`]. The renderer choked; the diagram
+/// did not.
+pub(crate) fn failure_html_transport(err: &str, source: &str) -> String {
+    format!(
+        "<b>⚠️ Renderer failure, not a syntax error: your diagram was NOT modified</b>\n<blockquote>{}</blockquote>\n<pre><code>{}</code></pre>",
+        escape_html(err),
         escape_html(source)
     )
 }

@@ -497,11 +497,22 @@ impl Config {
     /// misspelt one read identically, so the state looked healthy for nine
     /// days.
     fn report_unknown_sections(label: &str, content: &str) {
-        let Ok((legacy, other)) =
+        let Ok((legacy, _top)) =
             crate::config::sections::classify_unknown_top_level_sections(content)
         else {
             return;
         };
+        // #1724 (upstream): report EVERY key path the compiled `Config`
+        // discards, at any depth — a stale nested table
+        // (`[providers.web_search.duckduckgo]`) used to be silent in the log
+        // while the Telegram alert fired on the same file. The legacy channel
+        // spellings (#341) are split out above and get their own line below,
+        // so they are excluded here to avoid a duplicate report.
+        let other: Vec<String> = crate::config::sections::unknown_config_paths(content)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| !legacy.contains(p))
+            .collect();
 
         if !legacy.is_empty() {
             let as_written = legacy
@@ -529,7 +540,7 @@ impl Config {
 
         if !other.is_empty() {
             tracing::warn!(
-                "Unknown top-level keys in {label} (possible typos): {}",
+                "Unknown keys in {label} (possible typos or stale entries): {}",
                 other.join(", ")
             );
             CONFIG_TYPO_WARNINGS
@@ -1006,6 +1017,7 @@ impl Config {
             database: overlay.database,
             logging: overlay.logging,
             debug: overlay.debug,
+            decisions: overlay.decisions,
             providers: overlay.providers,
             channels: overlay.channels,
             agent: overlay.agent,
@@ -1019,6 +1031,7 @@ impl Config {
             browser: overlay.browser,
             tui: overlay.tui,
             retry: overlay.retry,
+            features: overlay.features,
         }
     }
 
@@ -1692,6 +1705,30 @@ impl Config {
         // Validate provider registry URL if enabled
         if self.provider_registry.enabled && self.provider_registry.base_url.is_empty() {
             anyhow::bail!("provider registry is enabled but base_url is empty");
+        }
+
+        // #1648: [decisions] tiers are opt-in contracts; a half-written one
+        // must stop the load rather than run a ring on undefined semantics.
+        for (tier_id, tier) in &self.decisions.tiers {
+            if tier.policy_version.trim().is_empty() {
+                anyhow::bail!(
+                    "decisions.tiers.{tier_id}: policy_version is required \
+                     (bump it whenever the tier's decision semantics change)"
+                );
+            }
+            if tier.similarity {
+                anyhow::bail!(
+                    "decisions.tiers.{tier_id}: similarity reuse is not implemented (#1648 L2); \
+                     set similarity = false"
+                );
+            }
+            if let Some(ttl) = tier.ttl_hours
+                && ttl <= 0
+            {
+                anyhow::bail!(
+                    "decisions.tiers.{tier_id}: ttl_hours must be positive when set (got {ttl})"
+                );
+            }
         }
 
         tracing::debug!("Configuration validation passed");

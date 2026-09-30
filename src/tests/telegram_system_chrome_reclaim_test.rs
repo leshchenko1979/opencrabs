@@ -168,8 +168,6 @@ fn compact_system_flow_entry_stays_folded_and_is_never_reclaimed_as_answer() {
     let done_line = compacted_flow_line(
         85.0,
         32.0,
-        100_000,
-        38_000,
         std::time::Duration::from_secs(5),
     );
 
@@ -196,8 +194,6 @@ fn compaction_lines_supersede_in_place_under_compaction_progress_key() {
     let done_line = compacted_flow_line(
         88.0,
         40.0,
-        120_000,
-        50_000,
         std::time::Duration::from_secs(8),
     );
 

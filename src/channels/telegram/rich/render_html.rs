@@ -96,9 +96,11 @@ fn render_block(block: &Block, wrap_p: bool, style: &mermaid::MermaidStyle) -> S
             // #189: same split as the markdown path — a transient failure
             // offers the svg hatch (the response had already passed the
             // image check, so the render may exist server-side), while a
-            // deterministic parse rejection does not.
+            // deterministic parse rejection does not. #1741: the transient
+            // headline also says the failure is the renderer's, not the
+            // diagram's syntax.
             MermaidResult::Failed(err) => {
-                super::mermaid::failure_html(err, source)
+                super::mermaid::failure_html_transport(err, source)
                     + &super::mermaid::svg_link_html(style, source)
             }
             MermaidResult::ParseError(err) => super::mermaid::failure_html(err, source),
@@ -557,7 +559,7 @@ mod tests {
         }];
         let html = render_html(&blocks);
         assert!(
-            html.contains("Mermaid diagram could not be rendered"),
+            html.contains("Renderer failure, not a syntax error"),
             "the transient failure keeps the legible block. Got:\n{html}"
         );
         assert!(

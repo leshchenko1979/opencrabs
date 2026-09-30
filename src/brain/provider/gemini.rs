@@ -38,11 +38,58 @@ const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 // waiting for the 300s request timeout. Critical for streaming.
 const DEFAULT_TCP_KEEPALIVE: Duration = Duration::from_secs(15);
 
+/// The streaming client: same pool and keepalive tuning as the request client,
+/// deliberately NO total request timeout. reqwest's `.timeout()` bounds the
+/// whole exchange including the body read, so on an SSE stream it is a
+/// wall-clock guillotine on healthy responses (#1687). Inter-chunk silence is
+/// guarded at the app level in `brain/agent/service/helpers.rs`; a handshake
+/// that never lands is still bounded by `connect_timeout`.
+fn build_stream_client() -> Client {
+    Client::builder()
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .pool_idle_timeout(DEFAULT_POOL_IDLE_TIMEOUT)
+        .pool_max_idle_per_host(2)
+        .tcp_keepalive(DEFAULT_TCP_KEEPALIVE)
+        .build()
+        .expect("Failed to create streaming HTTP client")
+}
+
+/// The NON-streaming request client: same pool and keepalive tuning as the
+/// stream client, plus a total ceiling. That ceiling is a budget on a call that
+/// buffers its whole body (title generation, compaction, `/models`); streams
+/// never touch this client, so `with_timeout` can only ever change how long a
+/// non-streaming call is allowed to hang (#1687).
+fn build_request_client(timeout: Duration) -> Client {
+    Client::builder()
+        .timeout(timeout)
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .pool_idle_timeout(DEFAULT_POOL_IDLE_TIMEOUT)
+        .pool_max_idle_per_host(2)
+        .tcp_keepalive(DEFAULT_TCP_KEEPALIVE)
+        .build()
+        .expect("Failed to create HTTP client")
+}
+
 /// Google Gemini provider
 #[derive(Clone)]
 pub struct GeminiProvider {
     api_key: String,
     client: Client,
+    /// Client for `stream()`: no total wall-clock ceiling, so a healthy long
+    /// stream is never cut (#1687).
+    stream_client: Client,
+    /// The resolved `[providers.gemini] timeout_secs` / `[agent] timeout_secs`
+    /// (#1688), mirrored from the client `with_timeout` rebuilt. `None` means
+    /// the compiled `DEFAULT_TIMEOUT` is what the request client carries.
+    request_timeout: Option<Duration>,
+    /// The resolved `stream_idle_timeout_secs` at either tier. Inter-chunk
+    /// silence is enforced in `brain/agent/service/helpers.rs`, which asks the
+    /// provider for this; `None` defers to that file's runtime table.
+    stream_idle_timeout: Option<Duration>,
+    /// The resolved thinking-loop guard ceiling in seconds (#1690), from
+    /// `[providers.gemini]` then `[agent]`. `Some(0)` disables the guard for
+    /// this provider, which is why this is seconds rather than a `Duration`.
+    thinking_loop_timeout: Option<u64>,
     model: String,
     cached_content_name: Arc<std::sync::Mutex<Option<String>>>,
     /// User override from `providers.gemini.context_window` in config.toml.
@@ -89,22 +136,52 @@ pub(crate) fn sanitize_schema_for_gemini(value: Value) -> Value {
 impl GeminiProvider {
     /// Create a new Gemini provider
     pub fn new(api_key: String) -> Self {
-        let client = Client::builder()
-            .timeout(DEFAULT_TIMEOUT)
-            .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-            .pool_idle_timeout(DEFAULT_POOL_IDLE_TIMEOUT)
-            .pool_max_idle_per_host(2)
-            .tcp_keepalive(DEFAULT_TCP_KEEPALIVE)
-            .build()
-            .expect("Failed to create HTTP client");
+        let client = build_request_client(DEFAULT_TIMEOUT);
+        let stream_client = build_stream_client();
 
         Self {
             api_key,
             client,
+            stream_client,
+            request_timeout: None,
+            stream_idle_timeout: None,
+            thinking_loop_timeout: None,
             model: "gemini-2.0-flash".to_string(),
             cached_content_name: Arc::new(std::sync::Mutex::new(None)),
             configured_context_window: None,
         }
+    }
+
+    /// Set the NON-STREAMING request ceiling and rebuild that client only.
+    ///
+    /// `stream_client` is never touched, so a user raising or lowering
+    /// `timeout_secs` cannot put a wall clock back on an SSE body (#1687).
+    /// Pairs with the `request_timeout()` trait accessor.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.client = build_request_client(timeout);
+        self.request_timeout = Some(timeout);
+        self
+    }
+
+    /// Set the inter-chunk streaming inactivity timeout (#1688/#1689).
+    ///
+    /// Stored rather than baked into a client: the stream loop in
+    /// `helpers.rs` owns the clock and asks the provider for this value,
+    /// falling back to its runtime table when it is `None`.
+    pub fn with_stream_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.stream_idle_timeout = Some(timeout);
+        self
+    }
+
+    /// Set the resolved thinking-loop guard ceiling in seconds (#1690).
+    ///
+    /// `0` is a value here, not an absent one: it disables the guard for this
+    /// provider. The factory resolves `[providers.gemini]` → `[agent]` and
+    /// always calls this, so a provider built from config never falls back to
+    /// the `[agent]` read in `brain/agent/service/helpers.rs`.
+    pub fn with_thinking_loop_timeout(mut self, secs: u64) -> Self {
+        self.thinking_loop_timeout = Some(secs);
+        self
     }
 
     /// Set the default model
@@ -538,17 +615,31 @@ impl Provider for GeminiProvider {
         let body = self.build_gemini_request(&request);
         let url = self.generate_url(&model, true);
         let retry_config = RetryConfig::default();
+        // Bound ONE send's connect + TLS + response headers (#680/#682). The
+        // budget is per attempt, so a retry's backoff sleep is charged to the
+        // retry policy and never to this clock.
+        let send_budget =
+            crate::brain::agent::service::helpers::send_handshake_timeout_for(
+                false,
+                self.base_url(),
+            );
 
         let response = retry(
             || async {
-                let response = self
-                    .client
+                let send = self
+                    .stream_client
                     .post(&url)
                     .header("Content-Type", "application/json")
                     .header("x-goog-api-key", &self.api_key)
                     .json(&body)
-                    .send()
-                    .await?;
+                    .send();
+                let response = match send_budget {
+                    Some(budget) => match tokio::time::timeout(budget, send).await {
+                        Ok(res) => res,
+                        Err(_) => return Err(ProviderError::Timeout(budget.as_secs())),
+                    },
+                    None => send.await,
+                }?;
 
                 if !response.status().is_success() {
                     return Err(self.handle_error(response).await);
@@ -803,6 +894,18 @@ impl Provider for GeminiProvider {
 
     fn configured_context_window(&self) -> Option<u32> {
         self.configured_context_window
+    }
+
+    fn request_timeout(&self) -> Option<Duration> {
+        self.request_timeout
+    }
+
+    fn stream_idle_timeout(&self) -> Option<Duration> {
+        self.stream_idle_timeout
+    }
+
+    fn thinking_loop_timeout(&self) -> Option<u64> {
+        self.thinking_loop_timeout
     }
 
     fn context_window(&self, model: &str) -> Option<u32> {

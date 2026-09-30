@@ -7,7 +7,9 @@
 //! need 20-45s when upstream is slow), while local HTTP keeps the longer
 //! 90s window for cold-loading models.
 
-use crate::brain::agent::service::helpers::handshake_timeout_for;
+use crate::brain::agent::service::helpers::{
+    cli_startup_timeout_for, handshake_timeout_for, send_handshake_timeout_for,
+};
 use std::time::Duration;
 
 #[test]
@@ -78,4 +80,93 @@ fn missing_base_url_defaults_to_cloud_timeout() {
     // hardcode their endpoints internally) are always cloud — they
     // can't be a local LM server.
     assert_eq!(handshake_timeout_for(false, None), Duration::from_secs(60));
+}
+
+// ---------------------------------------------------------------------------
+// The PER-SEND budget (#680/#682).
+//
+// `handshake_timeout_for` is the class table. `send_handshake_timeout_for` is
+// what each HTTP provider applies at its own `.send()`, and it must NOT return
+// a budget for a CLI provider: those spawn a subprocess rather than sending
+// HTTP, so a send budget is meaningless.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_providers_get_no_per_send_budget() {
+    assert_eq!(send_handshake_timeout_for(true, None), None);
+    assert_eq!(
+        send_handshake_timeout_for(true, Some("https://api.openai.com/v1/chat/completions")),
+        None,
+    );
+}
+
+#[test]
+fn http_providers_get_the_class_budget_per_send() {
+    assert_eq!(
+        send_handshake_timeout_for(false, Some("https://api.openai.com/v1/chat/completions")),
+        Some(Duration::from_secs(60)),
+    );
+    assert_eq!(
+        send_handshake_timeout_for(false, Some("http://127.0.0.1:8080/v1/chat/completions")),
+        Some(Duration::from_secs(90)),
+    );
+    // No base_url: the built-in Anthropic/Gemini providers hardcode cloud
+    // endpoints, so they take the cloud budget.
+    assert_eq!(
+        send_handshake_timeout_for(false, None),
+        Some(Duration::from_secs(60)),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The CALLER-LEVEL wall (#680). This is the leg that keeps the two helpers from
+// being swapped: an HTTP provider must get NO wall around `provider.stream()`
+// (its budget lives at the send), while a CLI provider — a subprocess, with no
+// send to bound — must keep its process-startup wall, and this level is the
+// only place that can carry it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn caller_wall_is_cli_only() {
+    assert_eq!(
+        cli_startup_timeout_for(true, None),
+        Some(Duration::from_secs(600)),
+    );
+    assert_eq!(
+        cli_startup_timeout_for(true, Some("https://api.openai.com/v1/chat/completions")),
+        Some(Duration::from_secs(600)),
+    );
+    assert_eq!(cli_startup_timeout_for(false, None), None);
+    assert_eq!(
+        cli_startup_timeout_for(false, Some("https://api.openai.com/v1/chat/completions")),
+        None,
+    );
+    assert_eq!(
+        cli_startup_timeout_for(false, Some("http://127.0.0.1:8080/v1/chat/completions")),
+        None,
+    );
+}
+
+/// The two helpers partition the provider space: exactly one of them yields a
+/// wall for any given provider, never both and never neither.
+#[test]
+fn send_and_caller_walls_never_both_apply() {
+    let bases = [
+        None,
+        Some("https://api.openai.com/v1/chat/completions"),
+        Some("http://127.0.0.1:8080/v1/chat/completions"),
+    ];
+    for cli in [true, false] {
+        for base in bases {
+            let send = send_handshake_timeout_for(cli, base);
+            let caller = cli_startup_timeout_for(cli, base);
+            assert!(
+                send.is_some() ^ caller.is_some(),
+                "exactly one wall must apply (cli={}, send={:?}, caller={:?})",
+                cli,
+                send,
+                caller
+            );
+        }
+    }
 }

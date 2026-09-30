@@ -1344,3 +1344,117 @@ async fn wait_out_arms_the_per_chat_pause_for_a_known_chat() {
         "a 429 naming a chat must arm that chat's per-chat pause"
     );
 }
+
+/// #676 — the cross-surface spacing floor refuses a request that arrives
+/// inside the interval and clears once the interval has passed. Driven through
+/// the real typing gate so the predicate is exercised where it is wired.
+#[tokio::test(start_paused = true)]
+async fn spacing_floor_blocks_inside_the_interval_and_clears_after() {
+    let _guard = ts::registry_guard().await;
+    rl_config!(enabled: true, spacing_floor_ms: 1_000);
+    ts::reset(0);
+    let chat = ChatId(-100_676_001);
+    ts::mark_forum(chat);
+
+    // Nothing to be crowded against yet: the first request always clears.
+    assert!(
+        matches!(
+            governor::pace_rich(chat, None, governor::EditClass::Clock).await,
+            governor::RichAdmission::Now
+        ),
+        "the first request has no predecessor and must clear the floor"
+    );
+
+    // 200ms later is inside the 1s floor.
+    ts::advance(200);
+    assert!(
+        matches!(
+            governor::pace_rich(chat, None, governor::EditClass::Clock).await,
+            governor::RichAdmission::Dropped(_)
+        ),
+        "a droppable request inside the spacing floor must be refused"
+    );
+    let snap = ts::snapshot(chat).expect("peer exists");
+    assert_eq!(
+        snap.dropped_spacing, 1,
+        "the refusal is counted on the spacing gate"
+    );
+    assert_eq!(snap.admitted_rich, 1, "the blocked tick must not be admitted");
+
+    // Past the floor: admitted again.
+    ts::advance(900);
+    assert!(
+        matches!(
+            governor::pace_rich(chat, None, governor::EditClass::Clock).await,
+            governor::RichAdmission::Now
+        ),
+        "past the floor the chat admits again — the floor is a gap, not a ban"
+    );
+}
+
+/// #676 — inside the floor a cosmetic edit is DROPPED, and content is never
+/// gated by the floor at all: a Final takes its token as usual. The drop is
+/// counted on the spacing gate rather than the ladder.
+#[tokio::test(start_paused = true)]
+async fn spacing_floor_drops_cosmetic_but_never_content() {
+    let _guard = ts::registry_guard().await;
+    rl_config!(enabled: true, spacing_floor_ms: 1_000);
+    ts::reset(0);
+    let bot = Bot::new("676:TEST");
+    let chat = ChatId(-100_676_002);
+    ts::mark_forum(chat);
+
+    // Establish the interval.
+    assert!(
+        governor::edit_admission(
+            &bot,
+            chat,
+            MessageId(1),
+            governor::EditClass::Intermediary,
+            governor::EditPayload::classic_html("first"),
+        )
+        .await,
+        "the first edit has no predecessor and must clear the floor"
+    );
+
+    // Cosmetic inside the floor: dropped, and counted on the spacing gate.
+    ts::advance(100);
+    assert!(
+        !governor::edit_admission(
+            &bot,
+            chat,
+            MessageId(2),
+            governor::EditClass::Clock,
+            governor::EditPayload::classic_html("clock"),
+        )
+        .await,
+        "a cosmetic edit inside the floor must not be admitted"
+    );
+    let snap = ts::snapshot(chat).expect("peer exists");
+    assert_eq!(snap.dropped_spacing, 1, "the cosmetic drop is spacing-attributed");
+    assert_eq!(
+        snap.dropped_clock, 0,
+        "the ladder counters must NOT absorb the spacing gate's drops"
+    );
+
+    // Final inside the floor: BYPASSES the floor and takes its token. The
+    // floor never gates content — content is already paced by the bucket,
+    // and deferring or dropping it would trade a throttle for a lost edit.
+    ts::advance(100);
+    assert!(
+        governor::edit_admission(
+            &bot,
+            chat,
+            MessageId(3),
+            governor::EditClass::Final,
+            governor::EditPayload::classic_html("final"),
+        )
+        .await,
+        "content is never gated by the spacing floor"
+    );
+    let snap = ts::snapshot(chat).expect("peer exists");
+    assert_eq!(
+        snap.dropped_spacing, 1,
+        "content must not add to the spacing drop count"
+    );
+}

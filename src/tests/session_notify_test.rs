@@ -305,6 +305,21 @@ fn test_schema_requires_target_and_message() {
 }
 
 #[test]
+fn target_session_schema_states_the_process_boundary_and_the_bridge() {
+    // #419: the same-process/profile constraint lived only in the runtime
+    // refusal, so a lane discovered the boundary by FAILING A CALL. The
+    // schema the caller reads before deciding the argument must name the
+    // boundary, the refusal verdict it returns, and the sanctioned bridge.
+    let schema = SessionNotifyTool.input_schema();
+    let desc = schema["properties"]["target_session"]["description"]
+        .as_str()
+        .expect("target_session description");
+    assert!(desc.contains("Same process"), "boundary missing: {desc}");
+    assert!(desc.contains("no_route"), "verdict name missing: {desc}");
+    assert!(desc.contains("a2a_send"), "bridge tool missing: {desc}");
+}
+
+#[test]
 fn test_a_parked_delivery_is_not_a_missing_route() {
     // The distinction the tool reports on: a session whose channel has not
     // claimed it since a restart holds the message rather than losing it.
@@ -769,5 +784,15 @@ async fn test_ownership_mirror_keys_dm_and_general_buckets_separately() {
         ChannelOwnership::Occupied {
             occupant: successor
         }
+    );
+}
+
+#[test]
+fn test_an_unroutable_session_is_reported_as_such() {
+    let _guard = test_guard();
+    // No local route is registered in tests, so nothing can take it.
+    assert_eq!(
+        deliver_to_session(Uuid::new_v4(), msg(), false),
+        Delivery::NoRoute
     );
 }

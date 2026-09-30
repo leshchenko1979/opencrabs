@@ -278,6 +278,20 @@ fn rich_send_fields<'a>(
     )
 }
 
+/// #676 - the message this request targets, for the 429 refusal line.
+///
+/// A refusal currently names the chat but not the message, so an operator
+/// cannot tell whether the refused calls are spread across the chat or
+/// concentrated on one continuously-edited bubble. `editMessageText` and
+/// `editRichMessage` bodies carry `message_id`; a `sendRichMessage` body has
+/// none, so a send reports `-` rather than omitting the field - a constant
+/// field shape is what makes the lines greppable.
+pub(crate) fn target_message_id(body: &serde_json::Value) -> String {
+    body.get("message_id")
+        .and_then(serde_json::Value::as_i64)
+        .map_or_else(|| "-".to_string(), |m| m.to_string())
+}
+
 /// Media references in a rich body that the body's OWN `media` array cannot
 /// resolve — the offenders a rich rejection is about (#334, H4). Returns `None`
 /// when the body carries no such reference, so an ordinary failure keeps the
@@ -406,11 +420,14 @@ async fn post_rich(
                     .map_or(5, |d| d.as_secs());
             attempt += 1;
             let (_, chat_id, _, _, _) = rich_send_fields(url, body);
+            // #676 - name the message this refusal was editing, so the line
+            // can be joined to the send telemetry it belongs to.
+            let msg = target_message_id(body);
             if matches!(
                 crate::channels::telegram::rate_limit::wait_out(
                     "rich API",
                     std::time::Duration::from_secs(retry_after),
-                    &format!(" (attempt {attempt}/{RICH_MAX_RETRIES})"),
+                    &format!(" (attempt {attempt}/{RICH_MAX_RETRIES}) msg={msg}"),
                     Some(chat_id),
                 )
                 .await,
@@ -752,11 +769,14 @@ async fn post_rich_multipart(
                     .map_or(5, |d| d.as_secs());
             attempt += 1;
             let (_, chat_id, _, _, _) = rich_send_fields(url, body);
+            // #676 - name the message this refusal was editing, so the line
+            // can be joined to the send telemetry it belongs to.
+            let msg = target_message_id(body);
             if matches!(
                 crate::channels::telegram::rate_limit::wait_out(
                     "rich API",
                     std::time::Duration::from_secs(retry_after),
-                    &format!(" (attempt {attempt}/{RICH_MAX_RETRIES})"),
+                    &format!(" (attempt {attempt}/{RICH_MAX_RETRIES}) msg={msg}"),
                     Some(chat_id),
                 )
                 .await,

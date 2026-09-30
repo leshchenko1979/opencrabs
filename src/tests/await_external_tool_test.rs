@@ -49,6 +49,7 @@ async fn make_session(
             working_directory: None,
             auto_title_attempted: false,
             project_id: None,
+            channel_chat_key: None,
         })
         .await
         .expect("Failed to create session row");

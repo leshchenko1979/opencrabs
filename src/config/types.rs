@@ -80,6 +80,12 @@ pub struct Config {
     #[serde(default)]
     pub memory: MemoryConfig,
 
+    /// Tiered decision cache (#1648): per-tier reuse rings with a
+    /// release-day keep-or-cut evaluation. Empty section = feature fully
+    /// off, every code path behaves exactly like before this existed.
+    #[serde(default)]
+    pub decisions: DecisionsConfig,
+
     /// Brain-file behaviour: read-time empty-section stripping and other
     /// per-file knobs. Optional — defaults preserve historical behaviour
     /// where strip-on-load was off.
@@ -107,6 +113,11 @@ pub struct Config {
     /// exactly the pre-#346 behaviour.
     #[serde(default)]
     pub retry: RetrySection,
+    /// Runtime feature flags (#1705): opt-in capabilities that default
+    /// OFF so per-use cost and storage only appear when the operator
+    /// asks for them. Empty section = everything off.
+    #[serde(default)]
+    pub features: FeaturesConfig,
 }
 
 /// Global retry tuning for provider requests (#346).
@@ -141,6 +152,25 @@ pub struct RetrySection {
     /// Random jitter fraction applied to each delay (0.0 = none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jitter: Option<f64>,
+}
+
+/// Opt-in runtime feature flags (#1705).
+///
+/// ```toml
+/// [features]
+/// audit_recording = true   # write turn_retrievals + turn_outcomes for /audit
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FeaturesConfig {
+    /// Audit recording (#1705): persist one `turn_retrievals` row per
+    /// read-class tool call (read/search/list) and one `turn_outcomes` row
+    /// per turn with the mechanically-observed verdict. Default off: with
+    /// the flag unset the tables stay empty and `/audit` renders the
+    /// pre-existing ACTION data only. Resolved once at agent construction
+    /// (same policy as `[agent] lazy_tools`), so a change needs a restart
+    /// or config reload.
+    #[serde(default)]
+    pub audit_recording: bool,
 }
 
 /// TUI (terminal UI) configuration.
@@ -711,10 +741,11 @@ pub struct RateLimiterConfig {
     /// so opting out is only needed to restore fully reactive behavior.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// G1 typing: minimum spacing between `sendChatAction` calls per forum
-    /// peer. Telegram documents short FLOOD_WAITs when action bursts land
-    /// inside one second; 3 s per topic keeps N concurrent sessions collapsed
-    /// well under the documented regime. Default: 3.
+    /// G1 typing: minimum spacing between `sendChatAction` calls, keyed on the
+    /// CHAT — `governor.rs` buckets one peer per chat id and a thread id only
+    /// sets `forum_seen` — so the sustained ceiling is exactly `60 / interval`
+    /// per chat per minute. 3 s is therefore 20/min: Telegram's documented
+    /// per-group ceiling, with no headroom. Default: 3.
     #[serde(default = "default_typing_min_interval_secs")]
     pub typing_min_interval_secs: u64,
     /// G1 typing: burst capacity of the bucket (refreshes allowed before
@@ -752,6 +783,17 @@ pub struct RateLimiterConfig {
     /// G4 rich: burst capacity of the rich bucket. Default: 10.
     #[serde(default = "default_rich_burst")]
     pub rich_burst: u32,
+    /// Cross-surface per-chat spacing floor: the minimum elapsed time between
+    /// two admissions to the SAME forum peer, in milliseconds, applied across
+    /// all four gates (typing, edits, sends, rich) and charged before any
+    /// bucket. Telegram states the per-chat rule in per-SECOND terms ("avoid
+    /// sending more than one message per second" per chat), which no per-minute
+    /// bucket can express; measured refusals separate on this axis and not on
+    /// the per-minute one. Cosmetic chrome drops when armed, finals defer, taps
+    /// pass through. Default: 1000. **0 disables the floor** and restores the
+    /// pre-floor behaviour exactly.
+    #[serde(default = "default_spacing_floor_ms")]
+    pub spacing_floor_ms: u64,
     /// Spacing of the telemetry summary INFO line (one line per active forum:
     /// admissions, ladder drops per class, finals stats, throttled ms).
     /// Default: 300.
@@ -775,6 +817,7 @@ impl Default for RateLimiterConfig {
             sends_burst: default_sends_burst(),
             rich_per_minute: default_rich_per_minute(),
             rich_burst: default_rich_burst(),
+            spacing_floor_ms: default_spacing_floor_ms(),
             summary_log_secs: default_summary_log_secs(),
         }
     }
@@ -818,6 +861,10 @@ fn default_rich_per_minute() -> u32 {
 
 fn default_rich_burst() -> u32 {
     10
+}
+
+fn default_spacing_floor_ms() -> u64 {
+    1000
 }
 
 fn default_summary_log_secs() -> u64 {
@@ -1630,6 +1677,27 @@ pub struct AgentConfig {
     #[serde(default)]
     pub silent_compaction: bool,
 
+    /// Render the `⏳ Compacting` / `✅ Compacted` progress pair in chat.
+    /// Default `false` (= the hint only, no pair).
+    ///
+    /// Distinct from `silent_compaction`, which governs the model's
+    /// post-compaction narration and deliberately stays `false` so the
+    /// personality survives. This flag governs channel chrome: the two flow
+    /// lines carrying percentages and elapsed time.
+    ///
+    /// Off does not mean blind. The anti-staleness header pin
+    /// (`StreamingState::compacting`) is NOT gated here. No streaming chunks
+    /// arrive for 10-60s while a background summariser runs, so without the pin
+    /// the flow header would hold a stale "Working on…" preview for the whole
+    /// silent window. The pin carries a bare "⏳ Compacting context…" with no
+    /// numbers, which is exactly the hint.
+    ///
+    /// Telegram is the only surface that renders the pair: Discord's
+    /// `Compacting` arm pings the native typing indicator with no text, and the
+    /// TUI drops both events.
+    #[serde(default)]
+    pub compaction_notice: bool,
+
     /// Run auto-compaction in the background. **On by default.** The
     /// summariser call is spawned on a snapshot of the conversation and the
     /// turn keeps going; the summary is swapped in on a later budget check.
@@ -1694,14 +1762,62 @@ pub struct AgentConfig {
     #[serde(default = "default_debug_logs")]
     pub debug_logs: bool,
 
-    /// Thinking-loop timeout in seconds (#890). If the model streams for this
-    /// long without emitting a single tool call, the stream is killed and
-    /// retried with multi-language phantom enforcement injected into the
-    /// system prompt. Catches the failure mode where a reasoning model loops
-    /// internally (thinking tokens flowing) but never acts. Default: 600 (10 min).
-    /// Set to 0 to disable.
+    /// Thinking-loop guard ceiling in seconds (#890), the global tier. If the
+    /// model streams this long without emitting a single tool call, the guard
+    /// fires. Catches the failure mode where a reasoning model loops internally
+    /// (thinking tokens flowing) but never acts. Default: 600 (10 min). Set to
+    /// 0 to disable.
+    ///
+    /// Two qualifiers as of #1690:
+    ///
+    /// * A provider may name its own ceiling via
+    ///   `[providers.<name>] thinking_loop_timeout_secs`, which wins here. Long
+    ///   reasoning runs are a property of the model, not of the agent, so one
+    ///   slow provider must not inherit — or impose — this number globally.
+    /// * The guard no longer discards a delivering stream. It kills only a
+    ///   stream that has produced NO output at all; a stream that is writing
+    ///   text but not calling tools stands the clock down and finishes, because
+    ///   replaying a turn to lose a complete answer is the worse bug. The
+    ///   killed stream is what triggers multi-language phantom enforcement in
+    ///   the retry.
     #[serde(default = "default_thinking_loop_timeout_secs")]
     pub thinking_loop_timeout_secs: u64,
+
+    /// Global non-streaming request ceiling, in seconds (#1688).
+    ///
+    /// The fallback for `[providers.<name>].timeout_secs`: a provider that
+    /// names no ceiling of its own inherits this one, and if neither is set the
+    /// family's compiled 300s default applies. Resolution lives in
+    /// `config::timeout`.
+    ///
+    /// Like the per-provider key, this has NO effect on streaming. Streams run
+    /// on a client built without a total timeout, so a healthy long turn is
+    /// never cut by a wall clock (#1687). The only stream timer here is
+    /// `stream_idle_timeout_secs`.
+    ///
+    /// ```toml
+    /// [agent]
+    /// timeout_secs = 120
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+
+    /// Global inter-chunk streaming inactivity timeout, in seconds (#1688).
+    ///
+    /// The fallback for `[providers.<name>].stream_idle_timeout_secs`. Silence
+    /// on a stream for longer than this is treated as a dead connection.
+    ///
+    /// There is deliberately no compiled floor for this flag: the default is
+    /// picked at stream time (3600s for local and CLI targets, 20s for remote),
+    /// so leaving it unset defers to that runtime choice instead of overriding
+    /// it.
+    ///
+    /// ```toml
+    /// [agent]
+    /// stream_idle_timeout_secs = 45
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_idle_timeout_secs: Option<u64>,
 
     /// Interval in seconds for injecting mid-turn time notices in long-running
     /// tool execution loops (#153). Default: 900 (15 min). Set to 0 to disable.
@@ -1912,6 +2028,7 @@ impl Default for AgentConfig {
             default_provider: None,
             default_model: None,
             silent_compaction: false,
+            compaction_notice: false,
             background_compaction: default_background_compaction(),
             skill_glob_gate: default_skill_glob_gate(),
             lazy_tools: default_lazy_tools(),
@@ -1920,6 +2037,8 @@ impl Default for AgentConfig {
             redact_dm: None,
             debug_logs: default_debug_logs(),
             thinking_loop_timeout_secs: default_thinking_loop_timeout_secs(),
+            timeout_secs: None,
+            stream_idle_timeout_secs: None,
             time_marker_interval_secs: default_time_marker_interval_secs(),
             goal_max_turns: None,
         }
@@ -1966,6 +2085,82 @@ impl Default for CronConfig {
             max_concurrent_turns: default_cron_max_concurrent_turns(),
         }
     }
+}
+
+/// One tier of the decision pyramid (#1648). A tier is a decision-shaped
+/// question the operator has declared worth caching: same canonical input
+/// + same policy version must give the same answer.
+///
+/// ```toml
+/// [decisions.tiers.triage]
+/// policy_version = "p1"        # REQUIRED — bump when the decision semantics change
+/// mode = "shadow"              # shadow (default) | live | off
+/// ttl_hours = 168              # optional; older rows miss and are swept (PR3)
+/// margin_floor = 0.2           # optional, default 0.0; sub-floor margins never cached
+/// similarity = false           # L2 reuse, not implemented — true is a load error
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionTierConfig {
+    /// Semantic version of THIS tier's decision policy. Missing or empty is
+    /// a named load error: without it, a policy change silently reuses
+    /// stale decisions, which is the one failure the ring must never allow.
+    #[serde(default)]
+    pub policy_version: String,
+
+    /// Reuse posture for this tier.
+    #[serde(default)]
+    pub mode: DecisionMode,
+
+    /// Rows older than this miss (and will be pruned by the PR3 sweeper).
+    /// `None` = no expiry on reads; keep one set so pruning has a bound.
+    #[serde(default)]
+    pub ttl_hours: Option<i64>,
+
+    /// Write gate: a reported margin below this is never cached. Default
+    /// 0.0 caches everything measurable; a real deployment should raise it
+    /// (e.g. 0.2) so borderline decisions stay live.
+    #[serde(default)]
+    pub margin_floor: f64,
+
+    /// Similarity (L2) reuse. Unimplemented; `true` is rejected at load so
+    /// an operator never believes a fuzzy ring is on.
+    #[serde(default)]
+    pub similarity: bool,
+}
+
+impl Default for DecisionTierConfig {
+    fn default() -> Self {
+        Self {
+            policy_version: String::new(),
+            mode: DecisionMode::default(),
+            ttl_hours: None,
+            margin_floor: 0.0,
+            similarity: false,
+        }
+    }
+}
+
+/// How a tier uses its cache. Default is `Shadow`: keys computed, would-hits
+/// counted, the model still always asked — the release-day evaluation is
+/// built on shadow evidence, and promotion to `Live` is a per-deployment
+/// operator decision, never a code default (#1648 kill rule).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DecisionMode {
+    #[default]
+    Shadow,
+    Live,
+    Off,
+}
+
+/// The `[decisions]` section: a map of named tiers. No global knobs in
+/// v1 — a tier with no config entry does not exist, and asking for it is
+/// a named error, never an implicit default.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DecisionsConfig {
+    /// Named tiers: `[decisions.tiers.<name>]`.
+    #[serde(default)]
+    pub tiers: std::collections::BTreeMap<String, DecisionTierConfig>,
 }
 
 /// OpenAI-compatible embedding provider configuration.
@@ -2691,6 +2886,14 @@ pub struct FallbackProviderConfig {
     /// Empty = no override, scan all providers as before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vision: Vec<String>,
+
+    /// Ordered list of provider names to try for `generate_image`,
+    /// mirroring the `vision` chain but resolved over each provider's
+    /// `generation_model` (#1672). The session's current provider is always
+    /// tried first; this chain extends the roll, it does not replace it.
+    /// Global `[image.generation]` Gemini stays the last resort.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generation: Vec<String>,
 }
 
 /// STT (Speech-to-Text) provider configurations
@@ -2895,6 +3098,10 @@ pub struct WebSearchProviders {
     /// Brave search configuration
     #[serde(default)]
     pub brave: Option<ProviderConfig>,
+
+    /// Serper (Google SERP) search configuration (#1731)
+    #[serde(default)]
+    pub serper: Option<ProviderConfig>,
 }
 
 /// Image provider configurations (e.g. Gemini for generation/vision)
@@ -3017,8 +3224,13 @@ pub struct ProviderConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_ttl: Option<u32>,
 
-    /// Request timeout in seconds for HTTP client requests to this provider.
-    /// Overrides the default 60s client timeout.
+    /// Non-streaming request ceiling, in seconds, for this provider. Covers
+    /// calls that buffer a whole body: title generation, compaction, `/models`,
+    /// the TUI dialogs. Overrides the default 300s.
+    ///
+    /// It has NO effect on streaming. Streams run on a client built without a
+    /// total timeout, so a healthy long turn is never cut by a wall clock
+    /// (#1687); the only stream timer is `stream_idle_timeout_secs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
 
@@ -3064,6 +3276,18 @@ pub struct ProviderConfig {
     /// burns the budget against a wall. Default false = #952 behaviour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_quota_exhausted: Option<bool>,
+
+    /// Thinking-loop guard ceiling in seconds, for this provider. Overrides
+    /// `[agent] thinking_loop_timeout_secs` (default 600).
+    ///
+    /// Unlike the two transport clocks above, `0` here is a VALUE, not a typo:
+    /// it disables the guard for this provider. The guard is a prompt to the
+    /// model ("you narrated work without calling a tool"), not a verdict on the
+    /// connection, and a provider that legitimately needs longer to reach its
+    /// first tool call is silenced by setting this to `0` rather than by
+    /// guessing a bigger number (#1690).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_loop_timeout_secs: Option<u64>,
 }
 
 fn default_enabled() -> bool {
@@ -3145,10 +3369,12 @@ impl Default for Config {
             image: ImageConfig::default(),
             cron: CronConfig::default(),
             memory: MemoryConfig::default(),
+            decisions: DecisionsConfig::default(),
             brain: BrainConfig::default(),
             browser: BrowserConfig::default(),
             doctor: DoctorConfig::default(),
             retry: RetrySection::default(),
+            features: FeaturesConfig::default(),
         }
     }
 }

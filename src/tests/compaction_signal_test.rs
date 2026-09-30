@@ -126,7 +126,7 @@ fn system_banner_stays_out_of_the_rich_header_preview() {
 #[test]
 fn compacted_line_under_a_minute() {
     assert_eq!(
-        compacted_flow_line(68.0, 26.0, 132_000, 51_000, Duration::from_secs(42)),
+        compacted_flow_line(68.0, 26.0, Duration::from_secs(42)),
         "🧹 compact: 68% → 26% 🧠"
     );
 }
@@ -134,7 +134,7 @@ fn compacted_line_under_a_minute() {
 #[test]
 fn compacted_line_multi_minute() {
     assert_eq!(
-        compacted_flow_line(71.0, 24.0, 94_559, 34_197, Duration::from_secs(132)),
+        compacted_flow_line(71.0, 24.0, Duration::from_secs(132)),
         "🧹 compact: 71% → 24% 🧠"
     );
 }
@@ -144,7 +144,7 @@ fn compacted_line_floors_subsecond_elapsed_to_1s() {
     // A sub-second summarizer call still reads as a real duration — "0s"
     // would look like the line was printed before the work happened.
     assert_eq!(
-        compacted_flow_line(66.0, 30.0, 90_000, 40_000, Duration::from_millis(300)),
+        compacted_flow_line(66.0, 30.0, Duration::from_millis(300)),
         "🧹 compact: 66% → 30% 🧠"
     );
 }

@@ -169,6 +169,13 @@ pub fn claim_session(session_id: Uuid, route: &MessageEnqueueCallback) -> usize 
         // notify_queue twin (#111): clear ONLY the rows matching what was
         // just delivered — a blanket clear-for-session here could eat a
         // never-delivered mid-turn row for the same session.
+        //
+        // Ordering (#439/#366, shape A): these clears run AFTER the routes
+        // above, and `clear_on_delivery` now WAITS for the row in its own
+        // window — because `route` is fire-and-forget and defers its
+        // `persist` into a spawn, the delete would otherwise reach the pool
+        // before the INSERT and the row would survive to mint one fresh
+        // duplicate at the next boot.
         for msg in &mine {
             super::notify_queue::clear_on_delivery(session_id, msg);
         }
@@ -338,6 +345,152 @@ pub async fn report_interrupted() -> usize {
         }
     }
     count
+}
+
+/// What happened to one interrupted boot row, so that clearing it is a
+/// decision rather than a blanket wipe (#481).
+///
+/// Every arm of the boot loop has to account for the row it is holding. Naming
+/// the outcome is what lets the log say *why* the row went, and what keeps the
+/// `NotDispatched` case — a row nothing could be done with — from looking
+/// exactly like a handed-off one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowOutcome {
+    /// The hand-off was attempted and returned: a system push was re-delivered,
+    /// or a user turn was resumed. The row has been accounted for.
+    HandedOff,
+    /// Another row for the same session was already handled this boot, so this
+    /// duplicate had no work of its own left to do.
+    Superseded,
+    /// No hand-off could be attempted: the row's `session_id` is not a UUID, so
+    /// there is no session to deliver it to. Reported and LEFT IN PLACE — it is
+    /// the only evidence that session was ever interrupted, and erasing a row no
+    /// boot can resume would hide the one fact worth keeping.
+    NotDispatched,
+}
+
+impl RowOutcome {
+    /// The stable spelling used in log lines and asserted by tests.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::HandedOff => "handed_off",
+            Self::Superseded => "superseded",
+            Self::NotDispatched => "not_dispatched",
+        }
+    }
+}
+
+/// A value with its newlines escaped, for use as a structured log field.
+///
+/// `id`/`session_id`/`origin` are read straight out of the database, and a
+/// `session_id` that does not parse as a UUID is precisely the row this module
+/// now has to account for — so the value is not assumed well-formed. An
+/// embedded newline would split the record and detach every field after it
+/// onto an orphan line.
+fn log_field(value: &str) -> String {
+    value.replace('\n', "\\n").replace('\r', "\\r")
+}
+
+/// Clear ONE interrupted row, once its disposition is known (#481).
+///
+/// The boot path used to wipe the whole table before it had resumed anything,
+/// so a row whose hand-off never produced a report was already gone: the work
+/// disappeared with nothing left to resume and nothing said about it. Deleting
+/// per row, after the arm has accounted for it, is the discipline the
+/// background-task leg already applies ([`report_interrupted`]).
+///
+/// Takes the repository rather than holding one: the boot loop owns the
+/// connection, and recovery must not open a second one.
+///
+/// Emits exactly ONE line per row, carrying the row's identity and its outcome,
+/// so a boot's dispositions are readable afterwards from the log alone.
+/// `NotDispatched` is the exception to the deleting: it reports and leaves the
+/// row, and says so. No free-form text goes into the fields — the row's
+/// `user_message` is the whole agent input and does not belong on this line.
+///
+/// Returns whether the row was cleared, so a caller can tell a disposal from a
+/// report without re-querying the table.
+pub async fn dispose_pending_row(
+    repo: &crate::db::repository::pending_request::PendingRequestRepository,
+    row: &crate::db::repository::pending_request::PendingRequest,
+    outcome: RowOutcome,
+) -> bool {
+    if outcome == RowOutcome::NotDispatched {
+        // The never-resumable arm: no hand-off was possible, so the row is the
+        // only record that this session was interrupted. Reported, not erased.
+        tracing::warn!(
+            target: "restart_recovery",
+            row_id = %log_field(&row.id),
+            session_id = %log_field(&row.session_id),
+            origin = %log_field(&row.origin),
+            outcome = outcome.as_str(),
+            "boot recovery could not dispatch this row — session_id is not a UUID; left in place"
+        );
+        return false;
+    }
+
+    match repo.delete_ids(vec![row.id.clone()]).await {
+        Ok(()) => {
+            tracing::info!(
+                target: "restart_recovery",
+                row_id = %log_field(&row.id),
+                session_id = %log_field(&row.session_id),
+                origin = %log_field(&row.origin),
+                outcome = outcome.as_str(),
+                "boot recovery accounted for an interrupted row"
+            );
+            true
+        }
+        Err(e) => {
+            // The row stays for the next boot, which is the safe direction: the
+            // hand-off already happened, so re-seeing it is noise, not loss.
+            tracing::error!(
+                target: "restart_recovery",
+                row_id = %log_field(&row.id),
+                session_id = %log_field(&row.session_id),
+                origin = %log_field(&row.origin),
+                outcome = outcome.as_str(),
+                error = %e,
+                "failed to clear an accounted-for interrupted row — it will be seen again next boot"
+            );
+            false
+        }
+    }
+}
+
+/// The continuation prompt a boot-resumed `user` turn is framed with (#481).
+///
+/// One home for the wording: both hand-off arms that resume a pending row frame
+/// their wake with it, so the surface contract below cannot drift between them.
+/// The boot classifier's `spawn_resumes` uses this const too, but the *bare*
+/// const — its wake belongs to the classifier rather than to a pending row, and
+/// its signature takes `&'static str`, so a per-session id cannot be threaded
+/// through it.
+///
+/// **The wording is a contract, not copy.** *"Do not mention the restart or any
+/// interruption"* must survive: a resumed turn that announces the restart shows
+/// the user a restart notice on every swap.
+pub(crate) const RESUME_CONTINUATION_BASE: &str =
+    "[System: A restart just occurred while you were processing a request. Read the conversation \
+context and continue where you left off naturally. Do not mention the restart or any \
+interruption — just pick up seamlessly.]";
+
+/// Frame a boot-resumed `user` turn: the base continuation, then the one fact the
+/// agent cannot read off a transcript that looks complete (#481).
+///
+/// A turn killed mid-flight leaves a transcript whose last entry is frequently a
+/// finished tool call, so nothing in it separates *"the work completed"* from
+/// *"the process died between the work and the report"*. The appended clause
+/// states that ambiguity and puts the check on the side-effecting steps, where
+/// repeating one is expensive or destructive.
+pub(crate) fn resumed_turn_prompt(session_id: Uuid) -> String {
+    format!(
+        "{} The previous attempt (session {}) was killed mid-turn and did NOT finish; part of the \
+work may already have been completed. Before repeating a side-effecting step — a send, a write, \
+an install, a commit — verify from the world whether it already landed.",
+        RESUME_CONTINUATION_BASE,
+        &session_id.simple().to_string()[..8],
+    )
 }
 
 /// What the agent is told about a command a restart killed. Deliberately

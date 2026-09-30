@@ -13,7 +13,8 @@ use uuid::Uuid;
 use crate::brain::agent::QueuedUserMessage;
 use crate::brain::agent::service::MessageEnqueueCallback;
 use crate::brain::agent::service::restart_recovery::{
-    deliver_or_park, flush_parked, parked_count, test_guard,
+    RESUME_CONTINUATION_BASE, deliver_or_park, flush_parked, parked_count, resumed_turn_prompt,
+    test_guard,
 };
 use crate::brain::agent::service::session_routes::register_session_route;
 
@@ -126,4 +127,44 @@ fn flushing_with_nothing_parked_is_a_no_op() {
 
     assert_eq!(flush_parked(&local), 0);
     assert!(seen.lock().unwrap().is_empty());
+}
+
+// ---- #481: the prompt a boot-resumed `user` turn is framed with -------------
+
+/// The base continuation is a user-facing contract, and the clause a hand-off
+/// appends is the only place the agent is told the transcript may be lying about
+/// what finished.
+#[test]
+fn resumed_turn_prompt_keeps_the_base_and_states_the_loss() {
+    let session = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+    let prompt = resumed_turn_prompt(session);
+
+    // The base survives verbatim as a prefix. This is what stops a swap from
+    // announcing itself: without it the user sees a restart notice every time.
+    assert!(
+        prompt.starts_with(RESUME_CONTINUATION_BASE),
+        "the resumed prompt must open with the base continuation; got: {prompt}"
+    );
+    assert!(
+        RESUME_CONTINUATION_BASE.contains("Do not mention the restart"),
+        "the surface contract must stay in the base, or the restart becomes visible"
+    );
+
+    // The appended clause names the ambiguity and the check that resolves it.
+    assert!(prompt.contains("did NOT finish"), "{prompt}");
+    assert!(
+        prompt.contains("verify from the world whether it already landed"),
+        "{prompt}"
+    );
+
+    // The session id is derived rather than frozen: same id, same prompt; a
+    // different id, a different prompt. Neither assertion can pass on a build
+    // that dropped the substitution.
+    let short = &session.simple().to_string()[..8];
+    assert!(
+        prompt.contains(short),
+        "expected short id {short} in: {prompt}"
+    );
+    assert_eq!(prompt, resumed_turn_prompt(session));
+    assert_ne!(prompt, resumed_turn_prompt(Uuid::from_u128(1)));
 }

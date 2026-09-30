@@ -452,6 +452,12 @@ impl App {
         // If this was a plain click (no drag motion), treat it as a click-select.
         let Some(anchor) = self.drag_anchor.take() else {
             self.drag_current = None;
+            // Click-to-open (#1772): a token under the cursor resolving to a
+            // URL or an existing path launches and consumes the click.
+            // Anywhere else keeps the existing fold/select semantics.
+            if self.try_open_clicked(col, row) {
+                return;
+            }
             self.handle_click_select(row);
             return;
         };
@@ -466,6 +472,54 @@ impl App {
             self.notification = Some("Copied to clipboard".to_string());
             self.notification_shown_at = Some(std::time::Instant::now());
         }
+    }
+
+    /// Screen coordinates → rendered line under the cursor → clickable token
+    /// → launch. Returns true when the click opened something (or copied the
+    /// path after a failed launch), consuming it. Coordinate math mirrors
+    /// `extract_drag_selection`: `Padding(1,1,1,0)` puts the first text row at
+    /// `chat_area_y + 1` and content one cell past `chat_area_x`.
+    fn try_open_clicked(&mut self, col: u16, row: u16) -> bool {
+        let chat_height = self.chat_area_height as usize;
+        if chat_height == 0 {
+            return false;
+        }
+        let top_pad = 1u16;
+        let Some(row_in_chat) = row.checked_sub(self.chat_area_y + top_pad) else {
+            return false;
+        };
+        let row_in_chat = row_in_chat as usize;
+        if row_in_chat >= chat_height.saturating_sub(top_pad as usize) {
+            return false;
+        }
+        let line_idx = self.chat_render_scroll + row_in_chat;
+        let Some(line) = self.chat_rendered_lines.get(line_idx) else {
+            return false;
+        };
+        let content_left = self.chat_area_x + 1;
+        let col_in_line = col.saturating_sub(content_left) as usize;
+        let Some(target) = super::clickable::target_at(line, col_in_line) else {
+            return false;
+        };
+        match super::clickable::open(&target) {
+            Ok(()) => {
+                self.notification = Some(format!("Opened {}", target.label()));
+                self.notification_shown_at = Some(std::time::Instant::now());
+            }
+            // No launcher on this box (or it refused): the token was still
+            // the click's intent, so copy it instead of a dead end — same
+            // fallback the session-files overlay uses.
+            Err(_) => {
+                let copied = Self::copy_to_clipboard(&target.label());
+                self.notification = Some(if copied {
+                    format!("Copied {} (no launcher available)", target.label())
+                } else {
+                    format!("Could not open {}", target.label())
+                });
+                self.notification_shown_at = Some(std::time::Instant::now());
+            }
+        }
+        true
     }
 
     /// Turn a pair of terminal-screen coordinates into the plain-text that was
@@ -801,6 +855,9 @@ impl App {
     // platform being compiled it reads as the tail, hence the allow.
     #[allow(clippy::needless_return)]
     fn read_clipboard_image() -> Option<Vec<u8>> {
+        // Both clipboard backends below are macOS/Linux; the import is
+        // unused (and warned) on Windows otherwise.
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         use std::process::{Command, Stdio};
 
         // macOS: pbpaste is text-only, so dump the clipboard PNG to a scratch
@@ -824,10 +881,32 @@ impl App {
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-            if ok && let Ok(bytes) = std::fs::read(&scratch) {
-                let _ = std::fs::remove_file(&scratch);
-                if Self::looks_like_image(&bytes) {
-                    return Some(bytes);
+            if !ok {
+                // #1740: clipboard holds no PNGf class (or osascript failed).
+                // Say so, or logs can never distinguish "never invoked" from
+                // "invoked and refused".
+                tracing::debug!(
+                    "clipboard image: osascript PNGf read failed or clipboard has no image"
+                );
+            }
+            if ok {
+                match std::fs::read(&scratch) {
+                    Ok(bytes) => {
+                        if Self::looks_like_image(&bytes) {
+                            let _ = std::fs::remove_file(&scratch);
+                            return Some(bytes);
+                        }
+                        tracing::debug!(
+                            "clipboard image: scratch file {} bytes are not an image",
+                            bytes.len()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "clipboard image: cannot read scratch file {}: {e}",
+                            scratch.display()
+                        );
+                    }
                 }
             }
             return None;
@@ -849,10 +928,19 @@ impl App {
                     .args(cmd_args)
                     .stderr(Stdio::null())
                     .output()
-                    && out.status.success()
-                    && Self::looks_like_image(&out.stdout)
                 {
-                    return Some(out.stdout);
+                    if out.status.success() && Self::looks_like_image(&out.stdout) {
+                        return Some(out.stdout);
+                    }
+                    // #1740: distinguish "backend missing" from "backend ran
+                    // but the clipboard was not an image".
+                    tracing::debug!(
+                        "clipboard image: {cmd} exit={} bytes={} (not a usable image)",
+                        out.status,
+                        out.stdout.len()
+                    );
+                } else {
+                    tracing::debug!("clipboard image: {cmd} not available");
                 }
             }
             return None;
@@ -894,6 +982,119 @@ impl App {
             path: path.to_string_lossy().to_string(),
             is_video: false,
         })
+    }
+
+    /// Read TEXT from the OS clipboard (pbpaste / wl-paste / xclip). `None`
+    /// when every backend fails or the clipboard holds nothing usable.
+    // Each platform's `return` is the exit of its own cfg block; on the one
+    // platform being compiled it reads as the tail, hence the allow.
+    #[allow(clippy::needless_return)]
+    fn read_clipboard_text() -> Option<String> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        use std::process::{Command, Stdio};
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(out) = Command::new("pbpaste").stderr(Stdio::null()).output()
+                && out.status.success()
+            {
+                let s = String::from_utf8_lossy(&out.stdout).to_string();
+                if !s.trim().is_empty() {
+                    return Some(s);
+                }
+            }
+            return None;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Wayland first, X11 fallback: mirrors read_clipboard_image's
+            // backend order.
+            for (cmd, args) in [
+                ("wl-paste", vec!["--no-newline"]),
+                ("xclip", vec!["-selection", "clipboard", "-o"]),
+            ] {
+                if let Ok(out) = Command::new(cmd).args(args).stderr(Stdio::null()).output()
+                    && out.status.success()
+                {
+                    let s = String::from_utf8_lossy(&out.stdout).to_string();
+                    if !s.trim().is_empty() {
+                        return Some(s);
+                    }
+                }
+            }
+            return None;
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            None
+        }
+    }
+
+    /// Ctrl+V handler (#1740): if the clipboard text resolves to a real local
+    /// file, attach it through the same `extract_attachments` pipeline a
+    /// drag-drop uses, so every file type and every receipt matches. Plain
+    /// text (or an unresolvable path) inserts at the cursor, keeping Ctrl+V a
+    /// working paste key on terminals that never bracket-paste.
+    pub(crate) fn attach_from_clipboard(&mut self) {
+        let Some(text) = Self::read_clipboard_text() else {
+            tracing::debug!("Ctrl+V: clipboard text unreadable");
+            return;
+        };
+        let trimmed = text.trim().to_string();
+        if trimmed.is_empty() {
+            tracing::debug!("Ctrl+V: clipboard text empty after trim");
+            return;
+        }
+
+        if Self::resolve_dropped_path(&trimmed).is_some() {
+            // File-shaped: ride the full pipeline so classification,
+            // receipts and project-file tracking all match a real drop.
+            let extraction = Self::extract_attachments(&trimmed);
+            for notice in extraction.notices {
+                self.push_system_message(notice);
+            }
+            if !extraction.attachments.is_empty() {
+                if let Some(session) = &self.current_session {
+                    for att in &extraction.attachments {
+                        let file_svc = self.file_service.clone();
+                        let sid = session.id;
+                        let path = std::path::PathBuf::from(&att.path);
+                        tokio::spawn(async move {
+                            if let Err(e) = file_svc.get_or_create_file(sid, path, None).await {
+                                tracing::warn!("Failed to track Ctrl+V file: {e}");
+                            }
+                        });
+                    }
+                }
+                let label = extraction.attachments[0].name.clone();
+                self.attachments.extend(extraction.attachments);
+                self.notification = Some(format!("📎 Attached from clipboard: {label}"));
+                self.notification_shown_at = Some(std::time::Instant::now());
+            }
+            // Notes for doc/audio/archive/unknown/text files flow into the
+            // input buffer below, exactly like a bracketed paste of the same
+            // path does; with no clean text there is nothing to insert.
+            self.insert_text_at_cursor(&extraction.text);
+            return;
+        }
+
+        // Plain text: normal paste.
+        self.insert_text_at_cursor(&text);
+    }
+
+    /// Insert `text` at the cursor (char-boundary safe, issue #69) and move
+    /// the cursor to the end of what was inserted.
+    pub(crate) fn insert_text_at_cursor(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.cursor_position = self
+            .input_buffer
+            .floor_char_boundary(self.cursor_position.min(self.input_buffer.len()));
+        self.input_buffer.insert_str(self.cursor_position, text);
+        self.cursor_position += text.len();
     }
 
     /// Delete the word before the cursor (for Ctrl+Backspace and Alt+Backspace)
@@ -1624,6 +1825,20 @@ impl App {
                         .as_ref()
                         .map(|s| s.id)
                         .unwrap_or_else(uuid::Uuid::nil);
+                    // Editor handoff (#1744): vi/vim/nano/emacs need the real
+                    // tty — pipe-capturing them dumps escape sequences into
+                    // the chat. Park the request; the runner loop performs
+                    // the terminal handoff before its next draw. Unix only
+                    // (#1755): Windows keeps the pipe path below.
+                    #[cfg(unix)]
+                    if crate::tui::editor::handoff_target(&shell_cmd).is_some() {
+                        self.pending_editor_handoff = Some((shell_cmd, origin_session));
+                        self.input_buffer.clear();
+                        self.cursor_position = 0;
+                        self.slash_suggestions_active = false;
+                        self.dismiss_emoji_picker();
+                        return Ok(());
+                    }
                     tokio::spawn(async move {
                         use crate::utils::shell::PushShellCommand;
                         let (shell, shell_arg) = crate::utils::shell::shell_pair();
@@ -1799,6 +2014,12 @@ impl App {
             // and its reasoning details. Scoped to that turn so a long
             // transcript does not reflow out from under the user.
             self.toggle_newest_turn(true);
+        } else if event.code == KeyCode::Char('v') && event.modifiers == KeyModifiers::CONTROL {
+            // Ctrl+V (#1740): paste/attach from the OS clipboard. File-shaped
+            // clipboard text attaches through the same pipeline as a drop
+            // (any file type); plain text inserts at the cursor, so terminals
+            // that never bracket-paste still get a working paste key.
+            self.attach_from_clipboard();
         } else if keys::is_page_up(&event) {
             let before = self.scroll_offset;
             self.scroll_offset = self.scroll_offset.saturating_add(10);

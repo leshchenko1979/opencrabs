@@ -18,6 +18,7 @@ use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{
     ChatKind, FileId, InlineKeyboardMarkup, MessageId, MessageKind, ParseMode, ReplyParameters,
+    ThreadId,
 };
 
 use super::send::{best_effort_delete, message_in_thread};
@@ -116,6 +117,86 @@ pub(crate) fn mentions_other_bot(text: &str, our_username: Option<&str>) -> bool
     })
 }
 
+/// True when `kind` is a chat-SERVICE notice rather than content someone sent.
+///
+/// Telegram records the bot as the sender of these by construction: whoever
+/// creates a forum topic, pins a message, or changes the member list is
+/// recorded as the author. So the sender id cannot distinguish "the bot spoke"
+/// from "the chat service notified us".
+///
+/// **The exclusions are chat-service kinds; everything else is content the bot
+/// could have sent.** That distinction is the `#661` fix. The predecessor shape
+/// (`#527`, `457ff4ffc`) accepted only `MessageKind::Common`, reasoning that
+/// "anything Telegram adds later is simply not `Common`, so it never counts as
+/// the bot speaking". That invariant held for service kinds and silently broke
+/// for CONTENT: `sendRichMessage` is Bot API 10.1 with no teloxide binding, so a
+/// rich-rendered bot message carries `rich_message` and no key any `MediaKind`
+/// variant accepts; the untagged `MessageKind` parse falls through `Common` to
+/// `Empty {}`, and every reply to a rich-rendered bot message was rejected as
+/// "not directed at the bot" - silently dropping user replies for four days
+/// before it was reported.
+///
+/// **No wildcard arm, deliberately.** The `match` is exhaustive by the
+/// compiler, so a teloxide bump that adds a variant fails the BUILD until
+/// someone classifies it. Without that, a new variant lands in a catch-all and
+/// this list rots in exactly the way the `Common` test did.
+fn is_chat_service_notice(kind: &MessageKind) -> bool {
+    match kind {
+        // The bot spoke, or sent something the typed parse cannot name.
+        // `Empty {}` is where an unnameable rich payload lands (#661) and must
+        // count as content, NOT as a service notice.
+        MessageKind::Common(_) | MessageKind::Empty {} => false,
+
+        // Content-bearing named variants: the bot could have sent these.
+        MessageKind::ChatShared(_)
+        | MessageKind::UsersShared(_)
+        | MessageKind::Invoice(_)
+        | MessageKind::SuccessfulPayment(_)
+        | MessageKind::RefundedPayment(_)
+        | MessageKind::PassportData(_)
+        | MessageKind::Dice(_) => false,
+
+        // Chat-service notices: bot-authored by construction, so replying to
+        // one is not addressing the bot (#527).
+        MessageKind::NewChatMembers(_)
+        | MessageKind::LeftChatMember(_)
+        | MessageKind::NewChatTitle(_)
+        | MessageKind::NewChatPhoto(_)
+        | MessageKind::DeleteChatPhoto(_)
+        | MessageKind::GroupChatCreated(_)
+        | MessageKind::SupergroupChatCreated(_)
+        | MessageKind::ChannelChatCreated(_)
+        | MessageKind::MessageAutoDeleteTimerChanged(_)
+        | MessageKind::Pinned(_)
+        | MessageKind::ConnectedWebsite(_)
+        | MessageKind::WriteAccessAllowed(_)
+        | MessageKind::ProximityAlertTriggered(_)
+        | MessageKind::ChatBoostAdded(_)
+        | MessageKind::ChatBackground(_)
+        | MessageKind::ChecklistTasksDone(_)
+        | MessageKind::ChecklistTasksAdded(_)
+        | MessageKind::DirectMessagePriceChanged(_)
+        | MessageKind::ForumTopicCreated(_)
+        | MessageKind::ForumTopicEdited(_)
+        | MessageKind::ForumTopicClosed(_)
+        | MessageKind::ForumTopicReopened(_)
+        | MessageKind::GeneralForumTopicHidden(_)
+        | MessageKind::GeneralForumTopicUnhidden(_)
+        | MessageKind::Giveaway(_)
+        | MessageKind::GiveawayCompleted(_)
+        | MessageKind::GiveawayCreated(_)
+        | MessageKind::GiveawayWinners(_)
+        | MessageKind::PaidMessagePriceChanged(_)
+        | MessageKind::GiftInfo(_)
+        | MessageKind::UniqueGiftInfo(_)
+        | MessageKind::VideoChatScheduled(_)
+        | MessageKind::VideoChatStarted(_)
+        | MessageKind::VideoChatEnded(_)
+        | MessageKind::VideoChatParticipantsInvited(_)
+        | MessageKind::WebAppData(_) => true,
+    }
+}
+
 /// True when `msg` replies to a message the bot sent AS AN INTERLOCUTOR.
 ///
 /// A reply to the bot is one way of addressing it - but not every bot-authored
@@ -128,10 +209,11 @@ pub(crate) fn mentions_other_bot(text: &str, our_username: Option<&str>) -> bool
 /// set for - any member replying to the topic root gets an answer they never
 /// asked for.
 ///
-/// So the replied-to message must be a real (common) message. Testing the kind
-/// rather than enumerating service kinds is exhaustive by construction and
-/// cannot drift: anything Telegram adds later is simply not `Common`, so it
-/// never counts as the bot speaking.
+/// So the replied-to message must be one the bot sent as CONTENT. The test is
+/// therefore on chat-service kinds rather than on `Common`: the service set is
+/// closed and enumerable, while content is open-ended, and a bot message whose
+/// type the typed parse cannot name is still content the bot sent (#661). See
+/// `is_chat_service_notice` for the exclusions and why they are compiler-checked.
 ///
 /// Shared by all three gate paths (ACL reply, `respond_to = mention`,
 /// `respond_to = auto`) so they cannot drift apart again.
@@ -141,7 +223,7 @@ pub(crate) fn replied_to_bot_as_interlocutor(msg: &Message, bot_uid: Option<i64>
             .from
             .as_ref()
             .is_some_and(|u| bot_uid.is_some_and(|bid| u.id.0 as i64 == bid));
-        from_bot && matches!(reply.kind, MessageKind::Common(_))
+        from_bot && !is_chat_service_notice(&reply.kind)
     })
 }
 
@@ -370,7 +452,20 @@ async fn persist_group_message(
     }
 }
 
+/// Fire a cosmetic "seen" reaction on a message.
+///
+/// Dropped while a global 429 cooldown is active (#1778): the API rejects
+/// the call with `Retry after` and each rejection risks extending the ban,
+/// for feedback the final response supersedes anyway. Mirrors the cosmetic
+/// drop in `admit_chat_action`; reactions resume once the cooldown clears.
 pub(crate) async fn fire_reaction(bot: &Bot, chat_id: ChatId, msg_id: MessageId, emoji: &str) {
+    if !super::rate_limit::reaction_ack_permitted() {
+        tracing::debug!(
+            "Telegram: dropping ack reaction {emoji} for msg {} during global 429 cooldown",
+            msg_id.0
+        );
+        return;
+    }
     let reaction = teloxide::types::ReactionType::Emoji {
         emoji: map_to_allowed_reaction(emoji),
     };
@@ -689,12 +784,15 @@ pub(crate) async fn handle_message(
     // return, since the burying messages are usually not addressed to the bot.
     telegram_state.note_incoming_msg(msg.chat.id.0, msg.id.0);
 
-    // Forum-ness evidence (#1220): any thread-scoped message proves this chat
-    // is a forum group. Recorded for EVERY message before early returns, so
-    // chatter not addressed to the bot still feeds the cache.
+    // Forum-ness evidence (#1220, gated per #1708): only a thread id that
+    // Telegram itself flagged is_topic_message proves this chat is a forum
+    // group. Recorded for EVERY message before early returns, so chatter not
+    // addressed to the bot still feeds the cache. A bare thread id from an
+    // ordinary reply chain in a non-forum group must stay inert — trusting
+    // it flipped real chats to "forum" and orphaned their sessions.
     let raw_thread = thread_id.map(|t| t.0.0);
     telegram_state
-        .note_thread_evidence(msg.chat.id.0, raw_thread)
+        .note_thread_evidence(msg.chat.id.0, msg.is_topic_message, raw_thread)
         .await;
 
     // Forum-topic rename capture (#143). A rename fires `forum_topic_edited`
@@ -2629,8 +2727,16 @@ pub(crate) async fn handle_message(
     // so it should NOT use telegram_send for simple text replies.
     // Surface the chat_id (and forum thread_id) so the agent can target THIS
     // conversation for cron reports / cross-surface sends without guessing or
-    // asking (#533, mirror of upstream #510).
-    let chan_ids = channel_id_hint(msg.chat.id.0, thread_id.map(|t| t.0.0));
+    // asking (#533, mirror of upstream #510). The thread id shown must be the
+    // SAME one session routing uses (#1708): topic_session_id-gated, so an
+    // ordinary reply chain in a non-forum group no longer displays a per-reply
+    // "thread_id: 215/220" that invites the model to bind phantom topics —
+    // and General stays unnamed, because writing 1 on the wire is refused
+    // (#1319).
+    let chan_ids = channel_id_hint(
+        msg.chat.id.0,
+        session_resolve::topic_session_id(msg.is_topic_message, thread_id.map(|t| t.0.0)),
+    );
     let agent_input = format!(
         "[Channel: Telegram ({chan_ids}) — your text response is automatically sent to this chat. \
          Do NOT call telegram_send to deliver your answer. Only use telegram_send for: \
@@ -2761,6 +2867,19 @@ pub(crate) async fn handle_message(
     // itself never fails the turn — it returns false on every error path.
     if tg_cfg.is_quiet_for(&chat_id_str) {
         super::quiet::fold_previous_answer(
+            &bot,
+            msg.chat.id,
+            thread_id,
+            session_id,
+            &telegram_state,
+        )
+        .await;
+        // #696: and remove the chrome that sat beside it. The card is per-turn
+        // scaffolding — tool roll, narration, context footer — so leaving one
+        // behind per turn re-accumulates exactly what quiet mode suppresses.
+        // Ordered AFTER the fold: both read the one retained state, and the
+        // fold needs the answer before this takes the card id out of it.
+        super::quiet::sweep_previous_flow_card(
             &bot,
             msg.chat.id,
             thread_id,
@@ -3417,6 +3536,21 @@ pub(crate) async fn handle_reaction(
     let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
     let text_only = redact_secrets(&text_only);
     let (text_only, react_emoji) = crate::utils::extract_react_marker_lenient(&text_only);
+    // #1670: a malformed marker (empty `<<react:>>`, word payload) survives
+    // extraction as visible text. On a reaction turn any marker shape is a
+    // directive, never prose — strip the debris so it can never ship as a
+    // bubble, and log when the turn degrades to silence (no emoji fired and
+    // the whole text was debris).
+    let stripped = crate::utils::strip_invalid_react_markers(&text_only);
+    if stripped.len() != text_only.len() {
+        tracing::warn!(
+            "Telegram reaction: stripped {} chars of malformed react-marker debris \
+             (emoji fired: {})",
+            text_only.len() - stripped.len(),
+            react_emoji.is_some(),
+        );
+    }
+    let text_only = stripped;
     let text_only = if react_emoji.is_some()
         && super::reaction_prompt::classify_reaction(&emoji)
             != super::reaction_prompt::ReactionSentiment::Negative
@@ -3457,7 +3591,17 @@ pub(crate) async fn handle_reaction(
         // and must not grow a notice.
         let text_only = crate::utils::append_failure_notice(&text_only, &image_scan.failures);
         let html = md_to_html(&text_only);
-        if let Err(e) = message_in_thread(&bot, chat_id, None, html).await {
+        // #1670: the reply belongs in the topic the reacted message lives in —
+        // step 6 resolved it to key the session, and `None` here used to
+        // deliver every reaction-path text reply to the group's General.
+        if let Err(e) = message_in_thread(
+            &bot,
+            chat_id,
+            topic_id.map(|t| ThreadId(MessageId(t))),
+            html,
+        )
+        .await
+        {
             tracing::warn!("Telegram reaction: failed to send text reply: {}", e);
             return Ok(());
         }
@@ -3478,7 +3622,11 @@ pub(crate) async fn handle_reaction(
             text_only,
             "text".to_string(),
             None,
-        );
+        )
+        // #1670: the row must carry the topic it was delivered in — a later
+        // reaction on this reply looks up its thread here to key the session,
+        // and a NULL would route that reaction to the chat's main session.
+        .with_thread(reacted_thread_id, None);
         if let Err(e) = channel_msg_repo.insert(&cm).await {
             tracing::warn!("Telegram reaction: failed to record bot reply: {}", e);
         }

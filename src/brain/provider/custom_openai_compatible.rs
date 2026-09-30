@@ -20,12 +20,18 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 const DEFAULT_OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
-// Total request timeout (including streaming). reqwest's `.timeout()` covers
-// the response body read, so this is a hard wall-clock ceiling on an SSE
-// stream no matter how healthy it is. At 60s it guillotined thinking-heavy
-// models mid-stream and the retries re-sent into the same wall. Matches the
-// Anthropic and Gemini providers; the 20s inter-chunk idle timeout stays the
-// fast detector for genuinely dead streams.
+// Total request ceiling for NON-STREAMING calls: `complete()`, `/models`, and
+// anything else that buffers a whole body. reqwest's `.timeout()` covers the
+// response body read, so the same value is also a hard wall-clock ceiling on
+// an SSE stream, which is exactly how #1687 killed healthy streams. With
+// `timeout_secs` unset this constant IS the ceiling every stream inherits
+// (`factory.rs` calls `with_timeout` only when the key is present and > 0),
+// and it sat at 60s from #217 until #1635 moved it to 300s, which relocated
+// the wall instead of taking it off the stream path. Streams are served by
+// `build_stream_http_client` instead, which carries no total
+// ceiling; inter-chunk silence stays the app-level guard in
+// `brain/agent/service/helpers.rs` (`stream_idle_timeout_secs`). Matches the
+// Anthropic and Gemini providers.
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -42,6 +48,25 @@ fn build_http_client(timeout: Duration) -> Client {
         .tcp_keepalive(DEFAULT_TCP_KEEPALIVE)
         .build()
         .expect("Failed to create HTTP client")
+}
+
+/// The streaming client: handshake bound by `connect_timeout`, pool and TCP
+/// keepalive preserved, and deliberately NO total request timeout.
+///
+/// reqwest's `.timeout()` is a wall-clock ceiling on the whole exchange
+/// INCLUDING the response body read, so on an SSE stream it fires no matter how
+/// healthily chunks are arriving (#1687). A dead stream is the app-level
+/// inter-chunk guard's job (`brain/agent/service/helpers.rs`,
+/// `stream_idle_timeout_secs`), and a handshake that never lands is still
+/// bounded by `connect_timeout`.
+fn build_stream_http_client() -> Client {
+    Client::builder()
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .pool_idle_timeout(DEFAULT_POOL_IDLE_TIMEOUT)
+        .pool_max_idle_per_host(2)
+        .tcp_keepalive(DEFAULT_TCP_KEEPALIVE)
+        .build()
+        .expect("Failed to create streaming HTTP client")
 }
 
 /// Open/close tag pairs to strip from streaming/non-streaming content.
@@ -2172,6 +2197,9 @@ pub struct OpenAIProvider {
     api_key: String,
     base_url: String,
     client: Client,
+    /// Client for `stream()`: no total wall-clock ceiling, so a healthy long
+    /// stream is never cut (#1687).
+    stream_client: Client,
     custom_default_model: Option<String>,
     name: String,
     /// When set, swap to this model for requests containing images.
@@ -2239,6 +2267,10 @@ pub struct OpenAIProvider {
     request_timeout: Option<Duration>,
     /// Configured inter-chunk streaming inactivity timeout.
     stream_idle_timeout: Option<Duration>,
+    /// Resolved thinking-loop guard ceiling in seconds (#1690). `Some(0)`
+    /// disables the guard for this provider, so this is a plain `u64` in
+    /// seconds rather than a `Duration`.
+    thinking_loop_timeout: Option<u64>,
 }
 
 impl OpenAIProvider {
@@ -2296,11 +2328,13 @@ impl OpenAIProvider {
     /// Create a new OpenAI provider with official API
     pub fn new(api_key: String) -> Self {
         let client = build_http_client(DEFAULT_TIMEOUT);
+        let stream_client = build_stream_http_client();
 
         Self {
             api_key,
             base_url: DEFAULT_OPENAI_API_URL.to_string(),
             client,
+            stream_client,
             custom_default_model: None,
             name: "openai".to_string(),
             vision_model: None,
@@ -2322,17 +2356,20 @@ impl OpenAIProvider {
             retry_notices: Arc::new(std::sync::Mutex::new(Vec::new())),
             request_timeout: None,
             stream_idle_timeout: None,
+            thinking_loop_timeout: None,
         }
     }
 
     /// Create provider for local LLM (LM Studio, Ollama, etc.)
     pub fn local(base_url: String) -> Self {
         let client = build_http_client(DEFAULT_TIMEOUT);
+        let stream_client = build_stream_http_client();
 
         Self {
             api_key: "not-needed".to_string(),
             base_url,
             client,
+            stream_client,
             custom_default_model: None,
             name: "openai-compatible".to_string(),
             vision_model: None,
@@ -2354,17 +2391,20 @@ impl OpenAIProvider {
             retry_notices: Arc::new(std::sync::Mutex::new(Vec::new())),
             request_timeout: None,
             stream_idle_timeout: None,
+            thinking_loop_timeout: None,
         }
     }
 
     /// Create with custom base URL
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
         let client = build_http_client(DEFAULT_TIMEOUT);
+        let stream_client = build_stream_http_client();
 
         Self {
             api_key,
             base_url,
             client,
+            stream_client,
             custom_default_model: None,
             name: "openai-compatible".to_string(),
             vision_model: None,
@@ -2386,6 +2426,7 @@ impl OpenAIProvider {
             retry_notices: Arc::new(std::sync::Mutex::new(Vec::new())),
             request_timeout: None,
             stream_idle_timeout: None,
+            thinking_loop_timeout: None,
         }
     }
 
@@ -2521,7 +2562,9 @@ impl OpenAIProvider {
         self
     }
 
-    /// Set HTTP client request timeout. Rebuilds the underlying HTTP client.
+    /// Set the NON-STREAMING request ceiling and rebuild that client.
+    /// Streams are unaffected: they run on `stream_client`, which has no total
+    /// timeout by construction (#1687).
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.client = build_http_client(timeout);
         self.request_timeout = Some(timeout);
@@ -2531,6 +2574,18 @@ impl OpenAIProvider {
     /// Set inter-chunk streaming inactivity timeout.
     pub fn with_stream_idle_timeout(mut self, timeout: Duration) -> Self {
         self.stream_idle_timeout = Some(timeout);
+        self
+    }
+
+    /// Set the resolved thinking-loop guard ceiling in seconds (#1690).
+    ///
+    /// Unlike the transport setters above, `0` is a value: it disables the
+    /// guard for this provider. The factory resolves
+    /// `[providers.<name>]` → `[agent]` and always calls this, so a provider
+    /// built from config never falls back to the `[agent]` read in
+    /// `brain/agent/service/helpers.rs`.
+    pub fn with_thinking_loop_timeout(mut self, secs: u64) -> Self {
+        self.thinking_loop_timeout = Some(secs);
         self
     }
 
@@ -2555,6 +2610,45 @@ impl OpenAIProvider {
             }
         }
         self.base_url.clone()
+    }
+
+    /// POST `url` with `headers` and a pre-encoded `body`, bounding **one
+    /// send's** connect + TLS + response headers (#680/#682).
+    ///
+    /// The budget is per ATTEMPT: a retry's backoff sleep belongs to the retry
+    /// policy, never to this clock — so a send budget that expires means the
+    /// send itself did not answer, not that we spent the interval on our own
+    /// backoff. Bound at the send (rather than around
+    /// `provider.stream(request)`, which also contains the rate-limit wait,
+    /// the retry backoff and the fallback walk) is what makes the resulting
+    /// `Timeout` mean what its name says.
+    ///
+    /// `client` is the caller's choice of transport: `self.client` for the
+    /// non-streaming paths (it carries the total request ceiling), and
+    /// `self.stream_client` for `stream()` (no total ceiling by construction,
+    /// #1687 — a wall clock over an SSE body kills healthy long streams). The
+    /// handshake budget applies on either, so a stream is bounded on the
+    /// handshake while its body stays unbounded.
+    async fn send_bounded(
+        &self,
+        client: &Client,
+        url: &str,
+        headers: reqwest::header::HeaderMap,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response> {
+        let budget = crate::brain::agent::service::helpers::send_handshake_timeout_for(
+            false,
+            Some(self.base_url.as_str()),
+        );
+        let send = client.post(url).headers(headers).json(body).send();
+        let response = match budget {
+            Some(budget) => match tokio::time::timeout(budget, send).await {
+                Ok(res) => res,
+                Err(_) => return Err(ProviderError::Timeout(budget.as_secs())),
+            },
+            None => send.await,
+        }?;
+        Ok(response)
     }
 
     /// Returns true if a ProviderError represents an auth failure that
@@ -3123,7 +3217,7 @@ impl OpenAIProvider {
 
     /// Convert OpenAI response to our generic format
     #[allow(clippy::wrong_self_convention)]
-    fn from_openai_response(&self, response: OpenAIResponse) -> LLMResponse {
+    fn from_openai_response(&self, response: OpenAIResponse, requested_model: &str) -> LLMResponse {
         let choice = response
             .choices
             .into_iter()
@@ -3286,7 +3380,7 @@ impl OpenAIProvider {
 
         LLMResponse {
             id: response.id,
-            model: response.model,
+            model: stable_model_id(response.model, requested_model),
             content: content_blocks,
             stop_reason,
             usage: TokenUsage {
@@ -3294,6 +3388,7 @@ impl OpenAIProvider {
                 output_tokens: response.usage.completion_tokens.unwrap_or(0),
                 cache_creation_tokens: response.usage.cache_creation_input_tokens.unwrap_or(0),
                 cache_read_tokens: response.usage.effective_cache_read(),
+                cost_usd: response.usage.cost,
                 ..Default::default()
             },
             // Non-streaming parse path — streaming responses go through helpers.rs.
@@ -3445,6 +3540,18 @@ impl OpenAIProvider {
     }
 }
 
+/// Keep the model identifier OpenCrabs sent when a compatible gateway reports
+/// a backend-local identifier in its response. The request ID is also the one
+/// used for the provider/model session pair, so replacing it with the response
+/// ID can make the next turn fail when the gateway strips a provider prefix.
+pub(crate) fn stable_model_id(response_model: String, requested_model: &str) -> String {
+    if requested_model.is_empty() {
+        response_model
+    } else {
+        requested_model.to_string()
+    }
+}
+
 #[async_trait]
 impl Provider for OpenAIProvider {
     async fn complete(&self, request: LLMRequest) -> Result<LLMResponse> {
@@ -3497,11 +3604,7 @@ impl Provider for OpenAIProvider {
                 tracing::debug!("Sending request to OpenAI API: {}", self.base_url);
                 let body = self.encode_body(&openai_request)?;
                 let response = self
-                    .client
-                    .post(self.send_url())
-                    .headers(self.headers_for(session)?)
-                    .json(&body)
-                    .send()
+                    .send_bounded(&self.client, &self.send_url(), self.headers_for(session)?, &body)
                     .await?;
 
                 let status = response.status();
@@ -3524,7 +3627,8 @@ impl Provider for OpenAIProvider {
                 let request_id = provider_request_id(response.headers());
 
                 let openai_response: OpenAIResponse = response.json().await?;
-                let llm_response = self.from_openai_response(openai_response);
+                let model_for_response = model.clone();
+                let llm_response = self.from_openai_response(openai_response, &model_for_response);
 
                 // Log cache hit/miss for OpenRouter
                 if let Some(ref status) = cache_status {
@@ -3575,17 +3679,14 @@ impl Provider for OpenAIProvider {
                     || async {
                         let body = self.encode_body(&openai_request)?;
                         let response = self
-                            .client
-                            .post(self.send_url())
-                            .headers(self.headers_for(session)?)
-                            .json(&body)
-                            .send()
+                            .send_bounded(&self.client, &self.send_url(), self.headers_for(session)?, &body)
                             .await?;
                         if !response.status().is_success() {
                             return Err(self.handle_error(response).await);
                         }
                         let openai_response: OpenAIResponse = response.json().await?;
-                        Ok(self.from_openai_response(openai_response))
+                        let model_for_response = model.clone();
+                        Ok(self.from_openai_response(openai_response, &model_for_response))
                     },
                     &retry_config,
                 )
@@ -3609,17 +3710,19 @@ impl Provider for OpenAIProvider {
                             || async {
                                 let body = self.encode_body(&openai_request)?;
                                 let response = self
-                                    .client
-                                    .post(self.send_url())
-                                    .headers(self.headers_for(session)?)
-                                    .json(&body)
-                                    .send()
+                                    .send_bounded(
+                                        &self.client,
+                                        &self.send_url(),
+                                        self.headers_for(session)?,
+                                        &body,
+                                    )
                                     .await?;
                                 if !response.status().is_success() {
                                     return Err(self.handle_error(response).await);
                                 }
                                 let openai_response: OpenAIResponse = response.json().await?;
-                                Ok(self.from_openai_response(openai_response))
+                                let model_for_response = model.clone();
+                                Ok(self.from_openai_response(openai_response, &model_for_response))
                             },
                             &retry_config,
                         )
@@ -3684,50 +3787,8 @@ impl Provider for OpenAIProvider {
             include_usage: true,
         });
 
-        let tools_count = openai_request.tools.as_ref().map(|t| t.len()).unwrap_or(0);
-
-        // Count input tokens via tiktoken (cl100k_base) to monitor context window usage.
-        // Each message: content tokens + serialized tool_calls tokens + 4 overhead per message.
-        let message_tokens: usize = openai_request
-            .messages
-            .iter()
-            .map(|m| {
-                let content = m
-                    .content
-                    .as_ref()
-                    .map(|v| {
-                        let s = v.as_str().unwrap_or("");
-                        count_message_tokens(s)
-                    })
-                    .unwrap_or(4);
-                let tool_calls = m
-                    .tool_calls
-                    .as_ref()
-                    .map(|tc| count_tokens(&serde_json::to_string(tc).unwrap_or_default()))
-                    .unwrap_or(0);
-                content + tool_calls
-            })
-            .sum();
-        let tool_schema_tokens = openai_request
-            .tools
-            .as_ref()
-            .map(|tools| count_tokens(&serde_json::to_string(tools).unwrap_or_default()))
-            .unwrap_or(0);
-        let total_input_tokens = message_tokens + tool_schema_tokens;
-        // #1147: budget against the provider's actual window (configured
-        // context_window, then model heuristics) instead of a hardcoded 200k,
-        // which misreported a configured-1M provider as "36% of 200k".
-        let context_window = self.context_window(&model).unwrap_or(200_000);
-        let context_pct =
-            (total_input_tokens as f32 / context_window as f32 * 100.0).round() as u32;
-        tracing::debug!(
-            "OpenAI stream request: ~{} input tokens ({}% of {}-token window) — {} messages, {} tool schemas",
-            total_input_tokens,
-            context_pct,
-            context_window,
-            openai_request.messages.len(),
-            tools_count
-        );
+        // The input-token estimate is deliberately NOT computed here (#681).
+        // It runs after the send returns, just past the auth-refresh retries.
 
         let retry_config = self.retry_config(&model);
 
@@ -3740,11 +3801,7 @@ impl Provider for OpenAIProvider {
             || async {
                 let body = self.encode_body(&openai_request)?;
                 let response = self
-                    .client
-                    .post(self.send_url())
-                    .headers(self.headers_for(session)?)
-                    .json(&body)
-                    .send()
+                    .send_bounded(&self.stream_client, &self.send_url(), self.headers_for(session)?, &body)
                     .await?;
 
                 tracing::debug!("OpenAI response status: {}", response.status());
@@ -3784,11 +3841,7 @@ impl Provider for OpenAIProvider {
                 || async {
                     let body = self.encode_body(&openai_request)?;
                     let r = self
-                        .client
-                        .post(self.send_url())
-                        .headers(self.headers_for(session)?)
-                        .json(&body)
-                        .send()
+                        .send_bounded(&self.stream_client, &self.send_url(), self.headers_for(session)?, &body)
                         .await?;
                     if !r.status().is_success() {
                         return Err(self.handle_error(r).await);
@@ -3815,11 +3868,7 @@ impl Provider for OpenAIProvider {
                         || async {
                             let body = self.encode_body(&openai_request)?;
                             let r = self
-                                .client
-                                .post(self.send_url())
-                                .headers(self.headers_for(session)?)
-                                .json(&body)
-                                .send()
+                                .send_bounded(&self.stream_client, &self.send_url(), self.headers_for(session)?, &body)
                                 .await?;
                             if !r.status().is_success() {
                                 return Err(self.handle_error(r).await);
@@ -3847,6 +3896,56 @@ impl Provider for OpenAIProvider {
             }
         }
         let response = response?;
+        let tools_count = openai_request.tools.as_ref().map(|t| t.len()).unwrap_or(0);
+
+        // Input-token estimate, computed AFTER the send (#681). It has two
+        // consumers, and both belong after the response is in hand: the debug
+        // line below, and the fallback usage figure emitted when a provider
+        // reports no usage of its own (`[STREAM_USAGE]`). Computing it before
+        // the request put a full tiktoken pass over every message and tool
+        // schema on the connect path, burning guest CPU in the window the send
+        // budget exists to protect.
+        // Each message: content tokens + serialized tool_calls tokens + 4 overhead per message.
+        let message_tokens: usize = openai_request
+            .messages
+            .iter()
+            .map(|m| {
+                let content = m
+                    .content
+                    .as_ref()
+                    .map(|v| {
+                        let s = v.as_str().unwrap_or("");
+                        count_message_tokens(s)
+                    })
+                    .unwrap_or(4);
+                let tool_calls = m
+                    .tool_calls
+                    .as_ref()
+                    .map(|tc| count_tokens(&serde_json::to_string(tc).unwrap_or_default()))
+                    .unwrap_or(0);
+                content + tool_calls
+            })
+            .sum();
+        let tool_schema_tokens = openai_request
+            .tools
+            .as_ref()
+            .map(|tools| count_tokens(&serde_json::to_string(tools).unwrap_or_default()))
+            .unwrap_or(0);
+        let total_input_tokens = message_tokens + tool_schema_tokens;
+        // #1147: budget against the provider's actual window (configured
+        // context_window, then model heuristics) instead of a hardcoded 200k,
+        // which misreported a configured-1M provider as "36% of 200k".
+        let context_window = self.context_window(&model).unwrap_or(200_000);
+        let context_pct =
+            (total_input_tokens as f32 / context_window as f32 * 100.0).round() as u32;
+        tracing::debug!(
+            "[OI] stream request: ~{} input tokens ({}% of {}-token window) — {} messages, {} tool schemas",
+            total_input_tokens,
+            context_pct,
+            context_window,
+            openai_request.messages.len(),
+            tools_count
+        );
 
         // Extract OpenRouter cache status before consuming the stream
         let cache_status = response
@@ -3874,7 +3973,14 @@ impl Provider for OpenAIProvider {
         }
 
         // Parse Server-Sent Events stream - return Vec to emit multiple events like Anthropic
-        let byte_stream = response.bytes_stream();
+        // Stringify the transport error at the boundary so the stream's item
+        // type is concrete. The only consumer is the `Err(e)` arm below, which
+        // already reports `e.to_string()`, so nothing is lost — and a concrete
+        // item type keeps the closure's inference independent of anything that
+        // happens to poison it upstream.
+        let byte_stream = response
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(|e| e.to_string()));
         let buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
 
         // Accumulated state for a single streamed tool call
@@ -4047,6 +4153,25 @@ impl Provider for OpenAIProvider {
 
                             if let Some(json_str) = line.strip_prefix("data: ") {
                                 if json_str == "[DONE]" {
+                                    // Single-final-delta guard (#1738): the
+                                    // inline-usage and usage-only-chunk paths set
+                                    // reported_usage when they emit the final
+                                    // MessageDelta+MessageStop pair. Reaching [DONE]
+                                    // after one of those means the stream was already
+                                    // finalized — pushing a second pair re-rendered
+                                    // the same text block twice in the TUI (2026-09-25
+                                    // zai: 604-char block duplicated) and carried a
+                                    // bogus EndTurn default over the real stop reason.
+                                    // Tools are not at risk: any terminal finish_reason
+                                    // flushes st.tool_calls before a usage path can set
+                                    // the flag, so the fallback flush below would be
+                                    // empty by construction in this case.
+                                    if st.reported_usage {
+                                        tracing::info!(
+                                            "[STREAM_RECONCILE] final delta already emitted (reported_usage=true) — suppressing duplicate [DONE] finalize (#1738)"
+                                        );
+                                        continue;
+                                    }
                                     // Close the text block first, if one is still open,
                                     // so helpers.rs can finalize it before tool events.
                                     if st.emitted_content_start && !st.emitted_content_stop {
@@ -4109,14 +4234,12 @@ impl Provider for OpenAIProvider {
                                         reconc_tail
                                     );
                                     // The estimate is a last resort, not a second
-                                    // opinion. Once the provider has reported real
-                                    // counts this delta exists only to carry
-                                    // stop_reason, so it reports zero tokens (#1636).
-                                    let fallback_input = if st.reported_usage {
-                                        0
-                                    } else {
-                                        total_input_tokens as u32
-                                    };
+                                    // opinion: this arm only runs when the
+                                    // provider never reported usage — the #1738
+                                    // guard above suppresses the whole finalize
+                                    // otherwise, so the local estimate is all we
+                                    // have (#36, #1636).
+                                    let fallback_input = total_input_tokens as u32;
                                     tracing::info!(
                                         "[STREAM_USAGE] Final usage (fallback on DONE): input={}, output=0, stop_reason={:?}, provider_already_reported={}",
                                         fallback_input, stop_reason, st.reported_usage
@@ -4784,16 +4907,17 @@ impl Provider for OpenAIProvider {
                                             // reported and what the [STREAM_USAGE] receipt line
                                             // has always carried. `net_input` is what the ledger
                                             // gets, cached prefix removed (#1636).
-                                            let (raw_input, raw_output, raw_cache_read, raw_cache_create, net_input) = if let Some(ref usage) = chunk.usage {
+                                            let (raw_input, raw_output, raw_cache_read, raw_cache_create, net_input, reported_cost) = if let Some(ref usage) = chunk.usage {
                                                 (
                                                     usage.prompt_tokens.unwrap_or(0),
                                                     usage.completion_tokens.unwrap_or(0),
                                                     usage.effective_cache_read(),
                                                     usage.cache_creation_input_tokens.unwrap_or(0),
                                                     usage.net_input_tokens(),
+                                                    usage.cost,
                                                 )
                                             } else {
-                                                (0, 0, 0, 0, 0)
+                                                (0, 0, 0, 0, 0, None)
                                             };
                                             let raw_reasoning = chunk
                                                 .usage
@@ -4842,6 +4966,7 @@ impl Provider for OpenAIProvider {
                                                         reasoning_tokens: raw_reasoning,
                                                         cache_creation_tokens: raw_cache_create,
                                                         cache_read_tokens: raw_cache_read,
+                                                        cost_usd: reported_cost,
                                                         ..Default::default()
                                                     },
                                                 }));
@@ -4909,6 +5034,7 @@ impl Provider for OpenAIProvider {
                                                             reasoning_tokens: reasoning,
                                                             cache_creation_tokens: cache_create,
                                                             cache_read_tokens: cache_read,
+                                                            cost_usd: usage.cost,
                                                             ..Default::default()
                                                         },
                                                     }));
@@ -5079,6 +5205,10 @@ impl Provider for OpenAIProvider {
         // exist, so go through a free helper that names the inherent one
         // unambiguously (same shape as `provider_error_is_retryable`).
         oi_provider_retry_config(self, model)
+    }
+
+    fn thinking_loop_timeout(&self) -> Option<u64> {
+        self.thinking_loop_timeout
     }
 
     fn context_window(&self, model: &str) -> Option<u32> {
@@ -5351,6 +5481,12 @@ struct OpenAIUsage {
     /// `usage.completion_tokens_details.reasoning_tokens`.
     #[serde(default)]
     completion_tokens_details: Option<OpenAICompletionTokensDetails>,
+    /// Gateway-reported dollars for this call: OpenRouter's `usage.cost`
+    /// (returned when the request opts into usage accounting), LiteLLM and
+    /// similar proxies. Where present the ledger trusts it over the pricing
+    /// table — it is what the provider actually charged (#1707).
+    #[serde(default)]
+    cost: Option<f64>,
 }
 
 impl OpenAIUsage {

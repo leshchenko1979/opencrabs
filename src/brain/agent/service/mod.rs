@@ -20,6 +20,7 @@ pub(crate) mod work_status;
 pub(crate) use context::{
     format_editing_reminder, format_plan_reminder, plan_state_block, unresolved_tasks,
 };
+pub(crate) mod failure_window;
 pub(crate) mod fallback_suggest;
 pub(crate) mod feedback;
 pub(crate) mod fenced_command;

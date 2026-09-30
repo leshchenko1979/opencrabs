@@ -352,10 +352,12 @@ pub(crate) fn build_enqueue_callback(
                 // the interrupt gate's true-branch knowingly accepts. One
                 // plain string tells the receiver to re-anchor after reading.
                 let mut msg = msg;
-                msg.context_text = format!(
-                    "[queued while you were working — re-anchor to your current task after \
-                     reading this]\n\n{}",
-                    msg.context_text
+                // Idempotent framing (#439/#366): a push that already carries
+                // it — a row re-offered at boot, an item re-queued after a lost
+                // turn race — must not accumulate a second wrapper. The literal
+                // and its inverse live together in `notify_queue`.
+                msg.context_text = crate::brain::agent::service::notify_queue::wrap_busy_once(
+                    &msg.context_text,
                 );
                 state.enqueue_detached_result(session_id, msg);
                 return;
@@ -676,6 +678,17 @@ pub(crate) async fn resume_session_inner(
     {
         super::quiet::fold_previous_answer(&bot, chat_id, thread_id, session_id, &telegram_state)
             .await;
+        // #696: parity with `handle_message` — the settled card is removed too,
+        // so a quiet group never accumulates one per turn whichever path the
+        // turn arrived through.
+        super::quiet::sweep_previous_flow_card(
+            &bot,
+            chat_id,
+            thread_id,
+            session_id,
+            &telegram_state,
+        )
+        .await;
     }
 
     // ── Streaming setup ────────────────────────────────────────────────────
@@ -775,12 +788,25 @@ pub(crate) async fn resume_session_inner(
                         .await;
                 });
                 if let Ok(mut s) = st.lock() {
-                    s.compacting = true;
-                    s.header_preview = Some(COMPACTING_HEADER_TEXT.to_string());
-                    s.display_queue
-                        .push(DisplayItem::System(compacting_flow_line(
-                            usage_pct, predicted,
-                        )));
+                    // The whole compaction surface is opt-in chrome (#1686),
+                    // header pin included. Leaving the pin ungated was
+                    // justified by a staleness worry that does not exist:
+                    // tick_flow_header advances flow_status from
+                    // turn_started_at outside the `compacting` branch, so the
+                    // clock keeps counting through the silent window and the
+                    // header keeps its last real preview. With the flag off
+                    // the pin is never set, so a compaction leaves no trace on
+                    // the block at all. The CompactionSummary arm's lift stays
+                    // unconditional, so a flag flip mid-window cannot strand
+                    // a pin.
+                    if Config::current().agent.compaction_notice {
+                        s.compacting = true;
+                        s.header_preview = Some(COMPACTING_HEADER_TEXT.to_string());
+                        s.display_queue
+                            .push(DisplayItem::Intermediate(compacting_flow_line(
+                                usage_pct, predicted,
+                            )));
+                    }
                 }
             }
             // Live ctx meter (#135): TokenCount fires after every API
@@ -892,7 +918,10 @@ pub(crate) async fn resume_session_inner(
             ProgressEvent::SelfHealingAlert { message } => {
                 if let Ok(mut s) = st.lock() {
                     s.display_queue
-                        .push(DisplayItem::System(format!("🛡️ guard: {}", message)));
+                        .push(DisplayItem::System(format!(
+                            "🔧 {}",
+                            crate::utils::sanitize::normalize_dashes(&message)
+                        )));
                 }
             }
             ProgressEvent::RetryAttempt {
@@ -937,7 +966,9 @@ pub(crate) async fn resume_session_inner(
             ProgressEvent::CompactionSummary {
                 before_pct,
                 after_pct,
-                before_tokens,
+                // Not rendered (the ✅ line carries percentages only, #29);
+                // `after_tokens` is read below for the footer slot.
+                before_tokens: _,
                 after_tokens,
                 elapsed,
                 ..
@@ -945,14 +976,6 @@ pub(crate) async fn resume_session_inner(
                 if let Ok(mut s) = st.lock() {
                     s.compacting = false;
                     s.header_preview = None;
-                    s.display_queue
-                        .push(DisplayItem::System(compacted_flow_line(
-                            before_pct,
-                            after_pct,
-                            before_tokens,
-                            after_tokens,
-                            elapsed,
-                        )));
                     // Resumed turns get the same live-meter treatment (#135):
                     // post-compaction token count lands in the footer slot.
                     s.sections.ctx = Some(crate::utils::format_ctx_footer(
@@ -961,6 +984,17 @@ pub(crate) async fn resume_session_inner(
                         None,
                     ));
                     s.dirty = true;
+                    // Lifting the pin stays unconditional while setting it is
+                    // gated (#1686): set-gated / lift-ungated means a flag flip
+                    // inside the compaction window can never strand a pin that
+                    // nothing will clear. The lift is what lets the next tick
+                    // recompute the header from live data.
+                    if Config::current().agent.compaction_notice {
+                        s.display_queue
+                            .push(DisplayItem::Intermediate(compacted_flow_line(
+                                before_pct, after_pct, elapsed,
+                            )));
+                    }
                 }
             }
             _ => {}

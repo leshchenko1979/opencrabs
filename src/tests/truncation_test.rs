@@ -63,6 +63,35 @@ fn backtick_closed_inline_code_clean() {
 }
 
 #[test]
+fn quote_tail_inside_open_code_span_is_truncated() {
+    // #1753 incident shape: the stream died one char PAST the opening
+    // backtick, on the opening quote of a string literal — last char `"`,
+    // odd inline-code parity. Old code only consulted parity when the
+    // last char WAS the backtick, so this read as complete-looking and
+    // shipped unmarked (provider EndTurn lie, Telegram + TUI alike).
+    let truncated = "The guard is fine, the replay sweep is gated on `content.contains(\"";
+    assert!(looks_truncated_mid_sentence(truncated));
+}
+
+#[test]
+fn quoted_period_ending_with_balanced_spans_stays_clean() {
+    // False-positive pin: `"…done."` endings are legitimate — which is
+    // exactly why `"` is NOT on the cut-char denylist. Balanced backticks,
+    // quote after a period: complete.
+    let complete = "He typed exit and the shell politely replied \"Goodbye, see you soon.\"";
+    assert!(!looks_truncated_mid_sentence(complete));
+}
+
+#[test]
+fn odd_parity_flags_even_on_a_period_ending() {
+    // Semantics of the generalization: a dangling inline-code span is the
+    // signal; the final character is not. Period ending, one unclosed
+    // span -> truncated.
+    let text = "To check the status just run `git status and read the worktree lines.";
+    assert!(looks_truncated_mid_sentence(text));
+}
+
+#[test]
 fn unclosed_fence_truncated() {
     let text = "Here is the script you asked for:\n\n```bash\necho hello\nls -la";
     assert!(looks_truncated_mid_sentence(text));
@@ -119,4 +148,65 @@ fn join_restart_reproducing_partial_is_progress() {
         join_continuation(partial, cont),
         Continuation::Extended(cont.to_string())
     );
+}
+
+// ── anchored continuation nudge (#1737) ─────────────────────────
+
+#[test]
+fn nudge_embeds_verbatim_tail() {
+    // The #1737 incident: the partial ended inside an unclosed code span
+    // and the unanchored nudge let the model "continue" with a lone
+    // closing backtick. The anchor must carry the exact tail characters.
+    let partial =
+        "The audit found three issues, and the fix lives in `hoist_reasoning_blocks` (`:839`, `";
+    let nudge = continuation_nudge(partial, None);
+    let tail = partial.trim_end();
+    assert!(
+        nudge.contains(
+            "---\nThe audit found three issues, and the fix lives in `hoist_reasoning_blocks` (`:839`, `\n---"
+        ),
+        "nudge must embed the verbatim tail between delimiter lines, got: {nudge}"
+    );
+    // Short partials embed whole — tail equals the trimmed partial.
+    assert!(nudge.contains(tail));
+}
+
+#[test]
+fn nudge_tail_window_is_capped_at_anchor_chars() {
+    let long = format!("{}{}", "a".repeat(200), "TAIL_MARKER_0123456789");
+    let nudge = continuation_nudge(&long, None);
+    // The anchor window is the LAST TAIL_ANCHOR_CHARS characters only —
+    // the beginning must NOT leak into the prompt.
+    assert!(!nudge.contains(&"a".repeat(150)));
+    let expected_tail: String = long
+        .trim_end()
+        .chars()
+        .rev()
+        .take(TAIL_ANCHOR_CHARS)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    assert!(nudge.contains(&expected_tail));
+}
+
+#[test]
+fn nudge_rejects_the_degenerate_minimal_move() {
+    // Anti-markup-close clause: closing a dangling span alone must be
+    // explicitly named as NOT continuing.
+    let nudge = continuation_nudge("text ending in `", None);
+    assert!(nudge.contains("closing it alone does NOT"));
+    assert!(nudge.contains("carry the content forward"));
+    // Degenerate variant names the rejected attempt.
+    let retry = continuation_nudge("text ending in `", Some("`"));
+    assert!(retry.contains("previous continuation attempt returned only"));
+    assert!(retry.contains('`'));
+}
+
+#[test]
+fn continuation_budget_is_bounded_at_two() {
+    // One original anchored attempt + one degenerate retry (#1737).
+    // Pinning the constant: raising it silently would let a broken
+    // provider loop on billed continuation requests.
+    assert_eq!(MAX_CONTINUATION_ATTEMPTS, 2);
 }

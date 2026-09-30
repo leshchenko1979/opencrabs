@@ -26,11 +26,13 @@ use super::{
     gemini::GeminiProvider,
     opencode_cli::OpenCodeCliProvider,
 };
-use crate::config::{Config, ProviderConfig};
+use crate::config::timeout::{resolve_thinking_loop, resolve_timeout};
+use crate::config::{AgentConfig, Config, ProviderConfig};
 use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 // ── Provider Registry ───────────────────────────────────────────
 
@@ -891,7 +893,7 @@ fn try_create_custom_by_name(config: &Config, name: &str) -> Result<Option<Arc<d
     };
     builder = builder.with_body_transform(combined_transform);
 
-    let provider = configure_openai_compatible(builder, config, &custom_config);
+    let provider = configure_openai_compatible(builder, config, &custom_config, &config.agent);
     Ok(Some(Arc::new(provider)))
 }
 
@@ -955,6 +957,18 @@ pub(crate) fn normalized_vision_chain(config: &Config) -> Vec<String> {
         config,
         crate::brain::provider_spec::ProviderKey::FALLBACK_VISION,
         &fallback.vision,
+    )
+}
+
+/// `[providers.fallback] generation` with every entry normalised (#1672).
+pub(crate) fn normalized_generation_chain(config: &Config) -> Vec<String> {
+    let Some(fallback) = config.providers.fallback.as_ref() else {
+        return Vec::new();
+    };
+    normalized_names(
+        config,
+        crate::brain::provider_spec::ProviderKey::FALLBACK_GENERATION,
+        &fallback.generation,
     )
 }
 
@@ -1315,23 +1329,226 @@ pub fn active_provider_generation(config: &Config) -> Option<(String, String, St
             .base_url
             .clone()
             .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-        let base_url = raw
-            .trim_end_matches("/chat/completions")
-            .trim_end_matches('/')
-            .to_string();
+        let base_url = generation_root_url(&raw);
         return Some((api_key, base_url, generation_model.clone()));
     }
     None
 }
 
-/// Final model name to hand to `GenerateImageTool` — active provider's
-/// `generation_model` override wins, otherwise fall back to the global
-/// `image.generation.model`. Keeps the resolution decision next to its
-/// vision counterpart so call sites stay plain wiring.
+/// Final model name to hand to `GenerateImageTool` — first resolved
+/// generation candidate (session provider's `generation_model`, then the
+/// `[providers.fallback] generation` chain) wins, otherwise fall back to the
+/// global `image.generation.model`. Keeps the resolution decision next to
+/// its vision counterpart so call sites stay plain wiring.
 pub fn effective_generation_model(config: &Config) -> String {
-    active_provider_generation(config)
-        .map(|(_, _, m)| m)
+    generation_candidates_for(config, None)
+        .first()
+        .map(|(_, _, m)| m.clone())
         .unwrap_or_else(|| config.image.generation.model.clone())
+}
+
+/// Normalise an endpoint for the OpenAI-style `/images/generations` route:
+/// strip a chat suffix and trailing slashes so callers can append the
+/// images segment. Accepts the three URL shapes users paste into
+/// provider config: `…/v1`, `…/v1/chat/completions`, or the bare host root.
+fn generation_root_url(url: &str) -> String {
+    url.trim_end_matches("/chat/completions")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Marker endpoint for the built-in Gemini provider's `generation_model`.
+/// `GenerateImageTool` detects the Google host marker and routes through
+/// the native Gemini wire (which builds its own URL); this string exists
+/// so the candidate carries the right backend signal, it is never called
+/// as-is.
+const GEMINI_GENERATION_MARKER_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+
+/// Generation endpoint for a built-in provider, derived the way the vision
+/// path derives it (#430 rule, applied to generation for #1672): explicit
+/// `base_url` first, then known per-provider defaults, and NEVER guessing
+/// OpenAI for an unknown id. `None` = endpoint unknown, candidate skipped.
+fn generation_base_url(session_id: &str, cfg: &ProviderConfig) -> Option<String> {
+    let derived = if let Some(url) = cfg.base_url.clone() {
+        url
+    } else {
+        match session_id {
+            "openai" => "https://api.openai.com/v1".to_string(),
+            // Anthropic's OpenAI-compatible layer.
+            "anthropic" => "https://api.anthropic.com/v1".to_string(),
+            "openrouter" => "https://openrouter.ai/api/v1".to_string(),
+            "minimax" => "https://api.minimax.io/v1".to_string(),
+            "qwen" => QWEN_DEFAULT_DASHSCOPE_URL.to_string(),
+            "ollama" => "http://localhost:11434/v1".to_string(),
+            "gemini" => GEMINI_GENERATION_MARKER_URL.to_string(),
+            // CLI wrappers, native protocols, and anything else without an
+            // explicit base_url: no derivable images endpoint.
+            _ => return None,
+        }
+    };
+    Some(generation_root_url(&derived))
+}
+
+/// Candidate for a built-in provider: derived endpoint + usable key.
+/// A real key wins; keyless only counts when the endpoint is local
+/// (Ollama diffusion and friends). Chat `enabled` is NOT consulted —
+/// same contract as the vision path (#401).
+fn builtin_generation_candidate(
+    session_id: &str,
+    cfg: &ProviderConfig,
+    generation_model: &str,
+) -> Option<(String, String, String)> {
+    let base_url = generation_base_url(session_id, cfg)?;
+    let api_key = cfg.api_key.clone().filter(|k| !k.is_empty());
+    if api_key.is_none() && !is_local_base_url(&base_url) {
+        return None;
+    }
+    Some((
+        api_key.unwrap_or_default(),
+        base_url,
+        generation_model.to_string(),
+    ))
+}
+
+/// Candidate for a custom provider: customs carry their own `base_url`
+/// (skipped when missing — never guessed) and may be keyless local
+/// endpoints (Ollama, llama.cpp, LM Studio, SD webui).
+fn custom_generation_candidate(
+    cfg: &ProviderConfig,
+    generation_model: &str,
+) -> Option<(String, String, String)> {
+    let base_url = generation_root_url(&cfg.base_url.clone()?);
+    Some((
+        cfg.api_key.clone().unwrap_or_default(),
+        base_url,
+        generation_model.to_string(),
+    ))
+}
+
+/// Look up a single provider by `name` (REGISTRATIONS session_id / alias,
+/// or custom map key, with or without the `custom:` prefix) and return its
+/// `(api_key, base_url, generation_model)` when it carries a
+/// `generation_model`. Mirrors `vision_by_name` exactly, including custom
+/// entries shadowing same-named built-ins.
+fn generation_by_name(config: &Config, name: &str) -> Option<(String, String, String)> {
+    // Custom entries take precedence (same convention as create_fallback).
+    if !name.starts_with("custom:")
+        && config
+            .providers
+            .custom
+            .as_ref()
+            .is_some_and(|m| m.contains_key(name))
+    {
+        let cfg = config.providers.custom.as_ref()?.get(name)?;
+        return cfg
+            .generation_model
+            .as_ref()
+            .and_then(|gm| custom_generation_candidate(cfg, gm));
+    }
+    if let Some(custom_name) = name.strip_prefix("custom:") {
+        let cfg = config.providers.custom.as_ref()?.get(custom_name)?;
+        return cfg
+            .generation_model
+            .as_ref()
+            .and_then(|gm| custom_generation_candidate(cfg, gm));
+    }
+    // Built-in registry — endpoint derived per provider, never guessed.
+    for reg in REGISTRATIONS.iter() {
+        if reg.session_id == name || reg.aliases.contains(&name) {
+            let cfg = (reg.config_field)(config)?;
+            return cfg
+                .generation_model
+                .as_ref()
+                .and_then(|gm| builtin_generation_candidate(reg.session_id, cfg, gm));
+        }
+    }
+    None
+}
+
+/// Ordered generation candidates `(api_key, base_url, generation_model)`,
+/// walked at REQUEST time by `GenerateImageTool` (#1672).
+///
+/// Order is the vision contract copied verbatim (#1318):
+/// 1. the session's CURRENT provider when it carries a `generation_model`
+///    (no session in hand: the config's active provider, preserving the
+///    pre-#1672 behavior for callers without session context);
+/// 2. `[providers.fallback] generation`, in the order written, deduped;
+/// 3. the global Gemini `[image.generation]` fallback — applied by the
+///    caller after every candidate fails, never primary.
+pub fn generation_candidates_for(
+    config: &Config,
+    session_provider: Option<&str>,
+) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    let push = |cand: (String, String, String), out: &mut Vec<(String, String, String)>| {
+        if !out.contains(&cand) {
+            out.push(cand);
+        }
+    };
+
+    match session_provider {
+        Some(name) => {
+            if let Some(cand) = generation_by_name(config, name) {
+                push(cand, &mut out);
+            }
+        }
+        None => {
+            // No session in hand: the config's active provider, resolved
+            // through the SAME never-guess path as chain entries —
+            // `active_provider_generation`'s api.openai.com default would
+            // point a keyless local provider (Ollama diffusion) at a
+            // public endpoint and 401 every roll (#430 rule, applied to
+            // generation in #1672).
+            let (active, _) = config.providers.active_provider_and_model();
+            if let Some(cand) = generation_by_name(config, &active) {
+                push(cand, &mut out);
+            }
+        }
+    }
+    for name in normalized_generation_chain(config) {
+        if let Some(cand) = generation_by_name(config, &name) {
+            push(cand, &mut out);
+        }
+    }
+    out
+}
+
+/// Capability answer — "can ANY provider generate images?" — deliberately
+/// unordered, the same split `any_provider_vision` draws (#1318's lesson:
+/// capability scan must never feed precedence). Used by the registration
+/// gate so a provider-based generation route registers `generate_image`
+/// even when the Gemini `[image.generation]` flag is off.
+pub fn any_provider_generation(config: &Config) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    let push = |cand: (String, String, String), out: &mut Vec<(String, String, String)>| {
+        if !out.contains(&cand) {
+            out.push(cand);
+        }
+    };
+
+    for reg in REGISTRATIONS.iter() {
+        if let Some(cfg) = (reg.config_field)(config)
+            && let Some(gm) = &cfg.generation_model
+            && let Some(cand) = builtin_generation_candidate(reg.session_id, cfg, gm)
+        {
+            push(cand, &mut out);
+        }
+    }
+    if let Some(customs) = &config.providers.custom {
+        for cfg in customs.values() {
+            if let Some(gm) = &cfg.generation_model
+                && let Some(cand) = custom_generation_candidate(cfg, gm)
+            {
+                push(cand, &mut out);
+            }
+        }
+    }
+    for name in normalized_generation_chain(config) {
+        if let Some(cand) = generation_by_name(config, &name) {
+            push(cand, &mut out);
+        }
+    }
+    out
 }
 
 // ── Individual provider factory functions ───────────────────────
@@ -1379,6 +1596,7 @@ fn try_create_github(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
             .with_extra_headers(copilot_extra_headers()),
         config,
         github_config,
+        &config.agent,
     );
     Ok(Some(Arc::new(provider)))
 }
@@ -1433,7 +1651,7 @@ async fn try_create_qwen(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
         .with_body_transform(Arc::new(qwen_body_transform))
         .with_rate_limiter(qwen_limiter);
 
-    let provider = configure_openai_compatible(builder, config, qwen_config);
+    let provider = configure_openai_compatible(builder, config, qwen_config, &config.agent);
     Ok(Some(Arc::new(provider)))
 }
 
@@ -1480,6 +1698,7 @@ fn try_create_openrouter(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
             ]),
         config,
         openrouter_config,
+        &config.agent,
     );
 
     // OpenRouter caches by default — turn it on unless the user explicitly opted
@@ -1572,7 +1791,7 @@ fn try_create_xiaomi(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
     // via prompt_tokens_details) — there is no request-side cache parameter, so
     // we deliberately do NOT set cache_enabled (which would send an
     // OpenRouter/Anthropic-style cache_control Xiaomi doesn't accept).
-    let provider = configure_openai_compatible(builder, config, xiaomi_config);
+    let provider = configure_openai_compatible(builder, config, xiaomi_config, &config.agent);
     Ok(Some(Arc::new(provider)))
 }
 
@@ -1612,6 +1831,7 @@ fn try_create_minimax(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
         OpenAIProvider::with_base_url(api_key.clone(), full_url).with_name("minimax"),
         config,
         minimax_config,
+        &config.agent,
     );
 
     // MiniMax M2.7/M2.5 doesn't support vision — default to MiniMax-Text-01 in-memory.
@@ -1650,11 +1870,37 @@ fn try_create_zhipu(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
         zhipu_config.endpoint_type,
         zhipu_config.base_url.is_some()
     );
-    let provider = configure_openai_compatible(
+    let mut provider = configure_openai_compatible(
         OpenAIProvider::with_base_url(api_key.clone(), base_url).with_name("zai"),
         config,
         zhipu_config,
+        &config.agent,
     );
+    // Neither tier configured an idle timeout, so the host-aware default is the
+    // only thing standing between z.ai and the generic 20s remote default, which
+    // would cut a host the code documents as holding an idle stream to ~30s and
+    // blame the connection for our own timer (#1666). Resolved across BOTH tiers
+    // (#1688): reading only the per-provider key here would let this default
+    // overwrite an explicit `[agent] stream_idle_timeout_secs`.
+    let idle_cfg = resolve_timeout(
+        zhipu_config.stream_idle_timeout_secs,
+        config.agent.stream_idle_timeout_secs,
+        None,
+    );
+    let host_aware_idle = idle_cfg
+        .effective
+        .is_none()
+        .then(|| {
+            super::zhipu_endpoint::default_idle_timeout_secs(
+                zhipu_config.base_url.as_deref(),
+                zhipu_config.endpoint_type.as_deref(),
+            )
+        })
+        .flatten();
+    if let Some(secs) = host_aware_idle {
+        provider = provider.with_stream_idle_timeout(std::time::Duration::from_secs(secs));
+        tracing::info!("z.ai host-aware stream idle timeout: {}s", secs);
+    }
     Ok(Some(Arc::new(provider)))
 }
 
@@ -1698,6 +1944,7 @@ fn try_create_moonshot(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
         OpenAIProvider::with_base_url(api_key.clone(), base_url).with_name("moonshot"),
         config,
         moonshot_config,
+        &config.agent,
     );
     Ok(Some(Arc::new(provider)))
 }
@@ -1737,7 +1984,7 @@ fn try_create_ollama(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
         let enable = ollama_config.enable_thinking.unwrap_or(true);
         builder = builder.with_body_transform(local_thinking_body_transform(enable));
     }
-    let provider = configure_openai_compatible(builder, config, ollama_config);
+    let provider = configure_openai_compatible(builder, config, ollama_config, &config.agent);
     Ok(Some(Arc::new(provider)))
 }
 
@@ -1790,10 +2037,87 @@ fn try_create_custom(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
     };
     builder = builder.with_body_transform(combined_transform);
 
-    let provider = configure_openai_compatible(builder, config, &custom_config);
+    let provider = configure_openai_compatible(builder, config, &custom_config, &config.agent);
     Ok(Some(Arc::new(provider)))
 }
 
+/// Resolve one timeout flag across `[providers.<name>]` -> `[agent]` -> the
+/// family default, log the tier that won, and return the duration to apply.
+///
+/// The return is an *override*, not the effective ceiling: when nothing usable
+/// is configured the family default still governs the wire, but the caller gets
+/// `None` so the provider keeps reporting "no override" through the trait
+/// accessors ([`crate::config::timeout::TimeoutResolution::override_duration`]).
+///
+/// `compiled_default` is `None` for a flag whose default is picked at runtime
+/// rather than baked into a family: `stream_idle_timeout_secs` is resolved in
+/// `brain/agent/service/helpers.rs` (3600s local/CLI, 45s z.ai, 20s remote), so
+/// a value unset at both tiers must defer to that table instead of overriding
+/// it with a number from the transport layer.
+///
+/// A `0` at either tier is skipped, never honoured: a zero-second reqwest
+/// timeout is an instant deadline, and a zero-second idle timer fires before
+/// the first chunk arrives. Skipping it *silently* is the same invisibility
+/// that kept these keys unnoticed long enough to become a documented README
+/// example, so every skip gets a log line naming the section that carried it.
+fn resolve_and_report(
+    provider_value: Option<u64>,
+    agent_value: Option<u64>,
+    compiled_default: Option<u64>,
+    flag: &str,
+    label: &str,
+) -> Option<Duration> {
+    let resolution = resolve_timeout(provider_value, agent_value, compiled_default);
+    let duration = resolution.override_duration();
+    if let Some(dur) = duration {
+        tracing::info!("{label}: {}s (from {})", dur.as_secs(), resolution.tier);
+    }
+    if let Some(note) = resolution.zero_note() {
+        tracing::warn!(
+            "`{flag} = 0` is skipped ({note}); a zero-second timer would fire \
+             immediately, so the default applies instead"
+        );
+    }
+    duration
+}
+
+/// Apply the resolved timeout chain to a provider that owns both setters.
+///
+/// Shared by all three families (#1688 compat, #1689 anthropic and gemini) so a
+/// new family cannot quietly implement one setter and forget the other: the
+/// per-provider tier, the global tier, and the family's compiled request
+/// ceiling are all named here, in one place.
+///
+/// The third value is the resolved thinking-loop guard in seconds (#1690). It
+/// is a plain `u64` and not an `Option<Duration>` because for this clock `0` is
+/// a value, not an absent one: it disables the guard.
+fn report_timeout_chain(
+    config: &ProviderConfig,
+    agent: &AgentConfig,
+    compiled_request_secs: u64,
+) -> (Option<Duration>, Option<Duration>, u64) {
+    let request = resolve_and_report(
+        config.timeout_secs,
+        agent.timeout_secs,
+        Some(compiled_request_secs),
+        "timeout_secs",
+        "Non-streaming request ceiling",
+    );
+    let idle = resolve_and_report(
+        config.stream_idle_timeout_secs,
+        agent.stream_idle_timeout_secs,
+        None,
+        "stream_idle_timeout_secs",
+        "Stream idle timeout",
+    );
+    let thinking_loop = resolve_thinking_loop(
+        config.thinking_loop_timeout_secs,
+        agent.thinking_loop_timeout_secs,
+    );
+    (request, idle, thinking_loop)
+}
+
+/// Configure OpenAI-compatible provider with custom model
 /// Configure OpenAI-compatible provider with custom model.
 ///
 /// `global` is the whole configuration, consulted for the `[retry]` block
@@ -1804,6 +2128,7 @@ pub(crate) fn configure_openai_compatible(
     mut provider: OpenAIProvider,
     global: &Config,
     config: &ProviderConfig,
+    agent: &AgentConfig,
 ) -> OpenAIProvider {
     tracing::debug!(
         "configure_openai_compatible: default_model = {:?}",
@@ -1857,17 +2182,21 @@ pub(crate) fn configure_openai_compatible(
         provider = provider.with_cache_ttl(ttl);
         tracing::info!("OpenRouter cache TTL: {}s", ttl);
     }
-    if let Some(secs) = config.timeout_secs
-        && secs > 0
-    {
-        provider = provider.with_timeout(std::time::Duration::from_secs(secs));
-        tracing::info!("Configured request timeout: {}s", secs);
+    // #1688: both flags resolve through [providers.<name>] -> [agent] -> the
+    // family default. Before this the per-provider struct was the only tier
+    // read anywhere in the tree, so `[agent] timeout_secs = 120` was parsed,
+    // stored, and then quietly ignored. #1689 put the same chain behind
+    // `report_timeout_chain` so anthropic and gemini read it too.
+    let (request, idle, thinking_loop) = report_timeout_chain(
+        config,
+        agent,
+        super::custom_openai_compatible::DEFAULT_TIMEOUT.as_secs(),
+    );
+    if let Some(dur) = request {
+        provider = provider.with_timeout(dur);
     }
-    if let Some(secs) = config.stream_idle_timeout_secs
-        && secs > 0
-    {
-        provider = provider.with_stream_idle_timeout(std::time::Duration::from_secs(secs));
-        tracing::info!("Configured stream idle timeout: {}s", secs);
+    if let Some(dur) = idle {
+        provider = provider.with_stream_idle_timeout(dur);
     }
     // Retry policy (#346): this provider's own `retry_*` keys merged over
     // the global `[retry]` block. Installed as OVERRIDES, never as a
@@ -1883,6 +2212,7 @@ pub(crate) fn configure_openai_compatible(
         );
         provider = provider.with_retry_overrides(retry_overrides);
     }
+    provider = provider.with_thinking_loop_timeout(thinking_loop);
     provider
 }
 
@@ -1903,7 +2233,7 @@ fn try_create_openai(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
             let enable = openai_config.enable_thinking.unwrap_or(true);
             builder = builder.with_body_transform(local_thinking_body_transform(enable));
         }
-        let provider = configure_openai_compatible(builder, config, openai_config);
+        let provider = configure_openai_compatible(builder, config, openai_config, &config.agent);
         return Ok(Some(Arc::new(provider)));
     }
 
@@ -1914,6 +2244,7 @@ fn try_create_openai(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
             OpenAIProvider::new(api_key.clone()).with_name("openai"),
             config,
             openai_config,
+            &config.agent,
         );
         return Ok(Some(Arc::new(provider)));
     }
@@ -1948,6 +2279,20 @@ fn try_create_gemini(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
         tracing::info!("Gemini context window override: {} tokens", cw);
         provider = provider.with_context_window(cw);
     }
+    // #1689: like anthropic, the gemini family read neither timeout key at any
+    // tier until this chain was wired in (#1688 built it for the compat family).
+    let (request, idle, thinking_loop) = report_timeout_chain(
+        gemini_config,
+        &config.agent,
+        super::gemini::DEFAULT_TIMEOUT.as_secs(),
+    );
+    if let Some(dur) = request {
+        provider = provider.with_timeout(dur);
+    }
+    if let Some(dur) = idle {
+        provider = provider.with_stream_idle_timeout(dur);
+    }
+    provider = provider.with_thinking_loop_timeout(thinking_loop);
     Ok(Some(Arc::new(provider)))
 }
 
@@ -2106,6 +2451,7 @@ async fn try_create_opencode(config: &Config) -> Result<Option<Arc<dyn Provider>
             .with_default_model(model.clone()),
         config,
         opencode_config,
+        &config.agent,
     );
 
     Ok(Some(Arc::new(provider)))
@@ -2136,6 +2482,21 @@ fn try_create_anthropic(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
         tracing::info!("Anthropic context window override: {} tokens", cw);
         provider = provider.with_context_window(cw);
     }
+    // #1689: the anthropic family used to read neither timeout key at any tier,
+    // so the README's `[providers.anthropic] timeout_secs = 120` example was a
+    // documented no-op. Same chain as the compat family (#1688).
+    let (request, idle, thinking_loop) = report_timeout_chain(
+        anthropic_config,
+        &config.agent,
+        super::anthropic::DEFAULT_TIMEOUT.as_secs(),
+    );
+    if let Some(dur) = request {
+        provider = provider.with_timeout(dur);
+    }
+    if let Some(dur) = idle {
+        provider = provider.with_stream_idle_timeout(dur);
+    }
+    provider = provider.with_thinking_loop_timeout(thinking_loop);
 
     tracing::info!("Using Anthropic provider");
 

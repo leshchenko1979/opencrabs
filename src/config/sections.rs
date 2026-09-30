@@ -177,6 +177,15 @@ pub fn is_legacy_channel_section(name: &str) -> bool {
         .iter()
         .any(|(child, parent)| *child == name && *parent == "channels")
 }
+/// Ignored config paths in `content` — what the loader's typo warning
+/// reports at load time (#1724). Returns every key the compiled `Config`
+/// struct discards, at any depth. A stale nested table (e.g.
+/// `[providers.web_search.duckduckgo]`) is reported here; previously only
+/// single-segment paths were, so nested garbage under a known section went
+/// invisible in the log while the Telegram alert fired on the same file.
+pub fn unknown_config_paths(content: &str) -> Result<Vec<String>, String> {
+    ignored_key_paths(content)
+}
 
 /// Can a WRITE address `section`/`key` in the candidate document?
 ///

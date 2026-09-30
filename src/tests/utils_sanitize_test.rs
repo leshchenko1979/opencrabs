@@ -484,3 +484,90 @@ fn phantom_strip_passthrough_without_marker() {
     let input = "ordinary content with <!-- some other comment --> intact";
     assert_eq!(strip_phantom_blocked(input), input);
 }
+
+#[test]
+fn strip_llm_artifacts_removes_ansi_csi_sequences() {
+    // #1719: escape sequences in model/tool text get executed by the
+    // terminal when the span buffer is drawn. They must not reach it.
+    let input = "\u{1b}[31mred\u{1b}[0m plain";
+    assert_eq!(strip_llm_artifacts(input), "red plain");
+}
+
+#[test]
+fn strip_llm_artifacts_removes_osc_and_single_char_escapes() {
+    let osc_bel = "\u{1b}]0;evil title\u{7}body";
+    assert_eq!(strip_llm_artifacts(osc_bel), "body");
+    let osc_st = "\u{1b}]2;t\u{1b}\\body";
+    assert_eq!(strip_llm_artifacts(osc_st), "body");
+    let single = "\u{1b}csave\u{1b}8rest";
+    assert_eq!(strip_llm_artifacts(single), "saverest");
+}
+
+#[test]
+fn strip_llm_artifacts_ansi_strip_keeps_plain_text_and_literal_brackets() {
+    // No ESC byte anywhere: fast path, text byte-identical.
+    let plain = "# Heading\n[31m not an escape\n`code [0m here`";
+    assert_eq!(strip_llm_artifacts(plain), plain);
+}
+
+#[test]
+fn strip_llm_artifacts_ansi_strip_survives_marker_then_escape_mix() {
+    // ANSI pass runs before the Qwen marker sweep; both must apply.
+    let input = "\u{1b}[2K<|tool\u{2581}call_begin|>hi";
+    assert_eq!(strip_llm_artifacts(input), "hi");
+}
+
+// --- #1745: typographic dash normalization ------------------------------
+
+#[test]
+fn dash_spaced_em_dash_becomes_bare_colon() {
+    // The house rule: space before the em-dash is consumed with it.
+    assert_eq!(strip_llm_artifacts("want \u{2014} the"), "want: the");
+}
+
+#[test]
+fn dash_trailing_space_em_dash_becomes_colon_space() {
+    assert_eq!(strip_llm_artifacts("word\u{2014} next"), "word: next");
+}
+
+#[test]
+fn dash_glued_em_dash_becomes_colon() {
+    assert_eq!(strip_llm_artifacts("word\u{2014}word"), "word:word");
+}
+
+#[test]
+fn dash_em_dash_at_end_of_text() {
+    assert_eq!(strip_llm_artifacts("and then \u{2014}"), "and then:");
+}
+
+#[test]
+fn dash_en_dash_becomes_plain_hyphen() {
+    // Ranges stay natural after the char swap.
+    assert_eq!(strip_llm_artifacts("1\u{2013}3"), "1-3");
+    assert_eq!(strip_llm_artifacts("a \u{2013} b"), "a - b");
+}
+
+#[test]
+fn dash_multiple_occurrences_all_normalized() {
+    let input = "a \u{2014} b\u{2014}c 1\u{2013}3 d\u{2014} e";
+    assert_eq!(strip_llm_artifacts(input), "a: b:c 1-3 d: e");
+}
+
+#[test]
+fn dash_normalization_is_idempotent() {
+    let once = strip_llm_artifacts("want \u{2014} the 1\u{2013}3");
+    assert_eq!(strip_llm_artifacts(&once), once);
+}
+
+#[test]
+fn dash_normalization_composes_with_artifact_stripping() {
+    // ANSI pass first, dashes last: one call must do both.
+    let input = "\u{1b}[31mgo\u{1b}[0m \u{2014} fast 1\u{2013}2";
+    assert_eq!(strip_llm_artifacts(input), "go: fast 1-2");
+}
+
+#[test]
+fn dash_free_text_is_byte_identical() {
+    let plain = "no dashes here: just colons, hyphens - and 1-3 ranges";
+    assert_eq!(strip_llm_artifacts(plain), plain);
+}

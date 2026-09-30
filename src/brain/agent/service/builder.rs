@@ -1,4 +1,5 @@
 use super::compaction::CompactionState;
+use super::failure_window;
 use super::types::*;
 use crate::brain::provider::Provider;
 use crate::brain::tools::ToolRegistry;
@@ -253,13 +254,17 @@ pub struct AgentService {
     /// (which is the common case for transient outages where the
     /// primary recovers on the very next request).
     ///
-    /// When the count reaches `STICKY_FALLBACK_THRESHOLD` (4 — see
-    /// the fallback-success commit site in `tool_loop.rs`), the
-    /// fallback gets persisted into `session_providers` and the
-    /// per-session model override; before then the fallback rescues
-    /// only this single request and the primary is restored for the
-    /// next one.
-    pub(super) session_primary_failure_streak: std::sync::RwLock<HashMap<Uuid, u32>>,
+    /// When `STICKY_FALLBACK_THRESHOLD` (4 — see the fallback-success
+    /// commit site in `tool_loop.rs`) rescues land inside
+    /// `failure_window::STICKY_FALLBACK_WINDOW`, the fallback gets
+    /// persisted into `session_providers` and the per-session model
+    /// override; before then the fallback rescues only this single
+    /// request and the primary is restored for the next one.
+    ///
+    /// Timestamps rather than a running count so a rescue expires on its
+    /// own instead of being wiped by the next primary success (#1667).
+    pub(super) session_primary_failure_streak:
+        std::sync::RwLock<HashMap<Uuid, Vec<std::time::Instant>>>,
 
     // #138 part 2: the active-skill set no longer lives here. It is now a
     // process-wide registry in `brain::tools::seen_skills`, persisted on the
@@ -304,6 +309,18 @@ pub struct AgentService {
     pub(super) session_outgoing_text_ring:
         std::sync::RwLock<HashMap<Uuid, super::announcement_loop::OutgoingTextRing>>,
 
+    /// Per-tool health annotations (#1706). Success rates from the feedback
+    /// ledger, surfaced as description suffixes on the tool schemas the model
+    /// sees, so routing decisions use recorded reality instead of stale
+    /// marketing descriptions. The ledger is queried by a fire-and-forget
+    /// task at most once per refresh interval; request-path reads only touch
+    /// this cache (the schema-build path is sync and must not block on the
+    /// DB). First process start serves an empty map for the milliseconds
+    /// until the first refresh lands, which is the correct degradation: no
+    /// data, no warnings.
+    pub(super) tool_health_cache:
+        std::sync::Arc<std::sync::RwLock<super::feedback::ToolHealthCache>>,
+
     /// Service context for database operations
     pub(super) context: ServiceContext,
 
@@ -325,6 +342,16 @@ pub struct AgentService {
 
     /// Whether to auto-approve tool execution
     pub(super) auto_approve_tools: bool,
+    /// Audit recording (#1705): when true, read-class tool calls persist a
+    /// `turn_retrievals` row and turn finalization persists a
+    /// `turn_outcomes` row for the /audit viewer. Resolved from
+    /// `[features] audit_recording` once at construction (same policy as
+    /// the other flattened flags) so the per-call gate is a bool check.
+    pub(super) audit_recording: bool,
+    /// Claude tasks started during the CURRENT turn, per session (#1776
+    /// seam 3). Cleared at turn entry (run_tool_loop_inner); membership at
+    /// notification time decides mid-turn-silent vs post-exit-survivor.
+    pub(super) claude_turn_tasks: std::sync::Mutex<super::background_tasks::ClaudeTurnTasks>,
 
     /// Headless session (#129): no live user surface (CLI one-shot run, cron
     /// daemon execute, sub-agent spawn). Stamped into every
@@ -476,6 +503,9 @@ impl AgentService {
             session_compaction_state: std::sync::RwLock::new(HashMap::new()),
             last_compaction_elapsed: std::sync::RwLock::new(HashMap::new()),
             session_outgoing_text_ring: std::sync::RwLock::new(HashMap::new()),
+            tool_health_cache: std::sync::Arc::new(std::sync::RwLock::new(
+                super::feedback::ToolHealthCache::default(),
+            )),
             context,
             tool_registry: {
                 let mut registry = ToolRegistry::new();
@@ -500,6 +530,8 @@ impl AgentService {
             auto_approve_tools: crate::utils::approval::policy_auto_approves(
                 &config.agent.approval_policy,
             ),
+            audit_recording: config.features.audit_recording,
+            claude_turn_tasks: std::sync::Mutex::default(),
             headless: false,
             silent_compaction: config.agent.silent_compaction,
             background_compaction: config.agent.background_compaction,
@@ -551,8 +583,15 @@ impl AgentService {
     /// `swap_provider_for_session` wraps in a `FallbackProvider`.
     /// Marked `#[doc(hidden)]` because no production caller should
     /// mutate this field after construction.
+    ///
+    /// Takes `&self`, not `&mut self`: the chain lives behind a `RwLock`, so
+    /// the write never needed exclusive access, and `&mut self` made this seam
+    /// unusable on an `Arc<AgentService>`. `Arc` is the only shape production
+    /// holds these in (every `ChannelFactory` build, every channel session, the
+    /// A2A gateway, cron), so a `&mut self` seam could not reach the instances
+    /// the #1700 regression test has to drive.
     #[doc(hidden)]
-    pub fn set_fallback_providers_for_test(&mut self, providers: Vec<Arc<dyn Provider>>) {
+    pub fn set_fallback_providers_for_test(&self, providers: Vec<Arc<dyn Provider>>) {
         *self
             .fallback_providers
             .write()
@@ -629,6 +668,13 @@ impl AgentService {
         self.provider()
             .configured_context_window()
             .unwrap_or(self.context_limit)
+    }
+
+    /// Whether audit recording (#1705) is enabled: the construction-time
+    /// resolution of `[features] audit_recording`. Public because the
+    /// /audit viewer lives outside this module (channels/commands.rs, TUI).
+    pub fn audit_recording_enabled(&self) -> bool {
+        self.audit_recording
     }
 
     /// Per-session context window budget. Mirrors `provider_for_session`:
@@ -837,6 +883,27 @@ impl AgentService {
             brain
         };
 
+        // Inject channel capabilities per session (#1773, port of fork #295).
+        // One process serves Telegram, Discord, Slack and cron alike, so the
+        // check is per session: Telegram-bound sessions get the renderer
+        // capabilities block, any other channel-bound session gets the
+        // file-delivery block, unbound sessions get neither. Channel awareness
+        // rides the ownership state; no RuntimeInfo.channel field exists.
+        #[cfg(feature = "telegram")]
+        let telegram_bound = self.channel_manager.as_ref().is_some_and(|mgr| {
+            !matches!(
+                mgr.telegram().channel_ownership_of(session_id),
+                super::session_routes::ChannelOwnership::Unknown
+            )
+        });
+        #[cfg(not(feature = "telegram"))]
+        let telegram_bound = false;
+        let channel_bound = super::session_routes::session_is_channel_bound(session_id);
+        let brain = crate::brain::prompt_builder::inject_channel_capabilities(
+            &brain,
+            telegram_bound,
+            channel_bound,
+        );
         Some(brain)
     }
 
@@ -1665,44 +1732,47 @@ impl AgentService {
     }
 
     /// Record one primary-provider failure that was rescued by a
-    /// successful fallback. Returns the new streak count.
+    /// successful fallback. Returns how many rescues now sit inside
+    /// `STICKY_FALLBACK_WINDOW`.
     ///
-    /// Bumped only when the fallback ACTUALLY succeeded — failures
+    /// Recorded only when the fallback ACTUALLY succeeded — failures
     /// where both primary and fallback errored out don't count, since
     /// no rescue happened and the situation is exceptional rather
     /// than evidence of a chronically broken primary.
     pub fn bump_primary_failure_streak(&self, session_id: Uuid) -> u32 {
+        self.record_primary_failure_at(session_id, std::time::Instant::now())
+    }
+
+    /// `bump_primary_failure_streak` with the clock supplied, so the window
+    /// expiry is exercisable without sleeping.
+    pub fn record_primary_failure_at(&self, session_id: Uuid, at: std::time::Instant) -> u32 {
         let mut map = self
             .session_primary_failure_streak
             .write()
             .expect("session_primary_failure_streak lock poisoned");
-        let entry = map.entry(session_id).or_insert(0);
-        *entry += 1;
-        *entry
+        failure_window::record(
+            map.entry(session_id).or_default(),
+            at,
+            failure_window::STICKY_FALLBACK_WINDOW,
+        )
     }
 
-    /// Reset the per-session primary-failure streak. Called after any
-    /// successful PRIMARY stream so a single recovery wipes the count
-    /// — the threshold meaning becomes "N consecutive rescues with
-    /// no primary success in between", which matches the user intent
-    /// ("if the fallback runs 3 times in a row successfully, the 4th
-    /// it sticks").
-    pub fn reset_primary_failure_streak(&self, session_id: Uuid) {
-        self.session_primary_failure_streak
-            .write()
-            .expect("session_primary_failure_streak lock poisoned")
-            .remove(&session_id);
-    }
-
-    /// Read current streak without mutating. Used by the fallback
-    /// commit site to decide between "rescue this request only" vs
-    /// "stick the fallback permanently".
+    /// Read the current in-window count without recording. Used by the
+    /// fallback commit site to decide between "rescue this request only"
+    /// vs "stick the fallback permanently".
     pub fn peek_primary_failure_streak(&self, session_id: Uuid) -> u32 {
+        self.peek_primary_failure_streak_at(session_id, std::time::Instant::now())
+    }
+
+    /// `peek_primary_failure_streak` with the clock supplied.
+    pub fn peek_primary_failure_streak_at(&self, session_id: Uuid, at: std::time::Instant) -> u32 {
         self.session_primary_failure_streak
             .read()
             .expect("session_primary_failure_streak lock poisoned")
             .get(&session_id)
-            .copied()
+            .map(|failures| {
+                failure_window::count(failures, at, failure_window::STICKY_FALLBACK_WINDOW)
+            })
             .unwrap_or(0)
     }
 

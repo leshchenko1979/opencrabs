@@ -20,7 +20,7 @@
 //!   auto_approve=false.
 
 use crate::brain::agent::service::compaction_prompts::{
-    CompactionKind, PlanRecovery, build_continuation,
+    CompactionKind, PlanRecovery, append_skill_stamp, build_continuation,
 };
 
 const APPROVAL_TAIL: &str = "Tool approval is REQUIRED";
@@ -61,8 +61,8 @@ fn fun_emergency_invites_fun_cheeky_remark() {
     // silent recovery and the personality moment never fires.
     let body = build_continuation(CompactionKind::Emergency, false, true, PlanRecovery::Active);
     assert!(
-        body.contains("fun/cheeky remark"),
-        "fun emergency must explicitly invite a fun/cheeky remark: {body}"
+        body.contains("fun/cheeky ROAST"),
+        "fun emergency must explicitly invite a fun/cheeky roast: {body}"
     );
 }
 
@@ -211,6 +211,164 @@ fn manual_compaction_is_brief() {
         assert!(
             body.contains("IMMEDIATE TASK"),
             "Manual compaction must still reference the IMMEDIATE TASK: {body}"
+        );
+    }
+}
+
+// ── #125: advisory skill-inventory stamp ────────────────────────────────────
+//
+// The stamp must: (1) carry the sorted skill list with the advisory
+// "consider, reload only those" framing, (2) be absent entirely when no
+// skills were active (zero marginal tokens), (3) ride EVERY compaction
+// kind in both fun and silent variants. String sentinels, same policy
+// as the rest of this file: exact wording may drift, these invariants
+// must not.
+
+const STAMP_HEADER: &str = "SKILLS LOADED PRE-COMPACTION:";
+const STAMP_ADVISORY: &str = "reload only those that are";
+
+#[test]
+fn skill_stamp_lists_active_skills_with_advisory_framing() {
+    let body = build_continuation(CompactionKind::Regular, false, true, PlanRecovery::Active);
+    let stamped = append_skill_stamp(body, &["opencrabs-dev".to_string(), "grafana".to_string()]);
+    assert!(
+        stamped.contains(STAMP_HEADER),
+        "stamp must carry the inventory header: {stamped}"
+    );
+    assert!(
+        stamped.contains("opencrabs-dev") && stamped.contains("grafana"),
+        "stamp must list every active skill: {stamped}"
+    );
+    assert!(
+        stamped.contains(STAMP_ADVISORY),
+        "stamp must be advisory (consider, reload selectively) not prescriptive: {stamped}"
+    );
+}
+
+#[test]
+fn skill_stamp_is_silent_when_no_skills_active() {
+    for kind in [
+        CompactionKind::Regular,
+        CompactionKind::MidLoop,
+        CompactionKind::Emergency,
+        CompactionKind::PostTool,
+        CompactionKind::Manual,
+    ] {
+        for silent in [false, true] {
+            let body = build_continuation(kind, silent, true, PlanRecovery::NoPlan);
+            let stamped = append_skill_stamp(body, &[]);
+            assert!(
+                !stamped.contains(STAMP_HEADER),
+                "{kind:?} silent={silent}: no skills → no stamp, zero marginal tokens: {stamped}"
+            );
+        }
+    }
+}
+
+#[test]
+fn skill_stamp_rides_all_kinds_and_variants() {
+    let skills = vec!["opencrabs-dev".to_string()];
+    for kind in [
+        CompactionKind::Regular,
+        CompactionKind::MidLoop,
+        CompactionKind::Emergency,
+        CompactionKind::PostTool,
+        CompactionKind::Manual,
+    ] {
+        for silent in [false, true] {
+            let body = build_continuation(kind, silent, true, PlanRecovery::Active);
+            let stamped = append_skill_stamp(body, &skills);
+            assert!(
+                stamped.contains(STAMP_HEADER) && stamped.contains(STAMP_ADVISORY),
+                "{kind:?} silent={silent}: stamp must ride every kind/variant: {stamped}"
+            );
+        }
+    }
+}
+
+#[test]
+fn skill_stamp_sorts_names_for_determinism() {
+    let body = build_continuation(CompactionKind::Regular, false, true, PlanRecovery::NoPlan);
+    let stamped = append_skill_stamp(
+        body,
+        &["zeta".to_string(), "alpha".to_string(), "mid".to_string()],
+    );
+    let header_pos = stamped.find(STAMP_HEADER).expect("stamp present");
+    let list = &stamped[header_pos..];
+    let alpha = list.find("alpha").expect("alpha present");
+    let mid = list.find("mid").expect("mid present");
+    let zeta = list.find("zeta").expect("zeta present");
+    assert!(
+        alpha < mid && mid < zeta,
+        "stamp list must be sorted for deterministic rendering: {list}"
+    );
+}
+
+/// The roast is a per-kind obligation inside `fun_body`, and that is
+/// exactly how it vanished. `d3c239c1e` (2026-05-30, "restore fun
+/// post-compaction narration") shipped the fun variant with the
+/// acknowledgement line in only two of five arms, Emergency and
+/// PostTool, leaving `Regular` and `MidLoop` with none. Those two are
+/// the dominant auto paths (11 of 18 continuations across the logs
+/// surviving on 2026-09-22), so the delight feature the restore commit
+/// was meant to bring back stayed dark for 115 days.
+///
+/// `compaction_single_continuation_path_test.rs` guards the CALL SITE
+/// (the loop reaches the builder exactly once). Nothing guarded the
+/// ARMS, so a missing arm was invisible to every test in this file.
+/// This pins the property the sentinel tests cannot.
+#[test]
+fn every_fun_arm_except_manual_invites_a_roast_by_name() {
+    for kind in [
+        CompactionKind::Regular,
+        CompactionKind::MidLoop,
+        CompactionKind::Emergency,
+        CompactionKind::PostTool,
+    ] {
+        let body = build_continuation(kind, false, true, PlanRecovery::Active);
+        assert!(
+            body.to_lowercase().contains("roast"),
+            "fun {kind:?} must name the ROAST explicitly. The model follows \
+             the loudest directive and drops a parenthetical aside, which is \
+             how a 'fun/cheeky remark' lost to an 'IMMEDIATELY continue ... \
+             NOT optional' sibling for 115 days: {body}"
+        );
+    }
+}
+
+/// Manual is the deliberate exception: the user typed `/compact`, so they
+/// already saw the confirmation and acknowledging it back to them is
+/// noise. Pinned as an exception rather than an oversight, so the next
+/// contributor does not "fix" it back in.
+#[test]
+fn manual_still_forbids_the_acknowledgement() {
+    let body = build_continuation(CompactionKind::Manual, false, true, PlanRecovery::Active);
+    assert!(
+        body.contains("Do NOT acknowledge the compaction"),
+        "manual must stay acknowledgement-free, the user asked for it: {body}"
+    );
+    assert!(
+        !body.to_lowercase().contains("roast"),
+        "manual must not invite a roast: {body}"
+    );
+}
+
+/// The silent variant must stay free of the roast invitation, or
+/// `silent_compaction = true` leaks personality into corporate
+/// deployments, which is the only reason the flag exists.
+#[test]
+fn silent_arms_never_invite_a_roast() {
+    for kind in [
+        CompactionKind::Regular,
+        CompactionKind::MidLoop,
+        CompactionKind::Emergency,
+        CompactionKind::PostTool,
+        CompactionKind::Manual,
+    ] {
+        let body = build_continuation(kind, true, true, PlanRecovery::Active);
+        assert!(
+            !body.to_lowercase().contains("roast"),
+            "silent {kind:?} must not invite a roast: {body}"
         );
     }
 }

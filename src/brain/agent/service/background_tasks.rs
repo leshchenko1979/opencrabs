@@ -15,6 +15,16 @@ use uuid::Uuid;
 
 use super::types::{BgTaskMeta, PushOrigin, QueuedUserMessage};
 
+/// Marks a roster row that mirrors an EXTERNAL task (#1776 seam 2).
+///
+/// A mirrored row has no process behind it: it carries an empty pid and empty
+/// stream paths, so it must never reach the code that signals a run or reads
+/// its capture files. Prefixing its synthetic id — which is a fresh uuid and
+/// therefore can never collide with a real run's `Uuid::new_v4().to_string()`
+/// — is what lets the registry tell the two kinds apart in one map instead of
+/// keeping a second, parallel store for shadows.
+const MIRROR_ID_PREFIX: &str = "mirror:";
+
 /// Result of a finished background command.
 #[derive(Debug, Clone)]
 pub struct CmdResult {
@@ -22,6 +32,23 @@ pub struct CmdResult {
     pub code: i32,
     pub output: String,
 }
+
+/// Everything a completion hook learns about a finished command: the result
+/// plus the wall-clock runtime the generic receipt carries (#15).
+pub struct HookContext {
+    pub result: CmdResult,
+    pub elapsed_secs: f32,
+}
+
+/// Post-completion action run INSTEAD of the generic session delivery
+/// (#1748). The detached rebuild uses it to exec-restart into the fresh
+/// binary: an in-memory enqueue would be orphaned the moment exec()
+/// replaces the process, so the hook delivers its own outcome text through
+/// the routes it needs (session route, channel targets).
+pub type CompletionHook = Box<
+    dyn FnOnce(HookContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send,
+>;
 
 /// One in-flight background command.
 #[derive(Debug, Clone)]
@@ -271,19 +298,101 @@ impl BackgroundTaskManager {
     /// Scoped to the caller's own session for the same reason `tasks_list` is
     /// (#191): the manager is process-global, so an unfiltered read reports
     /// other sessions' work as this caller's.
+    ///
+    /// A mirrored external row (#1776) is deliberately absent. It is a
+    /// label-only shadow with no run id, no pid and no stream paths, and every
+    /// consumer of this method reads those fields — `tasks_list` prints a pgid
+    /// and two capture paths per row, `task_wait` and `task_output` address a
+    /// run by id. Its visibility lives in [`Self::running_for`] and
+    /// [`Self::running_tasks`] instead.
     pub fn handles_for(&self, session_id: Uuid) -> Vec<RunHandle> {
         let mut out: Vec<RunHandle> = self
             .runs
             .lock()
             .map(|m| {
                 m.values()
-                    .filter(|r| r.session_id == session_id)
+                    .filter(|r| r.session_id == session_id && !r.id.starts_with(MIRROR_ID_PREFIX))
                     .cloned()
                     .collect()
             })
             .unwrap_or_default();
         out.sort_by_key(|r| r.started);
         out
+    }
+
+    /// Register a shadow row for an external task (#1776 seam 2).
+    ///
+    /// A mirrored row is a run id that addresses no process: the id is prefixed
+    /// [`MIRROR_ID_PREFIX`] — never a uuid, so it can never collide with a real
+    /// run's `Uuid::new_v4().to_string()` — and its pid and stream paths are
+    /// empty. That is exactly why the mirror lands here rather than on the
+    /// roster [`Self::handles_for`] reads: a handle with no pid and no capture
+    /// files would advertise a stop signal and an output path that do not exist.
+    fn mark_started(&self, session_id: Uuid, label: &str) {
+        let id = format!("{MIRROR_ID_PREFIX}{}", Uuid::new_v4());
+        if let Ok(mut m) = self.runs.lock() {
+            m.insert(
+                id.clone(),
+                RunHandle {
+                    id,
+                    session_id,
+                    label: label.to_string(),
+                    command: String::new(),
+                    cwd: PathBuf::new(),
+                    started: std::time::Instant::now(),
+                    pid: None,
+                    output_out: PathBuf::new(),
+                    output_err: PathBuf::new(),
+                },
+            );
+        }
+    }
+
+    /// Drop a mirrored external task row (#1776 seam 2).
+    ///
+    /// Removes the OLDEST shadow row carrying `label`: two mirrored tasks with
+    /// the same label are indistinguishable here, and dropping the oldest keeps
+    /// the elapsed time shown for the survivor honest. Only prefixed rows
+    /// qualify, so a mirror finish can never evict a real, running command that
+    /// happens to share a label. No-op when nothing matches: a
+    /// `task_notification` may name a task we never saw started (mid-session
+    /// attach, log replay) — that is not an error, there is just nothing to
+    /// clean up.
+    fn mark_finished(&self, session_id: Uuid, label: &str) {
+        if let Ok(mut m) = self.runs.lock() {
+            let victim = m
+                .values()
+                .filter(|r| {
+                    r.session_id == session_id
+                        && r.id.starts_with(MIRROR_ID_PREFIX)
+                        && r.label == label
+                })
+                .min_by_key(|r| r.started)
+                .map(|r| r.id.clone());
+            if let Some(id) = victim {
+                m.remove(&id);
+            }
+        }
+    }
+
+    /// Mirror an EXTERNAL task's lifecycle into the tracker (#1776 seam 2):
+    /// a claude-cli background task never runs as our spawned process, but
+    /// surfaces still need to show it as in-flight work for the session —
+    /// a backgrounded CLI task takes the turn idle and, without a row here,
+    /// the wait looks like a hang (#762 is the same disease, spawned flavor).
+    /// `label` is the mirror's identity: [`Self::mirror_finished`] removes
+    /// the oldest row carrying it, exactly like [`Self::mark_finished`].
+    pub fn mirror_started(&self, session_id: Uuid, label: &str) {
+        self.mark_started(session_id, label);
+    }
+
+    /// Remove a mirrored external task row (see [`Self::mirror_started`]).
+    ///
+    /// No-op when nothing matches: a `task_notification` may name a task we
+    /// never saw started (mid-session attach, log replay) — that is not an
+    /// error, there is just nothing to clean up.
+    pub fn mirror_finished(&self, session_id: Uuid, label: &str) {
+        self.mark_finished(session_id, label);
     }
 
     /// Spawn `command` (via `sh -c`) in `cwd`, detached; on completion enqueue a
@@ -294,6 +403,37 @@ impl BackgroundTaskManager {
     /// outlives its turn (explicit `background: true`, or the long-command
     /// classifier). The grace handover is [`Self::run_or_detach`].
     pub fn spawn_command(self: std::sync::Arc<Self>, req: RunRequest) {
+        self.spawn_inner(req, None);
+    }
+
+    /// Spawn like [`Self::spawn_command`], but hand the outcome to `hook`
+    /// instead of the generic session delivery (#1748). Identical lifecycle:
+    /// timer, status file, DB accounting; only the completion route differs.
+    ///
+    /// A hook does not opt the run out of the grace handover: the bash tool
+    /// passes `Some(grace)` on its own path, and the detached rebuild — whose
+    /// hook must not be handed an in-memory enqueue that exec() would orphan —
+    /// reaches this through the `None`-grace branch.
+    pub fn spawn_command_with_hook(
+        self: std::sync::Arc<Self>,
+        req: RunRequest,
+        hook: CompletionHook,
+    ) {
+        self.spawn_inner(req, Some(hook));
+    }
+
+    /// Spawn `req` detached, reserving its roster row on the CALLER's thread.
+    ///
+    /// The reservation is taken HERE, before the spawn, so the roster row and
+    /// the run's status file exist the moment the public call returns. Every
+    /// such caller reads the roster synchronously afterwards —
+    /// `build_goal_evidence` does, and so does `tasks_list` — and a reservation
+    /// taken inside the spawned task is invisible to that read until the task
+    /// is first polled, so the run would exist but be unaddressable. The base
+    /// registered on the caller's thread for exactly this reason; the rewrite
+    /// that routed this through `run_or_detach` moved the registration behind
+    /// the spawn and broke a passing test (#692 gate 36516212395).
+    fn spawn_inner(self: std::sync::Arc<Self>, req: RunRequest, hook: Option<CompletionHook>) {
         let RunRequest {
             session_id,
             cwd,
@@ -302,19 +442,16 @@ impl BackgroundTaskManager {
             wake,
         } = req;
         let cmd = build_command(&cwd, &command, session_id);
-        // Reserved HERE, on the caller's thread (#692), so the roster row and the
-        // run's status file exist the moment this returns. Every caller of this
-        // method reads the roster synchronously afterwards — `build_goal_evidence`
-        // does, and so does `tasks_list` — and a reservation taken inside the
-        // spawned task is invisible to that read until the task is first polled.
-        // The base registered on the caller's thread for exactly this reason; the
-        // rewrite that routed this through `run_or_detach` moved the registration
-        // behind the spawn and broke a passing test (#692 gate 36516212395).
         let reserved = self.reserve_run(session_id, &label, &command, &cwd, wake);
+        // The hook is MOVED into `run_reserved` below, so this side has to
+        // remember whether one existed BEFORE the move: a hooked run reports
+        // itself from inside `run_reserved` (both the inline and the detached
+        // arm), and delivering here as well would send the outcome twice.
+        let has_hook = hook.is_some();
         let this = std::sync::Arc::clone(&self);
         tokio::spawn(async move {
             match this
-                .run_reserved(reserved, cmd, Some(std::time::Duration::ZERO))
+                .run_reserved(reserved, cmd, Some(std::time::Duration::ZERO), hook)
                 .await
             {
                 // A command that somehow finished within the zero-length window
@@ -324,7 +461,20 @@ impl BackgroundTaskManager {
                 // contract ("returns immediately, reports on completion") holds
                 // for every duration, including zero.
                 Ok(Handover::Inline(output)) => {
-                    deliver_completion(session_id, &label, &command, &cmd_result_from(&output), 0.0);
+                    // A hooked run has already reported itself from inside
+                    // `run_reserved` — the hook owns the outcome there. Only an
+                    // unhooked one needs the generic delivery; without it the
+                    // caller here, a detached task with nobody to hand a result
+                    // to, would drop the completion on the floor.
+                    if !has_hook {
+                        deliver_completion(
+                            session_id,
+                            &label,
+                            &command,
+                            &cmd_result_from(&output),
+                            0.0,
+                        );
+                    }
                 }
                 Ok(Handover::Detached { .. }) => {}
                 Err(e) => tracing::error!(
@@ -364,7 +514,7 @@ impl BackgroundTaskManager {
             wake,
         } = req;
         let reserved = self.reserve_run(session_id, &label, &command, &cwd, wake);
-        self.run_reserved(reserved, cmd, grace).await
+        self.run_reserved(reserved, cmd, grace, None).await
     }
 
     /// Take a run's id, stream paths and roster row on the CALLER's thread,
@@ -423,6 +573,7 @@ impl BackgroundTaskManager {
         reserved: Reservation,
         mut cmd: tokio::process::Command,
         grace: Option<std::time::Duration>,
+        hook: Option<CompletionHook>,
     ) -> std::io::Result<Handover> {
         let Reservation {
             run_uuid,
@@ -577,6 +728,7 @@ impl BackgroundTaskManager {
                     out_reader,
                     err_reader,
                     wake,
+                    hook,
                 )
                 .await;
             });
@@ -604,6 +756,14 @@ impl BackgroundTaskManager {
                 write_finish(&id, &session_id, &label, &command, elapsed_secs, &result);
                 self.finish_run(&id);
                 clear_row(run_uuid, &label).await;
+                if let Some(hook) = hook {
+                    // A hook owns the outcome (#1748): the rebuild's hook
+                    // exec-replaces the process, so the generic enqueue must
+                    // never fire beside it. `spawn_inner` sees the returned
+                    // `Inline` output but skips its own delivery when a hook
+                    // was passed.
+                    hook(HookContext { result, elapsed_secs }).await;
+                }
                 Ok(Handover::Inline(output))
             }
             Ok(Err(e)) => {
@@ -631,6 +791,7 @@ impl BackgroundTaskManager {
                         out_reader,
                         err_reader,
                         wake,
+                        hook,
                     )
                     .await;
                 });
@@ -1244,6 +1405,7 @@ async fn continue_detached(
     out_reader: tokio::task::JoinHandle<()>,
     err_reader: tokio::task::JoinHandle<()>,
     wake: Option<WakeSpec>,
+    hook: Option<CompletionHook>,
 ) {
     let out_path = crate::brain::agent::service::work_status::command_output_path(&id, false);
     let err_path = crate::brain::agent::service::work_status::command_output_path(&id, true);
@@ -1298,7 +1460,18 @@ async fn continue_detached(
     // moment the process exits, so a badge that outlived it would show the
     // agent reporting a finished task as still running.
     this.finish_run(&id);
-    deliver_completion(session_id, &label, &command, &result, elapsed_secs);
+    if let Some(hook) = hook {
+        // A hook replaces the generic delivery entirely (#1748): the rebuild
+        // exec-replaces the process on success, so an in-memory enqueue would
+        // be orphaned mid-flight. The hook delivers its own outcome text
+        // through the routes it needs.
+        //
+        // No early return: the wake watcher below must still be stopped, or a
+        // finished run would leave a watcher observing a terminal stream.
+        hook(HookContext { result, elapsed_secs }).await;
+    } else {
+        deliver_completion(session_id, &label, &command, &result, elapsed_secs);
+    }
     // The run is over, so its watcher has nothing left to report. Aborted
     // rather than left to observe a terminal stream: a wake that arrived after
     // this completion would tell the agent to keep watching work that is
@@ -1328,6 +1501,68 @@ pub(crate) fn short_label(command: &str) -> String {
     } else {
         label
     }
+}
+
+/// The mirror row's label for a claude-cli background task (#1776 seam 2):
+/// the source tag plus the CLI's own task id, so a surface can tell a
+/// mirrored CLI task from a spawned command at a glance and the removal
+/// side can key on the identical string.
+pub(crate) fn claude_task_label(task_id: &str) -> String {
+    format!("claude-cli {task_id}")
+}
+
+/// Per-turn marker set for claude-cli background tasks (#1776 seam 3):
+/// `(session_id, task_id)` pairs started during the CURRENT turn. Cleared at
+/// `run_tool_loop_inner` entry, so a notification for a task absent from the
+/// set is a post-exit survivor and must be delivered synthetically, while a
+/// task present stays silent (claude sees those natively mid-turn).
+pub(crate) type ClaudeTurnTasks = std::collections::HashSet<(Uuid, String)>;
+
+/// The seam-3 discriminator (#1776): a notification whose task was NOT
+/// started during this turn is a post-exit survivor — the turn (and its
+/// claude process) that spawned the task already ended, so nobody but this
+/// synthetic delivery will carry the result to the user.
+pub(crate) fn claude_needs_survival_delivery(
+    turn_started: &ClaudeTurnTasks,
+    session_id: Uuid,
+    task_id: &str,
+) -> bool {
+    !turn_started.contains(&(session_id, task_id.to_string()))
+}
+
+/// The synthetic completion message for a post-exit claude task
+/// notification (#1776 seam 3). Mechanical context only: the summary text is
+/// the CLI's own, never model-judged. No `BgTaskMeta`: there is no
+/// `CmdResult` for a task we never spawned, and a fabricated duration would
+/// lie on the receipt card — the echo falls back to the display line.
+pub(crate) fn claude_completion_message(
+    task_id: &str,
+    status: &str,
+    summary: Option<&str>,
+) -> QueuedUserMessage {
+    let label = claude_task_label(task_id);
+    let context = format!(
+        "[System: a background claude task reported completion after the turn \
+         that started it already ended.\n\
+         Task: {label}\n\
+         Status: {status}\n\
+         Summary: {}\n\n\
+         Deliver this result to the user and continue anything that was \
+         waiting on it. Do not re-run the task.]",
+        summary.unwrap_or("(no summary provided)"),
+    );
+    let display = format!(
+        "🔧 background task {}: {label}",
+        if status == "completed" {
+            "finished"
+        } else {
+            "failed"
+        }
+    );
+    let mut msg = QueuedUserMessage::system(context, display);
+    // #1221: marks this delivery for the Telegram collapsible echo bubble.
+    msg.origin = PushOrigin::BackgroundTask;
+    msg
 }
 
 /// Keep only the last `n` lines of `text`.

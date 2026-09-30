@@ -397,7 +397,16 @@ pub(crate) fn normalize_tables_with_media(text: &str, media: &[MediaEntry]) -> S
     let shielded = shield_bare_leading_hashes(&images_shielded);
     let reflowed = reflow_collapsed_tables(&shielded);
     let inferred = infer_missing_table_separators(&reflowed);
-    ensure_blank_line_before_tables(&inferred)
+    let blank_lined = ensure_blank_line_before_tables(&inferred);
+    // Pass 7 (#552): terminate a blockquote run before a block-level HTML
+    // opener. An unbroken line after a `>` run is a CommonMark lazy
+    // continuation, so a `<details>` opener would land INSIDE the quote and its
+    // unmatched closers make Telegram reject the whole message
+    // (`RICH_MESSAGE_CONTENT_REQUIRED`), silently dropping the card to HTML.
+    // Wired HERE so every rich-build entry point and the structure-detection
+    // gate inherit it — the same single-canonical-entry discipline this
+    // function's own contract states.
+    ensure_blank_line_before_block_html(&blank_lined)
 }
 
 /// Balance unclosed or runaway code fences in markdown text (#240).

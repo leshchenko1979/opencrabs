@@ -7,10 +7,13 @@
 //! production module.
 
 use crate::acp::protocol::{
-    ClientMessage, SESSION_SET_MODE, SESSION_SET_MODEL, initialize_result, parse_line,
-    permission_outcome, prompt_text, tool_kind,
+    AcpMode, ClientMessage, SESSION_SET_MODE, SESSION_SET_MODEL, initialize_result, modes_payload,
+    parse_line, permission_outcome, prompt_text, replay_updates, tool_kind,
 };
+use crate::db::models::Message;
+use chrono::Utc;
 use serde_json::json;
+use uuid::Uuid;
 
 #[test]
 fn parses_request() {
@@ -108,9 +111,10 @@ fn tool_kind_covers_loop_tools() {
 #[test]
 fn initialize_result_is_honest_about_load_replay() {
     let caps = initialize_result()["agentCapabilities"].clone();
-    // session/load binds an existing session but does not replay history;
-    // the advertised capability must not claim otherwise.
-    assert_eq!(caps["loadSession"], json!(false));
+    // session/load binds an existing session AND replays the stored
+    // transcript before answering; the advertised capability must not claim
+    // otherwise.
+    assert_eq!(caps["loadSession"], json!(true));
     assert_eq!(caps["promptCapabilities"]["text"], json!(true));
 }
 
@@ -120,4 +124,85 @@ fn set_mode_is_accepted_alongside_set_model() {
     // both spellings dispatch to the same handler.
     assert_eq!(SESSION_SET_MODE, "session/set_mode");
     assert_eq!(SESSION_SET_MODEL, "session/set_model");
+}
+
+#[test]
+fn mode_parse_round_trips_advertised_ids() {
+    for id in [
+        "supervised",
+        "auto-accept-edits",
+        "auto",
+        "full-access",
+        "plan",
+    ] {
+        let mode = AcpMode::parse(id).expect("advertised id parses");
+        assert_eq!(mode.id(), id);
+    }
+    assert!(AcpMode::parse("yolo").is_none());
+}
+
+#[test]
+fn modes_payload_names_current() {
+    let payload = modes_payload(AcpMode::Plan);
+    assert_eq!(payload["currentModeId"], json!("plan"));
+    let ids: Vec<&str> = payload["availableModes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "supervised",
+            "auto-accept-edits",
+            "auto",
+            "full-access",
+            "plan"
+        ]
+    );
+}
+
+#[test]
+fn replay_updates_maps_reasoning_blocked_and_text_segments() {
+    let msg = Message {
+        id: Uuid::new_v4(),
+        session_id: Uuid::new_v4(),
+        role: "assistant".into(),
+        content: "<!-- reasoning -->\nthinking hard\n<!-- /reasoning -->\n\
+                  <!-- phantom_blocked=1 -->\nphantom narration\n<!-- /phantom_blocked=1 -->\n\
+                  the visible answer"
+            .into(),
+        sequence: 1,
+        created_at: Utc::now(),
+        token_count: None,
+        cost: None,
+        input_tokens: None,
+        cache_creation_tokens: None,
+        cache_read_tokens: None,
+        thinking: None,
+        duration_secs: None,
+    };
+    let updates = replay_updates(&[msg]);
+    let (kinds, texts): (Vec<&str>, Vec<&str>) = updates
+        .iter()
+        .map(|u| {
+            (
+                u["sessionUpdate"].as_str().unwrap(),
+                u["content"]["text"].as_str().unwrap(),
+            )
+        })
+        .unzip();
+    assert_eq!(
+        kinds,
+        vec![
+            "agent_thought_chunk",
+            "agent_thought_chunk",
+            "agent_message_chunk",
+        ]
+    );
+    assert_eq!(texts[0], "thinking hard");
+    assert!(texts[1].contains("Blocked narration"));
+    assert!(texts[1].contains("phantom narration"));
+    assert_eq!(texts[2], "the visible answer");
 }

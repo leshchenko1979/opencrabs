@@ -83,6 +83,7 @@ async fn test_global_429_lock_cooldown() {
     assert!(is_global_cooldown_active());
 
     // A bound that covers the deadline clears it.
+    // A bound that covers the deadline clears it.
     assert!(wait_global_cooldown(MAX_INLINE_RATE_LIMIT_WAIT).await);
     assert!(!is_global_cooldown_active());
     reset_global_cooldown();

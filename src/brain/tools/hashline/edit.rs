@@ -218,6 +218,11 @@ impl Tool for HashlineEditTool {
         if let Some(note) = pre_image.note() {
             output.push_str(&note);
         }
+        // An overlapping write is reported, not swallowed: the file may hold
+        // neither writer's intent, and only the caller can decide (#593).
+        if contended {
+            output.push_str(&crate::brain::tools::path_lock::contention_notice(&path));
+        }
 
         Ok(ToolResult::success(output))
     }

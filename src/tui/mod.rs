@@ -3,8 +3,15 @@
 //! Provides an interactive terminal interface for the AI orchestration agent using Ratatui.
 
 pub mod app;
+pub(crate) mod capture;
 pub(crate) mod clear_notice;
 pub(crate) mod compact_notice;
+/// Unix-only (#1744, #1755): the handoff reaps with libc `waitpid(WUNTRACED)`
+/// and coerces stops with SIGCONT/SIGTERM/SIGKILL, none of which the windows
+/// libc crate carries. On Windows the module compiles out and bang commands
+/// keep the pipe-capture path.
+#[cfg(unix)]
+pub mod editor;
 pub mod error;
 pub mod events;
 pub(crate) mod model_order;

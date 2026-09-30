@@ -1,19 +1,27 @@
-//! Quiet mode for groups (#679).
+//! Quiet mode for groups (#679, #696).
 //!
 //! A human group reads its scrollback as an archive to be scanned, not a place
 //! to watch an agent work. In such a room the bot's output should not dominate
-//! the room it shares with people, so quiet mode changes two things, both
+//! the room it shares with people, so quiet mode changes three things, all
 //! scoped to the opting group:
 //!
 //! * **no intermediate promotion** — mid-turn narration folds into the
 //!   collapsed processing log instead of opening its own bubble (the gate lives
 //!   in `delivery::handle_intermediate`, which owns the media carve-out);
 //! * **the previous turn's answer is folded in place** when the next turn
-//!   starts — this module.
+//!   starts — `fold_previous_answer`;
+//! * **the previous turn's flow card is removed** at the same moment (#696) —
+//!   `sweep_previous_flow_card`. The card is per-turn chrome; leaving one
+//!   behind per turn re-accumulates the scaffolding the mode exists to
+//!   suppress.
 //!
-//! Net effect: **at most one open bot message per topic**. The one still-open
-//! message is the one the reader just asked for; everything before it is one
-//! tap away.
+//! Net effect: **at most one open bot message per topic**, with no scaffolding
+//! trailing behind it. The one still-open message is the one the reader just
+//! asked for; everything before it is one tap away.
+//!
+//! Both turn-start hooks (`handler::handle_message`, `resume::resume_session_inner`)
+//! run the fold FIRST and the sweep second: they share one retained state, and
+//! the fold reads the answer before the sweep takes the card id out of it.
 //!
 //! Folding is an EDIT, never a delete. `deleteMessage` is capped at 48 h — no
 //! bot exception, admins included — while editing one's own message has no time
@@ -30,9 +38,11 @@ use std::sync::Arc;
 
 use teloxide::payloads::EditMessageTextSetters;
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, InlineKeyboardMarkup, ParseMode, ThreadId};
+use teloxide::types::{ChatId, InlineKeyboardMarkup, MessageId, ParseMode, ThreadId};
 use uuid::Uuid;
 
+use super::flow::StreamingState;
+use super::send::best_effort_delete;
 use super::state::{BubbleBody, TelegramState};
 
 /// Longest summary line a folded rich message keeps visible. The collapsed
@@ -199,4 +209,61 @@ pub(crate) async fn fold_previous_answer(
             false
         }
     }
+}
+
+/// Remove the previous turn's settled flow card (#696).
+///
+/// The fold collapses the previous ANSWER; this removes the chrome that sat
+/// beside it. The card is the per-turn processing log — tool roll, narration,
+/// context footer — so leaving one behind per turn accumulates exactly the
+/// scaffolding quiet mode exists to suppress, while the answer beside it folds.
+///
+/// The id is already in hand: `register_flow_state` runs at settle precisely
+/// when a card was open (`turn_settle.rs`), so the retained state has carried
+/// the card id into the next turn all along. No new state is needed.
+///
+/// The id is TAKEN, not read, and deliberately not put back on failure. Unlike
+/// the fold — where a transient error must not cost the answer a retry — this
+/// is chrome: `deleteMessage` is capped at 48 h with no bot exception, so an
+/// ancient card fails permanently and retrying it every turn would be pure
+/// churn. Clearing the field is also load-bearing beyond this delete: #1377's
+/// background-ack fold re-checks `open_group_msg_id` and falls back to the
+/// bubble lane rather than editing a message this call removed.
+pub(crate) async fn sweep_previous_flow_card(
+    bot: &Bot,
+    chat: ChatId,
+    thread_id: Option<ThreadId>,
+    session_id: Uuid,
+    tg: &Arc<TelegramState>,
+) -> bool {
+    let Some(flow_state) = tg.flow_state_for(session_id).await else {
+        return false;
+    };
+    let Some(mid) = take_previous_card(&flow_state) else {
+        return false;
+    };
+    best_effort_delete(bot, chat, mid, "quiet mode: previous flow card (#696)").await;
+    tracing::info!(
+        "Telegram quiet mode (#696): removed previous flow card msg {} (thread {:?})",
+        mid.0,
+        thread_id.map(|t| t.0.0)
+    );
+    true
+}
+
+/// Take the retained card id out of a settled flow state, clearing the field.
+///
+/// Split out from [`sweep_previous_flow_card`] deliberately: everything above
+/// this line is a network call, and this is the half whose contract must hold —
+/// the id is available exactly once, and the field is empty afterwards so no
+/// later reader (this delete on a retry, or #1377's ack fold) acts on a message
+/// that is already gone.
+pub(crate) fn take_previous_card(
+    flow_state: &Arc<std::sync::Mutex<StreamingState>>,
+) -> Option<MessageId> {
+    flow_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .open_group_msg_id
+        .take()
 }

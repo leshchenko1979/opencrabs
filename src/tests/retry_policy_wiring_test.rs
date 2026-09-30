@@ -69,6 +69,7 @@ fn build(config: &Config, name: &str) -> OpenAIProvider {
         OpenAIProvider::new("sk-test".to_string()).with_name(name),
         config,
         &section(config, name),
+        &config.agent,
     )
 }
 
