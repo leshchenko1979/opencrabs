@@ -1100,11 +1100,31 @@ fn scan_image_references(
 /// when the self-healing nudge budget is exhausted. `None` when there is
 /// nothing to report.
 pub fn failure_notice(failures: &[LocalImageFailure]) -> Option<String> {
+    media_failure_notice(failures, "Image", "an image")
+}
+
+/// [`failure_notice`] for the video family: the same shape, its own noun (#465).
+///
+/// A separate entry point rather than a caller-supplied noun because the
+/// sentence names its family twice ("Image not attached — the reply referenced
+/// an image …"), and a notice that says "Image" over a missing clip is a wrong
+/// statement about what the reader is looking at. Both families share the
+/// FAILURE SHAPE ([`LocalImageFailure`], one reason enum) — only the wording
+/// differs, so the wording is where the split lives.
+pub fn video_failure_notice(failures: &[LocalImageFailure]) -> Option<String> {
+    media_failure_notice(failures, "Video", "a video")
+}
+
+fn media_failure_notice(
+    failures: &[LocalImageFailure],
+    noun: &str,
+    article_noun: &str,
+) -> Option<String> {
     if failures.is_empty() {
         return None;
     }
-    let mut notice = String::from(
-        "⚠️ Image not attached — the reply referenced an image that could not be delivered:",
+    let mut notice = format!(
+        "⚠️ {noun} not attached — the reply referenced {article_noun} that could not be delivered:"
     );
     for failure in failures {
         notice.push_str("\n- ");
@@ -1122,7 +1142,17 @@ pub fn failure_notice(failures: &[LocalImageFailure]) -> Option<String> {
 /// blank-line-prefixed message (or, worse, be skipped by a downstream
 /// emptiness check and say nothing at all). An empty body becomes the notice.
 pub fn append_failure_notice(body: &str, failures: &[LocalImageFailure]) -> String {
-    match failure_notice(failures) {
+    append_media_notice(body, failure_notice(failures))
+}
+
+/// [`append_failure_notice`] for the video family (#465) — the same empty-body
+/// rule, applied to [`video_failure_notice`].
+pub fn append_video_failure_notice(body: &str, failures: &[LocalImageFailure]) -> String {
+    append_media_notice(body, video_failure_notice(failures))
+}
+
+fn append_media_notice(body: &str, notice: Option<String>) -> String {
+    match notice {
         None => body.to_string(),
         Some(notice) => {
             if body.trim().is_empty() {

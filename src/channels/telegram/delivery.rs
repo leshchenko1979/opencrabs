@@ -13,8 +13,9 @@ use super::handler::{fire_reaction, map_to_allowed_reaction};
 use super::intermediates::send_html_or_plain;
 use super::markdown::{markdown_to_telegram_html, split_message};
 use super::send::{
-    TelegramMediaKind, best_effort_delete, document_in_thread, message_in_thread, photo_in_thread,
-    telegram_media_kind, voice_in_thread,
+    TelegramMediaKind, TelegramVideoKind, VIDEO_FORMAT_HEAD_BYTES, best_effort_delete,
+    document_in_thread, message_in_thread, photo_in_thread, sniff_video_format,
+    telegram_media_kind, telegram_video_media_kind, video_in_thread, voice_in_thread,
 };
 use crate::brain::agent::AgentService;
 use crate::db::ChannelMessageRepository;
@@ -169,8 +170,19 @@ pub(crate) async fn deliver_final_response(
             // ships as native media instead of arriving as bare markdown
             // (#286).
             let image_cwd = agent.get_working_directory_for_session(session_id);
+            // #465: the video family reads the SAME two reference forms the
+            // image family does (`<<VID:…>>` and the markdown reference), so
+            // exactly one of them must own each reference — the invariant the
+            // image plane's own docs state. The video scan runs FIRST and
+            // consumes what it claims, so the image scan below never sees a
+            // reference the video plane is about to deliver or report. Without
+            // this order the image plane classifies a video's bytes as an
+            // unsupported image and answers the same reference with a second,
+            // false notice ("Image not attached") on the turn the clip arrives.
+            let video_scan =
+                crate::utils::extract_local_videos(&response.content, Some(image_cwd.as_path()));
             let image_scan = crate::utils::resolve_remote_images(
-                crate::utils::extract_local_images(&response.content, Some(image_cwd.as_path())),
+                crate::utils::extract_local_images(&video_scan.text, Some(image_cwd.as_path())),
             )
             .await;
             let (text_only, img_paths) = (image_scan.text, image_scan.attachments);
@@ -193,6 +205,27 @@ pub(crate) async fn deliver_final_response(
             // failed downloads, and — appended to below — images the channel
             // itself refused. Drives the honest notice and the regen nudge.
             let mut image_failures: Vec<LocalImageFailure> = image_scan.failures;
+            // #465: the same #502 rule for video. `delivered_image_paths` is the
+            // turn's delivered-MEDIA list — a path is either already in the chat
+            // or it is not, whichever family put it there — so video rides the
+            // same one, and a clip a promoted intermediate already sent is not
+            // sent a second time here.
+            let vid_paths: Vec<crate::utils::image::LocalVideo> = {
+                let delivered = {
+                    let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+                    s.delivered_image_paths.clone()
+                };
+                video_scan
+                    .attachments
+                    .into_iter()
+                    .filter(|v| !delivered.contains(&v.path))
+                    .collect()
+            };
+            // Rejected video references, and — appended to below — clips the
+            // channel refused. Its OWN vector, not folded into `image_failures`:
+            // the notice names the family, so a missing clip must not be
+            // answered with "Image not attached".
+            let mut video_failures: Vec<LocalImageFailure> = video_scan.failures;
             // Strip LLM-hallucinated artifacts (<!-- tools-v2 -->, XML tool blocks)
             let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
             let text_only = redact_secrets(&text_only);
@@ -215,18 +248,38 @@ pub(crate) async fn deliver_final_response(
             let rich_source = crate::utils::extract_react_marker(&response.content).0;
             let rich_source =
                 redact_secrets(&crate::utils::sanitize::strip_llm_artifacts(&rich_source));
-            let rich_rw = {
+            let (rich_rw, rich_vw) = {
                 let delivered = {
                     let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
                     s.delivered_image_paths.clone()
                 };
-                crate::utils::image::rewrite_local_images(
+                let rw = crate::utils::image::rewrite_local_images(
                     &rich_source,
                     Some(image_cwd.as_path()),
                     "img",
                     &delivered,
-                )
+                );
+                // #465: the video family reads the same two reference forms the
+                // image family does, so its rewrite runs on the IMAGE family's
+                // rich form rather than on `rich_source`. What the image walk
+                // already lifted into a `tg://photo` reference must not be
+                // re-resolved, and what it deliberately left — a `<<VID:…>>`
+                // marker, or a markdown reference to a video — is exactly this
+                // walk's input. `vid` is its own id prefix: entries are matched
+                // to references BY ID inside one message's media array, so a
+                // shared prefix would let an image entry answer a video
+                // reference.
+                let vw = crate::utils::image::rewrite_local_videos(
+                    &rw.rich,
+                    Some(image_cwd.as_path()),
+                    crate::utils::VID_ID_PREFIX,
+                    &delivered,
+                );
+                (rw, vw)
             };
+            // #487/#465: images and videos share ONE media array, so the entries
+            // are built into the same vector and the ownership decisions below
+            // are read off it.
             let mut rich_media: Vec<super::rich::mermaid::MediaEntry> = Vec::new();
             for entry in &rich_rw.entries {
                 match tokio::fs::read(&entry.image.path).await {
@@ -250,14 +303,51 @@ pub(crate) async fn deliver_final_response(
                     }
                 }
             }
+            // #465: video entries ride the same array, each carrying its own
+            // kind so the builder emits the string that matches the bytes. A
+            // read that fails here joins the VIDEO refusal list, not the image
+            // one — the notice names the family, and this is a clip.
+            for entry in &rich_vw.entries {
+                match tokio::fs::read(&entry.video.path).await {
+                    Ok(bytes) => rich_media.push(super::rich::mermaid::MediaEntry {
+                        kind: super::rich::mermaid::MediaKind::Video,
+                        id: entry.id.clone(),
+                        url: None,
+                        bytes: Some(bytes),
+                    }),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Telegram: failed to read local video {} for the rich plane: {}",
+                            entry.video.path.display(),
+                            e
+                        );
+                        video_failures.push(LocalImageFailure {
+                            raw: entry.video.path.display().to_string(),
+                            resolved: Some(entry.video.path.clone()),
+                            reason: LocalImageFailureReason::Unreadable,
+                        });
+                    }
+                }
+            }
             // #487: an image-only body takes the rich plane too. The rich send
             // carries the REWRITTEN markdown, so the reference itself is the
             // body's content — there is no "text bubble" needed to carry it,
             // and nothing is dropped: measured against the live API, an
             // image-only body renders inline WITH its caption. The extraction
             // leg below remains the floor when the rich send fails.
-            let rich_owns_images = !rich_media.is_empty()
-                && super::rich::should_send_native_rich_for_media(&rich_source, true);
+            //
+            // #465: video rides the same decision, but the two families keep
+            // SEPARATE ownership flags and the rich send is gated on their
+            // union. The array is shared, so `!rich_media.is_empty()` alone
+            // would make a video-only body claim to own IMAGES and suppress the
+            // image floor for a reply that has none — and symmetrically, an
+            // image-only body would suppress the video floor. The floors below
+            // are per-family; only the send is joint.
+            let rich_plane_ok = super::rich::should_send_native_rich_for_media(&rich_source, true);
+            let ownership = super::rich::mermaid::rich_media_ownership(rich_plane_ok, &rich_media);
+            let rich_owns_images = ownership.images;
+            let rich_owns_videos = ownership.videos;
+            let rich_owns_media = ownership.any();
 
             // Drop an echoed plan title (#837). The reminder shows the model
             // the title every turn and it opens by repeating it, directly
@@ -637,12 +727,27 @@ pub(crate) async fn deliver_final_response(
                     send_local_images(session_id, bot, chat_id, thread_id, &img_paths).await;
                 image_failures.extend(refused);
             }
+            // #465: the video floor, symmetric to the image one above and
+            // gated on its OWN flag. A rich plane that owns this reply's images
+            // has said nothing about its videos, and vice versa — the two lists
+            // are separate all the way down, so a clip must not be suppressed
+            // because a picture was inlined.
+            if !rich_owns_videos {
+                let (_, refused) =
+                    send_local_videos(session_id, bot, chat_id, thread_id, &vid_paths).await;
+                video_failures.extend(refused);
+            }
 
             // An image the reply announced must not vanish silently when the
             // send fails: the reply says plainly which one is missing. This is
             // the honest floor — the post-delivery re-entry ladder (#286) may
             // replace it with a model-authored line where a budget is available.
             text_only = crate::utils::append_failure_notice(&text_only, &image_failures);
+            // #465: and the same honest floor for a clip, under its own noun.
+            // Folding video refusals into the image notice would tell the user
+            // "Image not attached" about a video that is missing (#502's
+            // failure mode, one media family over).
+            text_only = crate::utils::append_video_failure_notice(&text_only, &video_failures);
 
             // Rich fallback: when all content was sent as HTML intermediates
             // during streaming, the dedup step strips text_only to empty. If
@@ -870,8 +975,13 @@ pub(crate) async fn deliver_final_response(
             // #487: an image-only body has an EMPTY `display_html` (the
             // reference was lifted into the rewrite), so the rich block must be
             // reachable on the image decision alone — otherwise the rich plane
-            // can never own a picture that has no prose around it.
-            if !display_html.is_empty() || rich_owns_images {
+            // can never own a picture that has no prose around it. #465 widens
+            // the same reachability to video: a video-only body has an empty
+            // `display_html` too, and gating on the image flag alone would send
+            // it down the HTML path where its `tg://video` reference is dead
+            // visible markdown. `rich_owns_media` is the union; the per-family
+            // flags below still decide what each floor does.
+            if !display_html.is_empty() || rich_owns_media {
                 // Rich-first delivery: a structured reply (tables / headings /
                 // lists / math) is delivered as a native Telegram rich message
                 // regardless of length — Telegram renders the raw markdown into
@@ -894,7 +1004,7 @@ pub(crate) async fn deliver_final_response(
                 // to the HTML path where they showed as bare markup). Non-table
                 // rich content still tries blocks first (clean fences) then falls
                 // back to markdown.
-                let mut delivered_rich = (rich_owns_images
+                let mut delivered_rich = (rich_owns_media
                     || super::rich::should_send_native_rich_for(
                         &text_only,
                         // #45: `options_pending` is true when the turn stashed a
@@ -907,12 +1017,19 @@ pub(crate) async fn deliver_final_response(
                     // markdown, whose `tg://photo` references only resolve
                     // against the media array sent with it; every other body
                     // keeps today's text, byte for byte.
-                    let rich_md = if rich_owns_images {
-                        rich_rw.rich.clone()
+                    // #465: `rich_vw.rich` is the same form one family further
+                    // on — the image walk's output fed through the video walk —
+                    // so it carries `tg://photo` AND `tg://video` references and
+                    // is the correct body for either family. Selecting on the
+                    // union is what keeps the two consistent: the array below is
+                    // shared, and a body whose references are not in it would
+                    // ship dead markdown.
+                    let rich_md = if rich_owns_media {
+                        rich_vw.rich.clone()
                     } else {
                         text_only.clone()
                     };
-                    let rich_media: &[super::rich::mermaid::MediaEntry] = if rich_owns_images {
+                    let rich_media: &[super::rich::mermaid::MediaEntry] = if rich_owns_media {
                         rich_media.as_slice()
                     } else {
                         &[]
@@ -1036,6 +1153,20 @@ pub(crate) async fn deliver_final_response(
                         if !refused.is_empty() {
                             display_html =
                                 crate::utils::append_failure_notice(&display_html, &refused);
+                        }
+                    }
+                    // #465: the video twin of the floor above, under its own
+                    // flag and its own notice noun. A reply whose rich send
+                    // failed has delivered neither family, so the clip would
+                    // vanish with no notice at all — the same silent loss, one
+                    // media type over.
+                    if rich_owns_videos && !vid_paths.is_empty() {
+                        let (_, refused) =
+                            send_local_videos(session_id, bot, chat_id, thread_id, &vid_paths)
+                                .await;
+                        if !refused.is_empty() {
+                            display_html =
+                                crate::utils::append_video_failure_notice(&display_html, &refused);
                         }
                     }
                     // #tg-mermaid-delivery-hardening: last-chance mermaid render
@@ -1525,6 +1656,117 @@ pub(crate) async fn send_local_images(
                 failures.push(LocalImageFailure {
                     raw: img_path.display().to_string(),
                     resolved: Some(img_path.clone()),
+                    reason: LocalImageFailureReason::DeliveryFailed,
+                });
+            }
+        }
+    }
+
+    (delivered, failures)
+}
+
+/// Send each resolved video as its own bubble, routing by the video ceiling and
+/// the container exactly as the final leg does (#465).
+///
+/// The video twin of [`send_local_images`], and deliberately not a
+/// generalization of it: the kind decision differs in SHAPE, not just in
+/// numbers — an image's kind is a property of its byte length alone, while a
+/// video's is a property of `(byte length, container)`, because Telegram's
+/// clients play MPEG-4 and will take anything else only as a document. So the
+/// bytes are sniffed here (`VIDEO_FORMAT_HEAD_BYTES` of them) and the result
+/// feeds [`telegram_video_media_kind`]. Returns the paths that landed and the
+/// failures the channel itself refused, for the same reason its twin does: the
+/// two halves are set in different arms and inferring one from the other would
+/// couple two independent facts.
+pub(crate) async fn send_local_videos(
+    session_id: Uuid,
+    bot: &Bot,
+    chat_id: ChatId,
+    thread_id: Option<teloxide::types::ThreadId>,
+    videos: &[crate::utils::image::LocalVideo],
+) -> (Vec<std::path::PathBuf>, Vec<LocalImageFailure>) {
+    let mut delivered: Vec<std::path::PathBuf> = Vec::new();
+    let mut failures: Vec<LocalImageFailure> = Vec::new();
+
+    for video in videos {
+        let vid_path = &video.path;
+        let bytes = match tokio::fs::read(vid_path).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(
+                    "Telegram: failed to read video {}: {}",
+                    vid_path.display(),
+                    e
+                );
+                failures.push(LocalImageFailure {
+                    raw: vid_path.display().to_string(),
+                    resolved: Some(vid_path.clone()),
+                    reason: LocalImageFailureReason::Unreadable,
+                });
+                continue;
+            }
+        };
+        let len = bytes.len();
+        // The container is read from the file's OWN leading bytes, never from
+        // its extension: a `.mp4` name over an AVI payload would otherwise take
+        // the video arm and settle as a bubble that never plays.
+        let format = sniff_video_format(&bytes[..VIDEO_FORMAT_HEAD_BYTES.min(len)]);
+        let kind = telegram_video_media_kind(len as u64, format);
+        let sent = match kind {
+            TelegramVideoKind::Video => video_in_thread(
+                bot,
+                chat_id,
+                thread_id,
+                InputFile::memory(bytes),
+                video.caption.clone(),
+            )
+            .await
+            .map(|m| m.id.0),
+            TelegramVideoKind::Document => document_in_thread(
+                bot,
+                chat_id,
+                thread_id,
+                InputFile::memory(bytes),
+                video.caption.clone(),
+            )
+            .await
+            .map(|m| m.id.0),
+        };
+        match sent {
+            Ok(mid) => {
+                delivered.push(vid_path.clone());
+                let reference = vid_path.display().to_string();
+                // Same audit predicate as the image twin: len is sent bytes and
+                // hash8 identifies the path, so one predicate covers both legs.
+                super::telemetry::log_send_success(
+                    "turn",
+                    "-",
+                    &session_id.to_string(),
+                    "delivery_media",
+                    match kind {
+                        TelegramVideoKind::Video => "video",
+                        TelegramVideoKind::Document => "video_document",
+                    },
+                    chat_id.0,
+                    thread_id.map(|t| t.0.0),
+                    mid,
+                    len,
+                    &super::telemetry::content_hash8(&reference),
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Telegram: failed to send video {} as {}: {}",
+                    vid_path.display(),
+                    match kind {
+                        TelegramVideoKind::Video => "video",
+                        TelegramVideoKind::Document => "document",
+                    },
+                    e
+                );
+                failures.push(LocalImageFailure {
+                    raw: vid_path.display().to_string(),
+                    resolved: Some(vid_path.clone()),
                     reason: LocalImageFailureReason::DeliveryFailed,
                 });
             }

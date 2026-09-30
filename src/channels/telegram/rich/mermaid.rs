@@ -543,6 +543,46 @@ pub(crate) struct MediaEntry {
     pub(crate) kind: MediaKind,
 }
 
+/// Which media families the rich plane OWNS for one reply (#465 / D6).
+///
+/// The two flags are separate all the way down, and only the SEND is joint.
+/// A single "did the rich plane own anything" boolean would make a video-only
+/// body claim to own IMAGES and suppress the image floor for a reply that has
+/// none — and symmetrically an image-only body would suppress the video floor,
+/// losing the clip. [`any`](Self::any) is that union, and it gates only the
+/// send decision.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RichMediaOwnership {
+    /// The rich plane carries this reply's pictures (`MediaKind::Photo`).
+    pub(crate) images: bool,
+    /// The rich plane carries this reply's clips (`MediaKind::Video`).
+    pub(crate) videos: bool,
+}
+
+impl RichMediaOwnership {
+    /// Whether the rich plane owns ANY media in this reply — the union the
+    /// send itself is gated on, never the per-family floors.
+    pub(crate) fn any(self) -> bool {
+        self.images || self.videos
+    }
+}
+
+/// Which families the rich plane owns, given that it is sending this body at
+/// all (`plane_ok`) and the entries it will carry.
+///
+/// A named predicate rather than an inline expression at the call site: the
+/// split is the whole point of D6, and a decision that lives only inside a
+/// `let` cannot be tested without driving delivery end to end.
+pub(crate) fn rich_media_ownership(plane_ok: bool, entries: &[MediaEntry]) -> RichMediaOwnership {
+    if !plane_ok {
+        return RichMediaOwnership::default();
+    }
+    RichMediaOwnership {
+        images: entries.iter().any(|e| e.kind == MediaKind::Photo),
+        videos: entries.iter().any(|e| e.kind == MediaKind::Video),
+    }
+}
+
 /// Encode `input` as base64url (RFC 4648 §5, no padding), the alphabet
 /// mermaid.ink requires. Standard base64 (`+`, `/`) returns 404 there.
 pub(crate) fn base64url(input: &str) -> String {
