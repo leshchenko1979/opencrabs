@@ -230,3 +230,62 @@ fn wake_message_says_the_run_is_still_going() {
     let err = wake_message("b", "run-43", "r", &["boom".to_string()], true);
     assert!(err.context_text.contains("Matched on stderr"));
 }
+
+/// #692 D7: the spawn normalisation reaches the command line, and a caller's
+/// own value still wins.
+///
+/// These four are a PROMISE to the model — no run will ever block on a pager or
+/// on a credential prompt it cannot answer — and a promise with no reader is a
+/// comment. `apply_context_env` is `pub(crate)` for this test alone.
+///
+/// `GIT_TERMINAL_PROMPT=0` is the one that changes behaviour rather than
+/// formatting: without it a git command on a pty prompts for a username the
+/// harness will never supply, and the run burns its whole deadline at the
+/// prompt instead of failing in a second with git's own message.
+#[test]
+fn apply_context_env_sets_the_noninteractive_defaults() {
+    use crate::brain::tools::ToolExecutionContext;
+    use crate::brain::tools::bash::apply_context_env;
+    use std::ffi::OsStr;
+    use std::process::Command;
+
+    let mut ctx = ToolExecutionContext::new(Uuid::new_v4());
+    let mut cmd = Command::new("true");
+    apply_context_env(&mut cmd, &ctx);
+
+    let envs: Vec<(String, Option<String>)> = cmd
+        .get_envs()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.map(|v| v.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+
+    for key in ["PAGER", "GIT_PAGER", "SYSTEMD_PAGER", "GIT_TERMINAL_PROMPT"] {
+        assert!(
+            envs.iter().any(|(k, _)| k == key),
+            "{key} must be set on every spawn, got {envs:?}"
+        );
+    }
+    assert!(
+        envs.iter()
+            .any(|(k, v)| k == "GIT_TERMINAL_PROMPT" && v.as_deref() == Some("0")),
+        "GIT_TERMINAL_PROMPT must be 0, got {envs:?}"
+    );
+
+    // A caller that deliberately sets one of these still wins: normalisation is
+    // a default, not a lock. Pinned because the ordering inside
+    // `apply_context_env` is what makes it true, and an `env_vars` loop moved
+    // above the four defaults would silently override every caller.
+    ctx.env_vars
+        .insert("PAGER".to_string(), "less".to_string());
+    let mut cmd2 = Command::new("true");
+    apply_context_env(&mut cmd2, &ctx);
+    assert!(
+        cmd2.get_envs()
+            .any(|(k, v)| k == OsStr::new("PAGER") && v == Some(OsStr::new("less"))),
+        "a caller's own PAGER must survive the defaults"
+    );
+}

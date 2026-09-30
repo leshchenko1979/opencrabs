@@ -156,8 +156,32 @@ pub(crate) fn detach_session_pre_exec(_cmd: &mut Command) {
     // console model) and pre_exec is a Unix-only API.
 }
 
-/// Inject session identity and context environment variables into the command.
-fn apply_context_env(cmd: &mut Command, context: &ToolExecutionContext) {
+/// Inject session identity, spawn normalisation and context environment
+/// variables into the command.
+///
+/// The four prompts/pagers below are the SINGLE home for them (#692, D7): the
+/// pty path once set `PAGER`/`GIT_PAGER` itself, which meant two writers for
+/// one value and a silent divergence the moment either moved — and it reached
+/// only the pty arm, leaving every piped run (the ssh arms, `sudo`, and every
+/// run on a platform without ptys) with the inherited pager. Setting them here
+/// covers every arm, because every arm calls this before it spawns.
+///
+/// `GIT_TERMINAL_PROMPT=0` is not cosmetic: a git command that wants a
+/// credential prompts on the tty it was handed, and the harness will never
+/// answer. Failing fast with git's own "could not read Username" beats a run
+/// that sits at the prompt until its deadline.
+///
+/// Order matters: normalisation first, then `context.env_vars`, so a caller
+/// that deliberately sets one of these still wins. A default, not a lock.
+///
+/// `pub(crate)` rather than private so the contract above can be pinned by a
+/// test: these four are a promise to the model ("no run will ever block on a
+/// pager or a credential prompt"), and a promise nothing reads is a comment.
+pub(crate) fn apply_context_env(cmd: &mut Command, context: &ToolExecutionContext) {
+    cmd.env("PAGER", "cat")
+        .env("GIT_PAGER", "cat")
+        .env("SYSTEMD_PAGER", "cat")
+        .env("GIT_TERMINAL_PROMPT", "0");
     for (k, v) in &context.env_vars {
         cmd.env(k, v);
     }

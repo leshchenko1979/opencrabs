@@ -227,10 +227,12 @@ pub fn install_pty(
     // `TERM=dumb` is the portable signal; `NO_COLOR` is what newer tools honour
     // when they ignore TERM; the pagers are pinned because a pager that decided
     // to page on a tty would block the capture it was asked to produce.
-    cmd.env("TERM", "dumb")
-        .env("NO_COLOR", "1")
-        .env("PAGER", "cat")
-        .env("GIT_PAGER", "cat");
+    //
+    // The pagers the comment above also argues for are NOT set here: they are
+    // the spawn normalisation's to own (`bash::apply_context_env`, #692 D7),
+    // which every arm calls — a second home here would reach only this arm and
+    // would drift the instant either copy moved.
+    cmd.env("TERM", "dumb").env("NO_COLOR", "1");
 
     Ok((mo, me))
 }
@@ -285,12 +287,7 @@ mod tests {
             })
             .collect();
 
-        for (key, want) in [
-            ("TERM", "dumb"),
-            ("NO_COLOR", "1"),
-            ("PAGER", "cat"),
-            ("GIT_PAGER", "cat"),
-        ] {
+        for (key, want) in [("TERM", "dumb"), ("NO_COLOR", "1")] {
             assert!(
                 envs.iter().any(|(k, v)| k == key && v == want),
                 "{key}={want} must be set on a pty child, got {envs:?}"
