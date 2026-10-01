@@ -24,10 +24,19 @@
 //! - a clip leaves through `video_in_thread`, the shared writer, rather than a
 //!   hand-built request (#1079), and its kind is chosen from the BYTES.
 
+use crate::channels::telegram::delivery::send_local_videos;
 use crate::utils::{extract_local_images, extract_local_videos};
 use std::path::Path;
 
 const SEND_SRC: &str = include_str!("../channels/telegram/send.rs");
+
+/// The chat a fixture turn is addressed to.
+const CHAT: i64 = 133_526_395;
+
+/// A response shaped like a successful send. Only the ROUTING is under test, so
+/// the body mirrors the proven shape rather than inventing a media object (same
+/// reasoning as `telegram_video_delivery_test.rs`).
+const SEND_OK_MESSAGE: &str = r#"{"ok":true,"result":{"message_id":601,"date":1757166400,"chat":{"id":133526395,"type":"private"},"text":"ok"}}"#;
 
 /// An ISO base-media header whose major brand is MPEG-4 — the bytes an
 /// `ffmpeg`/Remotion MP4 actually starts with.
@@ -208,4 +217,69 @@ fn the_tool_arm_names_the_video_family_in_its_notice() {
         SEND_SRC.contains("append_video_failure_notice("),
         "a missing clip must not be announced as a missing image (#465)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// (f) end-to-end: marker -> extraction -> floor -> wire
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_reply_carrying_a_marker_delivers_the_clip_and_leaves_no_marker_text() {
+    // Leg (f) of the #465 battery. Each half is proven elsewhere — the rewrite
+    // drops the marker (`telegram_video_rewrite_test`), the floor sends a clip
+    // (`telegram_video_delivery_test`) — but no single test walks a REPLY
+    // through both. This one does, in the tool arm's own order, so the property
+    // a reader actually cares about is asserted as ONE fact: the marker never
+    // reaches the delivered text AND the clip reaches the wire. Split across two
+    // tests it would be satisfiable by a pair that never met.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let clip = fixture(dir.path(), "render.mp4", MP4_BYTES);
+    let reply = format!("Uploading the render now. <<VID:{}>>", clip.display());
+
+    // The tool arm's order, exactly: video first, then the image family on the
+    // video family's stripped text.
+    let video_scan = extract_local_videos(&reply, None);
+    let image_scan = extract_local_images(&video_scan.text, None);
+
+    assert_eq!(video_scan.attachments.len(), 1, "the clip is claimed");
+    assert!(
+        !image_scan.text.contains("VID:"),
+        "no marker substring may reach the delivered text: {:?}",
+        image_scan.text
+    );
+    assert_eq!(
+        image_scan.text, "Uploading the render now.",
+        "the marker leaves the text with the surrounding prose intact"
+    );
+
+    // The clip must actually ARRIVE, not merely be extracted: drive the floor
+    // against a mock server and assert the request lands.
+    let mut server = mockito::Server::new_async().await;
+    let video_mock = server
+        .mock("POST", "/botTESTTOKEN/SendVideo")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(SEND_OK_MESSAGE)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let bot = teloxide::Bot::with_client(
+        "TESTTOKEN",
+        reqwest_teloxide::Client::builder().build().unwrap(),
+    )
+    .set_api_url(server.url().parse().unwrap());
+
+    let (delivered, failures) = send_local_videos(
+        uuid::Uuid::new_v4(),
+        &bot,
+        teloxide::types::ChatId(CHAT),
+        None,
+        &video_scan.attachments,
+    )
+    .await;
+
+    video_mock.assert_async().await;
+    assert_eq!(delivered, vec![clip], "the clip arrived on the wire");
+    assert!(failures.is_empty(), "and nothing failed: {:?}", failures);
 }
