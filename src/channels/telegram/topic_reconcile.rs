@@ -238,6 +238,20 @@ async fn probe_candidates(
 /// chat action leaves no message and changes no topic state — and it fails with
 /// the topic-gone vocabulary when the thread is closed or deleted.
 async fn probe_topic(bot: &teloxide::Bot, chat_id: i64, thread: i32) -> ProbeOutcome {
+    // #721 E1: this path calls `sendChatAction` DIRECTLY, bypassing both the
+    // typing funnel and the governor's ring — so it is invisible to the send
+    // log AND to the cooldown profile. That is exactly the class the request
+    // line exists to make countable.
+    super::telemetry::log_request(
+        "system",
+        "probe_topic",
+        "-",
+        "typing",
+        "sendChatAction",
+        chat_id,
+        Some(i64::from(thread)),
+        None,
+    );
     match bot
         .send_chat_action(ChatId(chat_id), ChatAction::Typing)
         .message_thread_id(ThreadId(MessageId(thread)))
