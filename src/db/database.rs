@@ -956,12 +956,17 @@ impl Database {
                     // A migration that ALREADY ran under an older list order
                     // must be stamped past BEFORE to_latest, not healed after:
                     // replaying its ALTER fails the whole startup, so there is
-                    // no "after" (#1401).
-                    crate::db::migration_heal::skip_applied_thread_id_migration(
-                        conn,
-                        user_version,
-                    )?;
-                    crate::db::migration_heal::skip_applied_active_migration(conn, user_version)?;
+                    // no "after" (#1401). The same pass also fills any migration
+                    // the stamp skips OVER — the direction no guard ever
+                    // covered, where a too-high stamp leaves the schema short in
+                    // silence (#724).
+                    //
+                    // The stamp is re-read because `heal_analytics_migration_33`
+                    // above may have just moved it, and both passes are bounded
+                    // by the value they start from.
+                    let user_version: i64 =
+                        conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+                    crate::db::migration_heal::reconcile_before_migrations(conn, user_version)?;
 
                     migrations.to_latest(conn)?;
 

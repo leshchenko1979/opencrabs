@@ -76,34 +76,59 @@ async fn heal_adds_missing_repo_remote_and_is_idempotent() {
     assert!(!second, "second heal run must be a no-op");
 }
 
-#[tokio::test]
-async fn migration_sql_order_invariants() {
-    assert!(
-        MIGRATION_SQL[36].contains("ADD COLUMN origin"),
-        "origin column must remain at index 36"
-    );
-    assert!(
-        MIGRATION_SQL[45].contains("projects"),
-        "projects.repo_remote must be at index 45 per chronological filename order (#1510, #209)"
-    );
-    assert!(
-        MIGRATION_SQL[46].contains("last_origin"),
-        "session_bindings_last_origin must remain at index 46 per chronological filename order"
-    );
-    assert!(
-        MIGRATION_SQL[47].contains("active"),
-        "session_seen_skills_active must remain at index 47 per chronological filename order"
-    );
-    assert!(
-        MIGRATION_SQL[48].contains("turn_open_at"),
-        "session_bindings_turn_open_at must remain at index 48 per chronological filename order (#200)"
-    );
+/// The declared effects are keyed by SQL MARKER, not by index, so this is not
+/// what keeps them correct — `declared_effects_resolve_to_the_measured_indices`
+/// in `migration_heal` is. What this pins is the ORDER the markers sit in, so a
+/// migration inserted with an earlier filename fails HERE, loudly, instead of
+/// silently shifting every position the #724 measurement was taken at.
+#[test]
+fn migration_sql_order_invariants() {
+    let cases: [(usize, &str, &str); 8] = [
+        (36, "ADD COLUMN origin", "pending_requests.origin"),
+        (
+            43,
+            "ADD COLUMN channel_thread_id",
+            "pending_requests.channel_thread_id (#1401)",
+        ),
+        (44, "ADD COLUMN epoch", "session_seen_skills.epoch"),
+        (
+            45,
+            "ADD COLUMN repo_remote",
+            "projects.repo_remote (#1510, #209)",
+        ),
+        (
+            46,
+            "ADD COLUMN last_origin",
+            "session_bindings.last_origin",
+        ),
+        (
+            47,
+            "ADD COLUMN active",
+            "session_seen_skills.active (#209, #212)",
+        ),
+        (
+            48,
+            "ADD COLUMN turn_open_at",
+            "session_bindings.turn_open_at (#200)",
+        ),
+        (50, "ADD COLUMN trigger_cmd", "cron_jobs.trigger_cmd"),
+    ];
+    for (index, needle, what) in cases {
+        assert!(
+            MIGRATION_SQL[index].contains(needle),
+            "{what} must stay at index {index} of MIGRATION_SQL: the list is \
+             filename-sorted, so inserting an earlier migration shifts it"
+        );
+    }
 }
 
+/// A prod DB stamped 47 with `session_seen_skills.active` already present and
+/// `projects.repo_remote` missing: the stamp sits ON a migration that partly
+/// ran, and BELOW one that did not — both directions of the #724 fault at once.
 #[tokio::test]
-async fn skip_applied_active_migration_prevents_duplicate_column_crash() {
+async fn a_stamp_on_a_partly_applied_migration_boots() {
     let db = Database::connect_in_memory().await.unwrap();
-    // Simulate prod DB shape at user_version 47 with column active present and projects.repo_remote missing
+    // The prod shape at stamp 47: `active` present, `repo_remote` missing.
     db.pool()
         .get()
         .await
@@ -153,7 +178,17 @@ async fn skip_applied_active_migration_prevents_duplicate_column_crash() {
             );
             assert!(
                 crate::db::migration_heal::has_column(conn, "projects", "repo_remote").unwrap(),
-                "repo_remote column must be healed"
+                "the migration below the stamp must be applied"
+            );
+            assert!(
+                crate::db::migration_heal::has_column(conn, "session_seen_skills", "loaded_mtime")
+                    .unwrap(),
+                "the other half of the partly applied migration must be filled in"
+            );
+            assert!(
+                crate::db::migration_heal::has_column(conn, "session_bindings", "last_origin")
+                    .unwrap(),
+                "an applied migration's object must not be replayed"
             );
         })
         .await
