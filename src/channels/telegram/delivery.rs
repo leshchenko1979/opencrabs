@@ -1849,15 +1849,17 @@ pub(crate) async fn handle_intermediate(
     //    Claiming it here means the image walk never sees it. What the video
     //    walk deliberately leaves — a markdown reference to a picture, an
     //    `<<IMG:…>>` marker, a remote target — is exactly the image walk's
-    //    input, and the image walk runs on the video family's STRIPPED form so
-    //    its own rich/stripped pair is complete on both planes: `rw.rich` is
-    //    the body with pictures embedded in place, `rw.stripped` is the body
-    //    with both families' references gone.
+    //    input. #732: the image walk runs TWICE, on the video family's rich and
+    //    stripped forms, because a `tg://video` reference survives verbatim in
+    //    both (a media ref is never consumed) and the two planes need opposite
+    //    things from it — `rw_rich.rich` keeps both families' references for the
+    //    media array, `rw_stripped.stripped` drops both for the HTML plane and
+    //    the dedup record.
     //
-    //    `vid` is its own id prefix, though only the image family embeds here:
-    //    the prefix is the video plane's identity, and a shared one would let
-    //    an image entry answer a `tg://video` reference wherever both arrays
-    //    are built.
+    //    `vid` is its own id prefix: entries are matched to references BY ID
+    //    inside one message's media array, so a shared prefix would let an image
+    //    entry answer a `tg://video` reference (#732 lifts the clips into that
+    //    same array).
     let vw = crate::utils::image::rewrite_local_videos(
         &text,
         Some(cwd),
@@ -1866,7 +1868,20 @@ pub(crate) async fn handle_intermediate(
     );
     // `Some(cwd)` is the session working directory — the same base the final
     // leg resolves against.
-    let rw = crate::utils::image::rewrite_local_images(&vw.stripped, Some(cwd), "img", &delivered);
+    //
+    // #732: TWO image rewrites, mirroring the final leg's own pipeline. The
+    // video walk leaves a `tg://video` reference verbatim in BOTH its buffers,
+    // so a single walk cannot separate them:
+    //
+    //  * `rw_rich` — built on `vw.rich` — keeps both families' references, which
+    //    is what the rich media array needs in order to answer the clip.
+    //  * `rw_stripped` — built on `vw.stripped` — carries NEITHER family's
+    //    reference, which is what the HTML plane (no media array) and the dedup
+    //    record need. It is byte-identical to the single walk this path used to
+    //    build, so the HTML and dedup behaviour are unchanged.
+    let rw_rich = crate::utils::image::rewrite_local_images(&vw.rich, Some(cwd), "img", &delivered);
+    let rw_stripped =
+        crate::utils::image::rewrite_local_images(&vw.stripped, Some(cwd), "img", &delivered);
 
     // 4. A fresh picture is report-shaped content on its own (#502); anything
     //    else keeps folding, with the failure notice carried along so a broken
@@ -1884,9 +1899,9 @@ pub(crate) async fn handle_intermediate(
         .channels
         .telegram
         .is_quiet_for(&chat.0.to_string());
-    let has_fresh_media = !(rw.entries.is_empty() && vw.entries.is_empty());
+    let has_fresh_media = !(rw_stripped.entries.is_empty() && vw.entries.is_empty());
     let promote = has_fresh_media
-        || (!quiet && super::intermediates::should_promote_intermediate(&rw.stripped, 0));
+        || (!quiet && super::intermediates::should_promote_intermediate(&rw_stripped.stripped, 0));
     if promote {
         super::intermediates::deliver_intermediate_message(
             session_id,
@@ -1896,7 +1911,8 @@ pub(crate) async fn handle_intermediate(
             streaming,
             tg,
             super::intermediates::IntermediateMedia {
-                images: &rw,
+                rich_images: &rw_rich,
+                stripped_images: &rw_stripped,
                 videos: &vw,
             },
         )
@@ -1905,12 +1921,12 @@ pub(crate) async fn handle_intermediate(
         // The FOLDED form is the image walk's stripped output, not the video
         // walk's: `vw.stripped` has the clips' references gone but still
         // carries every picture reference and `<<IMG:…>>` marker verbatim,
-        // because the image walk has not run on it. `rw.stripped` is the one
-        // form with both families' references removed — the only correct text
-        // for a plane that carries no media at all (#465).
+        // because the image walk has not run on it. `rw_stripped.stripped` is
+        // the one form with both families' references removed — the only correct
+        // text for a plane that carries no media at all (#465).
         let folded = crate::utils::append_failure_notice(
-            &rw.stripped,
-            &intermediate_failures(&rw, &vw),
+            &rw_stripped.stripped,
+            &intermediate_failures(&rw_stripped, &vw),
         );
         append_intermediate_to_flow(bot, chat, thread_id, streaming, &folded).await;
     }

@@ -10,9 +10,10 @@
 //! (`telegram_video_delivery_test.rs`).
 //!
 //! The order under test is the VIDEO walk first, on the turn's own text, with
-//! the image walk running on the video family's stripped form. It is not
-//! interchangeable with the reverse. The image walk CONSUMES a markdown
-//! reference whose bytes fail image validation — it records the failure and
+//! the image walk running afterwards — twice, on the video family's rich and
+//! stripped forms (#732). It is not interchangeable with the reverse. The image
+//! walk CONSUMES a markdown reference whose bytes fail image validation — it
+//! records the failure and
 //! returns `true`, so the reference leaves both of its buffers — and a clip is
 //! exactly such a reference (`UnsupportedFormat`). Image-first therefore eats a
 //! `![clip](x.mp4)` before the video family can claim it: the clip is never
@@ -40,18 +41,28 @@ fn fixture(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     path
 }
 
-/// The two walks `handle_intermediate` runs, in the order it runs them: video
-/// on the turn's text, image on the video family's stripped form.
+/// The walks `handle_intermediate` runs, in the order it runs them (#732):
+/// video on the turn's text, then the image family TWICE — on the video
+/// family's rich form for the rich plane, and on its stripped form for the
+/// HTML plane and the dedup record.
+///
+/// Returns `(rich_images, stripped_images, videos)`. The two image rewrites
+/// differ only in their BASE: `rich_images.rich` keeps both families'
+/// `tg://` references — the media array answers them — while
+/// `stripped_images.stripped` carries neither, because the HTML plane has no
+/// array to resolve one against.
 fn walks(
     text: &str,
     cwd: &Path,
 ) -> (
     crate::utils::image::LocalImageRewrite,
+    crate::utils::image::LocalImageRewrite,
     crate::utils::image::LocalVideoRewrite,
 ) {
     let vw = rewrite_local_videos(text, Some(cwd), VID_ID_PREFIX, &[]);
-    let rw = rewrite_local_images(&vw.stripped, Some(cwd), "img", &[]);
-    (rw, vw)
+    let rw_rich = rewrite_local_images(&vw.rich, Some(cwd), "img", &[]);
+    let rw_stripped = rewrite_local_images(&vw.stripped, Some(cwd), "img", &[]);
+    (rw_rich, rw_stripped, vw)
 }
 
 // ---------------------------------------------------------------------------
@@ -62,7 +73,7 @@ fn walks(
 fn an_intermediate_carrying_a_marker_yields_a_video_and_no_marker_text() {
     let dir = tempfile::tempdir().expect("tempdir");
     let clip = fixture(dir.path(), "clip.mp4", MP4_BYTES);
-    let (rw, vw) = walks(
+    let (rw_rich, rw_stripped, vw) = walks(
         &format!("Uploading the render now. <<VID:{}>>", clip.display()),
         dir.path(),
     );
@@ -89,16 +100,23 @@ fn an_intermediate_carrying_a_marker_yields_a_video_and_no_marker_text() {
     // The clip belongs to ONE family. The image walk runs second and must not
     // see it at all — the marker is gone from its input — so it can neither
     // claim the clip a second time nor answer it with a false "Image not
-    // attached" notice.
+    // attached" notice. Both image rewrites agree: neither family's reference
+    // is in either one's input.
     assert!(
-        rw.entries.is_empty() && rw.failures.is_empty(),
-        "the image walk must never judge a reference the video family claimed: \
-         entries={:?} failures={:?}",
-        rw.entries,
-        rw.failures
+        rw_rich.entries.is_empty() && rw_rich.failures.is_empty(),
+        "the rich-plane image walk must never judge a reference the video family \
+         claimed: entries={:?} failures={:?}",
+        rw_rich.entries,
+        rw_rich.failures
     );
     assert!(
-        !rw.rich.contains("VID:") && !rw.stripped.contains("VID:"),
+        rw_stripped.entries.is_empty() && rw_stripped.failures.is_empty(),
+        "nor the stripped-plane one: entries={:?} failures={:?}",
+        rw_stripped.entries,
+        rw_stripped.failures
+    );
+    assert!(
+        !rw_rich.rich.contains("VID:") && !rw_stripped.stripped.contains("VID:"),
         "and no video marker may survive into either image form"
     );
 }
@@ -108,18 +126,18 @@ fn the_two_families_keep_separate_id_namespaces_in_one_media_array() {
     let dir = tempfile::tempdir().expect("tempdir");
     let clip = fixture(dir.path(), "clip.mp4", MP4_BYTES);
     let png = fixture(dir.path(), "chart.png", PNG_BYTES);
-    let (rw, vw) = walks(
+    let (rw_rich, _rw_stripped, vw) = walks(
         &format!("<<IMG:{}>> and <<VID:{}>>", png.display(), clip.display()),
         dir.path(),
     );
 
-    assert_eq!(rw.entries.len(), 1, "the picture is the image family's");
+    assert_eq!(rw_rich.entries.len(), 1, "the picture is the image family's");
     assert_eq!(vw.entries.len(), 1, "the clip is the video family's");
-    assert_eq!(rw.entries[0].id, "img0");
+    assert_eq!(rw_rich.entries[0].id, "img0");
     assert_eq!(vw.entries[0].id, format!("{VID_ID_PREFIX}0"));
     // Entries are matched to references BY ID inside one message's media array,
     // so a shared prefix would let the image entry answer the video reference.
-    assert_ne!(rw.entries[0].id, vw.entries[0].id);
+    assert_ne!(rw_rich.entries[0].id, vw.entries[0].id);
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +148,8 @@ fn the_two_families_keep_separate_id_namespaces_in_one_media_array() {
 fn the_video_walk_claims_a_clip_before_the_image_walk_can_judge_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let clip = fixture(dir.path(), "clip.mp4", MP4_BYTES);
-    let (rw, vw) = walks(&format!("see ![clip]({}) here", clip.display()), dir.path());
+    let (_rw_rich, rw_stripped, vw) =
+        walks(&format!("see ![clip]({}) here", clip.display()), dir.path());
 
     // This is the markdown form BOTH families can read, and it is the one that
     // makes the order load-bearing: had the image walk gone first it would have
@@ -139,13 +158,13 @@ fn the_video_walk_claims_a_clip_before_the_image_walk_can_judge_it() {
     assert_eq!(vw.entries.len(), 1, "the video family claims the reference");
     assert_eq!(vw.entries[0].video.path, clip);
     assert!(
-        rw.failures.is_empty(),
+        rw_stripped.failures.is_empty(),
         "the image walk never saw it, so it has no verdict to give: {:?}",
-        rw.failures
+        rw_stripped.failures
     );
-    assert!(rw.entries.is_empty(), "and nothing to attach");
+    assert!(rw_stripped.entries.is_empty(), "and nothing to attach");
 
-    let failures = intermediate_failures(&rw, &vw);
+    let failures = intermediate_failures(&rw_stripped, &vw);
     assert!(
         failures.is_empty(),
         "a clip on its way to the user must not be reported as a broken image: {failures:?}"
@@ -159,9 +178,10 @@ fn a_genuinely_broken_image_is_still_reported() {
     // reason and the reconciliation would be untested.
     let dir = tempfile::tempdir().expect("tempdir");
     let absent = dir.path().join("nowhere.png");
-    let (rw, vw) = walks(&format!("x <<IMG:{}>> y", absent.display()), dir.path());
+    let (_rw_rich, rw_stripped, vw) =
+        walks(&format!("x <<IMG:{}>> y", absent.display()), dir.path());
 
-    let failures = intermediate_failures(&rw, &vw);
+    let failures = intermediate_failures(&rw_stripped, &vw);
     assert_eq!(
         failures.len(),
         1,
@@ -174,10 +194,11 @@ fn a_genuinely_broken_image_is_still_reported() {
 fn a_broken_video_reference_is_reported_by_its_own_family() {
     let dir = tempfile::tempdir().expect("tempdir");
     let absent = dir.path().join("nowhere.mp4");
-    let (rw, vw) = walks(&format!("x <<VID:{}>> y", absent.display()), dir.path());
+    let (_rw_rich, rw_stripped, vw) =
+        walks(&format!("x <<VID:{}>> y", absent.display()), dir.path());
 
     assert!(vw.entries.is_empty(), "nothing to attach");
-    let failures = intermediate_failures(&rw, &vw);
+    let failures = intermediate_failures(&rw_stripped, &vw);
     assert_eq!(
         failures.len(),
         1,
@@ -207,14 +228,21 @@ fn the_intermediate_path_walks_the_video_family_first() {
     let video = DELIVERY_SRC
         .find(VIDEO_WALK_ON_THE_TURN_TEXT)
         .expect("the intermediate path must run the video walk on the turn's text");
-    let image = DELIVERY_SRC
+    // #732: the image walk runs TWICE — on the video family's rich form for the
+    // rich plane (which is what the media array answers) and on its stripped
+    // form for the HTML plane and the dedup record.
+    let image_rich = DELIVERY_SRC
+        .find("rewrite_local_images(&vw.rich, Some(cwd), \"img\", &delivered)")
+        .expect("the intermediate path must run the image walk on the video family's rich form");
+    let image_stripped = DELIVERY_SRC
         .find("rewrite_local_images(&vw.stripped, Some(cwd), \"img\", &delivered)")
         .expect("the intermediate path must run the image walk on the video family's stripped form");
 
     assert!(
-        video < image,
+        video < image_rich && video < image_stripped,
         "the image walk consumes a clip's reference, so the video walk must \
-         claim it first (video at {video}, image at {image})"
+         claim it first (video at {video}, rich image at {image_rich}, \
+         stripped image at {image_stripped})"
     );
 }
 
@@ -227,10 +255,17 @@ fn the_intermediate_delivery_is_handed_both_walks() {
     let end = call.find(")\n").expect("the call must close");
     let args = &call[..end];
 
+    // #732: the image family now arrives as TWO rewrites. Handing the delivery
+    // the rich one alone would put a `tg://` reference into the HTML body, where
+    // no media array exists to answer it; handing it the stripped one alone
+    // would leave the clip's own reference unanswered in the rich body and the
+    // clip would have to fall back to its own bubble — the defect itself.
     assert!(
-        args.contains("images: &rw") && args.contains("videos: &vw"),
-        "the delivery needs BOTH families' rewrites — handing it only `rw` \
-         would ship a `<<VID:…>>` marker as literal text: {args}"
+        args.contains("rich_images: &rw_rich")
+            && args.contains("stripped_images: &rw_stripped")
+            && args.contains("videos: &vw"),
+        "the delivery needs BOTH image rewrites AND the video walk — a single \
+         image rewrite cannot serve both planes: {args}"
     );
 }
 
@@ -247,14 +282,52 @@ fn the_intermediate_path_delivers_clips_through_the_shared_floor() {
 }
 
 #[test]
-fn the_intermediate_media_array_stays_photo_only() {
-    // The design anchors this task at the SEND site, not in the media array. A
-    // video entry here would need a `tg://video?id=` reference in the rich body
-    // to answer, and the body on this path is built from the video family's
-    // STRIPPED form — so the reference would be absent, and
-    // `neutralize_orphan_photo_refs` would defuse it into a dead reference.
+fn the_intermediate_media_array_carries_the_clip_beside_the_pictures() {
+    // #732 INVERTS this pin. Before the fix the array was photo-only, and the
+    // clip could only leave as its own bubble — which is the defect. The clip
+    // now rides the SAME array as the pictures, each entry carrying its own
+    // kind, and the rich body built on `rw_rich` answers its `tg://video`
+    // reference in place.
+    //
+    // The pre-fix tree fails this assertion, so it doubles as the control that
+    // the fix is actually present rather than merely untested.
     assert!(
-        !INTERMEDIATES_SRC.contains("MediaKind::Video"),
-        "a video must not be lifted into the intermediate rich media array"
+        INTERMEDIATES_SRC.contains("MediaKind::Video"),
+        "the clip must be lifted into the intermediate rich media array — \
+         otherwise it can only ship as a detached bubble (#732)"
     );
+}
+
+#[test]
+fn the_rich_body_keeps_the_clip_reference_the_stripped_body_drops() {
+    // The whole point of the dual-base rewrite, stated as one behavioural
+    // assertion: the SAME clip leaves TWO different bodies, and only one of them
+    // may carry the reference.
+    //
+    //  * rich — `rw_rich`, built on `vw.rich` — MUST answer the media array's
+    //    video entry, so the clip inlines in the rich body.
+    //  * stripped — `rw_stripped`, built on `vw.stripped` — reaches the HTML
+    //    plane, which has NO media array, and the dedup record. A `tg://video`
+    //    reference there is dead visible markdown, so it must be absent.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let clip = fixture(dir.path(), "clip.mp4", MP4_BYTES);
+    let (rw_rich, rw_stripped, vw) = walks(
+        &format!("render done <<VID:{}>>", clip.display()),
+        dir.path(),
+    );
+
+    let reference = format!("![video](tg://video?id={VID_ID_PREFIX}0)");
+    assert!(
+        rw_rich.rich.contains(&reference),
+        "the rich body must answer the media array's video entry, or the clip \
+         can only fall back to its own bubble: {:?}",
+        rw_rich.rich
+    );
+    assert!(
+        !rw_stripped.stripped.contains("tg://video"),
+        "the HTML/dedup body must carry NO dead reference — it has no media \
+         array to answer one: {:?}",
+        rw_stripped.stripped
+    );
+    assert_eq!(vw.entries.len(), 1, "and the clip is still the video family's");
 }

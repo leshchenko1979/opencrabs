@@ -307,20 +307,29 @@ pub(crate) fn superseded_ids(bubbles: &[SentBubble], rich_text: &str) -> Vec<Mes
         .collect()
 }
 
-/// The two halves of one intermediate turn's media partition (#465).
+/// The two halves of one intermediate turn's media partition (#465), plus the
+/// image family's second rewrite (#732).
 ///
 /// The image and video walks are one partition, not two independent scans: a
 /// reference belongs to exactly one family, and only the pair can say which.
 /// They travel as one value for that reason — and because taking them as two
-/// more positional parameters would push the delivery below to eight
+/// more positional parameters would push the delivery below to nine
 /// arguments, past the point a positional list stays readable
 /// (`clippy::too_many_arguments`).
 pub(crate) struct IntermediateMedia<'a> {
-    /// The image family's rewrite: `rich` for the rich plane, `stripped` for
-    /// the HTML plane and the dedup record.
-    pub(crate) images: &'a crate::utils::image::LocalImageRewrite,
-    /// The video family's rewrite. Its entries ship as their own bubbles
-    /// through the delivery floor rather than through the media array.
+    /// The image family's rewrite for the RICH plane. Built on the video
+    /// family's rich form (`vw.rich`), so both families' `tg://` references
+    /// survive in `rich` for the media array to answer — a `tg://video` target
+    /// classifies as a media ref, so the image walk leaves it verbatim.
+    pub(crate) rich_images: &'a crate::utils::image::LocalImageRewrite,
+    /// The image family's rewrite for the HTML plane and the dedup record.
+    /// Built on the video family's stripped form (`vw.stripped`), so NEITHER
+    /// family's reference survives: the HTML plane has no media array and would
+    /// ship a `tg://` reference as dead visible markdown (#732).
+    pub(crate) stripped_images: &'a crate::utils::image::LocalImageRewrite,
+    /// The video family's rewrite. Its entries ride the rich media array beside
+    /// the pictures, each carrying its own `MediaKind::Video`; only when the
+    /// rich send is refused does a clip fall back to its own bubble.
     pub(crate) videos: &'a crate::utils::image::LocalVideoRewrite,
 }
 
@@ -331,13 +340,13 @@ pub(crate) struct IntermediateMedia<'a> {
 ///
 /// Takes the rewrites WHOLE rather than as `&str`s (#502) so no call site can
 /// hand this function the wrong text form. That matters: the rich form carries
-/// `tg://photo?id=imgN` references that only resolve against the media array
-/// sent with it, while the stripped form is the shape the HTML fallback and the
-/// dedup record need — the HTML plane has no media array and would ship a
-/// `tg://` reference as dead visible markdown.
+/// `tg://photo?id=imgN` AND `tg://video?id=vidN` references that only resolve
+/// against the media array sent with it, while the stripped form is the shape
+/// the HTML fallback and the dedup record need — the HTML plane has no media
+/// array and would ship a `tg://` reference as dead visible markdown.
 ///
-/// [`IntermediateMedia`] carries both walks — see that type for why they travel
-/// as one value rather than as two more parameters.
+/// [`IntermediateMedia`] carries all three rewrites — see that type for why they
+/// travel as one value rather than as more parameters.
 pub(crate) async fn deliver_intermediate_message(
     session_id: Uuid,
     bot: &Bot,
@@ -347,14 +356,15 @@ pub(crate) async fn deliver_intermediate_message(
     tg: &super::state::TelegramState,
     walks: IntermediateMedia<'_>,
 ) -> bool {
-    let rw = walks.images;
+    let rw_rich = walks.rich_images;
+    let rw_stripped = walks.stripped_images;
     let vw = walks.videos;
     // #690 follow-up (#980): re-expand a collapsed table once, up front, so the
     // dedup record, the rich send and the HTML fallback all see the same
     // expanded shape. The HTML path reflows again internally but is idempotent.
     // Both forms are reflowed: they are two renderings of one intermediate.
-    let rich_expanded = super::rich::reflow_collapsed_tables(&rw.rich);
-    let stripped_expanded = super::rich::reflow_collapsed_tables(&rw.stripped);
+    let rich_expanded = super::rich::reflow_collapsed_tables(&rw_rich.rich);
+    let stripped_expanded = super::rich::reflow_collapsed_tables(&rw_stripped.stripped);
     let rich = rich_expanded.as_str();
     let text = stripped_expanded.as_str();
     {
@@ -369,44 +379,28 @@ pub(crate) async fn deliver_intermediate_message(
     // validated seconds ago, but a file can disappear between the two.
     //
     // The failure list is the SHARED one (`intermediate_failures`), not
-    // `rw.failures`: the two walks are two halves of one partition, and only
-    // the pair knows which reference each family actually claimed (#465).
-    // #465: video goes out as its OWN bubble on this path, before the text, on
-    // both planes — the design's send-site anchoring. It is deliberately not
-    // lifted into the rich media array beside the pictures:
+    // `rw_stripped.failures` alone: the two walks are two halves of one
+    // partition, and only the pair knows which reference each family actually
+    // claimed (#465).
     //
-    //  * The array is the RICH plane's, and a video in it needs a
-    //    `tg://video?id=vidN` reference in the rich body to answer. The body
-    //    here is `rw.rich`, which is built from `vw.stripped` — the video
-    //    family's references are already gone from that form, because the HTML
-    //    plane ships `rw.stripped` and a `tg://` reference that plane cannot
-    //    resolve must not survive into it. An entry whose reference is absent
-    //    is exactly what `neutralize_orphan_photo_refs` defuses
-    //    (`mermaid.rs:1249`), so the clip would silently degrade to a dead
-    //    reference.
-    //  * Sending it here means ONE site covers both exits: the rich attempt
-    //    below returns early on success, and the HTML fallback would otherwise
-    //    be the only place a clip could leave.
+    // #732: the clip rides the rich media array BESIDE the pictures, exactly as
+    // it does on the final leg. What makes that possible is the base this path's
+    // image walk is given: `rw_rich` is built on `vw.rich`, so the video
+    // family's `![clip](tg://video?id=vidN)` reference survives into the body
+    // the rich plane sends, and the array entry below answers it. An entry whose
+    // reference is absent is exactly what `neutralize_orphan_photo_refs` defuses
+    // (`mermaid.rs:1285`), which is why the RICH-plane base is the one the media
+    // array must be paired with.
     //
-    // The floor helper is the same one the final leg uses, so kind selection,
-    // captions, telemetry and failure reasons cannot drift between the two
-    // (#502). `vw.entries` already excludes anything this turn has delivered,
-    // so a repeated intermediate cannot ship a clip twice.
-    let videos: Vec<crate::utils::image::LocalVideo> =
-        vw.entries.iter().map(|e| e.video.clone()).collect();
-    let (delivered_videos, refused_videos) =
-        super::delivery::send_local_videos(session_id, bot, chat, thread_id, &videos).await;
-    if !delivered_videos.is_empty() {
-        let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
-        s.delivered_image_paths.extend(delivered_videos);
-    }
-
-    let mut failures = super::delivery::intermediate_failures(rw, vw);
-    // A clip the channel refused is an honest failure of the same turn, and it
-    // rides the text bubble the reader is about to get — never a silent drop.
-    failures.extend(refused_videos);
+    // The clip's own bubble is not gone — it MOVED, into the HTML fallback at
+    // the bottom of this function, where it is reached only when the rich send
+    // returned `None`. The floor helper is the same one the final leg uses, so
+    // kind selection, captions, telemetry and failure reasons cannot drift
+    // between the two (#502). `vw.entries` already excludes anything this turn
+    // has delivered, so a repeated intermediate cannot ship a clip twice.
+    let mut failures = super::delivery::intermediate_failures(rw_stripped, vw);
     let mut media: Vec<super::rich::mermaid::MediaEntry> = Vec::new();
-    for entry in &rw.entries {
+    for entry in &rw_rich.entries {
         match tokio::fs::read(&entry.image.path).await {
             Ok(bytes) => media.push(super::rich::mermaid::MediaEntry {
                 kind: super::rich::mermaid::MediaKind::Photo,
@@ -428,9 +422,37 @@ pub(crate) async fn deliver_intermediate_message(
             }
         }
     }
-    // #465: video does NOT ride this array — see the send above. The array is
-    // the rich plane's, and an entry here without a matching reference in
-    // `body` is what the orphan shield defuses into a dead `tg://video` ref.
+    // #732: the clips ride the SAME array, each carrying its own kind so the
+    // builder emits the string that matches the bytes — exactly as the final
+    // leg does. Their `tg://video?id=vidN` references are present in `rich`
+    // because it was built on the video family's rich form (`rw_rich`). A read
+    // that fails here joins the failure list, never a panic.
+    let mut delivered_video_paths: Vec<std::path::PathBuf> = Vec::new();
+    for entry in &vw.entries {
+        match tokio::fs::read(&entry.video.path).await {
+            Ok(bytes) => {
+                media.push(super::rich::mermaid::MediaEntry {
+                    kind: super::rich::mermaid::MediaKind::Video,
+                    id: entry.id.clone(),
+                    url: None,
+                    bytes: Some(bytes),
+                });
+                delivered_video_paths.push(entry.video.path.clone());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Telegram: failed to read promoted video {}: {}",
+                    entry.video.path.display(),
+                    e
+                );
+                failures.push(LocalImageFailure {
+                    raw: entry.video.path.display().to_string(),
+                    resolved: Some(entry.video.path.clone()),
+                    reason: LocalImageFailureReason::Unreadable,
+                });
+            }
+        }
+    }
 
     // An image the bubble announced must not vanish silently when it cannot be
     // read: the notice rides the same bubble the model wrote (#502).
@@ -465,11 +487,13 @@ pub(crate) async fn deliver_intermediate_message(
         //
         // One list for both families (#465): a path is either already in the
         // chat or it is not, whichever plane put it there, so the delivered-media
-        // record is not split by kind. The videos were recorded by the send
-        // above; only the pictures rode this request.
-        for entry in &rw.entries {
+        // record is not split by kind. #732: the clips rode THIS request's media
+        // array, so they are recorded here beside the pictures — the only copy
+        // of each clip is now in the rich message the reader was shown.
+        for entry in &rw_rich.entries {
             s.delivered_image_paths.push(entry.image.path.clone());
         }
+        s.delivered_image_paths.extend(delivered_video_paths);
         return true;
     }
 
@@ -477,16 +501,21 @@ pub(crate) async fn deliver_intermediate_message(
     // Uses the STRIPPED form, never a re-strip of the rich form: the HTML plane
     // has no media array, and `record_candidate` leaves a `tg://photo?id=` ref
     // verbatim (it classifies as MediaRef), so rendering the rich form here
-    // would show the user dead markdown where the picture should be.
+    // would show the user dead markdown where the picture should be. The same
+    // holds for `tg://video?id=` (#732) — `rw_stripped` is built on the video
+    // family's stripped form, so NEITHER family's reference reaches this plane.
     //
     // The media is not lost on this plane either (#502): each resolved image
     // ships as its own bubble through the SAME helper the final leg uses, so
-    // the two cannot drift on kind selection, captions or failure reasons. The
-    // videos are not here — they left as their own bubbles before the rich
-    // attempt, so this plane owes only the pictures (#465).
+    // the two cannot drift on kind selection, captions or failure reasons.
+    // #732: the clips ship here TOO — this is the site their bubble MOVED to,
+    // from the pre-text send the rich path used to make unconditionally. It is
+    // reached only when the rich send returned `None`, which is exactly when the
+    // clip has nowhere else to go: it cannot ride an array this plane does not
+    // have. Each family keeps its own helper and its own refusal list.
     let mut plain = crate::utils::append_failure_notice(text, &failures);
     let images: Vec<crate::utils::image::LocalImage> =
-        rw.entries.iter().map(|e| e.image.clone()).collect();
+        rw_stripped.entries.iter().map(|e| e.image.clone()).collect();
     let (delivered, refused) =
         super::delivery::send_local_images(session_id, bot, chat, thread_id, &images).await;
     if !delivered.is_empty() {
@@ -494,6 +523,17 @@ pub(crate) async fn deliver_intermediate_message(
         s.delivered_image_paths.extend(delivered);
     }
     plain = crate::utils::append_failure_notice(&plain, &refused);
+    let videos: Vec<crate::utils::image::LocalVideo> =
+        vw.entries.iter().map(|e| e.video.clone()).collect();
+    let (delivered_videos, refused_videos) =
+        super::delivery::send_local_videos(session_id, bot, chat, thread_id, &videos).await;
+    if !delivered_videos.is_empty() {
+        let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+        s.delivered_image_paths.extend(delivered_videos);
+    }
+    // A clip the channel refused is an honest failure of the same turn, and it
+    // rides the text bubble the reader is about to get — never a silent drop.
+    plain = crate::utils::append_failure_notice(&plain, &refused_videos);
 
     // Resolve fences here too (#1142 parity): when the rich path rejected the
     // message, the HTML fallback must still render the diagram instead of
