@@ -865,16 +865,28 @@ impl Database {
         // precondition satisfied, has nothing to protect. `VACUUM INTO` of
         // that image is what filled the disk. The probe is a read.
         let migration_count = Self::MIGRATION_COUNT as i64;
-        let needs_snapshot = self
-            .pool
-            .get()
-            .await
-            .context("Failed to get connection for pre-migration snapshot")?
-            .interact(move |conn| {
-                crate::db::migration_snapshot::needs_pre_migration_snapshot(conn, migration_count)
-            })
-            .await
-            .map_err(interact_err)??;
+        let needs_snapshot = match self.pool.get().await {
+            Ok(conn) => conn
+                .interact(move |conn| {
+                    crate::db::migration_snapshot::needs_pre_migration_snapshot(
+                        conn,
+                        migration_count,
+                    )
+                })
+                .await
+                .map_err(interact_err)??,
+            // #725: the pool cannot open the image at all — deadpool's
+            // `post_create` hook fails on a torn file — so the probe cannot
+            // answer. `true` is the safe direction and the only one that keeps
+            // the refusal legible: it runs the preflight, which opens the file
+            // directly and reports the corruption WITH the restore path.
+            // Propagating the pool error here instead is what produced the
+            // "`post_create` hook failed: database disk image is malformed"
+            // receipt on exactly the image shape #1779 defect 2 exists to make
+            // readable — and it did so before the preflight ever ran, because
+            // this probe was inserted ahead of it.
+            Err(_) => true,
+        };
 
         // #1779 defect 2: this used to be the check *after* the migrations, so
         // on a corrupt image it never ran and the operator died on the
