@@ -1474,20 +1474,21 @@ pub struct AgentConfig {
     #[serde(default)]
     pub subagent_model: Option<String>,
 
-    /// How long an inline bash call holds the turn before its run is handed to
-    /// the background manager instead of being killed (#692).
+    /// Hard ceiling, in seconds, on how long ANY detached run may live (#752).
     ///
-    /// `"never"` restores today's behaviour — the run is killed at its deadline
-    /// and never handed over. `0` detaches immediately. A positive integer is
-    /// the grace in seconds, and an absent key takes the default. The three-way
-    /// shape exists because `0` cannot mean both "detach now" and "never detach";
-    /// see `default_bash_detach_after_secs` for why the default equals the
-    /// inline timeout rather than replacing it.
-    #[serde(
-        default = "default_bash_detach_after_secs",
-        deserialize_with = "deser_detach_after_compat"
-    )]
-    pub bash_detach_after_secs: Option<u64>,
+    /// The deadline merge makes `timeout_secs` hand a run OVER instead of
+    /// killing it, so nothing bounds a runaway any more: a detached child
+    /// inherits the daemon cgroup's `memory.max` and can hold it until the
+    /// kernel OOM-kills the whole group. This is the operator's backstop —
+    /// policy, not a per-call judgement, which is why it lives in config
+    /// rather than as another parameter on the tool.
+    ///
+    /// `0` means no ceiling, leaving the agent's own judgement as the only
+    /// bound. Expiry kills the process GROUP, so the sweep reaches a
+    /// grandchild that re-parented to init — the same reach the pgid gives the
+    /// agent when it signals a run itself.
+    #[serde(default = "default_run_max_lifetime_secs")]
+    pub run_max_lifetime_secs: u64,
 
     /// Per-stream cap, in bytes, on a detached run's captured output (#692).
     /// Past it the stream is still drained — a stopped reader blocks the child
@@ -1881,48 +1882,14 @@ fn default_approval_policy() -> String {
     "auto-always".to_string()
 }
 
-/// How long an inline bash call holds the turn before the run is handed to the
-/// background manager (#692).
+/// Default ceiling on a detached run's lifetime (#752).
 ///
-/// Equal to the inline `timeout_secs` default on purpose: at this instant the
-/// turn was going to end anyway, so detaching here costs no extra latency and
-/// converts a guaranteed kill into a surviving run. Raising it buys the agent
-/// more synchronous output at the price of a longer stall per long command;
-/// lowering it returns the turn sooner but sends more commands through the
-/// status-file path.
-fn default_bash_detach_after_secs() -> Option<u64> {
-    Some(120)
-}
-
-/// Parse `bash_detach_after_secs`, which is three-valued by design (#692):
-/// `"never"` (or `false`) kills the run at its deadline as before, `0` hands it
-/// over immediately, and a positive integer is the grace in seconds. TOML has
-/// no `Option`, and a bare `0` cannot carry both "detach now" and "never
-/// detach", so the sentinel is a word rather than a number.
-fn deser_detach_after_compat<'de, D>(d: D) -> std::result::Result<Option<u64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize as _;
-
-    let value: toml::Value = toml::Value::deserialize(d)?;
-    match &value {
-        toml::Value::Integer(n) if *n >= 0 => Ok(Some(*n as u64)),
-        toml::Value::Integer(n) => Err(serde::de::Error::custom(format!(
-            "bash_detach_after_secs: expected 0 or a positive integer, got {n}"
-        ))),
-        toml::Value::Boolean(false) => Ok(None),
-        toml::Value::Boolean(true) => Ok(default_bash_detach_after_secs()),
-        toml::Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
-            "never" | "none" | "off" => Ok(None),
-            other => Err(serde::de::Error::custom(format!(
-                "bash_detach_after_secs: expected \"never\", 0, or a positive integer; got {other:?}"
-            ))),
-        },
-        _ => Err(serde::de::Error::custom(
-            "bash_detach_after_secs: expected \"never\", 0, or a positive integer",
-        )),
-    }
+/// One hour: longer than any build, test run or CI wait this harness drives,
+/// and short enough that a runaway started by a confused agent cannot hold the
+/// daemon's cgroup memory until the kernel reclaims it. `0` disables the
+/// ceiling; this is the number an operator gets without saying anything.
+fn default_run_max_lifetime_secs() -> u64 {
+    3600
 }
 
 /// Per-stream cap on a detached run's captured output (#692).
@@ -2005,7 +1972,7 @@ impl Default for AgentConfig {
             max_tokens: default_max_tokens(),
             subagent_provider: None,
             subagent_model: None,
-            bash_detach_after_secs: default_bash_detach_after_secs(),
+            run_max_lifetime_secs: default_run_max_lifetime_secs(),
             run_output_cap_bytes: default_run_output_cap_bytes(),
             plan_provider: None,
             plan_model: None,

@@ -86,27 +86,23 @@ fn test_bash_tool_schema() {
     assert!(capabilities.contains(&ToolCapability::ExecuteShell));
     assert!(capabilities.contains(&ToolCapability::SystemModification));
 
+    // #752: exactly four parameters. The fork-invented knobs are gone, and
+    // their history lives in `bash.rs`'s `timeout_secs` doc rather than being
+    // repeated here. The schema is the surface the model actually reads, so pin
+    // the whole set instead of spot-checking one key: the switch this test used
+    // to spot-check promised a mode whose own handler never implemented it.
     let schema = tool.input_schema();
+    let props = schema["properties"]
+        .as_object()
+        .expect("properties must be an object");
+    let mut names: Vec<&str> = props.keys().map(|k| k.as_str()).collect();
+    names.sort_unstable();
     assert_eq!(
-        schema["properties"]["background"]["type"],
-        serde_json::json!("boolean")
+        names,
+        vec!["command", "timeout_secs", "wake_on_output", "working_dir"],
+        "the bash surface is command/working_dir/timeout_secs/wake_on_output"
     );
-}
-
-#[tokio::test]
-async fn test_bash_background_explicit_false_runs_inline() {
-    let tool = BashTool;
-    let session_id = Uuid::new_v4();
-    let context = ToolExecutionContext::new(session_id).with_auto_approve(true);
-
-    let input = serde_json::json!({
-        "command": "echo 'forced inline'",
-        "background": false
-    });
-
-    let result = tool.execute(input, &context).await.unwrap();
-    assert!(result.success);
-    assert!(result.output.contains("forced inline"));
+    assert_eq!(schema["required"], serde_json::json!(["command"]));
 }
 
 #[tokio::test]
@@ -126,7 +122,6 @@ async fn test_bash_injects_opencrabs_session_id() {
 
     let input = serde_json::json!({
         "command": command,
-        "background": false
     });
 
     let result = tool.execute(input, &context).await.unwrap();
@@ -145,46 +140,25 @@ async fn test_bash_injects_opencrabs_session_id() {
 }
 
 #[tokio::test]
-async fn test_bash_background_explicit_true_fails_when_unavailable() {
-    let tool = BashTool;
-    let session_id = Uuid::new_v4();
-    // context without background_manager
-    let context = ToolExecutionContext::new(session_id).with_auto_approve(true);
-
-    let input = serde_json::json!({
-        "command": "echo 'background test'",
-        "background": true
-    });
-
-    let result = tool.execute(input, &context).await.unwrap();
-    assert!(!result.success);
-    let err = result.error.as_deref().unwrap_or(&result.output);
-    assert!(
-        err.contains("Background execution is unavailable"),
-        "expected error message, got: {:?}",
-        result
-    );
-}
-
-#[tokio::test]
-async fn test_bash_background_explicit_true_refuses_sudo() {
+async fn test_bash_long_command_runs_inline_without_a_manager() {
+    // #752: with the explicit detach switch gone, the long-command heuristic is
+    // the only up-front detach path left. When the context carries no manager
+    // there is nowhere to hand the run to, and the heuristic has to degrade to
+    // an ordinary inline run. The old explicit-detach arm errored here instead
+    // — nothing may take its place with a failure, because the model can no
+    // longer ask for a detached run explicitly and must not lose the command
+    // instead.
     let tool = BashTool;
     let session_id = Uuid::new_v4();
     let context = ToolExecutionContext::new(session_id).with_auto_approve(true);
 
     let input = serde_json::json!({
-        "command": "sudo echo 'background sudo'",
-        "background": true
+        "command": "echo 'long looking' && sleep 0.05"
     });
 
     let result = tool.execute(input, &context).await.unwrap();
-    assert!(!result.success);
-    let err = result.error.as_deref().unwrap_or(&result.output);
-    assert!(
-        err.contains("Cannot run sudo commands in the background"),
-        "expected error message, got: {:?}",
-        result
-    );
+    assert!(result.success, "expected an inline run, got: {result:?}");
+    assert!(result.output.contains("long looking"));
 }
 
 #[test]

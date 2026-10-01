@@ -29,6 +29,7 @@ fn tail_keeps_last_n_lines() {
 #[test]
 fn completion_message_reflects_success_and_failure() {
     let ok = completion_message(
+        "11111111-2222-3333-4444-555555555555",
         "cargo test",
         "cargo test --all-features",
         &CmdResult {
@@ -41,6 +42,15 @@ fn completion_message_reflects_success_and_failure() {
     assert!(ok.context_text.contains("exit 0 (success)"));
     assert!(ok.context_text.contains("cargo test --all-features"));
     assert!(ok.context_text.contains("Do not re-run"));
+    // #752: the completion names the run, so a lane whose context was compacted
+    // since the handover does not have to call `tasks_list` to find out WHICH
+    // run just reported.
+    assert!(
+        ok.context_text
+            .contains("Run id: 11111111-2222-3333-4444-555555555555"),
+        "the run id must be in the context text: {}",
+        ok.context_text
+    );
     assert!(ok.display_text.contains("finished"));
     // #15: the typed receipt payload rides along for the echo card.
     let meta = ok.bg_meta.expect("bg completion carries BgTaskMeta");
@@ -50,6 +60,7 @@ fn completion_message_reflects_success_and_failure() {
     assert_eq!(meta.tail, "test result: ok. 5 passed");
 
     let fail = completion_message(
+        "66666666-7777-8888-9999-000000000000",
         "build",
         "cargo build",
         &CmdResult {
@@ -60,6 +71,12 @@ fn completion_message_reflects_success_and_failure() {
         3.0,
     );
     assert!(fail.context_text.contains("exit 101 (failure)"));
+    assert!(
+        fail.context_text
+            .contains("Run id: 66666666-7777-8888-9999-000000000000"),
+        "a FAILED run names itself too — that is when the id matters most: {}",
+        fail.context_text
+    );
     assert!(fail.display_text.contains("failed"));
     let meta = fail.bg_meta.expect("failed completion still carries meta");
     assert!(!meta.success);

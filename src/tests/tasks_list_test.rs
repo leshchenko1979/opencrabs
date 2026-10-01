@@ -41,6 +41,7 @@ fn render_lists_both_systems_with_states_and_pointers() {
     let det = vec![DetachedRow {
         id: "run-1".into(),
         label: "cargo test".into(),
+        state: "running".into(),
         elapsed_secs: 42,
         pid: Some(4242),
         output_out: Some("/tmp/runs/run-1.out".into()),
@@ -58,7 +59,16 @@ fn render_lists_both_systems_with_states_and_pointers() {
     // to look at the work (#692 D6).
     assert!(out.contains("output: /tmp/runs/child-run-1.out"), "was: {out}");
     assert!(out.contains("Detached commands (1)"), "was: {out}");
-    assert!(out.contains("- run-1 [cargo test] 42s"), "was: {out}");
+    // The row names the run's STATE, not just that it exists (#752). Before
+    // this, a detached row rendered `- <id> [<label>] <elapsed>s` and nothing
+    // else, so a run whose own status record said `interrupted` or had gone
+    // missing read exactly like a healthy one. The state is read from the run's
+    // status file — the run's own declaration — never assumed from the handle
+    // being in memory.
+    assert!(
+        out.contains("- run-1 [cargo test] running — 42s"),
+        "was: {out}"
+    );
     // A row must carry the run's ADDRESS, not just its label: the id is the
     // handle `task_output`/`task_wait` take, the pgid is what stops it, and the
     // paths are where the live streams are. A label-only row left the model

@@ -448,6 +448,10 @@ impl BackgroundTaskManager {
         // itself from inside `run_reserved` (both the inline and the detached
         // arm), and delivering here as well would send the outcome twice.
         let has_hook = hook.is_some();
+        // The reservation is MOVED into the spawned task below, so its id is
+        // taken here: the inline arm of that task has to name the run it is
+        // reporting (#752), and by then the reservation is gone.
+        let run_id = reserved.id.clone();
         let this = std::sync::Arc::clone(&self);
         tokio::spawn(async move {
             match this
@@ -468,6 +472,7 @@ impl BackgroundTaskManager {
                     // to, would drop the completion on the floor.
                     if !has_hook {
                         deliver_completion(
+                            &run_id,
                             session_id,
                             &label,
                             &command,
@@ -844,6 +849,74 @@ fn run_output_cap_bytes() -> u64 {
     crate::config::Config::current().agent.run_output_cap_bytes
 }
 
+/// The operator's ceiling on a detached run's lifetime (#752), read from config.
+///
+/// `0` means "no ceiling", leaving the agent's own judgement as the only bound
+/// — the same convention as [`run_output_cap_bytes`], and for the same reason:
+/// an operator who wrote `0` said something deliberate.
+fn run_max_lifetime() -> Option<std::time::Duration> {
+    match crate::config::Config::current().agent.run_max_lifetime_secs {
+        0 => None,
+        secs => Some(std::time::Duration::from_secs(secs)),
+    }
+}
+
+/// Stop a handed-over run that has outlived the operator's ceiling (#752).
+///
+/// Signals the process GROUP, not the child: [`build_command`] applies the same
+/// `setsid()` the inline path does, so the pid recorded on the run IS its pgid
+/// and one negative-pid signal reaches the whole tree — including a grandchild
+/// that re-parented to init. Signalling the child alone would kill the shell and
+/// leave the work running, which is exactly the miss `kill_process_tree`
+/// documents for the inline path.
+///
+/// SIGKILL, not SIGTERM: the ceiling is a backstop against a runaway, and a
+/// runaway is by definition a process that is not listening. There is no
+/// courtesy phase to grant it.
+#[cfg(unix)]
+fn kill_run_group(pid: Option<u32>) {
+    let Some(pid) = pid.filter(|p| *p != 0) else {
+        // No pid recorded — the child never spawned, or the platform never gave
+        // us one. Nothing to signal; the caller's own kill path still applies.
+        return;
+    };
+    // SAFETY: kill(2) on a process group this harness spawned. `setsid()` made
+    // the child a group leader, so -pid names that group and cannot name ours.
+    // ESRCH after an already-exited group is the ordinary case, not an error.
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+    }
+}
+
+/// Non-unix counterpart: tokio's own kill, which reaps the direct child.
+///
+/// The group semantics above are a unix property (`setsid` + `kill(-pgid)`);
+/// Windows has no equivalent here, so the ceiling still ends the run but a
+/// grandchild the shell spawned may outlive it. Stated rather than silently
+/// assumed to work.
+#[cfg(not(unix))]
+fn kill_run_group(_pid: Option<u32>) {}
+
+/// Wait for `child`, bounded by an optional ceiling (#752).
+///
+/// Three outcomes, deliberately distinct: the run finished, the WAIT itself
+/// failed, or the ceiling expired. The ceiling is not folded into the error arm
+/// because the two mean opposite things — a run that never executed, versus a
+/// run the harness stopped on purpose — and the caller reports them
+/// differently.
+async fn wait_bounded(
+    child: &mut tokio::process::Child,
+    ceiling: Option<std::time::Duration>,
+) -> std::result::Result<std::io::Result<std::process::ExitStatus>, ()> {
+    match ceiling {
+        Some(limit) => match tokio::time::timeout(limit, child.wait()).await {
+            Ok(inner) => Ok(inner),
+            Err(_elapsed) => Err(()),
+        },
+        None => Ok(child.wait().await),
+    }
+}
+
 /// Build the detached-run command: platform shell, session env, no controlling
 /// TTY, piped stdio.
 ///
@@ -1127,19 +1200,28 @@ fn tail_chars(s: &str, n: usize) -> String {
 /// undone; a consumer wanting the historical merged shape concatenates at read
 /// time, which is what this does.
 fn cmd_result_from(output: &std::process::Output) -> CmdResult {
-    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
-    let err = String::from_utf8_lossy(&output.stderr);
+    CmdResult {
+        success: output.status.success(),
+        code: exit_code(&output.status),
+        output: join_streams(&output.stdout, &output.stderr),
+    }
+}
+
+/// Join a run's two captures into one body: stdout first, stderr appended only
+/// when it carries anything.
+///
+/// Shared by the ordinary finish and the ceiling kill (#752), so the two paths
+/// cannot drift into reporting the same run's output differently.
+fn join_streams(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut combined = String::from_utf8_lossy(stdout).into_owned();
+    let err = String::from_utf8_lossy(stderr);
     if !err.trim().is_empty() {
         if !combined.is_empty() {
             combined.push('\n');
         }
         combined.push_str(&err);
     }
-    CmdResult {
-        success: output.status.success(),
-        code: exit_code(&output.status),
-        output: combined,
-    }
+    combined
 }
 
 /// The exit code to record for a finished process (#692).
@@ -1349,8 +1431,15 @@ pub(crate) fn wake_message(
 ///
 /// `interrupt=true`: a completion is the origin's own awaited work, exactly like
 /// a sub-agent's; it must reach it even mid-turn (fork #13).
-fn deliver_completion(session_id: Uuid, label: &str, command: &str, result: &CmdResult, elapsed_secs: f32) {
-    let msg = completion_message(label, command, result, elapsed_secs);
+fn deliver_completion(
+    id: &str,
+    session_id: Uuid,
+    label: &str,
+    command: &str,
+    result: &CmdResult,
+    elapsed_secs: f32,
+) {
+    let msg = completion_message(id, label, command, result, elapsed_secs);
     match super::session_routes::deliver_to_session(session_id, msg, true) {
         super::session_routes::Delivery::Redirected { to } => {
             tracing::info!(
@@ -1420,8 +1509,15 @@ async fn continue_detached(
         let wake_label = label.clone();
         tokio::spawn(async move { watch_for_wake(wake_id, session_id, wake_label, spec).await })
     });
-    let result = match child.wait().await {
-        Ok(status) => {
+    // The operator's ceiling (#752) is enforced HERE, where the `Child` is
+    // owned. The deadline merge turned `timeout_secs` into a handover rather
+    // than a kill, so nothing downstream of the handover ends a run that will
+    // not end itself — and a runaway inherits the daemon cgroup's `memory.max`
+    // and can hold it until the kernel OOM-kills the whole group.
+    let ceiling = run_max_lifetime();
+    let pid = child.id();
+    let result = match wait_bounded(&mut child, ceiling).await {
+        Ok(Ok(status)) => {
             let stdout = collect_capture(out_reader, &out_path).await;
             let stderr = collect_capture(err_reader, &err_path).await;
             cmd_result_from(&std::process::Output {
@@ -1430,7 +1526,7 @@ async fn continue_detached(
                 stderr,
             })
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             // Distinct from a command that ran and failed: nothing executed at
             // all, so the exit code below is not one the command produced.
             tracing::error!(
@@ -1441,6 +1537,37 @@ async fn continue_detached(
                 success: false,
                 code: -1,
                 output: format!("failed to await: {e}"),
+            }
+        }
+        Err(()) => {
+            // Outlived the ceiling. Kill the GROUP first, then reap: the
+            // captures below are drained by reader tasks that only finish once
+            // the group's writers are gone, so reaping before killing would
+            // block on a stream the run is still holding open.
+            kill_run_group(pid);
+            // A SIGKILLed child still has to be waited on, or it stays a zombie
+            // on the process table for the life of the daemon.
+            let _ = child.wait().await;
+            let stdout = collect_capture(out_reader, &out_path).await;
+            let stderr = collect_capture(err_reader, &err_path).await;
+            let limit = ceiling.map(|d| d.as_secs()).unwrap_or(0);
+            tracing::warn!(
+                target: "background_task",
+                "Run '{label}' for session {session_id} exceeded the {limit}s lifetime ceiling \
+                 and was killed (id={id}, pid={pid:?})"
+            );
+            CmdResult {
+                success: false,
+                // `128 + SIGKILL`, the same encoding `exit_code` uses for a
+                // signalled process — so a ceiling kill is distinguishable from
+                // an ordinary failure without a new field.
+                code: 137,
+                output: format!(
+                    "{}\n\n[run killed after {limit}s — the operator's ceiling on a detached \
+                     run's lifetime (`agent.run_max_lifetime_secs`). Raise that ceiling if this \
+                     work legitimately needs longer.]",
+                    join_streams(&stdout, &stderr)
+                ),
             }
         }
     };
@@ -1470,7 +1597,7 @@ async fn continue_detached(
         // finished run would leave a watcher observing a terminal stream.
         hook(HookContext { result, elapsed_secs }).await;
     } else {
-        deliver_completion(session_id, &label, &command, &result, elapsed_secs);
+        deliver_completion(&id, session_id, &label, &command, &result, elapsed_secs);
     }
     // The run is over, so its watcher has nothing left to report. Aborted
     // rather than left to observe a terminal stream: a wake that arrived after
@@ -1577,7 +1704,17 @@ pub(crate) fn tail_lines(text: &str, n: usize) -> String {
 /// the detached command's wall-clock runtime; it rides along in the typed
 /// `BgTaskMeta` payload (#15) so the receipt card renders a duration without
 /// parsing the context text.
+///
+/// `id` is the run's address, and it belongs in the CONTEXT TEXT (#752). A
+/// completion used to name the task, the command and the status but never the
+/// run, so a lane whose context had been compacted since the handover had to
+/// call `tasks_list` merely to learn WHICH run had just reported — and with two
+/// runs of the same command in flight the label does not tell them apart
+/// either. It stays out of `BgTaskMeta`: that payload is consumed by the
+/// channel echo, which renders a card rather than an addressable handle, and
+/// widening it would ripple through the six test files that build it.
 pub(crate) fn completion_message(
+    id: &str,
     label: &str,
     command: &str,
     result: &CmdResult,
@@ -1592,6 +1729,7 @@ pub(crate) fn completion_message(
     let context = format!(
         "[System: the background task you started has finished.\n\
          Task: {label}\n\
+         Run id: {id}\n\
          Command: {command}\n\
          Status: {status}\n\
          Output (last 50 lines):\n{tail}\n\n\

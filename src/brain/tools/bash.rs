@@ -287,6 +287,43 @@ fn ssh_stderr_is_auth_failure(stderr: &str) -> bool {
         || (s.contains("ssh:") && s.contains("authentication"))
 }
 
+/// How much of a live capture the handover notice carries (#752).
+///
+/// The notice used to name the two capture paths and nothing else, so a caller
+/// that wanted to know how far the run had got had to spend a whole
+/// `task_output` call on it — a 14-gate loop did exactly that. A short tail
+/// costs nothing and usually answers the question outright.
+const HANDOVER_TAIL_BYTES: u64 = 4096;
+const HANDOVER_TAIL_LINES: usize = 15;
+
+/// Bounded tail of a live capture, for the handover notice (#752).
+///
+/// The file is a LIVE capture that can grow to the whole output cap (8 MiB by
+/// default), so seek to the end and read at most `HANDOVER_TAIL_BYTES` rather
+/// than slurping it. Empty when the capture is empty or unreadable: this is
+/// decoration on a notice that already carries the paths, so a failure here is
+/// never worth an error.
+fn capture_tail(path: &std::path::Path) -> String {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let Ok(len) = f.metadata().map(|m| m.len()) else {
+        return String::new();
+    };
+    if f.seek(SeekFrom::Start(len.saturating_sub(HANDOVER_TAIL_BYTES)))
+        .is_err()
+    {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    if f.take(HANDOVER_TAIL_BYTES).read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&buf);
+    crate::brain::agent::service::background_tasks::tail_lines(&text, HANDOVER_TAIL_LINES)
+}
+
 /// Bash execution tool
 pub struct BashTool;
 
@@ -299,24 +336,21 @@ struct BashInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     working_dir: Option<String>,
 
-    /// Optional timeout in seconds (overrides context default)
+    /// How long this call may hold the turn, in seconds (overrides the
+    /// context default; capped at 600).
+    ///
+    /// ONE deadline, ONE behaviour (#752). A run that finishes inside the
+    /// window returns its output inline. A run still going at the deadline is
+    /// HANDED OVER — never killed: the caller gets the run id, its pgid and
+    /// both capture paths, and this session is resumed when it finishes. `0`
+    /// hands over immediately.
+    ///
+    /// This used to be two params (`timeout_secs` + `detach_after_secs`) whose
+    /// interaction was the opposite of what a reader would guess: an explicit
+    /// `timeout_secs` opted the call OUT of handover, so asking for a deadline
+    /// bought you a killed process. The merge deletes that trap.
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout_secs: Option<u64>,
-
-    /// Optional flag to run detached in background (true) or force inline (false)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    background: Option<bool>,
-
-    /// Optional per-call grace in seconds before an inline run is handed to the
-    /// background manager instead of being killed (#692).
-    ///
-    /// `0` hands over immediately; a positive integer is the grace; absent
-    /// takes `agent.bash_detach_after_secs`. This is the per-call form of the
-    /// same lever as `timeout_secs`: an explicit `timeout_secs` is a statement
-    /// that the caller WANTS the deadline enforced, so that path still kills
-    /// rather than handing over.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    detach_after_secs: Option<u64>,
 
     /// Optional: wake this session when a line of a detached run's output
     /// matches a pattern, instead of waiting for the run to exit (#692).
@@ -326,14 +360,6 @@ struct BashInput {
     /// inline has already reported itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     wake_on_output: Option<WakeOnOutputInput>,
-
-    /// Optional: Maximum inline byte limit before truncation or disk spilling (default: 16000)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_output_bytes: Option<usize>,
-
-    /// Optional: When true (default), spills full output exceeding byte limit to disk. When false, clamps inline.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub spill_to_disk: Option<bool>,
 }
 
 /// The owner's `wake_on_output` (#692), as the tool receives it.
@@ -409,15 +435,7 @@ impl Tool for BashTool {
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Optional: Timeout in seconds (default 120, max 600). Use higher values for builds."
-                },
-                "background": {
-                    "type": "boolean",
-                    "description": "Optional: Set to true to run the command in the background (detached), or false to force inline execution. If omitted, uses automatic heuristic detection."
-                },
-                "detach_after_secs": {
-                    "type": "integer",
-                    "description": "Optional: seconds an inline run may hold the turn before it is handed to the background manager instead of being killed. 0 detaches immediately. Omitted uses the configured default."
+                    "description": "Optional: How long this call may hold the turn (default 120, max 600). Finishes inside the window -> output comes back inline. Still running at the deadline -> the run is handed to the background manager instead of being killed, and you get its run id, pgid and both capture paths; this session is resumed when it finishes. 0 hands over immediately. The deadline never kills: stop a run yourself with kill -TERM -- -<pgid>. Exception: sudo keeps today's behaviour, because its password flow owns the inline tty."
                 },
                 "wake_on_output": {
                     "type": "object",
@@ -438,15 +456,6 @@ impl Tool for BashTool {
                         }
                     },
                     "required": ["pattern", "reason"]
-                },
-                "max_output_bytes": {
-                    "type": "integer",
-                    "description": "Optional: Maximum inline byte limit before truncation or disk spilling (default: 16000)",
-                    "minimum": 1
-                },
-                "spill_to_disk": {
-                    "type": "boolean",
-                    "description": "Optional: When true (default), spills full output exceeding byte limit to /tmp/opencrabs/tool_output/. When false, clamps inline without writing to disk."
                 }
             },
             "required": ["command"]
@@ -582,8 +591,8 @@ impl Tool for BashTool {
         // to be refused at the call: a watcher that discovers it later has no
         // way to tell the caller, and the run would proceed unwatched while the
         // caller believed it was being watched. Compiled once, above the branch,
-        // because all three detach paths (explicit `background: true`, the
-        // long-command marker, and the grace handover) carry the same watch.
+        // because both detach paths (the long-command marker, and the deadline
+        // handover) carry the same watch.
         let wake: Option<WakeSpec> = match input.wake_on_output.as_ref() {
             Some(w) => match regex::Regex::new(&w.pattern) {
                 Ok(pattern) => Some(WakeSpec {
@@ -600,95 +609,50 @@ impl Tool for BashTool {
             None => None,
         };
 
-        // Check explicit background override or heuristic auto-detection
-        match input.background {
-            Some(false) => {
-                tracing::debug!(
+        // Heuristic auto-detection: a command that LOOKS long (builds, test
+        // runs, CI waits, renders) starts detached up front, so the turn never
+        // churns toward the 600s cap.
+        //
+        // The explicit `background` param that used to sit above this is gone
+        // (#752): `true` was exactly `timeout_secs: 0`, and `false` promised
+        // "force inline execution" while its arm only logged and fell through
+        // — the filter that decides handover never read it.
+        if let Some(ref mgr) = context.background_manager
+            && !is_sudo
+            && nesting_ok
+        {
+            match crate::utils::long_command::classify(&input.command) {
+                Detach::Yes { marker } => {
+                    let label = crate::brain::agent::service::background_tasks::short_label(
+                        &input.command,
+                    );
+                    tracing::info!(
+                        target: "background_task",
+                        "Detaching '{label}' for session {}: '{marker}' starts a command",
+                        context.session_id
+                    );
+                    mgr.clone().spawn_command(RunRequest {
+                        session_id: context.session_id,
+                        cwd: context.working_directory.clone(),
+                        label: label.clone(),
+                        command: input.command.clone(),
+                        wake: wake.clone(),
+                    });
+                    return Ok(ToolResult::success(format!(
+                        "Started in the background: {label}\n\nThis is a long-running task, so it \
+                         is running detached. I'll continue this session automatically when it \
+                         finishes — no need to poll or wait. Do other independent work meanwhile \
+                         if there is any."
+                    )));
+                }
+                // Worth a line: the command looks long to a reader, and the
+                // reason it ran inline is not visible anywhere else.
+                Detach::Mentioned { marker } => tracing::debug!(
                     target: "background_task",
-                    "Forced inline execution (background: false) for session {}",
-                    context.session_id
-                );
-            }
-            Some(true) => {
-                if is_sudo {
-                    return Ok(ToolResult::error(
-                        "Cannot run sudo commands in the background (password prompt requires inline execution)"
-                            .to_string(),
-                    ));
-                }
-                if !nesting_ok {
-                    return Ok(ToolResult::error(
-                        "Background execution is disabled in pure worker sessions (allow_nested=false)"
-                            .to_string(),
-                    ));
-                }
-                let Some(ref mgr) = context.background_manager else {
-                    return Ok(ToolResult::error(
-                        "Background execution is unavailable on this surface (no background task manager)"
-                            .to_string(),
-                    ));
-                };
-
-                let label =
-                    crate::brain::agent::service::background_tasks::short_label(&input.command);
-                tracing::info!(
-                    target: "background_task",
-                    "Explicitly detaching '{label}' for session {} (background: true)",
-                    context.session_id
-                );
-                mgr.clone().spawn_command(RunRequest {
-                    session_id: context.session_id,
-                    cwd: context.working_directory.clone(),
-                    label: label.clone(),
-                    command: input.command.clone(),
-                    wake: wake.clone(),
-                });
-                return Ok(ToolResult::success(format!(
-                    "Started in the background: {label}\n\nThis is a long-running task, so it \
-                     is running detached. I'll continue this session automatically when it \
-                     finishes — no need to poll or wait. Do other independent work meanwhile \
-                     if there is any."
-                )));
-            }
-            None => {
-                if let Some(ref mgr) = context.background_manager
-                    && !is_sudo
-                    && nesting_ok
-                {
-                    match crate::utils::long_command::classify(&input.command) {
-                        Detach::Yes { marker } => {
-                            let label = crate::brain::agent::service::background_tasks::short_label(
-                                &input.command,
-                            );
-                            tracing::info!(
-                                target: "background_task",
-                                "Detaching '{label}' for session {}: '{marker}' starts a command",
-                                context.session_id
-                            );
-                            mgr.clone().spawn_command(RunRequest {
-                                session_id: context.session_id,
-                                cwd: context.working_directory.clone(),
-                                label: label.clone(),
-                                command: input.command.clone(),
-                                wake: wake.clone(),
-                            });
-                            return Ok(ToolResult::success(format!(
-                                "Started in the background: {label}\n\nThis is a long-running task, so it \
-                                 is running detached. I'll continue this session automatically when it \
-                                 finishes — no need to poll or wait. Do other independent work meanwhile \
-                                 if there is any."
-                            )));
-                        }
-                        // Worth a line: the command looks long to a reader, and the
-                        // reason it ran inline is not visible anywhere else.
-                        Detach::Mentioned { marker } => tracing::debug!(
-                            target: "background_task",
-                            "Running inline: '{marker}' appears only as data (heredoc body or quoted \
-                             argument), not as a command"
-                        ),
-                        Detach::No => {}
-                    }
-                }
+                    "Running inline: '{marker}' appears only as data (heredoc body or quoted \
+                     argument), not as a command"
+                ),
+                Detach::No => {}
             }
         }
 
@@ -971,24 +935,23 @@ impl Tool for BashTool {
             apply_context_env(&mut cmd, context);
             detach_session_pre_exec(&mut cmd);
 
-            // Grace handover (#692). An inline run that would have been KILLED
-            // at its deadline is instead handed to the background manager and
-            // keeps running, with the turn returning its run id and both
-            // capture paths.
+            // ONE deadline (#752). An inline run that reaches its deadline is
+            // HANDED OVER, never killed: the background manager takes the child
+            // over, and the turn returns its run id, pgid and both capture
+            // paths. Before the merge this happened only when `timeout_secs`
+            // was ABSENT — an explicit deadline opted the call out of handover
+            // and bought a killed process, the opposite of what a reader would
+            // guess from the param's name.
             //
-            // Three deliberate exclusions, each because the alternative is
-            // worse than today's behaviour: sudo (password flow needs the
-            // inline tty handshake), an explicit `timeout_secs` (an explicit
-            // deadline IS an instruction to enforce it, so it still kills), and
-            // a `"never"` config (the operator's escape hatch).
-            let grace: Option<u64> = match input.detach_after_secs {
-                Some(v) => Some(v),
-                None => crate::config::Config::current().agent.bash_detach_after_secs,
-            };
+            // Two exclusions survive, each because the alternative is worse:
+            // sudo (its password flow needs the inline tty handshake) and pure
+            // workers (`allow_nested=false`, #1195 — nothing may outlive their
+            // verdict).
+            let grace = Duration::from_secs(effective_timeout);
             let handover_manager = context
                 .background_manager
                 .clone()
-                .filter(|_| grace.is_some() && !is_sudo && input.timeout_secs.is_none())
+                .filter(|_| !is_sudo)
                 .filter(|_| nesting_ok);
 
             if let Some(mgr) = handover_manager {
@@ -1004,7 +967,7 @@ impl Tool for BashTool {
                             wake,
                         },
                         cmd,
-                        grace.map(Duration::from_secs),
+                        Some(grace),
                     )
                     .await
                 {
@@ -1017,13 +980,28 @@ impl Tool for BashTool {
                         output_out,
                         output_err,
                     }) => {
-                        // Only reachable when grace is Some — `handover_manager`
-                        // above is filtered on `grace.is_some()` — so the
-                        // fallback never renders; it exists rather than to
-                        // assert a number this branch cannot lack.
-                        let waited = grace
-                            .map(|s| format!("after {s}s"))
-                            .unwrap_or_else(|| "after its grace window".to_string());
+                        // `grace` is always Some now: the deadline IS the
+                        // handover trigger, not an opt-in (#752).
+                        let waited = format!("after {effective_timeout}s");
+                        // A short tail of each capture, so the caller can often
+                        // act without spending a `task_output` call (issue item
+                        // 5, #752). Bounded read — see `capture_tail`.
+                        let out_tail = capture_tail(&output_out);
+                        let err_tail = capture_tail(&output_err);
+                        let out_block = if out_tail.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "\n\nstdout so far (last {HANDOVER_TAIL_LINES} lines):\n{out_tail}"
+                            )
+                        };
+                        let err_block = if err_tail.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "\n\nstderr so far (last {HANDOVER_TAIL_LINES} lines):\n{err_tail}"
+                            )
+                        };
                         // The group id IS the stop mechanism: `setsid` made the
                         // child a leader, so signalling the group reaps the tree
                         // — including a descendant that re-parented to init.
@@ -1044,7 +1022,7 @@ impl Tool for BashTool {
                             ),
                         };
                         return Ok(ToolResult::success(format!(
-                            "Still running {waited} — handed to the background manager instead of being killed: {label}\n\nrun id: {id}{gid_line}\nstdout: {out}\nstderr: {err}\n\nIt keeps running, and I'll be told when it finishes.\nTo watch it from here: task_wait with the run id (give a pattern and it returns the moment a matching line appears, or omit one to wait for it to finish). To read what it has said so far, live: task_output with the run id (the two paths above are its captures, if you would rather read them directly). {stop} tasks_list shows every run in this session.",
+                            "Still running {waited} — handed to the background manager instead of being killed: {label}\n\nrun id: {id}{gid_line}\nstdout: {out}\nstderr: {err}{out_block}{err_block}\n\nIt keeps running, and I'll be told when it finishes.\nTo watch it from here: task_wait with the run id (give a pattern and it returns the moment a matching line appears, or omit one to wait for it to finish). To read what it has said so far, live: task_output with the run id (the two paths above are its captures, if you would rather read them directly). {stop} tasks_list shows every run in this session.",
                             out = output_out.display(),
                             err = output_err.display(),
                         )));
@@ -1056,8 +1034,9 @@ impl Tool for BashTool {
                     }
                 }
             } else {
-                // Today's behaviour: the run holds the turn, and is killed at
-                // its deadline.
+                // Reached only for the two exclusions above — sudo, and pure
+                // workers (`allow_nested=false`). No handover manager, so the
+                // run holds the turn and is killed at its deadline.
                 let exec_child_pid = std::sync::atomic::AtomicU32::new(0);
                 let command_future = async {
                     let child = cmd.spawn()?;

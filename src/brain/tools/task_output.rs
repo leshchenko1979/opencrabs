@@ -11,7 +11,7 @@
 
 use super::error::Result;
 use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolHints, ToolResult};
-use crate::brain::agent::service::work_status::{WorkState, WorkStatus};
+use crate::brain::agent::service::work_status::WorkStatus;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
@@ -133,23 +133,6 @@ pub struct TaskOutputTool;
 impl TaskOutputTool {
     pub fn new() -> Self {
         Self
-    }
-}
-
-fn state_label(state: &WorkState) -> &'static str {
-    match state {
-        WorkState::Pending => "pending",
-        WorkState::Running => "running",
-        WorkState::AwaitingInput => "awaiting input",
-        WorkState::Completed => "completed",
-        WorkState::Failed => "failed",
-        // Not an error: the owning process died before the run reached a
-        // terminal state, so how far it got is genuinely unknown. Reporting it
-        // as "failed" would assert the command went wrong; reporting it as
-        // "completed" would assert it went right. Neither is known.
-        WorkState::Interrupted => {
-            "interrupted (the process died mid-run; how far it got is unknown)"
-        }
     }
 }
 
@@ -326,7 +309,7 @@ impl Tool for TaskOutputTool {
             .unwrap_or_default();
         let state = record
             .as_ref()
-            .map(|r| state_label(&r.state).to_string())
+            .map(|r| r.state.label().to_string())
             .unwrap_or_else(|| "running".to_string());
         out.push_str(&format!("Run {run_id} [{label}] — {state}"));
         let pid = record

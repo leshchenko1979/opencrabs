@@ -64,6 +64,16 @@ pub(crate) fn subagent_status_file(id: &str) -> String {
 pub(crate) struct DetachedRow {
     pub id: String,
     pub label: String,
+    /// What the run's OWN status file says it is doing (#752).
+    ///
+    /// Read from disk rather than inferred from the handle being present in the
+    /// in-memory registry: the file is the run's own declaration, written by
+    /// the manager that owns it, so a row reading `running` reports a fact
+    /// instead of an assumption. `unknown` means no file was readable, which is
+    /// itself worth seeing for a live handle — every run writes one at spawn
+    /// (persist-before-wait, #763), and a run whose record has gone is exactly
+    /// the case a caller must not read as healthy.
+    pub state: String,
     pub elapsed_secs: u64,
     /// The run's process-GROUP id, when the platform gave us one. This is the
     /// stop handle: `setsid` made the child a leader, so `kill -- -<pgid>`
@@ -103,7 +113,13 @@ pub(crate) fn render_tasks(subagents: &[SubagentRow], detached: &[DetachedRow]) 
     if !detached.is_empty() {
         out.push_str(&format!("\n\nDetached commands ({}):", detached.len()));
         for d in detached {
-            out.push_str(&format!("\n- {} [{}] {}s", d.id, d.label, d.elapsed_secs));
+            // Same shape as a sub-agent row — `- <id> [<label>] <state>` — so
+            // the two halves of this roster read alike, with the elapsed time
+            // appended because it is the one thing only a command has (#752).
+            out.push_str(&format!(
+                "\n- {} [{}] {} — {}s",
+                d.id, d.label, d.state, d.elapsed_secs
+            ));
             if let Some(p) = d.pid {
                 out.push_str(&format!("\n  pgid: {p}"));
             }
@@ -141,8 +157,8 @@ impl Tool for TasksListTool {
     fn description(&self) -> &str {
         "List in-flight background work: spawned sub-agents (id, label, \
          state, status-file path) and detached shell commands (run id, label, \
-         elapsed, stdout path, stderr path, status-file path). Read-only. Use \
-         it to check what is running instead of re-spawning or busy-waiting; \
+         state, elapsed, stdout path, stderr path, status-file path). Read-only. \
+         Use it to check what is running instead of re-spawning or busy-waiting; \
          results are pushed to you on completion either way. The run id works \
          with task_output (read live output) and task_wait (block on it); the \
          pgid is what you signal to stop one."
@@ -218,9 +234,19 @@ impl Tool for TasksListTool {
             // capture paths are the whole point of the row (#692), and
             // `running_tasks` predates them.
             for h in bm.handles_for(context.session_id) {
+                // The state comes from the run's OWN status file rather than
+                // from the handle merely existing: the file is what the manager
+                // persisted, so reading it makes this row a report instead of an
+                // inference. A live handle whose record cannot be read says
+                // `unknown` — never `running`, which would assert liveness this
+                // code has not checked (#752).
+                let state = crate::brain::agent::service::work_status::WorkStatus::read(&h.id)
+                    .map(|s| s.state.label().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
                 detached.push(DetachedRow {
                     id: h.id.clone(),
                     label: h.label,
+                    state,
                     elapsed_secs: h.started.elapsed().as_secs(),
                     pid: h.pid,
                     output_out: Some(h.output_out.display().to_string()),

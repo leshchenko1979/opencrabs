@@ -73,9 +73,6 @@ pub(crate) fn check_intra_turn_time_marker(
 /// Default inline byte threshold for tool results before disk spilling (16 KB ≈ 4,000 tokens).
 pub(crate) const DEFAULT_MAX_INLINE_TOOL_BYTES: usize = 16_000;
 
-/// Absolute hard limit on tool result characters when spilling is disabled (50 KB).
-pub(crate) const MAX_TOOL_RESULT_CHARS: usize = 50_000;
-
 /// Number of head lines to keep in truncated preview.
 pub(crate) const PREVIEW_HEAD_LINES: usize = 40;
 
@@ -86,13 +83,19 @@ pub(crate) const PREVIEW_TAIL_LINES: usize = 40;
 pub(crate) const TOOL_OUTPUT_DIR: &str = "/tmp/opencrabs/tool_output";
 
 /// Process and cap tool result content blocks.
-/// Offloads oversized outputs (>16 KB default or custom `max_output_bytes`) to disk
-/// at `/tmp/opencrabs/tool_output/session_{session_id}_{call_id}.log` with 40-line head/tail preview,
-/// or clamps inline if `spill_to_disk` is false.
+///
+/// Anything past [`DEFAULT_MAX_INLINE_TOOL_BYTES`] is SPILLED to disk at
+/// `/tmp/opencrabs/tool_output/session_{session_id}_{call_id}.log`, with a
+/// 40-line head/tail preview left in context and the path in the notice.
+///
+/// Always spills, with no opt-out (#752). The fork's per-call byte cap and its
+/// spill toggle are gone: between them they produced a path where TWO constants
+/// decided one thing — 16 000 bytes to ENTER this capping path, 50 000 to CLAMP
+/// — so a result of 16 001–50 000 bytes came back with a truncation notice
+/// appended to content it had not truncated a single byte of.
 pub(crate) async fn process_tool_results_capping(
     session_id: Uuid,
     tool_results: &mut [ContentBlock],
-    tool_inputs_by_id: &std::collections::HashMap<&str, (&str, &Value)>,
 ) {
     for block in tool_results.iter_mut() {
         if let ContentBlock::ToolResult {
@@ -101,22 +104,7 @@ pub(crate) async fn process_tool_results_capping(
             ..
         } = block
         {
-            let (max_output_bytes, spill_to_disk) = tool_inputs_by_id
-                .get(tool_use_id.as_str())
-                .map(|(_, input)| {
-                    let max_bytes = input
-                        .get("max_output_bytes")
-                        .and_then(|v| v.as_u64())
-                        .map(|v| v as usize);
-                    let spill = input
-                        .get("spill_to_disk")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true);
-                    (max_bytes, spill)
-                })
-                .unwrap_or((None, true));
-
-            let effective_limit = max_output_bytes.unwrap_or(DEFAULT_MAX_INLINE_TOOL_BYTES);
+            let effective_limit = DEFAULT_MAX_INLINE_TOOL_BYTES;
             if content.len() <= effective_limit {
                 continue;
             }
@@ -124,86 +112,66 @@ pub(crate) async fn process_tool_results_capping(
             let total_bytes = content.len();
             let total_lines = content.lines().count();
 
-            if spill_to_disk {
-                // Sanitize tool_use_id for filesystem safety
-                let sanitized_id: String = tool_use_id
-                    .chars()
-                    .map(|c| {
-                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                            c
-                        } else {
-                            '_'
-                        }
-                    })
-                    .collect();
-                let file_path = format!(
-                    "{}/session_{}_{}.log",
-                    TOOL_OUTPUT_DIR, session_id, sanitized_id
-                );
-
-                // Write full raw content to disk
-                if let Err(e) = tokio::fs::create_dir_all(TOOL_OUTPUT_DIR).await {
-                    tracing::warn!("Failed to create tool output dir {TOOL_OUTPUT_DIR}: {e}");
-                }
-                if let Err(e) = tokio::fs::write(&file_path, content.as_bytes()).await {
-                    tracing::warn!("Failed to write spilled tool output to {file_path}: {e}");
-                }
-
-                // Format head and tail preview
-                let lines: Vec<&str> = content.lines().collect();
-                let preview_text = if lines.len() > (PREVIEW_HEAD_LINES + PREVIEW_TAIL_LINES) {
-                    let head = lines[..PREVIEW_HEAD_LINES].join("\n");
-                    let tail = lines[lines.len() - PREVIEW_TAIL_LINES..].join("\n");
-                    let skipped = lines.len() - (PREVIEW_HEAD_LINES + PREVIEW_TAIL_LINES);
-                    format!("{head}\n\n[... {skipped} lines omitted ...]\n\n{tail}")
-                } else {
-                    // Lines count <= 80 but byte length > effective_limit (e.g. few very long lines)
-                    let half_budget = effective_limit / 2;
-                    let mut head_cut = half_budget.min(content.len());
-                    while head_cut > 0 && !content.is_char_boundary(head_cut) {
-                        head_cut -= 1;
+            // Sanitize tool_use_id for filesystem safety
+            let sanitized_id: String = tool_use_id
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
                     }
-                    let head = &content[..head_cut];
+                })
+                .collect();
+            let file_path = format!(
+                "{}/session_{}_{}.log",
+                TOOL_OUTPUT_DIR, session_id, sanitized_id
+            );
 
-                    let mut tail_start = content.len().saturating_sub(half_budget);
-                    while tail_start < content.len() && !content.is_char_boundary(tail_start) {
-                        tail_start += 1;
-                    }
-                    let tail = &content[tail_start..];
-                    format!("{head}\n\n[... content omitted ...]\n\n{tail}")
-                };
-
-                *content = format!(
-                    "{preview_text}\n\n[Output truncated: {total_bytes} bytes ({total_lines} lines) exceeded {effective_limit} bytes limit.\n\
-                     Full output saved to: {file_path}\n\
-                     To inspect: use read_file with start_line/line_count, grep on the file, or call with max_output_bytes / spill_to_disk=false.]"
-                );
-
-                tracing::warn!(
-                    "Tool result content spilled to disk: {} → {} bytes (path: {})",
-                    total_bytes,
-                    content.len(),
-                    file_path
-                );
-            } else {
-                // Hard clamp inline without writing to disk
-                let max_clamp = max_output_bytes.unwrap_or(MAX_TOOL_RESULT_CHARS);
-                let mut cut = max_clamp.min(content.len());
-                while cut > 0 && !content.is_char_boundary(cut) {
-                    cut -= 1;
-                }
-                content.truncate(cut);
-                content.push_str(&format!(
-                    "\n\n[Output truncated: {} bytes ({} lines) exceeded {} bytes limit (spill_to_disk=false).\n\
-                     Re-call with start_line/line_count (read_file), head/tail, grep --max-count, or set a larger max_output_bytes.]",
-                    total_bytes, total_lines, effective_limit
-                ));
-                tracing::warn!(
-                    "Tool result content clamped inline (no spill): {} �� {} bytes",
-                    total_bytes,
-                    content.len()
-                );
+            // Write full raw content to disk
+            if let Err(e) = tokio::fs::create_dir_all(TOOL_OUTPUT_DIR).await {
+                tracing::warn!("Failed to create tool output dir {TOOL_OUTPUT_DIR}: {e}");
             }
+            if let Err(e) = tokio::fs::write(&file_path, content.as_bytes()).await {
+                tracing::warn!("Failed to write spilled tool output to {file_path}: {e}");
+            }
+
+            // Format head and tail preview
+            let lines: Vec<&str> = content.lines().collect();
+            let preview_text = if lines.len() > (PREVIEW_HEAD_LINES + PREVIEW_TAIL_LINES) {
+                let head = lines[..PREVIEW_HEAD_LINES].join("\n");
+                let tail = lines[lines.len() - PREVIEW_TAIL_LINES..].join("\n");
+                let skipped = lines.len() - (PREVIEW_HEAD_LINES + PREVIEW_TAIL_LINES);
+                format!("{head}\n\n[... {skipped} lines omitted ...]\n\n{tail}")
+            } else {
+                // Lines count <= 80 but byte length > effective_limit (e.g. few very long lines)
+                let half_budget = effective_limit / 2;
+                let mut head_cut = half_budget.min(content.len());
+                while head_cut > 0 && !content.is_char_boundary(head_cut) {
+                    head_cut -= 1;
+                }
+                let head = &content[..head_cut];
+
+                let mut tail_start = content.len().saturating_sub(half_budget);
+                while tail_start < content.len() && !content.is_char_boundary(tail_start) {
+                    tail_start += 1;
+                }
+                let tail = &content[tail_start..];
+                format!("{head}\n\n[... content omitted ...]\n\n{tail}")
+            };
+
+            *content = format!(
+                "{preview_text}\n\n[Output truncated: {total_bytes} bytes ({total_lines} lines) exceeded {effective_limit} bytes limit.\n\
+                 Full output saved to: {file_path}\n\
+                 To inspect: use read_file with start_line/line_count, grep on the file, or head/tail it.]"
+            );
+
+            tracing::warn!(
+                "Tool result content spilled to disk: {} → {} bytes (path: {})",
+                total_bytes,
+                content.len(),
+                file_path
+            );
         }
     }
 }
@@ -8041,20 +8009,10 @@ impl AgentService {
             }
 
             // Cap oversized tool_result bodies BEFORE they enter context.
-            // Large tool outputs are spilled to disk at 16 KB (default) with 40-line head/tail preview,
-            // or clamped inline if spill_to_disk is false (#226).
-            let tool_inputs_by_id: std::collections::HashMap<&str, (&str, &Value)> = response
-                .content
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::ToolUse { id, name, input } => {
-                        Some((id.as_str(), (name.as_str(), input)))
-                    }
-                    _ => None,
-                })
-                .collect();
-
-            process_tool_results_capping(session_id, &mut tool_results, &tool_inputs_by_id).await;
+            // Anything past 16 KB is spilled to disk with a 40-line head/tail
+            // preview left inline; the full body is readable at the path in the
+            // notice. No opt-out — the per-call knobs are gone (#752).
+            process_tool_results_capping(session_id, &mut tool_results).await;
 
             // Add user message with tool results to context
             let tool_result_msg = Message {

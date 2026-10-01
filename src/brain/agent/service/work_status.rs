@@ -204,6 +204,28 @@ impl WorkState {
             WorkState::Completed | WorkState::Failed | WorkState::Interrupted
         )
     }
+
+    /// The word a reader sees for this state.
+    ///
+    /// Lives on the enum rather than at each render site: `task_output` and
+    /// `tasks_list` both name a run's state, and a second copy of this match
+    /// would let the two tools describe the same run differently (#752).
+    pub fn label(&self) -> &'static str {
+        match self {
+            WorkState::Pending => "pending",
+            WorkState::Running => "running",
+            WorkState::AwaitingInput => "awaiting input",
+            WorkState::Completed => "completed",
+            WorkState::Failed => "failed",
+            // Not an error: the owning process died before the run reached a
+            // terminal state, so how far it got is genuinely unknown. Reporting
+            // it as "failed" would assert the command went wrong; reporting it
+            // as "completed" would assert it went right. Neither is known.
+            WorkState::Interrupted => {
+                "interrupted (the process died mid-run; how far it got is unknown)"
+            }
+        }
+    }
 }
 
 /// Snapshot of the latest tool-use event in a running sub-agent.
