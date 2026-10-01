@@ -1692,20 +1692,33 @@ pub(crate) async fn pace_rich(
                 return RichAdmission::Now;
             }
             let now = gate_now();
-            // #676 — the spacing floor governs DROPPABLE chrome only (D4:
+            // #676 — the spacing floor governs DROPPABLE chrome first (D4:
             // ahead of the bucket, so an in-interval request spends no
-            // token). Content and taps bypass it entirely: this path has no
-            // queue to defer into, and returning `Now` without spending a
-            // token would send a request the pacer never admitted. The drop
-            // is counted on BOTH counters on purpose — `dropped_rich` is the
+            // token): an in-interval cosmetic tick is refused here rather
+            // than queued behind a token it would only waste. The drop is
+            // counted on BOTH counters on purpose — `dropped_rich` is the
             // G4 gate's count (any reason), `dropped_spacing` is the reason.
-            if class.is_droppable() && !spacing_ok(peer, now, lim.spacing_floor) {
+            let spacing_hold = spacing_wait(peer, now, lim.spacing_floor);
+            if class.is_droppable() && !spacing_hold.is_zero() {
                 peer.counters.note_rich_drop(class);
                 peer.counters.note_spacing_drop(class);
                 return RichAdmission::Dropped(class);
             }
+            // #757 — the floor governs rich CONTENT too. A final WAITS the
+            // remainder of the interval instead of bypassing it, exactly like
+            // `pace_send`: the sub-second gap is the lever #676 named, and a
+            // rich call that skipped it fired inside the very interval the
+            // plain-send path waits out. Waiting spends no token, so this can
+            // only delay content, never widen the rich budget. Taps keep
+            // passing straight through — a tap never queues and never waits
+            // (#117) and its own reactive floor owns the outcome.
+            let floor_hold = if class == EditClass::Final {
+                spacing_hold
+            } else {
+                Duration::ZERO
+            };
             let bucket = ensure_bucket(&mut peer.rich, lim.rich_burst, lim.rich_rate_per_sec);
-            let need = bucket.next_token_in_for(now, 0.0);
+            let need = bucket.next_token_in_for(now, 0.0).max(floor_hold);
             if need.is_zero() {
                 // #580: `take` is the ONLY enforcement point for the per-chat
                 // step-2 pause. A paused bucket still REPORTS a token, because

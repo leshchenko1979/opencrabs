@@ -1053,15 +1053,20 @@ async fn rich_calls_are_paced_once_the_bucket_empties() {
     const CHAT: ChatId = ChatId(-100_555);
     const TOPIC: i32 = 4242;
 
-    // The burst passes without any hold at all: ordinary traffic is untouched.
+    // The burst passes without any BUCKET hold at all: ordinary traffic is
+    // untouched. #757 — the spacing floor governs rich content too, so the
+    // calls are spaced past it here to isolate the bucket arm this test pins;
+    // the floor's own behaviour is pinned by
+    // `spacing_floor_holds_rich_content_inside_the_interval`.
     for _ in 0..4 {
         governor::pace_rich(CHAT, Some(TOPIC), governor::EditClass::Final).await;
+        ts::advance(1_000);
     }
     let snap = ts::snapshot(CHAT).unwrap();
     assert_eq!(snap.admitted_rich, 4);
     assert_eq!(
         snap.throttled_rich_ms, 0,
-        "nothing within the burst may be held"
+        "nothing within the burst may be held by the bucket"
     );
 
     // The next one has to wait for a refill — 30/min is one token every 2 s.
@@ -1392,11 +1397,15 @@ async fn spacing_floor_blocks_inside_the_interval_and_clears_after() {
     );
 }
 
-/// #676 — inside the floor a cosmetic edit is DROPPED, and content is never
-/// gated by the floor at all: a Final takes its token as usual. The drop is
+/// #676 — inside the floor a cosmetic edit is DROPPED, and CLASSIC content is
+/// never gated by the floor: a Final takes its token as usual. The drop is
 /// counted on the spacing gate rather than the ladder.
+///
+/// Scoped to `edit_admission` (the classic `editMessageText` path) by #757 —
+/// the RICH content path now WAITS the floor instead of bypassing it, pinned
+/// by `spacing_floor_holds_rich_content_inside_the_interval`.
 #[tokio::test(start_paused = true)]
-async fn spacing_floor_drops_cosmetic_but_never_content() {
+async fn spacing_floor_drops_cosmetic_but_never_classic_content() {
     let _guard = ts::registry_guard().await;
     rl_config!(enabled: true, spacing_floor_ms: 1_000);
     ts::reset(0);
@@ -1437,9 +1446,10 @@ async fn spacing_floor_drops_cosmetic_but_never_content() {
         "the ladder counters must NOT absorb the spacing gate's drops"
     );
 
-    // Final inside the floor: BYPASSES the floor and takes its token. The
-    // floor never gates content — content is already paced by the bucket,
-    // and deferring or dropping it would trade a throttle for a lost edit.
+    // Final inside the floor: BYPASSES the floor and takes its token. This
+    // CLASSIC path never gates content — content is already paced by the
+    // bucket, and deferring or dropping it would trade a throttle for a lost
+    // edit. (The rich path is the one #757 floors.)
     ts::advance(100);
     assert!(
         governor::edit_admission(
@@ -1450,11 +1460,76 @@ async fn spacing_floor_drops_cosmetic_but_never_content() {
             governor::EditPayload::classic_html("final"),
         )
         .await,
-        "content is never gated by the spacing floor"
+        "classic content is never gated by the spacing floor"
     );
     let snap = ts::snapshot(chat).expect("peer exists");
     assert_eq!(
         snap.dropped_spacing, 1,
-        "content must not add to the spacing drop count"
+        "classic content must not add to the spacing drop count"
+    );
+}
+
+/// #757 — the spacing floor now governs rich CONTENT: a `Final` arriving
+/// inside the interval WAITS the remainder and then lands, where #676 let it
+/// bypass the floor entirely. It is never dropped — content waits, chrome
+/// drops. A tap (`Interactive`) still passes straight through (#117).
+#[tokio::test(start_paused = true)]
+async fn spacing_floor_holds_rich_content_inside_the_interval() {
+    let _guard = ts::registry_guard().await;
+    // Generous rich budget, so the ONLY thing that can hold a Final here is
+    // the spacing floor: the bucket arm has its own test.
+    rl_config!(enabled: true, spacing_floor_ms: 1_000, rich_per_minute: 600, rich_burst: 10);
+    ts::reset(0);
+    let chat = ChatId(-100_757_001);
+    ts::mark_forum(chat);
+
+    // Establish the interval with the first admission.
+    assert!(
+        matches!(
+            governor::pace_rich(chat, None, governor::EditClass::Final).await,
+            governor::RichAdmission::Now
+        ),
+        "the first rich call has no predecessor and must clear the floor"
+    );
+    assert_eq!(
+        ts::snapshot(chat).unwrap().throttled_rich_ms,
+        0,
+        "there is nothing to wait for on the first call"
+    );
+
+    // 200 ms later is inside the 1 s floor: the Final WAITS the 800 ms
+    // remainder instead of firing unspaced, and then lands.
+    ts::advance(200);
+    assert!(
+        matches!(
+            governor::pace_rich(chat, None, governor::EditClass::Final).await,
+            governor::RichAdmission::Now
+        ),
+        "content waits the floor out and is then admitted — never dropped"
+    );
+    let snap = ts::snapshot(chat).unwrap();
+    assert_eq!(snap.admitted_rich, 2, "the waited Final still lands");
+    assert!(
+        snap.throttled_rich_ms >= 800,
+        "the floor's remainder must be the hold, not zero; throttled_rich_ms={}",
+        snap.throttled_rich_ms
+    );
+
+    // A tap is exempt by contract: admitted with no hold even inside the
+    // interval, and it must not fold any hold time back.
+    ts::advance(1_000);
+    governor::pace_rich(chat, None, governor::EditClass::Final).await;
+    let held = ts::snapshot(chat).unwrap().throttled_rich_ms;
+    assert!(
+        matches!(
+            governor::pace_rich(chat, None, governor::EditClass::Interactive).await,
+            governor::RichAdmission::Now
+        ),
+        "a tap passes straight through"
+    );
+    assert_eq!(
+        ts::snapshot(chat).unwrap().throttled_rich_ms,
+        held,
+        "a tap must never be held by the spacing floor"
     );
 }
