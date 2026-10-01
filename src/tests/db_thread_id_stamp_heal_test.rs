@@ -378,7 +378,10 @@ async fn the_arm_a_shape_heals_to_the_schema_of_a_fresh_database() {
         ("session_seen_skills", "active"),
     ] {
         assert!(
-            healed.columns.iter().any(|(t, c)| t == table && c == column),
+            healed
+                .columns
+                .iter()
+                .any(|(t, c)| t == table && c == column),
             "{table}.{column} must be present"
         );
     }

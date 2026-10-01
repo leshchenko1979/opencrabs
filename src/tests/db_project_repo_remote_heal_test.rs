@@ -96,11 +96,7 @@ fn migration_sql_order_invariants() {
             "ADD COLUMN repo_remote",
             "projects.repo_remote (#1510, #209)",
         ),
-        (
-            46,
-            "ADD COLUMN last_origin",
-            "session_bindings.last_origin",
-        ),
+        (46, "ADD COLUMN last_origin", "session_bindings.last_origin"),
         (
             47,
             "ADD COLUMN active",

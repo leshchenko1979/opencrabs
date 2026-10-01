@@ -371,11 +371,7 @@ fn statement_for(sql: &str, effect: Effect) -> Option<String> {
 /// already present, so replaying the batch whole would fail on the object that
 /// is there. The declaration is per object precisely so the missing one can be
 /// applied alone.
-fn apply_effect(
-    conn: &rusqlite::Connection,
-    index: usize,
-    effect: Effect,
-) -> rusqlite::Result<()> {
+fn apply_effect(conn: &rusqlite::Connection, index: usize, effect: Effect) -> rusqlite::Result<()> {
     let sql = crate::db::database::MIGRATION_SQL[index];
     match statement_for(sql, effect) {
         Some(stmt) => conn.execute_batch(&stmt),
