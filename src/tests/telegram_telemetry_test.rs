@@ -96,7 +96,16 @@ fn request_line_keeps_the_dash_session_fallback() {
 /// schema (`len`, `hash8`) are DROPPED rather than carried as dead dashes.
 #[test]
 fn request_line_carries_no_message_body_fields() {
-    let line = request_line("tool", "delete", "-", "delete", "deleteMessage", 1, None, Some(2));
+    let line = request_line(
+        "tool",
+        "delete",
+        "-",
+        "delete",
+        "deleteMessage",
+        1,
+        None,
+        Some(2),
+    );
     assert!(!line.contains("len="), "a request has no body; got: {line}");
     assert!(
         !line.contains("hash8="),
