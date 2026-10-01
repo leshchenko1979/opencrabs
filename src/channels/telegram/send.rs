@@ -747,11 +747,33 @@ pub(crate) async fn send_markdown_outbox(
     // carries no session handle: an absolute or `~`-prefixed target still
     // resolves and delivers, while a relative one stays verbatim in the text
     // rather than being silently dropped.
+    //
+    // #465: the VIDEO family joins the same leg, and it walks FIRST. Both
+    // families read the markdown reference form, and `extract_local_images`
+    // CONSUMES a reference whose bytes fail image validation — a clip is
+    // exactly that — so an image-first order would eat `![clip](render.mp4)`
+    // and answer "Image not attached" over a video that was never delivered.
+    // The video walk is the selective one: it declines a picture by content
+    // and leaves every `<<IMG:…>>` marker, picture reference and remote
+    // target verbatim, so running it first cannot starve the image family.
+    // Same order and same reasoning as the delivery floor (#465).
+    //
+    // No remote-video arm, deliberately: `resolve_remote_images` has no video
+    // sibling, so a `<<VID:https://…>>` stays verbatim here rather than being
+    // fetched and re-uploaded. A future arm must NOT inherit the 50 MB
+    // `sendVideo` ceiling — URL-sourced media has a smaller one.
+    let video_scan = crate::utils::extract_local_videos(markdown, None);
     let image_scan = crate::utils::resolve_remote_images(crate::utils::extract_local_images(
-        markdown, None,
+        &video_scan.text,
+        None,
     ))
     .await;
-    let body = crate::utils::append_failure_notice(&image_scan.text, &image_scan.failures);
+    // Two notices, one body: each family names its own kind. A single merged
+    // list would print "Image not attached" over a missing clip (#465).
+    let body = crate::utils::append_video_failure_notice(
+        &crate::utils::append_failure_notice(&image_scan.text, &image_scan.failures),
+        &video_scan.failures,
+    );
     let thread = thread_id.map(|t| t.0.0);
     let html = super::handler::markdown_to_telegram_html(&body);
     // A body that was ONLY an image reference strips to empty; an empty chunk
@@ -920,6 +942,88 @@ pub(crate) async fn send_markdown_outbox(
                     match kind {
                         TelegramMediaKind::Photo => "photo",
                         TelegramMediaKind::Document => "document",
+                    }
+                );
+            }
+        }
+    }
+    // #465: the video family's attachments, through the same helpers the turn
+    // path uses (delivery.rs), so kind selection, captions and the thread the
+    // ladder settled on cannot drift between the two planes (#502). A
+    // container the clients do not play, or one past the `sendVideo` ceiling,
+    // ships as a document rather than settling as a bubble that never plays —
+    // the same honest direction the image arm takes above the `sendPhoto`
+    // ceiling (#286). `video_in_thread` is called rather than a hand-built
+    // request (#1079): the thread routing, caption HTML and parse mode are the
+    // three lines every writer needs, and a second copy is where the
+    // General-topic regression came from. A failure HERE cannot be announced
+    // in the body — the text has already gone out — so it is logged at `error`
+    // with the reference named, never swallowed.
+    for video in &video_scan.attachments {
+        let path = &video.path;
+        let bytes = match tokio::fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(
+                    "{origin}/{origin_detail}: failed to read video {}: {e}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        let len = bytes.len();
+        // The container is read from the BYTES, not the name: an extension is
+        // a claim the file may not honour, and this choice decides whether the
+        // reader gets a clip that plays or a download (#465).
+        let format = sniff_video_format(&bytes[..VIDEO_FORMAT_HEAD_BYTES.min(len)]);
+        let kind = telegram_video_media_kind(len as u64, format);
+        let uploaded = match kind {
+            TelegramVideoKind::Video => video_in_thread(
+                bot,
+                chat_id,
+                thread_id,
+                InputFile::memory(bytes),
+                video.caption.clone(),
+            )
+            .await
+            .map(|m| m.id.0),
+            TelegramVideoKind::Document => document_in_thread(
+                bot,
+                chat_id,
+                thread_id,
+                InputFile::memory(bytes),
+                video.caption.clone(),
+            )
+            .await
+            .map(|m| m.id.0),
+        };
+        match uploaded {
+            Ok(mid) => {
+                let reference = path.display().to_string();
+                super::telemetry::log_send_success(
+                    origin,
+                    origin_detail,
+                    "-",
+                    "outbox",
+                    match kind {
+                        TelegramVideoKind::Video => "video",
+                        TelegramVideoKind::Document => "video_document",
+                    },
+                    chat_id.0,
+                    thread_id.map(|t| t.0.0),
+                    mid,
+                    len,
+                    &super::telemetry::content_hash8(&reference),
+                );
+                sent.push((mid, format!("[video] {reference}")));
+            }
+            Err(e) => {
+                tracing::error!(
+                    "{origin}/{origin_detail}: failed to send video {} as {}: {e}",
+                    path.display(),
+                    match kind {
+                        TelegramVideoKind::Video => "video",
+                        TelegramVideoKind::Document => "document",
                     }
                 );
             }
