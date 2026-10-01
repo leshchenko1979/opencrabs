@@ -17,7 +17,9 @@
 use crate::channels::telegram::rich::api::{
     build_body_markdown_media_edit, build_body_markdown_media_target, media_part_identity,
 };
-use crate::channels::telegram::rich::mermaid::{MediaEntry, MediaKind};
+use crate::channels::telegram::rich::mermaid::{
+    MediaEntry, MediaKind, neutralize_orphan_photo_refs,
+};
 
 /// An MPEG-4 header (`ftyp` + `isom` brand) — the bytes a real clip carries.
 const MP4_BYTES: &[u8] = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2avc1mp41";
@@ -154,4 +156,62 @@ fn a_video_entry_with_url_bytes_absent_keeps_the_legacy_url_reference() {
     let arr = media_array(&body);
     assert_eq!(arr[0]["media"]["type"], "video");
     assert_eq!(arr[0]["media"]["media"], "https://example.invalid/clip.mp4");
+}
+
+// ---------------------------------------------------------------------------
+// the read side: the orphan shield and a matched video ref (#465)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_orphan_shield_leaves_a_matched_video_ref_alone() {
+    // The entry-type tests above never run the shield, so they prove the array
+    // is well-formed and not that the body survives it. A `tg://video?id=`
+    // whose id IS in the array must keep resolving: defusing a live reference
+    // would deliver a dead markdown link in place of the clip the reader was
+    // promised.
+    let media = vec![entry("vid0", MediaKind::Video, MP4_BYTES)];
+
+    assert_eq!(
+        neutralize_orphan_photo_refs("see ![clip](tg://video?id=vid0) here", &media),
+        "see ![clip](tg://video?id=vid0) here",
+        "a video ref with a matching entry must keep resolving"
+    );
+    // The control: the same ref with no entry behind it is defused, which is
+    // what protects the message from a rich rejection.
+    assert_eq!(
+        neutralize_orphan_photo_refs("see ![clip](tg://video?id=absent) here", &media),
+        "see ![clip](tg:video?id=absent) here",
+        "an orphan video ref must lose its scheme"
+    );
+}
+
+#[test]
+fn the_orphan_shield_matches_by_id_and_ignores_kind() {
+    // The mechanism that makes the separate id namespaces load-bearing (#465).
+    // The shield resolves a reference against an entry by ID alone, so a
+    // `tg://video?id=` ref would be "resolved" by an entry of ANY kind sharing
+    // that id — and a PHOTO entry cannot answer a video reference, so the whole
+    // message would be rejected with RICH_MESSAGE_VIDEO_INVALID. Sharing one
+    // `img` prefix between the families is exactly how that happens.
+    let photos = vec![entry("img0", MediaKind::Photo, PNG_BYTES)];
+
+    assert_eq!(
+        neutralize_orphan_photo_refs("![clip](tg://video?id=img0)", &photos),
+        "![clip](tg://video?id=img0)",
+        "the shield matches on the id alone — it does not consult the kind, \
+         which is WHY the two families must keep separate namespaces"
+    );
+
+    // With the video family's own prefix the same body is left untouched for
+    // the right reason: `vid0` names a real video entry.
+    let mixed = vec![
+        entry("img0", MediaKind::Photo, PNG_BYTES),
+        entry("vid0", MediaKind::Video, MP4_BYTES),
+    ];
+    let body = "![a](tg://photo?id=img0)\n\n![b](tg://video?id=vid0)";
+    assert_eq!(
+        neutralize_orphan_photo_refs(body, &mixed),
+        body,
+        "both families' refs resolve against their own entries"
+    );
 }
