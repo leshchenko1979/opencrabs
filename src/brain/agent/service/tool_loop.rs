@@ -7278,6 +7278,10 @@ impl AgentService {
                                             halt_turn_requested = true;
                                         }
                                         let success = result.success;
+                                        // #763: the process exit code, when the tool ran one.
+                                        // Read BEFORE `images` is moved out below — `exit_code()`
+                                        // takes &self, so `result` must still be whole.
+                                        let exit_code = result.exit_code();
                                         let images = result.images;
                                         let content = build_tool_result_content(
                                             result.success,
@@ -7340,7 +7344,9 @@ impl AgentService {
                                             let mid = assistant_db_msg.id.to_string();
                                             let sid = session_id.to_string();
                                             let tname = tool_name.clone();
-                                            let status = if success { "success" } else { "error" };
+                                            let status = crate::db::repository::tool_outcome_status(
+                                                success, exit_code,
+                                            );
                                             let prov = self.provider_name_for_session(session_id);
                                             let mdl =
                                                 Some(self.provider_model_for_session(session_id));
@@ -7355,6 +7361,7 @@ impl AgentService {
                                                         Some(&prov),
                                                         mdl.as_deref(),
                                                         None,
+                                                        exit_code,
                                                     )
                                                     .await
                                                 {
@@ -7497,6 +7504,9 @@ impl AgentService {
                                                         Some(&prov),
                                                         mdl.as_deref(),
                                                         None,
+                                                        // #763: an execution error carries no process
+                                                        // outcome — there is no code to record.
+                                                        None,
                                                     )
                                                     .await
                                                 {
@@ -7628,6 +7638,10 @@ impl AgentService {
                             halt_turn_requested = true;
                         }
                         let success = result.success;
+                        // #763: the process exit code, when the tool ran one.
+                        // Read BEFORE `images` is moved out below — `exit_code()`
+                        // takes &self, so `result` must still be whole.
+                        let exit_code = result.exit_code();
                         let images = result.images;
                         let result_output_for_evidence = result.output.clone();
                         let content =
@@ -7690,7 +7704,9 @@ impl AgentService {
                             let mid = assistant_db_msg.id.to_string();
                             let sid = session_id.to_string();
                             let tname = tool_name.clone();
-                            let status = if success { "success" } else { "error" };
+                            let status = crate::db::repository::tool_outcome_status(
+                                success, exit_code,
+                            );
                             let prov = self.provider_name_for_session(session_id);
                             let mdl = Some(self.provider_model_for_session(session_id));
                             let dur_ms = tool_start.elapsed().as_millis() as i64;
@@ -7705,6 +7721,7 @@ impl AgentService {
                                         Some(&prov),
                                         mdl.as_deref(),
                                         Some(dur_ms),
+                                        exit_code,
                                     )
                                     .await
                                 {
@@ -7795,6 +7812,9 @@ impl AgentService {
                                         Some(&prov),
                                         mdl.as_deref(),
                                         Some(dur_ms),
+                                        // #763: an execution error carries no process
+                                        // outcome — there is no code to record.
+                                        None,
                                     )
                                     .await
                                 {

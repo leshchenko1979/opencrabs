@@ -45,6 +45,14 @@ impl ToolExecutionRepository {
     /// meaningful to record for an unnamed tool; logging the refusal at warn
     /// level is enough to surface upstream model misbehaviour without
     /// polluting the stats.
+    ///
+    /// `status` states the TOOL-LEVEL outcome and `exit_code` carries what the
+    /// process the tool ran returned (#763). The two are separate on purpose:
+    /// an intentional `rc != 0` (a `grep` with no match, a probe's deliberate
+    /// `exit 1`) is a tool that RAN, so it writes `status = 'success'` with the
+    /// code, while a genuine tool failure writes `status = 'error'` with NULL.
+    /// Before #763 the code was folded into `status`, and the two classes were
+    /// indistinguishable in the record.
     #[allow(clippy::too_many_arguments)]
     pub async fn record(
         &self,
@@ -56,6 +64,7 @@ impl ToolExecutionRepository {
         provider: Option<&str>,
         model: Option<&str>,
         duration_ms: Option<i64>,
+        exit_code: Option<i32>,
     ) -> Result<()> {
         if tool_name.trim().is_empty() {
             tracing::warn!(
@@ -93,8 +102,9 @@ impl ToolExecutionRepository {
         write_with_retry(&self.pool, &write_retry_config(), move |conn| {
                 conn.execute(
                     "INSERT OR IGNORE INTO tool_executions \
-                     (id, message_id, session_id, tool_name, status, provider, model, duration_ms) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     (id, message_id, session_id, tool_name, status, provider, model, duration_ms, \
+                      exit_code) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     params![
                         id,
                         message_id,
@@ -103,7 +113,8 @@ impl ToolExecutionRepository {
                         status,
                         provider,
                         model,
-                        duration_ms
+                        duration_ms,
+                        exit_code
                     ],
                 )
         })
@@ -266,5 +277,27 @@ impl ToolExecutionRepository {
             .await
             .map_err(interact_err)?
             .context("Failed to query tool failure stats")
+    }
+}
+
+/// The tool-level outcome for the execution record (#763).
+///
+/// Single home for the predicate. It used to be restated at five call sites —
+/// four in `tool_loop.rs`, one in `parallel_tools.rs` — each writing the same
+/// three-way `if`, which is how a rule drifts.
+///
+/// The split this encodes: a tool that RAN ITS PROCESS TO COMPLETION is a tool
+/// that ran, whatever code came back, so a carried `exit_code` pins the status
+/// to `success`. `error` is reserved for the tool itself failing. A tool that
+/// spawns no process carries no code, and keeps the pre-#763 mapping of its own
+/// `success` flag, so non-bash behaviour is untouched.
+///
+/// Note what is NOT here: the code's VALUE is never consulted. `rc != 0` is not
+/// a failure — only the absence of a process outcome plus a failed tool is.
+pub fn tool_outcome_status(success: bool, exit_code: Option<i32>) -> &'static str {
+    if exit_code.is_some() || success {
+        "success"
+    } else {
+        "error"
     }
 }

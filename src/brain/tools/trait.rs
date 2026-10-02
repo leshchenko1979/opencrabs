@@ -279,6 +279,18 @@ impl ToolResult {
         self.metadata.insert(key, value);
         self
     }
+
+    /// The process exit code this result carries, when the tool ran one (#763).
+    ///
+    /// `bash` — and any tool that spawns a process — records the code under the
+    /// `exit_code` metadata key. `None` means no process ran: either the tool
+    /// is not a process runner, or it failed before spawning one. The execution
+    /// record's call sites use this to keep the PROCESS outcome (`exit_code`)
+    /// apart from the TOOL outcome (`status`), so an intentional `rc != 0` is
+    /// no longer written as a tool failure.
+    pub fn exit_code(&self) -> Option<i32> {
+        self.metadata.get("exit_code").and_then(|v| v.parse().ok())
+    }
 }
 
 /// Tool capability flags

@@ -176,6 +176,14 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // that moves every job's `next_run_at`, so a spent one-shot reads
     // `enabled = 0` instead of parking armed until the same date next year.
     include_str!("../migrations/20260927000001_add_cron_run_once.sql"),
+    // FORK (#763): the process exit code as its own column. `status` folded the
+    // code into success/error, so an intentional `rc != 0` read as a tool
+    // failure (25,013 of 30,933 error rows on the ops DB were `bash`,
+    // 6.0137 % of all bash rows). Nullable; pre-feature rows stay NULL and are
+    // deliberately NOT back-classified. Appended last per the list invariant,
+    // and covered by `heal_tool_executions_exit_code` after `to_latest` so a
+    // database stamped past this index still gains the column (#1401 class).
+    include_str!("../migrations/20261002000001_add_tool_executions_exit_code.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
@@ -978,6 +986,7 @@ impl Database {
                     crate::db::migration_heal::heal_notify_queue(conn)?;
                     crate::db::migration_heal::heal_project_repo_remote(conn)?;
                     crate::db::migration_heal::heal_session_seen_skills_loaded_mtime(conn)?;
+                    crate::db::migration_heal::heal_tool_executions_exit_code(conn)?;
                     Ok(())
                 },
             )

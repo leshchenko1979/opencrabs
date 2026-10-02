@@ -13,11 +13,12 @@
 //! `to_latest` on every boot, so a healed database stays healed and a
 //! correct one is untouched.
 //!
-//! # The reconciliation pass and the four post-pass heals
+//! # The reconciliation pass and the five post-pass heals
 //!
-//! [`reconcile_before_migrations`] runs BEFORE `to_latest`; the four heals at
+//! [`reconcile_before_migrations`] runs BEFORE `to_latest`; the five heals at
 //! the foot of this module (`heal_pending_requests_origin`, `heal_notify_queue`,
-//! `heal_project_repo_remote`, `heal_session_seen_skills_loaded_mtime`) still run
+//! `heal_project_repo_remote`, `heal_session_seen_skills_loaded_mtime`,
+//! `heal_tool_executions_exit_code`) still run
 //! AFTER it, from `Database::run_migrations`. They are kept because their
 //! migrations are NOT all declared above, and a reader who deletes one as
 //! "covered by the table" would remove the only cover its migration has:
@@ -42,6 +43,14 @@
 //! - `heal_pending_requests_origin` (migration 37, `pending_requests.origin`) —
 //!   **NOT overlapped, and must not be.** The migration is below the declared
 //!   window, so nothing above covers it; this heal is its only repair (#1401).
+//! - `heal_tool_executions_exit_code` (migration 60, `tool_executions.exit_code`)
+//!   — **NOT overlapped, and must not be.** The migration is appended LAST, above
+//!   the declared window, and the window's contiguity test forbids declaring it
+//!   there. Appending is exactly the shape the re-sort punishes: an upstream
+//!   merge that inserts an earlier filename below this one shifts its index, and
+//!   a database stamped against the pre-merge list then skips it in silence —
+//!   the #1401 class in the direction `to_latest` cannot see. This heal is its
+//!   only repair.
 
 /// The schema object a migration's effect creates.
 ///
@@ -625,6 +634,9 @@ pub(crate) fn heals_would_write(
     {
         return Ok(true);
     }
+    if has_table(conn, "tool_executions")? && !has_column(conn, "tool_executions", "exit_code")? {
+        return Ok(true);
+    }
     Ok(false)
 }
 
@@ -680,6 +692,28 @@ pub(crate) fn heal_session_seen_skills_loaded_mtime(
     }
     conn.execute_batch("ALTER TABLE session_seen_skills ADD COLUMN loaded_mtime INTEGER;")?;
     tracing::warn!("Healed session_seen_skills: added missing loaded_mtime column (#210).");
+    Ok(true)
+}
+
+/// Add `tool_executions.exit_code` when migration 60 was skipped (#763).
+///
+/// Mirrors `src/migrations/20261002000001_add_tool_executions_exit_code.sql`,
+/// which stays the source of truth. The migration is appended LAST, so an
+/// upstream merge that inserts an earlier filename below it shifts its index,
+/// and a database stamped against the pre-merge list then never runs it — the
+/// #1401 class, in the direction `to_latest` cannot see. This heal is the
+/// column's only repair.
+pub(crate) fn heal_tool_executions_exit_code(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<bool> {
+    if !has_table(conn, "tool_executions")? || has_column(conn, "tool_executions", "exit_code")? {
+        return Ok(false);
+    }
+    conn.execute_batch("ALTER TABLE tool_executions ADD COLUMN exit_code INTEGER;")?;
+    tracing::warn!(
+        "Healed tool_executions: the exit_code column of migration 60 was missing although the \
+         schema was stamped past it (#763)."
+    );
     Ok(true)
 }
 

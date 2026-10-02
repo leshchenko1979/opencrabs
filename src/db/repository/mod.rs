@@ -45,7 +45,7 @@ pub use recent_paths::RecentPathsRepository;
 pub use session::{SessionListOptions, SessionRepository};
 pub use session_binding::{BindingOrigin, SessionBinding, SessionBindingRepository};
 pub use session_skills::SessionSkillsRepository;
-pub use tool_execution::ToolExecutionRepository;
+pub use tool_execution::{ToolExecutionRepository, tool_outcome_status};
 pub use traits::Repository;
 pub use turn_retrieval::{AuditRow, TurnRetrievalRepository};
 pub use usage_ledger::UsageLedgerRepository;
