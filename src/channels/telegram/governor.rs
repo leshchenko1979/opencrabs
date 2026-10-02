@@ -279,6 +279,197 @@ impl Limits {
 }
 
 // ---------------------------------------------------------------------------
+// Surface policy descriptors (#635)
+// ---------------------------------------------------------------------------
+
+// Everything in this section is consumed by `pace_engine` in #635 step 3.
+// Step 2 lands the table alone so it can be reviewed against the frozen
+// matrix without a single call site moving; the `allow(dead_code)` markers
+// below come off in step 3, when the engine reads every field.
+//
+// Source of truth: `opencrabs-dev/designs/635-governor-policy-matrix.md`.
+// A cell that changes here is a behavioural change and must be named as one.
+
+/// Whether a surface consults the shared cross-surface spacing floor (#676).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum SpacingPolicy {
+    /// G1 (typing): no spacing check at all.
+    Exempt,
+    /// G3 (sends): the floor delays the request; the gate waits, or fails open.
+    Wait,
+    /// G2/G4: droppable chrome is discarded on a short gap, content is not.
+    DropDroppable,
+}
+
+/// What happens to droppable chrome (clock / brain-preview / intermediary /
+/// status edits) when the surface cannot admit it right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum ChromeOnDry {
+    /// Discard it — G2 and G4 both drop droppable chrome on a dry bucket.
+    Drop,
+    /// The surface has no droppable class at all (G1 typing, G3 sends).
+    NotApplicable,
+}
+
+/// What happens to content (G2 finals, G3 sends, G4 rich content) when the
+/// surface cannot admit it right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum ContentOnDry {
+    /// Discard it — G1's typing refresh has no queue and no wait.
+    Drop,
+    /// Queue it latest-wins, superseding whatever was queued before (G2).
+    Queue,
+    /// Hold until a token refills (G3, G4).
+    Wait,
+}
+
+/// Which budget bounds a surface's hold. The number itself is config-derived
+/// and lives in [`Limits`]; this names which knob supplies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum HoldBudget {
+    /// No wait loop at all — the gate answers in one shot (G2, G4).
+    None,
+    /// [`Limits::typing_max_hold`] (G1).
+    Typing,
+    /// The [`SEND_MAX_HOLD`] constant (G3).
+    Send,
+}
+
+/// How a surface treats an active global 429 cooldown / permit refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum PermitPolicy {
+    /// G1/G2: the global permit is not consulted at all.
+    Ignore,
+    /// G3: log and proceed — a send is delay-never-drop (#297).
+    WarnAndProceed,
+    /// G4: refuse, and let the caller defer.
+    Refuse,
+}
+
+/// Why a surface discarded a payload. One variant per drop path, so a caller
+/// can increment the counter its own surface already keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum DropReason {
+    /// The cross-surface spacing floor was not met (droppable chrome only).
+    SpacingFloor,
+    /// The surface's own bucket was dry.
+    BucketDry,
+    /// The surface's hold budget elapsed; the gate refuses rather than waits.
+    HoldExceeded,
+}
+
+/// The engine's verdict for one admission attempt.
+///
+/// The four gates return four different shapes today (`bool`, `bool`, `()`,
+/// `RichAdmission`). One enum means a gate cannot invent a fifth outcome, and
+/// a caller that ignores the reason stops compiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum PaceOutcome {
+    /// The request may proceed now.
+    Admit,
+    /// The request was discarded; the reason names the path that did it.
+    Drop(DropReason),
+    /// The request must wait this long before it may retry.
+    Defer(Duration),
+}
+
+/// One row of the governor policy matrix — the frozen contract for #635.
+///
+/// Every field is a column of that table. The four consts below are the four
+/// gates, and `pace_engine` (step 3) reads them instead of the four hand-
+/// written skeletons that let #757 diverge in the first place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct SurfacePolicy {
+    /// The gate this policy describes, as its function name.
+    pub(crate) gate: &'static str,
+    /// The event-time ring surface pushed on admission.
+    pub(crate) ring: &'static str,
+    /// Whether the shared spacing floor applies, and how.
+    pub(crate) spacing: SpacingPolicy,
+    /// Faith of droppable chrome when the bucket is dry.
+    pub(crate) chrome_on_dry: ChromeOnDry,
+    /// Faith of content when the bucket is dry.
+    pub(crate) content_on_dry: ContentOnDry,
+    /// Which budget bounds the hold.
+    pub(crate) hold: HoldBudget,
+    /// Whether the surface admits anyway once `hold` is exceeded. Only G3
+    /// does: a send is delay-never-drop, so its pacer has no drop path.
+    pub(crate) fail_open: bool,
+    /// How the global permit / cooldown is treated.
+    pub(crate) permit: PermitPolicy,
+    /// Whether the gate records `forum_seen` when a thread id is present.
+    /// G2 and G3 never do — they read the flag but do not set it.
+    pub(crate) sets_forum_seen: bool,
+}
+
+#[allow(dead_code)]
+impl SurfacePolicy {
+    /// G1 — `sendChatAction` (typing). Floor-exempt (#676), drops its refresh
+    /// once `typing_max_hold` elapses, never fails open.
+    pub(crate) const TYPING: Self = Self {
+        gate: "admit_chat_action",
+        ring: SURFACE_TYPING,
+        spacing: SpacingPolicy::Exempt,
+        chrome_on_dry: ChromeOnDry::NotApplicable,
+        content_on_dry: ContentOnDry::Drop,
+        hold: HoldBudget::Typing,
+        fail_open: false,
+        permit: PermitPolicy::Ignore,
+        sets_forum_seen: true,
+    };
+
+    /// G2 — `editMessageText` / rich edits. No wait loop: content queues
+    /// latest-wins, droppable chrome is discarded.
+    pub(crate) const EDITS: Self = Self {
+        gate: "edit_admission",
+        ring: SURFACE_EDITS,
+        spacing: SpacingPolicy::DropDroppable,
+        chrome_on_dry: ChromeOnDry::Drop,
+        content_on_dry: ContentOnDry::Queue,
+        hold: HoldBudget::None,
+        fail_open: false,
+        permit: PermitPolicy::Ignore,
+        sets_forum_seen: false,
+    };
+
+    /// G3 — `sendMessage`. Two buckets AND-ed, floor waited, global permit
+    /// logged and ignored, and the only surface that fails open.
+    pub(crate) const SENDS: Self = Self {
+        gate: "pace_send",
+        ring: SURFACE_SENDS,
+        spacing: SpacingPolicy::Wait,
+        chrome_on_dry: ChromeOnDry::NotApplicable,
+        content_on_dry: ContentOnDry::Wait,
+        hold: HoldBudget::Send,
+        fail_open: true,
+        permit: PermitPolicy::WarnAndProceed,
+        sets_forum_seen: false,
+    };
+
+    /// G4 — `sendRichMessage` and rich edits. Floor applies to finals only
+    /// (#757), droppable chrome is discarded, content waits, never fails open.
+    pub(crate) const RICH: Self = Self {
+        gate: "pace_rich",
+        ring: SURFACE_RICH,
+        spacing: SpacingPolicy::DropDroppable,
+        chrome_on_dry: ChromeOnDry::Drop,
+        content_on_dry: ContentOnDry::Wait,
+        hold: HoldBudget::None,
+        fail_open: false,
+        permit: PermitPolicy::Refuse,
+        sets_forum_seen: true,
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Token bucket
 // ---------------------------------------------------------------------------
 
