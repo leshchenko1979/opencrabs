@@ -87,16 +87,20 @@ fn test_rate_gate_callers_never_receive_raw_incoming_thread_ids() {
 
 #[test]
 fn test_forum_seen_marking_sites_are_a_closed_set() {
-    // Four sites, accounted for: admit_chat_action (certified param),
-    // pace_rich (certified param), mark_forum + burn_bucket (#[cfg(test)]
-    // helpers). A fifth means someone is arming forum behaviour from an
+    // Three sites, accounted for: pace_engine — the ONE production arming
+    // point, reached only when `SurfacePolicy::sets_forum_seen` holds (true
+    // for TYPING and RICH, false for SENDS and EDITS) AND the gate handed it
+    // a session-certified thread id — plus the mark_forum and burn_bucket
+    // #[cfg(test)] helpers. Before #635 the two production arms sat in
+    // admit_chat_action and pace_rich; the shared engine collapsed them, so a
+    // fourth line here means someone is arming forum behaviour from an
     // unvetted source — stop and justify it in the same PR.
     let markings: Vec<&str> = non_comment_lines(GOVERNOR_SRC)
         .filter(|l| l.contains("forum_seen = true"))
         .collect();
     assert_eq!(
         markings.len(),
-        4,
+        3,
         "#1708 class: unexpected forum_seen marking site appeared in governor.rs: {markings:?}"
     );
 }
