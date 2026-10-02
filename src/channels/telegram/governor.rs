@@ -394,13 +394,6 @@ pub(crate) enum DropReason {
 /// a caller that ignores the reason stops compiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
-/// The engine's verdict for one admission attempt.
-///
-/// The four gates return four different shapes today (`bool`, `bool`, `()`,
-/// `RichAdmission`). One enum means a gate cannot invent a fifth outcome, and
-/// a caller that ignores the reason stops compiling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum PaceOutcome {
     /// The request may proceed now.
     Admit,
