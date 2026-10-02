@@ -183,6 +183,7 @@ async fn roundtrip_retrieval_and_outcome_join_action_rows() {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -230,6 +231,7 @@ async fn roundtrip_without_recording_still_lists_actions() {
     actions
         .record(
             "act-2", "msg-2", "sess-1", "bash", "error", None, None, None,
+            None,
         )
         .await
         .unwrap();
@@ -291,6 +293,7 @@ async fn retrieval_preview_is_capped_at_128_chars() {
             "sess-1",
             "read_file",
             "success",
+            None,
             None,
             None,
             None,

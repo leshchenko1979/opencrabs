@@ -548,6 +548,7 @@ pub mod sanitize_redaction_test;
 pub mod toml_merge_test;
 pub mod tool_description_redaction_test;
 pub mod tool_execution_stats_test;
+pub mod tool_outcome_status_test;
 pub mod tool_process_kill_on_drop_test;
 pub mod tool_repeat_test;
 //pub mod error_scenarios_test;

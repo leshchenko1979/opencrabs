@@ -19,7 +19,7 @@ async fn make_db() -> Database {
 async fn record_skips_empty_tool_name() {
     let db = make_db().await;
     let repo = ToolExecutionRepository::new(db.pool().clone());
-    repo.record("id-empty", "msg-1", "sess-1", "", "error", None, None, None)
+    repo.record("id-empty", "msg-1", "sess-1", "", "error", None, None, None, None)
         .await
         .expect("empty record returns Ok, just skips the insert");
     let stats = repo.stats_by_tool(None).await.unwrap();
@@ -32,6 +32,7 @@ async fn record_skips_whitespace_only_tool_name() {
     let repo = ToolExecutionRepository::new(db.pool().clone());
     repo.record(
         "id-ws", "msg-1", "sess-1", "   \t  ", "error", None, None, None,
+        None,
     )
     .await
     .expect("whitespace-only is treated as empty");
@@ -52,6 +53,7 @@ async fn record_accepts_normal_tool_name() {
         None,
         None,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -61,6 +63,7 @@ async fn record_accepts_normal_tool_name() {
         "sess-1",
         "grep",
         "completed",
+        None,
         None,
         None,
         None,
@@ -103,6 +106,7 @@ async fn stats_by_tool_filters_legacy_empty_rows() {
         None,
         None,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -131,6 +135,7 @@ async fn record_skips_garbage_tool_name_with_xml_fragment() {
         None,
         None,
         None,
+        None,
     )
     .await
     .expect("garbage record returns Ok, just skips the insert");
@@ -144,6 +149,7 @@ async fn record_skips_tool_name_with_uppercase() {
     let repo = ToolExecutionRepository::new(db.pool().clone());
     repo.record(
         "id-upper", "msg-1", "sess-1", "Bash", "error", None, None, None,
+        None,
     )
     .await
     .unwrap();
@@ -158,6 +164,7 @@ async fn record_skips_overlong_tool_name() {
     let long_name = "a".repeat(65);
     repo.record(
         "id-long", "msg-1", "sess-1", &long_name, "error", None, None, None,
+        None,
     )
     .await
     .unwrap();
@@ -175,6 +182,7 @@ async fn record_accepts_tool_name_with_digits_and_underscores() {
         "sess-1",
         "web_search_v2",
         "success",
+        None,
         None,
         None,
         None,

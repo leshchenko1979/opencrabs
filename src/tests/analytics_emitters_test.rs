@@ -57,6 +57,7 @@ async fn record_writes_provider_model_duration() {
         Some("anthropic"),
         Some("claude-opus-4-8"),
         Some(250),
+        None,
     )
     .await
     .expect("record should succeed");
@@ -79,6 +80,7 @@ async fn record_writes_nulls_when_context_absent() {
         "sess-2",
         "grep",
         "error",
+        None,
         None,
         None,
         None,

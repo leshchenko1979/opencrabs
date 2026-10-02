@@ -32,8 +32,15 @@ struct ToolOutcome {
     /// Tool never ran (unknown name / invalid args): a model miss, bucketed
     /// as discovery_miss instead of a tool failure.
     pre_execution_miss: bool,
-    /// True when the execution returned Err (vs a failed ToolResult).
-    exec_error: bool,
+    /// The process exit code the tool ran to, when it ran one (#763).
+    /// `None` for a tool that spawns no process, and for an `Err` — no
+    /// process outcome exists either way.
+    ///
+    /// The former `exec_error` flag lived here and is gone: it only ever fed
+    /// the status predicate, and `exit_code.is_some() || success` now yields
+    /// the same verdict for every case it covered (an `Err` carries no code,
+    /// so it still reads `error`).
+    exit_code: Option<i32>,
 }
 
 /// What the batch produced, in original order.
@@ -166,6 +173,10 @@ impl super::AgentService {
                             tool_name,
                             tool_input,
                             success: result.success,
+                            // #763: must be read before `images` moves a field
+                            // out of `result` — a &self call needs the whole
+                            // struct intact.
+                            exit_code: result.exit_code(),
                             content: build_tool_result_content(
                                 result.success,
                                 result.error,
@@ -173,7 +184,6 @@ impl super::AgentService {
                             ),
                             images: result.images,
                             pre_execution_miss: false,
-                            exec_error: false,
                         },
                         Err(e) => ToolOutcome {
                             tool_id,
@@ -183,7 +193,8 @@ impl super::AgentService {
                             content: format!("Tool execution error: {}", e),
                             images: Vec::new(),
                             pre_execution_miss: e.is_pre_execution_miss(),
-                            exec_error: true,
+                            // #763: no process ran, so there is no code.
+                            exit_code: None,
                         },
                     };
                     // Completion event fires as each tool finishes (real-time
@@ -300,13 +311,10 @@ impl super::AgentService {
                 let tname = o.tool_name.clone();
                 let prov = self.provider_name_for_session(session_id);
                 let mdl = Some(self.provider_model_for_session(session_id));
-                let status = if o.exec_error {
-                    "error"
-                } else if o.success {
-                    "success"
-                } else {
-                    "error"
-                };
+                let status = crate::db::repository::tool_outcome_status(o.success, o.exit_code);
+                // Copied out before the spawn: the closure would otherwise
+                // capture `o` wholesale, and `o` is read again below.
+                let exit_code = o.exit_code;
                 tokio::spawn(async move {
                     if let Err(e) = tool_repo
                         .record(
@@ -318,6 +326,7 @@ impl super::AgentService {
                             Some(&prov),
                             mdl.as_deref(),
                             None,
+                            exit_code,
                         )
                         .await
                     {
