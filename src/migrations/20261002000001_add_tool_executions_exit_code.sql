@@ -1,0 +1,14 @@
+-- #763: the process exit code in its own column, split from `status`.
+--
+-- `status` carried the process code folded into success/error, so an
+-- intentional `rc != 0` (a `grep` with no match, a probe's deliberate
+-- `exit 1`, `test 1 -eq 2`) was written as `status = 'error'` — the same
+-- value a genuine tool failure gets. Measured 2026-10-02 on the ops DB:
+-- 25,013 of 30,933 error rows were `bash`, i.e. 6.0137 % of all bash rows,
+-- and the failure-rate predicate could not tell the two classes apart.
+--
+-- Nullable on purpose: a pre-#763 row and a tool that never spawned a
+-- process both read NULL, and `status` alone states the tool-level outcome.
+-- Existing error rows carry no stored code and are NOT back-classified —
+-- their series steps down once, at this migration, and is honest after it.
+ALTER TABLE tool_executions ADD COLUMN exit_code INTEGER;

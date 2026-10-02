@@ -128,3 +128,88 @@ fn the_guard_refuses_to_skip_an_unapplied_migration() {
         .unwrap();
     assert_eq!(version, 0, "the stamp must be left untouched");
 }
+
+/// The fresh-database leg of the #763 acceptance: a database built from the
+/// live list carries the column with no heal involved.
+#[tokio::test]
+async fn a_fresh_database_carries_the_exit_code_column() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+
+    db.pool
+        .get()
+        .await
+        .unwrap()
+        .interact(|conn| {
+            assert!(
+                has_column(conn, "tool_executions", "exit_code"),
+                "the #763 migration must run on a fresh database"
+            );
+        })
+        .await
+        .unwrap();
+}
+
+/// The #763 column must reach a database whose stamp already claims the list is
+/// complete.
+///
+/// `20261002000001_add_tool_executions_exit_code.sql` is appended LAST, so an
+/// upstream merge that inserts an earlier filename below it moves its index and
+/// a database stamped against the pre-merge list skips it in silence — the
+/// #1401 class in the direction `to_latest` cannot see. The post-pass heal is
+/// the column's only cover there.
+#[tokio::test]
+async fn a_stamp_at_latest_over_a_missing_exit_code_column_is_healed() {
+    let total = crate::db::database::MIGRATION_SQL.len();
+    let db = Database::connect_in_memory().await.unwrap();
+    // Migrated to the second-to-last entry (so the #763 column is absent) but
+    // stamped at the full length — what the pre-merge list leaves behind.
+    db.pool
+        .get()
+        .await
+        .unwrap()
+        .interact(move |conn| -> Result<(), String> {
+            crate::db::database::build_migrations()
+                .to_version(conn, total - 1)
+                .map_err(|e| e.to_string())?;
+            conn.pragma_update(None, "user_version", total as i64)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    db.pool
+        .get()
+        .await
+        .unwrap()
+        .interact(|conn| {
+            assert!(
+                !has_column(conn, "tool_executions", "exit_code"),
+                "fixture: the pre-#763 schema carries no exit_code column"
+            );
+        })
+        .await
+        .unwrap();
+
+    db.run_migrations()
+        .await
+        .expect("startup must survive a stamp that skipped the #763 migration");
+
+    db.pool
+        .get()
+        .await
+        .unwrap()
+        .interact(move |conn| {
+            assert!(
+                has_column(conn, "tool_executions", "exit_code"),
+                "the post-pass heal must add the column the stamp skipped (#763)"
+            );
+            let version: i64 = conn
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, total as i64);
+        })
+        .await
+        .unwrap();
+}

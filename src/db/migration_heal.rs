@@ -145,6 +145,9 @@ pub(crate) fn heals_would_write(
     if !has_table(conn, "notify_queue")? {
         return Ok(true);
     }
+    if has_table(conn, "tool_executions")? && !has_column(conn, "tool_executions", "exit_code")? {
+        return Ok(true);
+    }
     Ok(false)
 }
 
@@ -162,6 +165,28 @@ pub(crate) fn heal_pending_requests_origin(conn: &rusqlite::Connection) -> rusql
     tracing::warn!(
         "Healed pending_requests: the origin column of migration 37 was missing although the \
          schema was stamped past it (#1401). Restart recovery could not record turns until now."
+    );
+    Ok(true)
+}
+
+/// Add `tool_executions.exit_code` when migration 60 was skipped.
+///
+/// Mirrors `src/migrations/20261002000001_add_tool_executions_exit_code.sql`,
+/// which stays the source of truth. The migration is appended last, so an
+/// upstream merge that inserts an earlier filename below it shifts its index,
+/// and a database stamped against the pre-merge list then never runs it — the
+/// #1401 class, in the direction `to_latest` cannot see. This heal is the
+/// column's only repair.
+pub(crate) fn heal_tool_executions_exit_code(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<bool> {
+    if !has_table(conn, "tool_executions")? || has_column(conn, "tool_executions", "exit_code")? {
+        return Ok(false);
+    }
+    conn.execute_batch("ALTER TABLE tool_executions ADD COLUMN exit_code INTEGER;")?;
+    tracing::warn!(
+        "Healed tool_executions: the exit_code column of migration 60 was missing although the \
+         schema was stamped past it (#763)."
     );
     Ok(true)
 }
