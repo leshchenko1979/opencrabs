@@ -523,7 +523,10 @@ impl SurfacePolicy {
 /// `peers_guard()` is not reentrant.
 ///
 /// The loop itself stays with the caller, and with it the sleep, the virtual
-/// clock advance and the fold. That is not a convenience: `pace_rich` re-checks
+/// clock advance and the fold. The fold is one surface-keyed helper
+/// (`fold_hold_ms`), not one per gate: three byte-identical copies differing
+/// only in the counter they bumped is how a fourth gate grows a fourth copy.
+/// Keeping the loop here is not a convenience: `pace_rich` re-checks
 /// the process-wide cooldown at the top of EVERY pass (#556), so a cooldown armed
 /// by another chat is noticed even mid-wait, and a wait unbounded in the engine
 /// would step straight over it. `waited_so_far` is the hold time the caller has
@@ -596,6 +599,42 @@ where
         }
     } else {
         verdict
+    }
+}
+
+/// Which surface's hold counter a gate's elapsed hold is attributed to
+/// (#635 task 4). The three counters stay separate in the summary because
+/// they measure three different budgets — merging them would hide which
+/// surface spent the time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HoldSurface {
+    /// G1 — the wait against `typing_max_hold`.
+    Typing,
+    /// G3 — the wait against `SEND_MAX_HOLD`.
+    Sends,
+    /// G4 — the wait for a rich token.
+    Rich,
+}
+
+/// Attribute hold time spent by a gate back to its peer's counters, keyed by
+/// the surface that spent it (#635 task 4). One helper replaces the three
+/// byte-identical `fold_throttle_ms` / `fold_send_ms` / `fold_rich_ms` copies,
+/// which differed only in the counter they bumped. Best effort: a peer entry
+/// vanishing between hold and fold loses one sample.
+fn fold_hold_ms(chat_id: i64, waited: Duration, surface: HoldSurface) {
+    if waited.is_zero() {
+        return;
+    }
+    let ms = waited.as_millis() as u64;
+    if ms == 0 {
+        return;
+    }
+    if let Some(peer) = peers_guard().get_mut(&chat_id) {
+        match surface {
+            HoldSurface::Typing => peer.counters.throttled_typing_ms += ms,
+            HoldSurface::Sends => peer.counters.throttled_send_ms += ms,
+            HoldSurface::Rich => peer.counters.throttled_rich_ms += ms,
+        }
     }
 }
 
@@ -1256,7 +1295,7 @@ pub(crate) async fn admit_chat_action(chat: ChatId, thread_id: Option<i32>) -> b
         );
         match decision {
             PaceOutcome::Bypass | PaceOutcome::Admit => {
-                fold_throttle_ms(chat_id, waited);
+                fold_hold_ms(chat_id, waited, HoldSurface::Typing);
                 return true;
             }
             PaceOutcome::Drop(_) => {
@@ -1265,7 +1304,7 @@ pub(crate) async fn admit_chat_action(chat: ChatId, thread_id: Option<i32>) -> b
                      holding {waited:?} (hold cap {}s)",
                     lim.typing_max_hold.as_secs()
                 );
-                fold_throttle_ms(chat_id, waited);
+                fold_hold_ms(chat_id, waited, HoldSurface::Typing);
                 return false;
             }
             PaceOutcome::Defer(wait) => {
@@ -1282,26 +1321,10 @@ pub(crate) async fn admit_chat_action(chat: ChatId, thread_id: Option<i32>) -> b
             // G1 has neither a queue nor a fail-open arm; the policy table says
             // so. Reaching here would mean the table and the gate disagree.
             PaceOutcome::Queue | PaceOutcome::FailOpen(_) => {
-                fold_throttle_ms(chat_id, waited);
+                fold_hold_ms(chat_id, waited, HoldSurface::Typing);
                 return true;
             }
         }
-    }
-}
-
-/// Attribute hold time spent by a gate back to its peer's counters. Best
-/// effort: a peer entry vanishing between hold and fold loses one sample.
-fn fold_throttle_ms(chat_id: i64, waited: Duration) {
-    if waited.is_zero() {
-        return;
-    }
-    let ms = waited.as_millis() as u64;
-    if ms == 0 {
-        return;
-    }
-    if let Some(peer) = peers_guard().get_mut(&chat_id)
-    {
-        peer.counters.throttled_typing_ms += ms;
     }
 }
 
@@ -1874,7 +1897,7 @@ pub(crate) async fn pace_send(chat: ChatId) {
         match verdict {
             PaceOutcome::Bypass => return,
             PaceOutcome::Admit => {
-                fold_send_ms(chat_id, waited);
+                fold_hold_ms(chat_id, waited, HoldSurface::Sends);
                 return;
             }
             PaceOutcome::FailOpen(next) => {
@@ -1883,7 +1906,7 @@ pub(crate) async fn pace_send(chat: ChatId) {
                      still {} from a token — failing open to the reactive backstop",
                     next.as_secs_f64()
                 );
-                fold_send_ms(chat_id, waited);
+                fold_hold_ms(chat_id, waited, HoldSurface::Sends);
                 return;
             }
             PaceOutcome::Defer(delay) => {
@@ -1899,7 +1922,7 @@ pub(crate) async fn pace_send(chat: ChatId) {
             }
             // G3 is delay-never-drop and has no queue.
             PaceOutcome::Drop(_) | PaceOutcome::Queue => {
-                fold_send_ms(chat_id, waited);
+                fold_hold_ms(chat_id, waited, HoldSurface::Sends);
                 return;
             }
         }
@@ -2053,11 +2076,11 @@ pub(crate) async fn pace_rich(
         );
         match delay {
             PaceOutcome::Bypass | PaceOutcome::Admit => {
-                fold_rich_ms(chat_id, waited);
+                fold_hold_ms(chat_id, waited, HoldSurface::Rich);
                 return RichAdmission::Now;
             }
             PaceOutcome::Drop(_) => {
-                fold_rich_ms(chat_id, waited);
+                fold_hold_ms(chat_id, waited, HoldSurface::Rich);
                 return RichAdmission::Dropped(class);
             }
             PaceOutcome::Defer(delay) => {
@@ -2073,7 +2096,7 @@ pub(crate) async fn pace_rich(
             }
             // G4 waits for a token and never fails open (#556).
             PaceOutcome::Queue | PaceOutcome::FailOpen(_) => {
-                fold_rich_ms(chat_id, waited);
+                fold_hold_ms(chat_id, waited, HoldSurface::Rich);
                 return RichAdmission::Now;
             }
         }
@@ -2095,37 +2118,6 @@ fn refuse_rich(chat_id: i64, class: EditClass) -> RichAdmission {
     } else {
         peer.counters.note_rich_defer(class);
         RichAdmission::Deferred
-    }
-}
-
-/// Attribute G4 hold time back to the peer's counters.
-fn fold_rich_ms(chat_id: i64, waited: Duration) {
-    if waited.is_zero() {
-        return;
-    }
-    let ms = waited.as_millis() as u64;
-    if ms == 0 {
-        return;
-    }
-    if let Some(peer) = peers_guard().get_mut(&chat_id)
-    {
-        peer.counters.throttled_rich_ms += ms;
-    }
-}
-
-/// Attribute G3 hold time back to the peer's counters. Best effort, mirroring
-/// [`fold_throttle_ms`].
-fn fold_send_ms(chat_id: i64, waited: Duration) {
-    if waited.is_zero() {
-        return;
-    }
-    let ms = waited.as_millis() as u64;
-    if ms == 0 {
-        return;
-    }
-    if let Some(peer) = peers_guard().get_mut(&chat_id)
-    {
-        peer.counters.throttled_send_ms += ms;
     }
 }
 
