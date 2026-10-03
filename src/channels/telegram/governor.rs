@@ -18,7 +18,7 @@
 //!   into that single refresh because `sendChatAction` is thread-scoped and
 //!   stateless. Under pressure a caller holds briefly for refill instead of
 //!   hammering (hold-and-release); a refresh held past
-//!   [`Limits::typing_max_hold`] is dropped — the indicator is cosmetic and
+//!   [`RateLimiterConfig::typing_max_hold`] is dropped — the indicator is cosmetic and
 //!   the next tick re-fires it.
 //! - **G2 edits** ([`edit_admission`] + [`EditClass`]): token bucket
 //!   ~18/min per forum peer. On an empty bucket the priority drop ladder
@@ -53,7 +53,7 @@ use teloxide::prelude::Requester;
 use teloxide::types::{ChatId, MessageId, ParseMode};
 use teloxide::Bot;
 
-use crate::config::Config;
+use crate::config::{Config, RateLimiterConfig};
 
 /// Virtual-clock offset used ONLY by `cfg(test)` builds (`gate_now`). Tests
 /// advance it by hand to simulate refill spacing, hold budgets and drain
@@ -224,58 +224,17 @@ pub(crate) async fn acquire_global_permit() -> GlobalPermit {
 // Config snapshot
 // ---------------------------------------------------------------------------
 
-/// Live knob snapshot for one gate evaluation, from
+/// Live rate-limiter knob snapshot for one gate evaluation, from
 /// `[channels.telegram.rate_limiter]`. Read fresh per call so config.toml
 /// edits land without a restart (the same contract as `Config::current`).
-struct Limits {
-    enabled: bool,
-    /// G1 refill spacing (one typing action per this much wall time).
-    typing_interval: Duration,
-    /// G1 burst capacity.
-    typing_burst: u32,
-    /// G1 longest hold before a typing refresh is dropped.
-    typing_max_hold: Duration,
-    /// G2 refill rate in tokens (edits) per second.
-    edit_rate_per_sec: f64,
-    /// G2 burst capacity.
-    edit_burst: u32,
-    /// G3 minimum spacing between sends.
-    send_interval: Duration,
-    /// G3 minute-ceiling capacity (refills fully over 60 s).
-    send_minute_ceiling: u32,
-    /// G3 burst capacity.
-    send_burst: u32,
-    /// G4 refill rate in tokens (rich calls) per second.
-    rich_rate_per_sec: f64,
-    /// G4 burst capacity.
-    rich_burst: u32,
-    /// Cross-surface per-chat minimum spacing between two admissions.
-    /// `Duration::ZERO` disables the floor (#676).
-    spacing_floor: Duration,
-    /// Spacing of the telemetry summary INFO line.
-    summary_log_period: Duration,
-}
-
-impl Limits {
-    fn from_config() -> Self {
-        let rl = &Config::current().channels.telegram.rate_limiter;
-        let ceiling = rl.sends_ceiling_per_minute.max(1);
-        Self {
-            enabled: rl.enabled,
-            typing_interval: Duration::from_secs(rl.typing_min_interval_secs.max(1)),
-            typing_burst: rl.typing_burst.max(1),
-            typing_max_hold: Duration::from_secs(rl.typing_max_hold_secs),
-            edit_rate_per_sec: (rl.edits_per_minute.max(1) as f64) / 60.0,
-            edit_burst: rl.edit_burst.max(1),
-            send_interval: Duration::from_millis(rl.send_min_interval_millis.max(50)),
-            send_minute_ceiling: ceiling,
-            send_burst: rl.sends_burst.max(1),
-            rich_rate_per_sec: (rl.rich_per_minute.max(1) as f64) / 60.0,
-            rich_burst: rl.rich_burst.max(1),
-            spacing_floor: Duration::from_millis(rl.spacing_floor_ms),
-            summary_log_period: Duration::from_secs(rl.summary_log_secs.max(30)),
-        }
-    }
+///
+/// This is a SNAPSHOT, never a second definition: the 13 knobs and their
+/// defaults are declared once, on [`RateLimiterConfig`], and the unit
+/// conversions and clamps the governors need live in its accessors (#635
+/// task 7). `enabled` is read as the plain field it is - no conversion
+/// applies to a bool.
+fn limits() -> RateLimiterConfig {
+    Config::current().channels.telegram.rate_limiter.clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +286,7 @@ pub(crate) enum ContentOnDry {
 }
 
 /// Which budget bounds a surface's hold. The number itself is config-derived
-/// and lives in [`Limits`]; this names which knob supplies it.
+/// and lives in [`RateLimiterConfig`]; this names which knob supplies it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum HoldBudget {
@@ -336,7 +295,7 @@ pub(crate) enum HoldBudget {
     /// which must never fire unadmitted — matrix: max hold "none", fail-open
     /// "NEVER"). `None` means no CAP, never "no waiting".
     None,
-    /// [`Limits::typing_max_hold`] (G1).
+    /// [`RateLimiterConfig::typing_max_hold`] (G1).
     Typing,
     /// The [`SEND_MAX_HOLD`] constant (G3).
     Send,
@@ -537,7 +496,7 @@ impl SurfacePolicy {
 /// surface was not run at all because the peer is still ungoverned.
 fn pace_engine<F>(
     policy: &SurfacePolicy,
-    lim: &Limits,
+    lim: &RateLimiterConfig,
     chat_id: i64,
     thread_id: Option<i32>,
     waited_so_far: Duration,
@@ -558,7 +517,7 @@ where
     let spacing_hold = match policy.spacing {
         SpacingPolicy::Exempt => Duration::ZERO,
         SpacingPolicy::Wait | SpacingPolicy::DropDroppable => {
-            spacing_wait(peer, now, lim.spacing_floor)
+            spacing_wait(peer, now, lim.spacing_floor())
         }
     };
     let verdict = admit(peer, now, spacing_hold);
@@ -569,7 +528,7 @@ where
         // `hold_exceeded` cell is unreachable by construction.
         let over = match policy.hold {
             HoldBudget::None => false,
-            HoldBudget::Typing => waited_so_far + wait > lim.typing_max_hold,
+            HoldBudget::Typing => waited_so_far + wait > lim.typing_max_hold(),
             HoldBudget::Send => waited_so_far + wait > SEND_MAX_HOLD,
         };
         if !over {
@@ -1343,7 +1302,7 @@ pub(crate) fn format_summary(chat_id: i64, c: &Counters, finals_pending: usize) 
 #[cfg(not(test))]
 async fn summary_loop() {
     loop {
-        let period = Limits::from_config().summary_log_period;
+        let period = limits().summary_log_period();
         tokio::time::sleep(period).await;
         let lines: Vec<String> = {
             let map = peers_guard();
@@ -1367,7 +1326,7 @@ fn ensure_summary_task() {
     {
         // Read the knob rather than discarding the whole struct, so the field
         // is exercised in this cfg too instead of reading as dead.
-        let _ = Limits::from_config().summary_log_period;
+        let _ = limits().summary_log_period();
     }
     #[cfg(not(test))]
     {
@@ -1402,7 +1361,7 @@ pub(crate) async fn admit_chat_action(chat: ChatId, thread_id: Option<i32>) -> b
     if chat_id >= 0 {
         return true;
     }
-    let lim = Limits::from_config();
+    let lim = limits();
     if !lim.enabled {
         return true;
     }
@@ -1425,8 +1384,8 @@ pub(crate) async fn admit_chat_action(chat: ChatId, thread_id: Option<i32>) -> b
                 // budget, which a floor would break.
                 let bucket = ensure_bucket(
                     &mut peer.typing,
-                    lim.typing_burst,
-                    1.0 / lim.typing_interval.as_secs_f64(),
+                    lim.typing_burst_cap(),
+                    1.0 / lim.typing_interval().as_secs_f64(),
                 );
                 match bucket.take(now) {
                     Ok(()) => {
@@ -1450,7 +1409,7 @@ pub(crate) async fn admit_chat_action(chat: ChatId, thread_id: Option<i32>) -> b
                 tracing::debug!(
                     "Telegram rate-limiter: typing refresh dropped for chat={chat_id} after \
                      holding {waited:?} (hold cap {}s)",
-                    lim.typing_max_hold.as_secs()
+                    lim.typing_max_hold().as_secs()
                 );
                 fold_hold_ms(chat_id, waited, HoldSurface::Typing);
                 return false;
@@ -1556,7 +1515,7 @@ pub(crate) fn note_429_pause(chat: ChatId, wait: Duration) {
     if chat_id >= 0 {
         return; // DMs ungoverned, matching every other gate
     }
-    let lim = Limits::from_config();
+    let lim = limits();
     if !lim.enabled {
         return;
     }
@@ -1589,8 +1548,10 @@ pub(crate) fn note_429_pause(chat: ChatId, wait: Duration) {
     // clock-pure bucket), and this is production code. This is the same field
     // assignment the pre-#580 loop used.
     let until = now + pause;
-    ensure_bucket(&mut peer.rich, lim.rich_burst, lim.rich_rate_per_sec).pause_until = Some(until);
-    ensure_bucket(&mut peer.edits, lim.edit_burst, lim.edit_rate_per_sec).pause_until = Some(until);
+    ensure_bucket(&mut peer.rich, lim.rich_burst_cap(), lim.rich_rate_per_sec()).pause_until =
+        Some(until);
+    ensure_bucket(&mut peer.edits, lim.edit_burst_cap(), lim.edit_rate_per_sec()).pause_until =
+        Some(until);
     peer.counters.pause_armed_429 += 1;
     tracing::info!(
         "Governor: 429 pause {pause:?} armed on rich+edits for chat={chat_id} (step 2, per-chat scope)"
@@ -1628,7 +1589,7 @@ pub(crate) async fn edit_admission(
     if chat_id.0 >= 0 {
         return true;
     }
-    let lim = Limits::from_config();
+    let lim = limits();
     if !lim.enabled {
         return true;
     }
@@ -1651,7 +1612,8 @@ pub(crate) async fn edit_admission(
                 peer.counters.note_spacing_drop(class);
                 return PaceOutcome::Drop(DropReason::SpacingFloor);
             }
-            let bucket = ensure_bucket(&mut peer.edits, lim.edit_burst, lim.edit_rate_per_sec);
+            let bucket =
+                ensure_bucket(&mut peer.edits, lim.edit_burst_cap(), lim.edit_rate_per_sec());
             bucket.set_reserve(INTERACTIVE_RESERVE);
             // #117: Interactive spends the FLOOR preferentially (take_any) — a tap
             // must not have to compete with bulk for the reserve-protected tokens.
@@ -1750,14 +1712,14 @@ pub(crate) async fn edit_admission(
 /// Take ownership of one queued final when the edit bucket allows it.
 /// Returns `None` on "nothing to do this tick" (no peer, empty queue, or no
 /// edit budget yet).
-fn take_due_final(chat_id: i64, lim: &Limits) -> Option<(i32, PendingFinal)> {
+fn take_due_final(chat_id: i64, lim: &RateLimiterConfig) -> Option<(i32, PendingFinal)> {
     let mut map = peers_guard();
     let peer = map.get_mut(&chat_id)?;
     if peer.finals.is_empty() {
         peer.draining = false;
         return None;
     }
-    let bucket = ensure_bucket(&mut peer.edits, lim.edit_burst, lim.edit_rate_per_sec);
+    let bucket = ensure_bucket(&mut peer.edits, lim.edit_burst_cap(), lim.edit_rate_per_sec());
     if bucket.take(gate_now()).is_err() {
         return None;
     }
@@ -1776,7 +1738,7 @@ async fn drain_finals(chat_id: i64) {
         #[cfg(test)]
         test_support::advance(DRAIN_TICK.as_millis() as u64);
 
-        let lim = Limits::from_config();
+        let lim = limits();
         let Some(job) = take_due_final(chat_id, &lim) else {
             // Queue drained (draining flag cleared inside) or no budget yet.
             let empty = peers_guard()
@@ -1999,7 +1961,7 @@ pub(crate) async fn pace_send(chat: ChatId) {
         tracing::debug!("Telegram: pace_send proceeding through a {permit:?} refusal (#635)");
     }
 
-    let lim = Limits::from_config();
+    let lim = limits();
     if !lim.enabled {
         return;
     }
@@ -2019,13 +1981,13 @@ pub(crate) async fn pace_send(chat: ChatId) {
                 // wait is the REMAINDER of the interval, not the whole floor.
                 let sec = ensure_bucket(
                     &mut peer.sends_sec,
-                    lim.send_burst,
-                    1.0 / lim.send_interval.as_secs_f64(),
+                    lim.send_burst_cap(),
+                    1.0 / lim.send_interval().as_secs_f64(),
                 );
                 let min = ensure_bucket(
                     &mut peer.sends_min,
-                    lim.send_minute_ceiling,
-                    f64::from(lim.send_minute_ceiling) / 60.0,
+                    lim.send_minute_ceiling(),
+                    f64::from(lim.send_minute_ceiling()) / 60.0,
                 );
                 let need = sec
                     .next_token_in_for(now, 0.0)
@@ -2140,7 +2102,7 @@ pub(crate) async fn pace_rich(
         return refuse_rich(chat_id, class);
     }
 
-    let lim = Limits::from_config();
+    let lim = limits();
     if !lim.enabled {
         return RichAdmission::Now;
     }
@@ -2191,7 +2153,8 @@ pub(crate) async fn pace_rich(
                 } else {
                     Duration::ZERO
                 };
-                let bucket = ensure_bucket(&mut peer.rich, lim.rich_burst, lim.rich_rate_per_sec);
+                let bucket =
+                    ensure_bucket(&mut peer.rich, lim.rich_burst_cap(), lim.rich_rate_per_sec());
                 let need = bucket.next_token_in_for(now, 0.0).max(floor_hold);
                 if need.is_zero() {
                     // #580: `take` is the ONLY enforcement point for the per-chat
@@ -2318,10 +2281,10 @@ pub(crate) mod test_support {
         // hardcoding these would silently discard the armed pause the moment a
         // test set the rich knobs to anything but the literals — and the
         // failure would read as "the gate admitted", not "the pause vanished".
-        let lim = Limits::from_config();
+        let lim = limits();
         let mut map = peers_guard();
         let peer = map.entry(chat.0).or_default();
-        let bucket = ensure_bucket(&mut peer.rich, lim.rich_burst, lim.rich_rate_per_sec);
+        let bucket = ensure_bucket(&mut peer.rich, lim.rich_burst_cap(), lim.rich_rate_per_sec());
         bucket.pause_arm(gate_now() + wait);
     }
 

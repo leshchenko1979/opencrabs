@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Outcome of the FIRST `Config::load()` in the process, kept so the TUI can
 /// tell the user at startup that it is running on recovered values.
@@ -820,6 +821,76 @@ impl Default for RateLimiterConfig {
             spacing_floor_ms: default_spacing_floor_ms(),
             summary_log_secs: default_summary_log_secs(),
         }
+    }
+}
+
+impl RateLimiterConfig {
+    // The 13 knobs above are the ONLY declaration site for their names and
+    // defaults (#635 task 7). These accessors derive the units the governors
+    // consume - `Duration`, per-second token rates - and apply the clamps that
+    // keep a zero from dividing or a sub-tick interval from spinning, so the
+    // governor reads the config instead of mirroring it.
+
+    /// G1 typing: refill spacing (one `sendChatAction` per this much wall
+    /// time), floored at 1 s so the refill rate can never divide by zero.
+    pub(crate) fn typing_interval(&self) -> Duration {
+        Duration::from_secs(self.typing_min_interval_secs.max(1))
+    }
+
+    /// G1 typing: burst capacity, floored at 1 (an empty bucket never admits).
+    pub(crate) fn typing_burst_cap(&self) -> u32 {
+        self.typing_burst.max(1)
+    }
+
+    /// G1 typing: longest hold before a refresh is dropped.
+    pub(crate) fn typing_max_hold(&self) -> Duration {
+        Duration::from_secs(self.typing_max_hold_secs)
+    }
+
+    /// G2 edits: refill rate in tokens (edits) per second.
+    pub(crate) fn edit_rate_per_sec(&self) -> f64 {
+        (self.edits_per_minute.max(1) as f64) / 60.0
+    }
+
+    /// G2 edits: burst capacity, floored at 1.
+    pub(crate) fn edit_burst_cap(&self) -> u32 {
+        self.edit_burst.max(1)
+    }
+
+    /// G3 sends: minimum spacing between sends, floored at 50 ms.
+    pub(crate) fn send_interval(&self) -> Duration {
+        Duration::from_millis(self.send_min_interval_millis.max(50))
+    }
+
+    /// G3 sends: per-minute ceiling, floored at 1 (a zero ceiling would make
+    /// the minute bucket refuse everything).
+    pub(crate) fn send_minute_ceiling(&self) -> u32 {
+        self.sends_ceiling_per_minute.max(1)
+    }
+
+    /// G3 sends: burst capacity, floored at 1.
+    pub(crate) fn send_burst_cap(&self) -> u32 {
+        self.sends_burst.max(1)
+    }
+
+    /// G4 rich: refill rate in tokens (rich calls) per second.
+    pub(crate) fn rich_rate_per_sec(&self) -> f64 {
+        (self.rich_per_minute.max(1) as f64) / 60.0
+    }
+
+    /// G4 rich: burst capacity, floored at 1.
+    pub(crate) fn rich_burst_cap(&self) -> u32 {
+        self.rich_burst.max(1)
+    }
+
+    /// Cross-surface per-chat spacing floor. `Duration::ZERO` disables it (#676).
+    pub(crate) fn spacing_floor(&self) -> Duration {
+        Duration::from_millis(self.spacing_floor_ms)
+    }
+
+    /// Spacing of the telemetry summary INFO line, floored at 30 s.
+    pub(crate) fn summary_log_period(&self) -> Duration {
+        Duration::from_secs(self.summary_log_secs.max(30))
     }
 }
 
