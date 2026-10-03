@@ -84,7 +84,7 @@ on:
       diagnose:
         description: "true = print the runner's real resource envelope (cpu/ram/disk/cgroup/sccache) around the test leg; diagnostic only, never fails the run"
         required: false
-        default: false
+        default: true
         type: boolean
 
 # Owner GO 2026-09-18 01:2xZ (diagnose variable, CI-143 investigation): the
@@ -95,9 +95,22 @@ on:
 # published 16 GB / 4 vCPU spec, not against a reading. `diagnose=true` prints
 # nproc, free -m, df -h, cgroup v2 memory.max/current/peak (v1 fallback),
 # cache sizes and `sccache --show-stats` BOTH before and after the test leg,
-# so a future kill can be attributed from the run's own log. Default false =>
-# every existing caller is byte-for-byte unchanged in behavior. Diagnostics are
+# so a future kill can be attributed from the run's own log. Diagnostics are
 # `|| true`-guarded: a probe that fails the gate it is measuring is worthless.
+#
+# ARMED 2026-10-03 (HQ; owner routed the #311 finding here): default flipped
+# false -> true for a bounded MONITORING WINDOW. The owner-GO'd "default false
+# => every existing caller is byte-for-byte unchanged" invariant is DELIBERATELY
+# relaxed for the window; the revert restores it. Rationale: the #311 premise is
+# falsified — 11 teardown kills in the post-removal era, so the 143 mode is NOT
+# fixed and no kill's envelope has ever been measured. See
+# https://github.com/leshchenko1979/opencrabs/issues/311#issuecomment-5974242671
+# The kills are intermittent and cluster (11 in five days, then a 2.5-day gap),
+# so a single armed dispatch is a lottery; arming the DEFAULT makes every organic
+# gate dispatch a sample. On a teardown only the BEFORE step runs (the AFTER step
+# is skipped — its absence is itself the signature), which is exactly the
+# pre-test headroom H3/H4 need. REVERT to false once a kill's envelope is
+# captured, or by 2026-10-17, whichever is first.
 #
 # Owner-approved 2026-08-30 (fix batch, a87b66dc; group KEY corrected same
 # day, owner "Fix it" 02:32Z on the cancel-storm finding): every
