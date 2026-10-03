@@ -706,11 +706,23 @@ impl Bucket {
         self.pause_until
     }
 
+    /// The live step-2 deadline on this bucket, if one is armed and still
+    /// ahead of `now` (#635 task 5).
+    ///
+    /// This is the only production read of `pause_until`: admission
+    /// ([`Bucket::refill`] / [`Bucket::take`]) and the chat-level accessor
+    /// ([`chat_paused_until`]) all ask here instead of reaching for the field,
+    /// so the field stays an implementation detail. `pause_peek` is the
+    /// test-only raw read and keeps its own semantics (see its doc).
+    pub(crate) fn paused_until(&self, now: Instant) -> Option<Instant> {
+        self.pause_until.filter(|until| *until > now)
+    }
+
     fn refill(&mut self, now: Instant) {
         // Frozen refill inside a declared 429 window (step 2): tokens do not
         // accrue while the pause holds, so bulk cannot bank quota it would
         // then spend into the window. Interactive bypasses via take_any.
-        if self.pause_until.is_some_and(|until| until > now) {
+        if self.paused_until(now).is_some() {
             return;
         }
         let elapsed = now.saturating_duration_since(self.last_refill);
@@ -723,7 +735,7 @@ impl Bucket {
     /// Bulk surface: may not dip below the interactive reserve (#117), and
     /// is blocked while a declared 429 window holds (step 2).
     pub(crate) fn take(&mut self, now: Instant) -> Result<(), Duration> {
-        if let Some(until) = self.pause_until.filter(|until| *until > now) {
+        if let Some(until) = self.paused_until(now) {
             return Err((until - now).max(self.next_token_in_for(now, self.reserve)));
         }
         let wait = self.next_token_in_for(now, self.reserve);
@@ -1101,6 +1113,19 @@ struct Peer {
     recent: Recent,
 }
 
+impl Peer {
+    /// #635 task 5 — this chat's own step-2 window: the per-chat half of the
+    /// pause question. `note_429_pause` arms `rich` and `edits` together, so
+    /// the later of the two is the chat's deadline; a bucket that is absent or
+    /// unarmed contributes nothing. The other arms (typing, sends) are never
+    /// paused — owner ruling 2026-09-08 pauses the offending arm alone.
+    pub(crate) fn paused_until(&self, now: Instant) -> Option<Instant> {
+        let rich = self.rich.as_ref().and_then(|b| b.paused_until(now));
+        let edits = self.edits.as_ref().and_then(|b| b.paused_until(now));
+        rich.max(edits)
+    }
+}
+
 fn peers() -> &'static Mutex<HashMap<i64, Peer>> {
     static PEERS: OnceLock<Mutex<HashMap<i64, Peer>>> = OnceLock::new();
     PEERS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -1112,6 +1137,59 @@ fn peers() -> &'static Mutex<HashMap<i64, Peer>> {
 /// has one spelling instead of twenty-two.
 fn peers_guard() -> std::sync::MutexGuard<'static, HashMap<i64, Peer>> {
     peers().lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The ONE answer to "is this chat paused, and until when?" (#635 task 5).
+///
+/// Three pause concepts used to be consulted at their own sites, which is how a
+/// fourth surface grows a fourth read:
+///   * **P1 — process-wide.** The 429 deadline in `rate_limit` holds every
+///     chat. #635 freezes that file, so the scope is named without an instant;
+///     a caller that must WAIT it out uses
+///     [`super::rate_limit::wait_global_cooldown`].
+///   * **P2 — per-chat.** The step-2 window armed by [`note_429_pause`] on the
+///     offending chat's rich+edits buckets, capped at [`MAX_429_PAUSE`].
+///   * **P3 — the bucket field** that stores P2, read in exactly one place
+///     ([`Bucket::paused_until`]) behind this accessor.
+///
+/// `Global` wins when both scopes are live: it applies to every chat, and the
+/// per-chat window it would otherwise report is bounded by `MAX_429_PAUSE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // `Chat`'s deadline is REPORTED, not yet obeyed: the
+                    // cosmetic fast-paths obey the process-wide scope alone
+                    // (owner ruling 2026-09-08 — the per-chat window is armed
+                    // on the offending arm, whose own bucket enforces it).
+pub(crate) enum Cooldown {
+    /// Nothing holds this chat back.
+    None,
+    /// The process-wide 429 window is live: every chat obeys it.
+    Global,
+    /// The chat's own step-2 window holds its bulk arms until this instant.
+    Chat(Instant),
+}
+
+impl Cooldown {
+    /// Is the PROCESS-WIDE window the live one? This is the cosmetic
+    /// fast-path's question — not "is anything paused": the per-chat window is
+    /// armed on the offending arm alone, so dropping another arm's chrome on
+    /// it would over-punish unrelated traffic (owner ruling 2026-09-08).
+    pub(crate) fn is_global(self) -> bool {
+        matches!(self, Cooldown::Global)
+    }
+}
+
+/// The ONE pause read (#635 task 5). See [`Cooldown`] for the two scopes.
+///
+/// Takes the registry lock, so it is a PRE-admission question: never call it
+/// with the peer lock held (`peers_guard` is not reentrant).
+pub(crate) fn chat_paused_until(chat_id: i64) -> Cooldown {
+    if super::rate_limit::is_global_cooldown_active() {
+        return Cooldown::Global;
+    }
+    let now = gate_now();
+    let map = peers_guard();
+    let until = map.get(&chat_id).and_then(|peer| peer.paused_until(now));
+    until.map_or(Cooldown::None, Cooldown::Chat)
 }
 
 /// Event-time request profile for a chat, as a log suffix (#580).
@@ -1243,12 +1321,15 @@ fn ensure_summary_task() {
 /// still fits the hold budget sleeps for the refill window instead of
 /// retry-spinning into the same bucket, which is what amplified 429 storms.
 pub(crate) async fn admit_chat_action(chat: ChatId, thread_id: Option<i32>) -> bool {
-    // Fast-path: if a global 429 cooldown is active, drop cosmetic typing refreshes immediately
-    if super::rate_limit::is_global_cooldown_active() {
+    let chat_id = chat.0;
+    // Fast-path (#635 task 5): the ONE pause read. A live PROCESS-WIDE 429
+    // cooldown drops cosmetic typing refreshes immediately; the chat's own
+    // step-2 window does NOT — it is armed on the offending arm alone (owner
+    // ruling 2026-09-08) and typing is a different arm's budget.
+    if chat_paused_until(chat_id).is_global() {
         return false;
     }
 
-    let chat_id = chat.0;
     // Positive ids are DMs — untouched by construction, no matter what a
     // future call site passes. Cheap exit before touching config.
     if chat_id >= 0 {
@@ -1465,10 +1546,13 @@ pub(crate) async fn edit_admission(
     class: EditClass,
     payload: EditPayload,
 ) -> bool {
-    // Fast-path: if a global 429 cooldown is active, drop intermediate cosmetic edits immediately
-    if super::rate_limit::is_global_cooldown_active()
-        && class != EditClass::Final
+    // Fast-path (#635 task 5): the ONE pause read. Intermediate cosmetic edits
+    // drop while the PROCESS-WIDE 429 cooldown holds; finals and taps are never
+    // dropped here. The class test comes first so the read is skipped for the
+    // two classes that would not drop anyway.
+    if class != EditClass::Final
         && class != EditClass::Interactive
+        && chat_paused_until(chat_id.0).is_global()
     {
         return false;
     }
