@@ -908,7 +908,7 @@ pub(crate) const SURFACE_RICH: &str = "rich";
 /// Most recent admissions for one peer, newest last (#580).
 ///
 /// Event-time state, deliberately NOT inside [`Counters`]: the counters are
-/// cumulative and gated by `all_zero()` in [`format_summary`], while a ring is a
+/// cumulative and gated by the quiet test in [`format_summary`], while a ring is a
 /// sliding window. Keeping them apart leaves the summary format and its
 /// field-coverage test untouched.
 #[derive(Default)]
@@ -1063,27 +1063,66 @@ impl Counters {
 
     /// True while nothing at all was counted — quiet forums stay silent in
     /// the periodic summary instead of logging zero-lines forever.
-    fn all_zero(&self) -> bool {
-        self.admitted_typing == 0
-            && self.admitted_edits == 0
-            && self.admitted_sends == 0
-            && self.dropped_typing == 0
-            && self.dropped_clock == 0
-            && self.dropped_brain_preview == 0
-            && self.dropped_intermediary == 0
-            && self.dropped_status == 0
-            && self.queued_finals == 0
-            && self.superseded_finals == 0
-            && self.delivered_finals == 0
-            && self.failed_finals == 0
-            && self.admitted_interactive == 0
-            && self.interactive_overflow == 0
-            && self.pause_armed_429 == 0
-            && self.throttled_typing_ms == 0
-            && self.throttled_send_ms == 0
-            && self.dropped_rich == 0
-            && self.deferred_rich == 0
-            && self.dropped_spacing == 0
+    ///
+    /// The pattern below names EVERY counter and has no `..`, so adding a
+    /// field to [`Counters`] makes it non-exhaustive (E0027) and the build
+    /// fails until the new counter is listed here; because the array reads
+    /// every binding, leaving one out is an `unused_variables` error too.
+    /// [`format_summary`] carries the same exhaustive pattern for the emitted
+    /// line, so neither the zero test nor the summary can silently drop a
+    /// counter. The hand-written `all_zero()` this replaces listed 20 of the
+    /// 22 fields — it omitted `admitted_rich` and `throttled_rich_ms`, which
+    /// suppressed the whole summary for a rich-only peer (#635 task 6).
+    fn is_quiet(&self) -> bool {
+        let Counters {
+            admitted_typing,
+            admitted_edits,
+            admitted_sends,
+            admitted_rich,
+            dropped_typing,
+            dropped_clock,
+            dropped_brain_preview,
+            dropped_intermediary,
+            dropped_status,
+            queued_finals,
+            superseded_finals,
+            delivered_finals,
+            failed_finals,
+            admitted_interactive,
+            interactive_overflow,
+            pause_armed_429,
+            throttled_typing_ms,
+            throttled_send_ms,
+            throttled_rich_ms,
+            dropped_rich,
+            deferred_rich,
+            dropped_spacing,
+        } = self;
+        let all = [
+            *admitted_typing,
+            *admitted_edits,
+            *admitted_sends,
+            *admitted_rich,
+            *dropped_typing,
+            *dropped_clock,
+            *dropped_brain_preview,
+            *dropped_intermediary,
+            *dropped_status,
+            *queued_finals,
+            *superseded_finals,
+            *delivered_finals,
+            *failed_finals,
+            *admitted_interactive,
+            *interactive_overflow,
+            *pause_armed_429,
+            *throttled_typing_ms,
+            *throttled_send_ms,
+            *throttled_rich_ms,
+            *dropped_rich,
+            *deferred_rich,
+            *dropped_spacing,
+        ];
+        all.iter().all(|v| *v == 0)
     }
 }
 
@@ -1235,7 +1274,35 @@ pub(crate) fn recent_profile(chat: Option<i64>) -> String {
 /// Format one peer's summary line. Pure so the field coverage is pinned by a
 /// test: adding a counter without extending this format fails the test.
 pub(crate) fn format_summary(chat_id: i64, c: &Counters, finals_pending: usize) -> Option<String> {
-    if c.all_zero() && finals_pending == 0 {
+    // Exhaustive destructuring with NO `..` is the under-report guard (#635
+    // task 6): a new counter makes this pattern non-exhaustive (E0027), so the
+    // build fails until the field is named here — and every binding below is
+    // emitted, so it cannot be named and then dropped from the line either.
+    let Counters {
+        admitted_typing,
+        admitted_edits,
+        admitted_sends,
+        admitted_rich,
+        dropped_typing,
+        dropped_clock,
+        dropped_brain_preview,
+        dropped_intermediary,
+        dropped_status,
+        queued_finals,
+        superseded_finals,
+        delivered_finals,
+        failed_finals,
+        admitted_interactive,
+        interactive_overflow,
+        pause_armed_429,
+        throttled_typing_ms,
+        throttled_send_ms,
+        throttled_rich_ms,
+        dropped_rich,
+        deferred_rich,
+        dropped_spacing,
+    } = c;
+    if c.is_quiet() && finals_pending == 0 {
         return None;
     }
     Some(format!(
@@ -1245,29 +1312,29 @@ pub(crate) fn format_summary(chat_id: i64, c: &Counters, finals_pending: usize) 
          finals{{queued={},superseded={},delivered={},failed={},pending={}}} \
          interactive{{admitted={},overflow={},pause429={}}} \
          throttled_ms{{typing={},send={},rich={}}}",
-        c.admitted_typing,
-        c.admitted_edits,
-        c.admitted_sends,
-        c.admitted_rich,
-        c.dropped_clock,
-        c.dropped_brain_preview,
-        c.dropped_intermediary,
-        c.dropped_status,
-        c.dropped_typing,
-        c.dropped_rich,
-        c.deferred_rich,
-        c.dropped_spacing,
-        c.queued_finals,
-        c.superseded_finals,
-        c.delivered_finals,
-        c.failed_finals,
+        admitted_typing,
+        admitted_edits,
+        admitted_sends,
+        admitted_rich,
+        dropped_clock,
+        dropped_brain_preview,
+        dropped_intermediary,
+        dropped_status,
+        dropped_typing,
+        dropped_rich,
+        deferred_rich,
+        dropped_spacing,
+        queued_finals,
+        superseded_finals,
+        delivered_finals,
+        failed_finals,
         finals_pending,
-        c.admitted_interactive,
-        c.interactive_overflow,
-        c.pause_armed_429,
-        c.throttled_typing_ms,
-        c.throttled_send_ms,
-        c.throttled_rich_ms,
+        admitted_interactive,
+        interactive_overflow,
+        pause_armed_429,
+        throttled_typing_ms,
+        throttled_send_ms,
+        throttled_rich_ms,
     ))
 }
 
