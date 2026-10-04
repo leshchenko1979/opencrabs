@@ -314,8 +314,9 @@ fn halts_turn_false_for_unknown_tool() {
 
 /// End-to-end config toggle: with a real SKILL.md (globs declared) in a
 /// temp home's skills dir, `skill_glob_gate = true` blocks the first
-/// matching call (body in the rejection) and arms the identical retry
-/// (B1); `false` passes straight through.
+/// matching call with a bounded NOTICE (#405 — the body does NOT ride the
+/// rejection) and arms the identical retry (B1); `false` passes straight
+/// through.
 #[tokio::test]
 async fn skill_gate_config_toggle_end_to_end() {
     use crate::config::profile::with_home_override_async;
@@ -344,15 +345,26 @@ async fn skill_gate_config_toggle_end_to_end() {
             "content": "x"
         });
 
-        // Enabled (default): first call rejected with the body.
+        // Enabled (default): first call rejected with a bounded NOTICE.
         let blocked = registry
             .execute("write_file", input.clone(), &context)
             .await
             .expect("execute");
         let err_text = blocked.error.as_deref().unwrap_or(&blocked.output);
         assert!(
-            err_text.contains("[SKILL GATE]") && err_text.contains("GATE-PROBE-BODY"),
-            "enabled gate must reject with the body, got: {}",
+            err_text.contains("[SKILL GATE]"),
+            "enabled gate must reject, got: {}",
+            &err_text[..err_text.len().min(200)]
+        );
+        // #405: the notice names the skill and the route — and NOT the body.
+        assert!(
+            err_text.contains("gate-probe") && err_text.contains("load_brain_file 'gate-probe'"),
+            "the notice must name the skill and its reload route, got: {}",
+            &err_text[..err_text.len().min(200)]
+        );
+        assert!(
+            !err_text.contains("GATE-PROBE-BODY"),
+            "the skill body must NOT ride the rejection (#405), got: {}",
             &err_text[..err_text.len().min(200)]
         );
         // Identical retry passes (mark_seen armed it — B1).

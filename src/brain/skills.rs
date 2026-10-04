@@ -363,10 +363,11 @@ impl Skill {
     /// #406/#520: the warning hangs off THIS method rather than off any single
     /// caller, because every skill-body injection path already converges here —
     /// the turn-start and post-compaction manifest ([`active_skill_bodies`]),
-    /// the glob gate's block body (`tools/skill_gate.rs`), both resolution
-    /// branches of `tools/load_brain_file.rs`, the `/`-skill channel path
-    /// (`channels/commands.rs`), and the TUI paths. Wiring the sites one by one
-    /// means a new caller silently ships unwarned; wired here it cannot.
+    /// both resolution branches of `tools/load_brain_file.rs`, the `/`-skill
+    /// channel path (`channels/commands.rs`), and the TUI paths. Wiring the
+    /// sites one by one means a new caller silently ships unwarned; wired here
+    /// it cannot. (The glob gate is no longer a caller: since #405 its block
+    /// message is a bounded notice and the body never rides it.)
     ///
     /// Measured on the skill's OWN body, so the count matches the file an
     /// operator would actually split (`wc -l`): the review-gate reminder is

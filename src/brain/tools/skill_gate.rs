@@ -6,13 +6,23 @@
 //! attempts a tool call that references a path matching one of those
 //! globs, and the skill body is NOT loaded (seen) in the current session
 //! context — fresh sessions AND post-compaction (owner decision
-//! 2026-09-10) — the call is rejected. The rejection carries the skill
-//! body AND a durable route to the complete text (`gate_block_message`):
-//! the harness caps tool output at `DEFAULT_MAX_INLINE_TOOL_BYTES`, so a
-//! body larger than the cap reaches the caller as a head/tail preview —
-//! which is why the message names the skill's own source file instead of
-//! promising a complete body the cap can truncate. The identical retry
-//! succeeds either way: the retry is armed before the rejection returns.
+//! 2026-09-10) — the call is rejected with a bounded NOTICE
+//! (`gate_block_message`), not the body (#405). The notice names the
+//! matched path, the skill, its globs and the route to the complete text.
+//! The body itself used to ride the rejection verbatim: 23–47 KB per
+//! trigger, and it arrived truncated at the harness cap
+//! (`DEFAULT_MAX_INLINE_TOOL_BYTES`) anyway. The gate's job is to say a
+//! relevant skill EXISTS and how to get it — the body answers a second
+//! question the caller has not yet asked. The identical retry succeeds
+//! either way: the retry is armed before the rejection returns.
+//!
+//! **A headless surface fails open (#405).** The remedy above — "read
+//! this, then re-issue" — needs an interactive turn. A headless session
+//! (cron, CLI one-shot, sub-agent) has none, so the refusal there is
+//! terminal: an `ai-antispam` cron job's first `bash` call was refused on
+//! a path mention, the script never ran, and the job self-disabled —
+//! an outcome indistinguishable from a job that chose not to act. Where
+//! no human can undo the damage, the gate does not block.
 //!
 //! Laws (design v2, decisions 6–9):
 //! - **Fail-open:** any gate-internal error (pattern compile failure,
@@ -23,6 +33,9 @@
 //!   cannot self-serve (`load_brain_file`, `read_file`, `slash_command`,
 //!   `session_search`, `tool_search`, `write_opencrabs_file`,
 //!   `execute_code`).
+//! - **Headless fails open:** a session with no live user surface (cron,
+//!   CLI one-shot, sub-agent) is never blocked — the remedy needs an
+//!   interactive turn, and a headless session has none.
 //! - **Cursor match table:** `*` matches one path segment (never `/`),
 //!   `**` matches recursively — `require_literal_separator: true`.
 //!   Globs match against the normalized ABSOLUTE path; skill authors
@@ -70,17 +83,20 @@ const PATTERN_ONLY_TOOLS: &[&str] = &["grep", "glob"];
 pub enum GateVerdict {
     /// The call proceeds (also the verdict for every fail-open path).
     Pass,
-    /// The call is blocked: the named skill's body rides the rejection.
+    /// The call is blocked: the notice names the skill, its globs and the
+    /// route to its body. The body itself does NOT ride the rejection
+    /// (#405) — it cost 23–47 KB per trigger and arrived truncated at the
+    /// harness cap anyway.
     Block {
         skill: String,
         matched_path: String,
-        body: String,
         globs: Vec<String>,
     },
 }
 
-/// The gate's rejection text: the skill body, an honest statement of the
-/// harness cap, and a durable route to the complete body.
+/// The gate's rejection text (#405): a bounded NOTICE carrying the matched
+/// path, the skill, its globs, an honest statement of why the body is not
+/// appended, and a durable route to the complete body.
 ///
 /// `source_path` is resolved by the CALLER and passed in — `None` for a
 /// built-in skill, which has no file on disk — so this formatter is pure
@@ -88,23 +104,27 @@ pub enum GateVerdict {
 /// slug) is named in both arms: it is the one route that works for every
 /// skill, and it marks the skill seen exactly like the gate's own
 /// `mark_seen`.
+///
+/// The body is deliberately absent. Appending it cost 23–47 KB per trigger
+/// (measured, #405) and `DEFAULT_MAX_INLINE_TOOL_BYTES` truncated it
+/// anyway. This function's output must stay well under that cap — a
+/// regression test pins the bound.
 pub(crate) fn gate_block_message(
     skill: &str,
     matched_path: &str,
     globs: &[String],
-    body: &str,
     source_path: Option<&Path>,
 ) -> String {
     let route = match source_path {
         Some(path) => format!(
-            "The complete body: read '{}' with read_file, or reload it with \
+            "Read the complete body with read_file on '{}', or reload it with \
              load_brain_file '{}' — both are exempt from this gate, and \
              load_brain_file also takes query= for a section-filtered reload.",
             path.display(),
             skill
         ),
         None => format!(
-            "The complete body: reload it with load_brain_file '{}' (exempt from \
+            "Reload the complete body with load_brain_file '{}' (exempt from \
              this gate; it also takes query= for a section-filtered reload). This \
              skill is compiled in, so there is no file on disk to read.",
             skill
@@ -112,30 +132,34 @@ pub(crate) fn gate_block_message(
     };
     format!(
         "[SKILL GATE] This call touches '{}', which matches skill '{}' (globs: {}), and \
-         that skill is not loaded in this session context. The skill body is appended \
-         below — but tool output is capped at {} bytes, so a longer body arrives as a \
-         head/tail preview rather than the complete text. {} Re-issue the identical \
-         call once you have read it.\n\n---\n\n{}",
+         that skill is not loaded in this session context. The skill body is NOT \
+         appended here: it costs tens of KB per trigger, and tool output is capped at \
+         {} bytes, so a full body would arrive as a head/tail preview anyway. {} \
+         Re-issue the identical call once you have read it.",
         matched_path,
         skill,
         globs.join(", "),
         DEFAULT_MAX_INLINE_TOOL_BYTES,
-        route,
-        body
+        route
     )
 }
 
 /// Gate entry point. `enabled` is the `[agent] skill_glob_gate` master
 /// switch; `cwd` is the session's working directory for resolving
-/// relative candidate paths.
+/// relative candidate paths; `headless` marks a surface with no live user
+/// (cron, CLI one-shot, sub-agent) where a refusal is terminal (#405).
 pub fn check(
     session_id: Uuid,
     tool_name: &str,
     input: &Value,
     cwd: &std::path::Path,
     enabled: bool,
+    headless: bool,
 ) -> GateVerdict {
-    if !enabled || EXEMPT_TOOLS.contains(&tool_name) {
+    // Headless fails open (#405): the remedy ("read this, then re-issue")
+    // needs an interactive turn, and a headless surface has none — so a
+    // block there is a dead end no human can undo.
+    if !enabled || headless || EXEMPT_TOOLS.contains(&tool_name) {
         return GateVerdict::Pass;
     }
     // Fast-exit: no loaded skill declares globs (decision 12 — zero cost).
@@ -172,7 +196,6 @@ pub fn check(
                     return GateVerdict::Block {
                         skill: skill.name.clone(),
                         matched_path: candidate.display().to_string(),
-                        body: skill.prompt_body(),
                         globs: skill.globs.clone(),
                     };
                 }

@@ -248,14 +248,17 @@ fn review_gate_reminder_keeps_the_first_line() {
 // --------------------------------------------------------- the shared caller
 
 /// The #520 contract: the warning lives on `prompt_body()`, the single method
-/// every skill-body injection path already calls — the glob gate's block body,
-/// both resolution branches of `load_brain_file`, the `/`-skill channel path,
-/// the TUI paths, and this module's own `active_skill_bodies`. A test that only
-/// drove `active_skill_bodies` would keep passing if the warning were wired into
-/// that one caller and nowhere else, which is exactly the defect #520 reports;
-/// this test fails the moment the warning leaves the shared method.
+/// every skill-body injection path already calls — both resolution branches of
+/// `load_brain_file`, the `/`-skill channel path, the TUI paths, and this
+/// module's own `active_skill_bodies`. A test that only drove
+/// `active_skill_bodies` would keep passing if the warning were wired into that
+/// one caller and nowhere else, which is exactly the defect #520 reports; this
+/// test fails the moment the warning leaves the shared method.
 ///
-/// The four non-manifest consumers need live sessions/dbs to drive directly, so
+/// (The glob gate was a caller too until #405: its block message is now a
+/// bounded notice that never carries the body, so it consumes nothing here.)
+///
+/// The non-manifest consumers need live sessions/dbs to drive directly, so
 /// they are pinned structurally here: they call `prompt_body()` and nothing
 /// else, so what this asserts about the method they inherit.
 #[test]

@@ -54,7 +54,7 @@ Tool = function the agent calls (`bash`, `grep`); command = slash shortcut in co
 
 ## Skill `globs:` frontmatter (path-scoped skill gate, #150)
 
-A `SKILL.md` may declare `globs:` so its topic is ENFORCED, not advisory: a tool call referencing a matching path is rejected (the rejection carries the skill body and names a durable route to the complete text — `read_file` on the skill's source path, or `load_brain_file` with the slug; tool output is capped at 16 KB, so a longer body arrives as a head/tail preview) when the skill body is not in the current session context (fresh session or after compaction); the identical retry succeeds. Accepted forms — Cursor comma-string `globs: a/**, b.md`, inline flow `globs: [a/**, b.md]`, block list — quotes stripped; `metadata.globs` is ignored.
+A `SKILL.md` may declare `globs:` so its topic is ENFORCED, not advisory: a tool call referencing a matching path is rejected with a bounded NOTICE when the skill body is not in the current session context (fresh session or after compaction); the identical retry succeeds. The notice names the matched path, the skill, its globs, and the durable route to the complete text — `read_file` on the skill's source path, or `load_brain_file` with the slug. The body itself does NOT ride the rejection (#405): it cost 23–47 KB per trigger, and tool output is capped at 16 KB, so a full body would arrive as a head/tail preview anyway. Accepted forms — Cursor comma-string `globs: a/**, b.md`, inline flow `globs: [a/**, b.md]`, block list — quotes stripped; `metadata.globs` is ignored.
 
 - **Opt-in per skill:** no `globs` key = invisible to the gate; built-ins ship glob-less.
 - **Match:** case-insensitive against the normalized ABSOLUTE candidate path; `*` = one segment, `**` = recursive — write `**/` prefixes.
@@ -63,6 +63,7 @@ A `SKILL.md` may declare `globs:` so its topic is ENFORCED, not advisory: a tool
 - **Exempt (recovery) tools:** `load_brain_file`, `read_file`, `slash_command`, `session_search`, `tool_search`, `write_opencrabs_file`, `execute_code` — a blocked agent must be able to re-arm itself.
 - **Sub-agents:** gated too (shared registry path) — one extra blocked round-trip per matching skill per fresh sub-agent.
 - **Fail-open law:** any gate-internal error passes the call through; malformed globs WARN once and are skipped.
+- **Headless fails open (#405):** a surface with no live user (cron, CLI one-shot, sub-agent) is never blocked — the remedy (read the skill, then re-issue the call) needs an interactive turn, and there is none; a refusal there is terminal.
 - **Master switch:** `[agent] skill_glob_gate = true` (default) in config.toml.
 
 ## Build & Runtime Commands

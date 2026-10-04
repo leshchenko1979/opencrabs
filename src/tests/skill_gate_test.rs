@@ -24,37 +24,44 @@ fn skill(globs: &[&str]) -> Skill {
     Skill::parse("guard-skill", &fm, SkillSource::Builtin).unwrap()
 }
 
-fn verdict_with_skills(
+/// Mirror of `skill_gate::check` for tests — kept in step with it by hand,
+/// so any new short-circuit in `check` must be added here too.
+///
+/// `headless` is the #405 leg: a surface with no live user (cron, CLI
+/// one-shot, sub-agent) never blocks, because the remedy ("read this, then
+/// re-issue") needs an interactive turn.
+fn verdict_with_skills_opts(
     session: Uuid,
     tool: &str,
     input: serde_json::Value,
     skills: Vec<Skill>,
     enabled: bool,
+    headless: bool,
 ) -> GateVerdict {
-    if enabled && !skills.is_empty() && !EXEMPT_TOOLS.contains(&tool) {
-        let candidates = harvest_candidates(tool, &input, std::path::Path::new("/work"));
-        for s in &skills {
-            for g in &s.globs {
-                let Ok(pattern) = compile_pattern(g, std::path::Path::new("/work")) else {
-                    continue;
-                };
-                let options = glob::MatchOptions {
-                    case_sensitive: false,
-                    require_literal_separator: true,
-                    require_literal_leading_dot: false,
-                };
-                for c in &candidates {
-                    if pattern.matches_path_with(c, options) {
-                        if seen_skills::seen_since_compaction(session, &s.name) {
-                            return GateVerdict::Pass;
-                        }
-                        return GateVerdict::Block {
-                            skill: s.name.clone(),
-                            matched_path: c.display().to_string(),
-                            body: s.prompt_body(),
-                            globs: s.globs.clone(),
-                        };
+    if !enabled || headless || skills.is_empty() || EXEMPT_TOOLS.contains(&tool) {
+        return GateVerdict::Pass;
+    }
+    let candidates = harvest_candidates(tool, &input, std::path::Path::new("/work"));
+    for s in &skills {
+        for g in &s.globs {
+            let Ok(pattern) = compile_pattern(g, std::path::Path::new("/work")) else {
+                continue;
+            };
+            let options = glob::MatchOptions {
+                case_sensitive: false,
+                require_literal_separator: true,
+                require_literal_leading_dot: false,
+            };
+            for c in &candidates {
+                if pattern.matches_path_with(c, options) {
+                    if seen_skills::seen_since_compaction(session, &s.name) {
+                        return GateVerdict::Pass;
                     }
+                    return GateVerdict::Block {
+                        skill: s.name.clone(),
+                        matched_path: c.display().to_string(),
+                        globs: s.globs.clone(),
+                    };
                 }
             }
         }
@@ -62,8 +69,21 @@ fn verdict_with_skills(
     GateVerdict::Pass
 }
 
+/// The interactive (non-headless) surface — the common case.
+fn verdict_with_skills(
+    session: Uuid,
+    tool: &str,
+    input: serde_json::Value,
+    skills: Vec<Skill>,
+    enabled: bool,
+) -> GateVerdict {
+    verdict_with_skills_opts(session, tool, input, skills, enabled, false)
+}
+
 #[test]
-fn match_blocks_with_body_present() {
+fn match_blocks_and_names_the_skill() {
+    // #405: the Block verdict still carries the skill slug and its globs —
+    // they are what the notice is built from. The body no longer rides it.
     let s = skill(&["**/skills/guard-skill/**"]);
     let v = verdict_with_skills(
         Uuid::new_v4(),
@@ -73,13 +93,44 @@ fn match_blocks_with_body_present() {
         true,
     );
     let GateVerdict::Block {
-        body, matched_path, ..
+        skill,
+        matched_path,
+        globs,
     } = v
     else {
         panic!("expected Block, got {v:?}");
     };
-    assert!(body.contains("BODY-MARKER"));
+    assert_eq!(skill, "guard-skill");
+    assert_eq!(globs, vec!["**/skills/guard-skill/**".to_string()]);
     assert_eq!(matched_path, "/root/.opencrabs/skills/guard-skill/SKILL.md");
+}
+
+#[test]
+fn headless_surface_passes_where_interactive_blocks() {
+    // #405: the same call, the same skills, the same config — only the
+    // surface differs. A headless session must not be dead-ended by a
+    // refusal whose remedy requires a human turn.
+    let session = Uuid::new_v4();
+    let input = json!({"path": "/x/guard/file.md", "content": "c"});
+    let interactive = verdict_with_skills_opts(
+        session,
+        "write_file",
+        input.clone(),
+        vec![skill(&["**/guard/**"])],
+        true,
+        false,
+    );
+    let blocked = matches!(interactive, GateVerdict::Block { .. });
+    assert!(blocked, "interactive must block, got {interactive:?}");
+    let headless = verdict_with_skills_opts(
+        Uuid::new_v4(),
+        "write_file",
+        input,
+        vec![skill(&["**/guard/**"])],
+        true,
+        true,
+    );
+    assert_eq!(headless, GateVerdict::Pass);
 }
 
 #[test]
@@ -245,28 +296,70 @@ fn relative_pattern_resolves_against_cwd() {
 
 // ---------------------------------------------------------------------------
 // #458 — the rejection must not promise a body the harness cap truncates.
+// #405 — and it must not CARRY that body either: the notice is bounded.
 // ---------------------------------------------------------------------------
 
+/// The regression pin for #405: a synthetically oversized skill (the real
+/// ones measured 23–47 KB) must produce a Block message far under the
+/// harness cap, and the body's own bytes must not appear in it.
+///
+/// FALSIFIER (pre-change): `gate_block_message` took the body and appended
+/// it after a `\n\n---\n\n` separator, so for this input the returned
+/// string was `body.len() + ~600` bytes — the `< 2000` assertion below
+/// fails against that code, and the `!msg.contains(BODY-MARKER)` assertion
+/// fails with it. Both must keep failing if the append ever returns.
 #[test]
-fn gate_message_names_the_source_path_and_the_reload_route() {
-    // A body larger than the tool-output cap arrives as a head/tail
-    // preview, so the message must name a durable route to the full text
-    // instead of asserting that the body follows.
-    let body = "BODY-MARKER\n".repeat(2_000);
+fn gate_message_is_bounded_for_an_oversized_skill() {
+    // 40 KB body, comfortably past the harness cap — the class that made
+    // every trigger cost tens of KB.
+    let body = "BODY-MARKER\n".repeat(4_000);
     assert!(body.len() > DEFAULT_MAX_INLINE_TOOL_BYTES);
+
     let msg = gate_block_message(
         "guard-skill",
         "/work/guard/file.md",
         &["**/guard/**".to_string()],
-        &body,
+        Some(std::path::Path::new("/root/.opencrabs/skills/guard-skill/SKILL.md")),
+    );
+
+    // The bound. 2000 bytes is ~2 orders of magnitude below the payload the
+    // gate used to ship, and still ~8x under the harness cap.
+    assert!(
+        msg.len() < 2000,
+        "Block payload must be bounded, got {} bytes:\n{msg}",
+        msg.len()
+    );
+    assert!(
+        !msg.contains("BODY-MARKER"),
+        "the skill body must not ride the rejection (#405):\n{msg}"
+    );
+    // ...while the notice still does its job: slug, globs, and the route.
+    assert!(msg.contains("guard-skill"));
+    assert!(msg.contains("**/guard/**"));
+    assert!(msg.contains("/work/guard/file.md"));
+    assert!(msg.contains("load_brain_file 'guard-skill'"));
+    assert!(
+        msg.contains("/root/.opencrabs/skills/guard-skill/SKILL.md"),
+        "the on-disk source path is the durable route:\n{msg}"
+    );
+    assert!(msg.contains(&DEFAULT_MAX_INLINE_TOOL_BYTES.to_string()));
+    assert!(msg.contains("head/tail preview"));
+}
+
+#[test]
+fn gate_message_names_the_source_path_and_the_reload_route() {
+    let msg = gate_block_message(
+        "guard-skill",
+        "/work/guard/file.md",
+        &["**/guard/**".to_string()],
         Some(std::path::Path::new("/root/.opencrabs/skills/guard-skill/SKILL.md")),
     );
     assert!(!msg.contains("The full skill body follows"));
+    assert!(!msg.contains("is appended below"));
     assert!(msg.contains("/root/.opencrabs/skills/guard-skill/SKILL.md"));
     assert!(msg.contains("load_brain_file 'guard-skill'"));
     assert!(msg.contains(&DEFAULT_MAX_INLINE_TOOL_BYTES.to_string()));
     assert!(msg.contains("head/tail preview"));
-    assert!(msg.ends_with(&body));
 }
 
 #[test]
@@ -274,16 +367,10 @@ fn gate_message_builtin_arm_keeps_the_reload_route_without_a_file() {
     // A compiled-in skill has no source file to name, so the message must
     // drop the file route and keep the one that always works.
     let no_globs: &[String] = &[];
-    let msg = gate_block_message(
-        "guard-skill",
-        "/work/guard/file.md",
-        no_globs,
-        "BODY-MARKER",
-        None,
-    );
+    let msg = gate_block_message("guard-skill", "/work/guard/file.md", no_globs, None);
     assert!(msg.contains("load_brain_file 'guard-skill'"));
     assert!(msg.contains("no file on disk to read"));
     assert!(!msg.contains("read_file"));
     assert!(!msg.contains("The full skill body follows"));
-    assert!(msg.ends_with("BODY-MARKER"));
+    assert!(!msg.contains("is appended below"));
 }

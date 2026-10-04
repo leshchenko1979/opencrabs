@@ -374,23 +374,31 @@ impl ToolRegistry {
 
         // Skill glob gate (issue #150): a tool call touching a path that
         // matches a globs-declaring skill the session hasn't loaded is
-        // rejected with the skill's FULL body as the error content (the
-        // plan_gate deny precedent) and `mark_seen` arms the identical
-        // retry. Fires per call inside `execute` — sequential, parallel,
-        // and sub-agent dispatch all pass through here, so there is no
-        // batch-splice logic to get wrong. Fail-open: any internal gate
-        // error is a `Pass` inside `skill_gate::check` itself.
+        // rejected with a bounded NOTICE (#405), and `mark_seen` arms the
+        // identical retry. The body used to ride the rejection verbatim —
+        // 23–47 KB per trigger, and it arrived truncated at the harness cap
+        // anyway — so the notice now names the route to it instead. Fires
+        // per call inside `execute` — sequential, parallel, and sub-agent
+        // dispatch all pass through here, so there is no batch-splice logic
+        // to get wrong. Fail-open: any internal gate error is a `Pass`
+        // inside `skill_gate::check` itself, and a headless surface never
+        // blocks.
         let verdict = super::skill_gate::check(
             context.session_id,
             name,
             &input,
             &context.working_directory,
             self.skill_gate_enabled,
+            // #405: a surface with no live user (cron, CLI one-shot,
+            // sub-agent) is never blocked — the remedy ("read this, then
+            // re-issue") needs an interactive turn. The context already
+            // carries this (#510, stamped once per turn in `tool_loop`), so
+            // the gate reads the per-call truth instead of a second flag.
+            context.headless,
         );
         if let super::skill_gate::GateVerdict::Block {
             skill,
             matched_path,
-            body,
             globs,
         } = verdict
         {
@@ -404,17 +412,14 @@ impl ToolRegistry {
             // epoch-carrying registry (#150) this upserts the current
             // epoch, so the identical re-issued call passes.
             super::seen_skills::mark_seen(context.session_id, &skill);
-            // The harness caps tool output (~16 KB by default), so a body
-            // larger than that reaches the caller as a head/tail preview
-            // (#458). Resolve the skill's own source file here and pass it
-            // IN: the formatter stays pure, and a built-in skill (`None`)
-            // is still covered by the `load_brain_file` route it names.
+            // Resolve the skill's own source file here and pass it IN: the
+            // formatter stays pure, and a built-in skill (`None`) is still
+            // covered by the `load_brain_file` route it names.
             let source_path = crate::brain::skills::resolve_skill_path(&skill);
             let content = super::skill_gate::gate_block_message(
                 &skill,
                 &matched_path,
                 &globs,
-                &body,
                 source_path.as_deref(),
             );
             return Ok(ToolResult::error(content));
