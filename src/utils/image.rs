@@ -392,12 +392,16 @@ pub const VID_ID_PREFIX: &str = "vid";
 
 /// Why a local media candidate could not become an attachment.
 ///
-/// One enum for both families: the reasons a video cannot be delivered are the
-/// ones listed here (a missing path, a directory, an empty file, an unreadable
-/// file), so a second near-identical enum would be a second home for the same
-/// question. The image-only variants — `UnsupportedFormat`, `DownloadFailed`,
-/// `TooLarge`, `TooMany`, `BadUrl` — are never emitted for video: there is no
-/// container gate on the video path and no remote fetch arm to fail (#465).
+/// One enum for every local-media family — images, video (#465) and files
+/// (#1916). The reasons a video cannot be delivered are the ones listed here (a
+/// missing path, a directory, an empty file, an unreadable file), so a second
+/// near-identical enum would be a second home for the same question. The
+/// variants that need a remote fetch arm or an image format gate —
+/// `UnsupportedFormat`, `DownloadFailed`, `TooMany`, `BadUrl` — are emitted by
+/// neither video nor the local-file family: there is no container gate on the
+/// video path, no remote fetch arm to fail, and no format gate on a document.
+/// `TooLarge` is shared: an image hits the per-image ceiling, a file the
+/// `sendDocument` one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalImageFailureReason {
     /// No filesystem entry at the resolved path.
@@ -413,7 +417,8 @@ pub enum LocalImageFailureReason {
     /// A remote reference could not be fetched (connect error, timeout, or a
     /// non-success HTTP status).
     DownloadFailed,
-    /// A remote reference resolved to more bytes than the per-image limit.
+    /// More bytes than the family's ceiling — a remote image past the per-image
+    /// limit, or a local file past the `sendDocument` one.
     TooLarge,
     /// The reply referenced more remote images than the per-reply budget.
     TooMany,
@@ -438,7 +443,7 @@ impl LocalImageFailureReason {
             Self::DownloadFailed => {
                 "could not be downloaded (unreachable, timed out, or HTTP error)"
             }
-            Self::TooLarge => "larger than the per-image size limit",
+            Self::TooLarge => "larger than the size limit",
             Self::TooMany => "too many remote images in one reply (per-reply limit reached)",
             Self::BadUrl => "not a usable image URL",
             Self::DeliveryFailed => "the channel could not deliver the image",
@@ -1535,4 +1540,299 @@ pub fn rewrite_local_videos(
     rw.out.rich = rw.out.rich.trim().to_string();
     rw.out.stripped = rw.out.stripped.trim().to_string();
     rw.out
+}
+
+// ── Local file extraction (#1916) ─────────────────────────────────────────
+//
+// The file family is the image family's non-media sibling. A reply carries a
+// markdown LINK to a file on disk (`[Q3 report](/root/reports/q3.pdf)`), and the
+// reader is a channel user with no filesystem access — so the link is not a
+// deliverable, the FILE is. Before #1916 a plain `[label](path)` link was parsed
+// by the rich renderer as an inert link entity whose URL was the raw path:
+// Telegram has no scheme to resolve, so the file never arrived and the link was
+// dead.
+//
+// Two rules are INHERITED from the image scanner rather than re-decided:
+//   * the MARKDOWN form is guarded by `code_regions` — a link inside a fenced or
+//     backticked span stays byte-identical, because it may be documentation;
+//   * a relative target with no base directory to resolve against stays
+//     verbatim, because it may be ordinary prose that merely looks like a link.
+//
+// One rule genuinely differs, and it is the family's declared policy: a REJECTED
+// candidate is left in the text byte-identical (never stripped), because a link
+// carries its own label and a silent strip would delete the reader's only clue
+// about what was referenced. The failure it records is what drives the
+// self-healing nudge instead.
+
+/// A resolved local file together with the markdown link label that named it.
+///
+/// Path and caption live in ONE value for the reason [`LocalImage`] states: the
+/// label belongs to the link written around it, and two parallel vectors would
+/// let them desync the first time a candidate is dropped from one and not the
+/// other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalFile {
+    /// Absolute path to the file on disk.
+    pub path: PathBuf,
+    /// The markdown link label — `[label](target)` — to ship as the document
+    /// caption. `None` when the label was empty.
+    pub caption: Option<String>,
+}
+
+/// Result of scanning a reply for links to local files.
+#[derive(Debug, Clone, Default)]
+pub struct LocalFileScan {
+    /// Reply text with every DELIVERED local-file link removed. A remote link, a
+    /// non-file scheme, a reference inside a code span and a REJECTED candidate
+    /// are all left byte-identical (see the module note above).
+    pub text: String,
+    /// Resolved and validated local files, in order of appearance.
+    pub attachments: Vec<LocalFile>,
+    /// Rejected local candidates, in order of appearance.
+    pub failures: Vec<LocalImageFailure>,
+}
+
+/// Where a markdown link points, as far as the file family is concerned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FileTarget {
+    /// A local path, resolved to an absolute one.
+    Local(PathBuf),
+    /// A relative path with no base directory to resolve it against.
+    Unresolved,
+    /// Not a filesystem candidate at all — a remote URL, a Telegram media ref, a
+    /// `mailto:`/`tel:`-style scheme, or an in-page `#anchor`. Left as written.
+    Skip,
+}
+
+/// Classify a link target: a local path we can stat, or something the file
+/// family must leave alone. `~/…` goes through the shared tilde expander, an
+/// absolute path is taken as-is, and a relative path is joined to `base_dir`
+/// (the session working directory).
+fn classify_file_target(raw: &str, base_dir: Option<&Path>) -> FileTarget {
+    let trimmed = raw.trim();
+    // An in-page anchor (`#section`) is not a file.
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return FileTarget::Skip;
+    }
+    // A link Telegram resolves itself, or one it resolves against the rich
+    // request's media array (#334), is never ours; neither is any other URI
+    // scheme (`mailto:`, `ftp:`, `tel:`), which must not be joined to the cwd
+    // and reported as a missing file.
+    if is_remote_url(trimmed) || is_telegram_media_ref(trimmed) || has_url_scheme(trimmed) {
+        return FileTarget::Skip;
+    }
+    let expanded = crate::brain::tools::error::expand_tilde(trimmed);
+    if expanded.is_absolute() {
+        return FileTarget::Local(expanded);
+    }
+    match base_dir {
+        Some(dir) => FileTarget::Local(dir.join(expanded)),
+        None => FileTarget::Unresolved,
+    }
+}
+
+/// True when `raw` begins with a URI scheme (`mailto:`, `ftp:`, `tel:`, …).
+/// `http(s)://`, `data:` and `tg://`/`attach://` are covered by the caller's
+/// earlier checks; this catches every OTHER scheme so a `mailto:` link is left as
+/// written rather than joined to the session cwd and reported as missing.
+fn has_url_scheme(raw: &str) -> bool {
+    let mut chars = raw.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    for ch in chars {
+        if ch == ':' {
+            return true;
+        }
+        if !(ch.is_ascii_alphanumeric() || ch == '+' || ch == '-' || ch == '.') {
+            return false;
+        }
+    }
+    false
+}
+
+/// Telegram's `sendDocument` ceiling. Documents carry far more than a photo's
+/// 10 MiB (`TELEGRAM_PHOTO_MAX_BYTES`), so the file family gets its own wall: a
+/// larger file is reported as a failure rather than handed to an API that will
+/// reject it.
+pub const TELEGRAM_DOCUMENT_MAX_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Validate a resolved local-file candidate: it must exist, be a regular file,
+/// hold at least one byte, be openable, and fit the document size ceiling.
+///
+/// There is deliberately NO format gate here, where [`validate_local_image`] has
+/// one: any bytes can ship as a document, and rejecting an unrecognised format
+/// would delete a referenced file from the reply and deliver nothing — the #286
+/// loss this family exists to avoid.
+pub fn validate_local_file(path: &Path) -> Result<(), LocalImageFailureReason> {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LocalImageFailureReason::NotFound);
+        }
+        Err(_) => return Err(LocalImageFailureReason::Unreadable),
+    };
+    if !meta.is_file() {
+        return Err(LocalImageFailureReason::NotAFile);
+    }
+    if meta.len() == 0 {
+        return Err(LocalImageFailureReason::Empty);
+    }
+    if meta.len() > TELEGRAM_DOCUMENT_MAX_BYTES {
+        return Err(LocalImageFailureReason::TooLarge);
+    }
+    std::fs::File::open(path).map_err(|_| LocalImageFailureReason::Unreadable)?;
+    Ok(())
+}
+
+/// Parse a markdown link starting at `start` (a char boundary where the text
+/// begins with `[`). Accepts `[label](target)`, the angle-bracket form
+/// `[label](<target>)` markdown requires when the path holds spaces, and an
+/// optional `"title"` / `'title'` after the target. Returns
+/// `(end_byte_exclusive, label, raw_target, title)`.
+///
+/// The sibling of [`parse_markdown_image`]: same grammar, same skip rules. The
+/// label is returned because it is the caption carrier for a document, where the
+/// image parser's inert `alt` is not.
+fn parse_markdown_link(
+    text: &str,
+    start: usize,
+) -> Option<(usize, String, String, Option<String>)> {
+    debug_assert!(text[start..].starts_with('['));
+    // `\[label](path)` is escaped literal text, not a reference.
+    if start > 0 && text[..start].ends_with('\\') {
+        return None;
+    }
+    let label_end = text[start + 1..].find(']')?;
+    let paren = start + 1 + label_end + 1;
+    if !text[paren..].starts_with('(') {
+        return None;
+    }
+    let label = text[start + 1..start + 1 + label_end].to_string();
+    let cursor = skip_whitespace(text, paren + 1);
+    let (target, mut after_target) = if text[cursor..].starts_with('<') {
+        let close = text[cursor + 1..].find('>')?;
+        let target = text[cursor + 1..cursor + 1 + close].to_string();
+        (target, cursor + 1 + close + 1)
+    } else {
+        let mut end = cursor;
+        while let Some(ch) = text[end..].chars().next() {
+            if ch.is_whitespace() || ch == ')' {
+                break;
+            }
+            end += ch.len_utf8();
+        }
+        (text[cursor..end].to_string(), end)
+    };
+    after_target = skip_whitespace(text, after_target);
+    // The title is parsed only to find the closing paren; the label, not the
+    // title, is a document's caption carrier.
+    let mut title: Option<String> = None;
+    if let Some(quote) = text[after_target..].chars().next()
+        && (quote == '"' || quote == '\'')
+    {
+        let close = text[after_target + 1..].find(quote)?;
+        let parsed = text[after_target + 1..after_target + 1 + close].trim();
+        if !parsed.is_empty() {
+            title = Some(parsed.to_string());
+        }
+        after_target = skip_whitespace(text, after_target + 1 + close + 1);
+    }
+    if !text[after_target..].starts_with(')') || target.trim().is_empty() {
+        return None;
+    }
+    Some((after_target + 1, label, target, title))
+}
+
+/// File one parsed link into the scan accumulators. Returns `true` when the
+/// reference was consumed and must leave the reply text — which happens ONLY for
+/// a resolved, validated file. A rejected candidate or a non-file target returns
+/// `false`, so the link is copied through byte-identical: a remote link Telegram
+/// resolves itself, and a missing one is a nudge, never a silent strip.
+fn record_file_candidate(
+    raw: &str,
+    label: &str,
+    target: &str,
+    base_dir: Option<&Path>,
+    scan: &mut LocalFileScan,
+) -> bool {
+    match classify_file_target(target, base_dir) {
+        FileTarget::Local(path) => match validate_local_file(&path) {
+            Ok(()) => {
+                let caption = if label.trim().is_empty() {
+                    None
+                } else {
+                    Some(label.to_string())
+                };
+                scan.attachments.push(LocalFile { path, caption });
+                true
+            }
+            Err(reason) => {
+                scan.failures.push(LocalImageFailure {
+                    raw: raw.to_string(),
+                    resolved: Some(path),
+                    reason,
+                });
+                false
+            }
+        },
+        FileTarget::Unresolved | FileTarget::Skip => false,
+    }
+}
+
+/// Scan a reply for markdown links to local files and hand back the text with
+/// every DELIVERED link removed, the validated files, and the rejected
+/// candidates.
+///
+/// `base_dir` is the session working directory: a relative target resolves
+/// against it. With no base directory a relative link stays verbatim while
+/// `~`-prefixed and absolute targets still resolve.
+///
+/// Removal semantics differ from the image family on purpose. A resolved file
+/// leaves the text and becomes an attachment; a REJECTED candidate stays in the
+/// text byte-identical AND is reported as a failure, because a link carries its
+/// own label and a silent strip would delete the reader's only clue about what
+/// was referenced — the failure is what drives the self-healing nudge.
+pub fn extract_local_files(text: &str, base_dir: Option<&Path>) -> LocalFileScan {
+    let regions = code_regions(text);
+    let mut scan = LocalFileScan {
+        text: String::with_capacity(text.len()),
+        ..LocalFileScan::default()
+    };
+    let mut i = 0;
+
+    while i < text.len() {
+        if !regions[i]
+            && text[i..].starts_with('[')
+            // `![alt](path)` is the image family's reference, not a file link:
+            // its `[` is preceded by `!`, and copying the `!` first must not let
+            // the link parser claim the span on the next iteration.
+            && !text[..i].ends_with('!')
+            && let Some((end, label, target, _title)) = parse_markdown_link(text, i)
+            && record_file_candidate(&text[i..end], &label, &target, base_dir, &mut scan)
+        {
+            i = end;
+            continue;
+        }
+        let ch = text[i..].chars().next().expect("i lies on a char boundary");
+        scan.text.push(ch);
+        i += ch.len_utf8();
+    }
+
+    scan.text = scan.text.trim().to_string();
+    scan
+}
+
+/// The honest user-visible line for files that could not be delivered, used when
+/// the self-healing nudge budget is exhausted. `None` when there is nothing to
+/// report.
+pub fn file_failure_notice(failures: &[LocalImageFailure]) -> Option<String> {
+    media_failure_notice(failures, "File", "a file")
+}
+
+/// [`file_failure_notice`] appended to a reply body — the empty-body rule of
+/// [`append_failure_notice`], applied to the file family.
+pub fn append_file_failure_notice(body: &str, failures: &[LocalImageFailure]) -> String {
+    append_media_notice(body, file_failure_notice(failures))
 }

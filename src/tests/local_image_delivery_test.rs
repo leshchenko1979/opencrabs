@@ -399,3 +399,310 @@ mod reentry_latch {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Local-file links (#1916) — the non-media sibling of the image family
+// ---------------------------------------------------------------------------
+//
+// A `[label](path)` link is what the model writes when it means "the file is
+// here". The reader is a channel user with NO filesystem access, so the link is
+// not the deliverable — the FILE is. Before #1916 the link rendered as an inert
+// entity whose URL was the raw path: Telegram had no scheme to resolve, so the
+// file never arrived and the link was dead.
+//
+// These pin the scanner the delivery sites call. The removal policy is the one
+// place the file family deliberately differs from the image family: a resolved
+// file leaves the text, but a REJECTED candidate stays byte-identical and is
+// reported, because a link carries its own label and a silent strip would
+// delete the reader's only clue about what was referenced.
+
+mod local_file_links {
+    use crate::utils::image::{
+        LocalFileScan, LocalImageFailure, LocalImageFailureReason, TELEGRAM_DOCUMENT_MAX_BYTES,
+        append_file_failure_notice, extract_local_files, file_failure_notice, validate_local_file,
+    };
+    use std::path::{Path, PathBuf};
+
+    const PDF_BYTES: &[u8] = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n";
+
+    fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).expect("write fixture");
+        path
+    }
+
+    fn paths(scan: &LocalFileScan) -> Vec<PathBuf> {
+        scan.attachments.iter().map(|f| f.path.clone()).collect()
+    }
+
+    fn failure(raw: &str) -> LocalImageFailure {
+        LocalImageFailure {
+            raw: raw.to_string(),
+            resolved: None,
+            reason: LocalImageFailureReason::NotFound,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Resolution and removal
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_local_file_link_resolves_and_leaves_the_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let scan = extract_local_files(&format!("before [Q3 report]({}) after", pdf.display()), None);
+        assert_eq!(scan.text, "before  after");
+        assert_eq!(paths(&scan), vec![pdf]);
+        assert_eq!(scan.attachments[0].caption.as_deref(), Some("Q3 report"));
+        assert!(scan.failures.is_empty());
+    }
+
+    #[test]
+    fn an_empty_label_yields_no_caption() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let scan = extract_local_files(&format!("[]({})", pdf.display()), None);
+        assert_eq!(paths(&scan), vec![pdf]);
+        assert_eq!(
+            scan.attachments[0].caption, None,
+            "an empty label is not a caption"
+        );
+    }
+
+    #[test]
+    fn two_files_attach_in_order_of_appearance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = write_file(dir.path(), "a.pdf", PDF_BYTES);
+        let b = write_file(dir.path(), "b.pdf", PDF_BYTES);
+        let scan = extract_local_files(&format!("[A]({}) then [B]({})", a.display(), b.display()), None);
+        assert_eq!(paths(&scan), vec![a, b]);
+        assert_eq!(scan.text, "then");
+    }
+
+    #[test]
+    fn an_angle_bracket_target_holds_spaces() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "Q3 final.pdf", PDF_BYTES);
+        let scan = extract_local_files(&format!("x [Q3](<{}>) y", pdf.display()), None);
+        assert_eq!(scan.text, "x  y");
+        assert_eq!(paths(&scan), vec![pdf]);
+    }
+
+    #[test]
+    fn a_title_after_the_target_is_ignored_and_the_label_captions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let scan = extract_local_files(
+            &format!("x [Q3 report]({} \"quarterly\") y", pdf.display()),
+            None,
+        );
+        assert_eq!(scan.text, "x  y");
+        assert_eq!(scan.attachments[0].caption.as_deref(), Some("Q3 report"));
+    }
+
+    #[test]
+    fn a_relative_target_resolves_against_the_base_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("reports")).expect("mkdir");
+        let pdf = write_file(&dir.path().join("reports"), "q3.pdf", PDF_BYTES);
+        let scan = extract_local_files("see [report](reports/q3.pdf) here", Some(dir.path()));
+        assert_eq!(scan.text, "see  here");
+        assert_eq!(paths(&scan), vec![pdf]);
+        assert_eq!(scan.attachments[0].caption.as_deref(), Some("report"));
+    }
+
+    // -----------------------------------------------------------------------
+    // What the family must LEAVE ALONE
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_relative_target_without_a_base_dir_stays_literal() {
+        let text = "see [report](reports/q3.pdf) here";
+        let scan = extract_local_files(text, None);
+        assert_eq!(scan.text, text, "no base directory to resolve against");
+        assert!(scan.attachments.is_empty());
+        assert!(scan.failures.is_empty());
+    }
+
+    #[test]
+    fn a_remote_link_is_left_alone() {
+        let text = "see [the site](https://example.com/a) for details";
+        let scan = extract_local_files(text, None);
+        assert_eq!(scan.text, text, "Telegram resolves a real URL itself");
+        assert!(scan.attachments.is_empty());
+        assert!(scan.failures.is_empty(), "a URL is not a missing file");
+    }
+
+    #[test]
+    fn an_image_reference_is_not_claimed_by_the_file_family() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png = write_file(dir.path(), "chart.png", super::PNG_BYTES);
+        let text = format!("x ![chart]({}) y", png.display());
+        let scan = extract_local_files(&text, None);
+        assert_eq!(scan.text, text, "the image family owns `![…](…)`");
+        assert!(scan.attachments.is_empty());
+        assert!(scan.failures.is_empty());
+    }
+
+    #[test]
+    fn a_link_inside_a_code_span_is_left_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let text = format!("`[Q3 report]({})`", pdf.display());
+        let scan = extract_local_files(&text, None);
+        assert_eq!(
+            scan.text, text,
+            "a code span is documentation, not a deliverable"
+        );
+        assert!(scan.attachments.is_empty());
+        assert!(scan.failures.is_empty());
+    }
+
+    #[test]
+    fn a_link_inside_a_code_fence_is_left_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let text = format!("```\n[Q3 report]({})\n```", pdf.display());
+        let scan = extract_local_files(&text, None);
+        assert_eq!(scan.text, text);
+        assert!(scan.attachments.is_empty());
+    }
+
+    #[test]
+    fn an_escaped_link_stays_literal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let text = format!("\\[Q3 report]({})", pdf.display());
+        let scan = extract_local_files(&text, None);
+        assert_eq!(scan.text, text);
+        assert!(scan.attachments.is_empty());
+    }
+
+    #[test]
+    fn a_non_file_scheme_or_anchor_is_left_alone() {
+        for text in [
+            "mail [me](mailto:a@b.c)",
+            "call [me](tel:+1234)",
+            "see [anchor](#section)",
+            "see [nothing]()",
+        ] {
+            let scan = extract_local_files(text, None);
+            assert_eq!(scan.text, text, "{text} must survive byte-identical");
+            assert!(scan.attachments.is_empty(), "{text}");
+            assert!(scan.failures.is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn prose_that_merely_looks_like_a_link_is_untouched() {
+        for text in ["see [1] and [2] for details", "a [b] c", "[standalone]"] {
+            let scan = extract_local_files(text, None);
+            assert_eq!(scan.text, text);
+            assert!(scan.attachments.is_empty());
+            assert!(scan.failures.is_empty());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rejections — reported AND left in the text
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_missing_file_is_reported_and_the_link_survives() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("gone.pdf");
+        let raw = format!("[Q3 report]({})", missing.display());
+        let text = format!("x {raw} y");
+        let scan = extract_local_files(&text, Some(dir.path()));
+        assert_eq!(
+            scan.text, text,
+            "a rejected link keeps its label — it is the reader's only clue"
+        );
+        assert!(scan.attachments.is_empty());
+        assert_eq!(scan.failures.len(), 1);
+        assert_eq!(scan.failures[0].reason, LocalImageFailureReason::NotFound);
+        assert_eq!(scan.failures[0].raw, raw);
+        assert_eq!(scan.failures[0].resolved.as_deref(), Some(missing.as_path()));
+    }
+
+    #[test]
+    fn a_directory_is_not_a_regular_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sub = dir.path().join("reports");
+        std::fs::create_dir(&sub).expect("mkdir");
+        let scan = extract_local_files(&format!("[x]({})", sub.display()), None);
+        assert!(scan.attachments.is_empty());
+        assert_eq!(scan.failures[0].reason, LocalImageFailureReason::NotAFile);
+    }
+
+    #[test]
+    fn an_empty_file_is_reported_as_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let empty = write_file(dir.path(), "empty.pdf", b"");
+        let scan = extract_local_files(&format!("[x]({})", empty.display()), None);
+        assert!(scan.attachments.is_empty());
+        assert_eq!(scan.failures[0].reason, LocalImageFailureReason::Empty);
+    }
+
+    #[test]
+    fn a_file_past_the_document_ceiling_is_reported_as_too_large() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let big = dir.path().join("big.pdf");
+        // A sparse file: `set_len` costs no disk and no time, where writing
+        // 50 MiB of fixture bytes would.
+        std::fs::File::create(&big)
+            .expect("create")
+            .set_len(TELEGRAM_DOCUMENT_MAX_BYTES + 1)
+            .expect("set_len");
+        let scan = extract_local_files(&format!("[x]({})", big.display()), None);
+        assert!(scan.attachments.is_empty());
+        assert_eq!(scan.failures[0].reason, LocalImageFailureReason::TooLarge);
+    }
+
+    #[test]
+    fn validate_accepts_a_readable_non_empty_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        assert!(validate_local_file(&pdf).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // The notice — the honest line when the nudge budget is spent
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn no_failures_produces_no_file_notice() {
+        assert!(file_failure_notice(&[]).is_none());
+    }
+
+    #[test]
+    fn a_file_notice_names_the_reference_and_the_reason() {
+        let notice = file_failure_notice(&[failure("[Q3 report](/root/reports/q3.pdf)")])
+            .expect("notice");
+        assert!(notice.contains("File not attached"), "{notice}");
+        assert!(notice.contains("a file"), "{notice}");
+        assert!(
+            notice.contains("[Q3 report](/root/reports/q3.pdf)"),
+            "{notice}"
+        );
+        assert!(notice.contains("file not found"), "{notice}");
+    }
+
+    #[test]
+    fn appending_a_file_notice_keeps_the_body_and_adds_a_blank_line() {
+        let body = append_file_failure_notice("hello", &[failure("[x](/nope)")]);
+        assert!(body.starts_with("hello\n\n⚠️ File not attached"), "{body}");
+    }
+
+    #[test]
+    fn an_empty_body_becomes_the_file_notice_alone() {
+        let body = append_file_failure_notice("   ", &[failure("[x](/nope)")]);
+        assert!(body.starts_with("⚠️ File not attached"), "{body}");
+    }
+
+    #[test]
+    fn appending_without_failures_returns_the_body_untouched() {
+        assert_eq!(append_file_failure_notice("hello", &[]), "hello");
+    }
+}
