@@ -727,7 +727,8 @@ fn strip_ordered_list_prefix(s: &str) -> Option<&str> {
 /// preserving the text as a readable markdown link `\![alt](path)` (or plain text).
 /// Valid remote image URLs (`http://`, `https://`) are preserved by SCHEME alone —
 /// Telegram fetches those itself. A Telegram media reference (`tg://photo?id=<X>`,
-/// `tg://video?id=<X>`, `tg://audio?id=<X>`, `attach://<X>`) is preserved only when
+/// `tg://video?id=<X>`, `tg://document?id=<X>`, `tg://audio?id=<X>`, `attach://<X>`) is
+/// preserved only when
 /// `<X>` names an entry in THIS request's `media` array: that array is the sole
 /// authority for whether such a reference resolves (#334). A reference judged valid
 /// by scheme alone is rejected server-side with `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND`,
@@ -1014,7 +1015,8 @@ fn split_media_refs_onto_own_lines(line: &str, out: &mut String, media: &[MediaE
 /// Check whether `target` is a valid Telegram photo URL/ref **for this request**.
 ///
 /// - `http://` / `https://` — valid by scheme; Telegram fetches the URL itself.
-/// - `tg://photo?id=<X>` / `tg://video?id=<X>` / `tg://audio?id=<X>` / `attach://<X>` —
+/// - `tg://photo?id=<X>` / `tg://video?id=<X>` / `tg://document?id=<X>` / `tg://audio?id=<X>` /
+///   `attach://<X>` —
 ///   valid **iff** `<X>` names an entry in `media`, the media array of the very request
 ///   this body belongs to. Scheme alone is NOT sufficient: a reference with no matching
 ///   entry is rejected with `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND`, which fails the whole
@@ -1041,7 +1043,7 @@ fn is_valid_telegram_photo_url(target: &str, media: &[MediaEntry]) -> bool {
         return media_id_present(id, media);
     }
 
-    // `tg://photo?id=<X>` and siblings (`tg://video?id=`, `tg://audio?id=`).
+    // `tg://photo?id=<X>` and siblings (`tg://video?id=`, `tg://document?id=`, `tg://audio?id=`).
     if let Some(id) = telegram_media_id(url) {
         return media_id_present(id, media);
     }
@@ -1055,7 +1057,7 @@ fn is_valid_telegram_photo_url(target: &str, media: &[MediaEntry]) -> bool {
 fn telegram_media_id(url: &str) -> Option<&str> {
     let rest = url.strip_prefix("tg://")?;
     let (kind, query) = rest.split_once('?')?;
-    if !matches!(kind, "photo" | "video" | "audio") {
+    if !matches!(kind, "photo" | "video" | "document" | "audio") {
         return None;
     }
     let id = query.strip_prefix("id=")?;

@@ -1280,16 +1280,17 @@ pub(crate) fn neutralize_prose_media_html(text: &str) -> String {
 /// the non-triggering form each is rewritten to when its id is absent from `media`.
 /// The rewrite drops the `//` after the scheme name, which no trigger prefix contains —
 /// so a second pass is a no-op (idempotent) and the text stays readable.
-const ORPHAN_MEDIA_SCHEMES: [(&str, &str); 4] = [
+const ORPHAN_MEDIA_SCHEMES: [(&str, &str); 5] = [
     ("tg://photo?id=", "tg:photo?id="),
     ("tg://video?id=", "tg:video?id="),
     ("tg://audio?id=", "tg:audio?id="),
+    ("tg://document?id=", "tg:document?id="),
     ("attach://", "attach:"),
 ];
 
 /// Rewrite a media reference in an already-resolved rich body whose id has no
 /// matching [`MediaEntry`] into its non-triggering form (probe-verified 200,
-/// 2026-09-11) — see [`ORPHAN_MEDIA_SCHEMES`] for the four forms covered. Telegram
+/// 2026-09-11) — see [`ORPHAN_MEDIA_SCHEMES`] for the five forms covered. Telegram
 /// rejects the WHOLE message with `RICH_MESSAGE_PHOTO_INVALID` /
 /// `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND` when a reference cannot be resolved, and prose
 /// can carry such a reference as an example of the construct. `media` is the array of

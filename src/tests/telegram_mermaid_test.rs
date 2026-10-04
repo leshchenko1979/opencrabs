@@ -737,6 +737,46 @@ fn build_body_markdown_media_target_neutralises_orphan_refs() {
     );
 }
 
+/// #1921: `tg://document?id=` is the FOURTH documented `tg://` kind (Bot API 10.3),
+/// and the shield knew three. Before the fix `telegram_media_id` returned `None` for
+/// `kind == "document"`, so `is_valid_telegram_photo_url` judged a resolvable document
+/// reference unresolvable and the shield escaped its `!` — a documented reference
+/// degraded to literal text instead of resolving. The orphan half is the same
+/// register, so an UNRESOLVABLE document reference must be neutralised like the other
+/// three kinds rather than left live for Telegram to reject the whole message over.
+#[test]
+fn document_refs_are_shielded_like_the_other_tg_kinds() {
+    let media = vec![MediaEntry {
+        kind: MediaKind::Photo,
+        id: "q3".into(),
+        url: None,
+        bytes: Some(vec![0x89, b'P']),
+    }];
+
+    let raw = "kept ![d](tg://document?id=q3) dropped ![x](tg://document?id=absent)";
+    let body = build_body_markdown_media_target(-100, None, None, raw, &media, None);
+    let md = body["rich_message"]["markdown"]
+        .as_str()
+        .expect("rich markdown");
+
+    assert!(
+        md.contains("tg://document?id=q3"),
+        "a document ref naming a live media entry must survive into the body: {md}"
+    );
+    assert!(
+        !md.contains(r"\![d](tg://document?id=q3)"),
+        "the shield must not escape a RESOLVABLE document ref (#1921): {md}"
+    );
+    assert!(
+        !md.contains("tg://document?id=absent"),
+        "an orphan document ref must not reach the wire: {md}"
+    );
+    assert!(
+        md.contains("tg:document?id=absent"),
+        "the orphan document ref must be neutralised in place: {md}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // build_body_markdown_media_edit (#98 — same media convention on the edit path)
 // ---------------------------------------------------------------------------
@@ -1145,7 +1185,10 @@ fn orphan_photo_refs_are_neutralised_but_resolved_ones_survive() {
     );
 }
 
-/// #334 (H2): the orphan neutralizer covers all four media schemes, `attach://`
+/// #334 (H2) / #1921: the orphan neutralizer covers EVERY scheme in the register,
+/// `attach://` included — it was previously only reached by the markdown image shield, so a
+/// BARE prose `attach://X` in a rich body still took the whole message down. #1921 added
+/// `tg://document?id=` — the fourth documented `tg://` kind, absent from this register until then.
 /// included — it was previously only reached by the markdown image shield, so a
 /// BARE prose `attach://X` in a rich body still took the whole message down.
 #[test]
@@ -1180,6 +1223,7 @@ fn attach_and_tg_refs_are_neutralised_by_media_presence() {
         ("tg://photo?id=N", "tg:photo?id=N"),
         ("tg://video?id=N", "tg:video?id=N"),
         ("tg://audio?id=N", "tg:audio?id=N"),
+        ("tg://document?id=N", "tg:document?id=N"),
         ("attach://N", "attach:N"),
     ] {
         assert_eq!(
