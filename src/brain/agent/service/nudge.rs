@@ -235,6 +235,55 @@ pub(crate) fn local_image_delivery_failure_nudge(
     )
 }
 
+/// In-loop correction for a reply whose local-file links could not become
+/// attachments (#1916). Mirrors [`local_image_regen_nudge`] — same carrier,
+/// same ladder, file-worded — because the failure is the same KIND: a
+/// deterministic preflight miss that is worth one repair round before the user
+/// sees a dead link. Quotes each reference with its rejection reason and names
+/// the directory a relative target resolves against, so a model that guessed a
+/// path corrects it instead of repeating it.
+pub(crate) fn local_file_regen_nudge(
+    failures: &[crate::utils::image::LocalImageFailure],
+    base_dir: Option<&std::path::Path>,
+    attempt: u32,
+    max: u32,
+) -> String {
+    let listed = failures
+        .iter()
+        .map(|failure| format!("- {}", failure.describe()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let base = match base_dir {
+        Some(dir) => format!("A relative reference resolves against {}.", dir.display()),
+        None => "There is no session working directory here, so use an absolute path.".to_string(),
+    };
+    format!(
+        "[System: The local files your reply linked could not be attached:\n{listed}\n\
+         {base} Fix the link target or drop the link, then re-emit your COMPLETE reply — keep \
+         everything else you wrote. Regen attempt {attempt}/{max}.]"
+    )
+}
+
+/// Post-delivery correction for local files that passed extraction but that
+/// the channel refused to send (#1916). The file exists and is readable, so
+/// rewriting the link cannot help: the model is asked to tell the user plainly
+/// which file is missing rather than let it vanish silently.
+pub(crate) fn local_file_delivery_failure_nudge(
+    failures: &[crate::utils::image::LocalImageFailure],
+) -> String {
+    let listed = failures
+        .iter()
+        .map(|failure| format!("- {}", failure.describe()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "[System: These local files were extracted and validated, but the channel could not \
+         deliver them:\n{listed}\n\
+         The link target is not the problem, so do not re-emit it. Tell the user plainly which \
+         file is missing and that the file itself is intact, then finish the reply.]"
+    )
+}
+
 // ── Shared variation directive (#32) ──
 //
 // Born from the 2026-08-29 incident: a ship call recurred through the

@@ -425,9 +425,9 @@ pub enum LocalImageFailureReason {
     /// A remote reference is not a usable image URL (`data:` payload that is
     /// not base64, a base64 body that is not an image, an unparsable URL).
     BadUrl,
-    /// The image was extracted and validated, but the channel refused to send
-    /// it (API error, media-type rejection, platform size ceiling). Distinct
-    /// from every other reason: the reference is not the problem.
+    /// The attachment was extracted and validated, but the channel refused to
+    /// send it (API error, media-type rejection, platform size ceiling).
+    /// Distinct from every other reason: the reference is not the problem.
     DeliveryFailed,
 }
 
@@ -446,7 +446,7 @@ impl LocalImageFailureReason {
             Self::TooLarge => "larger than the size limit",
             Self::TooMany => "too many remote images in one reply (per-reply limit reached)",
             Self::BadUrl => "not a usable image URL",
-            Self::DeliveryFailed => "the channel could not deliver the image",
+            Self::DeliveryFailed => "the channel could not deliver it",
         }
     }
 }

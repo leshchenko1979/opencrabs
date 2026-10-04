@@ -149,7 +149,7 @@ fn a_delivery_failure_is_not_reported_as_a_reference_problem() {
     }];
     let notice = failure_notice(&failures).expect("a notice");
     assert!(
-        notice.contains("the channel could not deliver the image"),
+        notice.contains("the channel could not deliver it"),
         "the DeliveryFailed wording must differ from a validation reason: {notice}"
     );
 }

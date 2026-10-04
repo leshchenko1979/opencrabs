@@ -172,7 +172,7 @@ fn reentry_payload_carries_the_nudge_with_path_and_reason() {
     );
     assert!(
         msg.context_text
-            .contains("the channel could not deliver the image"),
+            .contains("the channel could not deliver it"),
         "context must carry the reason: {}",
         msg.context_text
     );

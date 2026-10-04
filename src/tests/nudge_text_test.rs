@@ -197,11 +197,95 @@ fn local_image_delivery_failure_nudge_forbids_re_emitting_the_reference() {
     assert!(nudge.starts_with("[System:"), "{nudge}");
     assert!(nudge.ends_with(']'), "{nudge}");
     assert!(
-        nudge.contains("/srv/work/big.png (the channel could not deliver the image)"),
+        nudge.contains("/srv/work/big.png (the channel could not deliver it)"),
         "{nudge}"
     );
     assert!(
         nudge.contains("do not re-emit it"),
         "a delivery failure is not fixed by rewriting the reference: {nudge}"
+    );
+}
+
+#[test]
+fn local_file_regen_nudge_quotes_each_link_and_the_base_dir() {
+    // #1916: the file ladder is the image ladder's shape, file-worded. The
+    // wording matters: a model told about "images" when it linked a PDF will
+    // look for a picture to fix and leave the dead link in place.
+    use crate::brain::agent::service::nudge::local_file_regen_nudge;
+    use crate::utils::image::{LocalImageFailure, LocalImageFailureReason};
+    use std::path::PathBuf;
+
+    let failures = vec![
+        LocalImageFailure {
+            raw: "q3.pdf".to_string(),
+            resolved: Some(PathBuf::from("/srv/work/q3.pdf")),
+            reason: LocalImageFailureReason::NotFound,
+        },
+        LocalImageFailure {
+            raw: "notes.txt".to_string(),
+            resolved: Some(PathBuf::from("/srv/work/notes.txt")),
+            reason: LocalImageFailureReason::Empty,
+        },
+    ];
+    let nudge = local_file_regen_nudge(&failures, Some(std::path::Path::new("/srv/work")), 1, 2);
+    assert!(nudge.starts_with("[System:"), "{nudge}");
+    assert!(nudge.ends_with(']'), "{nudge}");
+    assert!(
+        nudge.contains("The local files your reply linked could not be attached"),
+        "the nudge must name the FILE family: {nudge}"
+    );
+    assert!(nudge.contains("q3.pdf (file not found)"), "{nudge}");
+    assert!(nudge.contains("notes.txt (file is empty (0 bytes))"), "{nudge}");
+    assert!(nudge.contains("/srv/work"), "must name the base dir: {nudge}");
+    assert!(nudge.contains("Regen attempt 1/2"), "{nudge}");
+}
+
+#[test]
+fn local_file_regen_nudge_without_a_base_dir_says_to_use_an_absolute_path() {
+    use crate::brain::agent::service::nudge::local_file_regen_nudge;
+    use crate::utils::image::{LocalImageFailure, LocalImageFailureReason};
+
+    let failures = vec![LocalImageFailure {
+        raw: "rel.pdf".to_string(),
+        resolved: None,
+        reason: LocalImageFailureReason::NotFound,
+    }];
+    let nudge = local_file_regen_nudge(&failures, None, 2, 2);
+    assert!(nudge.contains("absolute path"), "{nudge}");
+    assert!(nudge.contains("Regen attempt 2/2"), "{nudge}");
+}
+
+#[test]
+fn local_file_delivery_failure_nudge_forbids_re_emitting_the_link() {
+    // The file exists and is readable — the CHANNEL refused it. Rewriting the
+    // link cannot help, so the nudge must say so, or the model spends its one
+    // correction round re-emitting a reference that was never the problem.
+    use crate::brain::agent::service::nudge::local_file_delivery_failure_nudge;
+    use crate::utils::image::{LocalImageFailure, LocalImageFailureReason};
+    use std::path::PathBuf;
+
+    let failures = vec![LocalImageFailure {
+        raw: "/srv/work/huge.pdf".to_string(),
+        resolved: Some(PathBuf::from("/srv/work/huge.pdf")),
+        reason: LocalImageFailureReason::DeliveryFailed,
+    }];
+    let nudge = local_file_delivery_failure_nudge(&failures);
+    assert!(nudge.starts_with("[System:"), "{nudge}");
+    assert!(nudge.ends_with(']'), "{nudge}");
+    assert!(
+        nudge.contains("These local files were extracted and validated"),
+        "the nudge must name the FILE family: {nudge}"
+    );
+    assert!(
+        nudge.contains("/srv/work/huge.pdf (the channel could not deliver it)"),
+        "{nudge}"
+    );
+    assert!(
+        nudge.contains("do not re-emit it"),
+        "a delivery failure is not fixed by rewriting the link: {nudge}"
+    );
+    assert!(
+        !nudge.contains("image"),
+        "the file nudge must not talk about images: {nudge}"
     );
 }
