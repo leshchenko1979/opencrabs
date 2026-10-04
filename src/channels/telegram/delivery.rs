@@ -185,7 +185,22 @@ pub(crate) async fn deliver_final_response(
                 crate::utils::extract_local_images(&video_scan.text, Some(image_cwd.as_path())),
             )
             .await;
-            let (text_only, img_paths) = (image_scan.text, image_scan.attachments);
+            // #1916: the file scan runs LAST, on the text the image plane left
+            // behind, so a reference one plane already claimed is never seen by
+            // this one — the same one-owner-per-reference invariant the video
+            // leg states above. Documents have no rich-plane twin (a markdown
+            // link is not a Telegram rich primitive), so the extraction leg
+            // below is their ONLY leg and the #487 plane-ownership split does
+            // not apply to them.
+            let file_scan = crate::utils::extract_local_files(
+                &image_scan.text,
+                Some(image_cwd.as_path()),
+            );
+            // `text_only` is the FILE scan's output: it ran last, on the text
+            // the image plane already emptied, so it is the only one that has
+            // seen every reference. Taking the image scan's text here would
+            // leave each delivered link in the body AND ship it as a document.
+            let (text_only, img_paths) = (file_scan.text, image_scan.attachments);
             // A picture this turn already delivered as a promoted intermediate
             // must not ship twice (#502). Filtering the ATTACHMENT list — not
             // the text — is what makes the final leg ship exactly one photo
@@ -205,6 +220,26 @@ pub(crate) async fn deliver_final_response(
             // failed downloads, and — appended to below — images the channel
             // itself refused. Drives the honest notice and the regen nudge.
             let mut image_failures: Vec<LocalImageFailure> = image_scan.failures;
+            // #1916: the same #502 dedup for files. `delivered_image_paths` is
+            // the turn's delivered-MEDIA list — a path is either already in the
+            // chat or it is not, whichever family put it there — so a file a
+            // promoted intermediate already sent is not sent a second time.
+            let file_paths: Vec<crate::utils::image::LocalFile> = {
+                let delivered = {
+                    let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+                    s.delivered_image_paths.clone()
+                };
+                file_scan
+                    .attachments
+                    .into_iter()
+                    .filter(|f| !delivered.contains(&f.path))
+                    .collect()
+            };
+            // Rejected file links, and — appended to below — files the channel
+            // refused. Its OWN vector, not folded into `image_failures`: the
+            // notice names the family, so a missing document must not be
+            // answered with "Image not attached".
+            let mut file_failures: Vec<LocalImageFailure> = file_scan.failures;
             // #465: the same #502 rule for video. `delivered_image_paths` is the
             // turn's delivered-MEDIA list — a path is either already in the chat
             // or it is not, whichever family put it there — so video rides the
@@ -755,6 +790,13 @@ pub(crate) async fn deliver_final_response(
                     send_local_videos(session_id, bot, chat_id, thread_id, &vid_paths).await;
                 video_failures.extend(refused);
             }
+            // #1916: the file floor, and the ONLY leg a document has — a
+            // markdown link is not a Telegram rich primitive, so there is no
+            // rich-plane twin to gate against and no flag to consult. A file
+            // link that resolves is sent here or not at all.
+            let (_, refused) =
+                send_local_files(session_id, bot, chat_id, thread_id, &file_paths).await;
+            file_failures.extend(refused);
 
             // An image the reply announced must not vanish silently when the
             // send fails: the reply says plainly which one is missing. This is
@@ -766,6 +808,11 @@ pub(crate) async fn deliver_final_response(
             // "Image not attached" about a video that is missing (#502's
             // failure mode, one media family over).
             text_only = crate::utils::append_video_failure_notice(&text_only, &video_failures);
+            // #1916: and the honest floor for a document, under its own noun.
+            // Folding file refusals into the image notice would tell the user
+            // "Image not attached" about a PDF that is missing — #502's failure
+            // mode, one media family over.
+            text_only = crate::utils::append_file_failure_notice(&text_only, &file_failures);
 
             // Rich fallback: when all content was sent as HTML intermediates
             // during streaming, the dedup step strips text_only to empty. If
@@ -1541,6 +1588,45 @@ pub(crate) async fn deliver_final_response(
                     );
                 }
             }
+            // #1916: the same post-delivery ladder for a file the channel
+            // refused. It shares the ONE re-entry latch with the image leg
+            // above — the latch is what keeps this finite, and a turn gets one
+            // synthetic correction, not one per media family. When both
+            // families fail in the same turn the image leg spends it first and
+            // this leg is notice-only; the honest floor above still tells the
+            // user which file is missing, so nothing vanishes silently either
+            // way.
+            if !file_failures.is_empty() {
+                let alert = format!(
+                    "{} file attachment(s) could not be delivered",
+                    file_failures.len()
+                );
+                let guard_line = format!("🛡️ guard: {alert}");
+                append_system_to_flow(bot, chat_id, thread_id, streaming, &guard_line).await;
+                if telegram_state.try_spend_image_reentry(session_id) {
+                    let nudge =
+                        crate::brain::agent::service::nudge::local_file_delivery_failure_nudge(
+                            &file_failures,
+                        );
+                    tracing::info!(
+                        "Telegram: post-delivery file re-entry queued for session {session_id} \
+                         ({} failure(s))",
+                        file_failures.len()
+                    );
+                    telegram_state.enqueue_detached_result(
+                        session_id,
+                        crate::brain::agent::QueuedUserMessage::system(
+                            nudge,
+                            format!("📄 {alert} — asking the model to report them"),
+                        ),
+                    );
+                } else {
+                    tracing::info!(
+                        "Telegram: post-delivery file re-entry latch already spent for session \
+                         {session_id}; notice only"
+                    );
+                }
+            }
         }
         Err(ref e) if matches!(e, crate::brain::agent::AgentError::Cancelled) => {
             tracing::info!("Telegram: agent call cancelled for session {}", session_id);
@@ -1675,6 +1761,89 @@ pub(crate) async fn send_local_images(
                 failures.push(LocalImageFailure {
                     raw: img_path.display().to_string(),
                     resolved: Some(img_path.clone()),
+                    reason: LocalImageFailureReason::DeliveryFailed,
+                });
+            }
+        }
+    }
+
+    (delivered, failures)
+}
+
+/// Send each resolved local file as its own document bubble (#1916).
+///
+/// Deliberately NOT a generalization of [`send_local_images`]: a file has no
+/// kind decision to make. Telegram's clients render no document preview, so
+/// there is no photo/document ceiling to route by — every file ships through
+/// `sendDocument`, and the one size gate that matters lives upstream in
+/// [`crate::utils::image::validate_local_file`], where exceeding it can be
+/// reported to the MODEL as a rejection reason before delivery is attempted
+/// instead of surfacing here as a refusal the model never saw coming. Returns
+/// the paths that landed and the failures the channel itself refused, for the
+/// same reason its siblings do: the two halves are set in different arms, and
+/// inferring one from the other would couple two independent facts.
+pub(crate) async fn send_local_files(
+    session_id: Uuid,
+    bot: &Bot,
+    chat_id: ChatId,
+    thread_id: Option<teloxide::types::ThreadId>,
+    files: &[crate::utils::image::LocalFile],
+) -> (Vec<std::path::PathBuf>, Vec<LocalImageFailure>) {
+    let mut delivered: Vec<std::path::PathBuf> = Vec::new();
+    let mut failures: Vec<LocalImageFailure> = Vec::new();
+
+    for file in files {
+        let path = &file.path;
+        let bytes = match tokio::fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!("Telegram: failed to read file {}: {}", path.display(), e);
+                failures.push(LocalImageFailure {
+                    raw: path.display().to_string(),
+                    resolved: Some(path.clone()),
+                    reason: LocalImageFailureReason::Unreadable,
+                });
+                continue;
+            }
+        };
+        let len = bytes.len();
+        let sent = document_in_thread(
+            bot,
+            chat_id,
+            thread_id,
+            InputFile::memory(bytes),
+            file.caption.clone(),
+        )
+        .await
+        .map(|m| m.id.0);
+        match sent {
+            Ok(mid) => {
+                delivered.push(path.clone());
+                let reference = path.display().to_string();
+                // Match the outbox media receipt: len is sent bytes and hash8
+                // identifies the path, so one audit predicate covers every leg.
+                super::telemetry::log_send_success(
+                    "turn",
+                    "-",
+                    &session_id.to_string(),
+                    "delivery_media",
+                    "file_document",
+                    chat_id.0,
+                    thread_id.map(|t| t.0.0),
+                    mid,
+                    len,
+                    &super::telemetry::content_hash8(&reference),
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Telegram: failed to send file {} as document: {}",
+                    path.display(),
+                    e
+                );
+                failures.push(LocalImageFailure {
+                    raw: path.display().to_string(),
+                    resolved: Some(path.clone()),
                     reason: LocalImageFailureReason::DeliveryFailed,
                 });
             }

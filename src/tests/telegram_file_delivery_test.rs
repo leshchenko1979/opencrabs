@@ -1,0 +1,256 @@
+//! Local-file delivery (#1916): what the delivery layer does with a markdown
+//! link whose target is a real file on disk.
+//!
+//! The scanner's own contract — which references become a `LocalFile` and
+//! which stay as literal text — is pinned in
+//! `local_image_delivery_test.rs::local_file_links`. This file covers the
+//! OTHER half, the leg that actually ships the bytes:
+//!
+//! 1. **The failure-entry contract.** A file the channel could not deliver
+//!    comes back as an entry the caller can NAME, never as a silent drop. The
+//!    two classes are distinct: a path that cannot be READ is a reference
+//!    problem (`Unreadable`), while a file the API refuses is a delivery
+//!    problem (`DeliveryFailed`).
+//! 2. **One bubble per link, captioned by the label.** A resolved link ships
+//!    exactly ONE `sendDocument` carrying the link label as its caption. This
+//!    is the feature's whole promise — "render markdown for links to local
+//!    files and send them to chat" — so it is asserted against the request the
+//!    bot actually makes, never inferred from a rendered reply.
+//!
+//! Deliberately NOT covered here: the extraction rules, the regen ladder, and
+//! the notice wording. Each has its own home.
+
+use crate::channels::telegram::delivery::send_local_files;
+use crate::utils::image::{LocalFile, LocalImageFailureReason};
+use std::path::{Path, PathBuf};
+
+const CHAT: i64 = 133_526_395;
+
+/// A minimal PDF header — the bytes a real report starts with. The file family
+/// has no format gate (Telegram renders no document preview, so there is
+/// nothing to decode), which makes this a realistic fixture rather than a
+/// required signature; nothing in the send path inspects it.
+const PDF_BYTES: &[u8] = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n";
+
+/// A response shaped like a successful text send. Only the ROUTING is under
+/// test, so the body mirrors the proven shape rather than inventing a media
+/// object (same reasoning as `telegram_video_delivery_test.rs`).
+const SEND_MESSAGE_OK: &str = r#"{"ok":true,"result":{"message_id":701,"date":1757166400,"chat":{"id":133526395,"type":"private"},"text":"ok"}}"#;
+
+/// What Telegram answers for an upload it will not take.
+const REFUSED: &str = r#"{"ok":false,"error_code":413,"description":"Request Entity Too Large"}"#;
+
+/// A bot pointed at the mockito server.
+///
+/// MOCK PATHS ARE PASCALCASE FOR EVERY TELOXIDE REQUEST: teloxide builds the
+/// method segment from the payload struct name, so `bot.send_document(..)`
+/// hits `/botTESTTOKEN/SendDocument`, never the lowercase form the Bot API
+/// docs use. A lowercase mock never matches — mockito serves its own unmatched
+/// 501, whose empty body teloxide reports as `InvalidJson` and the send reads
+/// as a network failure.
+fn test_bot(server: &mockito::ServerGuard) -> teloxide::Bot {
+    teloxide::Bot::with_client(
+        "TESTTOKEN",
+        reqwest_teloxide::Client::builder().build().unwrap(),
+    )
+    .set_api_url(server.url().parse().unwrap())
+}
+
+fn file_at(path: PathBuf, caption: Option<&str>) -> LocalFile {
+    LocalFile {
+        path,
+        caption: caption.map(str::to_string),
+    }
+}
+
+fn write_fixture(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, bytes).expect("write fixture");
+    path
+}
+
+// ---------------------------------------------------------------------------
+// the failure-entry contract
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn an_unreadable_file_returns_a_failure_entry() {
+    // The reference resolves to a path that is not there by the time the send
+    // runs. The caller must be able to NAME it: a document the model announced
+    // that vanishes with no notice is the #502 failure mode (silent in both
+    // directions).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("gone.pdf");
+    let server = mockito::Server::new_async().await;
+    let bot = test_bot(&server);
+
+    let (delivered, failures) = send_local_files(
+        uuid::Uuid::new_v4(),
+        &bot,
+        teloxide::types::ChatId(CHAT),
+        None,
+        &[file_at(missing.clone(), None)],
+    )
+    .await;
+
+    assert!(delivered.is_empty(), "nothing was delivered");
+    assert_eq!(failures.len(), 1, "the unreadable file must be reported");
+    assert_eq!(failures[0].raw, missing.display().to_string());
+    assert_eq!(
+        failures[0].reason,
+        LocalImageFailureReason::Unreadable,
+        "a path that cannot be read is a REFERENCE problem, not a delivery one"
+    );
+}
+
+#[tokio::test]
+async fn a_file_the_channel_refuses_returns_a_delivery_failure() {
+    // The file is readable and inside the ceiling, so the reference is fine —
+    // the API is what says no. That distinction is what routes the correction:
+    // a reference problem can be repaired by rewriting the link, a delivery
+    // problem cannot.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let report = write_fixture(dir.path(), "q3.pdf", PDF_BYTES);
+    let mut server = mockito::Server::new_async().await;
+    let document_mock = server
+        .mock("POST", "/botTESTTOKEN/SendDocument")
+        .with_status(413)
+        .with_header("content-type", "application/json")
+        .with_body(REFUSED)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let bot = test_bot(&server);
+    let (delivered, failures) = send_local_files(
+        uuid::Uuid::new_v4(),
+        &bot,
+        teloxide::types::ChatId(CHAT),
+        None,
+        &[file_at(report.clone(), Some("Q3 report"))],
+    )
+    .await;
+
+    document_mock.assert_async().await;
+    assert!(
+        delivered.is_empty(),
+        "the channel refused it, so nothing was delivered"
+    );
+    assert_eq!(failures.len(), 1, "the refusal must be reported");
+    assert_eq!(
+        failures[0].reason,
+        LocalImageFailureReason::DeliveryFailed,
+        "a file the channel refused is a DELIVERY problem — the reference itself was fine"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// the promise: one document bubble, captioned by the link label
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_resolved_link_ships_exactly_one_document_captioned_by_its_label() {
+    // The positive control for the two tests above, and the feature's core
+    // assertion at once: the instrument must be able to return an empty
+    // failure list (or "it reported a failure" proves nothing about which
+    // inputs fail), and the caption must ride the request as the link LABEL —
+    // not the path, which the user cannot open anyway.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let report = write_fixture(dir.path(), "q3.pdf", PDF_BYTES);
+    let mut server = mockito::Server::new_async().await;
+    // `expect(1)` is the whole point: a second bubble for one link is the
+    // #502/#360 duplicate, one media family over. The body match pins the
+    // caption, since the label is the only part of the link the user gets to
+    // read in the chat.
+    let document_mock = server
+        .mock("POST", "/botTESTTOKEN/SendDocument")
+        .match_body(mockito::Matcher::Regex("Q3 report".to_string()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(SEND_MESSAGE_OK)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let bot = test_bot(&server);
+    let (delivered, failures) = send_local_files(
+        uuid::Uuid::new_v4(),
+        &bot,
+        teloxide::types::ChatId(CHAT),
+        None,
+        &[file_at(report.clone(), Some("Q3 report"))],
+    )
+    .await;
+
+    document_mock.assert_async().await;
+    assert_eq!(delivered, vec![report], "the delivered path comes back");
+    assert!(failures.is_empty(), "a delivered file reports no failure");
+}
+
+#[tokio::test]
+async fn a_link_without_a_label_ships_the_document_with_no_caption() {
+    // `[](path)` — an empty label is not a caption. Sending `Some("")` would
+    // make Telegram render an empty caption bubble; the scanner already drops
+    // the empty label, and this pins that the send path does not resurrect it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let report = write_fixture(dir.path(), "q3.pdf", PDF_BYTES);
+    let mut server = mockito::Server::new_async().await;
+    let document_mock = server
+        .mock("POST", "/botTESTTOKEN/SendDocument")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(SEND_MESSAGE_OK)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let bot = test_bot(&server);
+    let (delivered, failures) = send_local_files(
+        uuid::Uuid::new_v4(),
+        &bot,
+        teloxide::types::ChatId(CHAT),
+        None,
+        &[file_at(report.clone(), None)],
+    )
+    .await;
+
+    document_mock.assert_async().await;
+    assert_eq!(delivered, vec![report]);
+    assert!(failures.is_empty());
+}
+
+#[tokio::test]
+async fn each_link_ships_its_own_bubble_in_order() {
+    // Two links are two documents, not one — and the order the reply wrote
+    // them in is the order they arrive, so the reply's prose still reads
+    // top-to-bottom against the bubbles beside it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let first = write_fixture(dir.path(), "q3.pdf", PDF_BYTES);
+    let second = write_fixture(dir.path(), "q4.pdf", PDF_BYTES);
+    let mut server = mockito::Server::new_async().await;
+    let document_mock = server
+        .mock("POST", "/botTESTTOKEN/SendDocument")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(SEND_MESSAGE_OK)
+        .expect(2)
+        .create_async()
+        .await;
+
+    let bot = test_bot(&server);
+    let (delivered, failures) = send_local_files(
+        uuid::Uuid::new_v4(),
+        &bot,
+        teloxide::types::ChatId(CHAT),
+        None,
+        &[
+            file_at(first.clone(), Some("Q3")),
+            file_at(second.clone(), Some("Q4")),
+        ],
+    )
+    .await;
+
+    document_mock.assert_async().await;
+    assert_eq!(delivered, vec![first, second], "delivered in the reply's order");
+    assert!(failures.is_empty());
+}
