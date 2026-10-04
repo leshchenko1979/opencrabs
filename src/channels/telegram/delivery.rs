@@ -188,10 +188,13 @@ pub(crate) async fn deliver_final_response(
             // #1916: the file scan runs LAST, on the text the image plane left
             // behind, so a reference one plane already claimed is never seen by
             // this one — the same one-owner-per-reference invariant the video
-            // leg states above. Documents have no rich-plane twin (a markdown
-            // link is not a Telegram rich primitive), so the extraction leg
-            // below is their ONLY leg and the #487 plane-ownership split does
-            // not apply to them.
+            // leg states above. Documents have no rich-plane TWIN — a markdown
+            // link is not a Telegram rich media entry, and our client's
+            // `MediaKind` carries no document kind yet (#1921) — so the send
+            // floor below is their only DELIVERY leg and the #487
+            // plane-ownership split does not apply to them. #1918 adds a TEXT
+            // pass over the rich body further down: a rewrite of that same
+            // buffer, never a second delivery arm.
             let file_scan = crate::utils::extract_local_files(
                 &image_scan.text,
                 Some(image_cwd.as_path()),
@@ -1090,8 +1093,19 @@ pub(crate) async fn deliver_final_response(
                     // output is missing the later family's references, and the
                     // array below is shared, so a body whose references are not
                     // in it would ship dead markdown.
+                    // #1918: `rich_rw.rich` is rebuilt from `response.content`
+                    // and the file scan never touched it, so a local-file link
+                    // in a media-bearing body would ship as dead markdown while
+                    // the document ALSO arrived from the floor below. Run the
+                    // file pass over this buffer too and take its TEXT: a
+                    // resolved link becomes the same `📎 <label>` marker the
+                    // text floor carries, a rejected one stays byte-identical.
+                    // Attachments are discarded on purpose — the floor owns
+                    // delivery, and sending them here would ship every document
+                    // twice.
                     let rich_md = if rich_owns_media {
-                        rich_rw.rich.clone()
+                        crate::utils::extract_local_files(&rich_rw.rich, Some(image_cwd.as_path()))
+                            .text
                     } else {
                         text_only.clone()
                     };

@@ -410,11 +410,13 @@ mod reentry_latch {
 // entity whose URL was the raw path: Telegram had no scheme to resolve, so the
 // file never arrived and the link was dead.
 //
-// These pin the scanner the delivery sites call. The removal policy is the one
+// These pin the scanner the delivery sites call. The marker policy is the one
 // place the file family deliberately differs from the image family: a resolved
-// file leaves the text, but a REJECTED candidate stays byte-identical and is
-// reported, because a link carries its own label and a silent strip would
-// delete the reader's only clue about what was referenced.
+// file leaves the text, but the link that named it is replaced by a visible
+// `📎 <label>` marker (#1918) rather than deleted, so the reader keeps the
+// file's name and the position it was referenced at. A REJECTED candidate stays
+// byte-identical and is reported, because a link carries its own label and a
+// silent strip would delete the reader's only clue about what was referenced.
 
 mod local_file_links {
     use crate::utils::image::{
@@ -444,7 +446,7 @@ mod local_file_links {
     }
 
     // -----------------------------------------------------------------------
-    // Resolution and removal
+    // Resolution and the marker
     // -----------------------------------------------------------------------
 
     #[test]
@@ -452,7 +454,10 @@ mod local_file_links {
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
         let scan = extract_local_files(&format!("before [Q3 report]({}) after", pdf.display()), None);
-        assert_eq!(scan.text, "before  after");
+        assert_eq!(
+            scan.text, "before 📎 Q3 report after",
+            "the reference leaves a visible marker where the link was"
+        );
         assert_eq!(paths(&scan), vec![pdf]);
         assert_eq!(scan.attachments[0].caption.as_deref(), Some("Q3 report"));
         assert!(scan.failures.is_empty());
@@ -468,6 +473,10 @@ mod local_file_links {
             scan.attachments[0].caption, None,
             "an empty label is not a caption"
         );
+        assert_eq!(
+            scan.text, "📎 q3.pdf",
+            "an empty label still leaves a marker — it falls back to the file name"
+        );
     }
 
     #[test]
@@ -477,7 +486,7 @@ mod local_file_links {
         let b = write_file(dir.path(), "b.pdf", PDF_BYTES);
         let scan = extract_local_files(&format!("[A]({}) then [B]({})", a.display(), b.display()), None);
         assert_eq!(paths(&scan), vec![a, b]);
-        assert_eq!(scan.text, "then");
+        assert_eq!(scan.text, "📎 A then 📎 B");
     }
 
     #[test]
@@ -485,7 +494,7 @@ mod local_file_links {
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "Q3 final.pdf", PDF_BYTES);
         let scan = extract_local_files(&format!("x [Q3](<{}>) y", pdf.display()), None);
-        assert_eq!(scan.text, "x  y");
+        assert_eq!(scan.text, "x 📎 Q3 y");
         assert_eq!(paths(&scan), vec![pdf]);
     }
 
@@ -497,7 +506,7 @@ mod local_file_links {
             &format!("x [Q3 report]({} \"quarterly\") y", pdf.display()),
             None,
         );
-        assert_eq!(scan.text, "x  y");
+        assert_eq!(scan.text, "x 📎 Q3 report y");
         assert_eq!(scan.attachments[0].caption.as_deref(), Some("Q3 report"));
     }
 
@@ -507,9 +516,34 @@ mod local_file_links {
         std::fs::create_dir(dir.path().join("reports")).expect("mkdir");
         let pdf = write_file(&dir.path().join("reports"), "q3.pdf", PDF_BYTES);
         let scan = extract_local_files("see [report](reports/q3.pdf) here", Some(dir.path()));
-        assert_eq!(scan.text, "see  here");
+        assert_eq!(scan.text, "see 📎 report here");
         assert_eq!(paths(&scan), vec![pdf]);
         assert_eq!(scan.attachments[0].caption.as_deref(), Some("report"));
+    }
+
+    #[test]
+    fn a_media_bearing_body_loses_its_raw_file_path() {
+        // #1918: the rich body is rebuilt from the model's reply, so delivery
+        // runs THIS pass over that buffer too. A body that owns a photo must
+        // not ship a dead local path beside it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let png = write_file(dir.path(), "chart.png", super::PNG_BYTES);
+        let rich = format!(
+            "![chart]({})\n\nsee [Q3 report]({}) for the numbers",
+            png.display(),
+            pdf.display()
+        );
+        let body = extract_local_files(&rich, None).text;
+        assert!(
+            !body.contains(&format!("]({})", pdf.display())),
+            "no raw local path may survive into the rich body: {body}"
+        );
+        assert!(body.contains("📎 Q3 report"), "{body}");
+        assert!(
+            body.contains(&format!("![chart]({})", png.display())),
+            "the image family's reference is untouched: {body}"
+        );
     }
 
     // -----------------------------------------------------------------------

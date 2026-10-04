@@ -1563,6 +1563,13 @@ pub fn rewrite_local_videos(
 // carries its own label and a silent strip would delete the reader's only clue
 // about what was referenced. The failure it records is what drives the
 // self-healing nudge instead.
+//
+// #1918: a DELIVERED link is replaced by a visible `📎 <label>` marker
+// rather than deleted. The prose keeps the file's NAME and, crucially, the
+// POSITION it was referenced at, so the reader is told a document was lifted
+// out here. The marker carries no URL, which is what makes it correct in EVERY
+// chat kind: a real `t.me` message link exists only for groups and channels, so
+// a DM has no form to offer and a URL-shaped placeholder would be dead there.
 
 /// A resolved local file together with the markdown link label that named it.
 ///
@@ -1582,9 +1589,10 @@ pub struct LocalFile {
 /// Result of scanning a reply for links to local files.
 #[derive(Debug, Clone, Default)]
 pub struct LocalFileScan {
-    /// Reply text with every DELIVERED local-file link removed. A remote link, a
-    /// non-file scheme, a reference inside a code span and a REJECTED candidate
-    /// are all left byte-identical (see the module note above).
+    /// Reply text with every DELIVERED local-file link replaced by a visible
+    /// `📎 <label>` marker (#1918). A remote link, a non-file scheme, a
+    /// reference inside a code span and a REJECTED candidate are all left
+    /// byte-identical (see the module note above).
     pub text: String,
     /// Resolved and validated local files, in order of appearance.
     pub attachments: Vec<LocalFile>,
@@ -1781,6 +1789,24 @@ fn record_file_candidate(
     }
 }
 
+/// The visible text left where a delivered file link was (#1918).
+///
+/// The link label is the natural marker — it is the words the author chose — and
+/// an empty label falls back to the file's own name so the marker is never
+/// blank. Deliberately NOT a URL: a `t.me` message link exists only for groups
+/// and channels, so a DM or a basic group has no form to offer, while a marker
+/// needs no link form at all.
+fn file_marker_text(label: &str, target: &str) -> String {
+    let trimmed = label.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    std::path::Path::new(target)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string())
+}
+
 /// Scan a reply for markdown links to local files and hand back the text with
 /// every DELIVERED link removed, the validated files, and the rejected
 /// candidates.
@@ -1789,11 +1815,15 @@ fn record_file_candidate(
 /// against it. With no base directory a relative link stays verbatim while
 /// `~`-prefixed and absolute targets still resolve.
 ///
-/// Removal semantics differ from the image family on purpose. A resolved file
-/// leaves the text and becomes an attachment; a REJECTED candidate stays in the
-/// text byte-identical AND is reported as a failure, because a link carries its
-/// own label and a silent strip would delete the reader's only clue about what
-/// was referenced — the failure is what drives the self-healing nudge.
+/// Marker semantics differ from the image family on purpose. A resolved file
+/// leaves the text and becomes an attachment, and the link that named it is
+/// replaced by a visible `📎 <label>` marker (#1918) — not deleted. The
+/// marker keeps the file's name and the position it was referenced at, and it
+/// carries no URL, so it is a valid rich-plane primitive in every chat kind. A
+/// REJECTED candidate stays in the text byte-identical AND is reported as a
+/// failure, because a link carries its own label and a silent strip would delete
+/// the reader's only clue about what was referenced — the failure is what drives
+/// the self-healing nudge.
 pub fn extract_local_files(text: &str, base_dir: Option<&Path>) -> LocalFileScan {
     let regions = code_regions(text);
     let mut scan = LocalFileScan {
@@ -1812,6 +1842,12 @@ pub fn extract_local_files(text: &str, base_dir: Option<&Path>) -> LocalFileScan
             && let Some((end, label, target, _title)) = parse_markdown_link(text, i)
             && record_file_candidate(&text[i..end], &label, &target, base_dir, &mut scan)
         {
+            // #1918: the reference becomes a visible marker, not a hole. The
+            // label is the marker text; an empty label falls back to the file's
+            // own name so the reader always has something to anchor on. No URL
+            // is emitted, so the marker renders in every chat kind.
+            scan.text.push_str("📎 ");
+            scan.text.push_str(&file_marker_text(&label, &target));
             i = end;
             continue;
         }
