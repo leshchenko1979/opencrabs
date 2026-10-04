@@ -267,6 +267,49 @@ fn the_intermediate_delivery_is_handed_both_walks() {
         "the delivery needs BOTH image rewrites AND the video walk — a single \
          image rewrite cannot serve both planes: {args}"
     );
+    // #1918: the delivery also needs the session's base directory. The FILE
+    // pass runs INSIDE `deliver_intermediate_message` (over the two reflowed
+    // forms), and it resolves a relative link against that base — exactly as
+    // the final leg does. Without it a relative file link in a promoted
+    // intermediate could not resolve at all.
+    assert!(
+        args.contains("cwd,"),
+        "the intermediate delivery must be handed the base directory: the file \
+         pass inside it resolves relative links against it, the same way the \
+         final leg does: {args}"
+    );
+}
+
+/// #1918: the file pass runs LAST on the intermediate plane, over the text the
+/// image family already emptied — the same one-owner-per-reference order the
+/// final leg uses. Pinned as a site because `handle_intermediate` needs a live
+/// bot; the pass itself is covered by the pure tests in
+/// `telegram_local_image_delivery_test.rs`.
+#[test]
+fn the_intermediate_path_scans_files_over_the_image_walks_output() {
+    let scan = DELIVERY_SRC
+        .find("extract_local_files(&rw_stripped.stripped, Some(cwd))")
+        .expect(
+            "the intermediate path must run the file pass over the image family's \
+             stripped output — the same order the final leg uses",
+        );
+    let image_stripped = DELIVERY_SRC
+        .find("rewrite_local_images(&vw.stripped, Some(cwd), \"img\", &delivered)")
+        .expect("the image walk must have run");
+    assert!(
+        image_stripped < scan,
+        "the file pass consumes what the image family left, so it must run \
+         AFTER the image walk (image at {image_stripped}, file at {scan})"
+    );
+    // Both planes take the marker: the rich body the reader sees, and the
+    // stripped form the HTML fallback and the dedup record use.
+    assert!(
+        INTERMEDIATES_SRC.contains("extract_local_files(rich_expanded.as_str(), Some(base_dir))")
+            && INTERMEDIATES_SRC
+                .contains("extract_local_files(stripped_expanded.as_str(), Some(base_dir))"),
+        "the intermediate must mark a file link in BOTH forms — a marker in the \
+         rich body alone would leave the HTML fallback shipping the bare label"
+    );
 }
 
 #[test]
@@ -330,4 +373,68 @@ fn the_rich_body_keeps_the_clip_reference_the_stripped_body_drops() {
         rw_stripped.stripped
     );
     assert_eq!(vw.entries.len(), 1, "and the clip is still the video family's");
+}
+
+// ---------------------------------------------------------------------------
+// #1918 — the FILE family on the intermediate plane
+// ---------------------------------------------------------------------------
+
+/// The composition `handle_intermediate` performs for the file family (#1918):
+/// build the two image rewrites, then run the FILE pass over the image family's
+/// output — LAST, exactly as the final leg does. A promoted intermediate is the
+/// bubble the reader SEES whenever the reply names a fresh image (the final leg
+/// then skips that picture via `delivered_image_paths`), so a local-file link in
+/// such a reply must leave a marker there rather than vanish.
+#[test]
+fn the_intermediate_file_pass_marks_a_link_in_both_planes() {
+    const PDF_BYTES: &[u8] = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pic = fixture(dir.path(), "pic.png", PNG_BYTES);
+    let doc = fixture(dir.path(), "q3-report.pdf", PDF_BYTES);
+    let (rw_rich, rw_stripped, _vw) = walks(
+        &format!(
+            "![pic]({}) then [Q3 report]({})",
+            pic.display(),
+            doc.display()
+        ),
+        dir.path(),
+    );
+
+    // The picture is the image family's: it rides the rich media array...
+    assert_eq!(rw_rich.entries.len(), 1, "the picture rides the media array");
+    assert!(
+        rw_rich.rich.contains("![pic](tg://photo?id=img0)"),
+        "the rich body answers the media array: {:?}",
+        rw_rich.rich
+    );
+    // ...and the file link is left to the file pass, in BOTH planes.
+    for (plane, form) in [("rich", &rw_rich.rich), ("stripped", &rw_stripped.stripped)] {
+        let scan = crate::utils::extract_local_files(form, Some(dir.path()));
+        assert_eq!(
+            scan.attachments.len(),
+            1,
+            "{plane}: the file link must still resolve to one document: {:?}",
+            scan.text
+        );
+        assert!(
+            scan.text.contains("📎 Q3 report"),
+            "{plane}: the reference becomes a marker, not a hole: {:?}",
+            scan.text
+        );
+        assert!(
+            !scan.text.contains(doc.to_str().unwrap()),
+            "{plane}: no raw path may survive in the body: {:?}",
+            scan.text
+        );
+    }
+    // The file pass never eats the picture's rich reference: the `!` guard in
+    // `extract_local_files` is what stops the two families claiming one
+    // reference (#1918). If it ever regressed, the picture would lose its
+    // marker position in the very body the media array answers.
+    let rich_files = crate::utils::extract_local_files(&rw_rich.rich, Some(dir.path()));
+    assert!(
+        rich_files.text.contains("![pic](tg://photo?id=img0)"),
+        "the file pass must leave the image family's rich reference verbatim: {:?}",
+        rich_files.text
+    );
 }

@@ -2093,6 +2093,7 @@ pub(crate) async fn handle_intermediate(
             thread_id,
             streaming,
             tg,
+            cwd,
             super::intermediates::IntermediateMedia {
                 rich_images: &rw_rich,
                 stripped_images: &rw_stripped,
@@ -2107,8 +2108,15 @@ pub(crate) async fn handle_intermediate(
         // because the image walk has not run on it. `rw_stripped.stripped` is
         // the one form with both families' references removed — the only correct
         // text for a plane that carries no media at all (#465).
+        //
+        // #1918: the file pass runs on it too. The flow block is a surface the
+        // reader sees, and a stripped local-file link there is the same defect
+        // the promoted bubble had — the reference gone, its position unmarked.
+        // (The promoted path runs the same pass inside
+        // `deliver_intermediate_message`, over both reflowed forms.)
+        let file_scan = crate::utils::extract_local_files(&rw_stripped.stripped, Some(cwd));
         let folded = crate::utils::append_failure_notice(
-            &rw_stripped.stripped,
+            &file_scan.text,
             &intermediate_failures(&rw_stripped, &vw),
         );
         append_intermediate_to_flow(bot, chat, thread_id, streaming, &folded).await;

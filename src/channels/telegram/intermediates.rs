@@ -347,6 +347,7 @@ pub(crate) struct IntermediateMedia<'a> {
 ///
 /// [`IntermediateMedia`] carries all three rewrites — see that type for why they
 /// travel as one value rather than as more parameters.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn deliver_intermediate_message(
     session_id: Uuid,
     bot: &Bot,
@@ -354,6 +355,7 @@ pub(crate) async fn deliver_intermediate_message(
     thread_id: Option<teloxide::types::ThreadId>,
     streaming: &Arc<std::sync::Mutex<StreamingState>>,
     tg: &super::state::TelegramState,
+    base_dir: &std::path::Path,
     walks: IntermediateMedia<'_>,
 ) -> bool {
     let rw_rich = walks.rich_images;
@@ -365,8 +367,20 @@ pub(crate) async fn deliver_intermediate_message(
     // Both forms are reflowed: they are two renderings of one intermediate.
     let rich_expanded = super::rich::reflow_collapsed_tables(&rw_rich.rich);
     let stripped_expanded = super::rich::reflow_collapsed_tables(&rw_stripped.stripped);
-    let rich = rich_expanded.as_str();
-    let text = stripped_expanded.as_str();
+    // #1918: the FILE pass runs LAST, on the text the image family already
+    // emptied — the same one-owner-per-reference order the final leg uses
+    // (`extract_local_files` over `image_scan.text`). It rewrites a resolved
+    // local-file link into the `📎 <label>` marker and takes NO attachment: a
+    // markdown link has no rich-plane media entry to pair bytes with, and the
+    // final leg's send floor is a document's only delivery leg. Without this
+    // pass the promoted intermediate — the bubble the reader sees whenever the
+    // reply names a fresh image — would show the bare label, which is the hole
+    // the #1918 probe found on rich bubble `90894`.
+    let rich_files = crate::utils::extract_local_files(rich_expanded.as_str(), Some(base_dir));
+    let stripped_files =
+        crate::utils::extract_local_files(stripped_expanded.as_str(), Some(base_dir));
+    let rich = rich_files.text.as_str();
+    let text = stripped_files.text.as_str();
     {
         let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
         if s.sent_bubbles.iter().any(|prev| prev.text == text) {
