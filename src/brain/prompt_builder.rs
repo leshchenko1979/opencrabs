@@ -765,7 +765,8 @@ const TELEGRAM_CHANNEL_CAPABILITIES_BODY: &str = "\
 - Mermaid diagrams: native rendering; prefer vertical layouts (tag the fence exactly ```mermaid, no suffix, then open the body with flowchart TD or sequenceDiagram for multi-actor flows).
 - Markdown tables: GFM tables rendered natively as rich Telegram tables (header on own line, blank line before, delimiter row).
 - HTML glyphs / formatting: rich HTML entities, blockquotes (<blockquote>), code, and emoji styling.
-- Image includes: Markdown syntax (![alt](path \"caption\")) - local path or http(s) URL. The quoted title becomes the media caption; the alt text is not shown. Put the reference alone on its own line, or the caption is dropped.";
+- Image includes: Markdown syntax (![alt](path \"caption\")) - local path or http(s) URL. The quoted title becomes the media caption; the alt text is not shown. Put the reference alone on its own line, or the caption is dropped.
+- Local file links: a markdown link ([label](path)) whose target is an existing local file ships to the chat as a document, with the link label as its caption. Put the reference alone on its own line. A target that does not resolve stays as plain text in the reply, so a link to a file that is not there still reads as a link.";
 
 /// The #1773 file-delivery directive, shared by both capability blocks: a
 /// channel user has no filesystem access, so "tell the user the path"
