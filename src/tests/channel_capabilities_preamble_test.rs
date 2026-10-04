@@ -176,4 +176,3 @@ fn test_local_file_link_line_is_telegram_only_and_stated_once() {
         "a Telegram renderer fact must not leak into the generic block"
     );
 }
-}
