@@ -176,32 +176,4 @@ fn test_local_file_link_line_is_telegram_only_and_stated_once() {
         "a Telegram renderer fact must not leak into the generic block"
     );
 }
-
-#[test]
-fn test_local_file_link_line_is_telegram_only_and_stated_once() {
-    // #1916: the preamble teaches the model that a markdown link to an
-    // existing local file ships as a document captioned by its label. The line
-    // belongs to the TELEGRAM block — a document bubble is a Telegram renderer
-    // fact, and the generic block exists precisely so a channel without a
-    // capability block is not told about renderer behaviour it may not have.
-    // Stated ONCE: a duplicate line re-bills tokens on every turn.
-    let telegram = telegram_channel_capabilities();
-    let generic = channel_file_delivery_capabilities();
-    assert_eq!(
-        telegram.matches("- Local file links:").count(),
-        1,
-        "the file-link line must appear exactly once in the Telegram block"
-    );
-    assert!(
-        telegram.contains("ships to the chat as a document"),
-        "the line must state the OUTCOME, not just the syntax"
-    );
-    assert!(
-        telegram.contains("link label as its caption"),
-        "the caption rule is what makes the bubble readable"
-    );
-    assert!(
-        !generic.contains("- Local file links:"),
-        "a Telegram renderer fact must not leak into the generic block"
-    );
 }
