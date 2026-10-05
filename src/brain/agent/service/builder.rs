@@ -862,33 +862,19 @@ impl AgentService {
             brain
         };
 
-        // Inject the Telegram channel formatting capabilities block when this
-        // session is bound to the Telegram channel (#295). The channel manager
-        // holds the session -> chat/topic ownership map, so the check is per
-        // session: one process serves Telegram, Discord, Slack and cron alike,
-        // and only Telegram-bound sessions get the block.
-        #[cfg(feature = "telegram")]
-        let telegram_bound = self.channel_manager.as_ref().is_some_and(|mgr| {
-            !matches!(
-                mgr.telegram().channel_ownership_of(session_id),
-                super::session_routes::ChannelOwnership::Unknown
-            )
-        });
-        #[cfg(not(feature = "telegram"))]
-        let telegram_bound = false;
-
-        let brain = if telegram_bound {
-            crate::brain::prompt_builder::inject_telegram_channel_capabilities(&brain)
-        } else {
-            brain
-        };
-
         // Inject channel capabilities per session (#1773, port of fork #295).
         // One process serves Telegram, Discord, Slack and cron alike, so the
         // check is per session: Telegram-bound sessions get the renderer
         // capabilities block, any other channel-bound session gets the
         // file-delivery block, unbound sessions get neither. Channel awareness
         // rides the ownership state; no RuntimeInfo.channel field exists.
+        //
+        // #1940: this is the ONLY injection site. `inject_channel_capabilities`
+        // dispatches to `inject_telegram_channel_capabilities` when
+        // `telegram_bound`, so the separate Telegram-only call that used to sit
+        // above was dead work — and the `telegram_bound` probe it needed was a
+        // byte-for-byte duplicate of this one, which any future gate change
+        // would have had to keep in sync.
         #[cfg(feature = "telegram")]
         let telegram_bound = self.channel_manager.as_ref().is_some_and(|mgr| {
             !matches!(

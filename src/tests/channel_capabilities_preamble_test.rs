@@ -151,11 +151,16 @@ fn test_compaction_preserves_capabilities_in_system_brain() {
 
 #[test]
 fn test_local_file_link_line_is_telegram_only_and_stated_once() {
-    // #1916: the preamble teaches the model that a markdown link to a local
-    // file ships as a document captioned by its label. The line belongs to the
-    // TELEGRAM block — a document bubble is a Telegram renderer fact, and the
-    // generic block exists precisely so a channel with no capability block is
-    // not taught renderer behaviour it may not have.
+    // #1916, reworded by #1940: the preamble teaches the model what a markdown
+    // link to a local file becomes. The line belongs to the TELEGRAM block — a
+    // document bubble is a Telegram renderer fact, and the generic block exists
+    // precisely so a channel with no capability block is not taught renderer
+    // behaviour it may not have.
+    //
+    // The wording is mode-agnostic on purpose (#1940): the note is injected for
+    // every Telegram-bound session and `rich_messages` is not consulted, so it
+    // has to hold in BOTH modes — hence the marker, which both modes carry,
+    // with the inline-at-reference behaviour named as the rich mode's.
     let telegram = telegram_channel_capabilities();
     let generic = channel_file_delivery_capabilities();
     assert_eq!(
@@ -164,12 +169,21 @@ fn test_local_file_link_line_is_telegram_only_and_stated_once() {
         "the file-link line must appear exactly once in the Telegram block"
     );
     assert!(
-        telegram.contains("ships to the chat as a document"),
+        telegram.contains("is delivered as a document"),
         "the line must state the OUTCOME, not just the syntax"
     );
     assert!(
-        telegram.contains("the link label as its caption"),
-        "the caption rule is what makes the bubble readable"
+        telegram.contains("visible marker naming the file"),
+        "the marker is what the reader actually sees in place of the link (#1918)"
+    );
+    assert!(
+        telegram.contains("inlined at that spot"),
+        "the rich plane puts the document AT the reference; the note must say so (#1918)"
+    );
+    assert!(
+        !telegram.contains("the link label as its caption"),
+        "the caption promise is stale — the rich plane sends no separate bubble, \
+         so the note must not describe a caption the reader never sees (#1940)"
     );
     assert!(
         !generic.contains("- Local file links:"),
