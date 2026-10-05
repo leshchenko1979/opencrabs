@@ -444,25 +444,46 @@ jobs:
             if command -v gdb >/dev/null 2>&1; then
               gdb --version | head -1 || true
               (
-                PID=""
-                for _ in $(seq 1 1800); do
-                  PID=$(pgrep -f "$GITHUB_WORKSPACE/target/ci/deps/opencrabs-" | head -1)
-                  [ -n "$PID" ] && break
-                  sleep 1
+                # Match the RUNNING test binary by its resolved executable
+                # path (/proc/<pid>/exe), NEVER by a cmdline substring:
+                # `pgrep -f target/ci/deps/opencrabs-` also matches rustc (its
+                # -o/--out-dir names that path) and build scripts, which is why
+                # the first Stage-2 attempt armed on a COMPILER pid at 12:26:02
+                # and declared "healthy run" at 12:27:42 — six minutes BEFORE
+                # the real test leg started at 12:33:57 (measured, run
+                # 37308117729). /proc/<pid>/exe is the discriminator: only the
+                # harness binary itself resolves to that path.
+                #
+                # Re-arm across binaries: `cargo test` runs the lib harness,
+                # then each integration harness, then doc-tests, so the first
+                # binary is not necessarily the one that hangs. The timer
+                # restarts whenever the live test-binary pid CHANGES, and the
+                # FIRST binary to stay alive past T+100s is the one dumped.
+                PID=""; ARMED_AT=0
+                DEADLINE=$(( $(date +%s) + 1800 ))
+                while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+                  CUR=""
+                  for p in /proc/[0-9]*; do
+                    exe=$(readlink -f "$p/exe" 2>/dev/null) || continue
+                    case "$exe" in
+                      "$GITHUB_WORKSPACE"/target/ci/deps/opencrabs-*) CUR=${p#/proc/}; break ;;
+                    esac
+                  done
+                  if [ -n "$CUR" ]; then
+                    if [ "$CUR" != "$PID" ]; then
+                      PID="$CUR"; ARMED_AT=$(date +%s)
+                      echo "HANGDUMP: test binary pid=$PID; watchdog armed at T+100s"
+                    fi
+                    if [ $(( $(date +%s) - ARMED_AT )) -ge 100 ]; then
+                      echo "===== HANGDUMP $(date -u +%FT%TZ) pid=$PID ====="
+                      gdb -p "$PID" -batch -ex 'thread apply all bt full' 2>&1 || true
+                      echo "===== HANGDUMP END ====="
+                      exit 0
+                    fi
+                  fi
+                  sleep 5
                 done
-                if [ -z "$PID" ]; then
-                  echo "HANGDUMP: test binary never appeared within 1800s; no dump"
-                  exit 0
-                fi
-                echo "HANGDUMP: test binary pid=$PID; watchdog armed at T+100s"
-                sleep 100
-                if ! kill -0 "$PID" 2>/dev/null; then
-                  echo "HANGDUMP: pid=$PID finished before T+100s; no dump (healthy run)"
-                  exit 0
-                fi
-                echo "===== HANGDUMP $(date -u +%FT%TZ) pid=$PID ====="
-                gdb -p "$PID" -batch -ex 'thread apply all bt full' 2>&1 || true
-                echo "===== HANGDUMP END ====="
+                echo "HANGDUMP: no test binary survived T+100s within 1800s; no dump"
               ) &
               WATCHDOG=$!
             else
