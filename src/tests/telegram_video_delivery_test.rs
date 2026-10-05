@@ -205,6 +205,7 @@ fn entry(id: &str, kind: MediaKind, bytes: &[u8]) -> MediaEntry {
         url: None,
         bytes: Some(bytes.to_vec()),
         kind,
+        name: None,
     }
 }
 

@@ -315,7 +315,8 @@ pub(crate) fn superseded_ids(bubbles: &[SentBubble], rich_text: &str) -> Vec<Mes
 /// They travel as one value for that reason — and because taking them as two
 /// more positional parameters would push the delivery below to nine
 /// arguments, past the point a positional list stays readable
-/// (`clippy::too_many_arguments`).
+/// (`clippy::too_many_arguments`). #1918 adds the file family's rich walk, the
+/// third of the same partition.
 pub(crate) struct IntermediateMedia<'a> {
     /// The image family's rewrite for the RICH plane. Built on the video
     /// family's rich form (`vw.rich`), so both families' `tg://` references
@@ -331,6 +332,13 @@ pub(crate) struct IntermediateMedia<'a> {
     /// the pictures, each carrying its own `MediaKind::Video`; only when the
     /// rich send is refused does a clip fall back to its own bubble.
     pub(crate) videos: &'a crate::utils::image::LocalVideoRewrite,
+    /// The file family's rewrite for the RICH plane (#1918). Built on the image
+    /// family's rich form, so every family's `tg://` reference survives in
+    /// `rich` for the shared media array to answer. Its entries ride that same
+    /// array as `MediaKind::Document`, each carrying the file's own name — the
+    /// promoted bubble inlines the document at its reference instead of showing
+    /// the bare `📎 <label>` marker the #1918 probe found on `90894`.
+    pub(crate) rich_files: &'a crate::utils::image::LocalFileRewrite,
 }
 
 /// Deliver a promoted intermediate as its own message (rich-first, HTML
@@ -345,7 +353,7 @@ pub(crate) struct IntermediateMedia<'a> {
 /// the HTML fallback and the dedup record need — the HTML plane has no media
 /// array and would ship a `tg://` reference as dead visible markdown.
 ///
-/// [`IntermediateMedia`] carries all three rewrites — see that type for why they
+/// [`IntermediateMedia`] carries all FOUR rewrites — see that type for why they
 /// travel as one value rather than as more parameters.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn deliver_intermediate_message(
@@ -364,22 +372,22 @@ pub(crate) async fn deliver_intermediate_message(
     // #690 follow-up (#980): re-expand a collapsed table once, up front, so the
     // dedup record, the rich send and the HTML fallback all see the same
     // expanded shape. The HTML path reflows again internally but is idempotent.
-    // Both forms are reflowed: they are two renderings of one intermediate.
-    let rich_expanded = super::rich::reflow_collapsed_tables(&rw_rich.rich);
     let stripped_expanded = super::rich::reflow_collapsed_tables(&rw_stripped.stripped);
-    // #1918: the FILE pass runs LAST, on the text the image family already
-    // emptied — the same one-owner-per-reference order the final leg uses
-    // (`extract_local_files` over `image_scan.text`). It rewrites a resolved
-    // local-file link into the `📎 <label>` marker and takes NO attachment: a
-    // markdown link has no rich-plane media entry to pair bytes with, and the
-    // final leg's send floor is a document's only delivery leg. Without this
-    // pass the promoted intermediate — the bubble the reader sees whenever the
-    // reply names a fresh image — would show the bare label, which is the hole
-    // the #1918 probe found on rich bubble `90894`.
-    let rich_files = crate::utils::extract_local_files(rich_expanded.as_str(), Some(base_dir));
+    // #1918: the FILE family now owns the rich plane's document references, so
+    // the rich body is the FILE walk's `rich` form — built on the image family's
+    // rich form, so it carries `tg://photo`, `tg://video` AND `tg://document`
+    // references, each answered by the shared media array below. Taking the
+    // marker form here instead (which is what the pre-#1918 line did) would
+    // leave the array's document entries with no reference to attach to.
+    //
+    // The HTML fallback and the dedup record keep the MARKER form, deliberately:
+    // that plane has no media array, so a `tg://document` reference there would
+    // ship as dead visible markdown — and a marker at least names the document
+    // the reader is about to get as its own bubble.
+    let rich_expanded = super::rich::reflow_collapsed_tables(walks.rich_files.rich.as_str());
     let stripped_files =
         crate::utils::extract_local_files(stripped_expanded.as_str(), Some(base_dir));
-    let rich = rich_files.text.as_str();
+    let rich = rich_expanded.as_str();
     let text = stripped_files.text.as_str();
     {
         let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
@@ -413,6 +421,10 @@ pub(crate) async fn deliver_intermediate_message(
     // between the two (#502). `vw.entries` already excludes anything this turn
     // has delivered, so a repeated intermediate cannot ship a clip twice.
     let mut failures = super::delivery::intermediate_failures(rw_stripped, vw);
+    // #1918: the documents' read failures are their OWN list, exactly as they are
+    // on the final leg — the notice names the family, so a document that could
+    // not be read must not be answered with "Image not attached".
+    let mut file_failures: Vec<LocalImageFailure> = Vec::new();
     let mut media: Vec<super::rich::mermaid::MediaEntry> = Vec::new();
     for entry in &rw_rich.entries {
         match tokio::fs::read(&entry.image.path).await {
@@ -421,6 +433,7 @@ pub(crate) async fn deliver_intermediate_message(
                 id: entry.id.clone(),
                 url: None,
                 bytes: Some(bytes),
+                name: None,
             }),
             Err(e) => {
                 tracing::warn!(
@@ -450,6 +463,7 @@ pub(crate) async fn deliver_intermediate_message(
                     id: entry.id.clone(),
                     url: None,
                     bytes: Some(bytes),
+                    name: None,
                 });
                 delivered_video_paths.push(entry.video.path.clone());
             }
@@ -468,9 +482,52 @@ pub(crate) async fn deliver_intermediate_message(
         }
     }
 
+    // #1918: the documents ride the SAME array, each carrying its own kind and
+    // the file's OWN name — the entry's part name is what Telegram shows as the
+    // file name in the chat, and bytes alone cannot recover it (`document_part_name`).
+    // Their `tg://document?id=docN` references are present in `rich` because it
+    // is the file walk's own rich form. A read that fails here joins the failure
+    // list, never a panic.
+    let mut delivered_file_paths: Vec<std::path::PathBuf> = Vec::new();
+    // The entries whose bytes actually READ, for the HTML fallback's floor
+    // below. Rebuilding that list from `rich_files.entries` would hand
+    // `send_local_files` the unreadable ones too, and it would report each of
+    // them a second time — the same file, the same noun, two notices.
+    let mut readable_files: Vec<crate::utils::image::LocalFile> = Vec::new();
+    for entry in &walks.rich_files.entries {
+        match tokio::fs::read(&entry.file.path).await {
+            Ok(bytes) => {
+                media.push(super::rich::mermaid::MediaEntry {
+                    kind: super::rich::mermaid::MediaKind::Document,
+                    id: entry.id.clone(),
+                    url: None,
+                    bytes: Some(bytes),
+                    name: Some(super::delivery::document_part_name(&entry.file.path)),
+                });
+                delivered_file_paths.push(entry.file.path.clone());
+                readable_files.push(entry.file.clone());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Telegram: failed to read promoted file {}: {}",
+                    entry.file.path.display(),
+                    e
+                );
+                file_failures.push(LocalImageFailure {
+                    raw: entry.file.path.display().to_string(),
+                    resolved: Some(entry.file.path.clone()),
+                    reason: LocalImageFailureReason::Unreadable,
+                });
+            }
+        }
+    }
+
     // An image the bubble announced must not vanish silently when it cannot be
-    // read: the notice rides the same bubble the model wrote (#502).
+    // read: the notice rides the same bubble the model wrote (#502). The
+    // documents get their own notice under their own noun (#1918) — same rule,
+    // different family, which is why the wording is not shared.
     let body = crate::utils::append_failure_notice(rich, &failures);
+    let body = crate::utils::append_file_failure_notice(&body, &file_failures);
 
     if let Some(id) = try_send_intermediate_rich(session_id, bot, chat, thread_id, &body, &media)
         .await
@@ -508,6 +565,10 @@ pub(crate) async fn deliver_intermediate_message(
             s.delivered_image_paths.push(entry.image.path.clone());
         }
         s.delivered_image_paths.extend(delivered_video_paths);
+        // #1918: and the documents, for the same reason — the only copy of each
+        // is now in the rich message the reader was shown, so the final leg's
+        // floor must not ship it a second time as its own bubble.
+        s.delivered_image_paths.extend(delivered_file_paths);
         return true;
     }
 
@@ -548,6 +609,26 @@ pub(crate) async fn deliver_intermediate_message(
     // A clip the channel refused is an honest failure of the same turn, and it
     // rides the text bubble the reader is about to get — never a silent drop.
     plain = crate::utils::append_failure_notice(&plain, &refused_videos);
+    // #1918: the documents ship here TOO — this is the site their bubble moved
+    // to, reached only when the rich send returned `None`, which is exactly when
+    // the document has nowhere else to go: it cannot ride an array this plane
+    // does not have. Same helper as the final leg's floor, so kind selection,
+    // the file's own name and the failure reasons cannot drift between them.
+    // Only the files whose bytes were READ reach this floor. The unreadable
+    // ones are already in `file_failures` above; handing them to
+    // `send_local_files` as well would report each of them twice under the same
+    // noun.
+    let (delivered_files, refused_files) =
+        super::delivery::send_local_files(session_id, bot, chat, thread_id, &readable_files).await;
+    if !delivered_files.is_empty() {
+        let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+        s.delivered_image_paths
+            .extend(delivered_files.iter().map(|f| f.path.clone()));
+    }
+    plain = crate::utils::append_file_failure_notice(&plain, &refused_files);
+    // The documents whose bytes could not be read never reached either send, so
+    // their notice is owed here too — same list, same noun (#1918).
+    plain = crate::utils::append_file_failure_notice(&plain, &file_failures);
 
     // Resolve fences here too (#1142 parity): when the rich path rejected the
     // message, the HTML fallback must still render the diagram instead of

@@ -79,6 +79,7 @@ fn test_build_body_markdown_media_target_normalizes_markdown() {
         id: "diag1".to_string(),
         url: Some("https://example.com/diag.png".to_string()),
         bytes: None,
+        name: None,
     }];
     let body = build_body_markdown_media_target(54321, None, None, raw_md, &media, None);
 
@@ -154,6 +155,7 @@ fn test_shield_tg_and_attach_refs_are_media_aware() {
         id: "diag9".to_string(),
         url: None,
         bytes: Some(vec![1, 2, 3]),
+        name: None,
     }];
     assert_eq!(
         shield_unresolvable_markdown_images("![d](tg://photo?id=diag0)", &other_media),
@@ -167,6 +169,7 @@ fn test_shield_tg_and_attach_refs_are_media_aware() {
         id: "diag1".to_string(),
         url: None,
         bytes: Some(vec![1, 2, 3]),
+        name: None,
     }];
     assert_eq!(
         shield_unresolvable_markdown_images("![d](tg://photo?id=diag1)", &matching_media),
@@ -219,6 +222,7 @@ fn test_shield_is_fence_and_code_span_safe_for_media_refs() {
         id: "absent".to_string(),
         url: None,
         bytes: Some(vec![1, 2, 3]),
+        name: None,
     }];
     assert_eq!(shield_unresolvable_markdown_images(prose, &matching), prose);
 }
@@ -234,6 +238,7 @@ fn photo_entry(id: &str) -> MediaEntry {
         id: id.to_string(),
         url: None,
         bytes: Some(vec![0x89, b'P', b'N', b'G']),
+        name: None,
     }
 }
 

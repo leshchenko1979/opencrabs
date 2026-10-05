@@ -31,6 +31,7 @@ fn entry(id: &str, kind: MediaKind, bytes: &[u8]) -> MediaEntry {
         url: None,
         bytes: Some(bytes.to_vec()),
         kind,
+        name: None,
     }
 }
 
@@ -130,7 +131,7 @@ fn a_video_part_is_named_and_mimed_as_a_video() {
     // The image sniffer answers `bmp`/`image/bmp` for bytes it cannot read, so
     // without this the one inline-video path would upload an MP4 as a BMP.
     assert_eq!(
-        media_part_identity("vid0", MP4_BYTES, MediaKind::Video),
+        media_part_identity("vid0", MP4_BYTES, MediaKind::Video, None),
         ("vid0.mp4".to_string(), "video/mp4")
     );
 }
@@ -144,6 +145,7 @@ fn a_video_entry_with_url_bytes_absent_keeps_the_legacy_url_reference() {
         url: Some("https://example.invalid/clip.mp4".to_string()),
         bytes: None,
         kind: MediaKind::Video,
+        name: None,
     }];
     let body = build_body_markdown_media_target(
         -100,

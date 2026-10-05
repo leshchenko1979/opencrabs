@@ -660,6 +660,7 @@ fn build_body_markdown_media_target_matches_prototype_shape() {
         id: "diag0".into(),
         url: Some("https://mermaid.ink/img/abc".into()),
         bytes: None,
+        name: None,
     }];
     let body = build_body_markdown_media_target(-100, None, None, "text", &media, None);
     assert_eq!(body["chat_id"], -100);
@@ -695,6 +696,7 @@ fn build_body_markdown_media_target_bytes_entry_uses_attach_reference() {
         id: "diag1".into(),
         url: None,
         bytes: Some(vec![0x89, b'P']),
+        name: None,
     }];
     let body = build_body_markdown_media_target(-100, None, None, "text", &media, None);
     let arr = body["rich_message"]["media"]
@@ -716,6 +718,7 @@ fn build_body_markdown_media_target_neutralises_orphan_refs() {
         id: "diag1".into(),
         url: None,
         bytes: Some(vec![0x89, b'P']),
+        name: None,
     }];
     let raw = "kept ![d](tg://photo?id=diag1) dropped ![x](tg://photo?id=absent)";
     let body = build_body_markdown_media_target(-100, None, None, raw, &media, None);
@@ -751,6 +754,7 @@ fn document_refs_are_shielded_like_the_other_tg_kinds() {
         id: "q3".into(),
         url: None,
         bytes: Some(vec![0x89, b'P']),
+        name: None,
     }];
 
     let raw = "kept ![d](tg://document?id=q3) dropped ![x](tg://document?id=absent)";
@@ -788,6 +792,7 @@ fn build_body_markdown_media_edit_carries_message_id_and_media() {
         id: "diag0".into(),
         url: Some("https://mermaid.ink/img/abc".into()),
         bytes: None,
+        name: None,
     }];
     let body = build_body_markdown_media_edit(-100, 40827, "text", &media);
     assert_eq!(body["chat_id"], -100);
@@ -810,6 +815,7 @@ fn build_body_markdown_media_edit_bytes_entry_uses_attach_reference() {
         id: "diag1".into(),
         url: None,
         bytes: Some(vec![0x89, b'P']),
+        name: None,
     }];
     let body = build_body_markdown_media_edit(-100, 5, "text", &media);
     let arr = body["rich_message"]["media"]
@@ -1164,6 +1170,7 @@ fn orphan_photo_refs_are_neutralised_but_resolved_ones_survive() {
         id: "diag0".to_string(),
         url: Some("https://example.invalid/d0.png".to_string()),
         bytes: None,
+        name: None,
     }];
     assert_eq!(
         neutralize_orphan_photo_refs("![d](tg://photo?id=diag0)", &media),
@@ -1198,6 +1205,7 @@ fn attach_and_tg_refs_are_neutralised_by_media_presence() {
         id: "diag1".to_string(),
         url: None,
         bytes: Some(vec![1, 2, 3]),
+        name: None,
     }];
 
     // Matching entry -> the reference keeps resolving.
@@ -1316,6 +1324,7 @@ fn unresolved_ref_extractors_agree_across_both_forms() {
         id: "diag1".to_string(),
         url: None,
         bytes: Some(vec![1, 2, 3]),
+        name: None,
     }];
     let text = "a ![x](tg://photo?id=absent) b attach://gone c tg://photo?id=diag1";
 

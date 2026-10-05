@@ -512,6 +512,12 @@ pub(crate) enum MediaKind {
     /// uploaded as `video/mp4`; a file that is not MPEG4 belongs on the send
     /// floor as a document instead (D3), so it never becomes this kind.
     Video,
+    /// A local document (#1918) — a PDF, an archive, any file the reply linked
+    /// to and the rich plane inlines. The bytes are uploaded with the file's own
+    /// name (Step 1's `document_part_name`), so the reader sees `q3-report.pdf`
+    /// rather than a bare `file`. `as_str` emits the fourth documented
+    /// `tg://` kind, which the shield has recognised since #1921.
+    Document,
 }
 
 impl MediaKind {
@@ -520,6 +526,7 @@ impl MediaKind {
         match self {
             MediaKind::Photo => "photo",
             MediaKind::Video => "video",
+            MediaKind::Document => "document",
         }
     }
 }
@@ -541,11 +548,19 @@ pub(crate) struct MediaEntry {
     /// Which `type` this entry declares. Defaults to `Photo` because every
     /// producer until #465 was an image; a video producer sets it explicitly.
     pub(crate) kind: MediaKind,
+    /// The multipart part's own file name, when the entry has one worth
+    /// carrying (#1918). `None` for the photo and video producers, whose part
+    /// name is derived from their bytes (`<id>.<ext>` / `<id>.mp4`); a DOCUMENT
+    /// sets it to the file's own name (`q3-report.pdf`) because bytes alone
+    /// cannot recover it, and Telegram shows the part name as the file name in
+    /// the chat. Threaded as a field rather than derived at the send site so the
+    /// producer — which is the only place that still knows the path — owns it.
+    pub(crate) name: Option<String>,
 }
 
 /// Which media families the rich plane OWNS for one reply (#465 / D6).
 ///
-/// The two flags are separate all the way down, and only the SEND is joint.
+/// The three flags are separate all the way down, and only the SEND is joint.
 /// A single "did the rich plane own anything" boolean would make a video-only
 /// body claim to own IMAGES and suppress the image floor for a reply that has
 /// none — and symmetrically an image-only body would suppress the video floor,
@@ -557,13 +572,18 @@ pub(crate) struct RichMediaOwnership {
     pub(crate) images: bool,
     /// The rich plane carries this reply's clips (`MediaKind::Video`).
     pub(crate) videos: bool,
+    /// The rich plane carries this reply's documents (`MediaKind::Document`,
+    /// #1918). Its own flag for the same reason the other two are separate: a
+    /// document-bearing body must suppress the FILE floor only, and a body with
+    /// no document must not have its floor suppressed by an image.
+    pub(crate) documents: bool,
 }
 
 impl RichMediaOwnership {
     /// Whether the rich plane owns ANY media in this reply — the union the
     /// send itself is gated on, never the per-family floors.
     pub(crate) fn any(self) -> bool {
-        self.images || self.videos
+        self.images || self.videos || self.documents
     }
 }
 
@@ -580,6 +600,7 @@ pub(crate) fn rich_media_ownership(plane_ok: bool, entries: &[MediaEntry]) -> Ri
     RichMediaOwnership {
         images: entries.iter().any(|e| e.kind == MediaKind::Photo),
         videos: entries.iter().any(|e| e.kind == MediaKind::Video),
+        documents: entries.iter().any(|e| e.kind == MediaKind::Document),
     }
 }
 
@@ -1162,6 +1183,7 @@ pub(crate) fn replacement_for(
                     id,
                     url: Some(url.clone()),
                     bytes: None,
+                    name: None,
                 }),
             )
         }
@@ -1182,6 +1204,7 @@ pub(crate) fn replacement_for(
                     id,
                     url: None,
                     bytes: Some(bytes.clone()),
+                    name: None,
                 }),
             )
         }

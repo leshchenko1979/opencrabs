@@ -124,6 +124,7 @@ async fn edit_rich_markdown_media_url_entry_uses_custom_api_url() {
             id: "diag0".to_string(),
             url: Some("https://mermaid.ink/img/abc".to_string()),
             bytes: None,
+            name: None,
         }],
         Some(&kb),
         "test",
@@ -162,6 +163,7 @@ async fn send_rich_markdown_media_target_id_uses_custom_api_url() {
             id: "1".to_string(),
             url: Some("https://example.com/img.png".to_string()),
             bytes: None,
+            name: None,
         }],
         None,
         "test",
@@ -291,6 +293,7 @@ async fn the_html_fallback_wraps_each_block_in_its_own_p_tag() {
         id: "img0".to_string(),
         url: Some("https://example.test/img0.png".to_string()),
         bytes: None,
+        name: None,
     }];
 
     let id = api::send_rich_with_media_target_id(

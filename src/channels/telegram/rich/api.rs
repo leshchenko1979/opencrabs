@@ -661,6 +661,7 @@ pub(crate) fn media_part_identity(
     id: &str,
     bytes: &[u8],
     kind: super::mermaid::MediaKind,
+    name: Option<&str>,
 ) -> (String, &'static str) {
     // An entry's bytes reach the API as a multipart file part, so the part's
     // own name and MIME have to agree with the `type` the entry declares
@@ -669,6 +670,17 @@ pub(crate) fn media_part_identity(
     // carries video inline.
     if kind == super::mermaid::MediaKind::Video {
         return (format!("{id}.mp4"), "video/mp4");
+    }
+    // #1918: a DOCUMENT's name cannot be recovered from its bytes, so the
+    // producer carries it (`name`, Step 1's `document_part_name`). Telegram
+    // shows the part name as the file name in the chat, which is the whole
+    // point: without it the reader sees a bare `file`. The MIME follows the
+    // extension so a `.pdf` ships as `application/pdf` rather than as an
+    // unknown binary.
+    if kind == super::mermaid::MediaKind::Document {
+        let file_name = name.unwrap_or(id).to_string();
+        let mime = document_mime(&file_name);
+        return (file_name, mime);
     }
     let ext = crate::utils::image::image_extension(bytes);
     let mime = match ext {
@@ -679,6 +691,35 @@ pub(crate) fn media_part_identity(
         _ => "image/bmp",
     };
     (format!("{id}.{ext}"), mime)
+}
+
+/// The MIME a document part declares, from its file name's extension (#1918).
+///
+/// A deliberately short register of the types a reply actually links to, with
+/// `application/octet-stream` as the honest fallback: the file family validates
+/// ANY bytes (`validate_local_file` has no format gate), so an unknown extension
+/// is a normal case, not an error — and a wrong `Content-Type` is worse than a
+/// generic one.
+fn document_mime(file_name: &str) -> &'static str {
+    match std::path::Path::new(file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("pdf") => "application/pdf",
+        Some("txt") => "text/plain",
+        Some("md") => "text/markdown",
+        Some("csv") => "text/csv",
+        Some("json") => "application/json",
+        Some("xml") => "application/xml",
+        Some("html") => "text/html",
+        Some("zip") => "application/zip",
+        Some("gz") => "application/gzip",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        _ => "application/octet-stream",
+    }
 }
 
 /// Build the multipart/form-data request for a `sendRichMessage` whose media
@@ -698,7 +739,7 @@ fn build_multipart_form(
     }
     for m in media {
         if let Some(bytes) = &m.bytes {
-            let (file_name, mime) = media_part_identity(&m.id, bytes, m.kind);
+            let (file_name, mime) = media_part_identity(&m.id, bytes, m.kind, m.name.as_deref());
             let part = reqwest::multipart::Part::bytes(bytes.clone())
                 .file_name(file_name)
                 .mime_str(mime)

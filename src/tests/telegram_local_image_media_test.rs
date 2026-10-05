@@ -35,6 +35,7 @@ fn local_entry(id: &str, bytes: &[u8]) -> MediaEntry {
         id: id.to_string(),
         url: None,
         bytes: Some(bytes.to_vec()),
+        name: None,
     }
 }
 
@@ -73,6 +74,7 @@ fn a_fence_and_a_local_image_share_one_request_and_both_references_survive() {
             id: "diag0".into(),
             url: None,
             bytes: Some(PNG_BYTES.to_vec()),
+            name: None,
         },
         local_entry("img0", PNG_BYTES),
     ];
@@ -128,24 +130,24 @@ fn an_orphan_local_reference_is_neutralised_like_any_other() {
 #[test]
 fn the_multipart_part_identity_follows_the_bytes() {
     assert_eq!(
-        media_part_identity("img0", PNG_BYTES, MediaKind::Photo),
+        media_part_identity("img0", PNG_BYTES, MediaKind::Photo, None),
         ("img0.png".to_string(), "image/png")
     );
     assert_eq!(
-        media_part_identity("img1", JPEG_BYTES, MediaKind::Photo),
+        media_part_identity("img1", JPEG_BYTES, MediaKind::Photo, None),
         ("img1.jpg".to_string(), "image/jpeg"),
         "a JPEG must not ship as <id>.png with image/png"
     );
     assert_eq!(
-        media_part_identity("img2", GIF_BYTES, MediaKind::Photo),
+        media_part_identity("img2", GIF_BYTES, MediaKind::Photo, None),
         ("img2.gif".to_string(), "image/gif")
     );
     assert_eq!(
-        media_part_identity("img3", WEBP_BYTES, MediaKind::Photo),
+        media_part_identity("img3", WEBP_BYTES, MediaKind::Photo, None),
         ("img3.webp".to_string(), "image/webp")
     );
     assert_eq!(
-        media_part_identity("img4", BMP_BYTES, MediaKind::Photo),
+        media_part_identity("img4", BMP_BYTES, MediaKind::Photo, None),
         ("img4.bmp".to_string(), "image/bmp")
     );
 }
@@ -155,8 +157,37 @@ fn a_mermaid_part_keeps_its_own_id_and_png_identity() {
     // The existing diagram path is unchanged by #502: the sniffer reads PNG
     // bytes and returns exactly the name and mime the hardcoded version did.
     assert_eq!(
-        media_part_identity("diag0", PNG_BYTES, MediaKind::Photo),
+        media_part_identity("diag0", PNG_BYTES, MediaKind::Photo, None),
         ("diag0.png".to_string(), "image/png")
+    );
+}
+
+#[test]
+fn a_document_part_carries_the_files_own_name_and_its_mimes_extension() {
+    // #1918: a document's name cannot be recovered from its bytes, so the
+    // producer carries it and this arm passes it through — Telegram shows the
+    // part name as the file name in the chat, which is the difference between
+    // the reader seeing `q3-report.pdf` and seeing a bare `file`.
+    assert_eq!(
+        media_part_identity(
+            "doc0",
+            b"%PDF-1.7\n",
+            MediaKind::Document,
+            Some("q3-report.pdf")
+        ),
+        ("q3-report.pdf".to_string(), "application/pdf")
+    );
+    // An extension outside the short register falls back to a generic type
+    // rather than a wrong one: the file family validates ANY bytes, so an
+    // unknown extension is a normal case, not an error.
+    assert_eq!(
+        media_part_identity("doc1", b"raw", MediaKind::Document, Some("data.bin")),
+        ("data.bin".to_string(), "application/octet-stream")
+    );
+    // With no name the id stands in, so the part is never nameless.
+    assert_eq!(
+        media_part_identity("doc2", b"raw", MediaKind::Document, None),
+        ("doc2".to_string(), "application/octet-stream")
     );
 }
 
