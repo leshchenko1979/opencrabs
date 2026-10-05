@@ -1813,6 +1813,47 @@ pub(crate) struct DeliveredFile {
     pub message_id: i32,
 }
 
+/// The `t.me` message link for a delivered file's bubble, when its chat kind has
+/// one (#1918).
+///
+/// A message link exists only for a public supergroup or a channel. `t.me/c/…`
+/// addresses a chat by its INTERNAL id — the chat id with the `-100` marker
+/// stripped — and gains a middle segment with the topic id when the message sits
+/// in a forum topic, so the reader lands on the bubble inside the right topic
+/// rather than at the top of a thread they then have to search.
+///
+/// A private chat and a basic group have no message-link form at all, so they
+/// get `None` and the caller leaves the marker as plain text: a link that goes
+/// nowhere is worse than no link, and the marker's job — pointing at the file —
+/// is done by the label either way.
+pub(crate) fn file_message_link(
+    kind: &teloxide::types::ChatKind,
+    chat_id: i64,
+    thread_id: Option<teloxide::types::ThreadId>,
+    message_id: i32,
+) -> Option<String> {
+    let has_message_link = match kind {
+        teloxide::types::ChatKind::Public(public) => matches!(
+            public.kind,
+            teloxide::types::PublicChatKind::Supergroup { .. }
+                | teloxide::types::PublicChatKind::Channel { .. }
+        ),
+        teloxide::types::ChatKind::Private { .. } => false,
+    };
+    if !has_message_link {
+        return None;
+    }
+    // `t.me/c/` takes the id WITHOUT the `-100` marker that identifies a
+    // supergroup or channel. A private or basic-group id never reaches here, so
+    // an id without the prefix keeps its digits rather than losing three.
+    let chat = chat_id.to_string();
+    let internal = chat.strip_prefix("-100").unwrap_or(chat.as_str());
+    Some(match thread_id {
+        Some(thread) => format!("https://t.me/c/{internal}/{}/{message_id}", thread.0.0),
+        None => format!("https://t.me/c/{internal}/{message_id}"),
+    })
+}
+
 /// Send each resolved local file as its own document bubble (#1916).
 ///
 /// Deliberately NOT a generalization of [`send_local_images`]: a file has no

@@ -20,7 +20,9 @@
 //! Deliberately NOT covered here: the extraction rules, the regen ladder, and
 //! the notice wording. Each has its own home.
 
-use crate::channels::telegram::delivery::{DeliveredFile, document_part_name, send_local_files};
+use crate::channels::telegram::delivery::{
+    DeliveredFile, document_part_name, file_message_link, send_local_files,
+};
 use crate::utils::image::{LocalFile, LocalImageFailureReason};
 use std::path::{Path, PathBuf};
 
@@ -377,4 +379,107 @@ async fn the_delivered_file_carries_the_message_id_the_send_produced() {
         "and the record still names the file that bubble carries"
     );
     assert!(failures.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// the message link (#1918, link part 3)
+// ---------------------------------------------------------------------------
+
+/// A supergroup — one of the two kinds a `t.me` message link exists for.
+/// `is_forum` is set because that is the shape the ops forum itself has, and
+/// the link's middle segment only ever appears for a topic inside one.
+fn supergroup() -> teloxide::types::ChatKind {
+    teloxide::types::ChatKind::Public(teloxide::types::ChatPublic {
+        title: Some("l1979 ops".to_string()),
+        kind: teloxide::types::PublicChatKind::Supergroup(
+            teloxide::types::PublicChatSupergroup {
+                username: None,
+                is_forum: true,
+            },
+        ),
+    })
+}
+
+/// A channel — the other kind that has a message link.
+fn channel() -> teloxide::types::ChatKind {
+    teloxide::types::ChatKind::Public(teloxide::types::ChatPublic {
+        title: Some("l1979 announcements".to_string()),
+        kind: teloxide::types::PublicChatKind::Channel(
+            teloxide::types::PublicChatChannel { username: None },
+        ),
+    })
+}
+
+/// A basic (non-super) group — no message-link form exists for it.
+fn basic_group() -> teloxide::types::ChatKind {
+    teloxide::types::ChatKind::Public(teloxide::types::ChatPublic {
+        title: Some("plain group".to_string()),
+        kind: teloxide::types::PublicChatKind::Group,
+    })
+}
+
+/// A one-to-one chat — no message-link form exists for it either.
+fn private_chat() -> teloxide::types::ChatKind {
+    teloxide::types::ChatKind::Private(teloxide::types::ChatPrivate {
+        username: None,
+        first_name: Some("Alexey".to_string()),
+        last_name: None,
+    })
+}
+
+/// The ops forum's real shape: chat id `-100…`, so the link addresses it by the
+/// INTERNAL id with the `-100` marker stripped.
+const FORUM_CHAT_ID: i64 = -1_001_234_567_890;
+
+#[test]
+fn a_supergroup_bubble_links_by_internal_id() {
+    let link = file_message_link(&supergroup(), FORUM_CHAT_ID, None, 91_047);
+    assert_eq!(
+        link.as_deref(),
+        Some("https://t.me/c/1234567890/91047"),
+        "the marker's link drops the -100 marker and names the bubble itself"
+    );
+}
+
+#[test]
+fn a_topic_bubble_links_with_the_topic_in_the_middle() {
+    let thread = teloxide::types::ThreadId(teloxide::types::MessageId(321));
+    let link = file_message_link(&supergroup(), FORUM_CHAT_ID, Some(thread), 91_047);
+    assert_eq!(
+        link.as_deref(),
+        Some("https://t.me/c/1234567890/321/91047"),
+        "inside a forum topic the link carries the topic, so the reader lands \
+         on the bubble rather than at the top of the thread"
+    );
+}
+
+#[test]
+fn a_channel_bubble_links_by_internal_id() {
+    let link = file_message_link(&channel(), FORUM_CHAT_ID, None, 5);
+    assert_eq!(link.as_deref(), Some("https://t.me/c/1234567890/5"));
+}
+
+#[test]
+fn a_private_chat_and_a_basic_group_have_no_message_link() {
+    assert_eq!(
+        file_message_link(&private_chat(), FORUM_CHAT_ID, None, 5),
+        None,
+        "a private chat has no t.me message-link form"
+    );
+    assert_eq!(
+        file_message_link(&basic_group(), FORUM_CHAT_ID, None, 5),
+        None,
+        "a basic group has no t.me message-link form either"
+    );
+}
+
+#[test]
+fn a_topic_does_not_rescue_a_kind_that_has_no_link() {
+    // The thread is only ever the MIDDLE segment of a link that already exists;
+    // it cannot conjure one for a kind that has no link form at all.
+    let thread = teloxide::types::ThreadId(teloxide::types::MessageId(321));
+    assert_eq!(
+        file_message_link(&basic_group(), FORUM_CHAT_ID, Some(thread), 5),
+        None
+    );
 }
