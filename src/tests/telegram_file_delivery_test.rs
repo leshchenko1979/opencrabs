@@ -21,9 +21,9 @@
 //! the notice wording. Each has its own home.
 
 use crate::channels::telegram::delivery::{
-    DeliveredFile, document_part_name, file_message_link, send_local_files,
+    DeliveredFile, document_part_name, file_message_link, link_file_markers, send_local_files,
 };
-use crate::utils::image::{LocalFile, LocalImageFailureReason};
+use crate::utils::image::{LocalFile, LocalFileScan, LocalImageFailureReason};
 use std::path::{Path, PathBuf};
 
 const CHAT: i64 = 133_526_395;
@@ -481,5 +481,140 @@ fn a_topic_does_not_rescue_a_kind_that_has_no_link() {
     assert_eq!(
         file_message_link(&basic_group(), FORUM_CHAT_ID, Some(thread), 5),
         None
+    );
+}
+
+// ---------------------------------------------------------------------------
+// the marker becomes a link (#1918, link part 4)
+// ---------------------------------------------------------------------------
+
+/// A scan over `body` holding one attachment per `(path, marker)` pair, the
+/// span being where that marker sits in `body`. The real scanner records exactly
+/// this as it emits each marker, so a test body reads as the reply and the
+/// markers as the emitted ones — no re-derivation of the scanner's own rules.
+fn scan_over(body: &str, files: &[(&Path, &str)]) -> LocalFileScan {
+    let mut attachments = Vec::new();
+    let mut from = 0;
+    for &(path, marker) in files {
+        let start = body[from..]
+            .find(marker)
+            .expect("the test body carries the marker it names")
+            + from;
+        let end = start + marker.len();
+        attachments.push(LocalFile {
+            path: path.to_path_buf(),
+            caption: Some(marker.trim_start_matches("📎 ").to_string()),
+            marker_span: (start, end),
+        });
+        from = end;
+    }
+    LocalFileScan {
+        text: body.to_string(),
+        attachments,
+        failures: Vec::new(),
+    }
+}
+
+const Q3: &str = "/tmp/reports/q3-report.pdf";
+const Q4: &str = "/tmp/reports/q4-report.pdf";
+
+#[test]
+fn a_delivered_file_links_its_marker() {
+    let body = "Here is the report: 📎 Q3 report — thanks.";
+    let scan = scan_over(body, &[(Path::new(Q3), "📎 Q3 report")]);
+    let links = vec![(
+        PathBuf::from(Q3),
+        "https://t.me/c/1234567890/321/91047".to_string(),
+    )];
+    assert_eq!(
+        link_file_markers(body, &scan, &links),
+        "Here is the report: [📎 Q3 report](https://t.me/c/1234567890/321/91047) — thanks.",
+        "the marker becomes a link and the prose around it is untouched"
+    );
+}
+
+#[test]
+fn each_marker_links_to_its_own_bubble() {
+    let body = "First 📎 Q3 report then 📎 Q4 report.";
+    let scan = scan_over(
+        body,
+        &[(Path::new(Q3), "📎 Q3 report"), (Path::new(Q4), "📎 Q4 report")],
+    );
+    let links = vec![
+        (PathBuf::from(Q3), "https://t.me/c/1234567890/1001".to_string()),
+        (PathBuf::from(Q4), "https://t.me/c/1234567890/1002".to_string()),
+    ];
+    assert_eq!(
+        link_file_markers(body, &scan, &links),
+        "First [📎 Q3 report](https://t.me/c/1234567890/1001) then \
+         [📎 Q4 report](https://t.me/c/1234567890/1002).",
+        "each marker carries the id of the bubble that file landed in — one link \
+         for both would send the reader to the wrong document"
+    );
+}
+
+#[test]
+fn a_dm_or_an_unsent_file_keeps_the_plain_marker() {
+    let body = "Report: 📎 Q3 report.";
+    let scan = scan_over(body, &[(Path::new(Q3), "📎 Q3 report")]);
+    // A DM has no message-link form, so the caller builds no link at all and
+    // the marker is passed through untouched.
+    assert_eq!(
+        file_message_link(&private_chat(), FORUM_CHAT_ID, None, 91_047),
+        None,
+        "a DM offers no link for the caller to pass"
+    );
+    assert_eq!(
+        link_file_markers(body, &scan, &[]),
+        body,
+        "with no link to pass, the marker is exactly what the scanner emitted"
+    );
+    // The other way it stays plain: the file never landed, so its path is absent
+    // from the links even though another file's is present.
+    let links = vec![(
+        PathBuf::from(Q4),
+        "https://t.me/c/1234567890/1001".to_string(),
+    )];
+    assert_eq!(
+        link_file_markers(body, &scan, &links),
+        body,
+        "an undelivered file keeps its plain marker"
+    );
+}
+
+#[test]
+fn a_file_that_did_not_come_from_a_scan_has_no_marker_to_link() {
+    // `(0, 0)` is the documented "not from a scan" span. A record built by hand
+    // must not make the rewrite cut into the head of the text.
+    let body = "Report: 📎 Q3 report.";
+    let scan = LocalFileScan {
+        text: body.to_string(),
+        attachments: vec![file_at(PathBuf::from(Q3), Some("Q3 report"))],
+        failures: Vec::new(),
+    };
+    let links = vec![(
+        PathBuf::from(Q3),
+        "https://t.me/c/1234567890/1001".to_string(),
+    )];
+    assert_eq!(link_file_markers(body, &scan, &links), body);
+}
+
+#[test]
+fn a_marker_whose_text_moved_is_left_plain() {
+    // `text` starts as a copy of the scan's own buffer and is then rewritten —
+    // the artifact strip, the secret redaction, the dedup ladder. When a rewrite
+    // moves the marker, the recorded span no longer names it, and splicing there
+    // would cut a link over unrelated words: the marker stays plain instead.
+    let body = "Report: 📎 Q3 report.";
+    let scan = scan_over(body, &[(Path::new(Q3), "📎 Q3 report")]);
+    let shifted = format!("(redacted) {body}");
+    let links = vec![(
+        PathBuf::from(Q3),
+        "https://t.me/c/1234567890/1001".to_string(),
+    )];
+    assert_eq!(
+        link_file_markers(&shifted, &scan, &links),
+        shifted,
+        "a span that no longer names the marker is not cut"
     );
 }

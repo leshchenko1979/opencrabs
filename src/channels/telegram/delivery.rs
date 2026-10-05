@@ -203,7 +203,12 @@ pub(crate) async fn deliver_final_response(
             // the image plane already emptied, so it is the only one that has
             // seen every reference. Taking the image scan's text here would
             // leave each delivered link in the body AND ship it as a document.
-            let (text_only, img_paths) = (file_scan.text, image_scan.attachments);
+            // The scan itself outlives this line (#1918): its `attachments`
+            // carry each marker's span and its `text` is the buffer those spans
+            // index into, so the link pass at the file floor below needs the
+            // whole record, not one field of it. The three reads that follow
+            // take copies for that reason — each is a handful of small values.
+            let (text_only, img_paths) = (file_scan.text.clone(), image_scan.attachments);
             // A picture this turn already delivered as a promoted intermediate
             // must not ship twice (#502). Filtering the ATTACHMENT list — not
             // the text — is what makes the final leg ship exactly one photo
@@ -234,15 +239,16 @@ pub(crate) async fn deliver_final_response(
                 };
                 file_scan
                     .attachments
-                    .into_iter()
+                    .iter()
                     .filter(|f| !delivered.contains(&f.path))
+                    .cloned()
                     .collect()
             };
             // Rejected file links, and — appended to below — files the channel
             // refused. Its OWN vector, not folded into `image_failures`: the
             // notice names the family, so a missing document must not be
             // answered with "Image not attached".
-            let mut file_failures: Vec<LocalImageFailure> = file_scan.failures;
+            let mut file_failures: Vec<LocalImageFailure> = file_scan.failures.clone();
             // #465: the same #502 rule for video. `delivered_image_paths` is the
             // turn's delivered-MEDIA list — a path is either already in the chat
             // or it is not, whichever family put it there — so video rides the
@@ -797,9 +803,37 @@ pub(crate) async fn deliver_final_response(
             // markdown link is not a Telegram rich primitive, so there is no
             // rich-plane twin to gate against and no flag to consult. A file
             // link that resolves is sent here or not at all.
-            let (_, refused) =
+            let (delivered, refused) =
                 send_local_files(session_id, bot, chat_id, thread_id, &file_paths).await;
             file_failures.extend(refused);
+            // #1918: now that each document has a bubble of its own, the marker
+            // standing in for it can point at that bubble — where the chat kind
+            // has a message-link form at all. The kind comes from the inbound
+            // message; on the crash-recovery resume path there is none, so no
+            // link is built and every marker stays plain rather than pointing
+            // somewhere the reply cannot honour. A path absent from `delivered`
+            // is absent here too, so a refused file keeps its plain marker.
+            let file_links: Vec<(std::path::PathBuf, String)> = inbound
+                .map(|message| {
+                    delivered
+                        .iter()
+                        .filter_map(|file| {
+                            file_message_link(
+                                &message.chat.kind,
+                                chat_id.0,
+                                thread_id,
+                                file.message_id,
+                            )
+                            .map(|link| (file.path.clone(), link))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Rewriting `text_only` here reaches both planes that derive from it
+            // below: the HTML edit/send and the mermaid path. The rich body does
+            // NOT derive from it (it is `pre_dedup_text`), so the rich arm
+            // applies the same rewrite to the buffer it sends.
+            text_only = link_file_markers(&text_only, &file_scan, &file_links);
 
             // An image the reply announced must not vanish silently when the
             // send fails: the reply says plainly which one is missing. This is
@@ -832,7 +866,11 @@ pub(crate) async fn deliver_final_response(
                     &pre_dedup_text,
                     options_pending(streaming),
                 ) {
-                let rich_md = pre_dedup_text.clone();
+                // #1918: the rich body does not derive from `text_only`, so the
+                // marker rewrite the floor applied there is applied here too —
+                // same spans, same links, and the same buffer those spans index
+                // into, which is what the rewrite checks before it cuts.
+                let rich_md = link_file_markers(&pre_dedup_text, &file_scan, &file_links);
                 // Deliberately NOT guarded (#500): this arm REPLACES the
                 // intermediates it deletes, so a suppression here would answer
                 // with the id of an intermediate the block below then deletes,
@@ -1852,6 +1890,69 @@ pub(crate) fn file_message_link(
         Some(thread) => format!("https://t.me/c/{internal}/{}/{message_id}", thread.0.0),
         None => format!("https://t.me/c/{internal}/{message_id}"),
     })
+}
+
+/// Rewrite each file's `📎 <label>` marker into a markdown link to the bubble
+/// that carries that file (#1918, link part 4).
+///
+/// `links` names the files that were BOTH delivered and reachable by a link —
+/// `(path, url)` — so a file the channel refused, a file a promoted
+/// intermediate already sent, or one whose chat kind has no message-link form
+/// is simply absent and keeps the plain marker. The marker never points at a
+/// bubble that does not exist, and it never disappears: the label is the
+/// reader's anchor either way.
+///
+/// `text` is the buffer being rewritten, which STARTS as a copy of `scan.text`
+/// and is then run through the artifact strip, the secret redaction and the
+/// dedup ladder — any of which can move a marker. `scan` therefore travels with
+/// the call, and a span is cut only while the bytes it names still match the
+/// ones the scanner wrote there: a rewrite that moved the text degrades to
+/// today's plain marker instead of splicing a link over unrelated words.
+///
+/// Spans are cut from the LAST to the FIRST, so a link's extra bytes can never
+/// invalidate a span that has not been cut yet.
+pub(crate) fn link_file_markers(
+    text: &str,
+    scan: &crate::utils::image::LocalFileScan,
+    links: &[(std::path::PathBuf, String)],
+) -> String {
+    if links.is_empty() {
+        return text.to_string();
+    }
+    let mut spans: Vec<(usize, usize, &str, &str)> = Vec::new();
+    for file in &scan.attachments {
+        let (start, end) = file.marker_span;
+        if start >= end {
+            // `(0, 0)` is the documented "not from a scan" span: nothing to cut.
+            continue;
+        }
+        let Some(marker) = text.get(start..end) else {
+            continue;
+        };
+        if scan.text.get(start..end) != Some(marker) {
+            // The text moved under the span — the marker stays plain.
+            continue;
+        }
+        let Some((_, link)) = links
+            .iter()
+            .find(|(path, _)| path.as_path() == file.path.as_path())
+        else {
+            continue;
+        };
+        spans.push((start, end, marker, link.as_str()));
+    }
+    if spans.is_empty() {
+        return text.to_string();
+    }
+    // The scanner emits markers in order, so this only guards a caller that
+    // reordered them: cutting back-to-front is what keeps the earlier spans
+    // valid, and that needs the order to be known.
+    spans.sort_by_key(|(start, _, _, _)| *start);
+    let mut linked = text.to_string();
+    for (start, end, marker, link) in spans.iter().rev() {
+        linked.replace_range(*start..*end, &format!("[{marker}]({link})"));
+    }
+    linked
 }
 
 /// Send each resolved local file as its own document bubble (#1916).
