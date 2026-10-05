@@ -633,7 +633,7 @@ fn the_link_form_and_the_marker_rewrite_agree() {
     // lands in the body as one well-formed markdown link.
     let body = "Report attached: 📎 Q3 report.";
     let scan = scan_over(body, &[(Path::new(Q3), "📎 Q3 report")]);
-    let delivered = vec![DeliveredFile {
+    let delivered = [DeliveredFile {
         path: PathBuf::from(Q3),
         message_id: 91047,
     }];
