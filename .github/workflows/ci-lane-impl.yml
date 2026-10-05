@@ -466,17 +466,21 @@ jobs:
                 # 37308117729). /proc/<pid>/exe is the discriminator: only the
                 # harness binary itself resolves to that path.
                 #
-                # Trigger = STILL ALIVE PAST THE HEALTHY CEILING, not a fixed
-                # T+100s mark. Measured on run 37308117729: the healthy test leg
-                # is 139-180s (run 37308138025: 139.62s; run 37300036106:
-                # 178.35s), and the stall that run began at T+111s (test leg
-                # 12:33:57, last output 12:35:48). A T+100s dump would therefore
-                # fire ~11s BEFORE the deadlock and photograph a HEALTHY
-                # process — an instrument aimed where its target is not. Alive at
-                # T+300s is past any healthy completion, so a live binary there
-                # IS the hang; the dump is repeated every 300s (max 3) so the
-                # stacks can be compared across snapshots — a true deadlock
-                # shows IDENTICAL stacks, a slow-but-live leg does not.
+                # Trigger = T+100s after the binary appears — the APPROVED
+                # design point (plan step 3), RESTORED after the impl had drifted
+                # it to T+300s. Measured healthy legs: 131-183s (run 37332916127:
+                # 131.59s; 37333037731: 138.66s; 37329405566: 183.63s), so a leg
+                # past 100s is either still-running-healthy or deadlocked, and a
+                # dump is taken EITHER WAY — deliberately: a hangdump=true
+                # dispatch must ALWAYS carry a `thread apply all bt` block, since
+                # an instrument that can silently produce nothing is the #1936
+                # trap (run 37300036106 went GREEN with no dump and proved
+                # nothing). Deadlock onset is 31-111s (run 37250880218: last `ok`
+                # at T+31s; run 37308117729: last output at T+111s), so on a hung
+                # run the FIRST snapshot may photograph a healthy process but the
+                # LATER ones (repeated every 100s, max 3) capture the deadlock —
+                # a true deadlock shows IDENTICAL stacks across snapshots, a
+                # slow-but-live leg does not.
                 #
                 # `thread apply all bt` (not `bt full`): bt full prints every
                 # frame's locals for every thread and would flood the log; the
@@ -499,10 +503,10 @@ jobs:
                   if [ -n "$CUR" ]; then
                     if [ "$CUR" != "$PID" ]; then
                       PID="$CUR"; ARMED_AT=$(date +%s); LAST_DUMP=0
-                      echo "HANGDUMP: harness binary pid=$PID appeared; dump threshold T+300s (healthy leg is 139-180s)"
+                      echo "HANGDUMP: harness binary pid=$PID appeared; dump threshold T+100s (healthy leg is 131-183s)"
                     fi
                     AGE=$(( $(date +%s) - ARMED_AT ))
-                    if [ "$AGE" -ge 300 ] && [ $(( AGE - LAST_DUMP )) -ge 300 ] && [ "$DUMPS" -lt 3 ]; then
+                    if [ "$AGE" -ge 100 ] && [ $(( AGE - LAST_DUMP )) -ge 100 ] && [ "$DUMPS" -lt 3 ]; then
                       LAST_DUMP=$AGE; DUMPS=$((DUMPS+1))
                       echo "===== HANGDUMP #$DUMPS $(date -u +%FT%TZ) pid=$PID age=${AGE}s ====="
                       # sudo: YAMA exempts root from ptrace_scope, so this
