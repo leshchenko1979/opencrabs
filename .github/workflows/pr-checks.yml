@@ -94,6 +94,15 @@ on:
         required: false
         default: ""
         type: string
+      # #1936 Stage 2 (hang-capture, owner-approved design): the gdb watchdog.
+      # false => Run tests is the unchanged `cargo test` invocation; true => the
+      # same command plus a background thread-stack dump at T+100s if the test
+      # binary is still alive. Diagnostic only: never kills, never fails.
+      hangdump:
+        description: "true = run the test leg under a gdb watchdog that dumps every thread's stack ONCE at T+100s if the test binary is still alive (Stage 2 of the #1936 hang-capture). Never kills the process, never changes the step's exit code; diagnostic only."
+        required: false
+        default: false
+        type: boolean
 
 # Owner GO 2026-09-18 01:2xZ (diagnose variable, CI-143 investigation): the
 # 2026-09-17 SIGTERM storm (16/17 `Run tests` runs, exit 143, post-steps
@@ -174,3 +183,4 @@ jobs:
       fast: ${{ inputs.fast }}
       diagnose: ${{ inputs.diagnose }}
       test_threads: ${{ inputs.test_threads }}
+      hangdump: ${{ inputs.hangdump }}
