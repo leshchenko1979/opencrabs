@@ -354,6 +354,16 @@ jobs:
           sccache --show-stats 2>/dev/null || echo "(sccache not on PATH)"
           echo "===== DIAG pre-test END ====="
 
+      - name: Install gdb (hangdump mode only)
+        if: ${{ inputs.hangdump }}
+        # #1936 Stage 2: the watchdog needs gdb, and ubuntu-latest does NOT
+        # ship it — measured, run 37300036106: the step went GREEN while the
+        # log read "HANGDUMP: gdb not on PATH; watchdog degrades to a no-op",
+        # i.e. the instrument never ran and the dump criterion was never
+        # exercised. Gated on hangdump so the default dispatch's step list and
+        # Run tests invocation stay byte-for-byte unchanged.
+        run: sudo apt-get update -qq && sudo apt-get install -y gdb
+
       - name: Run tests
         id: tests
         if: ${{ !inputs.fix && !inputs.lockregen && !inputs.fast }}
@@ -429,6 +439,7 @@ jobs:
           CMD="cargo test --locked --profile ci --all-features --verbose${{ inputs.test_threads && format(' -- --test-threads={0}', inputs.test_threads) || '' }}"
           echo "+ $CMD"
           WATCHDOG=""
+          DUMP_INVALID=""
           if [ "${HANGDUMP:-false}" = "true" ]; then
             if command -v gdb >/dev/null 2>&1; then
               gdb --version | head -1 || true
@@ -455,7 +466,13 @@ jobs:
               ) &
               WATCHDOG=$!
             else
-              echo "HANGDUMP: gdb not on PATH; watchdog degrades to a no-op"
+              # A hangdump dispatch exists to take a dump. Without gdb it
+              # cannot, so the run must NOT pass — a silent no-op here is
+              # exactly the "zero from a broken instrument" trap (#1936,
+              # measured run 37300036106). The tests still run below so the
+              # hang data is not lost; the step then exits non-zero.
+              echo "HANGDUMP: ERROR — gdb not on PATH; no dump can be taken; this dispatch is INVALID"
+              DUMP_INVALID="1"
             fi
           fi
           $CMD
@@ -463,6 +480,10 @@ jobs:
           if [ -n "$WATCHDOG" ]; then
             kill "$WATCHDOG" 2>/dev/null || true
             wait "$WATCHDOG" 2>/dev/null || true
+          fi
+          if [ "$DUMP_INVALID" = "1" ]; then
+            echo "HANGDUMP: failing the step — the dump this dispatch requested was never taken"
+            exit 1
           fi
           exit $RC
 
