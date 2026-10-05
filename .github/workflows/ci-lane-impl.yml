@@ -101,6 +101,11 @@ on:
         required: false
         default: false
         type: boolean
+      test_threads:
+        description: "libtest --test-threads value for the Run tests step (empty = libtest default). Stage 1 of the #1936 hang-capture: a bounded N discriminates concurrency-dependent deadlocks at zero code cost."
+        required: false
+        default: ""
+        type: string
       source_repository:
         description: "Repository to check out (owner/name)"
         required: false
@@ -393,7 +398,12 @@ jobs:
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-        run: cargo test --locked --profile ci --all-features --verbose
+        # test_threads (#1936 Stage 1): empty => this line is BYTE-FOR-BYTE the
+        # invocation it has always been — the separating space rides INSIDE the
+        # format string, so the empty case appends nothing; non-empty => libtest
+        # runs with a bounded thread count. Revert = delete the input at all
+        # three sites (here, and pr-checks.yml x2).
+        run: cargo test --locked --profile ci --all-features --verbose${{ inputs.test_threads && format(' --test-threads={0}', inputs.test_threads) || '' }}
 
       - name: "Diagnose: resource envelope AFTER test leg"
         if: ${{ always() && inputs.diagnose && !inputs.fix && !inputs.lockregen && !inputs.fast }}
