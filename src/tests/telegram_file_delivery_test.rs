@@ -20,7 +20,7 @@
 //! Deliberately NOT covered here: the extraction rules, the regen ladder, and
 //! the notice wording. Each has its own home.
 
-use crate::channels::telegram::delivery::{document_part_name, send_local_files};
+use crate::channels::telegram::delivery::{DeliveredFile, document_part_name, send_local_files};
 use crate::utils::image::{LocalFile, LocalImageFailureReason};
 use std::path::{Path, PathBuf};
 
@@ -63,6 +63,14 @@ fn file_at(path: PathBuf, caption: Option<&str>) -> LocalFile {
         // `(0, 0)` is the documented "not from a scan" value (#1918).
         marker_span: (0, 0),
     }
+}
+
+/// The paths a send handed back, in the order it delivered them. Most tests
+/// here are about WHICH files landed and in what order, so they read the paths
+/// out of the richer return value; the message ids are asserted where they are
+/// the point (the id-carrying test below).
+fn delivered_paths(files: &[DeliveredFile]) -> Vec<PathBuf> {
+    files.iter().map(|f| f.path.clone()).collect()
 }
 
 fn write_fixture(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
@@ -185,7 +193,11 @@ async fn a_resolved_link_ships_exactly_one_document_captioned_by_its_label() {
     .await;
 
     document_mock.assert_async().await;
-    assert_eq!(delivered, vec![report], "the delivered path comes back");
+    assert_eq!(
+        delivered_paths(&delivered),
+        vec![report],
+        "the delivered path comes back"
+    );
     assert!(failures.is_empty(), "a delivered file reports no failure");
 }
 
@@ -217,7 +229,7 @@ async fn a_link_without_a_label_ships_the_document_with_no_caption() {
     .await;
 
     document_mock.assert_async().await;
-    assert_eq!(delivered, vec![report]);
+    assert_eq!(delivered_paths(&delivered), vec![report]);
     assert!(failures.is_empty());
 }
 
@@ -253,7 +265,11 @@ async fn each_link_ships_its_own_bubble_in_order() {
     .await;
 
     document_mock.assert_async().await;
-    assert_eq!(delivered, vec![first, second], "delivered in the reply's order");
+    assert_eq!(
+        delivered_paths(&delivered),
+        vec![first, second],
+        "delivered in the reply's order"
+    );
     assert!(failures.is_empty());
 }
 
@@ -313,6 +329,52 @@ async fn the_document_request_carries_the_files_own_name() {
     .await;
 
     document_mock.assert_async().await;
-    assert_eq!(delivered, vec![report]);
+    assert_eq!(delivered_paths(&delivered), vec![report]);
+    assert!(failures.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// the delivered file names the bubble it landed in (#1918)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_delivered_file_carries_the_message_id_the_send_produced() {
+    // #1918: the rich plane links each `📎 <label>` marker to the bubble that
+    // carries its file, so the send must hand back WHICH message it produced.
+    // The id is read off the send's own response body (`SEND_MESSAGE_OK` ->
+    // `message_id` 701), never invented — a wrong id would point the marker at
+    // an unrelated message, which is worse than no link at all.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let report = write_fixture(dir.path(), "q3.pdf", PDF_BYTES);
+    let mut server = mockito::Server::new_async().await;
+    let document_mock = server
+        .mock("POST", "/botTESTTOKEN/SendDocument")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(SEND_MESSAGE_OK)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let bot = test_bot(&server);
+    let (delivered, failures) = send_local_files(
+        uuid::Uuid::new_v4(),
+        &bot,
+        teloxide::types::ChatId(CHAT),
+        None,
+        &[file_at(report.clone(), Some("Q3 report"))],
+    )
+    .await;
+
+    document_mock.assert_async().await;
+    assert_eq!(delivered.len(), 1, "one link, one document bubble");
+    assert_eq!(
+        delivered[0].message_id, 701,
+        "the id is the one the send produced, read off its own response"
+    );
+    assert_eq!(
+        delivered[0].path, report,
+        "and the record still names the file that bubble carries"
+    );
     assert!(failures.is_empty());
 }

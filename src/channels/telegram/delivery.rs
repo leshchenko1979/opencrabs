@@ -1797,6 +1797,22 @@ pub(crate) fn document_part_name(path: &std::path::Path) -> String {
         .unwrap_or_default()
 }
 
+/// A local file that landed in the chat, and the message it landed in (#1918).
+///
+/// The id is what lets the rich plane link a file's `📎 <label>` marker back to
+/// the bubble that carries it: a marker that names a document the reader can
+/// scroll to is the whole point of the marker, and without the id the rewrite
+/// would have to guess which bubble belongs to which link. The path travels
+/// with it because the caller looks the file up BY PATH — the id alone would
+/// not say which file it carried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeliveredFile {
+    /// The file that was sent.
+    pub path: std::path::PathBuf,
+    /// Telegram's id for the message the send produced.
+    pub message_id: i32,
+}
+
 /// Send each resolved local file as its own document bubble (#1916).
 ///
 /// Deliberately NOT a generalization of [`send_local_images`]: a file has no
@@ -1806,17 +1822,18 @@ pub(crate) fn document_part_name(path: &std::path::Path) -> String {
 /// [`crate::utils::image::validate_local_file`], where exceeding it can be
 /// reported to the MODEL as a rejection reason before delivery is attempted
 /// instead of surfacing here as a refusal the model never saw coming. Returns
-/// the paths that landed and the failures the channel itself refused, for the
-/// same reason its siblings do: the two halves are set in different arms, and
-/// inferring one from the other would couple two independent facts.
+/// the files that landed — each with the message id the send produced — and the
+/// failures the channel itself refused, for the same reason its siblings do: the
+/// two halves are set in different arms, and inferring one from the other would
+/// couple two independent facts.
 pub(crate) async fn send_local_files(
     session_id: Uuid,
     bot: &Bot,
     chat_id: ChatId,
     thread_id: Option<teloxide::types::ThreadId>,
     files: &[crate::utils::image::LocalFile],
-) -> (Vec<std::path::PathBuf>, Vec<LocalImageFailure>) {
-    let mut delivered: Vec<std::path::PathBuf> = Vec::new();
+) -> (Vec<DeliveredFile>, Vec<LocalImageFailure>) {
+    let mut delivered: Vec<DeliveredFile> = Vec::new();
     let mut failures: Vec<LocalImageFailure> = Vec::new();
 
     for file in files {
@@ -1845,7 +1862,10 @@ pub(crate) async fn send_local_files(
         .map(|m| m.id.0);
         match sent {
             Ok(mid) => {
-                delivered.push(path.clone());
+                delivered.push(DeliveredFile {
+                    path: path.clone(),
+                    message_id: mid,
+                });
                 let reference = path.display().to_string();
                 // Match the outbox media receipt: len is sent bytes and hash8
                 // identifies the path, so one audit predicate covers every leg.
