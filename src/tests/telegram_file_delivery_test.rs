@@ -23,7 +23,9 @@
 use crate::channels::telegram::delivery::{
     DeliveredFile, document_part_name, file_message_link, link_file_markers, send_local_files,
 };
-use crate::utils::image::{LocalFile, LocalFileScan, LocalImageFailureReason};
+use crate::utils::image::{
+    LocalFile, LocalFileScan, LocalImageFailureReason, disarm_autolink, file_marker_text,
+};
 use std::path::{Path, PathBuf};
 
 const CHAT: i64 = 133_526_395;
@@ -648,5 +650,78 @@ fn the_link_form_and_the_marker_rewrite_agree() {
         "Report attached: [📎 Q3 report](https://t.me/c/1234567890/91047).",
         "the marker points at the bubble the send produced, addressed by the \
          chat kind the message arrived in"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// the marker is not a domain (#1938)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_dotted_label_does_not_autolink_as_a_domain() {
+    // The live specimen: the marker `📎 1918-fix-state.md` was rendered by the
+    // Telegram client as a link to the Moldova ccTLD `1918-fix-state.md`. The
+    // dot is followed by a zero-width space, which no renderer shows ink for
+    // but which breaks the client's `name.tld` pattern.
+    let out = file_marker_text("1918-fix-state.md", "/tmp/1918-fix-state.md");
+    assert_eq!(
+        out, "1918-fix-state.\u{200b}md",
+        "the dot the client keys on is followed by an invisible breaker"
+    );
+    assert!(
+        !out.contains(".md"),
+        "no bare `.md` survives for the client's TLD detector to match"
+    );
+    assert_eq!(
+        out.replace('\u{200b}', ""),
+        "1918-fix-state.md",
+        "the breaker is invisible: strip it and the reader's own words are back"
+    );
+}
+
+#[test]
+fn an_empty_label_falls_back_to_a_disarmed_basename() {
+    let out = file_marker_text("   ", "/tmp/reports/q3-report.pdf");
+    assert_eq!(
+        out, "q3-report.\u{200b}pdf",
+        "the basename fallback is disarmed too — the name is the marker text \
+         whether or not the author wrote a label"
+    );
+}
+
+#[test]
+fn a_label_without_a_dotted_token_is_left_alone() {
+    // Nothing to disarm: the disarmer must not touch a marker it has no reason
+    // to change, or every label would carry noise.
+    assert_eq!(file_marker_text("Q3 report", "/tmp/q3-report.pdf"), "Q3 report");
+    assert_eq!(file_marker_text("notes", "/tmp/notes"), "notes");
+}
+
+#[test]
+fn a_trailing_dot_is_not_disarmed() {
+    // `sentence.` is not a domain: the dot precedes a space or the end of the
+    // string, so there is no TLD to break.
+    assert_eq!(disarm_autolink("the report."), "the report.");
+    assert_eq!(disarm_autolink("a.b.c"), "a.\u{200b}b.\u{200b}c");
+    assert_eq!(disarm_autolink("v1.2"), "v1.\u{200b}2");
+}
+
+#[test]
+fn a_disarmed_marker_survives_the_link_splice() {
+    // The seam: the HTML plane rewrites the marker in place into a markdown
+    // link. The breaker rides in the LABEL — the words between the brackets —
+    // so the address is untouched and the client still cannot autolink the
+    // label it is handed.
+    let label = file_marker_text("1918-fix-state.md", "/tmp/1918-fix-state.md");
+    let body = format!("State: 📎 {label}");
+    let scan = scan_over(&body, &[(Path::new(Q3), &format!("📎 {label}"))]);
+    let links = vec![(
+        PathBuf::from(Q3),
+        "https://t.me/c/3936827469/91639".to_string(),
+    )];
+    assert_eq!(
+        link_file_markers(&body, &scan, &links),
+        "State: [📎 1918-fix-state.\u{200b}md](https://t.me/c/3936827469/91639)",
+        "the marker becomes a link and the label inside it stays disarmed"
     );
 }

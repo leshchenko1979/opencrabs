@@ -1808,6 +1808,35 @@ fn record_file_candidate(
     }
 }
 
+/// Break a chat client's URL autolinker on a marker label (#1938).
+///
+/// A dotted token such as `1918-fix-state.md` or `config.io` is rendered by the
+/// Telegram client as a bare domain link — the marker then wears a fake `t.me`
+/// preview and hijacks the reader's tap. A zero-width space inserted after a
+/// dot that precedes an alphanumeric is invisible in every plane (the classic
+/// HTML renderer, the rich plane's `alt`, and the linked `[label](url)` form
+/// `link_file_markers` splices) while it breaks the client's `name.tld` pattern.
+///
+/// A backslash escape is deliberately NOT used: the classic plane has no escape,
+/// so `1918-fix-state\.md` would render with the backslash visible. The dot
+/// itself stays visible, so the reader still sees the file's own name.
+pub(crate) fn disarm_autolink(text: &str) -> String {
+    /// U+200B ZERO WIDTH SPACE — no ink in any renderer.
+    const ZWSP: char = '\u{200b}';
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 8);
+    for (i, &c) in chars.iter().enumerate() {
+        out.push(c);
+        if c == '.'
+            && let Some(&next) = chars.get(i + 1)
+            && next.is_ascii_alphanumeric()
+        {
+            out.push(ZWSP);
+        }
+    }
+    out
+}
+
 /// The visible text left where a delivered file link was (#1918).
 ///
 /// The link label is the natural marker — it is the words the author chose — and
@@ -1815,15 +1844,20 @@ fn record_file_candidate(
 /// blank. Deliberately NOT a URL: a `t.me` message link exists only for groups
 /// and channels, so a DM or a basic group has no form to offer, while a marker
 /// needs no link form at all.
-fn file_marker_text(label: &str, target: &str) -> String {
+///
+/// The result is passed through [`disarm_autolink`] (#1938) so a dotted name
+/// reads as a filename in both planes rather than as a domain link.
+pub(crate) fn file_marker_text(label: &str, target: &str) -> String {
     let trimmed = label.trim();
-    if !trimmed.is_empty() {
-        return trimmed.to_string();
-    }
-    std::path::Path::new(target)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "file".to_string())
+    let text = if !trimmed.is_empty() {
+        trimmed.to_string()
+    } else {
+        std::path::Path::new(target)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".to_string())
+    };
+    disarm_autolink(&text)
 }
 
 /// Scan a reply for markdown links to local files and hand back the text with

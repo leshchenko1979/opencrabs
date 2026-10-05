@@ -896,13 +896,42 @@ mod local_file_rewrite {
             &[],
         );
         assert_eq!(
-            rw.rich, "![📎 q3-report.pdf](tg://document?id=doc0)",
-            "the reader always has something to anchor on"
+            rw.rich,
+            "![📎 q3-report.\u{200b}pdf](tg://document?id=doc0)",
+            "the reader always has something to anchor on — the name, disarmed of \
+             the autolinker (#1938) so the marker is not read as a domain"
         );
         assert_eq!(rw.entries.len(), 1);
         assert!(
             rw.entries[0].file.caption.is_none(),
             "an empty label is no caption — the name is the marker's text, not its caption"
+        );
+    }
+
+    #[test]
+    fn a_dotted_label_is_disarmed_in_the_rich_alt_too() {
+        // The live specimen (#1938, topic `Telegram: Rich Text`): the label
+        // `1918-fix-state.md` was autolinked by the client as the Moldova
+        // ccTLD. The rich plane carries the same marker text in the `alt`, so
+        // the disarmer has to reach this plane as well as the HTML marker.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let md = write_file(dir.path(), "1918-fix-state.md", b"# state\n");
+        let rw = rewrite_local_files(
+            &format!("[1918-fix-state.md]({})", md.display()),
+            Some(dir.path()),
+            DOC_ID_PREFIX,
+            &[],
+        );
+        assert_eq!(
+            rw.rich,
+            "![📎 1918-fix-state.\u{200b}md](tg://document?id=doc0)",
+            "the alt is disarmed exactly as the HTML marker is"
+        );
+        assert_eq!(
+            rw.entries[0].file.caption.as_deref(),
+            Some("1918-fix-state.md"),
+            "the CAPTION is not a marker and stays verbatim — only the visible \
+             marker text is disarmed"
         );
     }
 
