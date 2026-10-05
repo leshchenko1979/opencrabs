@@ -215,6 +215,18 @@ pub(crate) struct SentBubble {
     /// holds the only copy of that picture, so it is never burial evidence
     /// (#617) and never enters the cleanup's delete set.
     pub(crate) ids: Vec<MessageId>,
+    /// The documents this bubble delivered, as `(path, bubble id)` (#1939).
+    ///
+    /// A document is not always carried by the bubble that named it: on the
+    /// rich plane it rides the bubble's media array (so that bubble IS its
+    /// address), while on the HTML plane it ships as its own bubble from the
+    /// file floor. Either way the final leg's rich fallback needs an address to
+    /// point the `📎` marker at, and its OWN `delivered` list is empty whenever
+    /// the rich plane owns documents — so the address travels with the bubble
+    /// that delivered them. The id is an `i32` because that is the shape
+    /// `file_message_link` takes, and the URL is built at the delivery site,
+    /// which is the only place that knows the chat kind.
+    pub(crate) delivered_files: Vec<(std::path::PathBuf, i32)>,
 }
 
 pub(crate) struct StreamingState {

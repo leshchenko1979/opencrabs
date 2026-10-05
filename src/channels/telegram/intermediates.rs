@@ -307,6 +307,52 @@ pub(crate) fn superseded_ids(bubbles: &[SentBubble], rich_text: &str) -> Vec<Mes
         .collect()
 }
 
+/// Does an UNDELETABLE bubble already carry `rich_text` — so that the rich
+/// fallback's re-send would be pure duplication (#1939)?
+///
+/// The fallback arm's premise is that it REPLACES the intermediates it deletes.
+/// A bubble that carried media records EMPTY ids (#617, [`promoted_bubble_is_burial_evidence`]),
+/// so [`superseded_ids`] cannot select it and nothing is deleted — yet the arm
+/// still sent, and the reader got the body twice: once in the media-bearing rich
+/// intermediate and once in the fallback. The second copy's `📎` marker also
+/// pointed nowhere, because the document rode the first.
+///
+/// Composition with [`superseded_ids`] is deliberate: the two answer different
+/// questions about the same list. `superseded_ids` names what may be DELETED;
+/// this names whether there is anything left to REPLACE. When it is true the
+/// send is skipped, and `superseded_ids` is still consulted for the bubbles the
+/// surviving copy supersedes.
+///
+/// Pure + free for the same reason as its neighbours: both directions are
+/// testable without a live bot.
+pub(crate) fn fallback_would_duplicate(bubbles: &[SentBubble], rich_text: &str) -> bool {
+    let norm_final = normalize_for_dedup(rich_text);
+    bubbles
+        .iter()
+        .any(|b| b.ids.is_empty() && normalize_for_dedup(&b.text) == norm_final)
+}
+
+/// The documents the intermediates being superseded already delivered, as
+/// `(path, bubble id)` (#1939).
+///
+/// The rich fallback's own `file_links` is built from the FINAL leg's `delivered`
+/// list, which is empty whenever the rich plane owns documents — nothing was
+/// sent, so nothing could be linked. But the documents did reach the chat, in an
+/// intermediate, and their addresses are recorded on the bubble that delivered
+/// them. Restricted to the bubbles the fallback actually supersedes: a
+/// narration bubble's documents belong to that bubble, which survives.
+pub(crate) fn intermediate_file_links(
+    bubbles: &[SentBubble],
+    rich_text: &str,
+) -> Vec<(std::path::PathBuf, i32)> {
+    let norm_final = normalize_for_dedup(rich_text);
+    bubbles
+        .iter()
+        .filter(|b| normalize_for_dedup(&b.text) == norm_final)
+        .flat_map(|b| b.delivered_files.iter().cloned())
+        .collect()
+}
+
 /// The two halves of one intermediate turn's media partition (#465), plus the
 /// image family's second rewrite (#732).
 ///
@@ -547,9 +593,19 @@ pub(crate) async fn deliver_intermediate_message(
         } else {
             Vec::new()
         };
+        // #1939: the documents rode THIS bubble's media array, so this bubble is
+        // their address — the fallback leg needs it to point the `📎` marker at
+        // something the reader can open. Recorded before the paths move into
+        // `delivered_image_paths` below.
+        let delivered_files: Vec<(std::path::PathBuf, i32)> = delivered_file_paths
+            .iter()
+            .cloned()
+            .map(|path| (path, id.0))
+            .collect();
         s.sent_bubbles.push(SentBubble {
             text: text.to_string(),
             ids,
+            delivered_files,
         });
         // Record the paths that just rode this bubble, so neither a later
         // intermediate nor the final leg ships the same media twice (#502).
@@ -659,6 +715,13 @@ pub(crate) async fn deliver_intermediate_message(
     s.sent_bubbles.push(SentBubble {
         text: text.to_string(),
         ids: sent_ids,
+        // #1939: on this plane each document shipped as its OWN bubble from the
+        // file floor above, so the fallback leg cannot derive their addresses
+        // from this bubble's ids — they travel here instead.
+        delivered_files: delivered_files
+            .iter()
+            .map(|file| (file.path.clone(), file.message_id))
+            .collect(),
     });
     true
 }

@@ -24,14 +24,34 @@
 
 use crate::channels::telegram::flow::SentBubble;
 use crate::channels::telegram::intermediates::{
-    normalize_for_dedup, promoted_bubble_is_burial_evidence, superseded_ids,
+    fallback_would_duplicate, intermediate_file_links, normalize_for_dedup,
+    promoted_bubble_is_burial_evidence, superseded_ids,
 };
+use std::path::PathBuf;
 use teloxide::types::MessageId;
 
 fn bubble(text: &str, ids: &[i32]) -> SentBubble {
     SentBubble {
         text: text.to_string(),
         ids: ids.iter().copied().map(MessageId).collect(),
+        // Most cases here are about the TEXT/ID pairing; a bubble that carried
+        // no document records none (#1939). The file-link cases build their own.
+        delivered_files: Vec::new(),
+    }
+}
+
+/// A bubble that delivered `files`, as `(path, bubble id)` pairs — the shape
+/// [`SentBubble::delivered_files`] holds (#1939). On the rich plane these are
+/// the documents that rode this bubble's media array; on the HTML plane they
+/// are the separate document bubbles this message produced.
+fn bubble_with_files(text: &str, ids: &[i32], files: &[(&str, i32)]) -> SentBubble {
+    SentBubble {
+        text: text.to_string(),
+        ids: ids.iter().copied().map(MessageId).collect(),
+        delivered_files: files
+            .iter()
+            .map(|(path, id)| (PathBuf::from(path), *id))
+            .collect(),
     }
 }
 
@@ -131,4 +151,71 @@ fn normalize_collapses_all_whitespace_runs() {
     assert_eq!(normalize_for_dedup("a\n\n b\tc "), "a b c");
     assert_eq!(normalize_for_dedup(""), "");
     assert_eq!(normalize_for_dedup("   "), "");
+}
+
+// ---------------------------------------------------------------------------
+// #1939 — the fallback must not duplicate an undeletable intermediate
+// ---------------------------------------------------------------------------
+
+/// A promoted intermediate that carried MEDIA records EMPTY ids (#617), so
+/// [`superseded_ids`] cannot select it: the fallback would delete nothing and
+/// still re-send the body, leaving the reader with it twice and orphaning the
+/// `📎` markers (the documents rode the intermediate, so the re-sent copy's
+/// markers point at a bubble that holds nothing). `fallback_would_duplicate` is
+/// what stops that, and it must fire ONLY for the undeletable case.
+#[test]
+fn a_media_intermediate_that_carries_the_final_body_suppresses_the_resend() {
+    let final_body = "Here is the report, inline.";
+    // Media-bearing: empty ids, and it carries the document the body names.
+    let media = bubble_with_files(final_body, &[], &[("/tmp/q3.pdf", 90_465)]);
+
+    assert!(
+        fallback_would_duplicate(std::slice::from_ref(&media), final_body),
+        "a media-bearing intermediate already carries this body, so the \
+         fallback's re-send would duplicate it"
+    );
+    // The premise, pinned: it is undeletable, so the burial arm would delete
+    // nothing and the duplicate would survive the cleanup.
+    assert!(superseded_ids(std::slice::from_ref(&media), final_body).is_empty());
+
+    // Negative control — the deletable case. An HTML bubble WITH ids is
+    // superseded, so the fallback must still run and replace it: suppressing
+    // here would leave the reader with the stale copy and no final.
+    let html = bubble(final_body, &[7]);
+    assert!(!fallback_would_duplicate(std::slice::from_ref(&html), final_body));
+    assert_eq!(
+        superseded_ids(std::slice::from_ref(&html), final_body),
+        ids_of(&[7])
+    );
+
+    // And a media bubble whose text DIFFERS does not suppress an unrelated body.
+    assert!(!fallback_would_duplicate(
+        std::slice::from_ref(&media),
+        "An entirely different answer."
+    ));
+}
+
+/// The fallback leg's own `file_links` is empty whenever the rich plane owned
+/// the documents — nothing was sent there, so nothing could be linked. The
+/// document's address is the INTERMEDIATE's bubble, and that is what the
+/// predicate recovers: the `(path, id)` pair for each file a SUPERSEDED bubble
+/// delivered, so the `📎` marker can point at the bubble that holds it.
+#[test]
+fn the_fallback_recovers_the_intermediates_delivered_files() {
+    let body = "Report attached.";
+    let media = bubble_with_files(body, &[], &[("/tmp/q3.pdf", 90_465)]);
+    let narration = bubble_with_files("Earlier narration.", &[5], &[("/tmp/other.pdf", 90_400)]);
+
+    let got = intermediate_file_links(&[narration, media], body);
+
+    assert_eq!(
+        got,
+        vec![(PathBuf::from("/tmp/q3.pdf"), 90_465)],
+        "only the bubble the fallback supersedes contributes its files — a \
+         narration bubble's documents belong to a bubble that survives"
+    );
+    // Negative control: when no bubble matches, nothing is recovered, so every
+    // marker stays plain rather than pointing at the wrong document.
+    assert!(intermediate_file_links(&[], body).is_empty());
+    assert!(intermediate_file_links(&[bubble("Something else.", &[6])], body).is_empty());
 }

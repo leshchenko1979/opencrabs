@@ -725,3 +725,55 @@ fn a_disarmed_marker_survives_the_link_splice() {
         "the marker becomes a link and the label inside it stays disarmed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// the fallback links a marker to an intermediate's bubble (#1939)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_fallback_links_a_marker_to_the_intermediates_bubble() {
+    // When the rich plane owned the documents, the final leg's `delivered` list
+    // is EMPTY — nothing was sent there — so the floor builds no link and the
+    // `📎` marker would stay plain even though the document IS in the chat. Its
+    // address is the intermediate's own bubble, recovered by
+    // `intermediate_file_links`. This drives the whole leg the way delivery
+    // does: recover the pair, build the chat kind's link over the intermediate's
+    // id, and splice it with the SAME rewrite the floor uses.
+    use crate::channels::telegram::flow::SentBubble;
+    use crate::channels::telegram::intermediates::intermediate_file_links;
+
+    let body = "Report: 📎 Q3 report.";
+    let scan = scan_over(body, &[(Path::new(Q3), "📎 Q3 report")]);
+    // The promoted intermediate delivered the document inside its own media
+    // array, so it records EMPTY ids (#617) and the id of the bubble it sent.
+    let intermediate = SentBubble {
+        text: body.to_string(),
+        ids: Vec::new(),
+        delivered_files: vec![(PathBuf::from(Q3), 91_047)],
+    };
+    let recovered = intermediate_file_links(std::slice::from_ref(&intermediate), body);
+    assert_eq!(recovered, vec![(PathBuf::from(Q3), 91_047)]);
+
+    let links: Vec<(PathBuf, String)> = recovered
+        .into_iter()
+        .filter_map(|(path, id)| {
+            file_message_link(&supergroup(), FORUM_CHAT_ID, None, id).map(|link| (path, link))
+        })
+        .collect();
+    assert_eq!(
+        link_file_markers(body, &scan, &links),
+        "Report: [📎 Q3 report](https://t.me/c/1234567890/91047).",
+        "the marker points at the bubble that actually holds the document"
+    );
+
+    // A DM has no message-link form, so the same recovery yields no link and the
+    // marker stays plain rather than pointing nowhere.
+    let dm_links: Vec<(PathBuf, String)> = vec![(PathBuf::from(Q3), 91_047)]
+        .into_iter()
+        .filter_map(|(path, id)| {
+            file_message_link(&private_chat(), FORUM_CHAT_ID, None, id).map(|link| (path, link))
+        })
+        .collect();
+    assert!(dm_links.is_empty());
+    assert_eq!(link_file_markers(body, &scan, &dm_links), body);
+}

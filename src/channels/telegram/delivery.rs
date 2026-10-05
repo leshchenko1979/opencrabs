@@ -879,7 +879,7 @@ pub(crate) async fn deliver_final_response(
             // link is built and every marker stays plain rather than pointing
             // somewhere the reply cannot honour. A path absent from `delivered`
             // is absent here too, so a refused file keeps its plain marker.
-            let file_links: Vec<(std::path::PathBuf, String)> = inbound
+            let mut file_links: Vec<(std::path::PathBuf, String)> = inbound
                 .map(|message| {
                     delivered
                         .iter()
@@ -895,14 +895,44 @@ pub(crate) async fn deliver_final_response(
                         .collect()
                 })
                 .unwrap_or_default();
+            // #1939: a document delivered by a promoted INTERMEDIATE is in the
+            // chat but absent from `delivered` — the rich plane owned it, so
+            // this floor sent nothing and there is no id here to build a link
+            // from. The intermediate's own bubble IS its address, and its
+            // `delivered_files` records the pair. Merged into the SAME list so
+            // the one `link_file_markers` pass below links both origins by one
+            // rule. A path the final leg DID send already has its own (more
+            // precise) id, so it is skipped here rather than overwritten.
+            if let Some(message) = inbound {
+                let from_intermediates = {
+                    let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+                    super::intermediates::intermediate_file_links(
+                        &s.sent_bubbles,
+                        &pre_dedup_text,
+                    )
+                };
+                for (path, message_id) in from_intermediates {
+                    if file_links.iter().any(|(p, _)| p == &path) {
+                        continue;
+                    }
+                    if let Some(link) =
+                        file_message_link(&message.chat.kind, chat_id.0, thread_id, message_id)
+                    {
+                        file_links.push((path, link));
+                    }
+                }
+            }
             // Rewriting `text_only` here reaches both planes that derive from it
             // below: the HTML edit/send and the mermaid path. The rich body does
             // NOT derive from it (it is `rich_fw.rich`), which carries the same
-            // anchors in their inline form. `file_links` is empty whenever the
-            // rich plane owns the documents — nothing was sent, so nothing can
-            // be linked, and this call is a no-op that leaves the plain marker
-            // for the HTML fallback (which is honest: the marker names the
-            // document, and the reader's own bubble is directly below it).
+            // anchors in their inline form. When the rich plane owns the
+            // documents this floor sends nothing, so `delivered` is empty — but
+            // #1939 fills `file_links` from the intermediate that DID deliver
+            // them, so the marker still points at the bubble that holds the
+            // document. Only where no such address exists (a DM, or an
+            // intermediate that delivered nothing) does the call leave the plain
+            // marker, which is honest: the marker names the document and the
+            // reader's own bubble sits directly below it.
             text_only = link_file_markers(&text_only, &file_scan, &file_links);
 
             // An image the reply announced must not vanish silently when the
@@ -930,8 +960,22 @@ pub(crate) async fn deliver_final_response(
             // reclaim below can restore the host, so it must consult
             // options_pending itself — same gate as the final-answer site
             // (#45) — or a fully-deduped buttons turn stays plain.
+            // #1939: does an intermediate that ALREADY carries this exact body
+            // hold it in a bubble that cannot be deleted? A bubble that carried
+            // media records EMPTY ids (#617), so the delete set below cannot
+            // select it — nothing would be deleted, and the fallback's re-send
+            // would leave the reader with the body twice while orphaning the
+            // `📎` markers (the documents rode the intermediate, so the second
+            // copy's markers point at a bubble that holds nothing). Skipping the
+            // arm keeps the intermediates the reader already has; `text_only` is
+            // empty here, so no reply text is lost — only the duplicate.
+            let fallback_dup = {
+                let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+                super::intermediates::fallback_would_duplicate(&s.sent_bubbles, &pre_dedup_text)
+            };
             let text_only = if text_only.is_empty()
                 && !sent.is_empty()
+                && !fallback_dup
                 && super::rich::should_send_native_rich_for(
                     &pre_dedup_text,
                     options_pending(streaming),
