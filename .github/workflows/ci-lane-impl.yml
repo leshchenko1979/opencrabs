@@ -399,11 +399,18 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
         # test_threads (#1936 Stage 1): empty => this line is BYTE-FOR-BYTE the
-        # invocation it has always been — the separating space rides INSIDE the
-        # format string, so the empty case appends nothing; non-empty => libtest
-        # runs with a bounded thread count. Revert = delete the input at all
-        # three sites (here, and pr-checks.yml x2).
-        run: cargo test --locked --profile ci --all-features --verbose${{ inputs.test_threads && format(' --test-threads={0}', inputs.test_threads) || '' }}
+        # invocation it has always been — the separator rides INSIDE the format
+        # string, so the empty case appends nothing; non-empty => libtest runs
+        # with a bounded thread count.
+        #
+        # `--` IS REQUIRED (measured, run 37296592854): --test-threads is a
+        # LIBTEST flag, not a cargo one, so `cargo test … --verbose
+        # --test-threads=2` dies at argument parsing — "error: unexpected
+        # argument '--test-threads' found" — in ~4 min with the test leg never
+        # run. It must follow the `--` separator. (The approved design's own
+        # snippet omitted it; this line is the corrected form.)
+        # Revert = delete the input at all three sites (here, pr-checks.yml x2).
+        run: cargo test --locked --profile ci --all-features --verbose${{ inputs.test_threads && format(' -- --test-threads={0}', inputs.test_threads) || '' }}
 
       - name: "Diagnose: resource envelope AFTER test leg"
         if: ${{ always() && inputs.diagnose && !inputs.fix && !inputs.lockregen && !inputs.fast }}
