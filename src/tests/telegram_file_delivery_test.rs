@@ -618,3 +618,35 @@ fn a_marker_whose_text_moved_is_left_plain() {
         "a span that no longer names the marker is not cut"
     );
 }
+
+// ---------------------------------------------------------------------------
+// the two halves of the link leg meet (#1918)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_link_form_and_the_marker_rewrite_agree() {
+    // Each half is pinned on its own above: `file_message_link` builds the
+    // address, `link_file_markers` splices it in. Neither test can see the
+    // SEAM — a change that made the builder emit a shape the splicer mangles
+    // would leave both green. This one drives the pair the way delivery does:
+    // the link the chat kind implies, over the bubble id the send produced,
+    // lands in the body as one well-formed markdown link.
+    let body = "Report attached: 📎 Q3 report.";
+    let scan = scan_over(body, &[(Path::new(Q3), "📎 Q3 report")]);
+    let delivered = vec![DeliveredFile {
+        path: PathBuf::from(Q3),
+        message_id: 91047,
+    }];
+    let link = file_message_link(&supergroup(), FORUM_CHAT_ID, None, delivered[0].message_id)
+        .expect("a supergroup bubble has a message link");
+    let links: Vec<(PathBuf, String)> = delivered
+        .iter()
+        .map(|file| (file.path.clone(), link.clone()))
+        .collect();
+    assert_eq!(
+        link_file_markers(body, &scan, &links),
+        "Report attached: [📎 Q3 report](https://t.me/c/1234567890/91047).",
+        "the marker points at the bubble the send produced, addressed by the \
+         chat kind the message arrived in"
+    );
+}

@@ -815,3 +815,194 @@ mod local_file_links {
         assert_eq!(append_file_failure_notice("hello", &[]), "hello");
     }
 }
+
+// ---------------------------------------------------------------------------
+// The rich plane's document twin (#1918)
+// ---------------------------------------------------------------------------
+
+/// `rewrite_local_files` — the document twin of `rewrite_local_images`. Where
+/// `extract_local_files` emits the `📎 <label>` MARKER the HTML plane needs, this
+/// one replaces a resolvable link IN PLACE with the `tg://document?id=docN`
+/// reference the rich plane's media array answers. The two walk the same
+/// references in the same order and share `classify_file_target` /
+/// `validate_local_file`, so they can never disagree about which links are files.
+mod local_file_rewrite {
+    use crate::utils::image::{DOC_ID_PREFIX, rewrite_local_files};
+    use std::path::{Path, PathBuf};
+
+    const PDF_BYTES: &[u8] = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n";
+    const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x01\x02\x03\x04\x05\x06\x07";
+
+    fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).expect("write fixture");
+        path
+    }
+
+    #[test]
+    fn a_local_file_link_becomes_a_document_reference_in_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3-report.pdf", PDF_BYTES);
+        let rw = rewrite_local_files(
+            &format!("before [Q3 report]({}) after", pdf.display()),
+            Some(dir.path()),
+            DOC_ID_PREFIX,
+            &[],
+        );
+        assert_eq!(
+            rw.rich, "before ![📎 Q3 report](tg://document?id=doc0) after",
+            "the link is replaced AT its position, never stripped"
+        );
+        assert_eq!(rw.entries.len(), 1);
+        assert_eq!(rw.entries[0].id, "doc0");
+        assert_eq!(rw.entries[0].file.path, pdf);
+        assert_eq!(rw.entries[0].file.caption.as_deref(), Some("Q3 report"));
+        assert_eq!(
+            rw.entries[0].file.marker_span,
+            (0, 0),
+            "a file that came from the rewrite has no position in any scan buffer"
+        );
+    }
+
+    #[test]
+    fn two_files_get_their_own_ids_in_order_of_appearance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let q3 = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let q4 = write_file(dir.path(), "q4.pdf", PDF_BYTES);
+        let rw = rewrite_local_files(
+            &format!("[Q3]({}) and [Q4]({})", q3.display(), q4.display()),
+            Some(dir.path()),
+            DOC_ID_PREFIX,
+            &[],
+        );
+        assert_eq!(
+            rw.rich,
+            "![📎 Q3](tg://document?id=doc0) and ![📎 Q4](tg://document?id=doc1)"
+        );
+        let ids: Vec<&str> = rw.entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["doc0", "doc1"]);
+        let paths: Vec<PathBuf> = rw.entries.iter().map(|e| e.file.path.clone()).collect();
+        assert_eq!(paths, vec![q3, q4]);
+    }
+
+    #[test]
+    fn an_empty_label_falls_back_to_the_files_own_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3-report.pdf", PDF_BYTES);
+        let rw = rewrite_local_files(
+            &format!("[]({})", pdf.display()),
+            Some(dir.path()),
+            DOC_ID_PREFIX,
+            &[],
+        );
+        assert_eq!(
+            rw.rich, "![📎 q3-report.pdf](tg://document?id=doc0)",
+            "the reader always has something to anchor on"
+        );
+        assert_eq!(rw.entries.len(), 1);
+        assert!(
+            rw.entries[0].file.caption.is_none(),
+            "an empty label is no caption — the name is the marker's text, not its caption"
+        );
+    }
+
+    #[test]
+    fn a_link_inside_a_code_span_is_left_byte_identical() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let text = format!("`[Q3]({})`", pdf.display());
+        let rw = rewrite_local_files(&text, Some(dir.path()), DOC_ID_PREFIX, &[]);
+        assert_eq!(rw.rich, text, "a code span is documentation, not a link");
+        assert!(rw.entries.is_empty());
+    }
+
+    #[test]
+    fn a_missing_file_stays_byte_identical_and_is_not_recorded() {
+        // A rejected candidate is left as written and is NOT an entry: the
+        // reference must survive so the reader still sees what was named. The
+        // failure is the SCAN's to report — one predicate, one home.
+        let text = "before [Q3 report](/definitely/not/here-q3.pdf) after";
+        let rw = rewrite_local_files(text, None, DOC_ID_PREFIX, &[]);
+        assert_eq!(rw.rich, text);
+        assert!(rw.entries.is_empty());
+    }
+
+    #[test]
+    fn a_relative_target_without_a_base_dir_stays_literal() {
+        // It may be ordinary prose that merely looks like a link, so with no
+        // working directory to resolve against it is left alone.
+        let text = "see [report](reports/q3.pdf) here";
+        let rw = rewrite_local_files(text, None, DOC_ID_PREFIX, &[]);
+        assert_eq!(rw.rich, text);
+        assert!(rw.entries.is_empty());
+    }
+
+    #[test]
+    fn a_remote_link_stays_byte_identical() {
+        let text = "see [the site](https://example.com/a) for details";
+        let rw = rewrite_local_files(text, None, DOC_ID_PREFIX, &[]);
+        assert_eq!(rw.rich, text);
+        assert!(rw.entries.is_empty());
+    }
+
+    #[test]
+    fn an_already_delivered_file_is_consumed_without_a_second_reference() {
+        // The document is already in the chat (a promoted intermediate sent
+        // it). The reference is CONSUMED — nothing is left to answer — but no
+        // entry is recorded: a delivered document is not a lost one, and a
+        // reference with no entry would be neutralised by the shield anyway.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let rw = rewrite_local_files(
+            &format!("before [Q3]({}) after", pdf.display()),
+            Some(dir.path()),
+            DOC_ID_PREFIX,
+            std::slice::from_ref(&pdf),
+        );
+        assert_eq!(rw.rich, "before  after");
+        assert!(rw.entries.is_empty());
+    }
+
+    #[test]
+    fn the_image_familys_reference_is_not_a_file_link() {
+        // `![alt](path)` belongs to the image family: the `!` guard is what
+        // keeps one reference from being claimed twice. Without it the file
+        // walk would eat a picture the image walk had already resolved.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png = write_file(dir.path(), "pic.png", PNG_BYTES);
+        let text = format!("![pic]({})", png.display());
+        let rw = rewrite_local_files(&text, Some(dir.path()), DOC_ID_PREFIX, &[]);
+        assert_eq!(rw.rich, text);
+        assert!(rw.entries.is_empty());
+    }
+
+    #[test]
+    fn the_id_prefix_is_the_callers_choice() {
+        // Entries are matched to references BY ID inside one message's media
+        // array, so the prefix is a parameter: the delivery site passes `doc`
+        // so a document entry can never answer a picture's reference.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let rw = rewrite_local_files(
+            &format!("[Q3]({})", pdf.display()),
+            Some(dir.path()),
+            "xyz",
+            &[],
+        );
+        assert_eq!(rw.rich, "![📎 Q3](tg://document?id=xyz0)");
+        assert_eq!(rw.entries[0].id, "xyz0");
+    }
+
+    #[test]
+    fn leading_whitespace_is_trimmed_off_the_rich_body() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let rw = rewrite_local_files(
+            &format!("\n\n  before [Q3]({})", pdf.display()),
+            Some(dir.path()),
+            DOC_ID_PREFIX,
+            &[],
+        );
+        assert_eq!(rw.rich, "before ![📎 Q3](tg://document?id=doc0)");
+    }
+}
