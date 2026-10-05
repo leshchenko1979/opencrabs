@@ -354,7 +354,7 @@ jobs:
           sccache --show-stats 2>/dev/null || echo "(sccache not on PATH)"
           echo "===== DIAG pre-test END ====="
 
-      - name: Install gdb (hangdump mode only)
+      - name: Install gdb + relax ptrace (hangdump mode only)
         if: ${{ inputs.hangdump }}
         # #1936 Stage 2: the watchdog needs gdb, and ubuntu-latest does NOT
         # ship it — measured, run 37300036106: the step went GREEN while the
@@ -362,7 +362,19 @@ jobs:
         # i.e. the instrument never ran and the dump criterion was never
         # exercised. Gated on hangdump so the default dispatch's step list and
         # Run tests invocation stay byte-for-byte unchanged.
-        run: sudo apt-get update -qq && sudo apt-get install -y gdb
+        #
+        # ptrace: gdb attaches to the test binary as a SIBLING, and
+        # ubuntu-latest ships YAMA ptrace_scope=1, which refuses a sibling
+        # attach — measured, run 37317799177: the watchdog armed on the right
+        # pid (the harness binary, not a compiler) and fired 3x, but every
+        # dump read "Could not attach to process ... /proc/sys/kernel/yama/
+        # ptrace_scope" and produced NO backtrace. Relax it for this job;
+        # `|| true` because some runners expose the knob read-only, and the
+        # dump itself also runs under sudo, which YAMA exempts regardless.
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y gdb
+          sudo sysctl -w kernel.yama.ptrace_scope=0 || true
+          echo "ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo unknown)"
 
       - name: Run tests
         id: tests
@@ -493,7 +505,11 @@ jobs:
                     if [ "$AGE" -ge 300 ] && [ $(( AGE - LAST_DUMP )) -ge 300 ] && [ "$DUMPS" -lt 3 ]; then
                       LAST_DUMP=$AGE; DUMPS=$((DUMPS+1))
                       echo "===== HANGDUMP #$DUMPS $(date -u +%FT%TZ) pid=$PID age=${AGE}s ====="
-                      gdb -p "$PID" -batch -ex 'thread apply all bt' 2>&1 | head -4000 || true
+                      # sudo: YAMA exempts root from ptrace_scope, so this
+                      # attaches even where the sysctl knob is read-only
+                      # (run 37317799177: plain `gdb -p` got
+                      # "Could not attach to process ... ptrace_scope").
+                      sudo gdb -p "$PID" -batch -ex 'thread apply all bt' 2>&1 | head -4000 || true
                       echo "===== HANGDUMP #$DUMPS END ====="
                     fi
                   else
