@@ -1784,6 +1784,19 @@ pub(crate) async fn send_local_images(
     (delivered, failures)
 }
 
+/// The filename Telegram should display for a document read from `path`.
+///
+/// `InputFile::memory` carries no name, and teloxide's own fallback returns an
+/// empty string for a `Bytes` payload — Telegram then labels the document
+/// `file` and drops the MIME, because the extension never travelled either.
+/// A path whose final component is absent (`/`, `..`) keeps that empty
+/// fallback, so the call site is unchanged for it.
+pub(crate) fn document_part_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Send each resolved local file as its own document bubble (#1916).
 ///
 /// Deliberately NOT a generalization of [`send_local_images`]: a file has no
@@ -1825,7 +1838,7 @@ pub(crate) async fn send_local_files(
             bot,
             chat_id,
             thread_id,
-            InputFile::memory(bytes),
+            InputFile::memory(bytes).file_name(document_part_name(path)),
             file.caption.clone(),
         )
         .await

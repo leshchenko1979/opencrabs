@@ -20,7 +20,7 @@
 //! Deliberately NOT covered here: the extraction rules, the regen ladder, and
 //! the notice wording. Each has its own home.
 
-use crate::channels::telegram::delivery::send_local_files;
+use crate::channels::telegram::delivery::{document_part_name, send_local_files};
 use crate::utils::image::{LocalFile, LocalImageFailureReason};
 use std::path::{Path, PathBuf};
 
@@ -252,5 +252,65 @@ async fn each_link_ships_its_own_bubble_in_order() {
 
     document_mock.assert_async().await;
     assert_eq!(delivered, vec![first, second], "delivered in the reply's order");
+    assert!(failures.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// the document carries its real name (#1937)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn document_part_name_uses_the_paths_final_component() {
+    // `InputFile::memory` ships no name and teloxide's fallback returns an
+    // empty string, so Telegram labels the document `file`. This helper is the
+    // one place that decides what name travels instead.
+    assert_eq!(
+        document_part_name(Path::new("/tmp/q3-report.pdf")),
+        "q3-report.pdf",
+        "the file's own name is the name that travels"
+    );
+    // A dotless name travels as-is: the name is the path's last component, not
+    // a value derived from an extension.
+    assert_eq!(document_part_name(Path::new("/tmp/README")), "README");
+    // The path parser strips a trailing slash, so a directory reference still
+    // yields its last real component rather than an empty name.
+    assert_eq!(document_part_name(Path::new("/tmp/reports/")), "reports");
+    // A path with no final component keeps the empty fallback — today's
+    // behaviour, unchanged: the call site passes an empty name exactly as
+    // before, and Telegram applies its own `file` label.
+    assert_eq!(document_part_name(Path::new("/")), "");
+}
+
+#[tokio::test]
+async fn the_document_request_carries_the_files_own_name() {
+    // The name must REACH Telegram, not merely be computed: the multipart part
+    // header is where the filename travels, and `file` is what an unnamed part
+    // gets instead. Pinning the request is what makes this a delivery test
+    // rather than a unit test of the helper above.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let report = write_fixture(dir.path(), "q3-report.pdf", PDF_BYTES);
+    let mut server = mockito::Server::new_async().await;
+    let document_mock = server
+        .mock("POST", "/botTESTTOKEN/SendDocument")
+        .match_body(mockito::Matcher::Regex("q3-report\\.pdf".to_string()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(SEND_MESSAGE_OK)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let bot = test_bot(&server);
+    let (delivered, failures) = send_local_files(
+        uuid::Uuid::new_v4(),
+        &bot,
+        teloxide::types::ChatId(CHAT),
+        None,
+        &[file_at(report.clone(), Some("Q3 report"))],
+    )
+    .await;
+
+    document_mock.assert_async().await;
+    assert_eq!(delivered, vec![report]);
     assert!(failures.is_empty());
 }
