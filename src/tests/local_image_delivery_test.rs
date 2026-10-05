@@ -547,6 +547,81 @@ mod local_file_links {
     }
 
     // -----------------------------------------------------------------------
+    // The marker's span — where it sits, so a later pass can target it
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn each_marker_span_slices_back_to_its_own_marker() {
+        // #1918: the scanner records WHERE each `📎 <label>` marker sits, so the
+        // rich-plane rewrite can target exactly that span rather than a label
+        // that may occur again in the prose. Two delivered links and one
+        // REJECTED candidate pin the alignment: the rejected link leaves no
+        // marker and so records no span.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let b = write_file(dir.path(), "q4.pdf", PDF_BYTES);
+        let missing = dir.path().join("gone.pdf");
+        let scan = extract_local_files(
+            &format!(
+                "first [Q3 report]({}) then [Q4 report]({}) and [Gone]({})",
+                a.display(),
+                b.display(),
+                missing.display()
+            ),
+            Some(dir.path()),
+        );
+
+        assert_eq!(
+            paths(&scan),
+            vec![a, b],
+            "only the two live files attach"
+        );
+        assert_eq!(scan.failures.len(), 1, "the missing file is reported");
+        assert_eq!(
+            scan.attachments.len(),
+            2,
+            "one span per DELIVERED marker, none for the rejected candidate"
+        );
+
+        let markers: Vec<&str> = scan
+            .attachments
+            .iter()
+            .map(|f| &scan.text[f.marker_span.0..f.marker_span.1])
+            .collect();
+        assert_eq!(
+            markers,
+            vec!["📎 Q3 report", "📎 Q4 report"],
+            "each span is exactly its own marker; whole text: {:?}",
+            scan.text
+        );
+    }
+
+    #[test]
+    fn a_marker_span_survives_the_leading_trim() {
+        // The final `trim()` shifts every index left by the leading whitespace
+        // it drops, so the recorded spans must be rebased. A body that OPENS
+        // with whitespace is the only shape that exercises that rebase: without
+        // it the sliced span is off by the trimmed run.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let scan = extract_local_files(
+            &format!("\n\n  leading space [Q3 report]({})", pdf.display()),
+            Some(dir.path()),
+        );
+
+        assert_eq!(
+            scan.text, "leading space 📎 Q3 report",
+            "the leading run is trimmed off the shipped text"
+        );
+        let span = scan.attachments[0].marker_span;
+        assert_eq!(
+            &scan.text[span.0..span.1],
+            "📎 Q3 report",
+            "the span is rebased onto the TRIMMED text (raw span {span:?})"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // What the family must LEAVE ALONE
     // -----------------------------------------------------------------------
 

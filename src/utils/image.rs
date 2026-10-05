@@ -1584,6 +1584,12 @@ pub struct LocalFile {
     /// The markdown link label — `[label](target)` — to ship as the document
     /// caption. `None` when the label was empty.
     pub caption: Option<String>,
+    /// Byte range in [`LocalFileScan::text`] occupied by this file's visible
+    /// `📎 <label>` marker (#1918). The scanner records it as it emits the
+    /// marker, so a later pass rewrites exactly that span: a label that also
+    /// occurs elsewhere in the reply can never be mis-targeted. `(0, 0)` for a
+    /// value that did not come from a scan.
+    pub marker_span: (usize, usize),
 }
 
 /// Result of scanning a reply for links to local files.
@@ -1773,7 +1779,13 @@ fn record_file_candidate(
                 } else {
                     Some(label.to_string())
                 };
-                scan.attachments.push(LocalFile { path, caption });
+                scan.attachments.push(LocalFile {
+                    path,
+                    caption,
+                    // The span is set by the caller that emits the marker; a
+                    // record built here has no position in `scan.text` yet.
+                    marker_span: (0, 0),
+                });
                 true
             }
             Err(reason) => {
@@ -1846,8 +1858,14 @@ pub fn extract_local_files(text: &str, base_dir: Option<&Path>) -> LocalFileScan
             // label is the marker text; an empty label falls back to the file's
             // own name so the reader always has something to anchor on. No URL
             // is emitted, so the marker renders in every chat kind.
+            let marker_start = scan.text.len();
             scan.text.push_str("📎 ");
             scan.text.push_str(&file_marker_text(&label, &target));
+            // The attachment pushed by `record_file_candidate` is the one this
+            // marker belongs to — the scan is single-threaded and in order.
+            if let Some(record) = scan.attachments.last_mut() {
+                record.marker_span = (marker_start, scan.text.len());
+            }
             i = end;
             continue;
         }
@@ -1856,6 +1874,19 @@ pub fn extract_local_files(text: &str, base_dir: Option<&Path>) -> LocalFileScan
         i += ch.len_utf8();
     }
 
+    // `trim()` strips leading whitespace, which shifts every recorded span left
+    // by that many bytes. Rebase the spans BEFORE trimming so a `marker_span` is
+    // always an index into the FINAL `scan.text`. Only the LEADING run matters:
+    // a marker begins with `📎` and ends with a non-whitespace label, so every
+    // span lies wholly inside `trim_start()..trim_end()`, and any trailing
+    // whitespace sits after the last marker and never moves an index.
+    let lead = scan.text.len() - scan.text.trim_start().len();
+    if lead > 0 {
+        for record in &mut scan.attachments {
+            record.marker_span.0 -= lead;
+            record.marker_span.1 -= lead;
+        }
+    }
     scan.text = scan.text.trim().to_string();
     scan
 }
