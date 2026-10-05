@@ -474,8 +474,9 @@ mod local_file_links {
             "an empty label is not a caption"
         );
         assert_eq!(
-            scan.text, "📎 q3.pdf",
-            "an empty label still leaves a marker — it falls back to the file name"
+            scan.text, "📎 q3.\u{200b}pdf",
+            "an empty label still leaves a marker — it falls back to the file name, \
+             disarmed of the autolinker (#1938) so the name is not read as a domain"
         );
     }
 
