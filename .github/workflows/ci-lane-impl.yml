@@ -454,12 +454,27 @@ jobs:
                 # 37308117729). /proc/<pid>/exe is the discriminator: only the
                 # harness binary itself resolves to that path.
                 #
-                # Re-arm across binaries: `cargo test` runs the lib harness,
-                # then each integration harness, then doc-tests, so the first
-                # binary is not necessarily the one that hangs. The timer
-                # restarts whenever the live test-binary pid CHANGES, and the
-                # FIRST binary to stay alive past T+100s is the one dumped.
-                PID=""; ARMED_AT=0
+                # Trigger = STILL ALIVE PAST THE HEALTHY CEILING, not a fixed
+                # T+100s mark. Measured on run 37308117729: the healthy test leg
+                # is 139-180s (run 37308138025: 139.62s; run 37300036106:
+                # 178.35s), and the stall that run began at T+111s (test leg
+                # 12:33:57, last output 12:35:48). A T+100s dump would therefore
+                # fire ~11s BEFORE the deadlock and photograph a HEALTHY
+                # process — an instrument aimed where its target is not. Alive at
+                # T+300s is past any healthy completion, so a live binary there
+                # IS the hang; the dump is repeated every 300s (max 3) so the
+                # stacks can be compared across snapshots — a true deadlock
+                # shows IDENTICAL stacks, a slow-but-live leg does not.
+                #
+                # `thread apply all bt` (not `bt full`): bt full prints every
+                # frame's locals for every thread and would flood the log; the
+                # deadlock cycle is read from the stacks themselves.
+                #
+                # Re-arm across binaries: `cargo test` runs the lib harness, then
+                # each integration harness, then doc-tests, so the first binary is
+                # not necessarily the one that hangs. The clock restarts whenever
+                # the live test-binary pid CHANGES.
+                PID=""; ARMED_AT=0; LAST_DUMP=0; DUMPS=0
                 DEADLINE=$(( $(date +%s) + 1800 ))
                 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
                   CUR=""
@@ -471,19 +486,22 @@ jobs:
                   done
                   if [ -n "$CUR" ]; then
                     if [ "$CUR" != "$PID" ]; then
-                      PID="$CUR"; ARMED_AT=$(date +%s)
-                      echo "HANGDUMP: test binary pid=$PID; watchdog armed at T+100s"
+                      PID="$CUR"; ARMED_AT=$(date +%s); LAST_DUMP=0
+                      echo "HANGDUMP: harness binary pid=$PID appeared; dump threshold T+300s (healthy leg is 139-180s)"
                     fi
-                    if [ $(( $(date +%s) - ARMED_AT )) -ge 100 ]; then
-                      echo "===== HANGDUMP $(date -u +%FT%TZ) pid=$PID ====="
-                      gdb -p "$PID" -batch -ex 'thread apply all bt full' 2>&1 || true
-                      echo "===== HANGDUMP END ====="
-                      exit 0
+                    AGE=$(( $(date +%s) - ARMED_AT ))
+                    if [ "$AGE" -ge 300 ] && [ $(( AGE - LAST_DUMP )) -ge 300 ] && [ "$DUMPS" -lt 3 ]; then
+                      LAST_DUMP=$AGE; DUMPS=$((DUMPS+1))
+                      echo "===== HANGDUMP #$DUMPS $(date -u +%FT%TZ) pid=$PID age=${AGE}s ====="
+                      gdb -p "$PID" -batch -ex 'thread apply all bt' 2>&1 | head -4000 || true
+                      echo "===== HANGDUMP #$DUMPS END ====="
                     fi
+                  else
+                    PID=""; ARMED_AT=0
                   fi
                   sleep 5
                 done
-                echo "HANGDUMP: no test binary survived T+100s within 1800s; no dump"
+                echo "HANGDUMP: watchdog deadline reached (${DUMPS} dump(s) taken)"
               ) &
               WATCHDOG=$!
             else
