@@ -562,15 +562,15 @@ pub struct TelegramConfig {
     pub rich_messages: bool,
     /// Inline a local MARKDOWN document (`.md` / `.markdown`) at its reference
     /// inside a rich message, instead of delivering it as a detached document
-    /// (#1968). On by default.
+    /// (#1968). Off by default.
     ///
     /// Telegram's Android client opens a `.md` ATTACHMENT in its built-in
     /// markdown viewer, but a document inlined INTO a rich message is not
-    /// openable there — the file is present in the bubble and unreadable. Turn
-    /// this off to have markdown documents delivered detached (by the file
-    /// floor), which the client CAN open. Every other document kind keeps
-    /// inlining either way.
-    #[serde(default = "default_true")]
+    /// openable there — the file is present in the bubble and unreadable. Left
+    /// off, markdown documents are delivered detached (by the file floor),
+    /// which the client CAN open; set this on to inline them instead. Every
+    /// other document kind keeps inlining either way.
+    #[serde(default)]
     pub inline_markdown_documents: bool,
     /// Render ```mermaid code fences as inline diagram images inside rich
     /// messages (#1044). Diagrams are rendered by mermaid.ink over HTTP and
@@ -672,7 +672,7 @@ impl Default for TelegramConfig {
             respond_to: RespondTo::default(),
             session_idle_hours: None,
             rich_messages: true,
-            inline_markdown_documents: true,
+            inline_markdown_documents: false,
             mermaid_render: true,
             mermaid_theme: default_auto(),
             mermaid_bg: default_auto(),

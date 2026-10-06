@@ -2007,7 +2007,7 @@ impl FileRewriter<'_> {
                         // nothing: a delivered document is not a lost one.
                         return true;
                     }
-                    // #1968: the markdown opt-out. A markdown document is left
+                    // #1968: the markdown inline gate. A markdown document is left
                     // as the plain `📎 <label>` marker the TEXT plane already
                     // shows — same buffer shape, same disarmed label — and no
                     // entry is recorded, so the rich plane never inlines it and
@@ -2078,8 +2078,8 @@ pub fn is_markdown_path(path: &std::path::Path) -> bool {
 /// own label and a silent strip would delete the reader's only clue about what
 /// was referenced.
 ///
-/// `inline_markdown_documents` is the `channels.telegram.inline_markdown_documents` opt-out
-/// (#1968): when false, a markdown document is left as the plain
+/// `inline_markdown_documents` mirrors `channels.telegram.inline_markdown_documents`
+/// (#1968): when false (the default), a markdown document is left as the plain
 /// `📎 <label>` marker instead of a `tg://document` reference and records no
 /// entry, so the caller delivers it detached.
 pub fn rewrite_local_files(

@@ -2421,7 +2421,7 @@ pub(crate) async fn handle_intermediate(
         Some(cwd),
         crate::utils::DOC_ID_PREFIX,
         &delivered,
-        // #1968: same opt-out as the final leg — a markdown document promoted
+        // #1968: same gate as the final leg — a markdown document promoted
         // with an intermediate must not be inlined either, or the bubble the
         // reader keeps would carry the un-openable form.
         crate::config::Config::current()
