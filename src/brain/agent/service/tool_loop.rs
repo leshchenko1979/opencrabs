@@ -701,9 +701,11 @@ impl AgentService {
             .map_err(AgentError::db)?;
 
         // Curate active skills and lazy tools according to the machine-readable manifest.
-        if let CompactionOutcome::Summarised(summary) = outcome
+        // The payload is the applied marker (banner + summary); the manifest
+        // block the model emits rides inside the summary it wraps (#1928).
+        if let CompactionOutcome::Summarised(marker_text) = outcome
             && let Some(manifest) =
-                crate::brain::agent::service::context::parse_context_manifest(summary)
+                crate::brain::agent::service::context::parse_context_manifest(marker_text)
         {
             for discard_slug in manifest.discard_skills {
                 self.unregister_active_skill(session_id, &discard_slug);
@@ -1545,7 +1547,7 @@ impl AgentService {
                 progress_callback.as_ref(),
             );
             match compacted {
-                Ok(summary) => {
+                Ok((summary, applied_marker)) => {
                     // Persist summary as the assistant response (for DB/search continuity)
                     message_service
                         .append_content(assistant_db_msg.id, &summary)
@@ -1560,7 +1562,7 @@ impl AgentService {
                         session_id,
                         &message_service,
                         &mut context,
-                        &CompactionOutcome::Summarised(summary),
+                        &CompactionOutcome::Summarised(applied_marker),
                         CompactionKind::Manual,
                         "",
                         true,
@@ -2469,12 +2471,12 @@ impl AgentService {
                         )
                         .await
                     {
-                        Ok(summary) => {
+                        Ok((_summary, applied_marker)) => {
                             self.apply_compaction_continuation(
                                 session_id,
                                 &message_service,
                                 &mut context,
-                                &CompactionOutcome::Summarised(summary),
+                                &CompactionOutcome::Summarised(applied_marker),
                                 CompactionKind::Emergency,
                                 "",
                                 true,
@@ -4140,14 +4142,13 @@ impl AgentService {
                     progress_callback.as_ref(),
                 );
                 match compacted {
-                    Ok(summary) => {
-                        let compaction_marker = format!(
-                            "[CONTEXT COMPACTION — The conversation was automatically compacted. \
-                             Below is a structured summary of everything before this point.]\n\n{}",
-                            summary
-                        );
+                    Ok((_summary, applied_marker)) => {
+                        // #1928: persist the marker the apply welded in, not a
+                        // banner rebuilt here — this inline copy was one of the
+                        // construction sites that could drift from the live
+                        // context.
                         let _ = message_service
-                            .create_message(session_id, "user".to_string(), compaction_marker)
+                            .create_message(session_id, "user".to_string(), applied_marker)
                             .await;
                     }
                     Err(e) => {

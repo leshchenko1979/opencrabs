@@ -108,7 +108,12 @@ fn restart_replay_carries_marker_and_stamped_continuation() {
 
     let all = vec![
         row("ancient history"),
-        row(&CompactionOutcome::Summarised("we were fixing the parser".into()).marker("")),
+        row(&CompactionOutcome::Summarised(format!(
+            "[CONTEXT COMPACTION — The conversation was automatically compacted. \
+             Below is a structured summary of everything before this point.]\n\n{}",
+            "we were fixing the parser"
+        ))
+        .marker("")),
         row(
             "[SYSTEM: Context was auto-compacted.\n\nSKILLS LOADED PRE-COMPACTION: grafana. \
              Session focus may have shifted — consider whether each is still relevant to \
