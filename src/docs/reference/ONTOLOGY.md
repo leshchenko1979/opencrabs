@@ -104,7 +104,7 @@
 
 ### Fleet & process terms
 
-These live with the ops skill outside this repo (`fleet-directives.md` §Glossary: carrier, fan-out, lane, roster, CI gate, ORDER gates, single-flight, GREEN/RED, S2/S3). They are listed here by NAME ONLY so repo readers know the terms exist and where they are defined — this file does not copy them (single-writer law).
+These live with the ops skill outside this repo (`SKILL.md` §Glossary: carrier, fan-out, lane, roster, CI gate, ORDER gates, single-flight, GREEN / RED, S2 / S3). They are listed here by NAME ONLY so repo readers know the terms exist and where they are defined — this file does not copy them (single-writer law).
 
 ## Maintenance
 
