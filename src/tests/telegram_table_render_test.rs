@@ -1,6 +1,8 @@
-//! Tests for table delivery routing (#651, #679).
+//! Tests for table delivery routing (#651, ex-upstream
+//! adolfousier/opencrabs#679).
 //!
-//! #679: a table message skips only the doomed native rich-BLOCKS attempt
+//! ex-upstream adolfousier/opencrabs#679: a table message skips only the
+//! doomed native rich-BLOCKS attempt
 //! (Telegram's InputRichBlock 400s our table shape) and is sent via rich
 //! MARKDOWN, which renders tables correctly. The monospace-HTML converter is
 //! the final fallback if the rich send fails; these tests cover both the

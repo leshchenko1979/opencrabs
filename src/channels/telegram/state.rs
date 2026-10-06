@@ -34,7 +34,8 @@ pub(crate) struct MergedHost {
     pub rich: bool,
     /// Markdown-plane host (#79 piece 4): the merged markdown payload.
     /// When set, pick redraws and strips ride `edit_rich_markdown` —
-    /// the server-side render keeps tables intact (#679). `None` = the
+    /// the server-side render keeps tables intact (ex-upstream
+    /// adolfousier/opencrabs#679). `None` = the
     /// html plane.
     pub markdown: Option<String>,
 }
@@ -48,7 +49,7 @@ pub(crate) struct MergeBubble {
     /// bubbles, the captured markdown for rich ones. Markdown-plane
     /// hosts (#79 piece 4) keep the raw markdown — the merge edit rides
     /// `edit_rich_markdown`, whose server-side render keeps tables
-    /// intact (#679).
+    /// intact (ex-upstream adolfousier/opencrabs#679).
     pub body: BubbleBody,
 }
 
@@ -61,7 +62,8 @@ pub(crate) enum BubbleBody {
     /// Native rich message sent from this markdown (tables render
     /// server-side). Merging re-renders via `rich::markdown_to_html`, so
     /// capture SKIPS table-bearing answers — rich HTML input flattens
-    /// tables (#679) — and those keep the standalone fallback.
+    /// tables (ex-upstream adolfousier/opencrabs#679) — and those keep
+    /// the standalone fallback.
     Markdown(String),
 }
 

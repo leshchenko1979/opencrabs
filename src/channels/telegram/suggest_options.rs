@@ -91,7 +91,8 @@ pub(crate) enum PickRewrite {
     RichHost(String),
     /// Markdown-plane merged host (#79 piece 4): body rides
     /// `edit_rich_markdown` — the server render keeps tables intact
-    /// (#679); empty markup strips the dead buttons.
+    /// (ex-upstream adolfousier/opencrabs#679); empty markup strips the
+    /// dead buttons.
     RichMarkdownHost(String),
     /// Classic merged host: body rides `edit_message_text` + empty markup
     /// to strip the dead buttons.
@@ -959,7 +960,8 @@ pub(crate) async fn render_suggestions(
         // HTML; markdown-plane hosts (#79 piece 4) keep the raw markdown —
         // including tables, which the markdown plane renders intact
         // server-side (C1 probe) where rich HTML input flattens them
-        // (#679). The html conversion of the merged payload is kept only
+        // (ex-upstream adolfousier/opencrabs#679). The html conversion of
+        // the merged payload is kept only
         // as the host record's strip source.
         let (mut new_html, rich, new_markdown) = match host.body {
             super::state::BubbleBody::Html(html) => {
@@ -1417,7 +1419,8 @@ async fn place_once(
         let mid = mp.message_id;
         let outcome: Result<(), PlaceErr> = if let Some(md) = &mp.new_markdown {
             // Markdown-plane host (#79 piece 4): raw markdown + embedded
-            // button rows — the server render keeps tables intact (#679).
+            // button rows — the server render keeps tables intact
+            // (ex-upstream adolfousier/opencrabs#679).
             // Fence-safe (#98): a delivered mermaid diagram re-renders
             // instead of degrading to raw fence text.
             edit_rich_md_fencesafe(

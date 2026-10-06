@@ -2,7 +2,8 @@
 -- Table-bearing answers can now carry the suggestion controls: the merge
 -- edit rides the rich MARKDOWN plane (editMessageText + rich_message.markdown),
 -- whose server-side render keeps tables intact — the HTML plane flattens
--- them (#679), which is why those answers were excluded from merging.
+-- them (ex-upstream adolfousier/opencrabs#679), which is why those
+-- answers were excluded from merging.
 -- The merged markdown payload is stored alongside the html copy so every
 -- later edit of the bubble (pick redraw, stale strip) re-sends it through
 -- the same markdown plane instead of flattening the table.
