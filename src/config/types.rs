@@ -571,7 +571,7 @@ pub struct TelegramConfig {
     /// floor), which the client CAN open. Every other document kind keeps
     /// inlining either way.
     #[serde(default = "default_true")]
-    pub inline_markdown: bool,
+    pub inline_markdown_documents: bool,
     /// Render ```mermaid code fences as inline diagram images inside rich
     /// messages (#1044). Diagrams are rendered by mermaid.ink over HTTP and
     /// embedded as `<img>` in the Telegram rich-HTML message; a diagram the
@@ -672,7 +672,7 @@ impl Default for TelegramConfig {
             respond_to: RespondTo::default(),
             session_idle_hours: None,
             rich_messages: true,
-            inline_markdown: true,
+            inline_markdown_documents: true,
             mermaid_render: true,
             mermaid_theme: default_auto(),
             mermaid_bg: default_auto(),

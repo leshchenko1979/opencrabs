@@ -944,7 +944,7 @@ mod local_file_rewrite {
     fn markdown_is_left_as_a_marker_when_inlining_is_off() {
         // #1968: Telegram's Android client opens a `.md` ATTACHMENT in its
         // markdown viewer but NOT a document inlined into a rich message. With
-        // `inline_markdown` off the walk must therefore leave the plain marker
+        // `inline_markdown_documents` off the walk must therefore leave the plain marker
         // the text plane already shows AND record no entry — no entry is what
         // keeps the document out of the media array, so the detached file floor
         // delivers it instead.

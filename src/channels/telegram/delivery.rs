@@ -363,7 +363,7 @@ pub(crate) async fn deliver_final_response(
                     crate::config::Config::current()
                         .channels
                         .telegram
-                        .inline_markdown,
+                        .inline_markdown_documents,
                 );
                 (rw, vw, fw)
             };
@@ -435,7 +435,7 @@ pub(crate) async fn deliver_final_response(
             // this is the leg that renders the document AT the reference instead
             // of as a detached bubble, which is the whole point of the kind.
             //
-            // #1968: with `inline_markdown` off the FILE WALK has already left
+            // #1968: with `inline_markdown_documents` off the FILE WALK has already left
             // every markdown document as a plain marker and recorded no entry
             // for it, so nothing here needs to filter — this loop carries
             // exactly the documents the rich plane owns, and the floor below
@@ -882,7 +882,7 @@ pub(crate) async fn deliver_final_response(
             // is then empty because nothing was sent.
             //
             // #1968: the suppression is now per-FILE, not per-family. With
-            // `inline_markdown` off a markdown document is deliberately absent
+            // `inline_markdown_documents` off a markdown document is deliberately absent
             // from the rich plane's entries, so a reply that also carries, say,
             // a PDF would read `rich_owns_documents == true` and this leg would
             // ship nothing — leaving the markdown file with no delivery leg at
@@ -2427,7 +2427,7 @@ pub(crate) async fn handle_intermediate(
         crate::config::Config::current()
             .channels
             .telegram
-            .inline_markdown,
+            .inline_markdown_documents,
     );
 
     // 4. A fresh picture is report-shaped content on its own (#502); anything

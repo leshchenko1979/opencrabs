@@ -5,8 +5,8 @@ fn test_telegram_config_default_struct_booleans() {
     let cfg = TelegramConfig::default();
     assert!(cfg.rich_messages, "rich_messages must default to true");
     assert!(
-        cfg.inline_markdown,
-        "inline_markdown must default to true — the opt-out is for clients that \
+        cfg.inline_markdown_documents,
+        "inline_markdown_documents must default to true — the opt-out is for clients that \
          cannot open an inlined `.md`, never a change of behaviour (#1968)"
     );
     assert!(cfg.mermaid_render, "mermaid_render must default to true");
