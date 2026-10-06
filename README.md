@@ -415,6 +415,8 @@ This is **on by default** via `channels.telegram.rich_messages`. The one caveat:
 
 When enabled, native rich applies to the agent's reply (sent as a fresh rich message so it renders cleanly) and to proactive `telegram_send` messages. Plain-prose replies are left untouched, so incidental characters like a stray `*` or `#` are never reinterpreted. If the rich send fails for any reason, OpenCrabs falls back silently to HTML, so a message is never dropped.
 
+**Markdown documents and inlining** (`channels.telegram.inline_markdown`, on by default). When a reply references a local `.md` file, the rich plane inlines the document *at* the reference. Telegram's **Android** client opens a `.md` **attachment** in its built-in markdown viewer, but a document inlined into a rich message is not openable there — the file sits in the bubble and cannot be read. Set `inline_markdown = false` to have markdown documents delivered as detached attachments instead, which the client *can* open; the reference stays as a visible `📎 <name>` marker. Every other document kind (PDF, CSV, …) keeps inlining either way, so the flag is scoped to markdown alone. Other clients are unaffected — leave it on unless your readers are on Android and want to read the `.md`.
+
 **Flow logs** (processing-log messages showing tool calls and intermediate text) also use the rich API when enabled, supporting 32K characters instead of HTML's 4K limit. Long tool chains fit in a single message without splitting. If the rich send fails, flow logs fall back to HTML rendering. The block auto-freezes at 30K characters to stay within limits.
 
 #### /cowork — Telegram-only workspace creation

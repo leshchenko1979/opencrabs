@@ -1974,6 +1974,13 @@ struct FileRewriter<'a> {
     base_dir: Option<&'a Path>,
     id_prefix: &'a str,
     already_delivered: &'a [PathBuf],
+    /// #1968: when false, a MARKDOWN document is left as the plain
+    /// `📎 <label>` marker instead of being rewritten to an inlined
+    /// `tg://document` reference. Telegram's Android client opens a `.md`
+    /// ATTACHMENT but not a document inlined into a rich message. No entry is
+    /// recorded for it either, so the file falls to the detached file floor
+    /// rather than to the rich plane's media array.
+    inline_markdown: bool,
     rich: String,
     entries: Vec<ResolvedFileRef>,
 }
@@ -1998,6 +2005,18 @@ impl FileRewriter<'_> {
                         // The document is already in the chat (a promoted
                         // intermediate sent it). Consume the reference, record
                         // nothing: a delivered document is not a lost one.
+                        return true;
+                    }
+                    // #1968: the markdown opt-out. A markdown document is left
+                    // as the plain `📎 <label>` marker the TEXT plane already
+                    // shows — same buffer shape, same disarmed label — and no
+                    // entry is recorded, so the rich plane never inlines it and
+                    // the detached file floor delivers it instead. The marker
+                    // is the reader's anchor either way, so nothing is lost by
+                    // declining the inline form.
+                    if !self.inline_markdown && is_markdown_path(&path) {
+                        self.rich.push_str("📎 ");
+                        self.rich.push_str(&file_marker_text(label, target));
                         return true;
                     }
                     let id = format!("{}{}", self.id_prefix, self.entries.len());
@@ -2034,6 +2053,19 @@ impl FileRewriter<'_> {
     }
 }
 
+/// Whether a local path names a MARKDOWN document, by extension.
+///
+/// The one predicate behind `channels.telegram.inline_markdown` (#1968): a
+/// markdown document is the single kind Telegram's Android client cannot open
+/// when the rich plane inlines it, so it is the kind that flag detaches. Kept
+/// here rather than inline at the call site so the delivery gate and any
+/// future consumer answer the question the same way.
+pub fn is_markdown_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+}
+
 /// Scan a reply for markdown links to local files and hand back the rich form
 /// with each resolvable link replaced in place by a `tg://document` media
 /// reference (#1918), together with the validated files and the id each got.
@@ -2045,17 +2077,24 @@ impl FileRewriter<'_> {
 /// byte-identical — the file family's declared policy, since a link carries its
 /// own label and a silent strip would delete the reader's only clue about what
 /// was referenced.
+///
+/// `inline_markdown` is the `channels.telegram.inline_markdown` opt-out
+/// (#1968): when false, a markdown document is left as the plain
+/// `📎 <label>` marker instead of a `tg://document` reference and records no
+/// entry, so the caller delivers it detached.
 pub fn rewrite_local_files(
     text: &str,
     base_dir: Option<&Path>,
     id_prefix: &str,
     already_delivered: &[PathBuf],
+    inline_markdown: bool,
 ) -> LocalFileRewrite {
     let regions = code_regions(text);
     let mut rw = FileRewriter {
         base_dir,
         id_prefix,
         already_delivered,
+        inline_markdown,
         rich: String::with_capacity(text.len()),
         entries: Vec::new(),
     };
