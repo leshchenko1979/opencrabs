@@ -1,5 +1,5 @@
 use crate::brain::agent::service::AgentService;
-use crate::brain::agent::service::context::parse_context_manifest;
+use crate::brain::agent::service::context::{parse_context_manifest, resolve_context_manifest};
 use std::collections::HashSet;
 
 #[test]
@@ -350,4 +350,46 @@ fn a_status_bearing_section_0_still_parses_its_manifest() {
             "status={status}: manifest content must survive intact"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// Issue #1933 — a document that carries no `context-manifest` fence must
+// resolve to the pruning-safe default (never `None`), so the reload path
+// can warn about the degradation instead of silently doing nothing.
+// ---------------------------------------------------------------------
+
+/// No fence at all → the resolver still yields a manifest, and that manifest
+/// is the pruning-safe default: keep every active skill, discard none,
+/// activate no lazy tool.
+#[test]
+fn test_resolve_context_manifest_falls_back_to_the_pruning_safe_default() {
+    let doc = "## 0. IMMEDIATE TASK\n**Obligation status: OPEN**\nno fence here\n";
+    let manifest = resolve_context_manifest(doc);
+    assert!(
+        manifest.active_skills.is_empty(),
+        "keep-all-active: nothing is discarded or re-activated"
+    );
+    assert!(
+        manifest.discard_skills.is_empty(),
+        "keep-all-active: nothing is pruned"
+    );
+    assert!(
+        manifest.required_tools.is_empty(),
+        "required_tools is not derivable from a document with no fence"
+    );
+}
+
+/// A present fence is still parsed verbatim — the default is a fallback,
+/// never an override.
+#[test]
+fn test_resolve_context_manifest_prefers_a_present_fence() {
+    let doc = "## 10. Context Manifest\n\
+               ```context-manifest\n\
+               active_skills: [opencrabs-dev]\n\
+               required_tools: [telegram_send]\n\
+               ```\n";
+    let manifest = resolve_context_manifest(doc);
+    assert_eq!(manifest.active_skills, vec!["opencrabs-dev".to_string()]);
+    assert_eq!(manifest.required_tools, vec!["telegram_send".to_string()]);
+    assert!(manifest.discard_skills.is_empty());
 }

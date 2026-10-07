@@ -703,10 +703,14 @@ impl AgentService {
         // Curate active skills and lazy tools according to the machine-readable manifest.
         // The payload is the applied marker (banner + summary); the manifest
         // block the model emits rides inside the summary it wraps (#1928).
-        if let CompactionOutcome::Summarised(marker_text) = outcome
-            && let Some(manifest) =
-                crate::brain::agent::service::context::parse_context_manifest(marker_text)
-        {
+        if let CompactionOutcome::Summarised(marker_text) = outcome {
+            // #1933: a document with no `context-manifest` fence used to fall
+            // through silently (keep-all-active + activate-nothing) with no
+            // trace that the summariser had dropped the fence. Resolve to the
+            // pruning-safe default instead, so the degradation is explicit and
+            // the resolver's WARN names what was substituted.
+            let manifest =
+                crate::brain::agent::service::context::resolve_context_manifest(marker_text);
             for discard_slug in manifest.discard_skills {
                 self.unregister_active_skill(session_id, &discard_slug);
             }
