@@ -1880,6 +1880,30 @@ fn consume_marker_prefix(buf: &mut String) {
     }
 }
 
+/// Append the text-plane marker for a resolved file — `📎 <label>` — and return
+/// the byte span it occupies in `out` (#1918). A `📎 ` the model wrote itself is
+/// consumed first, so the marker is emitted once whichever side wrote it
+/// (#2001). The single home of the marker's shape, shared with the rich plane's
+/// [`push_document_ref`].
+fn push_file_marker(out: &mut String, label: &str, target: &str) -> (usize, usize) {
+    consume_marker_prefix(out);
+    let start = out.len();
+    out.push_str("📎 ");
+    out.push_str(&file_marker_text(label, target));
+    (start, out.len())
+}
+
+/// Append the rich-plane reference for a resolved file —
+/// `![📎 <label>](tg://document?id=<id>)` — whose alt carries the same
+/// `📎 <label>` the text plane's marker does, so the reader's anchor is
+/// identical in both planes. A model-written `📎 ` is consumed first for the
+/// same reason as [`push_file_marker`].
+fn push_document_ref(out: &mut String, label: &str, target: &str, id: &str) {
+    consume_marker_prefix(out);
+    let alt = file_marker_text(label, target);
+    out.push_str(&format!("![📎 {alt}](tg://document?id={id})"));
+}
+
 /// Scan a reply for markdown links to local files and hand back the text with
 /// every DELIVERED link removed, the validated files, and the rejected
 /// candidates.
@@ -1915,20 +1939,18 @@ pub fn extract_local_files(text: &str, base_dir: Option<&Path>) -> LocalFileScan
             && let Some((end, label, target, _title)) = parse_markdown_ref(text, i, 1)
             && record_file_candidate(&text[i..end], &label, &target, base_dir, &mut scan)
         {
-            // #1918: the reference becomes a visible marker, not a hole. The
-            // label is the marker text; an empty label falls back to the file's
-            // own name so the reader always has something to anchor on. No URL
-            // is emitted, so the marker renders in every chat kind.
-            // #2001: drop a `📎 ` the model wrote itself, so the marker is not
-            // doubled — the harness's emit lands where the model's was.
-            consume_marker_prefix(&mut scan.text);
-            let marker_start = scan.text.len();
-            scan.text.push_str("📎 ");
-            scan.text.push_str(&file_marker_text(&label, &target));
+            // #1918: the reference becomes a visible marker, not a hole — the
+            // label is the marker text, and an empty label falls back to the
+            // file's own name so the reader always has something to anchor on.
+            // No URL is emitted, so the marker renders in every chat kind.
+            // #2001: a `📎 ` the model wrote itself is consumed first, so the
+            // marker is not doubled. The emission itself has one home, shared
+            // with the rich plane.
+            let span = push_file_marker(&mut scan.text, &label, &target);
             // The attachment pushed by `record_file_candidate` is the one this
             // marker belongs to — the scan is single-threaded and in order.
             if let Some(record) = scan.attachments.last_mut() {
-                record.marker_span = (marker_start, scan.text.len());
+                record.marker_span = span;
             }
             i = end;
             continue;
@@ -2040,12 +2062,9 @@ impl FileRewriter<'_> {
                 // The alt carries the same `📎 <label>` the text plane's
                 // marker does, so the reader's anchor is identical in both
                 // planes; an empty label falls back to the file's own name.
-                let alt = file_marker_text(label, target);
-                // #2001: drop a `📎 ` the model wrote itself, so the alt does
-                // not double the marker (`📎 ![📎 <label>](…)`).
-                consume_marker_prefix(&mut self.rich);
-                self.rich
-                    .push_str(&format!("![📎 {alt}](tg://document?id={id})"));
+                // #2001: the emission consumes a model-written `📎 ` first, so
+                // the alt never doubles the marker (`📎 ![📎 <label>](…)`).
+                push_document_ref(&mut self.rich, label, target, &id);
                 self.entries.push(ResolvedFileRef {
                     id,
                     file: LocalFile {
