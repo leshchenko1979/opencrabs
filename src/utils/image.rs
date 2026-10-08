@@ -1629,9 +1629,11 @@ pub struct LocalFile {
     /// Byte range in [`LocalFileScan::text`] occupied by this file's visible
     /// `📎 <label>` marker (#1918). The scanner records it as it emits the
     /// marker, so a later pass rewrites exactly that span: a label that also
-    /// occurs elsewhere in the reply can never be mis-targeted. `(0, 0)` for a
-    /// value that did not come from a scan.
-    pub marker_span: (usize, usize),
+    /// occurs elsewhere in the reply can never be mis-targeted. `None` for a
+    /// value that did not come from a scan — the sentinel is unrepresentable
+    /// rather than a `(0, 0)` a reader must remember to test for (#1918 review
+    /// f7).
+    pub marker_span: Option<std::ops::Range<usize>>,
 }
 
 /// Result of scanning a reply for links to local files.
@@ -1783,7 +1785,7 @@ fn record_file_candidate(
                 caption,
                 // The span is set by the caller that emits the marker; a
                 // record built here has no position in `scan.text` yet.
-                marker_span: (0, 0),
+                marker_span: None,
             });
             true
         }
@@ -1885,12 +1887,12 @@ fn consume_marker_prefix(buf: &mut String) {
 /// consumed first, so the marker is emitted once whichever side wrote it
 /// (#2001). The single home of the marker's shape, shared with the rich plane's
 /// [`push_document_ref`].
-fn push_file_marker(out: &mut String, label: &str, target: &str) -> (usize, usize) {
+fn push_file_marker(out: &mut String, label: &str, target: &str) -> std::ops::Range<usize> {
     consume_marker_prefix(out);
     let start = out.len();
     out.push_str("📎 ");
     out.push_str(&file_marker_text(label, target));
-    (start, out.len())
+    start..out.len()
 }
 
 /// Append the rich-plane reference for a resolved file —
@@ -1950,7 +1952,7 @@ pub fn extract_local_files(text: &str, base_dir: Option<&Path>) -> LocalFileScan
             // The attachment pushed by `record_file_candidate` is the one this
             // marker belongs to — the scan is single-threaded and in order.
             if let Some(record) = scan.attachments.last_mut() {
-                record.marker_span = span;
+                record.marker_span = Some(span);
             }
             i = end;
             continue;
@@ -1969,8 +1971,10 @@ pub fn extract_local_files(text: &str, base_dir: Option<&Path>) -> LocalFileScan
     let lead = scan.text.len() - scan.text.trim_start().len();
     if lead > 0 {
         for record in &mut scan.attachments {
-            record.marker_span.0 -= lead;
-            record.marker_span.1 -= lead;
+            if let Some(span) = &mut record.marker_span {
+                span.start -= lead;
+                span.end -= lead;
+            }
         }
     }
     scan.text = scan.text.trim().to_string();
@@ -2071,7 +2075,7 @@ impl FileRewriter<'_> {
                         path,
                         caption,
                         // Not from a scan: no position in any scan buffer.
-                        marker_span: (0, 0),
+                        marker_span: None,
                     },
                 });
             }

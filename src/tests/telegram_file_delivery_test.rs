@@ -64,8 +64,8 @@ fn file_at(path: PathBuf, caption: Option<&str>) -> LocalFile {
     LocalFile {
         path,
         caption: caption.map(str::to_string),
-        // `(0, 0)` is the documented "not from a scan" value (#1918).
-        marker_span: (0, 0),
+        // `None` is the documented "not from a scan" value (#1918).
+        marker_span: None,
     }
 }
 
@@ -506,7 +506,7 @@ fn scan_over(body: &str, files: &[(&Path, &str)]) -> LocalFileScan {
         attachments.push(LocalFile {
             path: path.to_path_buf(),
             caption: Some(marker.trim_start_matches("📎 ").to_string()),
-            marker_span: (start, end),
+            marker_span: Some(start..end),
         });
         from = end;
     }

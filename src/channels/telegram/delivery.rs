@@ -2076,11 +2076,11 @@ pub(crate) fn link_file_markers(
     }
     let mut spans: Vec<(usize, usize, &str, &str)> = Vec::new();
     for file in &scan.attachments {
-        let (start, end) = file.marker_span;
-        if start >= end {
-            // `(0, 0)` is the documented "not from a scan" span: nothing to cut.
+        let Some(span) = file.marker_span.as_ref() else {
+            // Not from a scan: nothing to cut.
             continue;
-        }
+        };
+        let (start, end) = (span.start, span.end);
         let Some(marker) = text.get(start..end) else {
             continue;
         };

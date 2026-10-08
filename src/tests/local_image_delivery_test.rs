@@ -587,7 +587,10 @@ mod local_file_links {
         let markers: Vec<&str> = scan
             .attachments
             .iter()
-            .map(|f| &scan.text[f.marker_span.0..f.marker_span.1])
+            .map(|f| {
+                let span = f.marker_span.clone().expect("a scanned marker has a span");
+                &scan.text[span]
+            })
             .collect();
         assert_eq!(
             markers,
@@ -614,9 +617,12 @@ mod local_file_links {
             scan.text, "leading space 📎 Q3 report",
             "the leading run is trimmed off the shipped text"
         );
-        let span = scan.attachments[0].marker_span;
+        let span = scan.attachments[0]
+            .marker_span
+            .clone()
+            .expect("a scanned marker has a span");
         assert_eq!(
-            &scan.text[span.0..span.1],
+            &scan.text[span.clone()],
             "📎 Q3 report",
             "the span is rebased onto the TRIMMED text (raw span {span:?})"
         );
@@ -879,8 +885,7 @@ mod local_file_rewrite {
         assert_eq!(rw.entries[0].file.path, pdf);
         assert_eq!(rw.entries[0].file.caption.as_deref(), Some("Q3 report"));
         assert_eq!(
-            rw.entries[0].file.marker_span,
-            (0, 0),
+            rw.entries[0].file.marker_span, None,
             "a file that came from the rewrite has no position in any scan buffer"
         );
     }
