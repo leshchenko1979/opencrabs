@@ -286,6 +286,79 @@ fn sentinel_quoted_in_a_summary_body_does_not_hide_the_boundary() {
     assert_eq!(kept[2].content, "q3");
 }
 
+/// #767: the RELOAD seam, end to end. A turn's load path is
+/// `messages_from_last_compaction` → `clean_rows_for_llm` → `from_db_messages`
+/// (tool_loop.rs). If the clean strips the marker's banner the in-memory row
+/// stops looking like a marker, `last_marker_index()` is `None`, and
+/// `compaction_scope()` silently reverts to `FullWindow` — so the reloaded
+/// session re-derives and re-bills every prior summary, the exact cumulative
+/// growth #1649 removed.
+#[test]
+fn a_reloaded_marker_still_scopes_the_next_compaction_as_a_delta() {
+    use crate::brain::agent::service::context_rows::clean_rows_for_llm;
+
+    let mut rows = AgentService::messages_from_last_compaction(vec![
+        db_row("stale pre-marker".to_string()),
+        db_row(format!(
+            "{COMPACTION_MARKER_PREFIX} — The conversation was automatically compacted.\n\n\
+             SUMMARY ONE about the first task"
+        )),
+        db_row("q2".to_string()),
+    ]);
+    clean_rows_for_llm(&mut rows, false);
+    let c = AgentContext::from_db_messages(uuid::Uuid::nil(), rows, 100_000);
+
+    assert_eq!(
+        c.last_marker_index(),
+        Some(0),
+        "the marker must survive the load-path clean"
+    );
+    assert_eq!(
+        c.compaction_scope(),
+        CompactionScope::DeltaSinceMarker,
+        "a reloaded session keeps the delta scope instead of reverting to FullWindow"
+    );
+    let (_, input, _) = c.compaction_input();
+    let texts: Vec<String> = input.iter().map(text_of).collect();
+    assert_eq!(
+        texts,
+        vec!["q2".to_string()],
+        "the delta is exactly the post-marker tail, never the whole window"
+    );
+}
+
+/// #767, the segment leg: a reloaded window is `[boundary][segments…][tail]`,
+/// so the LAST marker is a segment. If segments lost their banners the delta
+/// window would grow to everything after the boundary and re-bill the segment
+/// summaries — the same cumulative growth, one marker further in.
+#[test]
+fn a_reloaded_segment_still_bounds_the_delta_window() {
+    use crate::brain::agent::service::context_rows::clean_rows_for_llm;
+
+    let mut rows = AgentService::messages_from_last_compaction(vec![
+        db_row(format!("{COMPACTION_MARKER_PREFIX} — SUMMARY ONE")),
+        db_row(format!(
+            "{COMPACTION_MARKER_PREFIX} — {SEGMENT_SENTINEL} SEGMENT TWO"
+        )),
+        db_row("q3".to_string()),
+    ]);
+    clean_rows_for_llm(&mut rows, false);
+    let c = AgentContext::from_db_messages(uuid::Uuid::nil(), rows, 100_000);
+
+    assert_eq!(
+        c.last_marker_index(),
+        Some(1),
+        "the delta segment is the last marker in a reloaded window"
+    );
+    let (_, input, _) = c.compaction_input();
+    let texts: Vec<String> = input.iter().map(text_of).collect();
+    assert_eq!(
+        texts,
+        vec!["q3".to_string()],
+        "the delta is the tail only — the segment summary never re-enters"
+    );
+}
+
 /// #1928-C: the PERSIST seam. The production chain is
 /// `apply_scoped_compaction_summary` (welds the marker into the live context
 /// and — post-#1928 — returns its exact bytes) → `CompactionOutcome::Summarised(applied)`

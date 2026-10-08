@@ -50,8 +50,13 @@ fn an_untitled_session_still_gets_a_usable_nudge() {
     assert_eq!(clear_marker(Some("   ")), clear_marker(None));
 }
 
+/// `strip_compaction_banner` drops the banner line and keeps the body.
+///
+/// The LOAD path no longer calls this on a marker row (#767) — the banner is
+/// the identity `is_compaction_marker_msg` keys on — but the function's own
+/// contract is unchanged and still applies to every non-marker row.
 #[test]
-fn the_banner_is_stripped_and_the_body_kept_when_loaded_as_context() {
+fn strip_compaction_banner_drops_the_banner_and_keeps_the_body() {
     let mut content = clear_marker(Some("Router audit"));
     AgentService::strip_compaction_banner(&mut content);
     assert!(!content.starts_with("["));

@@ -110,15 +110,40 @@ fn user_rows_and_plain_rows_pass_through_untouched() {
     assert_eq!(rows[1].thinking.as_deref(), Some("kept as is"));
 }
 
+/// #767: the marker row KEEPS its banner through the clean.
+///
+/// `is_compaction_marker_msg` keys on that prefix, so stripping it here made a
+/// reloaded session look as if it had never compacted: `last_marker_index()`
+/// was `None` and #1649's delta scope silently reverted to `FullWindow`, so
+/// every prior summary was re-derived and re-billed into the next one. The
+/// in-memory apply path has always kept its banner, so the two now agree.
 #[test]
-fn the_compaction_banner_is_removed_from_the_marker_row() {
+fn the_marker_row_keeps_its_banner_through_the_clean() {
     let mut rows = vec![row(
         "user",
         "[CONTEXT COMPACTION marker line]\n\nThe summary body.",
         None,
     )];
     clean_rows_for_llm(&mut rows, false);
-    assert_eq!(rows[0].content, "The summary body.");
+    assert!(
+        rows[0].content.starts_with("[CONTEXT COMPACTION"),
+        "the marker identity must survive the clean, got: {}",
+        rows[0].content
+    );
+    assert!(rows[0].content.contains("The summary body."));
+}
+
+/// The echo-prevention the strip exists for (`0c0bf4126`) is aimed at a model
+/// echoing the banner — an ASSISTANT row, never a marker — and still holds.
+#[test]
+fn an_assistant_row_echoing_the_banner_is_still_stripped() {
+    let mut rows = vec![row(
+        "assistant",
+        "[CONTEXT COMPACTION — echoed by the model]\n\nand here is my summary",
+        None,
+    )];
+    clean_rows_for_llm(&mut rows, false);
+    assert_eq!(rows[0].content, "and here is my summary");
 }
 
 /// The loader cleans rows for every provider and hoists reasoning only for
