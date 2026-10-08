@@ -1813,6 +1813,10 @@ fn record_file_candidate(
 /// A backslash escape is deliberately NOT used: the classic plane has no escape,
 /// so `1918-fix-state\.md` would render with the backslash visible. The dot
 /// itself stays visible, so the reader still sees the file's own name.
+///
+/// `pub(crate)` exists for this crate's tests alone — every production caller
+/// lives in this module (`file_marker_text`) — so it is fork-internal API and
+/// deliberately NOT part of the upstream port surface (#1918 review f9).
 pub(crate) fn disarm_autolink(text: &str) -> String {
     /// U+200B ZERO WIDTH SPACE — no ink in any renderer.
     const ZWSP: char = '\u{200b}';
@@ -1840,6 +1844,11 @@ pub(crate) fn disarm_autolink(text: &str) -> String {
 ///
 /// The result is passed through [`disarm_autolink`] (#1938) so a dotted name
 /// reads as a filename in both planes rather than as a domain link.
+///
+/// `pub(crate)` exists for this crate's tests alone — every production caller
+/// lives in this module (`push_file_marker`, `push_document_ref`) — so it is
+/// fork-internal API and deliberately NOT part of the upstream port surface
+/// (#1918 review f9).
 pub(crate) fn file_marker_text(label: &str, target: &str) -> String {
     let trimmed = label.trim();
     let text = if !trimmed.is_empty() {
