@@ -1851,6 +1851,35 @@ pub(crate) fn file_marker_text(label: &str, target: &str) -> String {
     disarm_autolink(&text)
 }
 
+/// Consume a model-written `📎 ` run immediately before a reference (#2001).
+///
+/// The `📎 <label>` marker is the HARNESS's to write, and the channel
+/// capability line tells the model the reference "is replaced in your reply by
+/// a visible marker naming the file (📎 <label>)". A model that matches the
+/// output it was told to expect therefore prefixes its own `📎 ` before
+/// `[label](path)` — and both emission sites replace only the REFERENCE span,
+/// copying that prefix through, so the reader gets the marker twice
+/// (`📎 📎 <label>` on the text plane, `📎 ![📎 <label>](tg://document?id=…)` on
+/// the rich one). Dropping the model's prefix before emitting the harness one
+/// makes the emit idempotent on both planes.
+///
+/// Only trailing whitespace and `📎` tokens are consumed, so ordinary prose
+/// ending in a space is untouched, and the loop terminates because every
+/// iteration strictly shortens the buffer. Trailing whitespace is dropped with
+/// the token, so `text 📎 [x](p)` leaves `text ` — the marker lands exactly
+/// where the model's was.
+fn consume_marker_prefix(buf: &mut String) {
+    loop {
+        let trimmed = buf.trim_end_matches([' ', '\t']);
+        if !trimmed.ends_with('📎') {
+            break;
+        }
+        // Hoisted so the immutable borrow ends before `truncate` takes `&mut`.
+        let cut = trimmed.len() - '📎'.len_utf8();
+        buf.truncate(cut);
+    }
+}
+
 /// Scan a reply for markdown links to local files and hand back the text with
 /// every DELIVERED link removed, the validated files, and the rejected
 /// candidates.
@@ -1890,6 +1919,9 @@ pub fn extract_local_files(text: &str, base_dir: Option<&Path>) -> LocalFileScan
             // label is the marker text; an empty label falls back to the file's
             // own name so the reader always has something to anchor on. No URL
             // is emitted, so the marker renders in every chat kind.
+            // #2001: drop a `📎 ` the model wrote itself, so the marker is not
+            // doubled — the harness's emit lands where the model's was.
+            consume_marker_prefix(&mut scan.text);
             let marker_start = scan.text.len();
             scan.text.push_str("📎 ");
             scan.text.push_str(&file_marker_text(&label, &target));
@@ -2009,6 +2041,9 @@ impl FileRewriter<'_> {
                 // marker does, so the reader's anchor is identical in both
                 // planes; an empty label falls back to the file's own name.
                 let alt = file_marker_text(label, target);
+                // #2001: drop a `📎 ` the model wrote itself, so the alt does
+                // not double the marker (`📎 ![📎 <label>](…)`).
+                consume_marker_prefix(&mut self.rich);
                 self.rich
                     .push_str(&format!("![📎 {alt}](tg://document?id={id})"));
                 self.entries.push(ResolvedFileRef {

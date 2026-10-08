@@ -622,6 +622,26 @@ mod local_file_links {
         );
     }
 
+    #[test]
+    fn a_model_written_marker_prefix_is_not_doubled() {
+        // #2001: the capability line tells the model the reference becomes a
+        // `📎 <label>` marker, so a model may prefix that marker itself. The
+        // harness consumes the model's own `📎 ` before emitting its own, so
+        // the reader sees exactly ONE marker rather than `📎 📎 <label>`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let scan = extract_local_files(
+            &format!("before 📎 [Q3 report]({}) after", pdf.display()),
+            None,
+        );
+        assert_eq!(
+            scan.text, "before 📎 Q3 report after",
+            "the model's own 📎 is consumed, not doubled"
+        );
+        assert_eq!(scan.text.matches('📎').count(), 1, "exactly one marker");
+        assert_eq!(paths(&scan), vec![pdf]);
+    }
+
     // -----------------------------------------------------------------------
     // What the family must LEAVE ALONE
     // -----------------------------------------------------------------------
@@ -991,6 +1011,33 @@ mod local_file_rewrite {
         );
         assert_eq!(rw.rich, "before  after");
         assert!(rw.entries.is_empty());
+    }
+
+    #[test]
+    fn a_model_written_marker_prefix_is_not_doubled_in_the_rich_plane() {
+        // #2001, rich plane: a model's own `📎 ` before the reference must not
+        // survive beside the harness alt, or the reader gets
+        // `📎 ![📎 <label>](tg://document?id=…)`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let rw = rewrite_local_files(
+            &format!("before 📎 [Q3 report]({}) after", pdf.display()),
+            Some(dir.path()),
+            DOC_ID_PREFIX,
+            &[],
+        );
+        assert_eq!(
+            rw.rich.matches('📎').count(),
+            1,
+            "exactly one marker: {:?}",
+            rw.rich
+        );
+        assert_eq!(
+            rw.rich,
+            "before ![📎 Q3 report](tg://document?id=doc0) after",
+            "the model's own 📎 is consumed, not doubled"
+        );
+        assert_eq!(rw.entries.len(), 1);
     }
 
     #[test]
