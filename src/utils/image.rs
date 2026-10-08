@@ -367,6 +367,25 @@ fn extract_markers_with_prefix(text: &str, prefix: &str) -> (String, Vec<String>
 
 use std::path::{Path, PathBuf};
 
+/// The shape a resolved media reference presents to the media-array builder:
+/// the id its rewritten `tg://` reference points at, and the path whose bytes
+/// must be read for it.
+///
+/// Implemented by the three resolved-ref families ([`ResolvedImageRef`],
+/// [`ResolvedVideoRef`], [`ResolvedFileRef`]) so the one read-and-push loop in
+/// `channels::telegram::delivery::read_media_entries` can serve all six sites
+/// that build a `MediaEntry` array. The trait carries ONLY what those sites
+/// need from the entry — the id, the path, and (for documents) the part name —
+/// never the entry itself, so the helper cannot accidentally clone a whole
+/// resolved value into the array.
+pub(crate) trait MediaSource {
+    /// The id the rewritten reference points at: `tg://photo?id=<id>`,
+    /// `tg://video?id=<id>` or `tg://document?id=<id>`.
+    fn media_id(&self) -> &str;
+    /// The absolute path whose bytes are uploaded for this entry.
+    fn media_path(&self) -> &Path;
+}
+
 /// Marker prefix for the proprietary image form.
 const IMG_PREFIX: &str = "<<IMG:";
 
@@ -860,6 +879,15 @@ pub struct ResolvedImageRef {
     pub image: LocalImage,
 }
 
+impl MediaSource for ResolvedImageRef {
+    fn media_id(&self) -> &str {
+        &self.id
+    }
+    fn media_path(&self) -> &Path {
+        &self.image.path
+    }
+}
+
 /// A text prepared for the rich media plane, in both forms a mid-turn
 /// intermediate needs.
 ///
@@ -1242,6 +1270,15 @@ pub struct ResolvedVideoRef {
     /// The validated video, path and caption bound in one value as everywhere
     /// else in this module.
     pub video: LocalVideo,
+}
+
+impl MediaSource for ResolvedVideoRef {
+    fn media_id(&self) -> &str {
+        &self.id
+    }
+    fn media_path(&self) -> &Path {
+        &self.video.path
+    }
 }
 
 /// A text prepared for the rich media plane's video half (#465).
@@ -1895,6 +1932,15 @@ pub struct ResolvedFileRef {
     /// The validated file, path and caption bound in one value as everywhere
     /// else in this module.
     pub file: LocalFile,
+}
+
+impl MediaSource for ResolvedFileRef {
+    fn media_id(&self) -> &str {
+        &self.id
+    }
+    fn media_path(&self) -> &Path {
+        &self.file.path
+    }
 }
 
 /// A text prepared for the rich media plane's document half (#1918).

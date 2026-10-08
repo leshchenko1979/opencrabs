@@ -10,7 +10,7 @@ use super::flow::SentBubble;
 use super::handler::StreamingState;
 use super::markdown::{markdown_to_telegram_html, split_message, strip_html_tags};
 use super::send::message_in_thread;
-use crate::utils::{LocalImageFailure, LocalImageFailureReason};
+use crate::utils::LocalImageFailure;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{MessageId, ParseMode, ReplyParameters};
@@ -472,61 +472,29 @@ pub(crate) async fn deliver_intermediate_message(
     // not be read must not be answered with "Image not attached".
     let mut file_failures: Vec<LocalImageFailure> = Vec::new();
     let mut media: Vec<super::rich::mermaid::MediaEntry> = Vec::new();
-    for entry in &rw_rich.entries {
-        match tokio::fs::read(&entry.image.path).await {
-            Ok(bytes) => media.push(super::rich::mermaid::MediaEntry {
-                kind: super::rich::mermaid::MediaKind::Photo,
-                id: entry.id.clone(),
-                url: None,
-                bytes: Some(bytes),
-                name: None,
-            }),
-            Err(e) => {
-                tracing::warn!(
-                    "Telegram: failed to read promoted image {}: {}",
-                    entry.image.path.display(),
-                    e
-                );
-                failures.push(LocalImageFailure {
-                    raw: entry.image.path.display().to_string(),
-                    resolved: Some(entry.image.path.clone()),
-                    reason: LocalImageFailureReason::Unreadable,
-                });
-            }
-        }
-    }
+    let (entries, image_failures, _) = super::delivery::read_media_entries(
+        &rw_rich.entries,
+        super::rich::mermaid::MediaKind::Photo,
+        "promoted image",
+        |_| None,
+    )
+    .await;
+    media.extend(entries);
+    failures.extend(image_failures);
     // #732: the clips ride the SAME array, each carrying its own kind so the
     // builder emits the string that matches the bytes — exactly as the final
     // leg does. Their `tg://video?id=vidN` references are present in `rich`
     // because it was built on the video family's rich form (`rw_rich`). A read
     // that fails here joins the failure list, never a panic.
-    let mut delivered_video_paths: Vec<std::path::PathBuf> = Vec::new();
-    for entry in &vw.entries {
-        match tokio::fs::read(&entry.video.path).await {
-            Ok(bytes) => {
-                media.push(super::rich::mermaid::MediaEntry {
-                    kind: super::rich::mermaid::MediaKind::Video,
-                    id: entry.id.clone(),
-                    url: None,
-                    bytes: Some(bytes),
-                    name: None,
-                });
-                delivered_video_paths.push(entry.video.path.clone());
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Telegram: failed to read promoted video {}: {}",
-                    entry.video.path.display(),
-                    e
-                );
-                failures.push(LocalImageFailure {
-                    raw: entry.video.path.display().to_string(),
-                    resolved: Some(entry.video.path.clone()),
-                    reason: LocalImageFailureReason::Unreadable,
-                });
-            }
-        }
-    }
+    let (entries, video_failures, delivered_video_paths) = super::delivery::read_media_entries(
+        &vw.entries,
+        super::rich::mermaid::MediaKind::Video,
+        "promoted video",
+        |_| None,
+    )
+    .await;
+    media.extend(entries);
+    failures.extend(video_failures);
 
     // #1918: the documents ride the SAME array, each carrying its own kind and
     // the file's OWN name — the entry's part name is what Telegram shows as the
@@ -534,39 +502,27 @@ pub(crate) async fn deliver_intermediate_message(
     // Their `tg://document?id=docN` references are present in `rich` because it
     // is the file walk's own rich form. A read that fails here joins the failure
     // list, never a panic.
-    let mut delivered_file_paths: Vec<std::path::PathBuf> = Vec::new();
+    let (entries, file_read_failures, delivered_file_paths) = super::delivery::read_media_entries(
+        &walks.rich_files.entries,
+        super::rich::mermaid::MediaKind::Document,
+        "promoted file",
+        |entry| Some(super::delivery::document_part_name(&entry.file.path)),
+    )
+    .await;
+    media.extend(entries);
+    file_failures.extend(file_read_failures);
     // The entries whose bytes actually READ, for the HTML fallback's floor
-    // below. Rebuilding that list from `rich_files.entries` would hand
+    // below. Rebuilding that list from `rich_files.entries` wholesale would hand
     // `send_local_files` the unreadable ones too, and it would report each of
-    // them a second time — the same file, the same noun, two notices.
-    let mut readable_files: Vec<crate::utils::image::LocalFile> = Vec::new();
-    for entry in &walks.rich_files.entries {
-        match tokio::fs::read(&entry.file.path).await {
-            Ok(bytes) => {
-                media.push(super::rich::mermaid::MediaEntry {
-                    kind: super::rich::mermaid::MediaKind::Document,
-                    id: entry.id.clone(),
-                    url: None,
-                    bytes: Some(bytes),
-                    name: Some(super::delivery::document_part_name(&entry.file.path)),
-                });
-                delivered_file_paths.push(entry.file.path.clone());
-                readable_files.push(entry.file.clone());
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Telegram: failed to read promoted file {}: {}",
-                    entry.file.path.display(),
-                    e
-                );
-                file_failures.push(LocalImageFailure {
-                    raw: entry.file.path.display().to_string(),
-                    resolved: Some(entry.file.path.clone()),
-                    reason: LocalImageFailureReason::Unreadable,
-                });
-            }
-        }
-    }
+    // them a second time — the same file, the same noun, two notices. So the
+    // floor gets exactly the paths the read above returned.
+    let readable_files: Vec<crate::utils::image::LocalFile> = walks
+        .rich_files
+        .entries
+        .iter()
+        .filter(|entry| delivered_file_paths.contains(&entry.file.path))
+        .map(|entry| entry.file.clone())
+        .collect();
 
     // An image the bubble announced must not vanish silently when it cannot be
     // read: the notice rides the same bubble the model wrote (#502). The

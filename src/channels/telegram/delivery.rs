@@ -12,6 +12,7 @@ use super::flow::{
 use super::handler::{fire_reaction, map_to_allowed_reaction};
 use super::intermediates::send_html_or_plain;
 use super::markdown::{markdown_to_telegram_html, split_message};
+use super::rich::mermaid::{MediaEntry, MediaKind};
 use super::send::{
     TelegramMediaKind, TelegramVideoKind, VIDEO_FORMAT_HEAD_BYTES, best_effort_delete,
     document_in_thread, message_in_thread, photo_in_thread, sniff_video_format,
@@ -20,8 +21,10 @@ use super::send::{
 use crate::brain::agent::AgentService;
 use crate::db::ChannelMessageRepository;
 use crate::db::models::ChannelMessage as DbChannelMessage;
+use crate::utils::image::MediaSource;
 use crate::utils::sanitize::{redact_secrets, redact_secrets_scoped};
 use crate::utils::{LocalImageFailure, LocalImageFailureReason};
+use std::path::PathBuf;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{InputFile, MessageId, ParseMode};
@@ -362,57 +365,27 @@ pub(crate) async fn deliver_final_response(
             // #487/#465: images and videos share ONE media array, so the entries
             // are built into the same vector and the ownership decisions below
             // are read off it.
-            let mut rich_media: Vec<super::rich::mermaid::MediaEntry> = Vec::new();
-            for entry in &rich_rw.entries {
-                match tokio::fs::read(&entry.image.path).await {
-                    Ok(bytes) => rich_media.push(super::rich::mermaid::MediaEntry {
-                        kind: super::rich::mermaid::MediaKind::Photo,
-                        id: entry.id.clone(),
-                        url: None,
-                        bytes: Some(bytes),
-                        name: None,
-                    }),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Telegram: failed to read local image {} for the rich plane: {}",
-                            entry.image.path.display(),
-                            e
-                        );
-                        image_failures.push(LocalImageFailure {
-                            raw: entry.image.path.display().to_string(),
-                            resolved: Some(entry.image.path.clone()),
-                            reason: LocalImageFailureReason::Unreadable,
-                        });
-                    }
-                }
-            }
+            let (mut rich_media, failures, _) = read_media_entries(
+                &rich_rw.entries,
+                MediaKind::Photo,
+                "local image for the rich plane",
+                |_| None,
+            )
+            .await;
+            image_failures.extend(failures);
             // #465: video entries ride the same array, each carrying its own
             // kind so the builder emits the string that matches the bytes. A
             // read that fails here joins the VIDEO refusal list, not the image
             // one — the notice names the family, and this is a clip.
-            for entry in &rich_vw.entries {
-                match tokio::fs::read(&entry.video.path).await {
-                    Ok(bytes) => rich_media.push(super::rich::mermaid::MediaEntry {
-                        kind: super::rich::mermaid::MediaKind::Video,
-                        id: entry.id.clone(),
-                        url: None,
-                        bytes: Some(bytes),
-                        name: None,
-                    }),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Telegram: failed to read local video {} for the rich plane: {}",
-                            entry.video.path.display(),
-                            e
-                        );
-                        video_failures.push(LocalImageFailure {
-                            raw: entry.video.path.display().to_string(),
-                            resolved: Some(entry.video.path.clone()),
-                            reason: LocalImageFailureReason::Unreadable,
-                        });
-                    }
-                }
-            }
+            let (media, failures, _) = read_media_entries(
+                &rich_vw.entries,
+                MediaKind::Video,
+                "local video for the rich plane",
+                |_| None,
+            )
+            .await;
+            rich_media.extend(media);
+            video_failures.extend(failures);
             // #1918: the documents ride the SAME array, each carrying its own
             // kind so the builder emits the string that matches the bytes. The
             // entry's part name is the file's OWN name (Step 1's
@@ -426,29 +399,15 @@ pub(crate) async fn deliver_final_response(
             // which `rich_fw.rich` carries and the text plane's marker does not:
             // this is the leg that renders the document AT the reference instead
             // of as a detached bubble, which is the whole point of the kind.
-            for entry in &rich_fw.entries {
-                match tokio::fs::read(&entry.file.path).await {
-                    Ok(bytes) => rich_media.push(super::rich::mermaid::MediaEntry {
-                        kind: super::rich::mermaid::MediaKind::Document,
-                        id: entry.id.clone(),
-                        url: None,
-                        bytes: Some(bytes),
-                        name: Some(document_part_name(&entry.file.path)),
-                    }),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Telegram: failed to read local file {} for the rich plane: {}",
-                            entry.file.path.display(),
-                            e
-                        );
-                        file_failures.push(LocalImageFailure {
-                            raw: entry.file.path.display().to_string(),
-                            resolved: Some(entry.file.path.clone()),
-                            reason: LocalImageFailureReason::Unreadable,
-                        });
-                    }
-                }
-            }
+            let (media, failures, _) = read_media_entries(
+                &rich_fw.entries,
+                MediaKind::Document,
+                "local file for the rich plane",
+                |entry| Some(document_part_name(&entry.file.path)),
+            )
+            .await;
+            rich_media.extend(media);
+            file_failures.extend(failures);
             // #487: an image-only body takes the rich plane too. The rich send
             // carries the REWRITTEN markdown, so the reference itself is the
             // body's content — there is no "text bubble" needed to carry it,
@@ -1958,6 +1917,77 @@ pub(crate) fn document_part_name(path: &std::path::Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// Read the bytes for one family's resolved entries into a media array, once
+/// per site that builds one.
+///
+/// All six sites that fill a `MediaEntry` array — the final leg's image, video
+/// and document loops, and the intermediate leg's three — did the same three
+/// things in the same order: `tokio::fs::read` the entry's path, push an entry
+/// carrying the family's kind and the bytes, and on failure warn under the
+/// family's noun and push a [`LocalImageFailure`]. The bodies were identical
+/// per family and the only variation was the noun and the failure list, so one
+/// helper serves them all.
+///
+/// The returned tuple is `(entries, failures, read_paths)`:
+/// - `entries` are appended to the caller's shared media array, in order;
+/// - `failures` are appended to the caller's per-family failure list (the
+///   notice names the family, so an image's failure must not be answered under
+///   a document's noun);
+/// - `read_paths` are the paths whose bytes actually READ. A caller that
+///   records what it delivered needs exactly that set — a path whose read
+///   failed was never handed to the API and must not be recorded as sent.
+///
+/// `warn_what` names the family in the failure log, so every site's line reads
+/// `Telegram: failed to read <warn_what> <path>: <error>` (`local image for the
+/// rich plane`, `promoted video`, …). `name_fn` supplies the entry's part name
+/// for the family that has one: a document sets it to the file's own name
+/// (`document_part_name`) because bytes alone cannot recover it, while the photo
+/// and video families pass a closure returning `None`, whose part name is
+/// derived from their bytes at the send site.
+pub(crate) async fn read_media_entries<E, F>(
+    entries: &[E],
+    kind: MediaKind,
+    warn_what: &str,
+    name_fn: F,
+) -> (Vec<MediaEntry>, Vec<LocalImageFailure>, Vec<PathBuf>)
+where
+    E: MediaSource,
+    F: Fn(&E) -> Option<String>,
+{
+    let mut media: Vec<MediaEntry> = Vec::with_capacity(entries.len());
+    let mut failures: Vec<LocalImageFailure> = Vec::new();
+    let mut read_paths: Vec<PathBuf> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let path = entry.media_path();
+        match tokio::fs::read(path).await {
+            Ok(bytes) => {
+                media.push(MediaEntry {
+                    kind,
+                    id: entry.media_id().to_string(),
+                    url: None,
+                    bytes: Some(bytes),
+                    name: name_fn(entry),
+                });
+                read_paths.push(path.to_path_buf());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Telegram: failed to read {} {}: {}",
+                    warn_what,
+                    path.display(),
+                    e
+                );
+                failures.push(LocalImageFailure {
+                    raw: path.display().to_string(),
+                    resolved: Some(path.to_path_buf()),
+                    reason: LocalImageFailureReason::Unreadable,
+                });
+            }
+        }
+    }
+    (media, failures, read_paths)
 }
 
 /// A local file that landed in the chat, and the message it landed in (#1918).
