@@ -1611,42 +1611,59 @@ pub struct LocalFileScan {
     pub failures: Vec<LocalImageFailure>,
 }
 
-/// Where a markdown link points, as far as the file family is concerned.
+/// What a markdown link target resolves to for the file family, classification
+/// and validation in ONE step.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum FileTarget {
-    /// A local path, resolved to an absolute one.
+enum Resolution {
+    /// A local file that exists, is a regular non-empty file, is openable and
+    /// fits the document size ceiling.
     Local(PathBuf),
-    /// A relative path with no base directory to resolve it against.
-    Unresolved,
+    /// A local path that failed validation, with the resolved path and why.
+    Rejected {
+        path: PathBuf,
+        reason: LocalImageFailureReason,
+    },
     /// Not a filesystem candidate at all — a remote URL, a Telegram media ref, a
-    /// `mailto:`/`tel:`-style scheme, or an in-page `#anchor`. Left as written.
+    /// `mailto:`/`tel:`-style scheme, an in-page `#anchor`, or a relative path
+    /// with no base directory to resolve it against. Left as written.
     Skip,
 }
 
-/// Classify a link target: a local path we can stat, or something the file
-/// family must leave alone. `~/…` goes through the shared tilde expander, an
-/// absolute path is taken as-is, and a relative path is joined to `base_dir`
-/// (the session working directory).
-fn classify_file_target(raw: &str, base_dir: Option<&Path>) -> FileTarget {
-    let trimmed = raw.trim();
+/// Resolve AND validate one link target for the file family.
+///
+/// ONE policy for both the scan ([`record_file_candidate`]) and the rewrite
+/// ([`FileRewriter::file`]). The two used to spell classify → validate out
+/// separately and were kept in step by hand — an invariant documented only in
+/// prose, and exactly the kind that silently breaks. `~/…` goes through the
+/// shared tilde expander, an absolute path is taken as-is, and a relative path
+/// is joined to `base_dir` (the session working directory).
+fn resolve_file_target(target: &str, base_dir: Option<&Path>) -> Resolution {
+    let trimmed = target.trim();
     // An in-page anchor (`#section`) is not a file.
     if trimmed.is_empty() || trimmed.starts_with('#') {
-        return FileTarget::Skip;
+        return Resolution::Skip;
     }
     // A link Telegram resolves itself, or one it resolves against the rich
     // request's media array (#334), is never ours; neither is any other URI
     // scheme (`mailto:`, `ftp:`, `tel:`), which must not be joined to the cwd
     // and reported as a missing file.
     if is_remote_url(trimmed) || is_telegram_media_ref(trimmed) || has_url_scheme(trimmed) {
-        return FileTarget::Skip;
+        return Resolution::Skip;
     }
     let expanded = crate::brain::tools::error::expand_tilde(trimmed);
-    if expanded.is_absolute() {
-        return FileTarget::Local(expanded);
-    }
-    match base_dir {
-        Some(dir) => FileTarget::Local(dir.join(expanded)),
-        None => FileTarget::Unresolved,
+    let path = if expanded.is_absolute() {
+        expanded
+    } else {
+        match base_dir {
+            Some(dir) => dir.join(expanded),
+            // A relative target with no base directory may be ordinary prose
+            // that merely looks like a link: leave it as written.
+            None => return Resolution::Skip,
+        }
+    };
+    match validate_local_file(&path) {
+        Ok(()) => Resolution::Local(path),
+        Err(reason) => Resolution::Rejected { path, reason },
     }
 }
 
@@ -1717,33 +1734,31 @@ fn record_file_candidate(
     base_dir: Option<&Path>,
     scan: &mut LocalFileScan,
 ) -> bool {
-    match classify_file_target(target, base_dir) {
-        FileTarget::Local(path) => match validate_local_file(&path) {
-            Ok(()) => {
-                let caption = if label.trim().is_empty() {
-                    None
-                } else {
-                    Some(label.to_string())
-                };
-                scan.attachments.push(LocalFile {
-                    path,
-                    caption,
-                    // The span is set by the caller that emits the marker; a
-                    // record built here has no position in `scan.text` yet.
-                    marker_span: (0, 0),
-                });
-                true
-            }
-            Err(reason) => {
-                scan.failures.push(LocalImageFailure {
-                    raw: raw.to_string(),
-                    resolved: Some(path),
-                    reason,
-                });
-                false
-            }
-        },
-        FileTarget::Unresolved | FileTarget::Skip => false,
+    match resolve_file_target(target, base_dir) {
+        Resolution::Local(path) => {
+            let caption = if label.trim().is_empty() {
+                None
+            } else {
+                Some(label.to_string())
+            };
+            scan.attachments.push(LocalFile {
+                path,
+                caption,
+                // The span is set by the caller that emits the marker; a
+                // record built here has no position in `scan.text` yet.
+                marker_span: (0, 0),
+            });
+            true
+        }
+        Resolution::Rejected { path, reason } => {
+            scan.failures.push(LocalImageFailure {
+                raw: raw.to_string(),
+                resolved: Some(path),
+                reason,
+            });
+            false
+        }
+        Resolution::Skip => false,
     }
 }
 
@@ -1927,47 +1942,46 @@ impl FileRewriter<'_> {
     /// rewrite never disagree about which links were files — and the scan is
     /// what reports the rejection, so returning `false` loses nothing.
     fn file(&mut self, label: &str, target: &str) -> bool {
-        match classify_file_target(target, self.base_dir) {
-            FileTarget::Local(path) => match validate_local_file(&path) {
-                Ok(()) => {
-                    // Comparison is on the RESOLVED ABSOLUTE path, which is what
-                    // classify_file_target returns, so two spellings of one file
-                    // dedup correctly — the same rule the image family uses.
-                    if self.already_delivered.contains(&path) {
-                        // The document is already in the chat (a promoted
-                        // intermediate sent it). Consume the reference, record
-                        // nothing: a delivered document is not a lost one.
-                        return true;
-                    }
-                    let id = format!("{}{}", self.id_prefix, self.entries.len());
-                    let caption = if label.trim().is_empty() {
-                        None
-                    } else {
-                        Some(label.to_string())
-                    };
-                    // The alt carries the same `📎 <label>` the text plane's
-                    // marker does, so the reader's anchor is identical in both
-                    // planes; an empty label falls back to the file's own name.
-                    let alt = file_marker_text(label, target);
-                    self.rich
-                        .push_str(&format!("![📎 {alt}](tg://document?id={id})"));
-                    self.entries.push(ResolvedFileRef {
-                        id,
-                        file: LocalFile {
-                            path,
-                            caption,
-                            // Not from a scan: no position in any scan buffer.
-                            marker_span: (0, 0),
-                        },
-                    });
+        match resolve_file_target(target, self.base_dir) {
+            Resolution::Local(path) => {
+                // Comparison is on the RESOLVED ABSOLUTE path, which is what
+                // resolve_file_target returns, so two spellings of one file
+                // dedup correctly — the same rule the image family uses.
+                if self.already_delivered.contains(&path) {
+                    // The document is already in the chat (a promoted
+                    // intermediate sent it). Consume the reference, record
+                    // nothing: a delivered document is not a lost one.
+                    return true;
                 }
-                Err(_) => return false,
-            },
+                let id = format!("{}{}", self.id_prefix, self.entries.len());
+                let caption = if label.trim().is_empty() {
+                    None
+                } else {
+                    Some(label.to_string())
+                };
+                // The alt carries the same `📎 <label>` the text plane's
+                // marker does, so the reader's anchor is identical in both
+                // planes; an empty label falls back to the file's own name.
+                let alt = file_marker_text(label, target);
+                self.rich
+                    .push_str(&format!("![📎 {alt}](tg://document?id={id})"));
+                self.entries.push(ResolvedFileRef {
+                    id,
+                    file: LocalFile {
+                        path,
+                        caption,
+                        // Not from a scan: no position in any scan buffer.
+                        marker_span: (0, 0),
+                    },
+                });
+            }
             // A remote link, an in-page anchor or any other URI scheme has
             // nothing to embed here: the rich plane's media array is built from
             // local bytes, and deleting a link nothing downstream will fetch is
-            // the #286 loss this call site must not reintroduce.
-            FileTarget::Unresolved | FileTarget::Skip => return false,
+            // the #286 loss this call site must not reintroduce. A rejected
+            // candidate is the SCAN's to report — it walks the same references,
+            // so the rewriter stays silent and returns `false`.
+            Resolution::Rejected { .. } | Resolution::Skip => return false,
         }
         true
     }

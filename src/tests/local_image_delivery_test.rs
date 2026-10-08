@@ -825,8 +825,8 @@ mod local_file_links {
 /// `extract_local_files` emits the `📎 <label>` MARKER the HTML plane needs, this
 /// one replaces a resolvable link IN PLACE with the `tg://document?id=docN`
 /// reference the rich plane's media array answers. The two walk the same
-/// references in the same order and share `classify_file_target` /
-/// `validate_local_file`, so they can never disagree about which links are files.
+/// references in the same order and share `resolve_file_target`, so they can
+/// never disagree about which links are files.
 mod local_file_rewrite {
     use crate::utils::image::{DOC_ID_PREFIX, rewrite_local_files};
     use std::path::{Path, PathBuf};
