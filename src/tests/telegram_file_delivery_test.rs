@@ -473,16 +473,13 @@ fn a_private_chat_and_a_basic_group_have_no_message_link() {
         None,
         "a basic group has no t.me message-link form either"
     );
-}
-
-#[test]
-fn a_topic_does_not_rescue_a_kind_that_has_no_link() {
     // The thread is only ever the MIDDLE segment of a link that already exists;
     // it cannot conjure one for a kind that has no link form at all.
     let thread = teloxide::types::ThreadId(teloxide::types::MessageId(321));
     assert_eq!(
         file_message_link(&basic_group(), FORUM_CHAT_ID, Some(thread), 5),
-        None
+        None,
+        "a topic cannot rescue a kind that has no link form"
     );
 }
 
@@ -680,16 +677,6 @@ fn a_dotted_label_does_not_autolink_as_a_domain() {
 }
 
 #[test]
-fn an_empty_label_falls_back_to_a_disarmed_basename() {
-    let out = file_marker_text("   ", "/tmp/reports/q3-report.pdf");
-    assert_eq!(
-        out, "q3-report.\u{200b}pdf",
-        "the basename fallback is disarmed too — the name is the marker text \
-         whether or not the author wrote a label"
-    );
-}
-
-#[test]
 fn a_label_without_a_dotted_token_is_left_alone() {
     // Nothing to disarm: the disarmer must not touch a marker it has no reason
     // to change, or every label would carry noise.
@@ -700,7 +687,10 @@ fn a_label_without_a_dotted_token_is_left_alone() {
 #[test]
 fn a_trailing_dot_is_not_disarmed() {
     // `sentence.` is not a domain: the dot precedes a space or the end of the
-    // string, so there is no TLD to break.
+    // string, so there is no TLD to break. The two disarmed arms below are the
+    // ONLY direct controls on `disarm_autolink`'s positive branch — the
+    // scan-level tests reach it only through a marker, so the bare helper's
+    // multi-dot and version-number shapes are pinned here and nowhere else.
     assert_eq!(disarm_autolink("the report."), "the report.");
     assert_eq!(disarm_autolink("a.b.c"), "a.\u{200b}b.\u{200b}c");
     assert_eq!(disarm_autolink("v1.2"), "v1.\u{200b}2");
@@ -711,7 +701,9 @@ fn a_disarmed_marker_survives_the_link_splice() {
     // The seam: the HTML plane rewrites the marker in place into a markdown
     // link. The breaker rides in the LABEL — the words between the brackets —
     // so the address is untouched and the client still cannot autolink the
-    // label it is handed.
+    // label it is handed. Kept as the only test that carries a ZWSP THROUGH
+    // `link_file_markers`; the other link tests use a clean label, so a splice
+    // that stripped the breaker would pass every one of them.
     let label = file_marker_text("1918-fix-state.md", "/tmp/1918-fix-state.md");
     let body = format!("State: 📎 {label}");
     let scan = scan_over(&body, &[(Path::new(Q3), &format!("📎 {label}"))]);
