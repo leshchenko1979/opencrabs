@@ -1077,14 +1077,13 @@ pub fn rewrite_local_images(
         if !regions[i]
             && text[i..].starts_with("![")
             && let Some((end, label, raw, caption)) = parse_markdown_ref(text, i, 2)
+            && rw.file(&raw, &label, caption, false)
         {
-            if rw.file(&raw, &label, caption, false) {
-                i = end;
-                continue;
-            }
-            // Not consumed: fall through and copy the reference verbatim,
-            // one char at a time, exactly as the scan does.
+            i = end;
+            continue;
         }
+        // Not consumed: fall through and copy the reference verbatim,
+        // one char at a time, exactly as the scan does.
         let ch = text[i..].chars().next().expect("i lies on a char boundary");
         rw.out.rich.push(ch);
         rw.out.stripped.push(ch);
@@ -1565,14 +1564,13 @@ pub fn rewrite_local_videos(
         if !regions[i]
             && text[i..].starts_with("![")
             && let Some((end, label, raw, caption)) = parse_markdown_ref(text, i, 2)
+            && rw.file(&raw, &label, caption, false)
         {
-            if rw.file(&raw, &label, caption, false) {
-                i = end;
-                continue;
-            }
-            // Not consumed: fall through and copy the reference verbatim, one
-            // char at a time, exactly as the image rewriter does.
+            i = end;
+            continue;
         }
+        // Not consumed: fall through and copy the reference verbatim, one
+        // char at a time, exactly as the image rewriter does.
         let ch = text[i..].chars().next().expect("i lies on a char boundary");
         rw.out.rich.push(ch);
         rw.out.stripped.push(ch);
