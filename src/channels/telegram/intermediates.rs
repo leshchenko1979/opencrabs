@@ -502,7 +502,7 @@ pub(crate) async fn deliver_intermediate_message(
     // Their `tg://document?id=docN` references are present in `rich` because it
     // is the file walk's own rich form. A read that fails here joins the failure
     // list, never a panic.
-    let (entries, file_read_failures, delivered_file_paths) = super::delivery::read_media_entries(
+    let (entries, file_read_failures, file_read_paths) = super::delivery::read_media_entries(
         &walks.rich_files.entries,
         super::rich::mermaid::MediaKind::Document,
         "promoted file",
@@ -511,16 +511,18 @@ pub(crate) async fn deliver_intermediate_message(
     .await;
     media.extend(entries);
     file_failures.extend(file_read_failures);
-    // The entries whose bytes actually READ, for the HTML fallback's floor
-    // below. Rebuilding that list from `rich_files.entries` wholesale would hand
-    // `send_local_files` the unreadable ones too, and it would report each of
-    // them a second time — the same file, the same noun, two notices. So the
-    // floor gets exactly the paths the read above returned.
+    // The entries whose bytes actually READ — the ONE list this read produced
+    // (#1918 review f10). Rebuilding it from `rich_files.entries` wholesale
+    // would hand `send_local_files` the unreadable ones too, and it would report
+    // each of them a second time — the same file, the same noun, two notices.
+    // `file_read_paths` is consumed here and nowhere else: every path list below
+    // is derived from THIS list, so the read set has one home instead of a
+    // `Vec<PathBuf>` twin travelling beside it.
     let readable_files: Vec<crate::utils::image::LocalFile> = walks
         .rich_files
         .entries
         .iter()
-        .filter(|entry| delivered_file_paths.contains(&entry.file.path))
+        .filter(|entry| file_read_paths.contains(&entry.file.path))
         .map(|entry| entry.file.clone())
         .collect();
 
@@ -553,10 +555,9 @@ pub(crate) async fn deliver_intermediate_message(
         // their address — the fallback leg needs it to point the `📎` marker at
         // something the reader can open. Recorded before the paths move into
         // `delivered_image_paths` below.
-        let delivered_files: Vec<(std::path::PathBuf, i32)> = delivered_file_paths
+        let delivered_files: Vec<(std::path::PathBuf, i32)> = readable_files
             .iter()
-            .cloned()
-            .map(|path| (path, id.0))
+            .map(|file| (file.path.clone(), id.0))
             .collect();
         s.sent_bubbles.push(SentBubble {
             text: text.to_string(),
@@ -580,7 +581,8 @@ pub(crate) async fn deliver_intermediate_message(
         // #1918: and the documents, for the same reason — the only copy of each
         // is now in the rich message the reader was shown, so the final leg's
         // floor must not ship it a second time as its own bubble.
-        s.delivered_image_paths.extend(delivered_file_paths);
+        s.delivered_image_paths
+            .extend(readable_files.iter().map(|file| file.path.clone()));
         return true;
     }
 
@@ -637,10 +639,13 @@ pub(crate) async fn deliver_intermediate_message(
         s.delivered_image_paths
             .extend(delivered_files.iter().map(|f| f.path.clone()));
     }
-    plain = crate::utils::append_file_failure_notice(&plain, &refused_files);
-    // The documents whose bytes could not be read never reached either send, so
-    // their notice is owed here too — same list, same noun (#1918).
-    plain = crate::utils::append_file_failure_notice(&plain, &file_failures);
+    // #1918: the documents that failed ride ONE notice. The refused ones (the
+    // channel would not take them) and the unreadable ones (their bytes never
+    // reached either send) are the same fault to the reader, so two consecutive
+    // calls printed two lines for one problem (#1918 review f11).
+    let mut all_file_failures = refused_files;
+    all_file_failures.extend(file_failures);
+    plain = crate::utils::append_file_failure_notice(&plain, &all_file_failures);
 
     // Resolve fences here too (#1142 parity): when the rich path rejected the
     // message, the HTML fallback must still render the diagram instead of
