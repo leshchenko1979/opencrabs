@@ -655,27 +655,40 @@ fn parse_marker_at(text: &str, start: usize, prefix: &str) -> Option<(usize, Str
     ))
 }
 
-/// Parse a markdown image reference starting at `start` (a char boundary where
-/// the text begins with `![`). Accepts `![alt](target)`, the angle-bracket form
-/// `![alt](<target>)` that markdown requires when the path holds spaces, and an
-/// optional `"title"` / `'title'` after the target. Returns
-/// `(end_byte_exclusive, raw_target, title)`.
+/// Parse a markdown reference starting at `start` (a char boundary where the
+/// text begins with `[`). `bracket_len` is the length of the opening bracket —
+/// 2 for an image (`![alt](target)`), 1 for a link (`[label](target)`); the two
+/// forms differ in nothing else. Accepts the angle-bracket form `(<target>)`
+/// that markdown requires when the path holds spaces, and an optional `"title"`
+/// / `'title'` after the target. Returns
+/// `(end_byte_exclusive, label, raw_target, title)`.
 ///
-/// The title is the caption carrier — `![alt](chart.png "Quarterly revenue")`
-/// renders "Quarterly revenue" as the photo's caption — so it is returned
-/// rather than dropped, and the `alt` text is NOT: alt is inert on every
-/// delivery leg.
-fn parse_markdown_image(text: &str, start: usize) -> Option<(usize, String, Option<String>)> {
-    debug_assert!(text[start..].starts_with("!["));
-    // `\![alt](path)` is escaped literal text, not a reference.
+/// The label is the `alt` text for an image and the link text for a link. It is
+/// returned for both — inert on the image legs, and the caption carrier for a
+/// document. The title is the caption carrier for an image
+/// (`![alt](chart.png "Quarterly revenue")` renders "Quarterly revenue" as the
+/// photo's caption), so it is captured in both forms rather than stepped over.
+fn parse_markdown_ref(
+    text: &str,
+    start: usize,
+    bracket_len: usize,
+) -> Option<(usize, String, String, Option<String>)> {
+    let open = match bracket_len {
+        2 => "![",
+        1 => "[",
+        _ => return None,
+    };
+    debug_assert!(text[start..].starts_with(open));
+    // `\![alt](path)` and `\[label](path)` are escaped literal text, not references.
     if start > 0 && text[..start].ends_with('\\') {
         return None;
     }
-    let alt_end = text[start + 2..].find(']')?;
-    let paren = start + 2 + alt_end + 1;
+    let label_end = text[start + bracket_len..].find(']')?;
+    let paren = start + bracket_len + label_end + 1;
     if !text[paren..].starts_with('(') {
         return None;
     }
+    let label = text[start + bracket_len..start + bracket_len + label_end].to_string();
     let cursor = skip_whitespace(text, paren + 1);
     let (target, mut after_target) = if text[cursor..].starts_with('<') {
         let close = text[cursor + 1..].find('>')?;
@@ -708,7 +721,7 @@ fn parse_markdown_image(text: &str, start: usize) -> Option<(usize, String, Opti
     if !text[after_target..].starts_with(')') || target.trim().is_empty() {
         return None;
     }
-    Some((after_target + 1, target, title))
+    Some((after_target + 1, label, target, title))
 }
 
 /// Byte offset of the first non-whitespace char at or after `from`.
@@ -978,19 +991,6 @@ fn rich_title(caption: Option<&str>) -> String {
     format!(" \"{folded}\"")
 }
 
-/// The alt text of a markdown image reference whose `![` sits at `start`.
-///
-/// Returned verbatim so the rewritten reference keeps the author's own
-/// wording. [`parse_markdown_image`] returns the target and the title but not
-/// the alt — alt is inert on every delivery leg today — so the rewrite reads it
-/// from the span itself instead of widening that parser.
-fn markdown_alt(text: &str, start: usize) -> String {
-    match text[start + 2..].find(']') {
-        Some(rel) => text[start + 2..start + 2 + rel].to_string(),
-        None => String::new(),
-    }
-}
-
 /// Rewrite a mid-turn intermediate for the rich media plane (#502).
 ///
 /// The sibling of [`scan_image_references`]: same walk, same `code_regions`
@@ -1048,10 +1048,9 @@ pub fn rewrite_local_images(
         }
         if !regions[i]
             && text[i..].starts_with("![")
-            && let Some((end, raw, caption)) = parse_markdown_image(text, i)
+            && let Some((end, label, raw, caption)) = parse_markdown_ref(text, i, 2)
         {
-            let alt = markdown_alt(text, i);
-            if rw.file(&raw, &alt, caption, false) {
+            if rw.file(&raw, &label, caption, false) {
                 i = end;
                 continue;
             }
@@ -1093,7 +1092,7 @@ fn scan_image_references(
         }
         if !regions[i]
             && text[i..].starts_with("![")
-            && let Some((end, raw, caption)) = parse_markdown_image(text, i)
+            && let Some((end, _label, raw, caption)) = parse_markdown_ref(text, i, 2)
             && record_candidate(raw, caption, base_dir, false, remote, &mut scan)
         {
             i = end;
@@ -1407,7 +1406,7 @@ pub fn extract_local_videos(text: &str, base_dir: Option<&Path>) -> LocalVideoSc
         }
         if !regions[i]
             && text[i..].starts_with("![")
-            && let Some((end, raw, caption)) = parse_markdown_image(text, i)
+            && let Some((end, _label, raw, caption)) = parse_markdown_ref(text, i, 2)
             && record_video_candidate(raw, caption, base_dir, false, &mut scan)
         {
             i = end;
@@ -1528,10 +1527,9 @@ pub fn rewrite_local_videos(
         }
         if !regions[i]
             && text[i..].starts_with("![")
-            && let Some((end, raw, caption)) = parse_markdown_image(text, i)
+            && let Some((end, label, raw, caption)) = parse_markdown_ref(text, i, 2)
         {
-            let alt = markdown_alt(text, i);
-            if rw.file(&raw, &alt, caption, false) {
+            if rw.file(&raw, &label, caption, false) {
                 i = end;
                 continue;
             }
@@ -1707,65 +1705,6 @@ pub fn validate_local_file(path: &Path) -> Result<(), LocalImageFailureReason> {
     Ok(())
 }
 
-/// Parse a markdown link starting at `start` (a char boundary where the text
-/// begins with `[`). Accepts `[label](target)`, the angle-bracket form
-/// `[label](<target>)` markdown requires when the path holds spaces, and an
-/// optional `"title"` / `'title'` after the target. Returns
-/// `(end_byte_exclusive, label, raw_target, title)`.
-///
-/// The sibling of [`parse_markdown_image`]: same grammar, same skip rules. The
-/// label is returned because it is the caption carrier for a document, where the
-/// image parser's inert `alt` is not.
-fn parse_markdown_link(
-    text: &str,
-    start: usize,
-) -> Option<(usize, String, String, Option<String>)> {
-    debug_assert!(text[start..].starts_with('['));
-    // `\[label](path)` is escaped literal text, not a reference.
-    if start > 0 && text[..start].ends_with('\\') {
-        return None;
-    }
-    let label_end = text[start + 1..].find(']')?;
-    let paren = start + 1 + label_end + 1;
-    if !text[paren..].starts_with('(') {
-        return None;
-    }
-    let label = text[start + 1..start + 1 + label_end].to_string();
-    let cursor = skip_whitespace(text, paren + 1);
-    let (target, mut after_target) = if text[cursor..].starts_with('<') {
-        let close = text[cursor + 1..].find('>')?;
-        let target = text[cursor + 1..cursor + 1 + close].to_string();
-        (target, cursor + 1 + close + 1)
-    } else {
-        let mut end = cursor;
-        while let Some(ch) = text[end..].chars().next() {
-            if ch.is_whitespace() || ch == ')' {
-                break;
-            }
-            end += ch.len_utf8();
-        }
-        (text[cursor..end].to_string(), end)
-    };
-    after_target = skip_whitespace(text, after_target);
-    // The title is parsed only to find the closing paren; the label, not the
-    // title, is a document's caption carrier.
-    let mut title: Option<String> = None;
-    if let Some(quote) = text[after_target..].chars().next()
-        && (quote == '"' || quote == '\'')
-    {
-        let close = text[after_target + 1..].find(quote)?;
-        let parsed = text[after_target + 1..after_target + 1 + close].trim();
-        if !parsed.is_empty() {
-            title = Some(parsed.to_string());
-        }
-        after_target = skip_whitespace(text, after_target + 1 + close + 1);
-    }
-    if !text[after_target..].starts_with(')') || target.trim().is_empty() {
-        return None;
-    }
-    Some((after_target + 1, label, target, title))
-}
-
 /// File one parsed link into the scan accumulators. Returns `true` when the
 /// reference was consumed and must leave the reply text — which happens ONLY for
 /// a resolved, validated file. A rejected candidate or a non-file target returns
@@ -1892,7 +1831,7 @@ pub fn extract_local_files(text: &str, base_dir: Option<&Path>) -> LocalFileScan
             // its `[` is preceded by `!`, and copying the `!` first must not let
             // the link parser claim the span on the next iteration.
             && !text[..i].ends_with('!')
-            && let Some((end, label, target, _title)) = parse_markdown_link(text, i)
+            && let Some((end, label, target, _title)) = parse_markdown_ref(text, i, 1)
             && record_file_candidate(&text[i..end], &label, &target, base_dir, &mut scan)
         {
             // #1918: the reference becomes a visible marker, not a hole. The
@@ -2068,7 +2007,7 @@ pub fn rewrite_local_files(
             // its `[` is preceded by `!`, and copying the `!` first must not let
             // the link parser claim the span on the next iteration.
             && !text[..i].ends_with('!')
-            && let Some((end, label, target, _title)) = parse_markdown_link(text, i)
+            && let Some((end, label, target, _title)) = parse_markdown_ref(text, i, 1)
             && rw.file(&label, &target)
         {
             i = end;
