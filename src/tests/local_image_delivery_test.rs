@@ -1118,6 +1118,7 @@ mod local_file_rewrite {
             Some(dir.path()),
             DOC_ID_PREFIX,
             &[],
+            true,
         );
         assert_eq!(
             rw.rich.matches('📎').count(),
