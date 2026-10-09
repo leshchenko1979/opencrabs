@@ -477,7 +477,7 @@ fn the_intermediate_rich_body_carries_the_document_reference_and_owns_the_floor(
 
     // The file walk runs LAST, on the image family's rich form — the order the
     // intermediate performs.
-    let fw = rewrite_local_files(&rw_rich.rich, Some(dir.path()), DOC_ID_PREFIX, &[]);
+    let fw = rewrite_local_files(&rw_rich.rich, Some(dir.path()), DOC_ID_PREFIX, &[], true);
     assert_eq!(fw.entries.len(), 1, "one document resolved");
     assert!(
         fw.rich.contains("tg://document?id=doc0"),

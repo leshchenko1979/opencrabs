@@ -875,6 +875,7 @@ mod local_file_rewrite {
             Some(dir.path()),
             DOC_ID_PREFIX,
             &[],
+            true,
         );
         assert_eq!(
             rw.rich, "before ![📎 Q3 report](tg://document?id=doc0) after",
@@ -900,6 +901,7 @@ mod local_file_rewrite {
             Some(dir.path()),
             DOC_ID_PREFIX,
             &[],
+            true,
         );
         assert_eq!(
             rw.rich,
@@ -920,6 +922,7 @@ mod local_file_rewrite {
             Some(dir.path()),
             DOC_ID_PREFIX,
             &[],
+            true,
         );
         assert_eq!(
             rw.rich,
@@ -947,6 +950,7 @@ mod local_file_rewrite {
             Some(dir.path()),
             DOC_ID_PREFIX,
             &[],
+            true,
         );
         assert_eq!(
             rw.rich,
@@ -962,11 +966,58 @@ mod local_file_rewrite {
     }
 
     #[test]
+    fn markdown_is_left_as_a_marker_when_inlining_is_off() {
+        // #1968: Telegram's Android client opens a `.md` ATTACHMENT in its
+        // markdown viewer but NOT a document inlined into a rich message. With
+        // `inline_markdown_documents` off the walk must therefore leave the plain marker
+        // the text plane already shows AND record no entry — no entry is what
+        // keeps the document out of the media array, so the detached file floor
+        // delivers it instead.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let md = write_file(dir.path(), "state.md", b"# state\n");
+        let rw = rewrite_local_files(
+            &format!("before [state]({}) after", md.display()),
+            Some(dir.path()),
+            DOC_ID_PREFIX,
+            &[],
+            false,
+        );
+        assert_eq!(
+            rw.rich, "before 📎 state after",
+            "the reference becomes the plain marker, not an inlined document \
+             reference — an inlined `.md` is unopenable on Android"
+        );
+        assert!(
+            rw.entries.is_empty(),
+            "no entry: the rich plane must not carry the document, so the \
+             detached file floor is its delivery leg"
+        );
+    }
+
+    #[test]
+    fn a_non_markdown_document_still_inlines_when_markdown_inlining_is_off() {
+        // The flag is scoped to MARKDOWN. A PDF in the same reply keeps the
+        // inline form, or turning markdown inlining off would silently detach
+        // every other document kind too.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let rw = rewrite_local_files(
+            &format!("[Q3]({})", pdf.display()),
+            Some(dir.path()),
+            DOC_ID_PREFIX,
+            &[],
+            false,
+        );
+        assert_eq!(rw.rich, "![📎 Q3](tg://document?id=doc0)");
+        assert_eq!(rw.entries.len(), 1);
+    }
+
+    #[test]
     fn a_link_inside_a_code_span_is_left_byte_identical() {
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
         let text = format!("`[Q3]({})`", pdf.display());
-        let rw = rewrite_local_files(&text, Some(dir.path()), DOC_ID_PREFIX, &[]);
+        let rw = rewrite_local_files(&text, Some(dir.path()), DOC_ID_PREFIX, &[], true);
         assert_eq!(rw.rich, text, "a code span is documentation, not a link");
         assert!(rw.entries.is_empty());
     }
@@ -977,7 +1028,7 @@ mod local_file_rewrite {
         // reference must survive so the reader still sees what was named. The
         // failure is the SCAN's to report — one predicate, one home.
         let text = "before [Q3 report](/definitely/not/here-q3.pdf) after";
-        let rw = rewrite_local_files(text, None, DOC_ID_PREFIX, &[]);
+        let rw = rewrite_local_files(text, None, DOC_ID_PREFIX, &[], true);
         assert_eq!(rw.rich, text);
         assert!(rw.entries.is_empty());
     }
@@ -987,7 +1038,7 @@ mod local_file_rewrite {
         // It may be ordinary prose that merely looks like a link, so with no
         // working directory to resolve against it is left alone.
         let text = "see [report](reports/q3.pdf) here";
-        let rw = rewrite_local_files(text, None, DOC_ID_PREFIX, &[]);
+        let rw = rewrite_local_files(text, None, DOC_ID_PREFIX, &[], true);
         assert_eq!(rw.rich, text);
         assert!(rw.entries.is_empty());
     }
@@ -995,7 +1046,7 @@ mod local_file_rewrite {
     #[test]
     fn a_remote_link_stays_byte_identical() {
         let text = "see [the site](https://example.com/a) for details";
-        let rw = rewrite_local_files(text, None, DOC_ID_PREFIX, &[]);
+        let rw = rewrite_local_files(text, None, DOC_ID_PREFIX, &[], true);
         assert_eq!(rw.rich, text);
         assert!(rw.entries.is_empty());
     }
@@ -1013,6 +1064,7 @@ mod local_file_rewrite {
             Some(dir.path()),
             DOC_ID_PREFIX,
             std::slice::from_ref(&pdf),
+            true,
         );
         assert_eq!(rw.rich, "before  after");
         assert!(rw.entries.is_empty());
@@ -1053,7 +1105,7 @@ mod local_file_rewrite {
         let dir = tempfile::tempdir().expect("tempdir");
         let png = write_file(dir.path(), "pic.png", PNG_BYTES);
         let text = format!("![pic]({})", png.display());
-        let rw = rewrite_local_files(&text, Some(dir.path()), DOC_ID_PREFIX, &[]);
+        let rw = rewrite_local_files(&text, Some(dir.path()), DOC_ID_PREFIX, &[], true);
         assert_eq!(rw.rich, text);
         assert!(rw.entries.is_empty());
     }
@@ -1070,6 +1122,7 @@ mod local_file_rewrite {
             Some(dir.path()),
             "xyz",
             &[],
+            true,
         );
         assert_eq!(rw.rich, "![📎 Q3](tg://document?id=xyz0)");
         assert_eq!(rw.entries[0].id, "xyz0");
@@ -1084,6 +1137,7 @@ mod local_file_rewrite {
             Some(dir.path()),
             DOC_ID_PREFIX,
             &[],
+            true,
         );
         assert_eq!(rw.rich, "before ![📎 Q3](tg://document?id=doc0)");
     }

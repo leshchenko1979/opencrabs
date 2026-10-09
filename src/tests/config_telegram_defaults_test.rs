@@ -4,6 +4,12 @@ use crate::config::{Config, TelegramConfig};
 fn test_telegram_config_default_struct_booleans() {
     let cfg = TelegramConfig::default();
     assert!(cfg.rich_messages, "rich_messages must default to true");
+    assert!(
+        !cfg.inline_markdown_documents,
+        "inline_markdown_documents must default to false — a detached `.md` is openable in \
+         Telegram's built-in viewer on Android, an inlined one is not; enabling inlining is \
+         the opt-in (#1968)"
+    );
     assert!(cfg.mermaid_render, "mermaid_render must default to true");
     assert!(
         cfg.silence_group_start,

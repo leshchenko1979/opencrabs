@@ -359,6 +359,14 @@ pub(crate) async fn deliver_final_response(
                     Some(image_cwd.as_path()),
                     crate::utils::DOC_ID_PREFIX,
                     &delivered,
+                    // #1968: the markdown opt-out is applied INSIDE the walk, so
+                    // a `.md` reference comes back as the plain marker and no
+                    // entry is recorded for it — which is what keeps the rich
+                    // plane from inlining it and hands it to the floor below.
+                    crate::config::Config::current()
+                        .channels
+                        .telegram
+                        .inline_markdown_documents,
                 );
                 (rw, vw, fw)
             };
@@ -399,6 +407,11 @@ pub(crate) async fn deliver_final_response(
             // which `rich_fw.rich` carries and the text plane's marker does not:
             // this is the leg that renders the document AT the reference instead
             // of as a detached bubble, which is the whole point of the kind.
+            // #1968: with `inline_markdown_documents` off the FILE WALK has
+            // already left every markdown document as a plain marker and
+            // recorded no entry for it, so nothing here needs to filter — this
+            // carries exactly the documents the rich plane owns, and the
+            // detached file floor delivers the ones it does not.
             let (media, failures, _) = read_media_entries(
                 &rich_fw.entries,
                 MediaKind::Document,
@@ -825,8 +838,38 @@ pub(crate) async fn deliver_final_response(
             // a document's only delivery leg when the rich plane does not own it
             // (the flag off, or a body the rich plane declines), and `delivered`
             // is then empty because nothing was sent.
+            //
+            // #1968: the suppression is now per-FILE, not per-family. With
+            // `inline_markdown_documents` off a markdown document is deliberately absent
+            // from the rich plane's entries, so a reply that also carries, say,
+            // a PDF would read `rich_owns_documents == true` and this leg would
+            // ship nothing — leaving the markdown file with no delivery leg at
+            // all. The floor therefore sends exactly the files the rich plane
+            // did NOT take. Normally the two sets coincide (the plane owns all
+            // of them or none), so every other kind behaves as before.
+            let files_the_rich_plane_skipped: Vec<crate::utils::image::LocalFile> =
+                if rich_owns_documents {
+                    file_paths
+                        .iter()
+                        .filter(|f| !rich_fw.entries.iter().any(|e| e.file.path == f.path))
+                        .cloned()
+                        .collect()
+                } else {
+                    Vec::new()
+                };
             let (delivered, refused) = if rich_owns_documents {
-                (Vec::new(), Vec::new())
+                if files_the_rich_plane_skipped.is_empty() {
+                    (Vec::new(), Vec::new())
+                } else {
+                    send_local_files(
+                        session_id,
+                        bot,
+                        chat_id,
+                        thread_id,
+                        &files_the_rich_plane_skipped,
+                    )
+                    .await
+                }
             } else {
                 send_local_files(session_id, bot, chat_id, thread_id, &file_paths).await
             };
@@ -2407,6 +2450,13 @@ pub(crate) async fn handle_intermediate(
         Some(cwd),
         crate::utils::DOC_ID_PREFIX,
         &delivered,
+        // #1968: same gate as the final leg — a markdown document promoted
+        // with an intermediate must not be inlined either, or the bubble the
+        // reader keeps would carry the un-openable form.
+        crate::config::Config::current()
+            .channels
+            .telegram
+            .inline_markdown_documents,
     );
 
     // 4. A fresh picture is report-shaped content on its own (#502); anything
