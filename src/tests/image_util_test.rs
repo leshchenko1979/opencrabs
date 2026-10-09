@@ -189,11 +189,24 @@ fn data_url_markdown_image_counts_as_remote() {
 
 #[test]
 fn non_image_schemes_stay_literal() {
-    let text = "![a](mailto:x@y.z) and ![b](ftp://h/x.png) and ![c](file:///x.png)";
+    let text = "![a](mailto:x@y.z) and ![b](ftp://h/x.png)";
     let scan = extract_local_images(text, None);
     assert_eq!(scan.text, text);
     assert!(scan.remote.is_empty());
     assert!(scan.failures.is_empty());
+}
+
+#[test]
+fn a_file_uri_resolves_to_its_local_path() {
+    // #1968: `file:` is a LOCAL scheme, not a URI Telegram resolves. It must
+    // reach the same validate path a bare absolute path does — before this the
+    // image family joined the raw URI to the base dir and found nothing, while
+    // the file family skipped it outright.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png = write_file(dir.path(), "uri.png", PNG_BYTES);
+    let uri = format!("file://{}", png.display());
+    let scan = extract_local_images(&format!("![x]({uri})"), None);
+    assert_eq!(resolved_paths(&scan), vec![png]);
 }
 
 #[test]
@@ -296,7 +309,6 @@ fn non_image_schemes_are_not_remote() {
     for raw in [
         "mailto:x@y.z",
         "ftp://h/x.png",
-        "file:///x.png",
         "rel/x.png",
         "http:/h/x.png",
         "",
@@ -308,6 +320,22 @@ fn non_image_schemes_are_not_remote() {
             "{raw}"
         );
     }
+}
+
+#[test]
+fn a_file_uri_classifies_as_a_local_path() {
+    // #1968: `file://` names a local file, so it classifies as Local rather
+    // than being joined to the base dir as a relative path.
+    assert_eq!(
+        classify_image_target("file:///x.png", None),
+        ImageTarget::Local(PathBuf::from("/x.png"))
+    );
+    assert_eq!(
+        classify_image_target("file://localhost/x.png", None),
+        ImageTarget::Local(PathBuf::from("/x.png")),
+        "an empty or `localhost` authority names the same path"
+    );
+    assert!(!is_remote_url("file:///x.png"));
 }
 
 #[test]

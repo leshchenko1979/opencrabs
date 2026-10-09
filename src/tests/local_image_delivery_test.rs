@@ -500,6 +500,42 @@ mod local_file_links {
     }
 
     #[test]
+    fn a_file_uri_target_resolves_to_the_local_file() {
+        // #1968: a model spelled the local file as a `file://` URI. Before this
+        // the scheme guard skipped `file:` and the document was dropped
+        // SILENTLY — no attachment, no marker, no failure notice — while the
+        // prose still claimed the write-up was attached.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let uri = format!("file://{}", pdf.display());
+        let scan = extract_local_files(&format!("see [Q3 report]({uri}) here"), None);
+        assert_eq!(scan.text, "see 📎 Q3 report here");
+        assert_eq!(paths(&scan), vec![pdf]);
+        assert!(scan.failures.is_empty());
+    }
+
+    #[test]
+    fn a_percent_encoded_file_uri_is_decoded() {
+        // `url::Url` decodes `%20` for us, so a URI naming a path with a space
+        // reaches the file it names rather than a literal `%20` that is not there.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "Q3 final.pdf", PDF_BYTES);
+        let uri = format!("file://{}", dir.path().join("Q3%20final.pdf").display());
+        let scan = extract_local_files(&format!("[Q3]({uri})"), None);
+        assert_eq!(paths(&scan), vec![pdf]);
+        assert!(scan.failures.is_empty());
+    }
+
+    #[test]
+    fn a_missing_file_uri_is_reported_not_skipped() {
+        // The point of the fix: a `file://` that does NOT resolve must be a
+        // reported failure, not the silent drop the generic scheme guard gave.
+        let scan = extract_local_files("[Q3](file:///nonexistent/definitely/x.pdf)", None);
+        assert_eq!(scan.failures.len(), 1);
+        assert!(paths(&scan).is_empty());
+    }
+
+    #[test]
     fn a_title_after_the_target_is_ignored_and_the_label_captions() {
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);

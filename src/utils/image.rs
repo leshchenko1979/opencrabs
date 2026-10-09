@@ -570,6 +570,12 @@ pub fn classify_image_target(raw: &str, base_dir: Option<&Path>) -> ImageTarget 
     if is_telegram_media_ref(trimmed) {
         return ImageTarget::MediaRef(trimmed.to_string());
     }
+    // A `file://` URI names a local file (#1968). Without this arm the generic
+    // path below would join the raw URI to `base_dir` and resolve to nothing,
+    // because `file:` is neither remote nor a media ref.
+    if let Some(path) = local_file_path_from_uri(trimmed) {
+        return ImageTarget::Local(path);
+    }
     let expanded = crate::brain::tools::error::expand_tilde(trimmed);
     if expanded.is_absolute() {
         return ImageTarget::Local(expanded);
@@ -1680,6 +1686,14 @@ fn resolve_file_target(target: &str, base_dir: Option<&Path>) -> Resolution {
     if trimmed.is_empty() || trimmed.starts_with('#') {
         return Resolution::Skip;
     }
+    // A `file://` URI names a LOCAL file — the spelling a model reaches for when
+    // it means "this file on the box". Unwrap it to its path so it takes the same
+    // validate path a bare path does, instead of falling to the generic scheme
+    // guard below, which would skip it SILENTLY: no attachment, no marker, no
+    // failure notice (#1968).
+    if let Some(path) = local_file_path_from_uri(trimmed) {
+        return validate_local_path(path);
+    }
     // A link Telegram resolves itself, or one it resolves against the rich
     // request's media array (#334), is never ours; neither is any other URI
     // scheme (`mailto:`, `ftp:`, `tel:`), which must not be joined to the cwd
@@ -1698,6 +1712,13 @@ fn resolve_file_target(target: &str, base_dir: Option<&Path>) -> Resolution {
             None => return Resolution::Skip,
         }
     };
+    validate_local_path(path)
+}
+
+/// Validate an already-resolved local path into a [`Resolution`]. Shared by the
+/// bare-path arm and the `file://` arm of [`resolve_file_target`] so the two
+/// cannot drift apart.
+fn validate_local_path(path: PathBuf) -> Resolution {
     match validate_local_file(&path) {
         Ok(()) => Resolution::Local(path),
         Err(reason) => Resolution::Rejected { path, reason },
@@ -1723,6 +1744,35 @@ fn has_url_scheme(raw: &str) -> bool {
         }
     }
     false
+}
+
+/// Decode a `file://` URI into the local path it names, so a model that spells a
+/// local file the URI way (`file:///root/x.md`) reaches the same resolver as a
+/// bare path.
+///
+/// `file:` is an explicitly LOCAL scheme, but [`has_url_scheme`] treats it like
+/// `mailto:`/`ftp:` and the file family's guard would skip it — silently, with no
+/// attachment and no failure notice (the #1968 report: a model wrote
+/// `[label](file:///root/…)` and the file never shipped). Telegram's
+/// `sendDocument` has no URI form, so the spelling is unwrapped BEFORE the scheme
+/// guard, never after it.
+///
+/// `url::Url` does the whole job — it is already a dependency, it enforces the
+/// scheme, drops the authority (`file://localhost/…` and `file:///…` name the
+/// same path) and percent-decodes `%20`. `None` for anything that is not a
+/// `file:` URI, including a host that is neither empty nor `localhost`
+/// (`file://server/share` is a UNC path this resolver cannot reach) and a
+/// malformed escape.
+pub(crate) fn local_file_path_from_uri(raw: &str) -> Option<PathBuf> {
+    let url = url::Url::parse(raw).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+    match url.host() {
+        None | Some(url::Host::Domain("localhost")) => {}
+        _ => return None,
+    }
+    url.to_file_path().ok()
 }
 
 /// Telegram's `sendDocument` ceiling. Documents carry far more than a photo's
