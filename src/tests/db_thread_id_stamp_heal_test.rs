@@ -51,6 +51,10 @@ fn cron_trigger_index() -> usize {
     index_1based("ADD COLUMN trigger_cmd")
 }
 
+fn exit_code_index() -> usize {
+    index_1based("ADD COLUMN exit_code")
+}
+
 async fn has_column(db: &Database, table: &str, column: &str) -> bool {
     let (table, column) = (table.to_owned(), column.to_owned());
     db.pool()
@@ -447,17 +451,20 @@ async fn a_reconciliation_boot_is_worth_a_pre_migration_snapshot() {
 /// The #763 column must reach a database whose stamp already claims the list is
 /// complete.
 ///
-/// `20261002000001_add_tool_executions_exit_code.sql` is appended LAST, so an
-/// upstream merge that inserts an earlier filename below it moves its index and
-/// a database stamped against the pre-merge list skips it in silence — the
-/// #1401 class in the direction `to_latest` cannot see. The post-pass heal is
-/// the column's only cover there.
+/// `20261002000001_add_tool_executions_exit_code.sql` sits near the list's
+/// tail, so an upstream merge that inserts an earlier filename below it moves
+/// its index and a database stamped against the pre-merge list skips it in
+/// silence — the #1401 class in the direction `to_latest` cannot see. The
+/// post-pass heal is the column's only cover there.
 #[tokio::test]
 async fn a_stamp_at_latest_over_a_missing_exit_code_column_is_healed() {
     let total = MIGRATION_SQL.len();
-    // Migrated to the second-to-last entry (so the #763 column is absent) but
+    // Migrated to the entry just below #763's (so the column is absent) but
     // stamped at the full length — what the pre-merge list leaves behind.
-    let db = db_at(total - 1, total as i64).await;
+    // Located by name, not `total - 1`: #763 was the last entry when this test
+    // was written, and a later append silently moves the cut point past it —
+    // the same drift this file exists to guard.
+    let db = db_at(exit_code_index() - 1, total as i64).await;
     assert!(
         !has_column(&db, "tool_executions", "exit_code").await,
         "fixture: the pre-#763 schema carries no exit_code column"

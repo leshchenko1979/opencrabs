@@ -1,0 +1,23 @@
+-- Restore `idx_tool_executions_message_id`, dropped by
+-- `20260415000003_fix_tool_executions_schema.sql`.
+--
+-- That migration rebuilds the table as `DROP TABLE IF EXISTS tool_executions;`
+-- followed by a bare `CREATE TABLE`, and never re-creates the two indexes
+-- declared beside the table in `20251028000001_initial_schema.sql` /
+-- `20251028000002_modernize_schema.sql`. A DROP takes the indexes with it, and
+-- the earlier `CREATE INDEX IF NOT EXISTS` migrations are already stamped
+-- applied, so on every database that ran it the index is gone permanently.
+--
+-- Consequence, measured on the ops profile (2026-10-09, 642,855 rows): the
+-- 24 h retention prune's `DELETE FROM tool_executions WHERE message_id IN
+-- (SELECT id FROM messages WHERE created_at < ?)` plans as `SCAN
+-- tool_executions`, adding a ~13 s full-table scan to the single transaction
+-- that holds the SQLite write lock. `attachments`, the sibling leg, already
+-- has a covering index (`idx_attachments_message_id`) and stays a SEARCH.
+--
+-- Only `message_id` is restored. `idx_tool_executions_status` was declared
+-- too, but no query filters on `status`: the analytics panel folds it into a
+-- `SUM(CASE WHEN status = 'error' ...)` over a `GROUP BY tool_name`, which no
+-- index on `status` serves. Re-creating it would add write amplification to
+-- every tool-call INSERT for no read benefit.
+CREATE INDEX IF NOT EXISTS idx_tool_executions_message_id ON tool_executions(message_id);
