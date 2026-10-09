@@ -180,10 +180,25 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // code into success/error, so an intentional `rc != 0` read as a tool
     // failure (25,013 of 30,933 error rows on the ops DB were `bash`,
     // 6.0137 % of all bash rows). Nullable; pre-feature rows stay NULL and are
-    // deliberately NOT back-classified. Appended last per the list invariant,
-    // and covered by `heal_tool_executions_exit_code` after `to_latest` so a
-    // database stamped past this index still gains the column (#1401 class).
+    // deliberately NOT back-classified. Appended after the then-newest entry
+    // per the list invariant, and covered by `heal_tool_executions_exit_code`
+    // after `to_latest` so a database stamped past this index still gains the
+    // column (#1401 class).
     include_str!("../migrations/20261002000001_add_tool_executions_exit_code.sql"),
+    // Restore the `tool_executions(message_id)` index that
+    // `20260415000003_fix_tool_executions_schema.sql` dropped: that migration
+    // rebuilds the table (`DROP TABLE` + bare `CREATE TABLE`) and never
+    // re-creates the indexes declared with it, so every database that ran it
+    // lost the index for good. Appended last per the list invariant; without
+    // it the retention prune's `WHERE message_id IN (...)` DELETE is a full
+    // table scan inside the write-lock-holding transaction.
+    //
+    // Dated `…000002` rather than `…000001`: upstream's newest migration is
+    // `20261009000001_pending_requests_channel_message_id.sql`, absent here, so
+    // the `…000001` slot is already spoken for on the tracker this will be
+    // merged with — one unique timestamp per migration, per the tree's own
+    // convention (`20260921000001` / `20260921000002`).
+    include_str!("../migrations/20261009000002_recreate_tool_executions_message_id_index.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

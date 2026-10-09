@@ -698,10 +698,10 @@ pub(crate) fn heal_session_seen_skills_loaded_mtime(
 /// Add `tool_executions.exit_code` when migration 60 was skipped (#763).
 ///
 /// Mirrors `src/migrations/20261002000001_add_tool_executions_exit_code.sql`,
-/// which stays the source of truth. The migration is appended LAST, so an
-/// upstream merge that inserts an earlier filename below it shifts its index,
-/// and a database stamped against the pre-merge list then never runs it — the
-/// #1401 class, in the direction `to_latest` cannot see. This heal is the
+/// which stays the source of truth. The migration sits near the list's tail,
+/// so an upstream merge that inserts an earlier filename below it shifts its
+/// index, and a database stamped against the pre-merge list then never runs it
+/// — the #1401 class, in the direction `to_latest` cannot see. This heal is the
 /// column's only repair.
 pub(crate) fn heal_tool_executions_exit_code(
     conn: &rusqlite::Connection,
