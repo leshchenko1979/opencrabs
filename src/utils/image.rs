@@ -1768,9 +1768,8 @@ pub(crate) fn local_file_path_from_uri(raw: &str) -> Option<PathBuf> {
     if url.scheme() != "file" {
         return None;
     }
-    match url.host() {
-        None | Some(url::Host::Domain("localhost")) => {}
-        _ => return None,
+    if !matches!(url.host(), None | Some(url::Host::Domain("localhost"))) {
+        return None;
     }
     url.to_file_path().ok()
 }
