@@ -199,6 +199,13 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // merged with — one unique timestamp per migration, per the tree's own
     // convention (`20260921000001` / `20260921000002`).
     include_str!("../migrations/20261009000002_recreate_tool_executions_message_id_index.sql"),
+    // Index `messages(created_at)` for the retention prune (#278). The prune's
+    // `DELETE FROM messages WHERE created_at < ?` had no supporting index, so it
+    // full-scanned a table holding ~78 % of the database's bytes inside the
+    // write-lock-holding transaction. Appended last per the list invariant; no
+    // `MIGRATION_EFFECTS` declaration is owed (that window is contiguous and
+    // ends far below this entry).
+    include_str!("../migrations/20261010000001_add_messages_created_at_index.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

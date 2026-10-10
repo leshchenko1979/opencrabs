@@ -1,0 +1,38 @@
+-- Index `messages(created_at)` for the 24 h retention prune (#278).
+--
+-- `MessageRepository::prune_older_than` (#278) runs three statements inside one
+-- transaction:
+--
+--   DELETE FROM attachments     WHERE message_id IN (SELECT id FROM messages WHERE created_at < ?1)
+--   DELETE FROM tool_executions WHERE message_id IN (SELECT id FROM messages WHERE created_at < ?1)
+--   DELETE FROM messages        WHERE created_at < ?1
+--
+-- The first two legs are covered (`idx_attachments_message_id`,
+-- `idx_tool_executions_message_id`); the `messages` leg had no index on
+-- `created_at` at all, so it planned as `SCAN messages` — a full scan of the
+-- table that holds ~78 % of the database's bytes.
+--
+-- Measured on the ops profile (2026-10-09, 90,507 rows, 2.47 GB of content): a
+-- forced full scan of `messages` took 171.6 s, and the prune holds the SQLite
+-- write lock for the whole transaction. Writers carry a 30 s `busy_timeout`
+-- with 3 retries, so every attempt lost: the daemon logged `database is
+-- locked` from 19:30:42 to 19:37:47Z with zero successful writes 19:31-19:36.
+--
+-- With this index all three legs plan as indexed SEARCH:
+--
+--   tool_executions USING COVERING INDEX idx_tool_executions_message_id
+--   attachments     USING COVERING INDEX idx_attachments_message_id
+--   messages        USING INDEX idx_messages_created_at (created_at<?)
+--
+-- `messages.id` is TEXT, not the rowid, so the subquery's `id` is reached by
+-- rowid lookup rather than read from the index; that is still a range scan of a
+-- ~1 MB index instead of a 2.47 GB table scan. Widening the index to
+-- `(created_at, id)` to make the subquery covering was rejected as YAGNI: it
+-- would grow the index several-fold for a path that is already index-bound, and
+-- would diverge from the definition already built by hand on the live profiles.
+--
+-- Appended last per the list invariant (a new entry must not shift any existing
+-- index, or a `user_version` stamp would map to a different migration — the
+-- #1401 class). No `MIGRATION_EFFECTS` declaration is owed: that window is the
+-- contiguous replay-crash set ending at HEAD 51, and this sits far outside it.
+CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
