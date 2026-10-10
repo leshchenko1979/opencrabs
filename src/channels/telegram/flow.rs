@@ -224,8 +224,9 @@ pub(crate) struct SentBubble {
     /// point the `📎` marker at, and its OWN `delivered` list is empty whenever
     /// the rich plane owns documents — so the address travels with the bubble
     /// that delivered them. The id is an `i32` because that is the shape
-    /// `file_message_link` takes, and the URL is built at the delivery site,
-    /// which is the only place that knows the chat kind.
+    /// `file_message_link` takes; the URL is built at the delivery site from the
+    /// CHAT ID, which is what decides whether a message link exists at all
+    /// (#771).
     pub(crate) delivered_files: Vec<(std::path::PathBuf, i32)>,
 }
 

@@ -90,13 +90,17 @@ pub(crate) fn is_no_media_found(e: &anyhow::Error) -> bool {
 /// above the buttons instead of below (race reported in issue #142).
 ///
 /// Applies the same sanitize/redact/dedup/split/send chain as the edit loop.
-/// Deliver the final agent response for a live inbound turn: marker
+/// Deliver the final agent response for a turn: marker
 /// extraction, sanitize, react directive, dedup, reaction-only handling,
 /// folded-final reclaim, footer, rich-first send with HTML fallback,
 /// chunked sends, history recording, TTS. Extracted VERBATIM from
 /// handle_message (#471 phase 2) — the only edit is early
 /// `return Ok(())` becoming `return Ok(false)` so the caller can
 /// preserve handle_message's original control flow exactly.
+///
+/// Shared by live turns and the crash-recovery resume path (#471 phase 3); the
+/// only difference is `reply_to`, which is `None` on resume because the original
+/// message id is lost across a restart (#771).
 /// Background-task indicator for the settled flow footer (#1054): the first
 /// task's label when exactly one is running, a count when several, `None`
 /// when nothing is detached or no manager is wired (#722). A settled turn
@@ -144,10 +148,12 @@ pub(crate) fn subagent_counts_for(
 pub(crate) async fn deliver_final_response(
     bot: &Bot,
     chat_id: ChatId,
-    // The inbound message this turn answers: reaction target and reply
-    // anchor. None on the crash-recovery resume path, where the original
-    // message id is lost across restarts — reactions strip without firing.
-    inbound: Option<&Message>,
+    // The message this turn answers, for the reaction target. None on the
+    // crash-recovery resume path, where the original message id is lost across
+    // restarts — reactions strip without firing. Only the ID travels: the chat
+    // facts the file-link leg needs come from `chat_id`, so a resumed turn can
+    // still address the bubbles it delivered (#771).
+    reply_to: Option<MessageId>,
     thread_id: Option<teloxide::types::ThreadId>,
     streaming: &Arc<std::sync::Mutex<StreamingState>>,
     session_id: Uuid,
@@ -608,11 +614,11 @@ pub(crate) async fn deliver_final_response(
                     "setMessageReaction",
                     chat_id.0,
                     None,
-                    inbound.map(|m| i64::from(m.id.0)),
+                    reply_to.map(|id| i64::from(id.0)),
                 );
-                let react_result = match inbound {
-                    Some(m) => bot
-                        .set_message_reaction(chat_id, m.id)
+                let react_result = match reply_to {
+                    Some(id) => bot
+                        .set_message_reaction(chat_id, id)
                         .reaction(vec![reaction])
                         .is_big(false)
                         .await
@@ -875,28 +881,15 @@ pub(crate) async fn deliver_final_response(
             };
             file_failures.extend(refused);
             // #1918: now that each document has a bubble of its own, the marker
-            // standing in for it can point at that bubble — where the chat kind
-            // has a message-link form at all. The kind comes from the inbound
-            // message; on the crash-recovery resume path there is none, so no
-            // link is built and every marker stays plain rather than pointing
-            // somewhere the reply cannot honour. A path absent from `delivered`
-            // is absent here too, so a refused file keeps its plain marker.
-            let mut file_links: Vec<(std::path::PathBuf, String)> = inbound
-                .map(|message| {
-                    delivered
-                        .iter()
-                        .filter_map(|file| {
-                            file_message_link(
-                                &message.chat.kind,
-                                chat_id.0,
-                                thread_id,
-                                file.message_id,
-                            )
-                            .map(|link| (file.path.clone(), link))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            // standing in for it can point at that bubble — where the chat has a
+            // message-link form at all. That is a property of the CHAT ID, not of
+            // the message that happened to arrive, so a resumed turn builds the
+            // same links a live one does (#771): the old `inbound` gate made a
+            // fact about the chat hostage to a fact about the message. A path
+            // absent from `delivered` is absent here too, so a refused file
+            // keeps its plain marker.
+            let mut file_links: Vec<(std::path::PathBuf, String)> =
+                delivered_file_links(&delivered, chat_id.0, thread_id);
             // #1939: a document delivered by a promoted INTERMEDIATE is in the
             // chat but absent from `delivered` — the rich plane owned it, so
             // this floor sent nothing and there is no id here to build a link
@@ -905,23 +898,18 @@ pub(crate) async fn deliver_final_response(
             // the one `link_file_markers` pass below links both origins by one
             // rule. A path the final leg DID send already has its own (more
             // precise) id, so it is skipped here rather than overwritten.
-            if let Some(message) = inbound {
-                let from_intermediates = {
-                    let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
-                    super::intermediates::intermediate_file_links(
-                        &s.sent_bubbles,
-                        &pre_dedup_text,
-                    )
-                };
-                for (path, message_id) in from_intermediates {
-                    if file_links.iter().any(|(p, _)| p == &path) {
-                        continue;
-                    }
-                    if let Some(link) =
-                        file_message_link(&message.chat.kind, chat_id.0, thread_id, message_id)
-                    {
-                        file_links.push((path, link));
-                    }
+            // #771: no `inbound` gate — the link form comes from `chat_id`, so
+            // a resumed turn recovers its intermediate links too.
+            let from_intermediates = {
+                let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+                super::intermediates::intermediate_file_links(&s.sent_bubbles, &pre_dedup_text)
+            };
+            for (path, message_id) in from_intermediates {
+                if file_links.iter().any(|(p, _)| p == &path) {
+                    continue;
+                }
+                if let Some(link) = file_message_link(chat_id.0, thread_id, message_id) {
+                    file_links.push((path, link));
                 }
             }
             // Rewriting `text_only` here reaches both planes that derive from it
@@ -2049,45 +2037,61 @@ pub(crate) struct DeliveredFile {
     pub message_id: i32,
 }
 
-/// The `t.me` message link for a delivered file's bubble, when its chat kind has
-/// one (#1918).
+/// The `t.me` message link for a delivered file's bubble, when its chat has one
+/// (#1918).
 ///
-/// A message link exists only for a public supergroup or a channel. `t.me/c/…`
-/// addresses a chat by its INTERNAL id — the chat id with the `-100` marker
-/// stripped — and gains a middle segment with the topic id when the message sits
-/// in a forum topic, so the reader lands on the bubble inside the right topic
-/// rather than at the top of a thread they then have to search.
+/// A message link exists only for a supergroup or a channel, and both are
+/// identified by the `-100` prefix on the chat id — the SAME marker the
+/// `t.me/c/` path below strips. Deriving it from `chat_id` rather than taking a
+/// `ChatKind` is what lets a resume-path turn build the link at all: the chat id
+/// survives a restart, the inbound message does not (#771).
+///
+/// `t.me/c/…` addresses a chat by its INTERNAL id — the chat id with the `-100`
+/// marker stripped — and gains a middle segment with the topic id when the
+/// message sits in a forum topic, so the reader lands on the bubble inside the
+/// right topic rather than at the top of a thread they then have to search.
 ///
 /// A private chat and a basic group have no message-link form at all, so they
 /// get `None` and the caller leaves the marker as plain text: a link that goes
 /// nowhere is worse than no link, and the marker's job — pointing at the file —
 /// is done by the label either way.
 pub(crate) fn file_message_link(
-    kind: &teloxide::types::ChatKind,
     chat_id: i64,
     thread_id: Option<teloxide::types::ThreadId>,
     message_id: i32,
 ) -> Option<String> {
-    let has_message_link = match kind {
-        teloxide::types::ChatKind::Public(public) => matches!(
-            public.kind,
-            teloxide::types::PublicChatKind::Supergroup { .. }
-                | teloxide::types::PublicChatKind::Channel { .. }
-        ),
-        teloxide::types::ChatKind::Private { .. } => false,
-    };
-    if !has_message_link {
-        return None;
-    }
     // `t.me/c/` takes the id WITHOUT the `-100` marker that identifies a
-    // supergroup or channel. A private or basic-group id never reaches here, so
-    // an id without the prefix keeps its digits rather than losing three.
+    // supergroup or channel. An id lacking the prefix is a private chat or a
+    // basic group, neither of which has a message-link form, so `None` falls out
+    // of the same strip that produces the internal id.
     let chat = chat_id.to_string();
-    let internal = chat.strip_prefix("-100").unwrap_or(chat.as_str());
+    let internal = chat.strip_prefix("-100")?;
     Some(match thread_id {
         Some(thread) => format!("https://t.me/c/{internal}/{}/{message_id}", thread.0.0),
         None => format!("https://t.me/c/{internal}/{message_id}"),
     })
+}
+
+/// The `(path, t.me link)` pairs for the files a delivery leg actually sent
+/// (#771).
+///
+/// Built from the delivered ids alone. It used to be written inline at the
+/// delivery site behind `inbound.map(…)`, which made a fact about the CHAT — the
+/// link form its id implies — hostage to a fact about the MESSAGE, so a resumed
+/// turn built no links at all. One helper so the final leg and any future caller
+/// share the rule, and so the resume-path case has a unit test of its own.
+pub(crate) fn delivered_file_links(
+    delivered: &[DeliveredFile],
+    chat_id: i64,
+    thread_id: Option<teloxide::types::ThreadId>,
+) -> Vec<(std::path::PathBuf, String)> {
+    delivered
+        .iter()
+        .filter_map(|file| {
+            file_message_link(chat_id, thread_id, file.message_id)
+                .map(|link| (file.path.clone(), link))
+        })
+        .collect()
 }
 
 /// Rewrite each file's `📎 <label>` marker into a markdown link to the bubble

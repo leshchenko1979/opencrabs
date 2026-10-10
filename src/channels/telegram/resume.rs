@@ -1172,9 +1172,12 @@ pub(crate) async fn resume_session_inner(
     // - the ctx footer renders in <i> like live turns (was <sub> here)
     // - the intermediate dedup uses the shared normalized matching
     // - group history records the bot reply (the old copy skipped it)
-    // inbound=None: the original message id is lost across restarts, so
+    // reply_to=None: the original message id is lost across restarts, so
     // reactions strip without firing and reply anchoring is skipped —
-    // identical to the old resume behavior.
+    // identical to the old resume behavior. This is the ONLY leg the missing
+    // message costs: the file-marker links derive their form from `chat_id`, so
+    // a resumed turn addresses its delivered bubbles exactly as a live one does
+    // (#771).
     let voice_config = Config::current().voice_config();
     let channel_msg_repo = ChannelMessageRepository::new(agent.context().pool().clone());
     let is_dm = chat_id.0 > 0;

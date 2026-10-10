@@ -3226,7 +3226,7 @@ pub(crate) async fn handle_message(
         deliver_final_response(
             &bot,
             msg.chat.id,
-            Some(&msg),
+            Some(msg.id),
             thread_id,
             &streaming,
             session_id,

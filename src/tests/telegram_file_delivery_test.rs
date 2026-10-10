@@ -21,7 +21,8 @@
 //! the notice wording. Each has its own home.
 
 use crate::channels::telegram::delivery::{
-    DeliveredFile, document_part_name, file_message_link, link_file_markers, send_local_files,
+    DeliveredFile, delivered_file_links, document_part_name, file_message_link, link_file_markers,
+    send_local_files,
 };
 use crate::utils::image::{
     LocalFile, LocalFileScan, LocalImageFailureReason, disarm_autolink, file_marker_text,
@@ -387,55 +388,22 @@ async fn the_delivered_file_carries_the_message_id_the_send_produced() {
 // the message link (#1918, link part 3)
 // ---------------------------------------------------------------------------
 
-/// A supergroup — one of the two kinds a `t.me` message link exists for.
-/// `is_forum` is set because that is the shape the ops forum itself has, and
-/// the link's middle segment only ever appears for a topic inside one.
-fn supergroup() -> teloxide::types::ChatKind {
-    teloxide::types::ChatKind::Public(teloxide::types::ChatPublic {
-        title: Some("l1979 ops".to_string()),
-        kind: teloxide::types::PublicChatKind::Supergroup(
-            teloxide::types::PublicChatSupergroup {
-                username: None,
-                is_forum: true,
-            },
-        ),
-    })
-}
-
-/// A channel — the other kind that has a message link.
-fn channel() -> teloxide::types::ChatKind {
-    teloxide::types::ChatKind::Public(teloxide::types::ChatPublic {
-        title: Some("l1979 announcements".to_string()),
-        kind: teloxide::types::PublicChatKind::Channel(
-            teloxide::types::PublicChatChannel { username: None },
-        ),
-    })
-}
-
-/// A basic (non-super) group — no message-link form exists for it.
-fn basic_group() -> teloxide::types::ChatKind {
-    teloxide::types::ChatKind::Public(teloxide::types::ChatPublic {
-        title: Some("plain group".to_string()),
-        kind: teloxide::types::PublicChatKind::Group,
-    })
-}
-
-/// A one-to-one chat — no message-link form exists for it either.
-fn private_chat() -> teloxide::types::ChatKind {
-    teloxide::types::ChatKind::Private(teloxide::types::ChatPrivate {
-        username: None,
-        first_name: Some("Alexey".to_string()),
-        last_name: None,
-    })
-}
-
-/// The ops forum's real shape: chat id `-100…`, so the link addresses it by the
-/// INTERNAL id with the `-100` marker stripped.
+/// The ids that decide the link form (#771).
+///
+/// The `-100` prefix is what marks a chat as a supergroup or a channel — the two
+/// kinds a `t.me` message link exists for — so the fixtures are IDS, not
+/// `ChatKind`s: the delivery layer reads the id, and that is exactly what the
+/// resume path still has once the message that carried the kind is gone.
 const FORUM_CHAT_ID: i64 = -1_001_234_567_890;
+/// A one-to-one chat: positive id, so no message-link form.
+const DM_CHAT_ID: i64 = 133_526_395;
+/// A basic (non-super) group: negative but WITHOUT the `-100` marker, so no
+/// message-link form either.
+const BASIC_GROUP_CHAT_ID: i64 = -987_654_321;
 
 #[test]
 fn a_supergroup_bubble_links_by_internal_id() {
-    let link = file_message_link(&supergroup(), FORUM_CHAT_ID, None, 91_047);
+    let link = file_message_link(FORUM_CHAT_ID, None, 91_047);
     assert_eq!(
         link.as_deref(),
         Some("https://t.me/c/1234567890/91047"),
@@ -446,7 +414,7 @@ fn a_supergroup_bubble_links_by_internal_id() {
 #[test]
 fn a_topic_bubble_links_with_the_topic_in_the_middle() {
     let thread = teloxide::types::ThreadId(teloxide::types::MessageId(321));
-    let link = file_message_link(&supergroup(), FORUM_CHAT_ID, Some(thread), 91_047);
+    let link = file_message_link(FORUM_CHAT_ID, Some(thread), 91_047);
     assert_eq!(
         link.as_deref(),
         Some("https://t.me/c/1234567890/321/91047"),
@@ -456,31 +424,91 @@ fn a_topic_bubble_links_with_the_topic_in_the_middle() {
 }
 
 #[test]
-fn a_channel_bubble_links_by_internal_id() {
-    let link = file_message_link(&channel(), FORUM_CHAT_ID, None, 5);
+fn a_channel_links_by_the_same_rule_as_a_supergroup() {
+    // #771: a channel and a supergroup are indistinguishable by id — both carry
+    // the `-100` marker — and they share one link form, so one rule covers both.
+    // The old `ChatKind` match spelled the two arms out separately and produced
+    // the same URL either way; the id states it once.
+    let link = file_message_link(FORUM_CHAT_ID, None, 5);
     assert_eq!(link.as_deref(), Some("https://t.me/c/1234567890/5"));
 }
 
 #[test]
 fn a_private_chat_and_a_basic_group_have_no_message_link() {
     assert_eq!(
-        file_message_link(&private_chat(), FORUM_CHAT_ID, None, 5),
+        file_message_link(DM_CHAT_ID, None, 5),
         None,
         "a private chat has no t.me message-link form"
     );
     assert_eq!(
-        file_message_link(&basic_group(), FORUM_CHAT_ID, None, 5),
+        file_message_link(BASIC_GROUP_CHAT_ID, None, 5),
         None,
         "a basic group has no t.me message-link form either"
     );
     // The thread is only ever the MIDDLE segment of a link that already exists;
-    // it cannot conjure one for a kind that has no link form at all.
+    // it cannot conjure one for a chat that has no link form at all.
     let thread = teloxide::types::ThreadId(teloxide::types::MessageId(321));
     assert_eq!(
-        file_message_link(&basic_group(), FORUM_CHAT_ID, Some(thread), 5),
+        file_message_link(BASIC_GROUP_CHAT_ID, Some(thread), 5),
         None,
-        "a topic cannot rescue a kind that has no link form"
+        "a topic cannot rescue a chat that has no link form"
     );
+}
+
+#[test]
+fn a_delivered_file_links_with_no_inbound_message() {
+    // #771, the regression: this is the whole point of the fix. The old build
+    // site was `inbound.map(|message| …)`, so a resumed turn — which has no
+    // message — produced NO links and every `📎` marker stayed plain even though
+    // the document bubble sat right below it. The links now derive from the chat
+    // id alone, so the same call that a live turn makes works here with nothing
+    // but the delivered ids.
+    let delivered = [
+        DeliveredFile {
+            path: PathBuf::from(Q3),
+            message_id: 91_047,
+        },
+        DeliveredFile {
+            path: PathBuf::from(Q4),
+            message_id: 91_048,
+        },
+    ];
+    assert_eq!(
+        delivered_file_links(&delivered, FORUM_CHAT_ID, None),
+        vec![
+            (
+                PathBuf::from(Q3),
+                "https://t.me/c/1234567890/91047".to_string()
+            ),
+            (
+                PathBuf::from(Q4),
+                "https://t.me/c/1234567890/91048".to_string()
+            ),
+        ],
+        "a resume turn has the chat id and the delivered ids, and that is all a \
+         link needs — the inbound message was never the input it wanted"
+    );
+    // And the same list, spliced by the SAME rewrite the floor uses, puts the
+    // link in the body: the two halves of the leg agree on the resume path too.
+    let body = "Reports: 📎 Q3 report and 📎 Q4 report.";
+    let scan = scan_over(
+        body,
+        &[(Path::new(Q3), "📎 Q3 report"), (Path::new(Q4), "📎 Q4 report")],
+    );
+    assert_eq!(
+        link_file_markers(
+            body,
+            &scan,
+            &delivered_file_links(&delivered, FORUM_CHAT_ID, None)
+        ),
+        "Reports: [📎 Q3 report](https://t.me/c/1234567890/91047) and \
+         [📎 Q4 report](https://t.me/c/1234567890/91048).",
+        "with no inbound message the markers still point at the bubbles that \
+         hold the files"
+    );
+    // A DM still offers no link, so its marker stays plain — the fix removes the
+    // message dependency, it does not invent a link form the chat lacks.
+    assert!(delivered_file_links(&delivered, DM_CHAT_ID, None).is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -559,7 +587,7 @@ fn a_dm_or_an_unsent_file_keeps_the_plain_marker() {
     // A DM has no message-link form, so the caller builds no link at all and
     // the marker is passed through untouched.
     assert_eq!(
-        file_message_link(&private_chat(), FORUM_CHAT_ID, None, 91_047),
+        file_message_link(DM_CHAT_ID, None, 91_047),
         None,
         "a DM offers no link for the caller to pass"
     );
@@ -636,7 +664,7 @@ fn the_link_form_and_the_marker_rewrite_agree() {
         path: PathBuf::from(Q3),
         message_id: 91047,
     }];
-    let link = file_message_link(&supergroup(), FORUM_CHAT_ID, None, delivered[0].message_id)
+    let link = file_message_link(FORUM_CHAT_ID, None, delivered[0].message_id)
         .expect("a supergroup bubble has a message link");
     let links: Vec<(PathBuf, String)> = delivered
         .iter()
@@ -749,7 +777,7 @@ fn the_fallback_links_a_marker_to_the_intermediates_bubble() {
     let links: Vec<(PathBuf, String)> = recovered
         .into_iter()
         .filter_map(|(path, id)| {
-            file_message_link(&supergroup(), FORUM_CHAT_ID, None, id).map(|link| (path, link))
+            file_message_link(FORUM_CHAT_ID, None, id).map(|link| (path, link))
         })
         .collect();
     assert_eq!(
@@ -763,7 +791,7 @@ fn the_fallback_links_a_marker_to_the_intermediates_bubble() {
     let dm_links: Vec<(PathBuf, String)> = vec![(PathBuf::from(Q3), 91_047)]
         .into_iter()
         .filter_map(|(path, id)| {
-            file_message_link(&private_chat(), FORUM_CHAT_ID, None, id).map(|link| (path, link))
+            file_message_link(DM_CHAT_ID, None, id).map(|link| (path, link))
         })
         .collect();
     assert!(dm_links.is_empty());
