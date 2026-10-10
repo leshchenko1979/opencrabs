@@ -34,5 +34,5 @@
 -- Appended last per the list invariant (a new entry must not shift any existing
 -- index, or a `user_version` stamp would map to a different migration — the
 -- #1401 class). No `MIGRATION_EFFECTS` declaration is owed: that window is the
--- contiguous replay-crash set ending at HEAD 51, and this sits far outside it.
+-- contiguous replay-crash set ending at HEAD 59, and this sits outside it.
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);

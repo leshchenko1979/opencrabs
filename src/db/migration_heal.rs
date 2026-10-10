@@ -108,6 +108,15 @@ pub(crate) enum Effect {
 /// done while the object is missing), the window's hole-closers (checkable
 /// migrations between the two, declared so the stamp can advance across them
 /// without skipping), and the two migrations the hand-written guards covered.
+///
+/// #774 extended the window from HEAD 51 to HEAD 59. The #1401 class was alive
+/// one band higher than #724 covered: a database stamped 55 by the PRE-re-sort
+/// list carries `cron_jobs.run_once` (55 then) while the four migrations the
+/// re-sort inserted below it are absent, so replay died on `duplicate column
+/// name: run_once` and 55–58 were skipped in silence. Declaring 52–59 lets pass
+/// 1 advance the stamp past the present `run_once` and pass 2 fill the gaps
+/// beneath it. The span is kept CONTIGUOUS for the same reason as before: an
+/// undeclared migration inside it is stepped over and never applied.
 pub(crate) const MIGRATION_EFFECTS: &[(&str, Effect)] = &[
     // --- Replay-crash set: the effect is PRESENT above a v0.5.3 stamp, so the
     //     walk must stamp past the migration instead of letting `to_latest`
@@ -226,6 +235,106 @@ pub(crate) const MIGRATION_EFFECTS: &[(&str, Effect)] = &[
     (
         "ALTER TABLE pending_requests ADD COLUMN channel_thread_id TEXT;",
         Effect::Column("pending_requests", "channel_thread_id"),
+    ),
+    // --- The 52–59 band: the far side of the same re-sort (#774). ---
+    //
+    // The window above stopped at HEAD 51, which left the #1401 class alive one
+    // band higher. On the PRE-re-sort list `run_once` sat at index 55, so a
+    // database stamped 55 by that build carries the one-shot flag while
+    // `decision_cache` (55), `decision_stats` (56), `sessions.channel_chat_key`
+    // (57) and the audit pair (58) — all inserted BELOW it when the list was
+    // re-sorted by filename — are absent. A window ending at 51 cannot see any
+    // of them: pass 1 finds no declared migration above the stamp, so the stamp
+    // stays at 55, `to_latest` replays `ALTER TABLE cron_jobs ADD COLUMN
+    // run_once` and startup dies on `duplicate column name: run_once`, while
+    // 55–58 are never applied. Declaring the band lets pass 1 advance the stamp
+    // past the present `run_once` and pass 2 fill the four absent migrations
+    // below it. Every object here is also a hole-closer: an undeclared
+    // migration inside the span would be stepped over in silence.
+    //
+    // HEAD 52 — `20260918000001_add_goal_criteria.sql` (#299). Two columns;
+    // the judge's declared criteria and the consecutive-Uncertain counter that
+    // parks a non-converging goal.
+    (
+        "ALTER TABLE goal_state ADD COLUMN criteria TEXT;",
+        Effect::Column("goal_state", "criteria"),
+    ),
+    (
+        "ALTER TABLE goal_state ADD COLUMN consecutive_uncertain INTEGER NOT NULL DEFAULT 0;",
+        Effect::Column("goal_state", "consecutive_uncertain"),
+    ),
+    // HEAD 53 — `20260918000002_add_goal_criterion_evaluations.sql` (#299).
+    (
+        "ALTER TABLE goal_state ADD COLUMN criterion_evaluations TEXT;",
+        Effect::Column("goal_state", "criterion_evaluations"),
+    ),
+    // HEAD 54 — `20260919000001_session_bindings_await.sql` (#344). The durable
+    // await record: what a lane is waiting on when it ends its turn on an
+    // EXTERNAL completion. Three columns, so the per-object declaration is what
+    // lets a partly-applied migration be completed.
+    (
+        "ALTER TABLE session_bindings ADD COLUMN await_kind TEXT;",
+        Effect::Column("session_bindings", "await_kind"),
+    ),
+    (
+        "ALTER TABLE session_bindings ADD COLUMN await_ref TEXT;",
+        Effect::Column("session_bindings", "await_ref"),
+    ),
+    (
+        "ALTER TABLE session_bindings ADD COLUMN await_at INTEGER;",
+        Effect::Column("session_bindings", "await_at"),
+    ),
+    // HEAD 55 — `20260921000001_add_decision_cache.sql` (#1648).
+    (
+        "CREATE TABLE IF NOT EXISTS decision_cache",
+        Effect::Table("decision_cache"),
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_decision_cache_tier",
+        Effect::Index("idx_decision_cache_tier"),
+    ),
+    // HEAD 56 — `20260921000002_add_decision_stats.sql` (#1648 PR2).
+    (
+        "CREATE TABLE IF NOT EXISTS decision_stats",
+        Effect::Table("decision_stats"),
+    ),
+    // HEAD 57 — `20260925220000_add_session_channel_chat_key.sql` (#1721). The
+    // migration also backfills and dedups before creating its UNIQUE index; only
+    // the column and the index are declared, because those are the objects whose
+    // presence is checkable. On a database where the column is absent (this
+    // victim) the whole migration is applied, so the backfill still runs.
+    (
+        "ALTER TABLE sessions ADD COLUMN channel_chat_key TEXT;",
+        Effect::Column("sessions", "channel_chat_key"),
+    ),
+    (
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_channel_chat_key",
+        Effect::Index("idx_sessions_channel_chat_key"),
+    ),
+    // HEAD 58 — `20260926000001_add_audit_turn_retrievals.sql` (#1705). Two
+    // tables and their indexes, declared per object.
+    (
+        "CREATE TABLE IF NOT EXISTS turn_retrievals",
+        Effect::Table("turn_retrievals"),
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_turn_retrievals_session",
+        Effect::Index("idx_turn_retrievals_session"),
+    ),
+    (
+        "CREATE TABLE IF NOT EXISTS turn_outcomes",
+        Effect::Table("turn_outcomes"),
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_turn_outcomes_session",
+        Effect::Index("idx_turn_outcomes_session"),
+    ),
+    // HEAD 59 — `20260927000001_add_cron_run_once.sql` (#544). The far-side
+    // replay hazard: PRESENT on the victim, which is why the stamp must advance
+    // past it rather than let `to_latest` replay the `ADD COLUMN`.
+    (
+        "ALTER TABLE cron_jobs ADD COLUMN run_once INTEGER NOT NULL DEFAULT 0;",
+        Effect::Column("cron_jobs", "run_once"),
     ),
 ];
 
@@ -881,12 +990,16 @@ mod tests {
 
         // The span has to contain every hazard and every hole-closer the walk
         // must cross, or the stamp cannot reach the far side of the re-sort.
+        // The last entry is the far-side replay hazard #774 added: it is
+        // PRESENT on the victim, so a span that stopped short of it would leave
+        // the stamp below it and let `to_latest` replay the `ADD COLUMN`.
         let last = *indices.last().expect("non-empty, asserted above");
         let span = indices[0]..=last;
         for marker in [
             "ALTER TABLE projects ADD COLUMN repo_remote TEXT;",
             "ALTER TABLE cron_jobs ADD COLUMN trigger_cmd TEXT;",
             "CREATE TABLE IF NOT EXISTS whatsapp_newsletter_cursors",
+            "ALTER TABLE cron_jobs ADD COLUMN run_once INTEGER NOT NULL DEFAULT 0;",
         ] {
             let idx = migration_index_0based(marker);
             assert!(
