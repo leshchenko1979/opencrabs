@@ -176,6 +176,7 @@ fn request(model: &str) -> LLMRequest {
         max_tokens: None,
         temperature: None,
         tools: None,
+        disable_reasoning: false,
         stream: false,
         metadata: None,
         working_directory: None,

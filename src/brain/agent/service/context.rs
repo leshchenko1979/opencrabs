@@ -943,6 +943,63 @@ impl AgentService {
         )))
     }
 
+    /// #778: one summariser attempt, retried ONCE if the provider answered but
+    /// produced no document at all.
+    ///
+    /// An empty summary is worse than no summary. `enforce_summary_budget` can
+    /// only re-attach the `context-manifest` fence and the §0 obligation line
+    /// from a document that already carries them, so an empty stub lands as a
+    /// fence-less document and the resuming turn loses its manifest. Measured
+    /// 2026-10-15: 8 empty documents in a single day, one session compacting
+    /// four times in two minutes because an empty summary bought it no room.
+    ///
+    /// Retries only an EMPTY document. An `Err` is the fallback walk's business
+    /// inside `complete_compaction_request`, and re-driving it here would double
+    /// the chain. A `MaxTokens` stop that still produced text is left alone: the
+    /// document is cut but usable, and `warn_if_summary_truncated` (#1933)
+    /// already reports it. The notifier rides both attempts — `CompactionStep::Failed`
+    /// is emitted on the error path alone, so a successful retry cannot double-report.
+    pub(crate) async fn complete_compaction_request_with_retry(
+        primary: &Arc<dyn Provider>,
+        fallbacks: &[Arc<dyn Provider>],
+        request: LLMRequest,
+        cancel: &CancellationToken,
+        attempt_deadline: std::time::Duration,
+        notifier: Option<&super::compaction_notice::CompactionNotifier>,
+    ) -> Result<crate::brain::provider::LLMResponse> {
+        let response = Self::complete_compaction_request(
+            primary,
+            fallbacks,
+            request.clone(),
+            cancel,
+            attempt_deadline,
+            notifier,
+        )
+        .await?;
+
+        if !Self::extract_text_from_response(&response).trim().is_empty() {
+            return Ok(response);
+        }
+
+        tracing::warn!(
+            "compute_compaction_summary: the summariser returned an EMPTY document \
+             (stop_reason={:?}, output_tokens={}, reasoning_tokens={}) — retrying once (#778)",
+            response.stop_reason,
+            response.usage.output_tokens,
+            response.usage.reasoning_tokens
+        );
+
+        Self::complete_compaction_request(
+            primary,
+            fallbacks,
+            request,
+            cancel,
+            attempt_deadline,
+            notifier,
+        )
+        .await
+    }
+
     /// #1930: the summariser's system prompt. Dense knowledge transfer under a
     /// hard budget — the document is trimmed mechanically if it overruns, so
     /// the instruction is completeness of FACTS, not volume of prose.
@@ -1392,8 +1449,14 @@ impl AgentService {
             effective_model = remapped;
         }
 
+        // #778: the summary document is the payload, and reasoning tokens are
+        // charged to the same output allowance — a reasoning model that thinks
+        // its way through all 5500 tokens returns no document at all. Measured
+        // 2026-10-15: 42 `MaxTokens` stops in one day, 8 of them empty. The
+        // summariser formats; it has nothing to reason about.
         let mut request = LLMRequest::new(effective_model, summary_messages)
             .with_max_tokens(max_output_tokens)
+            .with_reasoning_disabled()
             .with_system(Self::compaction_system_prompt());
         request.working_directory = Some(working_directory.to_string_lossy().to_string());
         request.session_id = Some(session_id);
@@ -1402,7 +1465,11 @@ impl AgentService {
         // into one response inside `compaction_attempt`, no progress callback
         // is attached (#1519). `cancel` aborts the request mid-flight if the
         // caller signals (e.g. 90% hard-truncate firing on the same session).
-        let response = Self::complete_compaction_request(
+        // #778: the retry wrapper, not the bare attempt — an empty document is
+        // the one failure the fallback chain never sees (a provider that
+        // answers with nothing is a SUCCESS to it), so the retry has to sit
+        // here, above the walk.
+        let response = Self::complete_compaction_request_with_retry(
             &provider,
             &fallbacks,
             request,

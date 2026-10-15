@@ -119,6 +119,16 @@ pub struct LLMRequest {
     /// Maximum tokens to generate
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Suppress provider-side reasoning for THIS request (#778).
+    ///
+    /// Set by a caller whose output is itself the payload — the compaction
+    /// summariser. There, every reasoning token comes out of the same
+    /// allowance the document needs, so a reasoning model can spend the whole
+    /// budget thinking and return no document at all: measured 2026-10-15,
+    /// 42 `MaxTokens` stops in one day with all 5500 output tokens spent on
+    /// reasoning, 8 of them emitting nothing (#778).
+    #[serde(skip)]
+    pub disable_reasoning: bool,
     /// Whether to stream the response
     #[serde(skip)]
     pub stream: bool,
@@ -144,6 +154,7 @@ impl LLMRequest {
             tools: None,
             temperature: None,
             max_tokens: None,
+            disable_reasoning: false,
             stream: false,
             metadata: None,
             working_directory: None,
@@ -198,6 +209,17 @@ impl LLMRequest {
     /// Set max tokens
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// Turn provider-side reasoning off for this request (#778).
+    ///
+    /// For a request whose output IS the payload — the compaction
+    /// summariser's document — reasoning is pure overhead charged to the same
+    /// allowance the document needs. Providers honour this by dropping their
+    /// reasoning knobs entirely (see `OpenAiProvider::to_openai_request`).
+    pub fn with_reasoning_disabled(mut self) -> Self {
+        self.disable_reasoning = true;
         self
     }
 

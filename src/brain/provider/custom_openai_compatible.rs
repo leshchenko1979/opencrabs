@@ -3075,7 +3075,7 @@ impl OpenAIProvider {
         // Enable reasoning/thinking for OpenRouter and compatible endpoints.
         // Detection is intentionally broad — models that don't support the field ignore it.
         let base = self.base_url.to_lowercase();
-        let include_reasoning = if base.contains("openrouter")
+        let mut include_reasoning = if base.contains("openrouter")
             || base.contains("openrouter.ai")
             || std::env::var("OPENCRABS_ENABLE_REASONING").is_ok()
         {
@@ -3174,7 +3174,7 @@ impl OpenAIProvider {
 
         // Carry reasoning across turns instead of re-deriving it each turn
         // (#1033). Sent on every DashScope request, ungated by family.
-        let preserve_thinking =
+        let mut preserve_thinking =
             if super::qwen_reasoning::preserve_thinking_for(&self.base_url, &request.model) {
                 Some(true)
             } else {
@@ -3193,6 +3193,31 @@ impl OpenAIProvider {
         // buffered 40 KB write is minutes of SSE silence that the idle timer
         // reads as a dead connection (#1347).
         let tool_stream = super::glm_reasoning::tool_stream_for(&self.base_url, request.stream);
+
+        // #778: a caller may suppress reasoning for this request outright. The
+        // compaction summariser sets this — its output IS the payload, so every
+        // reasoning token is taken from the document's own allowance. Measured
+        // 2026-10-15: 42 `MaxTokens` stops in one day, all 5500 output tokens
+        // spent on reasoning, 8 of them returning no document at all.
+        //
+        // Applied here, AFTER the family resolvers, because "off" is spelled
+        // differently per target and each spelling is resolved above: DeepSeek
+        // reads an explicit top-level `thinking: {"type": "disabled"}` and
+        // would otherwise fall back to its server default — thinking ON — if
+        // the field were merely omitted. Clearing the rest unconditionally is
+        // what makes the suppression complete for every other family.
+        if request.disable_reasoning {
+            include_reasoning = None;
+            reasoning_effort = None;
+            enable_thinking = None;
+            preserve_thinking = None;
+            thinking = if super::deepseek_reasoning::serves_deepseek(&self.base_url, &request.model)
+            {
+                Some(serde_json::json!({ "type": "disabled" }))
+            } else {
+                None
+            };
+        }
 
         OpenAIRequest {
             model: request.model,
