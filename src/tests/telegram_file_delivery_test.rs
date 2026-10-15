@@ -902,3 +902,101 @@ fn the_fallback_links_a_marker_to_the_intermediates_bubble() {
     assert!(dm_links.is_empty());
     assert_eq!(link_file_markers(body, &scan, &dm_links), body);
 }
+// ---------------------------------------------------------------------------
+// the intermediate's document floor (#779)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_markdown_file_the_rich_plane_did_not_take_still_has_a_delivery_leg() {
+    // #779 — the dead anchor the owner hit on bubble 93966. With
+    // `inline_markdown_documents` off (the #1968 default) a markdown reference
+    // comes back from the file walk as the plain `📎 <label>` marker and
+    // records NO rich entry. Every file list the intermediate built was derived
+    // from those entries, so the document had no leg on EITHER plane: the
+    // marker was emitted with nothing behind it and no address to link to.
+    //
+    // The scan is the walk that saw the reference, and it is the list the
+    // floor must read. The three arms below are the predicate's whole
+    // contract: the skipped set is what the rich plane did not take AND the
+    // chat does not already hold.
+    use crate::channels::telegram::intermediates::files_the_rich_plane_skipped;
+    use crate::utils::image::{extract_local_files, rewrite_local_files};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let doc = write_fixture(
+        dir.path(),
+        "harvest-workorder.md",
+        b"# work order\n\nNothing is blocked on you.\n",
+    );
+    let text = format!(
+        "Work order, full:\n[harvest-workorder.md]({})",
+        doc.display()
+    );
+
+    // The marker's visible text is the label passed through `disarm_autolink`,
+    // which inserts a ZWSP after every `.` that precedes an ASCII alphanumeric
+    // (#1938) so a dotted filename does not autolink as a domain. The `.md` in
+    // this label is exactly that shape, so the expected marker carries the ZWSP
+    // — asserting the raw label would fail on the byte that makes it a filename.
+    let marker = "📎 harvest-workorder.\u{200b}md";
+
+    // The plane-independent read: the scan resolves the reference and replaces
+    // it with the marker the reader actually sees.
+    let scan = extract_local_files(&text, Some(dir.path()));
+    assert_eq!(scan.attachments.len(), 1, "the scan resolves the document");
+    assert!(
+        scan.text.contains(marker),
+        "the scan emits the visible marker, got {:?}",
+        scan.text
+    );
+
+    // The rich walk with documents NOT inlined: the marker survives and no
+    // entry is recorded — the exact asymmetry that produced the dead anchor.
+    let rich = rewrite_local_files(&text, Some(dir.path()), "file", &[], false);
+    assert!(
+        rich.entries.is_empty(),
+        "with inline_markdown_documents off the rich plane takes no document"
+    );
+    assert!(
+        rich.rich.contains(marker),
+        "the rich body carries the marker, got {:?}",
+        rich.rich
+    );
+
+    // ARM 1 — the bug. A list built from `entries` is empty here, so the
+    // document would ship nowhere and the marker above would stay plain.
+    let skipped = files_the_rich_plane_skipped(&scan, &rich.entries, &[]);
+    assert_eq!(
+        skipped.len(),
+        1,
+        "a document the rich plane skipped must still have a delivery leg"
+    );
+    assert_eq!(skipped[0].path, doc, "and it is the resolved document");
+
+    // ARM 2 — a document the rich plane DID take (inlining on) rides the media
+    // array, so it must not also ship a bubble of its own.
+    let inlined = rewrite_local_files(&text, Some(dir.path()), "file", &[], true);
+    assert_eq!(
+        inlined.entries.len(),
+        1,
+        "inlining on records the rich entry the media array is built from"
+    );
+    assert!(
+        files_the_rich_plane_skipped(&scan, &inlined.entries, &[]).is_empty(),
+        "a document the rich plane carries must not ship a second bubble"
+    );
+
+    // ARM 3 — the turn's delivered-media list. This is not only the
+    // #502/#1916 double-send rule: the REWRITER's own `already_delivered` leg
+    // consumes such a reference and records nothing, so without this filter the
+    // same path would come back as a skipped file and ship twice.
+    let pre_delivered = rewrite_local_files(&text, Some(dir.path()), "file", &[doc.clone()], false);
+    assert!(
+        pre_delivered.entries.is_empty() && !pre_delivered.rich.contains(marker),
+        "a reference the rewriter consumed as already delivered leaves neither marker nor entry"
+    );
+    assert!(
+        files_the_rich_plane_skipped(&scan, &pre_delivered.entries, &[doc.clone()]).is_empty(),
+        "a path already in the chat must not ship again"
+    );
+}

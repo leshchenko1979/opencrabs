@@ -353,6 +353,38 @@ pub(crate) fn intermediate_file_links(
         .collect()
 }
 
+/// The files an intermediate's SCAN resolved but the rich plane did NOT take
+/// (#779).
+///
+/// The rich plane's entries are the wrong source for "which documents need a
+/// bubble of their own": with `inline_markdown_documents` off, a markdown
+/// reference comes back from the file walk as a plain `📎 <label>` marker with
+/// NO entry recorded, so a list derived from `entries` silently drops it. The
+/// scan is the walk that saw every reference, so the skipped set is read off it
+/// and then narrowed twice:
+///
+/// - by the rich plane's own entries — those ride the media array and must not
+///   ship a second time as their own bubble;
+/// - by `delivered`, the turn's delivered-media list — a path already in the
+///   chat from an earlier bubble is the #502/#1916 double-send the final leg's
+///   floor also guards against.
+///
+/// Pure so the predicate can be tested without a bot: the caller reads
+/// `delivered` under the streaming lock and hands it in.
+pub(crate) fn files_the_rich_plane_skipped(
+    scan: &crate::utils::image::LocalFileScan,
+    rich_entries: &[crate::utils::image::ResolvedFileRef],
+    delivered: &[std::path::PathBuf],
+) -> Vec<crate::utils::image::LocalFile> {
+    scan.attachments
+        .iter()
+        .filter(|f| {
+            !rich_entries.iter().any(|e| e.file.path == f.path) && !delivered.contains(&f.path)
+        })
+        .cloned()
+        .collect()
+}
+
 /// The two halves of one intermediate turn's media partition (#465), plus the
 /// image family's second rewrite (#732).
 ///
@@ -525,12 +557,67 @@ pub(crate) async fn deliver_intermediate_message(
         .filter(|entry| file_read_paths.contains(&entry.file.path))
         .map(|entry| entry.file.clone())
         .collect();
+    // #779: the documents the RICH plane did NOT take. With
+    // `inline_markdown_documents` off a markdown reference comes back as the
+    // plain `📎 <label>` marker with NO entry in `rich_files.entries`, so a list
+    // derived from those entries alone has no leg on EITHER plane: the marker is
+    // emitted with nothing behind it and no address to link to — the dead-anchor
+    // shape the owner reported on bubble 93966. The predicate lives in
+    // `files_the_rich_plane_skipped` above, where it is unit-tested.
+    let skipped_files: Vec<crate::utils::image::LocalFile> = {
+        let delivered = {
+            let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+            s.delivered_image_paths.clone()
+        };
+        files_the_rich_plane_skipped(&stripped_files, &walks.rich_files.entries, &delivered)
+    };
 
     // An image the bubble announced must not vanish silently when it cannot be
     // read: the notice rides the same bubble the model wrote (#502). The
     // documents get their own notice under their own noun (#1918) — same rule,
     // different family, which is why the wording is not shared.
-    let body = crate::utils::append_failure_notice(rich, &failures);
+    // #779: the documents the rich plane skipped ship BEFORE the body that names
+    // them, so the marker can point at a bubble that already exists. Shipping
+    // them after would leave the link dangling for as long as the body takes to
+    // land — and the body is what carries the marker.
+    let (skipped_delivered, skipped_refused): (
+        Vec<super::delivery::DeliveredFile>,
+        Vec<LocalImageFailure>,
+    ) = if skipped_files.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        super::delivery::send_local_files(
+            session_id,
+            bot,
+            chat,
+            thread_id,
+            &skipped_files,
+        )
+        .await
+    };
+    file_failures.extend(skipped_refused);
+    // #779: record these the moment they land, NOT inside the rich arm below.
+    // The send above happens whatever the rich body does, so a rich send that
+    // returns `None` still leaves these files in the chat — and the HTML
+    // fallback's re-filter reads this list to avoid shipping a second copy.
+    // Recording them only on the success path would double-send every skipped
+    // file whenever the rich plane declined the body.
+    if !skipped_delivered.is_empty() {
+        let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+        s.delivered_image_paths
+            .extend(skipped_delivered.iter().map(|file| file.path.clone()));
+    }
+    // The marker the file walk left in `rich` carries the same bytes the scan
+    // recorded (`push_file_marker` is the single home of its shape), so the link
+    // pass finds it. A path with no link — a refused file, or a chat kind with
+    // no message-link form — keeps its plain marker, which is honest: the marker
+    // still names the document sitting below it.
+    let rich_linked = super::delivery::link_file_markers(
+        rich,
+        &stripped_files,
+        &super::delivery::delivered_file_links(&skipped_delivered, chat.0, thread_id),
+    );
+    let body = crate::utils::append_failure_notice(&rich_linked, &failures);
     let body = crate::utils::append_file_failure_notice(&body, &file_failures);
 
     if let Some(id) = try_send_intermediate_rich(session_id, bot, chat, thread_id, &body, &media)
@@ -555,10 +642,20 @@ pub(crate) async fn deliver_intermediate_message(
         // their address — the fallback leg needs it to point the `📎` marker at
         // something the reader can open. Recorded before the paths move into
         // `delivered_image_paths` below.
-        let delivered_files: Vec<(std::path::PathBuf, i32)> = readable_files
+        // #779: the skipped documents did NOT ride this array — each has a
+        // bubble of its own from above, so its OWN id is its address. Recorded
+        // in the same list so the final leg's `intermediate_file_links` can
+        // re-point a marker the closing answer repeats, exactly as it does for
+        // the entries that rode the array (#1939).
+        let mut delivered_files: Vec<(std::path::PathBuf, i32)> = readable_files
             .iter()
             .map(|file| (file.path.clone(), id.0))
             .collect();
+        delivered_files.extend(
+            skipped_delivered
+                .iter()
+                .map(|file| (file.path.clone(), file.message_id)),
+        );
         s.sent_bubbles.push(SentBubble {
             text: text.to_string(),
             ids,
@@ -632,8 +729,33 @@ pub(crate) async fn deliver_intermediate_message(
     // ones are already in `file_failures` above; handing them to
     // `send_local_files` as well would report each of them twice under the same
     // noun.
+    // #779: this plane's floor ships what the rich plane skipped TOO. The
+    // pre-#779 line sent `readable_files` alone — the rich plane's OWN entry
+    // list — so a markdown document the plane declined had no leg here either,
+    // which is the dead-anchor defect on the plane that actually renders the
+    // marker. Upstream's floor ships the whole scan for exactly this reason
+    // ("a marker with no delivery behind it would point at a file that never
+    // reaches the chat"); our port kept only the entries half.
+    //
+    // Re-filtered against the turn's delivered list because the rich arm above
+    // may have shipped these already, before its own send failed — and a second
+    // copy is the #502/#1916 double-send the final leg's floor guards against.
+    let fallback_files: Vec<crate::utils::image::LocalFile> = {
+        let delivered = {
+            let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
+            s.delivered_image_paths.clone()
+        };
+        let mut files = readable_files.clone();
+        files.extend(
+            skipped_files
+                .iter()
+                .filter(|f| !delivered.contains(&f.path))
+                .cloned(),
+        );
+        files
+    };
     let (delivered_files, refused_files) =
-        super::delivery::send_local_files(session_id, bot, chat, thread_id, &readable_files).await;
+        super::delivery::send_local_files(session_id, bot, chat, thread_id, &fallback_files).await;
     if !delivered_files.is_empty() {
         let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
         s.delivered_image_paths
@@ -643,9 +765,45 @@ pub(crate) async fn deliver_intermediate_message(
     // channel would not take them) and the unreadable ones (their bytes never
     // reached either send) are the same fault to the reader, so two consecutive
     // calls printed two lines for one problem (#1918 review f11).
+    // #779: link the markers whose documents just shipped. The links are read
+    // off the SEND's own result — its id is the bubble the chat actually has —
+    // and merged with whatever the rich arm delivered above, since that leg ran
+    // before its own body send failed and those bubbles remain the reader's
+    // address for their files. `link_file_markers` looks a link up BY PATH and
+    // leaves every marker it has no link for plain, so the merge cannot
+    // mis-point one.
+    let fallback_links: Vec<(std::path::PathBuf, String)> = {
+        let mut links = super::delivery::delivered_file_links(&delivered_files, chat.0, thread_id);
+        for file in &skipped_delivered {
+            if links.iter().any(|(path, _)| path == &file.path) {
+                continue;
+            }
+            if let Some(link) =
+                super::delivery::file_message_link(chat.0, thread_id, file.message_id)
+            {
+                links.push((file.path.clone(), link));
+            }
+        }
+        links
+    };
+    plain = super::delivery::link_file_markers(&plain, &stripped_files, &fallback_links);
+    // #779: a file the rich arm refused is re-attempted by the floor above (it
+    // is not in the delivered list), so its refusal arrives twice — once from
+    // each attempt. One line per file, keeping the FIRST reason: the second
+    // attempt's is the same fault told twice (#1918 review f11).
     let mut all_file_failures = refused_files;
     all_file_failures.extend(file_failures);
-    plain = crate::utils::append_file_failure_notice(&plain, &all_file_failures);
+    let mut deduped_failures: Vec<LocalImageFailure> = Vec::new();
+    for failure in all_file_failures {
+        if deduped_failures
+            .iter()
+            .any(|kept| kept.raw == failure.raw && kept.resolved == failure.resolved)
+        {
+            continue;
+        }
+        deduped_failures.push(failure);
+    }
+    plain = crate::utils::append_file_failure_notice(&plain, &deduped_failures);
 
     // Resolve fences here too (#1142 parity): when the rich path rejected the
     // message, the HTML fallback must still render the diagram instead of
@@ -682,6 +840,14 @@ pub(crate) async fn deliver_intermediate_message(
         delivered_files: delivered_files
             .iter()
             .map(|file| (file.path.clone(), file.message_id))
+            // #779: and the documents the rich arm shipped before its body send
+            // failed — those bubbles are their address too, and the final leg
+            // must be able to re-point a marker the closing answer repeats.
+            .chain(
+                skipped_delivered
+                    .iter()
+                    .map(|file| (file.path.clone(), file.message_id)),
+            )
             .collect(),
     });
     true
