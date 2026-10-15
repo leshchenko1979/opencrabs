@@ -242,10 +242,10 @@ fn shed_order_fires_only_above_the_budget_it_was_given() {
 
 // ─── S1 · the compaction streak and its reset ───────────────────────────────
 
-/// A compaction raises the streak, restarts the turn clock, and remembers the
-/// share the session was at — the input the prompt's trend signal (A4) reports.
+/// A compaction raises the streak — the run of compactions with no completed
+/// tool call between them.
 #[tokio::test]
-async fn a_compaction_raises_the_streak_and_restarts_the_turn_clock() {
+async fn a_compaction_raises_the_streak() {
     let svc = make_service().await;
     let sid = Uuid::new_v4();
 
@@ -255,42 +255,23 @@ async fn a_compaction_raises_the_streak_and_restarts_the_turn_clock() {
         "a session that has never compacted has no streak"
     );
 
-    svc.note_compaction_streak(sid, 71.0);
-    svc.bump_turns_since_compaction(sid);
-    svc.bump_turns_since_compaction(sid);
+    svc.note_compaction_streak(sid);
+    svc.note_compaction_streak(sid);
     assert_eq!(
-        svc.compaction_state(sid).turns_since_compaction,
+        svc.compaction_state(sid).compaction_streak,
         2,
-        "turns accumulate between compactions"
-    );
-
-    svc.note_compaction_streak(sid, 88.5);
-    let state = svc.compaction_state(sid);
-    assert_eq!(state.compaction_streak, 2, "the run is two compactions long");
-    assert_eq!(
-        state.turns_since_compaction, 0,
-        "a compaction restarts the turn clock"
-    );
-    assert_eq!(
-        state.share_at_last_compaction, 88.5,
-        "the latest share is the one remembered"
+        "the run is two compactions long"
     );
 }
 
-/// The reset a committed tool result performs clears the streak ONLY. Turns
-/// elapsed and the share at the last compaction are separate facts and must
-/// survive: clearing the clock would destroy the evidence that tells
-/// "compacting every turn" from "compacted twice over a long session".
+/// The reset a committed tool result performs clears the streak.
 #[tokio::test]
-async fn a_committed_tool_result_clears_the_streak_and_nothing_else() {
+async fn a_committed_tool_result_clears_the_streak() {
     let svc = make_service().await;
     let sid = Uuid::new_v4();
 
-    svc.note_compaction_streak(sid, 60.0);
-    svc.bump_turns_since_compaction(sid);
-    svc.bump_turns_since_compaction(sid);
-    svc.note_compaction_streak(sid, 64.0);
-    svc.bump_turns_since_compaction(sid);
+    svc.note_compaction_streak(sid);
+    svc.note_compaction_streak(sid);
 
     let before = svc.compaction_state(sid);
     assert_eq!(before.compaction_streak, 2, "test setup: a run of two");
@@ -299,14 +280,6 @@ async fn a_committed_tool_result_clears_the_streak_and_nothing_else() {
 
     let after = svc.compaction_state(sid);
     assert_eq!(after.compaction_streak, 0, "the tool result ends the run");
-    assert_eq!(
-        after.turns_since_compaction, before.turns_since_compaction,
-        "turns elapsed is not the streak's to clear"
-    );
-    assert_eq!(
-        after.share_at_last_compaction, before.share_at_last_compaction,
-        "the last compaction still happened at the share it happened at"
-    );
 }
 
 /// The property A3's brake depends on, driven through the real methods: the
@@ -318,13 +291,13 @@ async fn the_guard_releases_when_a_tool_result_lands() {
     let svc = make_service().await;
     let sid = Uuid::new_v4();
 
-    svc.note_compaction_streak(sid, 70.0);
+    svc.note_compaction_streak(sid);
     assert!(
         !compaction_loop_guard(svc.compaction_state(sid).compaction_streak),
         "one compaction is not a loop"
     );
 
-    svc.note_compaction_streak(sid, 70.0);
+    svc.note_compaction_streak(sid);
     assert!(
         compaction_loop_guard(svc.compaction_state(sid).compaction_streak),
         "two compactions with no completed tool call between them is the #226 loop"
@@ -336,7 +309,7 @@ async fn the_guard_releases_when_a_tool_result_lands() {
         "a completed tool call is evidence of progress and must release the brake"
     );
 
-    svc.note_compaction_streak(sid, 70.0);
+    svc.note_compaction_streak(sid);
     let state = svc.compaction_state(sid);
     assert_eq!(
         state.compaction_streak, 1,
@@ -345,23 +318,15 @@ async fn the_guard_releases_when_a_tool_result_lands() {
     assert!(!compaction_loop_guard(state.compaction_streak));
 }
 
-/// The tool loop resets and bumps on every turn, including for sessions that
-/// have never compacted. Those calls must be no-ops rather than panics or
-/// phantom entries: a bump that created an entry would leave a turn already on
-/// the clock of a session that has not compacted at all.
+/// The reset the tool loop performs on every turn must be a no-op for a
+/// session that has never compacted — not a panic, and not a phantom entry.
 #[tokio::test]
 async fn resetting_a_session_that_never_compacted_is_a_no_op() {
     let svc = make_service().await;
     let sid = Uuid::new_v4();
 
     svc.reset_compaction_streak(sid);
-    svc.bump_turns_since_compaction(sid);
 
     let state = svc.compaction_state(sid);
     assert_eq!(state.compaction_streak, 0);
-    assert_eq!(
-        state.turns_since_compaction, 0,
-        "an absent session has no clock to bump"
-    );
-    assert_eq!(state.share_at_last_compaction, 0.0);
 }

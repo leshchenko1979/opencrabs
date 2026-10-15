@@ -1,5 +1,4 @@
 use super::builder::AgentService;
-use super::compaction::CompactionState;
 use crate::brain::agent::context::{AgentContext, CompactionScope};
 use crate::brain::agent::error::{AgentError, Result};
 use crate::brain::provider::{ContentBlock, LLMRequest, Message, Provider};
@@ -670,11 +669,6 @@ impl AgentService {
             Some(&self.tool_registry),
         );
 
-        // #438 A4: the trend this session is on, read BEFORE this compaction is
-        // recorded — so the prompt reports how many compactions came before it,
-        // not the one it is about to add.
-        let compaction_trend = self.compaction_state(session_id);
-
         let summary = Self::compute_compaction_summary(
             provider,
             self.fallback_chain_snapshot(),
@@ -695,7 +689,6 @@ impl AgentService {
             self.compaction_attempt_deadline(session_id),
             notifier,
             context_inventory,
-            compaction_trend,
         )
         .await?;
 
@@ -1140,35 +1133,6 @@ impl AgentService {
         out
     }
 
-    /// #438 A4 — the feedback the compactor prompt was missing: how many times
-    /// this session has compacted in a row, how little work passed between
-    /// those compactions, and how full the window was when the last one ran.
-    ///
-    /// Returns an empty string on the first compaction. There is no trend yet,
-    /// and a zeroed block would read as "compaction 0 — fine" rather than
-    /// "no history", which is the opposite of the intended signal.
-    fn compaction_trend_block(trend: CompactionState) -> String {
-        if trend.compaction_streak == 0 {
-            return String::new();
-        }
-        let share_clause = if trend.share_at_last_compaction > 0.0 {
-            format!(", with the window at {:.0}%", trend.share_at_last_compaction)
-        } else {
-            String::new()
-        };
-        format!(
-            "### Compaction trend (feedback on your last attempt):\n\
-             This session has now compacted {} time(s) in a row with no completed tool call \
-             between them. The previous compaction ran {} assistant turns ago{}.\n\
-             That streak means the previous compaction did not buy the session any room. \
-             Compact HARDER than last time: shed auxiliary documents before whole skills, and \
-             bring the retained set inside the budget stated in the Manifest Rules. A run of \
-             degraded compactions is broken by the harness shedding the retained set \
-             mechanically.\n\n",
-            trend.compaction_streak, trend.turns_since_compaction, share_clause,
-        )
-    }
-
     /// Compute a compaction summary from a snapshot of messages.
     ///
     /// This is the LLM-facing half of compaction. It does not touch any live
@@ -1196,7 +1160,6 @@ impl AgentService {
         attempt_deadline: std::time::Duration,
         notifier: Option<super::compaction_notice::CompactionNotifier>,
         context_inventory: String,
-        compaction_trend: CompactionState,
     ) -> Result<String> {
         let remaining_budget = snapshot_max_tokens.saturating_sub(snapshot_token_count);
 
@@ -1388,7 +1351,6 @@ impl AgentService {
              DO NOT be generic. DO NOT say \"I'm ready to continue.\" Reference actual conversation details \
              that only someone who was there would know.\n\n\
              Tool approval status: {}\n\n\
-             {trend}\
              {budget_directive}",
             snapshot_usage_pct,
             snapshot_token_count,
@@ -1400,7 +1362,6 @@ impl AgentService {
             } else {
                 "AUTO-APPROVE OFF — tool approval is REQUIRED for every tool call"
             },
-            trend = Self::compaction_trend_block(compaction_trend),
             budget_directive = Self::compaction_budget_directive(
                 super::request_budget::COMPACTION_SUMMARY_MAX_TOKENS,
             ),

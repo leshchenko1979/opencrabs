@@ -115,7 +115,7 @@ async fn degraded_streak_sheds_the_aux_document_before_any_whole_skill() {
         svc.shed_retained_set(sid, max_tokens, &skills).is_empty(),
         "a session that has not compacted is not degraded and must never be shed"
     );
-    svc.note_compaction_streak(sid, 42.0);
+    svc.note_compaction_streak(sid);
     assert!(
         svc.shed_retained_set(sid, max_tokens, &skills).is_empty(),
         "a single over-budget compaction is the model's call, not the harness's \
@@ -129,7 +129,7 @@ async fn degraded_streak_sheds_the_aux_document_before_any_whole_skill() {
 
     // A SECOND compaction with no committed tool result between them is the
     // #226 loop: the harness enforces the budget itself.
-    svc.note_compaction_streak(sid, 42.0);
+    svc.note_compaction_streak(sid);
     let shed = svc.shed_retained_set(sid, max_tokens, &skills);
 
     assert_eq!(
@@ -182,8 +182,8 @@ async fn a_degraded_streak_with_a_set_inside_budget_sheds_nothing() {
     let sid_roomy = Uuid::new_v4();
     svc.register_active_skill(sid_roomy, "alpha");
     seen_skills::mark_aux_seen(sid_roomy, "alpha", "procedure.md");
-    svc.note_compaction_streak(sid_roomy, 42.0);
-    svc.note_compaction_streak(sid_roomy, 42.0);
+    svc.note_compaction_streak(sid_roomy);
+    svc.note_compaction_streak(sid_roomy);
 
     let active: HashSet<String> = svc.active_skills_for_session(sid_roomy);
     let aux = seen_skills::aux_seen_for_session(sid_roomy);
@@ -204,8 +204,8 @@ async fn a_degraded_streak_with_a_set_inside_budget_sheds_nothing() {
 
     // Half one, missing: over-budget, nothing active to shed.
     let sid_empty = Uuid::new_v4();
-    svc.note_compaction_streak(sid_empty, 42.0);
-    svc.note_compaction_streak(sid_empty, 42.0);
+    svc.note_compaction_streak(sid_empty);
+    svc.note_compaction_streak(sid_empty);
     assert!(
         svc.shed_retained_set(sid_empty, 1_000, &skills).is_empty(),
         "a session holding no active skills has nothing to shed"

@@ -1044,12 +1044,6 @@ impl AgentService {
         has_progress_override: bool,
         progress_callback: Option<ProgressCallback>,
     ) -> Result<AgentResponse> {
-        // #438 S1: one assistant turn elapsed for this session. Recorded once
-        // per TURN (at the top of the per-turn body), not once per tool call,
-        // so the loop guard (A3) and the compactor prompt (A4) can tell
-        // "compacting every turn" from "compacted twice over a long session".
-        self.bump_turns_since_compaction(session_id);
-
         // #1776 seam 3: a fresh turn invalidates the claude-task turn
         // markers. Notifications arriving this turn for tasks NOT started
         // this turn are post-exit survivors and get delivered synthetically;

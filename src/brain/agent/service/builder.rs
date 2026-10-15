@@ -1763,23 +1763,19 @@ impl AgentService {
     }
 
     /// #438 S1: record that a compaction just completed for this session —
-    /// raise the streak, restart the turns-since clock, and remember the
-    /// context share the session was at when it happened (the "window it
-    /// started from" the compactor prompt reports in A4).
+    /// raise the streak.
     ///
     /// Crate-visible rather than module-private: the shed tests in
     /// `src/tests/compaction_shed_test.rs` raise the streak through this same
     /// entry point the compaction path uses, so the gate they exercise is the
     /// production one and not a test-only re-implementation.
-    pub(crate) fn note_compaction_streak(&self, session_id: Uuid, before_pct: f64) {
+    pub(crate) fn note_compaction_streak(&self, session_id: Uuid) {
         let mut map = self
             .session_compaction_state
             .write()
             .expect("session_compaction_state lock poisoned");
         let entry = map.entry(session_id).or_default();
         entry.compaction_streak = entry.compaction_streak.saturating_add(1);
-        entry.turns_since_compaction = 0;
-        entry.share_at_last_compaction = before_pct;
     }
 
     /// #438 S1: a committed tool result is the evidence that the last
@@ -1795,17 +1791,6 @@ impl AgentService {
             && let Some(entry) = map.get_mut(&session_id)
         {
             entry.compaction_streak = 0;
-        }
-    }
-
-    /// #438 S1: one turn elapsed for this session. Kept alongside the streak
-    /// so the guard can tell "compacting every turn" from "compacted twice
-    /// over a long session".
-    pub(crate) fn bump_turns_since_compaction(&self, session_id: Uuid) {
-        if let Ok(mut map) = self.session_compaction_state.write()
-            && let Some(entry) = map.get_mut(&session_id)
-        {
-            entry.turns_since_compaction = entry.turns_since_compaction.saturating_add(1);
         }
     }
 
