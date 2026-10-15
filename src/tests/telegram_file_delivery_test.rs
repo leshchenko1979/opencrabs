@@ -27,6 +27,7 @@ use crate::channels::telegram::delivery::{
 use crate::utils::image::{
     LocalFile, LocalFileScan, LocalImageFailureReason, disarm_autolink, file_marker_text,
 };
+use crate::utils::sanitize::strip_llm_artifacts;
 use std::path::{Path, PathBuf};
 
 const CHAT: i64 = 133_526_395;
@@ -627,22 +628,126 @@ fn a_file_that_did_not_come_from_a_scan_has_no_marker_to_link() {
 }
 
 #[test]
-fn a_marker_whose_text_moved_is_left_plain() {
-    // `text` starts as a copy of the scan's own buffer and is then rewritten —
-    // the artifact strip, the secret redaction, the dedup ladder. When a rewrite
-    // moves the marker, the recorded span no longer names it, and splicing there
-    // would cut a link over unrelated words: the marker stays plain instead.
+fn a_marker_that_moved_still_links() {
+    // #773: the recorded span is a record of WHAT the scanner wrote, not of
+    // WHERE it now sits. `text` starts as a copy of the scan's own buffer and
+    // is then rewritten — the artifact strip, the secret redaction, the dedup
+    // ladder — and any of those can move a marker. The old guard compared the
+    // recorded span against the marker's bytes, read the mismatch as "the
+    // marker is gone" and left it plain; on a reply carrying an em dash that
+    // was the norm, not the exception (#1745). Searching for the marker's own
+    // bytes finds it where it actually is.
     let body = "Report: 📎 Q3 report.";
     let scan = scan_over(body, &[(Path::new(Q3), "📎 Q3 report")]);
-    let shifted = format!("(redacted) {body}");
+    let moved = format!("(redacted) {body}");
     let links = vec![(
         PathBuf::from(Q3),
         "https://t.me/c/1234567890/1001".to_string(),
     )];
     assert_eq!(
-        link_file_markers(&shifted, &scan, &links),
-        shifted,
-        "a span that no longer names the marker is not cut"
+        link_file_markers(&moved, &scan, &links),
+        "(redacted) Report: [📎 Q3 report](https://t.me/c/1234567890/1001).",
+        "the span is stale but the marker is still there exactly once, so it \
+         links to the bubble that holds the file"
+    );
+}
+
+#[test]
+fn a_marker_whose_text_moved_is_left_plain() {
+    // The other half of the same rule: a rewrite that does not merely move the
+    // marker but REMOVES it — the redaction pass, the dedup ladder — leaves no
+    // bytes to find, and nothing may be spliced over whatever took their place.
+    // The refusal the old guard made for the wrong reason is still the right
+    // answer here.
+    let body = "Report: 📎 Q3 report.";
+    let scan = scan_over(body, &[(Path::new(Q3), "📎 Q3 report")]);
+    let redacted = body.replace("📎 Q3 report", "[redacted]");
+    let links = vec![(
+        PathBuf::from(Q3),
+        "https://t.me/c/1234567890/1001".to_string(),
+    )];
+    assert_eq!(
+        link_file_markers(&redacted, &scan, &links),
+        redacted,
+        "no marker bytes survive the rewrite, so there is nothing to link"
+    );
+}
+
+#[test]
+fn a_marker_after_a_real_rewrite_still_links() {
+    // The live defect (#773) driven through the REAL transform rather than a
+    // hand-made shift. `strip_llm_artifacts` runs on every delivered reply and
+    // its `normalize_dashes` pass rewrites " —" to ":" (#1745), SHORTENING the
+    // buffer, so every span past the first em dash goes stale by exactly the
+    // bytes the dash gave up. Measured on this lane's own smoke reply: scan
+    // text 1165 B with the marker at span [889, 911), 1153 B after the
+    // normalize — the marker really at 885 — while the guard read byte 889.
+    let scan_text = "Here is the report — the one you asked for: 📎 Q3 report.";
+    let scan = scan_over(scan_text, &[(Path::new(Q3), "📎 Q3 report")]);
+    let rewritten = strip_llm_artifacts(scan_text);
+
+    assert_ne!(rewritten, scan_text, "the transform has to actually fire");
+    assert!(
+        rewritten.len() < scan_text.len(),
+        "the em dash gives up bytes, so the buffer shortens: {rewritten:?}"
+    );
+    // The span the scanner recorded no longer names the marker — the exact
+    // condition the old guard refused on, so this test fails on the pre-fix
+    // code instead of passing for the wrong reason.
+    let span = scan.attachments[0]
+        .marker_span
+        .clone()
+        .expect("the scan records the span it emitted the marker at");
+    let real = rewritten
+        .find("📎 Q3 report")
+        .expect("the marker itself survives the rewrite");
+    assert!(
+        real < span.start,
+        "the rewrite moved the marker to {real}, left of the recorded span {span:?}"
+    );
+    let links = vec![(
+        PathBuf::from(Q3),
+        "https://t.me/c/1234567890/1001".to_string(),
+    )];
+    assert_eq!(
+        link_file_markers(&rewritten, &scan, &links),
+        "Here is the report: the one you asked for: \
+         [📎 Q3 report](https://t.me/c/1234567890/1001).",
+        "the marker links even though the transform moved it out from under its \
+         own span"
+    );
+}
+
+#[test]
+fn an_ambiguous_marker_is_left_plain() {
+    // #2001: the model can write the marker's own bytes into its prose — the
+    // very `📎 <label>` the scanner emits for the file it attached. Two
+    // occurrences are indistinguishable by search, and the one the recorded
+    // span names is not necessarily the scanner's, so cutting the first hit
+    // would drop a document link over the model's own words. Both stay plain.
+    let body = "I wrote 📎 Q3 report in the draft. Attached: 📎 Q3 report";
+    let marker = "📎 Q3 report";
+    // The span names the marker the SCANNER emitted — the second one; the
+    // model's copy sits earlier in the prose.
+    let emitted_at = body.rfind(marker).expect("the body carries it twice");
+    let scan = LocalFileScan {
+        text: body.to_string(),
+        attachments: vec![LocalFile {
+            path: PathBuf::from(Q3),
+            caption: Some("Q3 report".to_string()),
+            marker_span: Some(emitted_at..emitted_at + marker.len()),
+        }],
+        failures: Vec::new(),
+    };
+    let links = vec![(
+        PathBuf::from(Q3),
+        "https://t.me/c/1234567890/1001".to_string(),
+    )];
+    assert_eq!(
+        link_file_markers(body, &scan, &links),
+        body,
+        "an ambiguous marker is not cut — the link would land on whichever copy \
+         the search happened to reach first"
     );
 }
 
