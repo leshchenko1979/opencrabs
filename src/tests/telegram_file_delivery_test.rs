@@ -11,11 +11,14 @@
 //!    two classes are distinct: a path that cannot be READ is a reference
 //!    problem (`Unreadable`), while a file the API refuses is a delivery
 //!    problem (`DeliveryFailed`).
-//! 2. **One bubble per link, captioned by the label.** A resolved link ships
-//!    exactly ONE `sendDocument` carrying the link label as its caption. This
-//!    is the feature's whole promise — "render markdown for links to local
-//!    files and send them to chat" — so it is asserted against the request the
-//!    bot actually makes, never inferred from a rendered reply.
+//! 2. **One bubble per link, uncaptioned.** A resolved link ships exactly ONE
+//!    `sendDocument`, and that bubble carries NO caption (#780): the caption a
+//!    file carries is the link label, which the reader already has as the
+//!    `📎 <label>` marker in the body directly above it — so it said the same
+//!    thing twice, one line apart. This is the feature's whole promise —
+//!    "render markdown for links to local files and send them to chat" — so it
+//!    is asserted against the request the bot actually makes, never inferred
+//!    from a rendered reply.
 //!
 //! Deliberately NOT covered here: the extraction rules, the regen ladder, and
 //! the notice wording. Each has its own home.
@@ -161,26 +164,65 @@ async fn a_file_the_channel_refuses_returns_a_delivery_failure() {
 }
 
 // ---------------------------------------------------------------------------
-// the promise: one document bubble, captioned by the link label
+// the promise: one document bubble per link, and no caption on it
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_resolved_link_ships_exactly_one_document_captioned_by_its_label() {
+async fn a_resolved_link_ships_exactly_one_document_with_no_caption() {
     // The positive control for the two tests above, and the feature's core
-    // assertion at once: the instrument must be able to return an empty
-    // failure list (or "it reported a failure" proves nothing about which
-    // inputs fail), and the caption must ride the request as the link LABEL —
-    // not the path, which the user cannot open anyway.
+    // assertion at once: the instrument must be able to return an empty failure
+    // list (or "it reported a failure" proves nothing about which inputs fail),
+    // and the bubble must carry NO caption (#780).
+    //
+    // THE ABSENCE IS NOT ASSERTED BY AN `expect(0)` MOCK ALONE — that mock
+    // cannot fire here, and reading its zero as a verdict is a false pass.
+    // mockito picks, among the mocks a request matches, the FIRST that still
+    // NEEDS hits (`is_missing_hits`, server.rs `handle_request`), and only falls
+    // back to the LAST match once every one is satisfied. `expect(0)` sets
+    // `expected_hits_at_most = 0`, so its `is_missing_hits` is `0 < 0` — false,
+    // always. A co-matching `expect(1)` control (`0 < 1` — true) therefore
+    // always wins the request, the captioned mock stays at zero, and its
+    // `expect(0)` passes whether or not a caption was sent. That is why every
+    // other `expect(0)` in this suite sits on a DIFFERENT path, where it is the
+    // sole match.
+    //
+    // Both mocks below are therefore keyed so that at most ONE of them can match
+    // any given request, and each fails with its own message:
+    //   - the positive control matches ONLY the uncaptioned shape — the document
+    //     part is the payload's LAST field, so its bytes are followed directly
+    //     by the multipart terminator (`--<boundary>--`). teloxide omits a `None`
+    //     field entirely (its multipart serializer makes `serialize_none`
+    //     `unimplemented!`: "`None`s are not serialized"), so a caption would
+    //     push a part in between and the pattern stops matching;
+    //   - the captioned mock matches the label text, which reaches the wire only
+    //     if a caption was actually attached.
+    // A captioned send therefore fails BOTH: the control sees zero requests, and
+    // the captioned mock sees one.
     let dir = tempfile::tempdir().expect("tempdir");
     let report = write_fixture(dir.path(), "q3.pdf", PDF_BYTES);
     let mut server = mockito::Server::new_async().await;
-    // `expect(1)` is the whole point: a second bubble for one link is the
-    // #502/#360 duplicate, one media family over. The body match pins the
-    // caption, since the label is the only part of the link the user gets to
-    // read in the chat.
-    let document_mock = server
+    // The caption a file carries IS the link label, and the reader already has
+    // the label as the `📎 <label>` marker in the body directly above this
+    // bubble — so a caption here would print the same string twice, one line
+    // apart.
+    let captioned_mock = server
         .mock("POST", "/botTESTTOKEN/SendDocument")
         .match_body(mockito::Matcher::Regex("Q3 report".to_string()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(SEND_MESSAGE_OK)
+        .expect(0)
+        .create_async()
+        .await;
+    // The positive control: exactly ONE bubble for one link, and it carries the
+    // document as the LAST part. A second bubble is the #502/#360 duplicate, one
+    // media family over. `endobj\n` is the tail of the PDF fixture above; the
+    // terminator right after it is what a caption would displace.
+    let document_mock = server
+        .mock("POST", "/botTESTTOKEN/SendDocument")
+        .match_body(mockito::Matcher::Regex(
+            r"endobj\n\r\n--[0-9A-Za-z_-]+--".to_string(),
+        ))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(SEND_MESSAGE_OK)
@@ -199,6 +241,7 @@ async fn a_resolved_link_ships_exactly_one_document_captioned_by_its_label() {
     .await;
 
     document_mock.assert_async().await;
+    captioned_mock.assert_async().await;
     assert_eq!(
         delivered_paths(&delivered),
         vec![report],
@@ -902,6 +945,7 @@ fn the_fallback_links_a_marker_to_the_intermediates_bubble() {
     assert!(dm_links.is_empty());
     assert_eq!(link_file_markers(body, &scan, &dm_links), body);
 }
+
 // ---------------------------------------------------------------------------
 // the intermediate's document floor (#779)
 // ---------------------------------------------------------------------------
@@ -990,13 +1034,15 @@ fn a_markdown_file_the_rich_plane_did_not_take_still_has_a_delivery_leg() {
     // #502/#1916 double-send rule: the REWRITER's own `already_delivered` leg
     // consumes such a reference and records nothing, so without this filter the
     // same path would come back as a skipped file and ship twice.
-    let pre_delivered = rewrite_local_files(&text, Some(dir.path()), "file", &[doc.clone()], false);
+    let pre_delivered =
+        rewrite_local_files(&text, Some(dir.path()), "file", std::slice::from_ref(&doc), false);
     assert!(
         pre_delivered.entries.is_empty() && !pre_delivered.rich.contains(marker),
         "a reference the rewriter consumed as already delivered leaves neither marker nor entry"
     );
     assert!(
-        files_the_rich_plane_skipped(&scan, &pre_delivered.entries, &[doc.clone()]).is_empty(),
+        files_the_rich_plane_skipped(&scan, &pre_delivered.entries, std::slice::from_ref(&doc))
+            .is_empty(),
         "a path already in the chat must not ship again"
     );
 }

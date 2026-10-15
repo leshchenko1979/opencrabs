@@ -2224,7 +2224,15 @@ pub(crate) async fn send_local_files(
             chat_id,
             thread_id,
             InputFile::memory(bytes).file_name(document_part_name(path)),
-            file.caption.clone(),
+            // #780: no caption. The caption a file carries IS the markdown
+            // label, and the label is also the text of the `📎 <label>` marker
+            // the reader sees in the body directly above this bubble — so the
+            // caption repeats, one line down, what the message already said. The
+            // bubble needs no caption to be understood: Telegram renders the
+            // document's own file name (`document_part_name`), which is the same
+            // name the marker carries. Dropping it also keeps the reader from
+            // reading the same string twice in two different type sizes.
+            None,
         )
         .await
         .map(|m| m.id.0);
