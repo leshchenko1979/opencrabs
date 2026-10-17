@@ -15,7 +15,7 @@
 //! ARCHIVED sessions are NOT dead (owner directive 2026-08-28): they pass
 //! the gate like any live session and auto-route exactly as everywhere else
 //! — an archived session whose channel a successor now occupies is
-//! REDIRECTED to the occupant by the #19 machinery, with provenance
+//! REDIRECTED to the occupant by the leshchenko1979/opencrabs#19 machinery, with provenance
 //! framing. Existence-gate only, never an activity-gate.
 //!
 //! SENDER FRAMING (owner amendment 2026-08-28, "Overridable"): the CLI lane
@@ -177,7 +177,7 @@ pub async fn handle_session_notify(
     // row — its local-route fallback would hand the message to this
     // process's own boot channel, resurrecting traffic for a session that no
     // longer exists. An ARCHIVED row passes: archived sessions auto-route
-    // like anywhere else (#19 redirect to the successor occupying the
+    // like anywhere else (leshchenko1979/opencrabs#19 redirect to the successor occupying the
     // channel), so the gate checks existence only, never activity.
     let session_svc = SessionService::new(service_context.clone());
     match session_svc.get_session(session_id).await {
@@ -364,7 +364,7 @@ pub async fn handle_session_notify(
                     "delivered",
                     format!(
                         "redirected to session {to}: session {session_id} no longer owns its \
-                         channel (#19)"
+                         channel (leshchenko1979/opencrabs#19)"
                     ),
                     serde_json::json!({
                         "notify_id": notify_id.to_string(),

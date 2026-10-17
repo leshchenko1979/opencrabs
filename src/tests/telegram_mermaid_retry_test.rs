@@ -2,7 +2,7 @@
 //! headline split (#1741).
 //!
 //! The connect stage used to be one-shot while the body stage retried once
-//! (#189), so a single stalled handshake degraded a valid diagram to the
+//! (leshchenko1979/opencrabs#189), so a single stalled handshake degraded a valid diagram to the
 //! failure block, whose headline read as a parse rejection. These tests pin
 //! the new contract: exactly one retry for transient failures (transport
 //! errors, 5xx, 408, 429), no retry for a deterministic 4xx, and the

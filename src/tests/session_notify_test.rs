@@ -291,7 +291,7 @@ async fn test_tool_interrupt_param_reaches_delivery() {
     );
 }
 
-// ── Channel-ownership gate (fork #17) + redirect (fork #19) ─────────────
+// ── Channel-ownership gate (fork #17) + redirect (fork leshchenko1979/opencrabs#19) ─────────────
 //
 // A session REPLACED on its chat/topic (idle-timeout reset creates a
 // successor) keeps its delivery route — routes are UUID-keyed and never
@@ -300,7 +300,7 @@ async fn test_tool_interrupt_param_reaches_delivery() {
 // owns the channel, not the target's turn state, so `interrupt` does not
 // override it. Unknown ownership fails open, same posture as the turn gate.
 //
-// Occupied no longer REFUSES (#19): the message is REDIRECTED to the
+// Occupied no longer REFUSES (leshchenko1979/opencrabs#19): the message is REDIRECTED to the
 // occupant — the session that owns the channel now — with a provenance
 // frame on its context text, up to a 3-hop cap (cycle insurance), then
 // parked. The original `interrupt` flag is honored against the FINAL
@@ -328,7 +328,7 @@ fn test_occupied_channel_redirects_delivery_to_occupant() {
     assert_eq!(
         outcome,
         Delivery::Redirected { to: occupant },
-        "#19: an occupied channel redirects to the occupant — delivered, never refused"
+        "leshchenko1979/opencrabs#19: an occupied channel redirects to the occupant — delivered, never refused"
     );
     let queued = captured
         .lock()
@@ -340,7 +340,7 @@ fn test_occupied_channel_redirects_delivery_to_occupant() {
     );
     assert!(
         queued.context_text.starts_with(&frame),
-        "#19: the successor must see the provenance frame: {}",
+        "leshchenko1979/opencrabs#19: the successor must see the provenance frame: {}",
         queued.context_text
     );
 }
@@ -358,7 +358,7 @@ fn test_occupied_channel_redirects_even_with_interrupt() {
     assert_eq!(
         deliver_to_session(session, msg(), true),
         Delivery::Redirected { to: occupant },
-        "#19: interrupt overrides the TURN gate only — never channel ownership; \
+        "leshchenko1979/opencrabs#19: interrupt overrides the TURN gate only — never channel ownership; \
          the redirect still happens"
     );
 }
@@ -379,7 +379,7 @@ fn test_ownership_gate_outranks_turn_gate() {
     assert_eq!(
         deliver_to_session(session, msg(), false),
         Delivery::Redirected { to: occupant },
-        "#19: the ownership gate runs outside the turn gate"
+        "leshchenko1979/opencrabs#19: the ownership gate runs outside the turn gate"
     );
 }
 
@@ -401,13 +401,13 @@ fn test_redirect_honors_interrupt_against_occupant() {
         Delivery::RefusedInFlight {
             redirected_to: Some(occupant)
         },
-        "#19: a redirect landing on a mid-turn occupant is refused with the \
+        "leshchenko1979/opencrabs#19: a redirect landing on a mid-turn occupant is refused with the \
          redirect context — the sender hears where the message WOULD have gone"
     );
     assert_eq!(
         deliver_to_session(session, msg(), true),
         Delivery::Redirected { to: occupant },
-        "#19: interrupt=true still delivers through the redirect"
+        "leshchenko1979/opencrabs#19: interrupt=true still delivers through the redirect"
     );
 }
 
@@ -439,7 +439,7 @@ fn test_redirect_hop_cap_parks_beyond_three() {
     assert_eq!(
         deliver_to_session(session, msg(), false),
         Delivery::Parked,
-        "#19: hop cap 3 is cycle insurance — past it the message is parked, \
+        "leshchenko1979/opencrabs#19: hop cap 3 is cycle insurance — past it the message is parked, \
          never looped and never dropped"
     );
 }
@@ -492,16 +492,16 @@ async fn test_tool_reports_redirect_to_occupant() {
         )
         .await;
     let result = outcome.expect("tool executes");
-    assert!(result.success, "#19: a redirect is delivery, not failure");
+    assert!(result.success, "leshchenko1979/opencrabs#19: a redirect is delivery, not failure");
     let message = result.output;
-    assert!(!message.is_empty(), "#19: the outcome names where it went");
+    assert!(!message.is_empty(), "leshchenko1979/opencrabs#19: the outcome names where it went");
     assert!(
         message.contains(&occupant.to_string()),
-        "#19: must name the session that owns the channel now: {message}"
+        "leshchenko1979/opencrabs#19: must name the session that owns the channel now: {message}"
     );
     assert!(
         message.contains("Redirected"),
-        "#19: must say it was redirected: {message}"
+        "leshchenko1979/opencrabs#19: must say it was redirected: {message}"
     );
 }
 

@@ -467,7 +467,7 @@ impl AgentService {
         // reminder of its incomplete tasks so it rides at the END of the prompt
         // (best recall) every turn — without it the plan scrolls out of the
         // recency window in a long conversation and the model forgets it was
-        // mid-plan (discussion #177). Regenerated each turn from the plan file;
+        // mid-plan (discussion leshchenko1979/opencrabs#177). Regenerated each turn from the plan file;
         // the DB only ever stores the clean user message, so it never piles up.
         let brain_dir = self.brain_workspace_path();
         let context_user_message =

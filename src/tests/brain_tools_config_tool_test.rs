@@ -38,7 +38,7 @@ async fn test_read_config() {
     assert!(result.output.contains("approval_policy"));
 }
 
-/// Every section the resolver resolves must render (#86).
+/// Every section the resolver resolves must render (leshchenko1979/opencrabs#86).
 ///
 /// The render match once carried only 8 arms, so 8 known sections
 /// (memory, brain, browser, cron, daemon, doctor, image, a2a — plus tui
@@ -68,7 +68,7 @@ async fn test_read_config_renders_every_known_section() {
     }
 }
 
-/// Shorthand children resolve to their parent and render (#86 contract).
+/// Shorthand children resolve to their parent and render (leshchenko1979/opencrabs#86 contract).
 #[tokio::test]
 async fn test_read_config_shorthand_children_render() {
     let tool = ConfigTool;

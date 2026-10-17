@@ -39,7 +39,7 @@ async fn async_main() -> Result<()> {
     let _guard = logging::init_logging(log_config)
         .map_err(|e| anyhow::anyhow!("Failed to initialize logging: {}", e))?;
 
-    // Install the crash-signal diagnostic handler (#352). Without it a fatal
+    // Install the crash-signal diagnostic handler (leshchenko1979/opencrabs#352). Without it a fatal
     // fault signal (SIGBUS/SIGSEGV/…) is delivered to the kernel's default
     // disposition and the daemon dies silently, recording neither the signal
     // nor the faulting address. A failure here is logged and never fatal: a box

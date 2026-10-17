@@ -88,7 +88,7 @@ fn render_block(block: &Block, wrap_p: bool) -> String {
                 "diagram rendered locally but could not be embedded in HTML",
                 source,
             ),
-            // #189: same split as the markdown path — a transient failure
+            // leshchenko1979/opencrabs#189: same split as the markdown path — a transient failure
             // offers the svg hatch (the response had already passed the
             // image check, so the render may exist server-side), while a
             // deterministic parse rejection does not. #1741: the transient

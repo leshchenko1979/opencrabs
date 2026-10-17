@@ -465,7 +465,7 @@ fn markdown_failure_block_contains_warning_error_and_source() {
 
 #[test]
 fn markdown_failure_block_with_link_appends_a_tappable_svg_hatch() {
-    // #189 Leg 4: the transient-failure variant offers the vector render as a
+    // leshchenko1979/opencrabs#189 Leg 4: the transient-failure variant offers the vector render as a
     // markdown link, which `inline.rs` parses and `render_html.rs` emits as a
     // real <a href> anchor — tappable rather than raw text. #1741: the
     // transient headline now says renderer failure, not a syntax rejection.
@@ -481,7 +481,7 @@ fn markdown_failure_block_with_link_appends_a_tappable_svg_hatch() {
 
 #[test]
 fn replacement_for_failed_offers_the_hatch_but_parse_error_does_not() {
-    // #189: the split is load-bearing. A Failed outcome lost its body AFTER
+    // leshchenko1979/opencrabs#189: the split is load-bearing. A Failed outcome lost its body AFTER
     // the `2xx + image/*` check, so the render likely exists server-side and
     // the link is worth offering. A ParseError is a deterministic rejection —
     // the renderer produced no diagram, so a link would be dead.
@@ -508,7 +508,7 @@ fn replacement_for_failed_offers_the_hatch_but_parse_error_does_not() {
 
 #[test]
 fn prevalidate_budgets_split_connect_from_total() {
-    // #189 Leg 3: the old single 10s budget covered connect + headers + the
+    // leshchenko1979/opencrabs#189 Leg 3: the old single 10s budget covered connect + headers + the
     // full body, so a slow ~55-140KB stream could exhaust it and land on the
     // dropped-body branch indistinguishable from an unreachable host. The
     // connect budget must now be strictly smaller than the total, or the

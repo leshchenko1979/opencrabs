@@ -6,7 +6,7 @@
 //! through the same `deliver_to_session` path the agent tool uses, the
 //! sender-label override riding the `cli:` header, and that malformed
 //! params are protocol errors while business outcomes are JSON-RPC
-//! successes. (The archived-session auto-route case rides with the #19
+//! successes. (The archived-session auto-route case rides with the leshchenko1979/opencrabs#19
 //! channel-ownership harvest.)
 
 use crate::a2a::handler::notify::{

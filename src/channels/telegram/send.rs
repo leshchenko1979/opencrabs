@@ -428,7 +428,7 @@ pub async fn best_effort_note<C>(
 }
 
 /// Result of an outbox send, pairing the delivered message IDs and chunk texts
-/// with the *effective* thread ID after any stale-topic fallback (#116, #169).
+/// with the *effective* thread ID after any stale-topic fallback (leshchenko1979/opencrabs#116, #169).
 /// When a dead topic (HTTP 400 `message thread not found`) causes an unthreaded
 /// retry, `effective_thread_id` becomes `None` (General/DM) so callers and
 /// persistence cannot accidentally re-poison the database with the evicted topic.
@@ -494,7 +494,7 @@ pub(crate) async fn send_markdown_outbox(
                 });
             }
             Err(e) => {
-                // Stale-topic auto-route (#116): a remembered topic that was
+                // Stale-topic auto-route (leshchenko1979/opencrabs#116): a remembered topic that was
                 // deleted on Telegram's side makes EVERY thread-carrying send
                 // fail with 400 `message thread not found` — rich AND (before
                 // this fix) the plain fallback below, which re-used the same
@@ -548,7 +548,7 @@ pub(crate) async fn send_markdown_outbox(
 
     // 2. Universal HTML ladder, chunked to Telegram's limit. When the
     // stale-topic eviction above fired, `thread_id` is now None — the
-    // ladder (and its plain-text fallback, the #116 poisoning leg) is
+    // ladder (and its plain-text fallback, the leshchenko1979/opencrabs#116 poisoning leg) is
     // re-addressed to General/DM instead of the dead topic.
     let thread = thread_id.map(|t| t.0.0);
     let html = super::handler::markdown_to_telegram_html(markdown);
@@ -577,7 +577,7 @@ pub(crate) async fn send_markdown_outbox(
                 sent.push((mid.0, chunk.to_string()));
             }
             Err(e) => {
-                // Plain-path leg of the #116 poisoning chain: a message that
+                // Plain-path leg of the leshchenko1979/opencrabs#116 poisoning chain: a message that
                 // is NOT rich-shaped never entered the rich arm, so its first
                 // sight of the dead topic is here — the HTML ladder 400s and
                 // (pre-fix) the plain fallback re-used the same thread and
@@ -648,7 +648,7 @@ pub(crate) async fn send_markdown_outbox(
     })
 }
 
-/// Evict a dead forum-topic address chat-scoped (#116): clear the
+/// Evict a dead forum-topic address chat-scoped (leshchenko1979/opencrabs#116): clear the
 /// `thread_id` on `channel_messages` rows of THIS chat that carry it, so
 /// `latest_thread_id_for_chat` never serves the deleted topic again. The
 /// in-memory session-topic map self-heals on the chat's next inbound

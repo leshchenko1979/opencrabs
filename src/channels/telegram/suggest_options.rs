@@ -335,7 +335,7 @@ pub(crate) enum SuggestLayout {
 /// entities first, so the emitter and the funnel measure the same unit.
 /// Measuring the escaped form instead overcounts by up to 4 units per `&`
 /// — and that is NOT "safe": it rejected a row the emitter had already
-/// approved, folding a 30-unit label that read as 34 (#396).
+/// approved, folding a 30-unit label that read as 34 (leshchenko1979/opencrabs#396).
 pub(crate) fn row_fits(labels: &[&str]) -> bool {
     if labels.len() == 1 {
         labels[0].chars().count() <= SINGLE_BUTTON_MAX_UNITS
@@ -516,9 +516,9 @@ pub(crate) fn empty_keyboard() -> teloxide::types::InlineKeyboardMarkup {
 /// — callback data and URL routing are untouched — but render their fold-tier label,
 /// and the original labels move into an `<ol>` after the last row of that set.
 ///
-/// The fold tier is the owner's 2026-09-14 shape (#396): `N. <FirstWord>` for n>=2,
+/// The fold tier is the owner's 2026-09-14 shape (leshchenko1979/opencrabs#396): `N. <FirstWord>` for n>=2,
 /// `Go!` for a single-button set — the same tier the emitter's NumberedProse arm
-/// writes, so the two arms agree. The pre-#396 fold wrote a bare index, which told
+/// writes, so the two arms agree. The pre-leshchenko1979/opencrabs#396 fold wrote a bare index, which told
 /// the owner nothing about what the button did. The tier label is derived from the
 /// DECODED first word and re-escaped for the HTML context; when it cannot fit the
 /// solo budget on its own (a first word of 28+ units), the button falls back to the
@@ -526,7 +526,7 @@ pub(crate) fn empty_keyboard() -> teloxide::types::InlineKeyboardMarkup {
 /// the fold on the next pass.
 ///
 /// Every verdict below measures the label's DISPLAY width, not its escaped form —
-/// see [`row_fits`] for why the escaped form is the wrong unit (#396).
+/// see [`row_fits`] for why the escaped form is the wrong unit (leshchenko1979/opencrabs#396).
 ///
 /// Contiguous runs of `<tg-button-row>` blocks (separated only by whitespace) form
 /// a single logical set; intervening non-whitespace text delineates independent sets.
@@ -624,7 +624,7 @@ pub(crate) fn enforce_button_fit(html: &str) -> String {
     // raw out of the HTML, so they still carry the entities `escape_html`
     // wrote, and one `&` alone inflates a label by 4 characters (`&amp;`).
     // Measuring the escaped form therefore rejects rows that fit their
-    // budget: #396 folded an approved 30-unit label because it read as 34.
+    // budget: leshchenko1979/opencrabs#396 folded an approved 30-unit label because it read as 34.
     // One helper keeps all three feeders in lockstep.
     let display_fits = |buttons: &[EnforcerButton<'_>]| -> bool {
         let decoded: Vec<String> = buttons

@@ -2,7 +2,7 @@
 //!   1. SAME-ORIGIN thread inheritance — the session-origin topic is
 //!      applied ONLY when the resolved target chat IS the session-origin
 //!      chat. Cross-chat sends with omitted `thread_id` must NOT inherit
-//!      a topic from a chat they are not going to (the #116 poisoning
+//!      a topic from a chat they are not going to (the leshchenko1979/opencrabs#116 poisoning
 //!      chain: group topic 7198 applied to owner DM → thread not found).
 //!   2. Landing echo — `landing_echo` names the resolved destination,
 //!      degrading gracefully when no DB pool exists.
@@ -33,7 +33,7 @@ async fn session_origin_topic_does_not_leak_into_other_chat() {
     // #127: session lives in chat 12345 topic 42, but the send targets a
     // DIFFERENT chat (-100999). The origin topic must NOT be applied —
     // topic 42 does not exist in that chat, and putting it on the wire
-    // hard-fails with "message thread not found" (#116). The resolver
+    // hard-fails with "message thread not found" (leshchenko1979/opencrabs#116). The resolver
     // falls through to the chat-wide lookup (None here: no global pool).
     let state = TelegramState::new();
     let session_id = Uuid::from_u128(0xABCD);

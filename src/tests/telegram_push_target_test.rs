@@ -46,7 +46,7 @@ fn no_binding_at_all_falls_back_to_the_chat_lookup() {
 }
 
 /// A binding for another chat says nothing about this one, so it must not be
-/// applied — the #116 poisoning shape (a topic id sent into a chat that does
+/// applied — the leshchenko1979/opencrabs#116 poisoning shape (a topic id sent into a chat that does
 /// not have it is refused with `message thread not found`).
 #[test]
 fn a_binding_for_another_chat_does_not_apply() {

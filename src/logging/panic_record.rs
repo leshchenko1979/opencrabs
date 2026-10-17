@@ -22,7 +22,7 @@
 //!    death record cannot be allowed to hide behind one, and stderr is
 //!    ephemeral — a closed terminal window took the evidence with it.
 //!
-//! Like `logging::crash` (#352), the interesting half is pure: a record, the
+//! Like `logging::crash` (leshchenko1979/opencrabs#352), the interesting half is pure: a record, the
 //! renderers that turn it into bytes, and a payload reader that never panics.
 //! The only effectful entry point is [`persist`].
 

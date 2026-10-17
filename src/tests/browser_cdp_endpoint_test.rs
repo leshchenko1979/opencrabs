@@ -3,7 +3,7 @@
 //! chromey's `Browser::connect` only auto-resolves the real
 //! `/devtools/browser/<id>` websocket URL via `/json/version` when the scheme
 //! is `http`/`https`. A bare `ws://host:port` (the form originally documented
-//! for #189) is handed straight to the websocket client and Chromium rejects
+//! for leshchenko1979/opencrabs#189) is handed straight to the websocket client and Chromium rejects
 //! the upgrade on the root path — so it silently fails to connect.
 //!
 //! `normalize_cdp_endpoint` rewrites a path-less ws/wss endpoint to http/https

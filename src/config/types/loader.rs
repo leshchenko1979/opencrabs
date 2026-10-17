@@ -1049,7 +1049,7 @@ impl Config {
     ///
     /// JSON arrays and objects convert faithfully — objects become inline
     /// tables, arrays recurse (so arrays-of-tables like `memory.extra_paths`
-    /// survive instead of being silently dropped, #87). Values TOML cannot
+    /// survive instead of being silently dropped, leshchenko1979/opencrabs#87). Values TOML cannot
     /// represent (`null`, mixed-type arrays) hard-error BEFORE the file is
     /// touched. On success the returned `String` is the TOML rendering of the
     /// value actually written, so callers can echo reality, not the raw input.
@@ -1779,7 +1779,7 @@ fn inject_into_agent_section(content: &str, comment_block: &str) -> Result<Strin
 /// Faithful for every JSON shape TOML can represent: strings, integers,
 /// floats, booleans, arrays (recursively) and objects → inline tables. Two
 /// shapes hard-error BEFORE any file access because TOML cannot represent
-/// them without silent loss (#87):
+/// them without silent loss (leshchenko1979/opencrabs#87):
 /// - `null` — TOML has no null;
 /// - mixed-type arrays — TOML v1.0 arrays must be homogeneous; integer and
 ///   float count as one family (`[0.1, 1, 2]` is legal TOML), but e.g. a
@@ -1814,7 +1814,7 @@ fn json_to_toml_value(json: &serde_json::Value) -> Result<toml_edit::Value> {
                     if prev != fam {
                         anyhow::bail!(
                             "array mixes types `{prev}` and `{fam}` — TOML arrays must be \
-                             homogeneous (#87). The value was NOT written."
+                             homogeneous (leshchenko1979/opencrabs#87). The value was NOT written."
                         );
                     }
                 } else {
@@ -1836,7 +1836,7 @@ fn json_to_toml_value(json: &serde_json::Value) -> Result<toml_edit::Value> {
 }
 
 /// The TOML type family of a value, used for the array-homogeneity check.
-/// Integer and float share one family (`[0.1, 1, 2]` is legal TOML #87).
+/// Integer and float share one family (`[0.1, 1, 2]` is legal TOML leshchenko1979/opencrabs#87).
 fn toml_family(v: &toml_edit::Value) -> &'static str {
     match v {
         toml_edit::Value::Integer(_) | toml_edit::Value::Float(_) => "number",

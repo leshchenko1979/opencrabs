@@ -870,7 +870,7 @@ pub fn hoist_reasoning_blocks(content: &str) -> (String, Option<String>) {
 /// Phantom-blocked iterations are persisted to the DB under these paired
 /// markers so a misclassified deliverable stays recoverable to humans — but
 /// that same text re-entering LLM context as assistant history is what turned
-/// one Telegram session into 34 piled-up phantom entries (#86): the model
+/// one Telegram session into 34 piled-up phantom entries (leshchenko1979/opencrabs#86): the model
 /// reads its own discarded narrations and emits fresh ones from them.
 /// Callers rebuilding LLM context from DB rows strip whole flagged sections;
 /// TUI/CLI replay paths keep them, since there the content drives
@@ -897,7 +897,7 @@ pub fn strip_phantom_blocked(content: &str) -> String {
                 rest = after.strip_prefix('\n').unwrap_or(after);
             }
             None => {
-                // Unpaired open: treat the tail as blocked (#86 fail-safe).
+                // Unpaired open: treat the tail as blocked (leshchenko1979/opencrabs#86 fail-safe).
                 rest = "";
             }
         }

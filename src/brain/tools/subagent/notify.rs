@@ -27,7 +27,7 @@ fn short_id(id: uuid::Uuid) -> String {
 }
 
 /// Redirect-acknowledgement text for a delivery steered to the channel's
-/// current owner (fork #19). Pure so tests can pin the wording: the sender
+/// current owner (fork leshchenko1979/opencrabs#19). Pure so tests can pin the wording: the sender
 /// must hear WHERE the message went without a second discovery round.
 fn redirect_message(target: uuid::Uuid, occupant: uuid::Uuid) -> String {
     format!(
@@ -558,7 +558,7 @@ impl Tool for SessionNotifyTool {
                 ],
             )),
             // The target no longer owns its channel (fork #17): the message
-            // was redirected to the session that owns it NOW (fork #19) — a
+            // was redirected to the session that owns it NOW (fork leshchenko1979/opencrabs#19) — a
             // success, not a refusal, and the reply names where it went.
             Delivery::Redirected { to } => {
                 maybe_set_goal(to, goal, goal_max_turns, context).await;

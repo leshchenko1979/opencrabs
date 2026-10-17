@@ -5,7 +5,7 @@
 //! route table, so the verb posts over the profile's A2A gateway — the
 //! daemon's HTTP surface — where the `session/notify` method hands the
 //! message to `deliver_to_session`, the same route the agent's
-//! session_notify tool uses (including #19 redirect-with-framing for
+//! session_notify tool uses (including leshchenko1979/opencrabs#19 redirect-with-framing for
 //! archived/replaced sessions and #1206 parking).
 //!
 //! Exit codes are the machine contract for tooling (oc-deploy fan-out, #24):

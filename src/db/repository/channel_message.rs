@@ -133,7 +133,7 @@ impl ChannelMessageRepository {
             .context("Failed to delete channel message by platform id")
     }
 
-    /// Forum-topic dead-key eviction (#116): Telegram answered
+    /// Forum-topic dead-key eviction (leshchenko1979/opencrabs#116): Telegram answered
     /// `400 Bad Request: message thread not found` for `(channel, chat,
     /// thread)` — the remembered topic no longer exists. Clear the
     /// thread_id on every row of that chat carrying it, so the

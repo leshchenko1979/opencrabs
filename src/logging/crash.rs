@@ -1,4 +1,4 @@
-//! Crash-signal diagnostics — pure record formatting (#352).
+//! Crash-signal diagnostics — pure record formatting (leshchenko1979/opencrabs#352).
 //!
 //! `opencrabs-ops` was killed by SIGBUS under host memory pressure and logged
 //! **nothing**: the daemon installs no signal handler at all, so a fatal fault

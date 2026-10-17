@@ -258,7 +258,7 @@ fn test_enforce_button_fit_folds_oversized_labels_keeping_routing() {
     // solo budget (30), so the set folds; the button keeps its attrs
     // (routing untouched), carries its fold-tier label, and the original
     // label moves into the <ol>. One button in the set is the Go! tier
-    // (owner order 2026-09-14) — a bare index here was the #396 defect.
+    // (owner order 2026-09-14) — a bare index here was the leshchenko1979/opencrabs#396 defect.
     let long = "Проверка ширины кнопки хххххххххЖЖЖ";
     let body = format!(
         "<tg-button-row><tg-button type=\"url\" data=\"https://x/{long}\">{long}\
@@ -472,11 +472,11 @@ fn test_rows_and_trailer_start_a_fresh_markdown_block() {
     assert!(!md.starts_with("Answer.\n\n\n"), "{md}");
 }
 
-// ── #396 — the funnel must measure the label's DISPLAY width ──────────────
+// ── leshchenko1979/opencrabs#396 — the funnel must measure the label's DISPLAY width ──────────────
 
 #[test]
 fn test_owner_label_with_ampersand_survives_the_rich_funnel() {
-    // #396: `pick_layout` measured the RAW label (30 units) and approved a
+    // leshchenko1979/opencrabs#396: `pick_layout` measured the RAW label (30 units) and approved a
     // Column layout, but `enforce_button_fit` re-measured the ESCAPED form —
     // `&` becomes `&amp;`, four units longer — read 34 > 30, and folded the
     // row, so the button rendered as a bare `1` instead of its label. Both
@@ -525,11 +525,11 @@ fn test_owner_label_with_ampersand_survives_the_rich_funnel() {
     );
 }
 
-// ── #396 — the fold tier and its width guard ──────────────────────────────
+// ── leshchenko1979/opencrabs#396 — the fold tier and its width guard ──────────────────────────────
 
 #[test]
 fn test_fold_button_label_decodes_the_first_word_and_re_escapes_it() {
-    // #396, second half: the fold branch used to write a bare `index.to_string()`,
+    // leshchenko1979/opencrabs#396, second half: the fold branch used to write a bare `index.to_string()`,
     // so every folded button rendered as `1`, `2`, … with no hint of its action.
     // It now writes the owner's 2026-09-14 tier — `N. <FirstWord>` for n>=2 —
     // taken from the DECODED label and re-escaped for the HTML context.

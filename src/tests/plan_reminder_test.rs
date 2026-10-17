@@ -1,4 +1,4 @@
-//! Tests for the pinned plan reminder (discussion #177): the active plan's
+//! Tests for the pinned plan reminder (discussion leshchenko1979/opencrabs#177): the active plan's
 //! incomplete tasks are re-injected at the end of the prompt each turn so the
 //! model doesn't forget it's mid-plan in a long conversation.
 //!

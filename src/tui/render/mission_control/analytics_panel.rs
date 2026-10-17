@@ -5,7 +5,7 @@
 //! the renderer never hits disk or the DB itself.
 //!
 //! This is the native home for what the external `opencrabs-analytics` HTML
-//! tool produced (discussion #178).
+//! tool produced (discussion leshchenko1979/opencrabs#178).
 //!
 //! Layout (#900): the D/W/M/All filter tabs are pinned on the top line, and
 //! the sections below render as individual bordered cards flowed into a

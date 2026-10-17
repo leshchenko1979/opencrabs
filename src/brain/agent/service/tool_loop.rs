@@ -4782,7 +4782,7 @@ impl AgentService {
                 // pollutes the DB row that gets reloaded as assistant
                 // context on the next turn (and on session reconnect —
                 // matches the 34-entry Telegram session reported in
-                // discussion #86 / gist 85cfdc26), so the model sees its
+                // discussion leshchenko1979/opencrabs#86 / gist 85cfdc26), so the model sees its
                 // own past phantoms and repeats the pattern. Skip the
                 // append on phantom iterations; the eventual successful
                 // iteration (where a real tool runs after the self-heal
@@ -6461,7 +6461,7 @@ impl AgentService {
             // nudge once, then break if the model keeps re-issuing
             // near-duplicates. Every tool participates: numeric argument
             // values (read_file start_line, plan task_order, timeouts) are
-            // preserved exactly by the signature (#82), so chunked reads
+            // preserved exactly by the signature (leshchenko1979/opencrabs#82), so chunked reads
             // and checklist progression no longer collide — the exclusion
             // read_file once needed is gone, and its loops are guarded
             // again.
