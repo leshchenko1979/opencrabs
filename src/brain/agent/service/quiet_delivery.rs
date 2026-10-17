@@ -13,7 +13,7 @@
 //! Release is a per-target BATCH: when one deferred entry becomes due,
 //! every entry for the same target that is due under the same clock drains
 //! together — the first wakes the session, the rest ride the woken turn's
-//! boundaries. Route (and the fork #17/#19 channel-ownership gate)
+//! boundaries. Route (and the fork #17/leshchenko1979/opencrabs#19 channel-ownership gate)
 //! re-evaluates at fire time via `deliver_to_session`.
 
 use std::collections::HashMap;

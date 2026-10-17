@@ -180,7 +180,7 @@ async fn malformed_params_are_protocol_errors() {
 async fn archived_session_auto_routes_to_its_successor() {
     // Owner directive 2026-08-28: archived ≠ dead. An archived session
     // whose channel a successor occupies must auto-route exactly like
-    // any session_notify — the #19 redirect carries the notification to
+    // any session_notify — the leshchenko1979/opencrabs#19 redirect carries the notification to
     // the occupant with provenance framing, never a no_route refusal.
     let _guard = test_guard();
     let ctx = placeholder_service_context().await;

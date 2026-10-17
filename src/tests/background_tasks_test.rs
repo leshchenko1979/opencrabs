@@ -100,7 +100,7 @@ async fn spawn_command_enqueues_on_completion() {
 
     let mgr = Arc::new(BackgroundTaskManager::new());
     let sid = Uuid::new_v4();
-    // The manager no longer carries its own route (fork #19 — delivery goes
+    // The manager no longer carries its own route (fork leshchenko1979/opencrabs#19 — delivery goes
     // through the one gated route, which resolves the session's registered
     // route), so claim the session the way a channel would: register the
     // recording callback as its route.

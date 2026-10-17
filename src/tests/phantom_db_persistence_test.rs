@@ -1,7 +1,7 @@
 //! Regression: phantom self-heal scaffolding must never reach the user or
 //! future LLM context.
 //!
-//! Background: discussion #86 / gist 85cfdc26 showed a Telegram session
+//! Background: discussion leshchenko1979/opencrabs#86 / gist 85cfdc26 showed a Telegram session
 //! with 34 phantom entries piled into the agent's history. Each new turn
 //! reloaded the DB row, the phantom narrations re-entered LLM context as
 //! assistant history, and the model hallucinated more phantoms from its
@@ -12,7 +12,7 @@
 //! replaced that with flag-and-persist — blocked iterations land in the DB
 //! wrapped in paired `<!-- phantom_blocked=1 -->` sections, so a
 //! misclassified deliverable stays recoverable, while context rebuilds call
-//! `strip_phantom_blocked` so #86's guarantee (discarded narrations never
+//! `strip_phantom_blocked` so leshchenko1979/opencrabs#86's guarantee (discarded narrations never
 //! re-enter LLM history) still holds. This file pins that contract.
 
 use crate::brain::agent::service::AgentService;
@@ -176,7 +176,7 @@ async fn phantom_iteration_not_persisted_to_assistant_db_row() {
     // #1172: the blocked iteration IS persisted now — but wrapped in paired
     // phantom_blocked markers, so (a) a misclassified deliverable stays
     // recoverable from the DB, and (b) context rebuilds strip the whole
-    // section (strip_phantom_blocked), preserving #86's guarantee that
+    // section (strip_phantom_blocked), preserving leshchenko1979/opencrabs#86's guarantee that
     // discarded narrations never re-enter LLM history.
     assert!(
         assistant.content.contains("<!-- phantom_blocked=1 -->")

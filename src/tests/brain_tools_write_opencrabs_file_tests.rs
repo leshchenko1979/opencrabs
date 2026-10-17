@@ -128,7 +128,7 @@ fn test_valid_subdirectory_paths_accepted() {
 
 /// A leading `profiles/` segment duplicates a NAMED profile's home path, so it
 /// is refused in BOTH spellings — the plain one and the `./`-prefixed one that
-/// used to slip past the string test (issue #350).
+/// used to slip past the string test (issue leshchenko1979/opencrabs#350).
 #[test]
 fn test_profiles_prefix_duplication_rejected() {
     let dir = TempDir::new().unwrap();
@@ -157,7 +157,7 @@ fn test_profiles_prefix_duplication_rejected() {
     );
 }
 
-/// Issue #350: for the DEFAULT profile (`<base>`), `profiles/<name>/...` is a
+/// Issue leshchenko1979/opencrabs#350: for the DEFAULT profile (`<base>`), `profiles/<name>/...` is a
 /// sibling profile's real home, not a duplicated prefix — it must be accepted,
 /// in both spellings.
 #[test]
@@ -179,7 +179,7 @@ fn test_profiles_sibling_path_accepted_for_default_home() {
     );
 }
 
-/// The default home keeps every traversal refusal it had before #350.
+/// The default home keeps every traversal refusal it had before leshchenko1979/opencrabs#350.
 #[test]
 fn test_default_home_still_rejects_traversal() {
     let dir = TempDir::new().unwrap();

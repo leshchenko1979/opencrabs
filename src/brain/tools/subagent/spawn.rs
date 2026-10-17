@@ -131,7 +131,7 @@ pub(crate) fn push_result(
         Delivery::Redirected { to } => {
             // The parent was replaced on its channel while the sub-agent ran
             // (fork #17), so the result was REDIRECTED to the session that
-            // owns the channel now (fork #19) — delivered, not dropped.
+            // owns the channel now (fork leshchenko1979/opencrabs#19) — delivered, not dropped.
             tracing::info!(
                 "Sub-agent {agent_id}'s result was redirected from session \
                  {parent_session_id} to session {to}, which now owns its channel"

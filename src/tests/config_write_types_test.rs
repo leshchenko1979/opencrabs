@@ -32,7 +32,7 @@ fn config_content(home: &Path) -> String {
     std::fs::read_to_string(home.join("config.toml")).expect("config.toml readable")
 }
 
-/// The #87 incident case: `extra_paths` is an array-of-tables. The old
+/// The leshchenko1979/opencrabs#87 incident case: `extra_paths` is an array-of-tables. The old
 /// write_key dropped non-scalar array elements silently (the file ended up
 /// with `extra_paths = []`); now each object survives as an inline table and
 /// `Config::load()` sees the real path/pattern pair.
@@ -83,7 +83,7 @@ fn array_of_tables_round_trips_the_87_incident_case() {
 }
 
 /// Object-shaped input becomes a real inline table, never a string literal
-/// (the old `{...}` coerce-to-string behaviour, #87). Uses struct-known
+/// (the old `{...}` coerce-to-string behaviour, leshchenko1979/opencrabs#87). Uses struct-known
 /// fields (`url`, `model`) so the schema guard passes — `provider` is not an
 /// `EmbeddingConfig` field.
 #[test]

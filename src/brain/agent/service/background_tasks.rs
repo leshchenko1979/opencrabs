@@ -279,7 +279,7 @@ impl BackgroundTaskManager {
                 .await;
                 return;
             }
-            // Deliver through the ONE gated route (fork #19): the same
+            // Deliver through the ONE gated route (fork leshchenko1979/opencrabs#19): the same
             // `deliver_to_session` that sub-agent completions and the
             // session_notify tool use, so channel-ownership, mid-turn and
             // redirect decisions live in exactly one place instead of being

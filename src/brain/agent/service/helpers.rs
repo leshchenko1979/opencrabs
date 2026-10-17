@@ -1133,7 +1133,7 @@ impl AgentService {
                 // notification for a task started THIS turn is claude's to
                 // see natively (silent); one for an earlier turn's task is a
                 // survivor — the spawning process is gone — so it rides the
-                // ONE gated route (fork #19, interrupt=true per fork #13).
+                // ONE gated route (fork leshchenko1979/opencrabs#19, interrupt=true per fork #13).
                 // Cosmetic mirror / missing id = skip silently, never fail a
                 // turn over it.
                 StreamEvent::BackgroundTask {
@@ -2081,7 +2081,7 @@ pub fn is_pagination_key(key: &str) -> bool {
 /// counters — `task_order: 1` vs `2`, `start_line: 100` vs `150`,
 /// `timeout_secs: 30` vs `60` are genuinely different calls, and
 /// digit-stripping made the guard flag that legitimate work as a loop
-/// (#82: a plan checklist progression was nudged, then broken,
+/// (leshchenko1979/opencrabs#82: a plan checklist progression was nudged, then broken,
 /// 2026-09-02). Pagination arguments (page, cursor, offset, continuation tokens)
 /// are preserved intact (#199) so legitimate paging loops do not collapse.
 /// Parts are sorted so argument insertion order never changes the signature.

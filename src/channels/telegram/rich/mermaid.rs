@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 /// base64url-appended. NOTE: this sends the diagram text to a third party.
 const MERMAID_INK_BASE: &str = "https://mermaid.ink/img/";
 
-/// Dedicated vector endpoint for a diagram source (#189 Leg 4). Same base64url
+/// Dedicated vector endpoint for a diagram source (leshchenko1979/opencrabs#189 Leg 4). Same base64url
 /// payload as [`ink_url`], over `https://mermaid.ink/svg/` — the endpoint
 /// serves a real `image/svg+xml`. Build-only URL: the browser does the fetch,
 /// this host never touches mermaid.ink for it.
@@ -54,19 +54,19 @@ const MERMAID_INK_CLAMP_PARAMS: &str = "?type=png&width=1200";
 /// (measured live, #1238: 3200×7404 refused, 1611×3727 accepted).
 const PHOTO_MAX_TOTAL_DIMS: f32 = 9_600.0;
 
-/// Total budget for one renderer fetch — connect, headers AND body (#189).
+/// Total budget for one renderer fetch — connect, headers AND body (leshchenko1979/opencrabs#189).
 /// The body is the expensive leg: live renders measured 12 KB–140 KB
 /// (2026-09-12), so this must cover a slow stream rather than only a slow
 /// handshake. A stalled download degrades to a legible failure block.
 pub(crate) const PREVALIDATE_TIMEOUT_SECS: u64 = 30;
 
-/// Connect-phase budget, split out of the total (#189). A renderer that will
+/// Connect-phase budget, split out of the total (leshchenko1979/opencrabs#189). A renderer that will
 /// not accept a connection within this window is down, and spending the whole
 /// body budget waiting for a handshake wastes the ladder. Before the split a
 /// single 10s total let a slow body masquerade as an unreachable host.
 pub(crate) const PREVALIDATE_CONNECT_TIMEOUT_SECS: u64 = 5;
 
-/// One bounded re-fetch after a transient body failure (#189). By then the
+/// One bounded re-fetch after a transient body failure (leshchenko1979/opencrabs#189). By then the
 /// response has already passed the `2xx + image/*` check, so the render
 /// exists server-side and the retry is a cheap re-read of bytes we know are
 /// there — one network wobble should not cost the picture.
@@ -276,7 +276,7 @@ pub(crate) fn ink_url(source: &str) -> String {
     ink_url_params(source, MERMAID_INK_PARAMS)
 }
 
-/// The dedicated vector endpoint for a diagram source (#189 Leg 4).
+/// The dedicated vector endpoint for a diagram source (leshchenko1979/opencrabs#189 Leg 4).
 /// Same base64url payload as [`ink_url`], over `https://mermaid.ink/svg/` —
 /// the endpoint serves a real `image/svg+xml`. Build-only URL: the browser
 /// does the fetch, the server never touches mermaid.ink for this.
@@ -399,7 +399,7 @@ fn finish(source: &str, outcome: MermaidResult) -> MermaidResult {
     outcome
 }
 
-/// Record a render failure and return it (#189). Before this helper every
+/// Record a render failure and return it (leshchenko1979/opencrabs#189). Before this helper every
 /// non-image exit returned [`MermaidResult::Failed`] with ZERO log output, so
 /// a dropped body left no trace in the daemon log and incidents were argued
 /// from absence — the same defect class #64 fixed for non-200 responses, where
@@ -425,7 +425,7 @@ fn fail(
     MermaidResult::Failed(note)
 }
 
-/// Read a render body in full, retrying ONCE on a transient failure (#189).
+/// Read a render body in full, retrying ONCE on a transient failure (leshchenko1979/opencrabs#189).
 /// The caller only reaches this with a response that already passed the
 /// `2xx + image/*` check, so the render exists server-side: one mid-stream
 /// drop is worth exactly one cheap re-fetch before we degrade to a failure
@@ -510,7 +510,7 @@ pub(crate) fn transport_note(e: &reqwest::Error) -> &'static str {
 }
 
 /// Send the render request with ONE bounded retry (#1741). The body stage
-/// has had this since #189; the connect stage did not, so a single stalled
+/// has had this since leshchenko1979/opencrabs#189; the connect stage did not, so a single stalled
 /// handshake degraded a valid diagram to the failure block: 3 of 4 renders
 /// in one 6-minute window failed at `connect` with `timed_out=true` while a
 /// manual GET seconds later returned HTTP 200. The GET is idempotent and
@@ -784,7 +784,7 @@ pub(crate) fn replacement_for(
                 }),
             )
         }
-        // #189: a transient failure keeps the svg hatch — the render may well
+        // leshchenko1979/opencrabs#189: a transient failure keeps the svg hatch — the render may well
         // exist server-side; a deterministic parse rejection does not, because
         // the renderer produced no diagram to link to.
         MermaidResult::Failed(err) => (markdown_failure_block_with_link(err, source), None),
@@ -911,7 +911,7 @@ pub(crate) fn markdown_failure_block_transport(err: &str, source: &str) -> Strin
     )
 }
 
-/// #189: the markdown failure block plus a `[svg]` escape hatch, for a
+/// leshchenko1979/opencrabs#189: the markdown failure block plus a `[svg]` escape hatch, for a
 /// TRANSIENT failure ([`MermaidResult::Failed`]) only. In that case the
 /// response had already passed the `2xx + image/*` check before the body was
 /// lost, so the render very likely exists server-side and the link is worth

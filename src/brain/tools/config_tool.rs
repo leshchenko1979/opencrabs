@@ -152,7 +152,7 @@ impl ConfigTool {
             Some("provider_registry") => format_toml(&config.provider_registry),
             Some("database") => format_toml(&config.database),
             Some("providers") => format_toml(&config.providers),
-            // Remaining struct sections (#86): the resolver resolves them fine,
+            // Remaining struct sections (leshchenko1979/opencrabs#86): the resolver resolves them fine,
             // but the render match only carried the first eight arms, so every
             // other known section fell into the catch-all error arm — the
             // error named the section unknown while listing it as valid.

@@ -61,9 +61,9 @@ pub fn register_session_route(session_id: Uuid, enqueue: MessageEnqueueCallback)
 /// session, falling back to `executing` when nothing did.
 ///
 /// The whole fix in one line — pick by session, never by who ran the command —
-/// so it is a pure function and directly testable. Test-only since fork #19:
+/// so it is a pure function and directly testable. Test-only since fork leshchenko1979/opencrabs#19:
 /// production delivery now flows through [`deliver_to_session`], but the
-/// pre-#19 routing suites still exercise these semantics directly (#22).
+/// pre-leshchenko1979/opencrabs#19 routing suites still exercise these semantics directly (#22).
 #[cfg(test)]
 pub fn resolve_route(
     session_id: Uuid,
@@ -237,7 +237,7 @@ pub enum Delivery {
     /// The target is mid-turn and the caller did not ask to interrupt
     /// (fork #13). Nothing was delivered; the sender retries when the
     /// target goes idle, or resends with `interrupt` set. When the
-    /// refusal follows a redirect (fork #19), `redirected_to` names the
+    /// refusal follows a redirect (fork leshchenko1979/opencrabs#19), `redirected_to` names the
     /// occupant that is mid-turn — the message WOULD have gone there, and
     /// will once it goes idle or `interrupt` is set.
     RefusedInFlight { redirected_to: Option<Uuid> },
@@ -245,7 +245,7 @@ pub enum Delivery {
     /// occupies the chat/topic it was bound to (fork #17). Instead of
     /// refusing, the message was REDIRECTED to the occupant `to`, with a
     /// provenance frame so the successor does not adopt a dead session's
-    /// task as its own (fork #19).
+    /// task as its own (fork leshchenko1979/opencrabs#19).
     Redirected { to: Uuid },
 }
 
@@ -264,7 +264,7 @@ pub enum Delivery {
 /// override it. Unknown ownership (no probe, or no binding recorded) fails
 /// open, same posture as the turn gate.
 ///
-/// Occupied no longer REFUSES (fork #19): the replaced session's message is
+/// Occupied no longer REFUSES (fork leshchenko1979/opencrabs#19): the replaced session's message is
 /// nobody's fault, and retrying a session that no longer owns its channel
 /// never fixes it. Instead the message is REDIRECTED to the occupant — the
 /// session that owns the channel now — with a provenance frame prefixed to
@@ -276,7 +276,7 @@ pub enum Delivery {
 /// still gated by the sender's original intent.
 pub fn deliver_to_session(session_id: Uuid, msg: QueuedUserMessage, interrupt: bool) -> Delivery {
     // Channel-ownership gate, outermost (fork #17). Occupied → redirect to
-    // the occupant (fork #19), with provenance framing once per chain and a
+    // the occupant (fork leshchenko1979/opencrabs#19), with provenance framing once per chain and a
     // hop cap so a replacing chain (A replaced B replaced C…) cannot loop.
     const REDIRECT_HOP_CAP: usize = 3;
     let mut target = session_id;
@@ -305,7 +305,7 @@ pub fn deliver_to_session(session_id: Uuid, msg: QueuedUserMessage, interrupt: b
                  session {occupant} (hop {hops}); delivering to the new owner"
             );
             if hops == 1 {
-                // Provenance framing (#19): the successor must know this
+                // Provenance framing (leshchenko1979/opencrabs#19): the successor must know this
                 // message was written for the session that lost the
                 // channel, not for itself. Framed once, against the ORIGINAL
                 // target, so a multi-hop chain does not stack frames.

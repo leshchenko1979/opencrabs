@@ -1,4 +1,4 @@
-//! Crash-signal record formatting (#352).
+//! Crash-signal record formatting (leshchenko1979/opencrabs#352).
 //!
 //! `opencrabs-ops` was killed by SIGBUS and logged nothing, because the daemon
 //! installs no signal handler: a fatal fault signal goes to the kernel's
@@ -16,7 +16,7 @@ use crate::logging::crash::{
     si_code_name, signal_name,
 };
 
-/// A truncated-mmap SIGBUS — the memory-pressure shape from #352.
+/// A truncated-mmap SIGBUS — the memory-pressure shape from leshchenko1979/opencrabs#352.
 fn bus_objerr() -> CrashFacts {
     CrashFacts {
         signo: 7,
@@ -77,7 +77,7 @@ fn si_code_decoding_is_signal_specific() {
     assert_eq!(si_code_name(8, 1), "FPE_INTDIV");
 }
 
-/// The decisive discrimination for #352: `BUS_OBJERR`/`BUS_ADRERR` are the
+/// The decisive discrimination for leshchenko1979/opencrabs#352: `BUS_OBJERR`/`BUS_ADRERR` are the
 /// truncated-mmap shapes, `BUS_MCEERR_*` is a hardware machine check, and
 /// `BUS_ADRALN` is a misaligned access. They must never collapse into one name.
 #[test]
@@ -221,7 +221,7 @@ const PROBE_TEST: &str = "crash_probe_child";
 
 /// Touch a page of a mapping whose backing file has been truncated to zero.
 ///
-/// This is the #352 shape: `SIGBUS`/`BUS_ADRERR` carrying a real `si_addr`,
+/// This is the leshchenko1979/opencrabs#352 shape: `SIGBUS`/`BUS_ADRERR` carrying a real `si_addr`,
 /// rather than a raised signal that leaves sender credentials in the union.
 /// Returns `false` when the mapping cannot be set up, so the caller can fall
 /// back to a raised `SIGBUS` instead of passing silently.

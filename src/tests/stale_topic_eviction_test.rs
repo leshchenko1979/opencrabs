@@ -1,4 +1,4 @@
-//! Stale-topic auto-route eviction (#116).
+//! Stale-topic auto-route eviction (leshchenko1979/opencrabs#116).
 //!
 //! A remembered forum topic can be deleted on Telegram's side while we hold
 //! its address in `channel_messages` / the session-topic map. Every send

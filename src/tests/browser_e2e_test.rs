@@ -122,7 +122,7 @@ async fn concurrent_screenshots_do_not_deadlock() {
     let _ = close.execute(serde_json::json!({}), &ctx).await;
 }
 
-/// Pins the bug-#4 fix (this commit): browser_close on an open
+/// Pins the bug-leshchenko1979/opencrabs#4 fix (this commit): browser_close on an open
 /// session removes the page so a subsequent action gets a fresh
 /// page rather than reusing the stale one. We can't directly
 /// observe "fresh vs stale" without invoking another navigate, but
@@ -165,7 +165,7 @@ async fn close_actually_removes_session_page() {
 
 /// Tests that when `cdp_endpoint` is configured, the browser manager
 /// connects to an existing Chromium instance instead of launching a new one.
-/// This is the fix for issue #189 — multiple profiles sharing a single
+/// This is the fix for issue leshchenko1979/opencrabs#189 — multiple profiles sharing a single
 /// browser to save memory.
 ///
 /// To run this test manually:

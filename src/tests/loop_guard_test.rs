@@ -115,7 +115,7 @@ fn signature_is_namespaced_by_tool_name() {
 
 #[test]
 fn read_file_chunk_offsets_stay_apart() {
-    // #82: numeric argument values are preserved exactly, so chunked reads
+    // leshchenko1979/opencrabs#82: numeric argument values are preserved exactly, so chunked reads
     // differing only in start_line no longer collapse — the tool loop no
     // longer needs its read_file exclusion, and genuine read loops (same
     // path, same range) still collide.
@@ -139,7 +139,7 @@ fn read_file_chunk_offsets_stay_apart() {
 
 #[test]
 fn plan_checklist_progression_stays_apart() {
-    // #82 real-world false positive (2026-09-02): completing plan checklist
+    // leshchenko1979/opencrabs#82 real-world false positive (2026-09-02): completing plan checklist
     // tasks differs ONLY in task_order — digit-stripping collapsed the
     // progression into one signature, nudging and then breaking a session
     // mid-checklist. Numeric fields must keep the calls distinct, while a
@@ -251,7 +251,7 @@ fn identifiers_in_non_bash_string_args_stay_apart_too() {
 #[test]
 fn numeric_and_bool_fields_are_order_independent_and_exact() {
     // Numeric/bool params are kept exactly and sorted by key, so argument
-    // insertion order never changes the signature (#82).
+    // insertion order never changes the signature (leshchenko1979/opencrabs#82).
     let a = normalized_call_signature("bash", &json!({"command": "sleep 5", "timeout_secs": 120}));
     let b = normalized_call_signature("bash", &json!({"timeout_secs": 120, "command": "sleep 5"}));
     assert_eq!(a, b);

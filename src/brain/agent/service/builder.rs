@@ -959,7 +959,7 @@ impl AgentService {
         mut self,
         callback: Option<super::types::MessageEnqueueCallback>,
     ) -> Self {
-        // Spin up the background-task manager (fork #19: it no longer carries
+        // Spin up the background-task manager (fork leshchenko1979/opencrabs#19: it no longer carries
         // its own enqueue route — delivery goes through the one gated route,
         // `deliver_to_session`, which resolves the session's registered route;
         // this callback is still kept on self for #940 claiming).

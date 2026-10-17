@@ -6,7 +6,7 @@
 //! secrets, no message content, nothing leaves the machine. This is the
 //! native, real-time home for the analytics that the external
 //! `opencrabs-analytics` tool produced as a static HTML upload (discussion
-//! #178), same numbers, no public paste, no CDN.
+//! leshchenko1979/opencrabs#178), same numbers, no public paste, no CDN.
 //!
 //! `summary` is async because the stats live in SQLite; the renderer
 //! pre-fetches once (like the other panels) rather than per `draw`.

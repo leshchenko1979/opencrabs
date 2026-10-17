@@ -28,7 +28,7 @@ use crate::db::models::Message as DbMessage;
 pub(crate) fn clean_rows_for_llm(rows: &mut [DbMessage], preserve_thinking: bool) {
     for msg in rows.iter_mut() {
         // #1172: phantom-blocked sections must never re-enter LLM context
-        // (#86). Strip them before the generic artifact sweep, which would
+        // (leshchenko1979/opencrabs#86). Strip them before the generic artifact sweep, which would
         // only remove their markers and leave the narration standing.
         if msg.content.contains("<!-- phantom_blocked=1 -->") {
             msg.content = crate::utils::sanitize::strip_phantom_blocked(&msg.content);

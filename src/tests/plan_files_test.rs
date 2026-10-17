@@ -323,7 +323,7 @@ async fn sync_refuses_malformed_body_and_restores_previous_mirror() {
         assert_eq!(std::fs::read_to_string(&md_path).unwrap(), valid);
         assert_eq!(load_plan(sid).await.unwrap().description, valid);
 
-        // #172: Broken mermaid diagram syntax is refused and restores previous mirror.
+        // leshchenko1979/opencrabs#172: Broken mermaid diagram syntax is refused and restores previous mirror.
         let broken_mermaid = "# Guarded design\n\n## Context\n- **Problem:** old\n- **Target state:** fixed\n- **Intent:** test\n\n## Implementation steps\n1. Keep old\n\n```mermaid\nsequenceDiagram\nNote over A,B,C: Broken\n```\n";
         crate::channels::telegram::rich::mermaid::cache_put(
             "sequenceDiagram\nNote over A,B,C: Broken",

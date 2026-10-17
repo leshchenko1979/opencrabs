@@ -125,7 +125,7 @@ pub(crate) async fn resolve_input_file(
 ///      resolved target chat IS the session-origin chat (#127). The forum
 ///      topic this interaction started in; makes replies land back in the
 ///      originating topic with no explicit routing, without leaking the
-///      topic into other chats (the #116 poisoning chain). A session bound
+///      topic into other chats (the leshchenko1979/opencrabs#116 poisoning chain). A session bound
 ///      to General resolves to no thread and STOPS here (#478) — it must not
 ///      reach step 3, which would post into whichever topic spoke last.
 ///   3. Auto-lookup via `latest_thread_id_for_chat(chat_id)` — the
@@ -161,7 +161,7 @@ pub(crate) async fn resolve_thread_id(
     // Session origin topic — the forum topic this interaction started in.
     // SAME-ORIGIN ONLY (#127): the origin topic is applied ONLY when the
     // resolved target chat IS the session-origin chat. Inheriting a topic
-    // across chats is what poisoned cross-chat sends (#116): a session
+    // across chats is what poisoned cross-chat sends (leshchenko1979/opencrabs#116): a session
     // living in group topic 7198, sending to the owner DM with thread_id
     // omitted, had topic 7198 — which does not exist in the DM — put on the
     // wire.
@@ -178,7 +178,7 @@ pub(crate) async fn resolve_thread_id(
     //
     // A remembered topic can outlive its existence on Telegram's side
     // (deleted while we were away). Its first hard evidence is the send
-    // itself failing with `message thread not found` (#116) — handled at
+    // itself failing with `message thread not found` (leshchenko1979/opencrabs#116) — handled at
     // the send seams (rich + HTML ladder), which evict chat-scoped and
     // retry unthreaded. Here we just resolve the address; the map
     // re-registers on the chat's next inbound topic message.
