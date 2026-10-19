@@ -41,6 +41,14 @@ struct ToolOutcome {
     /// the same verdict for every case it covered (an `Err` carries no code,
     /// so it still reads `error`).
     exit_code: Option<i32>,
+    /// The id this call's `tool_executions` row is keyed by (#787).
+    ///
+    /// The parallel recorder is a SECOND write site beside the sequential one
+    /// in `tool_loop`, and it minted its own uuid — so a detached run whose
+    /// call was batched with another had no row for its outcome to land on.
+    /// Carried here for the same reason as `exit_code`: it must be read off
+    /// `result` before `images` moves a field out.
+    exec_row_id: String,
 }
 
 /// What the batch produced, in original order.
@@ -177,6 +185,7 @@ impl super::AgentService {
                             // out of `result` — a &self call needs the whole
                             // struct intact.
                             exit_code: result.exit_code(),
+                            exec_row_id: result.exec_row_id(),
                             content: build_tool_result_content(
                                 result.success,
                                 result.error,
@@ -195,6 +204,9 @@ impl super::AgentService {
                             pre_execution_miss: e.is_pre_execution_miss(),
                             // #763: no process ran, so there is no code.
                             exit_code: None,
+                            // No result to read a run id off: this call never
+                            // reached a tool, so it keys its own row.
+                            exec_row_id: Uuid::new_v4().to_string(),
                         },
                     };
                     // Completion event fires as each tool finishes (real-time
@@ -305,7 +317,10 @@ impl super::AgentService {
                 && let Some(pool) = crate::db::global_pool()
             {
                 let tool_repo = crate::db::repository::ToolExecutionRepository::new(pool.clone());
-                let exec_id = Uuid::new_v4().to_string();
+                // #787: the row takes the run id when the tool handed its work
+                // to the background manager, so the completion can write the
+                // run's real outcome back onto it.
+                let exec_id = o.exec_row_id.clone();
                 let mid = assistant_msg_id.to_string();
                 let sid = session_id.to_string();
                 let tname = o.tool_name.clone();
