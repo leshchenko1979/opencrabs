@@ -21,6 +21,9 @@
 //! (d) #617 composition — a media bubble carries `ids: vec![]` and can never be
 //!     selected, so the media guard stays load-bearing.
 //! (e) negative control — no bubble matches, so nothing is deleted.
+//! (f) #788 — the seam the arm actually got wrong: the STORED body carries a
+//!     `📎 label` marker, the WIRE body carries `[📎 label](url)`. The two are
+//!     not interchangeable, and passing the wire form deleted nothing.
 
 use crate::channels::telegram::flow::SentBubble;
 use crate::channels::telegram::intermediates::{
@@ -218,4 +221,57 @@ fn the_fallback_recovers_the_intermediates_delivered_files() {
     // marker stays plain rather than pointing at the wrong document.
     assert!(intermediate_file_links(&[], body).is_empty());
     assert!(intermediate_file_links(&[bubble("Something else.", &[6])], body).is_empty());
+}
+
+/// #788 — the burial arm compared the REWRITTEN body against the STORED one.
+///
+/// A bubble's `text` is the body as it stood when the bubble was sent, and for
+/// a marker-bearing answer that body still carries the plain `📎 label` form.
+/// The rich plane, by contrast, sends `link_file_markers(&body, …)`, which
+/// expands every marker into `[📎 label](url)` so the reference becomes a
+/// tappable link to the document bubble. The two strings differ by the link
+/// targets, and `normalize_for_dedup` only collapses whitespace, so handing the
+/// wire form to `superseded_ids` could never match a bubble: the delete set
+/// came back empty, the intermediate survived, and the reader got the answer
+/// twice while the log said `deleted 0 superseded HTML intermediates`.
+///
+/// The case the rest of this file never exercised: every other test passes the
+/// SAME text form on both sides, which is exactly why the defect shipped.
+#[test]
+fn the_burial_compares_the_stored_marker_form_not_the_rewritten_wire_form() {
+    // The body as the bubble recorded it: marker form, no link target.
+    let stored = "Report ready.\n\n📎 q3-report.md";
+    // The body as the rich plane put it on the wire: the marker expanded into a
+    // link pointing at the detached document bubble.
+    let wire = "Report ready.\n\n[📎 q3-report.md](https://t.me/c/3936827469/31847/93956)";
+    let b = bubble(stored, &[93_956]);
+
+    // The premise of the defect: the rewrite GROWS the buffer, so the two forms
+    // cannot normalize to the same string.
+    assert!(
+        wire.len() > stored.len(),
+        "the marker rewrite adds the link target, so the wire body is longer"
+    );
+    assert_ne!(normalize_for_dedup(stored), normalize_for_dedup(wire));
+
+    // The fix: the arm passes the stored form, and the bubble is superseded.
+    assert_eq!(
+        superseded_ids(std::slice::from_ref(&b), stored),
+        ids_of(&[93_956]),
+        "the body the bubbles stored is what the burial must compare against"
+    );
+
+    // The #788 signature, pinned as a negative control: the wire form finds
+    // nothing. If this ever starts matching, the two forms have collapsed and
+    // the fix's premise needs re-reading — but while they differ, passing the
+    // wire form is the duplicate send.
+    assert!(
+        superseded_ids(std::slice::from_ref(&b), wire).is_empty(),
+        "the rewritten body must never select a bubble that stored the marker form"
+    );
+
+    // And the bubble is deletable, so the duplicate guard does NOT suppress the
+    // send: the burial is the only thing standing between the reader and a
+    // second copy of the answer.
+    assert!(!fallback_would_duplicate(std::slice::from_ref(&b), stored));
 }

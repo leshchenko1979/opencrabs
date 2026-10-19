@@ -1004,10 +1004,46 @@ pub(crate) async fn deliver_final_response(
                         // the bubbles whose TEXT it actually repeats. A
                         // narration bubble it does not repeat is the only copy
                         // of that prose.
-                        let superseded = {
+                        // #788: compare against the body the bubbles actually
+                        // STORED, not the rewritten one sent above. `rich_md`
+                        // is `pre_dedup_text` after `link_file_markers` turned
+                        // every `📎 label` marker into `[📎 label](url)` — the
+                        // same prose with the link targets added, so the
+                        // buffer is longer than the one recorded on the
+                        // bubble. `normalize_for_dedup` only collapses
+                        // whitespace and cannot bridge that gap: a
+                        // marker-bearing answer never matched its own bubble,
+                        // the delete set came back empty, the intermediate
+                        // survived, and the reader got the answer twice while
+                        // the log reported `deleted 0 superseded HTML
+                        // intermediates`. The comparison is text-to-text on
+                        // the stored form; the rewrite exists only for the
+                        // wire.
+                        let (superseded, undeletable_match) = {
                             let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
-                            super::intermediates::superseded_ids(&s.sent_bubbles, &rich_md)
+                            (
+                                super::intermediates::superseded_ids(
+                                    &s.sent_bubbles,
+                                    &pre_dedup_text,
+                                ),
+                                // #617's class: a bubble that carried media
+                                // records EMPTY ids, so `superseded_ids` can
+                                // never select it. `fallback_would_duplicate`
+                                // above is supposed to have skipped this send
+                                // entirely when such a bubble already held the
+                                // body; this is the runtime tripwire for the
+                                // day those two predicates stop agreeing.
+                                super::intermediates::fallback_would_duplicate(
+                                    &s.sent_bubbles,
+                                    &pre_dedup_text,
+                                ),
+                            )
                         };
+                        if undeletable_match {
+                            tracing::warn!(
+                                "Telegram: rich fallback sent a body an undelatable intermediate already carried (#788) — the duplicate-send guard missed it"
+                            );
+                        }
                         for mid in &superseded {
                             best_effort_delete(bot, chat_id, *mid, "intermediate cleanup").await;
                         }
