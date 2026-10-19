@@ -858,6 +858,9 @@ pub fn migrate_legacy_dir(legacy: &Path) -> usize {
                     output_bytes: None,
                     error: None,
                     output_full: None,
+                    // A legacy record predates #786 and never recorded why the
+                    // run ended. `None` is "unknown", never "ordinary".
+                    cause: None,
                 };
                 finish.error = old.error.clone();
                 finish
