@@ -304,11 +304,17 @@ fn report(
     let state_word = status
         .map(|s| format!("{:?}", s.state).to_lowercase())
         .unwrap_or_else(|| "unknown".to_string());
-    let code = status
-        .and_then(|s| s.finish.as_ref())
+    let finish = status.and_then(|s| s.finish.as_ref());
+    let code = finish
         .and_then(|f| f.code)
         .map(|c| c.to_string())
         .unwrap_or_else(|| "none recorded".to_string());
+    // WHY it ended (#786) — `137` is a ceiling kill, an OOM kill and a literal
+    // `exit 137` alike, so the code alone never answered this.
+    let cause = finish
+        .and_then(|f| f.cause)
+        .map(|c| c.describe(finish.and_then(|f| f.code).unwrap_or(-1)))
+        .unwrap_or_else(|| "not recorded".to_string());
 
     let mut out = match &outcome {
         Matched(lines) => format!(
@@ -318,7 +324,8 @@ fn report(
             shown = lines.len().min(SHOW_MATCHES)
         ),
         Finished => format!(
-            "FINISHED run {run_id} ({}) — state {state_word}, recorded exit code {code}.\n",
+            "FINISHED run {run_id} ({}) — state {state_word}, recorded exit code {code}, \
+             end {cause}.\n",
             paths.label
         ),
         TimedOut => format!(

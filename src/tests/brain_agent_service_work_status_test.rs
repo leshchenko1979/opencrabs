@@ -156,6 +156,7 @@ fn command_finish_success_stamps_exit_info() {
             code: 0,
             elapsed_secs: 99.5,
             output_bytes: 2048,
+            cause: RunCause::Ordinary,
         },
     )
     .unwrap();
@@ -183,6 +184,7 @@ fn command_finish_failure_reads_failed() {
             code: 101,
             elapsed_secs: 3.0,
             output_bytes: 12,
+            cause: RunCause::Ordinary,
         },
     )
     .unwrap();
@@ -207,6 +209,7 @@ fn command_finish_without_spawn_write_falls_back_to_fresh_record() {
             code: 0,
             elapsed_secs: 0.1,
             output_bytes: 0,
+            cause: RunCause::Ordinary,
         },
     )
     .unwrap();

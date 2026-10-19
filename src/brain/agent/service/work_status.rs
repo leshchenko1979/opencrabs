@@ -243,6 +243,57 @@ pub struct ProgressSnapshot {
     pub updated_at: Option<String>,
 }
 
+/// Why a detached command ended (#786).
+///
+/// An exit code alone cannot answer this. `137` is what a SIGKILL encodes, and
+/// three materially different events produce it: the operator's lifetime
+/// ceiling killed the run, the kernel OOM-killed it, or the command ran
+/// `exit 137` itself. Before this the harness destroyed the discriminator at
+/// the source — `background_tasks::exit_code` read
+/// `status.signal()` and folded it into `128 + signal`, discarding the signal.
+///
+/// `Ordinary` is the `Default` so a status file written before this change
+/// reads back exactly as it renders today: no migration is owed, and an old
+/// record is never silently re-described as a kill.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunCause {
+    /// The process exited on its own, with or without success.
+    #[default]
+    Ordinary,
+    /// A signal ended it. `code` is the shell encoding (`128 + signal`).
+    Signalled {
+        /// The signal number, kept rather than folded into the exit code.
+        signal: i32,
+    },
+    /// The operator's `agent.run_max_lifetime_secs` ceiling SIGKILLed the group.
+    ///
+    /// This is the only ending the HARNESS caused, so it is the one a caller
+    /// most needs named: the run did not fail, it was stopped.
+    Ceiling {
+        /// The ceiling that was exceeded, in seconds.
+        limit_secs: u64,
+    },
+    /// The child was never awaited, so nothing ran and no code is the command's.
+    NotAwaited,
+}
+
+impl RunCause {
+    /// The one-line rendering both readers emit.
+    ///
+    /// `code` is passed rather than stored because `Ordinary` is the only arm
+    /// that needs it, and a second copy of the code inside this enum could
+    /// disagree with the recorded one.
+    pub fn describe(&self, code: i32) -> String {
+        match self {
+            Self::Ordinary => format!("exit {code}"),
+            Self::Signalled { signal } => format!("signal {signal} (killed)"),
+            Self::Ceiling { limit_secs } => format!("ceiling {limit_secs}s"),
+            Self::NotAwaited => "not awaited (nothing ran)".to_string(),
+        }
+    }
+}
+
 /// Terminal outcome of one unit of detached work.
 ///
 /// Commands fill the exit side (`success`/`code`/`elapsed_secs`/
@@ -257,6 +308,10 @@ pub struct WorkFinish {
     pub success: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<i32>,
+    /// Why the run ended (#786). Absent in records written before the field
+    /// existed, and absent for agents — both read as [`RunCause::Ordinary`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<RunCause>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_secs: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -278,6 +333,10 @@ pub struct WorkFinish {
 pub struct CommandExit {
     pub success: bool,
     pub code: i32,
+    /// Why the run ended (#786). Stamped by the arm that knows, never inferred
+    /// from `code` at read time — `137` alone cannot tell a ceiling kill from
+    /// an OOM kill from a command that exited `137`.
+    pub cause: RunCause,
     pub elapsed_secs: f32,
     pub output_bytes: usize,
 }
@@ -316,6 +375,7 @@ fn finish_now() -> WorkFinish {
         completed_at: now_rfc3339(),
         success: None,
         code: None,
+        cause: None,
         elapsed_secs: None,
         output_bytes: None,
         error: None,
@@ -471,6 +531,10 @@ impl WorkStatus {
         let mut finish = finish_now();
         finish.success = Some(exit.success);
         finish.code = Some(exit.code);
+        // Stamped from the caller that KNEW, never re-derived from `code`:
+        // `137` is produced by a ceiling kill, an OOM kill and a literal
+        // `exit 137` alike (#786).
+        finish.cause = Some(exit.cause);
         finish.elapsed_secs = Some(exit.elapsed_secs);
         finish.output_bytes = Some(exit.output_bytes);
         status.finish = Some(finish);
@@ -974,4 +1038,95 @@ fn file_stale(path: &Path, cutoff: &SystemTime) -> bool {
 
 fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+#[cfg(test)]
+mod run_cause_tests {
+    use super::*;
+
+    /// #786 — the whole point of the field: three endings that ALL record `137`
+    /// must render as three different strings.
+    ///
+    /// Before this, a caller reading `task_output` saw `exit code: 137` for a
+    /// run the harness killed at the operator's ceiling, a run the kernel
+    /// OOM-killed, and a command that simply ran `exit 137`. The ceiling case is
+    /// the one that matters most: the run did not fail, it was STOPPED, and the
+    /// fix is a longer ceiling rather than a code change.
+    #[test]
+    fn ceiling_oom_and_literal_137_are_three_distinct_renderings() {
+        let ceiling = RunCause::Ceiling { limit_secs: 3600 }.describe(137);
+        let oom = RunCause::Signalled { signal: 9 }.describe(137);
+        let literal = RunCause::Ordinary.describe(137);
+
+        assert_eq!(ceiling, "ceiling 3600s");
+        assert_eq!(oom, "signal 9 (killed)");
+        assert_eq!(literal, "exit 137");
+
+        // The assertion that would have caught the original defect.
+        assert_ne!(
+            ceiling, literal,
+            "a ceiling kill must not render like a command that exited 137"
+        );
+        assert_ne!(ceiling, oom, "a ceiling kill is not an OOM kill");
+        assert_ne!(oom, literal, "a signal is not an ordinary exit");
+    }
+
+    /// `Ordinary` needs the code, and only `Ordinary` does — so the code is
+    /// passed at render time rather than duplicated inside the enum, where it
+    /// could disagree with the recorded one.
+    #[test]
+    fn only_ordinary_renders_the_code() {
+        assert_eq!(RunCause::Ordinary.describe(0), "exit 0");
+        assert_eq!(RunCause::Ordinary.describe(7), "exit 7");
+        // A non-zero code must not leak into the other arms' text.
+        for cause in [
+            RunCause::Signalled { signal: 15 },
+            RunCause::Ceiling { limit_secs: 60 },
+            RunCause::NotAwaited,
+        ] {
+            let rendered = cause.describe(143);
+            assert!(
+                !rendered.contains("143"),
+                "{cause:?} must describe its own cause, not echo the code: {rendered}"
+            );
+        }
+    }
+
+    /// A status file written BEFORE #786 carries no `cause`. It must read back
+    /// as `Ordinary` — i.e. render exactly as it does today — rather than fail
+    /// to parse or be silently re-described as a kill.
+    #[test]
+    fn a_pre_change_record_reads_as_ordinary() {
+        let legacy = r#"{
+            "completed_at": "2026-10-01T00:00:00Z",
+            "success": false,
+            "code": 137
+        }"#;
+        let finish: WorkFinish = serde_json::from_str(legacy).expect("legacy record must parse");
+        assert_eq!(
+            finish.cause, None,
+            "an absent cause stays absent — it is not invented"
+        );
+        assert_eq!(
+            finish.cause.unwrap_or_default(),
+            RunCause::Ordinary,
+            "an old record renders as it did before the field existed"
+        );
+    }
+
+    /// The enum round-trips through the status file, so a reader on a later
+    /// binary sees the cause the finishing binary stamped.
+    #[test]
+    fn every_cause_round_trips_through_serde() {
+        for cause in [
+            RunCause::Ordinary,
+            RunCause::Signalled { signal: 9 },
+            RunCause::Ceiling { limit_secs: 3600 },
+            RunCause::NotAwaited,
+        ] {
+            let json = serde_json::to_string(&cause).expect("serialize");
+            let back: RunCause = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, cause, "round-trip lost the cause: {json}");
+        }
+    }
 }
