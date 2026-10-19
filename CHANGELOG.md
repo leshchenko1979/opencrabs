@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 🐛 Fixes
+
+- `859731882` **tools**: one stream vocabulary across both detached-run readers (#785)
+- `46e52136a` **task**: record WHY a detached run ended, not just its exit code (#786)
+- `0a5f2867d` **db**: write a detached run's real outcome back onto its `tool_executions` row (#787)
+
 ## [0.5.4] - 2026-09-26
 
 104 commits since v0.5.3, 7 contributors. 225 files changed, +18,619 / -1,429 lines.
