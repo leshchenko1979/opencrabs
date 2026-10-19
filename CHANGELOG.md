@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `859731882` **tools**: one stream vocabulary across both detached-run readers (#785)
 - `46e52136a` **task**: record WHY a detached run ended, not just its exit code (#786)
-- `0a5f2867d` **db**: write a detached run's real outcome back onto its `tool_executions` row (#787)
+- `793dc2a44` **db**: write a detached run's real outcome back onto its `tool_executions` row (#787)
+- `96d737be0` **db**: key a batched detached run's row by its run id too (#787)
 
 ## [0.5.4] - 2026-09-26
 
