@@ -217,8 +217,9 @@ impl Tool for TaskOutputTool {
                 },
                 "stream": {
                     "type": "string",
-                    "enum": ["stdout", "stderr", "both"],
-                    "description": "Which capture to read. Default: both."
+                    "enum": ["both", "stdout", "stderr"],
+                    "description": "Which capture to read. Default: both. \
+                                    The short aliases 'out' and 'err' are also accepted."
                 },
                 "tail_bytes": {
                     "type": "integer",
@@ -490,5 +491,29 @@ mod tests {
         // An unknown value must be refused, not silently treated as "both": a
         // caller asking for a stream that does not exist should be told.
         assert!(Stream::parse(Some("stdin")).is_none());
+    }
+
+    /// T5 — both reader tools declare ONE vocabulary.
+    ///
+    /// The schema is the only thing an agent reads before choosing a value, so
+    /// two spellings for one concept means the caller must remember which tool
+    /// it is addressing. `task_output` used to declare `["stdout","stderr",
+    /// "both"]` while `task_wait` declared `["both","out","err"]`. The short
+    /// aliases stay ACCEPTED — this is a declaration change, not a behaviour
+    /// change, and no caller breaks.
+    #[test]
+    fn the_declared_stream_vocabulary_is_unified() {
+        let schema = TaskOutputTool.input_schema();
+        assert_eq!(
+            schema["properties"]["stream"]["enum"],
+            serde_json::json!(["both", "stdout", "stderr"]),
+            "task_output must declare the shared vocabulary"
+        );
+        for alias in ["both", "stdout", "stderr", "out", "err"] {
+            assert!(
+                Stream::parse(Some(alias)).is_some(),
+                "alias {alias:?} must still parse"
+            );
+        }
     }
 }

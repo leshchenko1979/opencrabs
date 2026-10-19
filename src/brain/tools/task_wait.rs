@@ -114,8 +114,8 @@ impl Tool for TaskWaitTool {
                 },
                 "stream": {
                     "type": "string",
-                    "enum": ["both", "out", "err"],
-                    "description": "Which capture to match against. Default 'both' (stdout then stderr, the historical merged shape)."
+                    "enum": ["both", "stdout", "stderr"],
+                    "description": "Which capture to match against. Default 'both' (stdout then stderr, the historical merged shape). The short aliases 'out' and 'err' are also accepted."
                 },
                 "timeout_secs": {
                     "type": "number",
@@ -387,4 +387,38 @@ fn resolve(context: &ToolExecutionContext, run_id: &str) -> Option<RunPaths> {
         err: status.output_err.filter(|p| !p.is_empty()).map(PathBuf::from),
         label: status.label,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T5 — both reader tools declare ONE vocabulary.
+    ///
+    /// `task_wait` used to declare `["both","out","err"]` while `task_output`
+    /// declared `["stdout","stderr","both"]`: one concept, two spellings, and
+    /// the schema is the only thing an agent reads before choosing a value. The
+    /// short aliases stay ACCEPTED — declaration change, not behaviour change.
+    #[test]
+    fn the_declared_stream_vocabulary_is_unified() {
+        let schema = TaskWaitTool::new().input_schema();
+        assert_eq!(
+            schema["properties"]["stream"]["enum"],
+            serde_json::json!(["both", "stdout", "stderr"]),
+            "task_wait must declare the shared vocabulary"
+        );
+        for alias in ["both", "stdout", "stderr", "out", "err"] {
+            assert!(Stream::accepts(alias), "alias {alias:?} must still parse");
+        }
+        assert!(!Stream::accepts("stdin"), "an unknown stream is still refused");
+    }
+
+    #[test]
+    fn aliases_map_onto_the_same_stream_as_their_long_form() {
+        // `assert!` rather than `assert_eq!`: `Stream` carries no Debug derive,
+        // and adding one to a two-value internal enum buys nothing here.
+        assert!(Stream::parse(Some("out")) == Stream::parse(Some("stdout")));
+        assert!(Stream::parse(Some("err")) == Stream::parse(Some("stderr")));
+        assert!(Stream::parse(None) == Stream::Both);
+    }
 }
