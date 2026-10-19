@@ -30,6 +30,9 @@ const MIRROR_ID_PREFIX: &str = "mirror:";
 pub struct CmdResult {
     pub success: bool,
     pub code: i32,
+    /// Why the run ended (#786). Carried rather than re-derived at render time:
+    /// a ceiling kill, an OOM kill and a literal `exit 137` all record `137`.
+    pub cause: RunCause,
     pub output: String,
 }
 
@@ -212,7 +215,7 @@ pub struct BackgroundTaskManager {
     runs: Mutex<HashMap<String, RunHandle>>,
 }
 
-use super::work_status::{CommandExit, CommandPaths, WorkStatus};
+use super::work_status::{CommandExit, CommandPaths, RunCause, WorkStatus};
 
 impl BackgroundTaskManager {
     pub fn new() -> Self {
@@ -1200,9 +1203,17 @@ fn tail_chars(s: &str, n: usize) -> String {
 /// undone; a consumer wanting the historical merged shape concatenates at read
 /// time, which is what this does.
 fn cmd_result_from(output: &std::process::Output) -> CmdResult {
+    // A process that exited on its own is `Ordinary` even when it failed: the
+    // command's own code IS the cause. Only a signal is a different event, and
+    // it is the one `exit_code` used to discard.
+    let cause = match exit_signal(&output.status) {
+        Some(signal) => RunCause::Signalled { signal },
+        None => RunCause::Ordinary,
+    };
     CmdResult {
         success: output.status.success(),
         code: exit_code(&output.status),
+        cause,
         output: join_streams(&output.stdout, &output.stderr),
     }
 }
@@ -1235,14 +1246,27 @@ fn exit_code(status: &std::process::ExitStatus) -> i32 {
     if let Some(code) = status.code() {
         return code;
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt as _;
-        if let Some(signal) = status.signal() {
-            return 128 + signal;
-        }
+    if let Some(signal) = exit_signal(status) {
+        return 128 + signal;
     }
     -1
+}
+
+/// The signal that ended a process, when one did (#786).
+///
+/// Split out of [`exit_code`], which reads this and then folds it into
+/// `128 + signal` — a lossy encoding that made a ceiling kill, an OOM kill and
+/// a literal `exit 137` indistinguishable. The signal is the discriminator, so
+/// it is now kept.
+#[cfg(unix)]
+fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt as _;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
+    None
 }
 
 /// Write a run's terminal status, best-effort.
@@ -1262,6 +1286,7 @@ fn write_finish(
         CommandExit {
             success: result.success,
             code: result.code,
+            cause: result.cause,
             elapsed_secs,
             output_bytes: result.output.len(),
         },
@@ -1536,6 +1561,10 @@ async fn continue_detached(
             CmdResult {
                 success: false,
                 code: -1,
+                // Nothing ran, so this code is the harness's, not the
+                // command's — the caller must be able to tell that apart from a
+                // command that genuinely failed (#786).
+                cause: RunCause::NotAwaited,
                 output: format!("failed to await: {e}"),
             }
         }
@@ -1559,9 +1588,15 @@ async fn continue_detached(
             CmdResult {
                 success: false,
                 // `128 + SIGKILL`, the same encoding `exit_code` uses for a
-                // signalled process — so a ceiling kill is distinguishable from
-                // an ordinary failure without a new field.
+                // signalled process. The CODE alone cannot distinguish this from
+                // an OOM kill or a literal `exit 137`; `cause` below is what
+                // does, and it is why the bracket line in `output` is no longer
+                // the only marker — a `tail_lines` read could truncate it away
+                // and leave a bare `137` (#786).
                 code: 137,
+                cause: RunCause::Ceiling {
+                    limit_secs: limit,
+                },
                 output: format!(
                     "{}\n\n[run killed after {limit}s — the operator's ceiling on a detached \
                      run's lifetime (`agent.run_max_lifetime_secs`). Raise that ceiling if this \
@@ -1720,10 +1755,21 @@ pub(crate) fn completion_message(
     result: &CmdResult,
     elapsed_secs: f32,
 ) -> QueuedUserMessage {
-    let status = if result.success {
-        "exit 0 (success)".to_string()
-    } else {
-        format!("exit {} (failure)", result.code)
+    // #786 — the wake message is the FIRST surface a lane reads, and it used to
+    // report every non-zero code as `exit N (failure)`. A ceiling kill is not a
+    // failure of the command: it was stopped, and the remedy is a longer
+    // ceiling, not a code change. Naming the cause here is what stops a lane
+    // debugging a command that never got the chance to fail.
+    let cause = result.cause;
+    let status = match cause {
+        RunCause::Ordinary if result.success => "exit 0 (success)".to_string(),
+        RunCause::Ordinary => format!("exit {} (failure)", result.code),
+        RunCause::Ceiling { .. } => format!(
+            "{} — killed by the lifetime ceiling, so the command did not fail; \
+             raise `agent.run_max_lifetime_secs` if this work legitimately needs longer",
+            cause.describe(result.code)
+        ),
+        _ => cause.describe(result.code),
     };
     let tail = tail_lines(&result.output, 50);
     let context = format!(
@@ -1736,10 +1782,14 @@ pub(crate) fn completion_message(
          Report the result to the user and continue anything that was waiting on it. \
          Do not re-run the command — this IS its result.]"
     );
-    let display = format!(
-        "🔧 background task {}: {label}",
-        if result.success { "finished" } else { "failed" }
-    );
+    let outcome_word = if result.success {
+        "finished"
+    } else if matches!(result.cause, RunCause::Ceiling { .. }) {
+        "killed (ceiling)"
+    } else {
+        "failed"
+    };
+    let display = format!("🔧 background task {outcome_word}: {label}");
     let mut msg = QueuedUserMessage::system(context, display);
     // #1221: marks this delivery for the Telegram collapsible echo bubble.
     msg.origin = PushOrigin::BackgroundTask;

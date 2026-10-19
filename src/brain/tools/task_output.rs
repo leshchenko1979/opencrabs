@@ -324,6 +324,18 @@ impl Tool for TaskOutputTool {
             if let Some(code) = finish.code {
                 out.push_str(&format!("\n  exit code: {code}"));
             }
+            // WHY it ended (#786). The code alone cannot tell a ceiling kill
+            // from an OOM kill from a literal `exit 137`, and the ceiling's only
+            // other marker was a prose line inside the captured output — which a
+            // `tail_lines` read can truncate away entirely. A record written
+            // before this field existed carries no cause and renders exactly as
+            // it did before.
+            if let Some(cause) = finish.cause {
+                out.push_str(&format!(
+                    "\n  end: {}",
+                    cause.describe(finish.code.unwrap_or(-1))
+                ));
+            }
         } else if handle.is_some() {
             out.push_str(&format!(
                 "\n  elapsed: {}s",

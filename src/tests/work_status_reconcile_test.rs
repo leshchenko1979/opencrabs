@@ -9,7 +9,7 @@
 //! by construction.
 
 use crate::brain::agent::service::work_status::{
-    CommandExit, CommandPaths, WorkState, WorkStatus, test_override,
+    CommandExit, CommandPaths, RunCause, WorkState, WorkStatus, test_override,
 };
 
 /// Point the status dir at a throwaway temp dir for one test.
@@ -59,6 +59,7 @@ fn running_command_file_is_finalized_and_completed_one_is_spared() {
             code: 0,
             elapsed_secs: 0.1,
             output_bytes: 0,
+            cause: RunCause::Ordinary,
         },
     )
     .expect("finish command");
