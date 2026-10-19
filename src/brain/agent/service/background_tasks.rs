@@ -405,8 +405,8 @@ impl BackgroundTaskManager {
     /// This is the "detach now" form: the caller has already decided the run
     /// outlives its turn (explicit `background: true`, or the long-command
     /// classifier). The grace handover is [`Self::run_or_detach`].
-    pub fn spawn_command(self: std::sync::Arc<Self>, req: RunRequest) {
-        self.spawn_inner(req, None);
+    pub fn spawn_command(self: std::sync::Arc<Self>, req: RunRequest) -> String {
+        self.spawn_inner(req, None)
     }
 
     /// Spawn like [`Self::spawn_command`], but hand the outcome to `hook`
@@ -421,8 +421,8 @@ impl BackgroundTaskManager {
         self: std::sync::Arc<Self>,
         req: RunRequest,
         hook: CompletionHook,
-    ) {
-        self.spawn_inner(req, Some(hook));
+    ) -> String {
+        self.spawn_inner(req, Some(hook))
     }
 
     /// Spawn `req` detached, reserving its roster row on the CALLER's thread.
@@ -436,7 +436,11 @@ impl BackgroundTaskManager {
     /// registered on the caller's thread for exactly this reason; the rewrite
     /// that routed this through `run_or_detach` moved the registration behind
     /// the spawn and broke a passing test (#692 gate 36516212395).
-    fn spawn_inner(self: std::sync::Arc<Self>, req: RunRequest, hook: Option<CompletionHook>) {
+    fn spawn_inner(
+        self: std::sync::Arc<Self>,
+        req: RunRequest,
+        hook: Option<CompletionHook>,
+    ) -> String {
         let RunRequest {
             session_id,
             cwd,
@@ -455,6 +459,9 @@ impl BackgroundTaskManager {
         // taken here: the inline arm of that task has to name the run it is
         // reporting (#752), and by then the reservation is gone.
         let run_id = reserved.id.clone();
+        // The spawned task names the run when it delivers the outcome, so it
+        // takes its own copy: the caller gets the original back (#787).
+        let delivery_id = run_id.clone();
         let this = std::sync::Arc::clone(&self);
         tokio::spawn(async move {
             match this
@@ -475,7 +482,7 @@ impl BackgroundTaskManager {
                     // to, would drop the completion on the floor.
                     if !has_hook {
                         deliver_completion(
-                            &run_id,
+                            &delivery_id,
                             session_id,
                             &label,
                             &command,
@@ -491,6 +498,11 @@ impl BackgroundTaskManager {
                 ),
             }
         });
+        // Returned so the caller can name the run it just started (#787): the
+        // tool result carries this id, and `tool_loop` uses it as the
+        // `tool_executions` row id, which is what lets the completion write the
+        // run's REAL outcome back onto that row.
+        run_id
     }
 
     /// Spawn `cmd`, hold the caller's turn for at most `grace`, and hand the run
@@ -1296,6 +1308,59 @@ fn write_finish(
             "Could not write run status for {id}: {e}"
         );
     }
+    // #787: the same transition, written to the DB row as well. This is the one
+    // place every terminal transition passes through, so the row cannot be left
+    // describing the spawn.
+    write_outcome_row(id, result);
+}
+
+/// Write a detached run's REAL outcome onto its `tool_executions` row (#787).
+///
+/// The row is inserted when the tool call returns — i.e. when the run was only
+/// SPAWNED — with no exit code and `status = 'success'` (the spawn did succeed).
+/// Without this writeback every detached run stays recorded as a successful
+/// `bash` call forever, whatever it went on to do: a build that failed, a run
+/// the ceiling killed, and one that finished cleanly all looked identical.
+///
+/// The insert is itself spawned and can land AFTER this point — a `true`
+/// command finishes in milliseconds — so a zero-row UPDATE is retried rather
+/// than read as absent. Nothing is inserted here: the completion site knows
+/// none of the row's NOT NULL columns (`message_id`, `arguments`,
+/// `created_at`), and inventing them would be a worse record than none.
+fn write_outcome_row(id: &str, result: &CmdResult) {
+    let Some(pool) = crate::db::global_pool().cloned() else {
+        return;
+    };
+    let repo = crate::db::repository::ToolExecutionRepository::new(pool);
+    let id = id.to_string();
+    let exit_code = Some(result.code);
+    let status = crate::db::repository::tool_outcome_status(result.success, exit_code).to_string();
+    tokio::spawn(async move {
+        // 200 ms, 400 ms, then 800 ms x4 — ~3.8 s in total: far longer than the
+        // insert needs, short enough to stay inside a turn.
+        for attempt in 0..6u32 {
+            match repo.update_outcome(&id, exit_code, &status).await {
+                Ok(n) if n > 0 => return,
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!(
+                        target: "background_task",
+                        "Failed to record run '{id}' outcome: {e:#}"
+                    );
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(
+                200 * 2u64.pow(attempt.min(2)),
+            ))
+            .await;
+        }
+        tracing::warn!(
+            target: "background_task",
+            "Run '{id}' finished but no tool_executions row accepted its outcome — \
+             the status file remains the record"
+        );
+    });
 }
 
 /// Drop a finished run's restart-accounting row, loud on failure.

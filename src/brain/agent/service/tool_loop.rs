@@ -7339,6 +7339,10 @@ impl AgentService {
                                         // Read BEFORE `images` is moved out below — `exit_code()`
                                         // takes &self, so `result` must still be whole.
                                         let exit_code = result.exit_code();
+                                        // #787: a detached run's row is keyed by its run id, so the
+                                        // completion can write the run's real outcome back onto it.
+                                        // Taken before `images` is moved out below.
+                                        let exec_row_id = result.exec_row_id();
                                         let images = result.images;
                                         let content = build_tool_result_content(
                                             result.success,
@@ -7397,7 +7401,7 @@ impl AgentService {
                                                 crate::db::repository::ToolExecutionRepository::new(
                                                     pool.clone(),
                                                 );
-                                            let exec_id = uuid::Uuid::new_v4().to_string();
+                                            let exec_id = exec_row_id;
                                             let mid = assistant_db_msg.id.to_string();
                                             let sid = session_id.to_string();
                                             let tname = tool_name.clone();
@@ -7699,6 +7703,10 @@ impl AgentService {
                         // Read BEFORE `images` is moved out below — `exit_code()`
                         // takes &self, so `result` must still be whole.
                         let exit_code = result.exit_code();
+                        // #787: a detached run's row is keyed by its run id, so the
+                        // completion can write the run's real outcome back onto it.
+                        // Taken before `images` is moved out below.
+                        let exec_row_id = result.exec_row_id();
                         let images = result.images;
                         let result_output_for_evidence = result.output.clone();
                         let content =
@@ -7757,7 +7765,7 @@ impl AgentService {
                         if let Some(pool) = crate::db::global_pool() {
                             let tool_repo =
                                 crate::db::repository::ToolExecutionRepository::new(pool.clone());
-                            let exec_id = uuid::Uuid::new_v4().to_string();
+                            let exec_id = exec_row_id;
                             let mid = assistant_db_msg.id.to_string();
                             let sid = session_id.to_string();
                             let tname = tool_name.clone();

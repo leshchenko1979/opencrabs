@@ -291,6 +291,19 @@ impl ToolResult {
     pub fn exit_code(&self) -> Option<i32> {
         self.metadata.get("exit_code").and_then(|v| v.parse().ok())
     }
+
+    /// The id this call's `tool_executions` row is keyed by (#787).
+    ///
+    /// A tool that handed its work to the background manager stamps the run id
+    /// into `metadata`, and the row takes that id — which is what lets the
+    /// completion write the run's REAL outcome back onto the row that described
+    /// its spawn. Every other tool gets a fresh id, exactly as before.
+    pub fn exec_row_id(&self) -> String {
+        self.metadata
+            .get("run_id")
+            .cloned()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+    }
 }
 
 /// Tool capability flags
@@ -451,4 +464,29 @@ pub(crate) fn write_target_from_path_arg(
         .and_then(|v| v.as_str())
         .filter(|p| !p.trim().is_empty())
         .map(|p| super::error::resolve_tool_path(p, working_directory))
+}
+
+#[cfg(test)]
+mod exec_row_id_tests {
+    use super::*;
+
+    /// #787 — a tool that handed its work to the background manager stamps the
+    /// run id, and the `tool_executions` row takes it. That shared id is the
+    /// only thing linking a row to the run whose outcome it should describe.
+    #[test]
+    fn a_detached_result_keys_its_row_by_the_run_id() {
+        let mut result = ToolResult::success("Started in the background: make".to_string());
+        result.metadata.insert("run_id".to_string(), "3f2b".to_string());
+        assert_eq!(result.exec_row_id(), "3f2b");
+    }
+
+    /// Every other tool keeps a fresh id per call — the row's historical shape.
+    #[test]
+    fn an_ordinary_result_gets_a_fresh_id_per_call() {
+        let result = ToolResult::success("ok".to_string());
+        let a = result.exec_row_id();
+        let b = result.exec_row_id();
+        assert!(!a.is_empty(), "a row id is always minted");
+        assert_ne!(a, b, "two calls must not share a row");
+    }
 }

@@ -185,3 +185,56 @@ async fn record_accepts_tool_name_with_digits_and_underscores() {
     assert_eq!(stats.len(), 1);
     assert_eq!(stats[0].tool_name, "web_search_v2");
 }
+
+/// #787: a detached run's row is written twice — once when the run is SPAWNED
+/// (no code yet) and once when it ENDS. The second write is the whole point:
+/// without it every detached run stays recorded as a successful `bash` call
+/// with no exit code, whatever it went on to do.
+#[tokio::test]
+async fn update_outcome_writes_the_runs_real_result() {
+    let db = make_db().await;
+    let repo = ToolExecutionRepository::new(db.pool().clone());
+    // The spawn-time row, exactly as `tool_loop` writes it: the run has not
+    // exited, so there is no code, and the spawn itself succeeded.
+    repo.record("run-1", "msg-1", "sess-1", "bash", "success", None, None, None, None)
+        .await
+        .unwrap();
+
+    let touched = repo
+        .update_outcome("run-1", Some(7), "success")
+        .await
+        .expect("update succeeds");
+    assert_eq!(touched, 1, "the row exists, so exactly one row is touched");
+
+    let pool = db.pool().clone();
+    let row: (Option<i32>, String) = pool
+        .get()
+        .await
+        .unwrap()
+        .interact(move |conn| {
+            conn.query_row(
+                "SELECT exit_code, status FROM tool_executions WHERE id = 'run-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.0, Some(7), "the run's real exit code lands on the row");
+    assert_eq!(row.1, "success", "#763's split is not restated here");
+}
+
+/// The insert is spawned and can lose the race against a fast run, so a zero
+/// is a RETRY signal, not a verdict — the caller must be able to tell the two
+/// apart, which is why the count is returned rather than swallowed.
+#[tokio::test]
+async fn update_outcome_on_a_missing_row_reports_zero() {
+    let db = make_db().await;
+    let repo = ToolExecutionRepository::new(db.pool().clone());
+    let touched = repo
+        .update_outcome("never-inserted", Some(0), "success")
+        .await
+        .expect("a missing row is not an error");
+    assert_eq!(touched, 0, "no row yet is reported, never invented");
+}

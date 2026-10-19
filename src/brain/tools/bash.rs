@@ -631,19 +631,25 @@ impl Tool for BashTool {
                         "Detaching '{label}' for session {}: '{marker}' starts a command",
                         context.session_id
                     );
-                    mgr.clone().spawn_command(RunRequest {
+                    let run_id = mgr.clone().spawn_command(RunRequest {
                         session_id: context.session_id,
                         cwd: context.working_directory.clone(),
                         label: label.clone(),
                         command: input.command.clone(),
                         wake: wake.clone(),
                     });
-                    return Ok(ToolResult::success(format!(
+                    let mut started = ToolResult::success(format!(
                         "Started in the background: {label}\n\nThis is a long-running task, so it \
                          is running detached. I'll continue this session automatically when it \
                          finishes — no need to poll or wait. Do other independent work meanwhile \
                          if there is any."
-                    )));
+                    ));
+                    // #787: this tool call's `tool_executions` row is keyed by the
+                    // run id, so the completion can write the run's REAL outcome
+                    // onto it. Without the link the row keeps describing the
+                    // spawn — `success`, no exit code — forever.
+                    started.metadata.insert("run_id".to_string(), run_id);
+                    return Ok(started);
                 }
                 // Worth a line: the command looks long to a reader, and the
                 // reason it ran inline is not visible anywhere else.
@@ -1021,11 +1027,16 @@ impl Tool for BashTool {
                                     .to_string(),
                             ),
                         };
-                        return Ok(ToolResult::success(format!(
+                        let mut handed_over = ToolResult::success(format!(
                             "Still running {waited} — handed to the background manager instead of being killed: {label}\n\nrun id: {id}{gid_line}\nstdout: {out}\nstderr: {err}{out_block}{err_block}\n\nIt keeps running, and I'll be told when it finishes.\nTo watch it from here: task_wait with the run id (give a pattern and it returns the moment a matching line appears, or omit one to wait for it to finish). To read what it has said so far, live: task_output with the run id (the two paths above are its captures, if you would rather read them directly). {stop} tasks_list shows every run in this session.",
                             out = output_out.display(),
                             err = output_err.display(),
-                        )));
+                        ));
+                        // #787: keys this tool call's `tool_executions` row to
+                        // the run, so the completion can write the real outcome
+                        // back. Same link as the detached-now arm above.
+                        handed_over.metadata.insert("run_id".to_string(), id);
+                        return Ok(handed_over);
                     }
                     Err(e) => {
                         return Ok(ToolResult::error(format!(

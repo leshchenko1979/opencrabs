@@ -123,6 +123,36 @@ impl ToolExecutionRepository {
         Ok(())
     }
 
+    /// Write a detached run's terminal outcome back onto its row (#787).
+    ///
+    /// Returns the number of rows touched, and `0` is a MEANINGFUL answer: the
+    /// row is inserted by `tool_loop` in a spawned task *after* the tool call
+    /// returned, so a fast run can finish before its own row exists. The caller
+    /// retries on `0`.
+    ///
+    /// It is deliberately an UPDATE and not an upsert. `tool_executions`
+    /// requires `message_id`, `arguments` and `created_at` NOT NULL, and the
+    /// completion site knows none of them — an INSERT there would have to
+    /// invent values, which is a worse defect than the one this fixes. The
+    /// status file remains the record of truth if the row never lands.
+    pub async fn update_outcome(
+        &self,
+        id: &str,
+        exit_code: Option<i32>,
+        status: &str,
+    ) -> Result<usize> {
+        let id = id.to_string();
+        let status = status.to_string();
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
+            conn.execute(
+                "UPDATE tool_executions SET exit_code = ?2, status = ?3 WHERE id = ?1",
+                params![id, exit_code, status],
+            )
+        })
+        .await
+        .context("Failed to record a detached run's outcome")
+    }
+
     /// Get tool usage stats grouped by tool_name, optionally filtered by time period
     pub async fn stats_by_tool(&self, since_epoch: Option<i64>) -> Result<Vec<ToolUsageStats>> {
         self.pool
