@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `8b96d159b` **cli**: retry the cron scheduler lock instead of deciding once, so a handoff from an adopting daemon cannot leave a profile with no scheduler (#795)
 - `bbbff6921` **agent**: read the 403 body before choosing wording, so a provider content-policy refusal is reported as moderation instead of telling the operator to change an API key (#792)
 - `3c21a7be3` **utils**: gate that recovery on path shape, so a wrong path reaches the "fix the link target" nudge instead of silence (#793)
+- `b29f992fb` **utils**: peel a markdown title off that recovery's greedy span, so a captioned image keeps its attachment (#793)
 
 ## [0.5.4] - 2026-09-26
 
