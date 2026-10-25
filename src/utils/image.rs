@@ -755,11 +755,23 @@ fn parse_markdown_ref(
         // path-shaped miss is REJECTED, which is exactly what fires the "fix the
         // link target" regen nudge. The strict parse above stays authoritative
         // wherever it already succeeded.
+        //
+        // Any markdown TITLE must be peeled off the span first. A title carries
+        // spaces of its own, so a greedy read folds the caption into the path —
+        // and because the folded span still carries a separator it passes the
+        // shape gate and reaches the resolver as a path that does not exist.
+        // The reference then loses the attachment the STRICT parse already
+        // handled correctly: `![alt](/tmp/x/chart.png "the chart")` delivered
+        // nothing. A title is not part of the target.
         if !text[end..].starts_with(')')
             && let Some(close) = text[cursor..].find(')')
-            && repaired_target_is_candidate(&text[cursor..cursor + close], base_dir)
         {
-            (text[cursor..cursor + close].to_string(), cursor + close)
+            let (span, span_after) = split_trailing_title(text, cursor, close);
+            if repaired_target_is_candidate(span, base_dir) {
+                (span.to_string(), span_after)
+            } else {
+                (text[cursor..end].to_string(), end)
+            }
         } else {
             (text[cursor..end].to_string(), end)
         }
@@ -782,6 +794,40 @@ fn parse_markdown_ref(
         return None;
     }
     Some((after_target + 1, label, target, title))
+}
+
+/// Peel a trailing markdown title off a greedy target span.
+///
+/// Returns the target and the byte index the title starts at. A title is the
+/// caption carrier for an image and a decoration for a document, but it is
+/// never part of the PATH — and it holds spaces of its own, so a greedy read to
+/// the closing `)` would fold it into the target. That is not cosmetic: the
+/// folded span still carries a separator, so it passes the shape gate and the
+/// resolver rejects a path that no file can ever match, losing the attachment
+/// the strict parse already delivered (#793 regression, ten legs across five
+/// test files).
+///
+/// Only a quoted span PRECEDED BY WHITESPACE counts as a title, which is the
+/// markdown rule; anything else stays part of the path, so a filename holding a
+/// quote is not silently truncated.
+fn split_trailing_title(text: &str, cursor: usize, close: usize) -> (&str, usize) {
+    let span = &text[cursor..cursor + close];
+    let trimmed = span.trim_end();
+    let Some(quote) = trimmed.chars().last().filter(|c| *c == '"' || *c == '\'') else {
+        return (span, cursor + close);
+    };
+    let body = &trimmed[..trimmed.len() - quote.len_utf8()];
+    let Some(open) = body.rfind(quote) else {
+        return (span, cursor + close);
+    };
+    let separated = body[..open]
+        .chars()
+        .last()
+        .is_some_and(|c| c.is_whitespace());
+    if !separated {
+        return (span, cursor + close);
+    }
+    (span[..open].trim_end(), cursor + open)
 }
 
 /// Whether a space-bearing bare target is the resolver's business at all — the

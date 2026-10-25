@@ -585,6 +585,29 @@ mod local_file_links {
     }
 
     #[test]
+    fn a_title_after_a_space_bearing_target_is_not_folded_into_the_path() {
+        // #793 REGRESSION CONTROL. The repair reads the target greedily up to the
+        // closing `)`, so a markdown title — which carries spaces of its own —
+        // was folded into the path. The folded span still carried a separator, so
+        // it passed the shape gate and reached the resolver as a path that no
+        // file can match: the attachment the STRICT parse already delivered was
+        // lost. Ten legs across five test files went red on exactly this.
+        //
+        // Both halves are asserted here because either one alone is satisfiable
+        // by a wrong fix: the file must ATTACH, and the title must still be the
+        // caption rather than path debris.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "Q3 final report.pdf", PDF_BYTES);
+        let scan = extract_local_files(
+            &format!("[report]({} \"Q3 numbers\")", pdf.display()),
+            None,
+        );
+        assert_eq!(scan.text, "📎 report");
+        assert_eq!(paths(&scan), vec![pdf], "the title is not part of the path");
+        assert!(scan.failures.is_empty());
+    }
+
+    #[test]
     fn a_file_uri_target_resolves_to_the_local_file() {
         // #1968: a model spelled the local file as a `file://` URI. Before this
         // the scheme guard skipped `file:` and the document was dropped
