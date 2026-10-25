@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `793dc2a44` **db**: write a detached run's real outcome back onto its `tool_executions` row (#787)
 - `96d737be0` **db**: key a batched detached run's row by its run id too (#787)
 - `86d816ecd` **telegram**: compare the rich fallback's burial against the body the bubbles stored (#788)
+- `2e24dfd62` **utils**: recover a markdown link whose path holds a space instead of dropping the file silently (#793)
 
 ## [0.5.4] - 2026-09-26
 
