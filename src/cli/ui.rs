@@ -2345,31 +2345,62 @@ async fn cmd_chat_inner(
     // scheduler, don't spawn a second or every due job double-fires. The guard
     // is bound at function scope so it lives for the whole session; the OS
     // releases it on process exit.
+    //
+    // #795: the acquisition is RETRIED, never decided once. A lock held by a
+    // TEMPORARY owner is indistinguishable from one held by a permanent owner,
+    // and the temporary case is the common one here: an adopting daemon
+    // (`spawn_cron_scheduler_for_profile`) holds this profile's lock only until
+    // it notices this process's instance lock — and it releases it a few
+    // seconds AFTER the single attempt this code used to make. Deciding once
+    // left the process running for its whole life with no scheduler while the
+    // adopter had already exited: measured 2026-10-24 on the `ops` profile,
+    // 29 h of silence, ended only by an unrelated restart.
     let active_profile = crate::config::profile::active_profile()
         .unwrap_or("default")
         .to_string();
-    let _scheduler_lock =
+    let a2a_enabled = config.a2a.enabled;
+    let pool = db.pool().clone();
+    let channel_factory = channel_factory.clone();
+    let service_context = service_context.clone();
+    let initial_lock =
         scheduler_lock.or_else(|| crate::config::profile::acquire_scheduler_lock(&active_profile));
-    if _scheduler_lock.is_some() {
-        if config.a2a.enabled && !a2a_ready {
-            tracing::error!("Cron scheduler not spawned: A2A gateway did not become ready (#196)");
-        } else {
-            let cron_repo = crate::db::CronJobRepository::new(db.pool().clone());
-            let cron_run_repo = crate::db::CronJobRunRepository::new(db.pool().clone());
+    {
+        let profile = active_profile.clone();
+        tokio::spawn(async move {
+            let mut guard = initial_lock;
+            if guard.is_none() {
+                tracing::info!(
+                    "Cron scheduler for '{profile}' already running elsewhere — retrying every 15s (#795)"
+                );
+            }
+            while guard.is_none() {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                guard = crate::config::profile::acquire_scheduler_lock(&profile);
+                if guard.is_some() {
+                    tracing::info!(
+                        "Cron scheduler for '{profile}' — lock acquired on retry (#795)"
+                    );
+                }
+            }
+            let _scheduler_lock = guard;
+            if a2a_enabled && !a2a_ready {
+                tracing::error!("Cron scheduler not spawned: A2A gateway did not become ready (#196)");
+                return;
+            }
             let cron_scheduler = crate::cron::CronScheduler::new(
-                cron_repo,
-                cron_run_repo,
-                channel_factory.clone(),
-                service_context.clone(),
+                crate::db::CronJobRepository::new(pool.clone()),
+                crate::db::CronJobRunRepository::new(pool),
+                channel_factory,
+                service_context,
             );
             // Detached task; the JoinHandle isn't awaited or aborted anywhere.
             cron_scheduler.spawn();
             tracing::info!("Cron scheduler spawned");
-        }
-    } else {
-        tracing::info!(
-            "Cron scheduler for '{active_profile}' already running elsewhere — not spawning a second"
-        );
+            // Hold the guard for the life of the process. The scheduler task is
+            // detached, so dropping the lock here would let a second scheduler
+            // start while this one keeps ticking.
+            std::future::pending::<()>().await;
+        });
     }
 
     // Channel spawning is handled by channel_manager.reconcile() above (line ~669).
