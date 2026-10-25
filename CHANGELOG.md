@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `96d737be0` **db**: key a batched detached run's row by its run id too (#787)
 - `86d816ecd` **telegram**: compare the rich fallback's burial against the body the bubbles stored (#788)
 - `2e24dfd62` **utils**: recover a markdown link whose path holds a space instead of dropping the file silently (#793)
+- `8b96d159b` **cli**: retry the cron scheduler lock instead of deciding once, so a handoff from an adopting daemon cannot leave a profile with no scheduler (#795)
 
 ## [0.5.4] - 2026-09-26
 
