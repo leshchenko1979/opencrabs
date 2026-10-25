@@ -152,11 +152,9 @@ fn maps_403_auth_body_mentioning_policy_to_auth_message() {
 /// a sibling's content refusal must not relabel this 403 as moderation.
 #[test]
 fn chain_summary_does_not_relabel_auth_403_as_moderation() {
-    let body = format!(
-        "API error (403): forbidden\nAll providers in the fallback chain failed. \
-         primary: forbidden. Fallback other-provider: content policy refusal."
-    );
-    let msg = format_user_error(&provider_err(&body));
+    let body = "API error (403): forbidden\nAll providers in the fallback chain failed. \
+                primary: forbidden. Fallback other-provider: content policy refusal.";
+    let msg = format_user_error(&provider_err(body));
     assert!(
         msg.contains("Authentication") || msg.contains("API key"),
         "the 403's own body is auth, so the summary must not hijack it: {msg}"
