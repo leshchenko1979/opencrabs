@@ -500,6 +500,69 @@ mod local_file_links {
     }
 
     #[test]
+    fn a_space_bearing_bare_path_is_recovered_when_the_file_exists() {
+        // #793: CommonMark ends a bare target at the first whitespace, so a real
+        // path holding a space stopped the parse early, failed the `)` check and
+        // was copied through verbatim. The file was then dropped SILENTLY —
+        // upstream of the candidacy whose rejection is what reports a failure
+        // and drives the self-healing nudge — so nothing anywhere said a file
+        // was lost. Measured receipt: a reply carrying this shape shipped the
+        // markdown document beside it and left the 189 276-byte PDF as a dead
+        // `/root/...` string in the body.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("mail")).expect("mkdir");
+        let pdf = write_file(
+            &dir.path().join("mail"),
+            "Онлайн-выписка земельный участок_11_41_43.pdf",
+            PDF_BYTES,
+        );
+        let scan = extract_local_files(&format!("see [Выписка]({}) here", pdf.display()), None);
+        assert_eq!(scan.text, "see 📎 Выписка here");
+        assert_eq!(paths(&scan), vec![pdf]);
+        assert!(scan.failures.is_empty(), "recovered, not rejected");
+    }
+
+    #[test]
+    fn a_bracketed_phrase_with_no_file_behind_it_stays_literal() {
+        // NEGATIVE CONTROL for the repair's existence gate. `[note](see the
+        // docs)` fails the strict parse for the same reason a space-bearing path
+        // does, so without the gate it would be "recovered" as a path and
+        // reported as a missing attachment — a false failure line in place of
+        // the prose the reader was meant to see.
+        let text = "a [note](see the docs) mid-sentence";
+        let scan = extract_local_files(text, None);
+        assert_eq!(scan.text, text, "no file behind the target, no repair");
+        assert!(scan.attachments.is_empty());
+        assert!(scan.failures.is_empty(), "prose is not a failed attachment");
+    }
+
+    #[test]
+    fn a_relative_space_bearing_path_resolves_against_the_base_dir() {
+        // The repair resolves the recovered target the same way every other
+        // target is resolved, so a RELATIVE space-bearing path reaches the file
+        // it names rather than a literal string joined to nothing.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "Q3 final report.pdf", PDF_BYTES);
+        let scan = extract_local_files("[report](Q3 final report.pdf)", Some(dir.path()));
+        assert_eq!(scan.text, "📎 report");
+        assert_eq!(paths(&scan), vec![pdf]);
+        assert!(scan.failures.is_empty());
+    }
+
+    #[test]
+    fn a_space_bearing_path_that_does_not_exist_stays_literal() {
+        // The documented BOUNDARY of the #793 repair: with no file behind the
+        // target the repair declines, so this class stays as silent as it was
+        // before. Stated here so the limit is a decision on the record, not an
+        // accident a later reader mistakes for coverage.
+        let text = "[Gone](/nonexistent/Q3 final report.pdf)";
+        let scan = extract_local_files(text, None);
+        assert_eq!(scan.text, text);
+        assert!(scan.attachments.is_empty());
+        assert!(scan.failures.is_empty());
+    }
+
+    #[test]
     fn a_file_uri_target_resolves_to_the_local_file() {
         // #1968: a model spelled the local file as a `file://` URI. Before this
         // the scheme guard skipped `file:` and the document was dropped
@@ -925,6 +988,25 @@ mod local_file_rewrite {
             rw.entries[0].file.marker_span, None,
             "a file that came from the rewrite has no position in any scan buffer"
         );
+    }
+
+    #[test]
+    fn a_space_bearing_path_becomes_a_document_reference() {
+        // #793, rewrite half: the rich plane walks the same references through
+        // the same parser, so the repair must reach it too — otherwise the scan
+        // would ship the document while the rich body kept a dead raw path.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "Q3 final.pdf", PDF_BYTES);
+        let rw = rewrite_local_files(
+            &format!("see [Q3]({}) here", pdf.display()),
+            Some(dir.path()),
+            DOC_ID_PREFIX,
+            &[],
+            true,
+        );
+        assert_eq!(rw.rich, "see ![📎 Q3](tg://document?id=doc0) here");
+        assert_eq!(rw.entries.len(), 1);
+        assert_eq!(rw.entries[0].file.path, pdf);
     }
 
     #[test]

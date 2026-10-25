@@ -688,6 +688,22 @@ fn parse_marker_at(text: &str, start: usize, prefix: &str) -> Option<(usize, Str
 /// / `'title'` after the target. Returns
 /// `(end_byte_exclusive, label, raw_target, title)`.
 ///
+/// `base_dir` is only read by the #793 space repair (below); every other
+/// decision here is independent of it.
+///
+/// **The space repair (#793).** CommonMark ends a bare target at the first
+/// whitespace, so `[label](/root/x/Выписка земельный участок.pdf)` parses a
+/// truncated target, fails the closing-`)` check and returns `None` — the
+/// reference is then copied through verbatim and the file is dropped SILENTLY,
+/// because a parse failure happens upstream of the candidacy whose rejection is
+/// what reports a failure and drives the self-healing nudge. When the strict
+/// form does not close on `)`, the target is re-read up to the next `)` and
+/// accepted ONLY when that path exists on disk. The existence gate is what makes
+/// the repair safe: prose such as `[note](see the docs)` fails the strict parse
+/// for the same reason and must stay literal rather than become a false "File
+/// not attached" line. A space-bearing path with no file behind it therefore
+/// stays silent — the documented boundary of this repair, not an oversight.
+///
 /// The label is the `alt` text for an image and the link text for a link. It is
 /// returned for both — inert on the image legs, and the caption carrier for a
 /// document. The title is the caption carrier for an image
@@ -697,6 +713,7 @@ fn parse_markdown_ref(
     text: &str,
     start: usize,
     bracket_len: usize,
+    base_dir: Option<&Path>,
 ) -> Option<(usize, String, String, Option<String>)> {
     let open = match bracket_len {
         2 => "![",
@@ -727,7 +744,24 @@ fn parse_markdown_ref(
             }
             end += ch.len_utf8();
         }
-        (text[cursor..end].to_string(), end)
+        // #793: a bare target cannot hold a space under CommonMark, so a path
+        // that does stops this scan early and the `)` check below fails. The
+        // reference is then copied through verbatim and the file is dropped
+        // SILENTLY — upstream of the candidacy whose rejection is what reports
+        // a failure and drives the self-healing nudge, so nothing anywhere says
+        // a file was lost. Re-read the target up to the next `)` and take it
+        // only when it names a file that EXISTS: the existence gate is what
+        // keeps prose such as `[note](see the docs)` from becoming a false
+        // "File not attached" line, and the strict parse above stays
+        // authoritative wherever it already succeeded.
+        if !text[end..].starts_with(')')
+            && let Some(close) = text[cursor..].find(')')
+            && repaired_target_exists(&text[cursor..cursor + close], base_dir)
+        {
+            (text[cursor..cursor + close].to_string(), cursor + close)
+        } else {
+            (text[cursor..end].to_string(), end)
+        }
     };
     after_target = skip_whitespace(text, after_target);
     // The title is the only caption carrier markdown offers, so it is captured
@@ -747,6 +781,36 @@ fn parse_markdown_ref(
         return None;
     }
     Some((after_target + 1, label, target, title))
+}
+
+/// Whether a space-bearing bare target names a file that exists — the gate on
+/// the #793 repair.
+///
+/// Deliberately family-agnostic: the family's own resolver still decides whether
+/// the file is DELIVERABLE (the image format gate, the document size ceiling),
+/// so this answers only "is there a real file at this path", which is the one
+/// question the parser can settle without owning a delivery policy. A remote
+/// URL, a scheme, or a relative target with no base directory answers `false`,
+/// so the repair never claims a target the resolvers would treat as prose.
+fn repaired_target_exists(target: &str, base_dir: Option<&Path>) -> bool {
+    let trimmed = target.trim();
+    if trimmed.is_empty()
+        || has_url_scheme(trimmed)
+        || is_remote_url(trimmed)
+        || is_telegram_media_ref(trimmed)
+    {
+        return false;
+    }
+    let expanded = crate::brain::tools::error::expand_tilde(trimmed);
+    let path = if expanded.is_absolute() {
+        expanded
+    } else {
+        match base_dir {
+            Some(dir) => dir.join(expanded),
+            None => return false,
+        }
+    };
+    path.is_file()
 }
 
 /// Byte offset of the first non-whitespace char at or after `from`.
@@ -1082,7 +1146,7 @@ pub fn rewrite_local_images(
         }
         if !regions[i]
             && text[i..].starts_with("![")
-            && let Some((end, label, raw, caption)) = parse_markdown_ref(text, i, 2)
+            && let Some((end, label, raw, caption)) = parse_markdown_ref(text, i, 2, base_dir)
             && rw.file(&raw, &label, caption, false)
         {
             i = end;
@@ -1125,7 +1189,7 @@ fn scan_image_references(
         }
         if !regions[i]
             && text[i..].starts_with("![")
-            && let Some((end, _label, raw, caption)) = parse_markdown_ref(text, i, 2)
+            && let Some((end, _label, raw, caption)) = parse_markdown_ref(text, i, 2, base_dir)
             && record_candidate(raw, caption, base_dir, false, remote, &mut scan)
         {
             i = end;
@@ -1448,7 +1512,7 @@ pub fn extract_local_videos(text: &str, base_dir: Option<&Path>) -> LocalVideoSc
         }
         if !regions[i]
             && text[i..].starts_with("![")
-            && let Some((end, _label, raw, caption)) = parse_markdown_ref(text, i, 2)
+            && let Some((end, _label, raw, caption)) = parse_markdown_ref(text, i, 2, base_dir)
             && record_video_candidate(raw, caption, base_dir, false, &mut scan)
         {
             i = end;
@@ -1569,7 +1633,7 @@ pub fn rewrite_local_videos(
         }
         if !regions[i]
             && text[i..].starts_with("![")
-            && let Some((end, label, raw, caption)) = parse_markdown_ref(text, i, 2)
+            && let Some((end, label, raw, caption)) = parse_markdown_ref(text, i, 2, base_dir)
             && rw.file(&raw, &label, caption, false)
         {
             i = end;
@@ -1994,7 +2058,7 @@ pub fn extract_local_files(text: &str, base_dir: Option<&Path>) -> LocalFileScan
             // its `[` is preceded by `!`, and copying the `!` first must not let
             // the link parser claim the span on the next iteration.
             && !text[..i].ends_with('!')
-            && let Some((end, label, target, _title)) = parse_markdown_ref(text, i, 1)
+            && let Some((end, label, target, _title)) = parse_markdown_ref(text, i, 1, base_dir)
             && record_file_candidate(&text[i..end], &label, &target, base_dir, &mut scan)
         {
             // #1918: the reference becomes a visible marker, not a hole — the
@@ -2223,7 +2287,7 @@ pub fn rewrite_local_files(
             // its `[` is preceded by `!`, and copying the `!` first must not let
             // the link parser claim the span on the next iteration.
             && !text[..i].ends_with('!')
-            && let Some((end, label, target, _title)) = parse_markdown_ref(text, i, 1)
+            && let Some((end, label, target, _title)) = parse_markdown_ref(text, i, 1, base_dir)
             && rw.file(&label, &target)
         {
             i = end;
