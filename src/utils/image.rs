@@ -697,12 +697,13 @@ fn parse_marker_at(text: &str, start: usize, prefix: &str) -> Option<(usize, Str
 /// reference is then copied through verbatim and the file is dropped SILENTLY,
 /// because a parse failure happens upstream of the candidacy whose rejection is
 /// what reports a failure and drives the self-healing nudge. When the strict
-/// form does not close on `)`, the target is re-read up to the next `)` and
-/// accepted ONLY when that path exists on disk. The existence gate is what makes
-/// the repair safe: prose such as `[note](see the docs)` fails the strict parse
-/// for the same reason and must stay literal rather than become a false "File
-/// not attached" line. A space-bearing path with no file behind it therefore
-/// stays silent — the documented boundary of this repair, not an oversight.
+/// form does not close on `)`, the target is re-read to the paren that actually
+/// closes the reference and handed to the resolver when it is about a file at
+/// all (`repaired_target_is_candidate`). The gate asks SHAPE, not existence: a
+/// missing path must reach the resolver so it can be REJECTED, which is what
+/// fires the "fix the link target" nudge. Prose such as `[note](see the docs)`
+/// has no separator and stays literal, which is the false-failure case the gate
+/// exists for.
 ///
 /// The label is the `alt` text for an image and the link text for a link. It is
 /// returned for both — inert on the image legs, and the caption carrier for a
@@ -764,7 +765,7 @@ fn parse_markdown_ref(
         // handled correctly: `![alt](/tmp/x/chart.png "the chart")` delivered
         // nothing. A title is not part of the target.
         if !text[end..].starts_with(')')
-            && let Some(close) = text[cursor..].find(')')
+            && let Some(close) = closing_paren_outside_quotes(text, cursor)
         {
             let (span, span_after) = split_trailing_title(text, cursor, close);
             if repaired_target_is_candidate(span, base_dir) {
@@ -794,6 +795,47 @@ fn parse_markdown_ref(
         return None;
     }
     Some((after_target + 1, label, target, title))
+}
+
+/// Byte offset (relative to `cursor`) of the `)` that CLOSES a reference,
+/// skipping any `)` that sits inside a quoted markdown title.
+///
+/// A title may legally contain `)`: `![alt](chart.png "revenue) 2026")` is
+/// valid markdown and the reference closes on the paren AFTER the closing
+/// quote. A greedy read to the FIRST `)` therefore stops inside the caption,
+/// accepts a span whose title never closes, and parses a target no file can
+/// match — the message then keeps ` 2026")` as dead text and the caption is
+/// lost (`#793`, caught by the CI gate on `a3bdffa1c`:
+/// `an_inexpressible_caption_is_dropped_rather_than_mangling_the_reference`).
+///
+/// A quote only OPENS a title when whitespace precedes it, the same rule
+/// `split_trailing_title` peels by: that keeps an apostrophe inside a filename
+/// (`/root/x/O'Brien report.pdf`) part of the path instead of swallowing the
+/// rest of the reference. An unbalanced quote returns `None`, which declines
+/// the repair and leaves the text literal — the safe direction.
+fn closing_paren_outside_quotes(text: &str, cursor: usize) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut idx = cursor;
+    let mut prev_whitespace = true;
+    while let Some(ch) = text[idx..].chars().next() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if (ch == '"' || ch == '\'') && prev_whitespace {
+                    quote = Some(ch);
+                } else if ch == ')' {
+                    return Some(idx - cursor);
+                }
+            }
+        }
+        prev_whitespace = ch.is_whitespace();
+        idx += ch.len_utf8();
+    }
+    None
 }
 
 /// Peel a trailing markdown title off a greedy target span.

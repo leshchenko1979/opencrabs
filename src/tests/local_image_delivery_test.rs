@@ -608,6 +608,33 @@ mod local_file_links {
     }
 
     #[test]
+    fn a_title_holding_a_closing_paren_does_not_truncate_the_reference() {
+        // #793 REGRESSION CONTROL, second mutant. The repair used to stop at the
+        // FIRST `)`, and a title may legally contain one: `"revenue) 2026"`. The
+        // span then ended inside the caption, its title never closed, and the
+        // parse produced a target no file can match — the message kept ` 2026")`
+        // as dead text and lost the caption. Caught by the CI gate on
+        // `a3bdffa1c` (`an_inexpressible_caption_is_dropped_rather_than_mangling_
+        // the_reference`). The closing paren is the one AFTER the quote.
+        //
+        // Kills the mutant: reverting to `text[cursor..].find(')')` makes the
+        // path assertion below fail, because the target then ends mid-caption.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "Q3 final report.pdf", PDF_BYTES);
+        let scan = extract_local_files(
+            &format!("[report]({} \"revenue) 2026\")", pdf.display()),
+            None,
+        );
+        assert_eq!(scan.text, "📎 report");
+        assert_eq!(
+            paths(&scan),
+            vec![pdf],
+            "a `)` inside the title is not the closing paren"
+        );
+        assert!(scan.failures.is_empty());
+    }
+
+    #[test]
     fn a_file_uri_target_resolves_to_the_local_file() {
         // #1968: a model spelled the local file as a `file://` URI. Before this
         // the scheme guard skipped `file:` and the document was dropped
