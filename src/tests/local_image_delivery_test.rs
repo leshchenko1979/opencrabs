@@ -524,11 +524,13 @@ mod local_file_links {
 
     #[test]
     fn a_bracketed_phrase_with_no_file_behind_it_stays_literal() {
-        // NEGATIVE CONTROL for the repair's existence gate. `[note](see the
-        // docs)` fails the strict parse for the same reason a space-bearing path
-        // does, so without the gate it would be "recovered" as a path and
-        // reported as a missing attachment — a false failure line in place of
-        // the prose the reader was meant to see.
+        // NEGATIVE CONTROL for the repair's SHAPE gate. `[note](see the docs)`
+        // fails the strict parse for the same reason a space-bearing path does,
+        // so without a gate it would be "recovered" as a path and reported as a
+        // missing attachment — a false failure line, and a wasted regen attempt,
+        // in place of the prose the reader was meant to see. It has neither an
+        // absolute root nor a separator, so it is not a path reference and the
+        // repair declines.
         let text = "a [note](see the docs) mid-sentence";
         let scan = extract_local_files(text, None);
         assert_eq!(scan.text, text, "no file behind the target, no repair");
@@ -550,16 +552,36 @@ mod local_file_links {
     }
 
     #[test]
-    fn a_space_bearing_path_that_does_not_exist_stays_literal() {
-        // The documented BOUNDARY of the #793 repair: with no file behind the
-        // target the repair declines, so this class stays as silent as it was
-        // before. Stated here so the limit is a decision on the record, not an
-        // accident a later reader mistakes for coverage.
+    fn a_space_bearing_path_that_does_not_exist_is_reported_for_the_nudge() {
+        // The first cut of #793 gated the repair on the file EXISTING, which
+        // answered a WRONG path exactly the way it answered prose: silence. That
+        // disabled the one mechanism built for this case. The regen ladder
+        // (`nudge::local_file_regen_nudge`, driven from the tool loop) tells the
+        // model "Fix the link target or drop the link, then re-emit your COMPLETE
+        // reply", and it can only fire on a REJECTED candidate — so a missing
+        // path must reach the resolver as a candidate. It is shaped like one.
         let text = "[Gone](/nonexistent/Q3 final report.pdf)";
         let scan = extract_local_files(text, None);
-        assert_eq!(scan.text, text);
+        assert_eq!(
+            scan.text, text,
+            "a rejected candidate keeps its clue in the text"
+        );
         assert!(scan.attachments.is_empty());
-        assert!(scan.failures.is_empty());
+        assert_eq!(scan.failures.len(), 1, "reported, so the nudge can fire");
+        assert_eq!(scan.failures[0].reason, LocalImageFailureReason::NotFound);
+    }
+
+    #[test]
+    fn a_relative_space_bearing_miss_is_reported_too() {
+        // The relative half: the span carries a separator, so it is a path
+        // reference rather than prose. Joining it to the session cwd and finding
+        // nothing is a MISSING FILE — the model gets told to fix the target,
+        // which is the whole point of reporting instead of swallowing.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scan = extract_local_files("[Gone](mail/Q3 final report.pdf)", Some(dir.path()));
+        assert_eq!(scan.failures.len(), 1);
+        assert_eq!(scan.failures[0].reason, LocalImageFailureReason::NotFound);
+        assert!(scan.attachments.is_empty());
     }
 
     #[test]

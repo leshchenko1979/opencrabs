@@ -746,17 +746,18 @@ fn parse_markdown_ref(
         }
         // #793: a bare target cannot hold a space under CommonMark, so a path
         // that does stops this scan early and the `)` check below fails. The
-        // reference is then copied through verbatim and the file is dropped
-        // SILENTLY — upstream of the candidacy whose rejection is what reports
-        // a failure and drives the self-healing nudge, so nothing anywhere says
-        // a file was lost. Re-read the target up to the next `)` and take it
-        // only when it names a file that EXISTS: the existence gate is what
-        // keeps prose such as `[note](see the docs)` from becoming a false
-        // "File not attached" line, and the strict parse above stays
-        // authoritative wherever it already succeeded.
+        // reference is then copied through verbatim — upstream of the candidacy
+        // whose rejection is what reports a failure and drives the self-healing
+        // nudge, so a wrong path would get neither an attachment nor a
+        // correction. Re-read the target up to the next `)` and hand it to the
+        // resolver when it is about a file at all (see
+        // `repaired_target_is_candidate`): an existing file attaches, and a
+        // path-shaped miss is REJECTED, which is exactly what fires the "fix the
+        // link target" regen nudge. The strict parse above stays authoritative
+        // wherever it already succeeded.
         if !text[end..].starts_with(')')
             && let Some(close) = text[cursor..].find(')')
-            && repaired_target_exists(&text[cursor..cursor + close], base_dir)
+            && repaired_target_is_candidate(&text[cursor..cursor + close], base_dir)
         {
             (text[cursor..cursor + close].to_string(), cursor + close)
         } else {
@@ -783,16 +784,30 @@ fn parse_markdown_ref(
     Some((after_target + 1, label, target, title))
 }
 
-/// Whether a space-bearing bare target names a file that exists — the gate on
-/// the #793 repair.
+/// Whether a space-bearing bare target is the resolver's business at all — the
+/// gate on the #793 repair.
+///
+/// The question is deliberately NOT "does this file exist". An existence gate
+/// answers a MISSING file exactly the way it answers prose, and that is the one
+/// outcome the failure machinery is built to prevent: a model that wrote
+/// `/root/mail/report final.pdf` when the file is really
+/// `/root/mail/report-final.pdf` would get no attachment AND no correction,
+/// because the reference never becomes a candidate, so nothing is rejected, so
+/// the regen ladder that exists to say *"Fix the link target or drop the link,
+/// then re-emit your COMPLETE reply"* ([`crate::brain::agent::service::nudge::
+/// local_file_regen_nudge`], driven from the tool loop) never fires. A wrong
+/// path must be able to speak.
+///
+/// So a span qualifies when it is either a real file or SHAPED like a path —
+/// absolute, `~`-rooted (which expands to absolute), or carrying a directory
+/// separator. Prose such as `[note](see the docs)` is neither and stays silent,
+/// which is the case this gate exists for; shape, not existence, settles it.
 ///
 /// Deliberately family-agnostic: the family's own resolver still decides whether
-/// the file is DELIVERABLE (the image format gate, the document size ceiling),
-/// so this answers only "is there a real file at this path", which is the one
-/// question the parser can settle without owning a delivery policy. A remote
-/// URL, a scheme, or a relative target with no base directory answers `false`,
-/// so the repair never claims a target the resolvers would treat as prose.
-fn repaired_target_exists(target: &str, base_dir: Option<&Path>) -> bool {
+/// the file is DELIVERABLE (the image format gate, the document size ceiling) and
+/// still owns the failure reason, so this answers only "is this span about a file
+/// at all".
+fn repaired_target_is_candidate(target: &str, base_dir: Option<&Path>) -> bool {
     let trimmed = target.trim();
     if trimmed.is_empty()
         || has_url_scheme(trimmed)
@@ -802,7 +817,8 @@ fn repaired_target_exists(target: &str, base_dir: Option<&Path>) -> bool {
         return false;
     }
     let expanded = crate::brain::tools::error::expand_tilde(trimmed);
-    let path = if expanded.is_absolute() {
+    let absolute = expanded.is_absolute();
+    let path = if absolute {
         expanded
     } else {
         match base_dir {
@@ -810,7 +826,14 @@ fn repaired_target_exists(target: &str, base_dir: Option<&Path>) -> bool {
             None => return false,
         }
     };
-    path.is_file()
+    // A real file is always the family's business.
+    if path.is_file() {
+        return true;
+    }
+    // Nothing there — but a path-shaped span is a MISSING file, not prose. Hand
+    // it over so the resolver rejects it with `NotFound` and the nudge can ask
+    // for the correction (#793).
+    absolute || trimmed.contains(std::path::MAIN_SEPARATOR)
 }
 
 /// Byte offset of the first non-whitespace char at or after `from`.
