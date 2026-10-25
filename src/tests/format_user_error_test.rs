@@ -98,6 +98,71 @@ fn maps_401_and_403_to_auth_failure() {
     }
 }
 
+// ------------------------------------------------------------------
+// 403 is overloaded: content-policy refusal vs auth failure
+// ------------------------------------------------------------------
+//
+// A 403 arrives for a rejected credential, an exhausted quota, AND a
+// moderation / acceptable-use refusal, and the three need opposite actions.
+// Telling a user to edit `keys.toml` over a content refusal sends them at a
+// problem no key change can fix, and on a managed deployment that advice is
+// delivered to the end client, not the operator.
+
+/// The body a real gateway returned for a 403 that was NOT an auth failure.
+const AUP_BODY: &str = "API error (403): request refused: this content is not \
+                         permitted under the Acceptable Use section of the \
+                         Terms of Service.";
+
+/// Kills the mutant that reverts the arm to `401 | 403`: the content
+/// refusal would then be answered with key advice, which this leg rejects
+/// from both sides (it must name the cause AND must not point at a key).
+#[test]
+fn maps_403_content_refusal_to_moderation_message() {
+    let msg = format_user_error(&provider_err(AUP_BODY));
+    assert!(
+        msg.contains("content") && (msg.contains("moderation") || msg.contains("acceptable-use")),
+        "a content refusal must name its own cause: {msg}"
+    );
+    assert!(
+        !msg.contains("keys.toml") && !msg.contains("/onboard:provider"),
+        "must NOT send the user to a key file over a content refusal: {msg}"
+    );
+    assert!(
+        msg.contains("/models") || msg.contains("Rephrase"),
+        "must offer an action that can actually clear it: {msg}"
+    );
+}
+
+/// Kills the mutant that adds a generic token such as `policy` to the hint
+/// vocabulary: this body rejects a CREDENTIAL and merely mentions policy, so
+/// a broad predicate would misreport it as moderation.
+#[test]
+fn maps_403_auth_body_mentioning_policy_to_auth_message() {
+    let msg = format_user_error(&provider_err(
+        "API error (403): invalid api key for this organization policy",
+    ));
+    assert!(
+        msg.contains("Authentication") || msg.contains("API key"),
+        "a rejected credential must still read as auth: {msg}"
+    );
+}
+
+/// Kills the mutant that matches the hint vocabulary against the WHOLE error
+/// string: a fallback-chain summary quotes every provider that was tried, so
+/// a sibling's content refusal must not relabel this 403 as moderation.
+#[test]
+fn chain_summary_does_not_relabel_auth_403_as_moderation() {
+    let body = format!(
+        "API error (403): forbidden\nAll providers in the fallback chain failed. \
+         primary: forbidden. Fallback other-provider: content policy refusal."
+    );
+    let msg = format_user_error(&provider_err(&body));
+    assert!(
+        msg.contains("Authentication") || msg.contains("API key"),
+        "the 403's own body is auth, so the summary must not hijack it: {msg}"
+    );
+}
+
 #[test]
 fn maps_stream_broken_to_specific_message() {
     let err = AgentError::Internal("error decoding response body: ...".to_string());

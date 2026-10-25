@@ -80,6 +80,10 @@ pub type Result<T> = std::result::Result<T, AgentError>;
 ///   - HTTP 5xx (502 / 503 / 504) → explain that fallback chain
 ///     exhausted, likely shared upstream gateway outage, retry hint
 ///   - HTTP 429 → rate limit, wait or switch provider
+///   - HTTP 401 → auth failure, point at the key config
+///   - HTTP 403 → auth failure UNLESS the body names a content-policy
+///     refusal, which is reported as a moderation refusal because no key
+///     or configuration change can clear it
 ///   - HTTP 4xx (other) → quote status, recommend provider switch
 ///   - Stream decode / `error decoding response body` → connection
 ///     dropped mid-response, try again or switch model
@@ -173,7 +177,34 @@ pub fn format_user_error(err: &AgentError) -> String {
                         minute or switch provider via `/models`."
                     .to_string();
             }
-            401 | 403 => {
+            401 => {
+                return format!(
+                    "Authentication failed on the active provider \
+                     ({status}). Check your API key in `/onboard:provider` \
+                     or `keys.toml`."
+                );
+            }
+            // 403 is overloaded: a rejected credential, an exhausted quota
+            // and a CONTENT-POLICY refusal all arrive with this status, and
+            // the three need opposite actions. The key advice is right for
+            // the first two and actively wrong for the third -- it sends the
+            // operator to edit a key file for a problem no key change can
+            // fix, and on a managed deployment that text is delivered to the
+            // END CLIENT, exposing an internal config path in a chat that is
+            // not the operator's. The body is the only discriminator, so
+            // read it; an unreadable body keeps the auth wording, because a
+            // rejected key is the most common cause of a bare 403.
+            403 => {
+                if is_content_refusal(&raw) {
+                    return "The provider refused this request's content \
+                            (403). This is a moderation / acceptable-use \
+                            refusal, not an authentication failure -- no \
+                            key or configuration change will clear it. \
+                            Rephrase the request, remove the content the \
+                            provider objected to, or switch provider via \
+                            `/models`."
+                        .to_string();
+                }
                 return format!(
                     "Authentication failed on the active provider \
                      ({status}). Check your API key in `/onboard:provider` \
@@ -272,4 +303,39 @@ fn extract_loop_diagnostics(raw: &str) -> Option<LoopDiagnostics> {
         swaps,
         rolls,
     })
+}
+
+/// True when a provider error body describes a CONTENT-POLICY refusal
+/// rather than a rejected credential or an exhausted quota.
+///
+/// HTTP 403 covers all three causes and the body is the only discriminator,
+/// so this predicate decides whether the user is told to fix a key or to
+/// change a request. Two constraints shape it:
+///
+///   - It reads the error's OWN message only. A fallback-chain summary is
+///     appended to that message before the error reaches the user, and the
+///     summary quotes every provider that was tried — so a chain in which a
+///     SIBLING refused content must not relabel an auth 403 as moderation.
+///     The summary is cut off at its own marker.
+///   - The vocabulary is narrow on purpose. Each phrase below is one that
+///     providers actually emit for a moderation / acceptable-use refusal; a
+///     generic token like "policy" is NOT in the set, because a body
+///     rejecting a credential can mention policy too.
+fn is_content_refusal(raw: &str) -> bool {
+    const CHAIN_MARKER: &str = "All providers in the fallback chain failed";
+    let own = match raw.find(CHAIN_MARKER) {
+        Some(idx) => &raw[..idx],
+        None => raw,
+    };
+    let body = own.to_ascii_lowercase();
+    const HINTS: &[&str] = &[
+        "not permitted",
+        "acceptable use",
+        "content policy",
+        "content_policy",
+        "moderation",
+        "safety",
+        "usage polic",
+    ];
+    HINTS.iter().any(|h| body.contains(*h))
 }
