@@ -432,6 +432,7 @@ pub mod provider_models_isolation_test;
 pub mod provider_reported_cost_test;
 pub mod provider_spec_test;
 pub mod provider_streaming_perf_test;
+pub mod provider_vision_budget_test;
 pub mod queued_message_join_test;
 pub mod ralph_loop_config_test;
 pub mod ralph_receipt_binding_test;
