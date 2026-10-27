@@ -37,13 +37,18 @@ mod request_body {
         );
     }
 
-    /// Mutant killed: a cap small enough to reproduce the original bug.
+    /// Mutant killed: a retry that keeps the original 1024 ceiling, which
+    /// would reproduce the very bug this change exists to fix.
     #[test]
-    fn the_retry_cap_is_generous() {
+    fn the_retry_cap_lands_in_the_body_and_is_generous() {
         use crate::brain::tools::provider_vision::VISION_RETRY_MAX_TOKENS;
+        let body = vision_request_body("m", "q", "https://x/i.png", Some(VISION_RETRY_MAX_TOKENS));
+        let sent = body["max_tokens"]
+            .as_u64()
+            .expect("the retry body must carry a numeric cap");
         assert!(
-            VISION_RETRY_MAX_TOKENS > 1024,
-            "the retry cap exists to escape the 1024 ceiling, not to restate it"
+            sent > 1024,
+            "the retry cap exists to escape the 1024 ceiling, not to restate it: {sent}"
         );
     }
 }
