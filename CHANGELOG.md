@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `d82488b43` **utils**: gate that recovery on path shape, so a wrong path reaches the "fix the link target" nudge instead of silence (#793)
 - `d663cdd2b` **utils**: peel a markdown title off that recovery's greedy span, so a captioned image keeps its attachment (#793)
 - `03e428dbc` **utils**: close the recovered reference on the paren outside a quoted title, so a caption holding `)` keeps its attachment (#793)
+- `b5b4adde1` **vision**: send no `max_tokens` cap and retry once only when the endpoint names the field, so a reasoning vision model can spend its budget on thinking and still answer instead of coming back empty (#796)
 
 ## [0.5.4] - 2026-09-26
 
