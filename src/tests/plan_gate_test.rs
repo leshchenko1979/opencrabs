@@ -8,7 +8,9 @@
 //!   writes ONLY to the session `.md`
 //! - Active freezes the `.md` against generic write tools; the seed
 //!   window hard-denies mutators
-//! - NoPlan gates nothing
+//! - NoPlan allows everything except a write to the session `.md` (with no
+//!   plan there is no JSON twin to mirror the prose into, so the file would
+//!   be an orphan `/discard` never clears)
 //!
 //! The gate is pure: `hints.read_only` is the sole signal. No name
 //! lists, no capability branching.
@@ -73,7 +75,7 @@ async fn make_active(sid: Uuid, with_md: bool) {
 }
 
 #[tokio::test]
-async fn no_plan_gates_nothing() {
+async fn no_plan_allows_all_but_session_md() {
     in_temp_home(async {
         let sid = Uuid::new_v4();
         for (name, hints) in [
@@ -89,6 +91,35 @@ async fn no_plan_gates_nothing() {
                 "{name} must pass with no plan"
             );
         }
+
+        // A write aimed at the session plan .md has no JSON twin to mirror
+        // into while no plan is live: the prose would be an orphan that the
+        // card renders from and `/discard` reports as "no live plan" without
+        // ever clearing. The .md is created by `plan` init, with its JSON.
+        let md = plan_md_path(sid).await;
+        for input in [
+            json!({ "path": md.to_string_lossy() }),
+            json!({ "file_path": md.to_string_lossy() }),
+        ] {
+            let decision = check_plan_gate(sid, "edit_file", &mut_tool(), &input).await;
+            assert!(
+                decision.is_denied(),
+                "writing the session .md with no plan must be denied ({input}), got {decision:?}"
+            );
+        }
+
+        // Read-only tools stay untouched even when they name the .md.
+        assert!(
+            check_plan_gate(
+                sid,
+                "read_file",
+                &ro(),
+                &json!({ "path": md.to_string_lossy() })
+            )
+            .await
+            .is_allowed(),
+            "read_file must stay allowed with no plan"
+        );
     })
     .await;
 }

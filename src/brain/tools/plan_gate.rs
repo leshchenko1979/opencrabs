@@ -83,7 +83,24 @@ pub(crate) async fn check_plan_gate(
     let state = plan_files::plan_mode_state(session_id).await;
 
     match state {
-        PlanModeState::NoPlan => GateDecision::Allow,
+        PlanModeState::NoPlan => {
+            // With no live plan there is no JSON twin to mirror the .md
+            // into, so a write here leaves an orphan: the prose exists,
+            // `sync_md_to_json` has nothing to update, the card renders
+            // from prose alone, and `/discard` reports "no live plan" and
+            // returns without clearing anything. The .md is created by
+            // `plan` init, together with its JSON — deny the write and
+            // point there.
+            if !hints.read_only && write_targets_session_md(session_id, input).await {
+                return GateDecision::Deny(
+                    "Plan gate: no live plan for this session, so the session plan \
+                     .md is not writable. Call `plan` init first; the .md is created \
+                     with it."
+                        .to_string(),
+                );
+            }
+            GateDecision::Allow
+        }
 
         PlanModeState::Active => {
             // Seed window (locked): between user Approve and a successful
