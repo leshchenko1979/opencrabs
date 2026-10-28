@@ -6,7 +6,7 @@
 
 use super::ast::{Align, Inline, Table};
 use super::inline::parse_inlines;
-use super::mermaid::MediaEntry;
+use super::mermaid::{MediaEntry, MediaKind};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -824,6 +824,19 @@ fn shield_line_unresolvable_images(line: &str, out: &mut String, media: &[MediaE
                 if is_valid_telegram_photo_url(target, media) {
                     // Valid URL - keep as is
                     out.push_str(&line[i..match_end]);
+                } else if media_ref_names_live_entry(target, media) {
+                    // #800: the reference names a LIVE entry that image syntax
+                    // cannot render — a document (or video/audio) entry, or a
+                    // scheme the entry's kind contradicts — and Telegram reads
+                    // `![alt](tg://…)` as a PHOTO reference: it answers
+                    // `RICH_MESSAGE_PHOTO_INVALID` and rejects the WHOLE rich
+                    // send, taking the reply's text and every other attachment
+                    // down with it. The same reference in LINK syntax is
+                    // accepted, so the repair is to DROP the `!`: escaping it
+                    // would leave literal `![…](…)` text on screen and lose the
+                    // reader's anchor to a file that is actually being
+                    // delivered.
+                    out.push_str(&line[i + 1..match_end]);
                 } else {
                     // Unresolvable URL - escape leading `!` to `\!`
                     out.push('\\');
@@ -1015,40 +1028,80 @@ fn split_media_refs_onto_own_lines(line: &str, out: &mut String, media: &[MediaE
 /// Check whether `target` is a valid Telegram photo URL/ref **for this request**.
 ///
 /// - `http://` / `https://` — valid by scheme; Telegram fetches the URL itself.
-/// - `tg://photo?id=<X>` / `tg://video?id=<X>` / `tg://document?id=<X>` / `tg://audio?id=<X>` /
-///   `attach://<X>` —
-///   valid **iff** `<X>` names an entry in `media`, the media array of the very request
-///   this body belongs to. Scheme alone is NOT sufficient: a reference with no matching
-///   entry is rejected with `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND`, which fails the whole
-///   message rather than that one image (#334).
+/// - `tg://photo?id=<X>` / `attach://<X>` — valid **iff** `<X>` names an entry in
+///   `media`, the media array of the very request this body belongs to, **AND that
+///   entry's kind is a photo**. Scheme alone is NOT sufficient: a reference with no
+///   matching entry is rejected with `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND`, which fails
+///   the whole message rather than that one image (#334).
+/// - `tg://document?id=<X>` / `tg://video?id=<X>` / `tg://audio?id=<X>` — never valid
+///   here, whatever the entry says. Markdown image syntax is a PHOTO reference to
+///   Telegram: aimed at a `document` entry it answers `RICH_MESSAGE_PHOTO_INVALID` and
+///   rejects the entire rich send, dropping the reply's text and every other
+///   attachment with it (#800). The caller demotes these to LINK syntax instead —
+///   see [`media_ref_names_live_entry`].
 /// - anything else — invalid (a local path, a bare string).
 ///
 /// An empty `media` therefore means every `tg`/`attach` reference is an orphan, which is
 /// the correct reading for the builders that carry no media array at all.
 fn is_valid_telegram_photo_url(target: &str, media: &[MediaEntry]) -> bool {
-    let trimmed = target.trim();
-    // Strip optional enclosing `<...>`
-    let url = if trimmed.starts_with('<') && trimmed.ends_with('>') && trimmed.len() >= 2 {
-        &trimmed[1..trimmed.len() - 1]
-    } else {
-        trimmed
-    };
+    let url = strip_angle_wrappers(target);
 
     if url.starts_with("http://") || url.starts_with("https://") {
         return true;
     }
 
+    // BOTH halves must agree: the reference's own scheme has to be a photo scheme,
+    // and the entry it names has to be a photo. Telegram resolves image syntax as a
+    // photo embed, so a `tg://document` reference is rejected on the scheme alone
+    // and a document ENTRY is rejected on the kind alone.
+    media_ref_is_photo_scheme(url)
+        && media_ref_id(url)
+            .and_then(|id| media_entry(id, media))
+            .is_some_and(|m| m.kind == MediaKind::Photo)
+}
+
+/// Whether `target` names an entry in this request's media array — of ANY kind.
+///
+/// Separated from [`is_valid_telegram_photo_url`] because the two want different
+/// repairs: an orphan reference names nothing, has nothing to render, and is ESCAPED;
+/// a LIVE entry is a file that is actually being delivered, where only the syntax is
+/// wrong — so its `!` is dropped and the reference survives as the link Telegram
+/// accepts, keeping the reader's anchor (#800).
+fn media_ref_names_live_entry(target: &str, media: &[MediaEntry]) -> bool {
+    media_ref_id(target)
+        .and_then(|id| media_entry(id, media))
+        .is_some()
+}
+
+/// Whether the reference's own scheme is a photo scheme — `tg://photo?id=` or
+/// `attach://`. `attach://` is the bytes reference used for photos AND documents
+/// alike, so it defers to the entry's kind; `tg://video` / `tg://document` /
+/// `tg://audio` cannot ride image syntax at all.
+fn media_ref_is_photo_scheme(url: &str) -> bool {
+    url.strip_prefix("attach://").is_some() || url.starts_with("tg://photo?")
+}
+
+/// The `<X>` in a `tg://<kind>?id=<X>` or `attach://<X>` reference, or `None` when
+/// `target` is neither. The one place a reference is taken apart, so the validity test
+/// and the kind test can never disagree about which id a reference names.
+fn media_ref_id(target: &str) -> Option<&str> {
+    let url = strip_angle_wrappers(target);
     // `attach://<X>` — the id is everything after the scheme.
     if let Some(id) = url.strip_prefix("attach://") {
-        return media_id_present(id, media);
+        return Some(id);
     }
-
     // `tg://photo?id=<X>` and siblings (`tg://video?id=`, `tg://document?id=`, `tg://audio?id=`).
-    if let Some(id) = telegram_media_id(url) {
-        return media_id_present(id, media);
-    }
+    telegram_media_id(url)
+}
 
-    false
+/// Strip the optional enclosing `<...>` a markdown target may carry.
+fn strip_angle_wrappers(target: &str) -> &str {
+    let trimmed = target.trim();
+    if trimmed.starts_with('<') && trimmed.ends_with('>') && trimmed.len() >= 2 {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    }
 }
 
 /// Extract `<X>` from a `tg://<kind>?id=<X>` media reference, or `None` when
@@ -1069,7 +1122,10 @@ fn telegram_media_id(url: &str) -> Option<&str> {
     Some(id.split(|c: char| c == '&' || c.is_whitespace()).next().unwrap_or(id))
 }
 
-/// Whether `id` names an entry in this request's media array.
-fn media_id_present(id: &str, media: &[MediaEntry]) -> bool {
-    !id.is_empty() && media.iter().any(|m| m.id == id)
+/// The entry `id` names in this request's media array, or `None`.
+fn media_entry<'a>(id: &str, media: &'a [MediaEntry]) -> Option<&'a MediaEntry> {
+    if id.is_empty() {
+        return None;
+    }
+    media.iter().find(|m| m.id == id)
 }

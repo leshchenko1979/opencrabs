@@ -2092,7 +2092,7 @@ pub(crate) fn file_marker_text(label: &str, target: &str) -> String {
 /// output it was told to expect therefore prefixes its own `📎 ` before
 /// `[label](path)` — and both emission sites replace only the REFERENCE span,
 /// copying that prefix through, so the reader gets the marker twice
-/// (`📎 📎 <label>` on the text plane, `📎 ![📎 <label>](tg://document?id=…)` on
+/// (`📎 📎 <label>` on the text plane, `📎 [📎 <label>](tg://document?id=…)` on
 /// the rich one). Dropping the model's prefix before emitting the harness one
 /// makes the emit idempotent on both planes.
 ///
@@ -2127,14 +2127,22 @@ fn push_file_marker(out: &mut String, label: &str, target: &str) -> std::ops::Ra
 }
 
 /// Append the rich-plane reference for a resolved file —
-/// `![📎 <label>](tg://document?id=<id>)` — whose alt carries the same
+/// `[📎 <label>](tg://document?id=<id>)` — whose LINK TEXT carries the same
 /// `📎 <label>` the text plane's marker does, so the reader's anchor is
 /// identical in both planes. A model-written `📎 ` is consumed first for the
 /// same reason as [`push_file_marker`].
+///
+/// LINK syntax, never image syntax (#800). Telegram reads `![alt](tg://…)` as a
+/// PHOTO reference: aimed at an entry whose `media[].media.type` is `document`
+/// it answers `RICH_MESSAGE_PHOTO_INVALID` and rejects the WHOLE rich send, so
+/// the reply loses its text and every attachment in it — not just that one
+/// reference. The identical reference in link syntax is accepted; measured live
+/// with the same media array, the `!` was the only variable between the 400 and
+/// the 200.
 fn push_document_ref(out: &mut String, label: &str, target: &str, id: &str) {
     consume_marker_prefix(out);
-    let alt = file_marker_text(label, target);
-    out.push_str(&format!("![📎 {alt}](tg://document?id={id})"));
+    let marker = file_marker_text(label, target);
+    out.push_str(&format!("[📎 {marker}](tg://document?id={id})"));
 }
 
 /// Scan a reply for markdown links to local files and hand back the text with
@@ -2246,7 +2254,8 @@ impl MediaSource for ResolvedFileRef {
 #[derive(Debug, Clone, Default)]
 pub struct LocalFileRewrite {
     /// Input with every resolvable local-file link replaced IN PLACE by
-    /// `![📎 <label>](tg://document?id=<prefix><n>)`. Links inside code spans,
+    /// `[📎 <label>](tg://document?id=<prefix><n>)` — LINK syntax, never image
+    /// syntax (#800). Links inside code spans,
     /// remote targets and existing Telegram media refs are left byte-identical.
     /// The id prefix is passed by the caller (`doc` at the delivery site) so the
     /// document namespace cannot collide with the image or video ones inside a
@@ -2316,11 +2325,13 @@ impl FileRewriter<'_> {
                 } else {
                     Some(label.to_string())
                 };
-                // The alt carries the same `📎 <label>` the text plane's
+                // The link text carries the same `📎 <label>` the text plane's
                 // marker does, so the reader's anchor is identical in both
                 // planes; an empty label falls back to the file's own name.
                 // #2001: the emission consumes a model-written `📎 ` first, so
-                // the alt never doubles the marker (`📎 ![📎 <label>](…)`).
+                // the marker never doubles (`📎 [📎 <label>](…)`).
+                // #800: LINK syntax — image syntax aimed at a document entry is
+                // what Telegram rejects with `RICH_MESSAGE_PHOTO_INVALID`.
                 push_document_ref(&mut self.rich, label, target, &id);
                 self.entries.push(ResolvedFileRef {
                     id,
