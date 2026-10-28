@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `d663cdd2b` **utils**: peel a markdown title off that recovery's greedy span, so a captioned image keeps its attachment (#793)
 - `03e428dbc` **utils**: close the recovered reference on the paren outside a quoted title, so a caption holding `)` keeps its attachment (#793)
 - `b5b4adde1` **vision**: send no `max_tokens` cap and retry once only when the endpoint names the field, so a reasoning vision model can spend its budget on thinking and still answer instead of coming back empty (#796)
+- `6b87dbd29` **telegram**: emit a document reference in link syntax and demote any live-entry image ref to a link, so a reply's files stop 400-ing the whole rich send and arriving as dead text (#800)
 
 ## [0.5.4] - 2026-09-26
 
