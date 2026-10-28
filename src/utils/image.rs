@@ -2323,7 +2323,6 @@ impl FileRewriter<'_> {
             // so the rewriter stays silent and returns `false`.
             Resolution::Rejected { .. } | Resolution::Skip => return false,
         }
-        true
     }
 }
 
