@@ -2313,7 +2313,7 @@ impl FileRewriter<'_> {
                 // marker's shape, so a model-written `📎 ` is consumed rather
                 // than doubled (#2001).
                 push_file_marker(&mut self.rich, label, target);
-                return true;
+                true
             }
             // A remote link, an in-page anchor or any other URI scheme has
             // nothing to embed here: the rich plane's media array is built from
@@ -2321,7 +2321,7 @@ impl FileRewriter<'_> {
             // the #286 loss this call site must not reintroduce. A rejected
             // candidate is the SCAN's to report — it walks the same references,
             // so the rewriter stays silent and returns `false`.
-            Resolution::Rejected { .. } | Resolution::Skip => return false,
+            Resolution::Rejected { .. } | Resolution::Skip => false,
         }
     }
 }
