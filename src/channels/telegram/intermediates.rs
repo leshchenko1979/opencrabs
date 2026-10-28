@@ -357,9 +357,9 @@ pub(crate) fn intermediate_file_links(
 /// (#779).
 ///
 /// The rich plane's entries are the wrong source for "which documents need a
-/// bubble of their own": with `inline_markdown_documents` off, a markdown
-/// reference comes back from the file walk as a plain `📎 <label>` marker with
-/// NO entry recorded, so a list derived from `entries` silently drops it. The
+/// bubble of their own": #801 made the file walk record NO entry for any
+/// document, so every resolvable file comes back from it as a plain
+/// `📎 <label>` marker and a list derived from `entries` drops all of them. The
 /// scan is the walk that saw every reference, so the skipped set is read off it
 /// and then narrowed twice:
 ///
@@ -410,12 +410,13 @@ pub(crate) struct IntermediateMedia<'a> {
     /// the pictures, each carrying its own `MediaKind::Video`; only when the
     /// rich send is refused does a clip fall back to its own bubble.
     pub(crate) videos: &'a crate::utils::image::LocalVideoRewrite,
-    /// The file family's rewrite for the RICH plane (#1918). Built on the image
-    /// family's rich form, so every family's `tg://` reference survives in
-    /// `rich` for the shared media array to answer. Its entries ride that same
-    /// array as `MediaKind::Document`, each carrying the file's own name — the
-    /// promoted bubble inlines the document at its reference instead of showing
-    /// the bare `📎 <label>` marker the #1918 probe found on `90894`.
+    /// The file family's rewrite for the RICH plane (#1918, #801). Built on the
+    /// image family's rich form, so every family's `tg://` reference survives in
+    /// `rich` for the shared media array to answer — but it records NO entry for
+    /// any document: Telegram accepts a `{"type":"document"}` media entry with
+    /// `ok:true` and then delivers nothing (owner report, 2026-10-28), so the
+    /// only leg a document has is the detached floor, which reads `rich`'s
+    /// `📎 <label>` markers and ships a bubble per file.
     pub(crate) rich_files: &'a crate::utils::image::LocalFileRewrite,
 }
 
@@ -451,12 +452,12 @@ pub(crate) async fn deliver_intermediate_message(
     // dedup record, the rich send and the HTML fallback all see the same
     // expanded shape. The HTML path reflows again internally but is idempotent.
     let stripped_expanded = super::rich::reflow_collapsed_tables(&rw_stripped.stripped);
-    // #1918: the FILE family now owns the rich plane's document references, so
-    // the rich body is the FILE walk's `rich` form — built on the image family's
-    // rich form, so it carries `tg://photo`, `tg://video` AND `tg://document`
-    // references, each answered by the shared media array below. Taking the
-    // marker form here instead (which is what the pre-#1918 line did) would
-    // leave the array's document entries with no reference to attach to.
+    // #1918: the FILE family's rich form is still the body's source, but since
+    // #801 it carries no document reference — only the image and video families
+    // put `tg://` refs in it, and every document comes back as the `📎 <label>`
+    // marker the shared media array below has nothing to answer. The marker form
+    // is therefore what the reader gets, and the detached file floor is the leg
+    // that puts a bubble behind each marker.
     //
     // The HTML fallback and the dedup record keep the MARKER form, deliberately:
     // that plane has no media array, so a `tg://document` reference there would
@@ -528,12 +529,14 @@ pub(crate) async fn deliver_intermediate_message(
     media.extend(entries);
     failures.extend(video_failures);
 
-    // #1918: the documents ride the SAME array, each carrying its own kind and
-    // the file's OWN name — the entry's part name is what Telegram shows as the
-    // file name in the chat, and bytes alone cannot recover it (`document_part_name`).
-    // Their `tg://document?id=docN` references are present in `rich` because it
-    // is the file walk's own rich form. A read that fails here joins the failure
-    // list, never a panic.
+    // #1918: the documents WOULD ride the SAME array, each carrying its own kind
+    // and the file's OWN name — but #801 made this read a no-op by construction:
+    // the file walk records no entry for any document, because Telegram accepts
+    // a `{"type":"document"}` media entry with `ok:true` and then delivers
+    // nothing (owner report, 2026-10-28). It stays as the guard rather than
+    // being deleted: a path that starts emitting a document entry again must
+    // land in this array, not ship the same bytes twice. A read that fails here
+    // joins the failure list, never a panic.
     let (entries, file_read_failures, file_read_paths) = super::delivery::read_media_entries(
         &walks.rich_files.entries,
         super::rich::mermaid::MediaKind::Document,
@@ -557,12 +560,12 @@ pub(crate) async fn deliver_intermediate_message(
         .filter(|entry| file_read_paths.contains(&entry.file.path))
         .map(|entry| entry.file.clone())
         .collect();
-    // #779: the documents the RICH plane did NOT take. With
-    // `inline_markdown_documents` off a markdown reference comes back as the
-    // plain `📎 <label>` marker with NO entry in `rich_files.entries`, so a list
-    // derived from those entries alone has no leg on EITHER plane: the marker is
-    // emitted with nothing behind it and no address to link to — the dead-anchor
-    // shape the owner reported on bubble 93966. The predicate lives in
+    // #779: the documents the RICH plane did NOT take — which since #801 is
+    // every one of them. A reference comes back as the plain `📎 <label>` marker
+    // with NO entry in `rich_files.entries`, so a list derived from those
+    // entries alone has no leg on EITHER plane: the marker is emitted with
+    // nothing behind it and no address to link to — the dead-anchor shape the
+    // owner reported on bubble 93966. The predicate lives in
     // `files_the_rich_plane_skipped` above, where it is unit-tested.
     let skipped_files: Vec<crate::utils::image::LocalFile> = {
         let delivered = {

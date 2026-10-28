@@ -197,13 +197,13 @@ pub(crate) async fn deliver_final_response(
             // #1916: the file scan runs LAST, on the text the image plane left
             // behind, so a reference one plane already claimed is never seen by
             // this one — the same one-owner-per-reference invariant the video
-            // leg states above. #1918 gives the family the rich-plane TWIN it
-            // lacked — the `tg://document` media kind — so the #487
-            // plane-ownership split now applies to it exactly as it does to the
-            // other two: the rich plane inlines the document AT its reference,
-            // and the send floor below is gated on that ownership. This scan
-            // still owns the HTML plane: the `📎 <label>` marker the reader
-            // falls back to, and the failure list that notice names.
+            // leg states above. #1918 gave the family a rich-plane twin (a
+            // `tg://document` media kind); #801 took it away again, because
+            // Telegram accepts that entry and delivers nothing, so the family
+            // has no rich plane at all and the send floor below is its ONLY leg
+            // — ungated, always on. This scan owns the HTML plane too: the
+            // `📎 <label>` marker the reader falls back to, and the failure list
+            // that notice names.
             let file_scan = crate::utils::extract_local_files(
                 &image_scan.text,
                 Some(image_cwd.as_path()),
@@ -346,7 +346,7 @@ pub(crate) async fn deliver_final_response(
                     "img",
                     &delivered,
                 );
-                // #1918: the FILE walk runs LAST, on the image family's rich
+                // #801: the FILE walk runs LAST, on the image family's rich
                 // form — the same one-owner-per-reference order the text floor
                 // uses (`extract_local_videos` → `extract_local_images` →
                 // `extract_local_files`). It must run here rather than over
@@ -354,25 +354,16 @@ pub(crate) async fn deliver_final_response(
                 // `vw.rich`: a reference an earlier family already claimed must
                 // not be judged twice. A `![pic](tg://photo?id=img0)` reference
                 // the image walk produced classifies as a media ref, so this
-                // walk leaves it verbatim and the two families' references both
-                // survive in `rich_fw.rich` for the media array to answer.
-                // `doc` is its own id prefix for the reason `vid` is: entries
-                // are matched to references BY ID inside one message's media
-                // array, so a shared prefix would let a document entry answer a
-                // picture reference.
+                // walk leaves it verbatim.
+                //
+                // It records NO entries: a document can never inline in a rich
+                // message (#801 — Telegram accepts the entry and drops it), so
+                // every file comes back as the plain `📎 <label>` marker and the
+                // detached file floor below is its delivery leg.
                 let fw = crate::utils::image::rewrite_local_files(
                     &rw.rich,
                     Some(image_cwd.as_path()),
-                    crate::utils::DOC_ID_PREFIX,
                     &delivered,
-                    // #1968: the markdown opt-out is applied INSIDE the walk, so
-                    // a `.md` reference comes back as the plain marker and no
-                    // entry is recorded for it — which is what keeps the rich
-                    // plane from inlining it and hands it to the floor below.
-                    crate::config::Config::current()
-                        .channels
-                        .telegram
-                        .inline_markdown_documents,
                 );
                 (rw, vw, fw)
             };
@@ -409,15 +400,15 @@ pub(crate) async fn deliver_final_response(
             // here joins the FILE refusal list, not the image one: the notice
             // names the family, and this is a document.
             //
-            // The reference that answers these entries is `tg://document?id=docN`,
-            // which `rich_fw.rich` carries and the text plane's marker does not:
-            // this is the leg that renders the document AT the reference instead
-            // of as a detached bubble, which is the whole point of the kind.
-            // #1968: with `inline_markdown_documents` off the FILE WALK has
-            // already left every markdown document as a plain marker and
-            // recorded no entry for it, so nothing here needs to filter — this
-            // carries exactly the documents the rich plane owns, and the
-            // detached file floor delivers the ones it does not.
+            // #801: this read is now a no-op BY CONSTRUCTION, and it stays as
+            // the guard rather than being deleted. The file walk above records
+            // no entry for any document — every resolvable file comes back as
+            // the plain `📎 <label>` marker — so `rich_fw.entries` is always
+            // empty here and the detached file floor is the only delivery leg a
+            // document has. The read is kept because `MediaKind::Document` is
+            // still a live kind on the ownership predicate: a path that starts
+            // emitting one again must land in this array (and so suppress the
+            // floor) instead of silently shipping the same bytes twice.
             let (media, failures, _) = read_media_entries(
                 &rich_fw.entries,
                 MediaKind::Document,
@@ -845,14 +836,14 @@ pub(crate) async fn deliver_final_response(
             // (the flag off, or a body the rich plane declines), and `delivered`
             // is then empty because nothing was sent.
             //
-            // #1968: the suppression is now per-FILE, not per-family. With
-            // `inline_markdown_documents` off a markdown document is deliberately absent
-            // from the rich plane's entries, so a reply that also carries, say,
-            // a PDF would read `rich_owns_documents == true` and this leg would
-            // ship nothing — leaving the markdown file with no delivery leg at
-            // all. The floor therefore sends exactly the files the rich plane
-            // did NOT take. Normally the two sets coincide (the plane owns all
-            // of them or none), so every other kind behaves as before.
+            // #1968: the suppression is per-FILE, not per-family. #801 made the
+            // rich plane take NO document at all, so this leg is now the file
+            // family's ONLY leg: a markdown file, a PDF, a CSV — every resolvable
+            // one comes back from the walk as a plain marker with no entry, and
+            // the floor ships exactly the files the rich plane did NOT take.
+            // Normally the two sets coincide (the plane owns none of them), so
+            // the filter is defensive: it is what keeps a future producer from
+            // shipping a document twice.
             let files_the_rich_plane_skipped: Vec<crate::utils::image::LocalFile> =
                 if rich_owns_documents {
                     file_paths
@@ -1265,16 +1256,17 @@ pub(crate) async fn deliver_final_response(
                     // keeps today's text, byte for byte.
                     // #465/#1918: `rich_fw.rich` is the LAST walk's output —
                     // the video walk's form fed through the image walk, then
-                    // through the file walk — so it carries `tg://photo`,
-                    // `tg://video` AND `tg://document` references and is the
-                    // correct body for any of the three families. It must be
-                    // the final walk's form, not a named family's: the earlier
-                    // walk's output is missing the later family's references,
-                    // and the array below is shared, so a body whose references
-                    // are not in it would ship dead markdown. When no family
-                    // claimed anything it is byte-identical to `rich_rw.rich`,
-                    // which is what the pre-#1918 line sent — so the image and
-                    // video planes are unchanged.
+                    // through the file walk — so it carries `tg://photo` and
+                    // `tg://video` references (a `tg://document` one is no
+                    // longer produced: #801) and is the correct body for either
+                    // family. It must be the final walk's form, not a named
+                    // family's: the earlier walk's output is missing the later
+                    // family's references, and the array below is shared, so a
+                    // body whose references are not in it would ship dead
+                    // markdown. When no family claimed anything it is
+                    // byte-identical to `rich_rw.rich`, which is what the
+                    // pre-#1918 line sent — so the image and video planes are
+                    // unchanged.
                     let rich_md = if rich_owns_media {
                         rich_fw.rich.clone()
                     } else {
@@ -2510,25 +2502,17 @@ pub(crate) async fn handle_intermediate(
     let rw_rich = crate::utils::image::rewrite_local_images(&vw.rich, Some(cwd), "img", &delivered);
     let rw_stripped =
         crate::utils::image::rewrite_local_images(&vw.stripped, Some(cwd), "img", &delivered);
-    // #1918: the FILE family walks LAST, on the image family's rich form — the
-    // same one-owner-per-reference order the final leg uses. Its entries ride
-    // the promoted bubble's media array as `MediaKind::Document`, so the
-    // document renders AT its reference instead of as a bare `📎 <label>` (the
-    // hole the #1918 probe found on rich bubble `90894`). `doc` is its own id
-    // prefix for the reason `vid` is: entries are matched to references BY ID
-    // inside one message's media array.
+    // #801: the FILE family walks LAST, on the image family's rich form — the
+    // same one-owner-per-reference order the final leg uses. It records NO
+    // entries, so a promoted document comes back as the plain `📎 <label>`
+    // marker and rides the detached floor like every other file. #1918 put it
+    // in the media array as `MediaKind::Document` so it would render "at its
+    // reference"; the API silently drops that entry, so the reference was always
+    // an inert link with no bubble behind it (owner report, 2026-10-28).
     let fw_rich = crate::utils::image::rewrite_local_files(
         &rw_rich.rich,
         Some(cwd),
-        crate::utils::DOC_ID_PREFIX,
         &delivered,
-        // #1968: same gate as the final leg — a markdown document promoted
-        // with an intermediate must not be inlined either, or the bubble the
-        // reader keeps would carry the un-openable form.
-        crate::config::Config::current()
-            .channels
-            .telegram
-            .inline_markdown_documents,
     );
 
     // 4. A fresh picture is report-shaped content on its own (#502); anything
@@ -2549,10 +2533,13 @@ pub(crate) async fn handle_intermediate(
         .is_quiet_for(&chat.0.to_string());
     let has_fresh_media = !(rw_stripped.entries.is_empty()
         && vw.entries.is_empty()
-        // #1918: a fresh DOCUMENT is media too. Leaving it out would fold a
-        // document-only intermediate into the collapsed block, where the file
-        // walk's `tg://document` reference has no media array to answer it —
-        // the exact detached-bubble shape this task removes.
+        // #1918: a fresh DOCUMENT used to be media too. #801 removed that term
+        // from the decision in substance — the file walk records no entry, so
+        // `fw_rich.entries` is empty by construction and the term can never
+        // fire. It stays as the guard: a document-only intermediate is promoted
+        // by the FILE FLOOR below (the marker has a bubble behind it), never by
+        // this predicate, and a future producer that records an entry must
+        // promote here rather than fold a file into the collapsed block.
         && fw_rich.entries.is_empty());
     let promote = has_fresh_media
         || (!quiet && super::intermediates::should_promote_intermediate(&rw_stripped.stripped, 0));

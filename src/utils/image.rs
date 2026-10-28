@@ -409,13 +409,6 @@ pub const IMG_ID_PREFIX: &str = "img";
 /// side by side.
 pub const VID_ID_PREFIX: &str = "vid";
 
-/// The media-id prefix the file family gives a rewritten reference: the
-/// `docN` in `tg://document?id=docN` (#1918). A third distinct literal for the
-/// reason [`IMG_ID_PREFIX`] states: entries are matched to references BY ID
-/// inside one message's media array, so a shared prefix would let a document
-/// entry answer a picture's reference.
-pub const DOC_ID_PREFIX: &str = "doc";
-
 /// Why a local media candidate could not become an attachment.
 ///
 /// One enum for every local-media family — images, video (#465) and files
@@ -2067,10 +2060,9 @@ pub(crate) fn disarm_autolink(text: &str) -> String {
 /// The result is passed through [`disarm_autolink`] (#1938) so a dotted name
 /// reads as a filename in both planes rather than as a domain link.
 ///
-/// `pub(crate)` exists for this crate's tests alone — every production caller
-/// lives in this module (`push_file_marker`, `push_document_ref`) — so it is
-/// fork-internal API and deliberately NOT part of the upstream port surface
-/// (#1918 review f9).
+/// `pub(crate)` exists for this crate's tests alone — its one production caller
+/// is [`push_file_marker`] — so it is fork-internal API and deliberately NOT
+/// part of the upstream port surface (#1918 review f9).
 pub(crate) fn file_marker_text(label: &str, target: &str) -> String {
     let trimmed = label.trim();
     let text = if !trimmed.is_empty() {
@@ -2116,33 +2108,15 @@ fn consume_marker_prefix(buf: &mut String) {
 /// Append the text-plane marker for a resolved file — `📎 <label>` — and return
 /// the byte span it occupies in `out` (#1918). A `📎 ` the model wrote itself is
 /// consumed first, so the marker is emitted once whichever side wrote it
-/// (#2001). The single home of the marker's shape, shared with the rich plane's
-/// [`push_document_ref`].
+/// (#2001). The single home of the marker's shape, and since #801 the only shape
+/// a document gets in EITHER plane — the rich plane has no document form left to
+/// differ from.
 fn push_file_marker(out: &mut String, label: &str, target: &str) -> std::ops::Range<usize> {
     consume_marker_prefix(out);
     let start = out.len();
     out.push_str("📎 ");
     out.push_str(&file_marker_text(label, target));
     start..out.len()
-}
-
-/// Append the rich-plane reference for a resolved file —
-/// `[📎 <label>](tg://document?id=<id>)` — whose LINK TEXT carries the same
-/// `📎 <label>` the text plane's marker does, so the reader's anchor is
-/// identical in both planes. A model-written `📎 ` is consumed first for the
-/// same reason as [`push_file_marker`].
-///
-/// LINK syntax, never image syntax (#800). Telegram reads `![alt](tg://…)` as a
-/// PHOTO reference: aimed at an entry whose `media[].media.type` is `document`
-/// it answers `RICH_MESSAGE_PHOTO_INVALID` and rejects the WHOLE rich send, so
-/// the reply loses its text and every attachment in it — not just that one
-/// reference. The identical reference in link syntax is accepted; measured live
-/// with the same media array, the `!` was the only variable between the 400 and
-/// the 200.
-fn push_document_ref(out: &mut String, label: &str, target: &str, id: &str) {
-    consume_marker_prefix(out);
-    let marker = file_marker_text(label, target);
-    out.push_str(&format!("[📎 {marker}](tg://document?id={id})"));
 }
 
 /// Scan a reply for markdown links to local files and hand back the text with
@@ -2221,7 +2195,15 @@ pub fn extract_local_files(text: &str, base_dir: Option<&Path>) -> LocalFileScan
 }
 
 /// A resolved local file together with the media-array id its rewritten
-/// reference points at: `tg://document?id=<id>`.
+/// reference WOULD point at: `tg://document?id=<id>`.
+///
+/// #801: no walk produces one of these any more. Telegram accepts a
+/// `{"type":"document"}` media entry with `ok:true` and then delivers nothing
+/// (measured 2026-10-28, five multipart probes), so a reference pointing at such
+/// an entry was always an inert link. The type survives as the element of
+/// [`LocalFileRewrite::entries`], which is empty by construction and read as a
+/// guard: a path that starts recording one again must suppress the detached
+/// floor rather than ship the same bytes twice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedFileRef {
     /// The id the rewritten reference points at.
@@ -2240,29 +2222,33 @@ impl MediaSource for ResolvedFileRef {
     }
 }
 
-/// A text prepared for the rich media plane's document half (#1918).
+/// A text prepared for the rich media plane's file half (#1918 → #801).
 ///
 /// The document twin of [`rewrite_local_images`], and it carries ONE text buffer
-/// where that one carries two. The file family's other plane is the MARKER form
-/// (`📎 <label>`), which [`extract_local_files`] already produces for the HTML
-/// body and the dedup record — and it is the only honest shape there: that plane
-/// has no media array to answer a `tg://document` reference, and the marker is
-/// the reader's sole anchor to the document. A strip buffer here would be a
-/// second home for a shape the scan owns, and a wrong one. Rejected candidates
-/// are the scan's to report for the same reason: it walks the same references,
-/// so a copy of that list here would be a second home for one predicate.
+/// where that one carries two. #801 leaves this walk with a single behaviour:
+/// every resolvable file becomes the plain `📎 <label>` MARKER, in place, and NO
+/// entry is recorded — so `rich` and `entries` are the marker form and an empty
+/// list respectively. The marker is the only honest shape on this plane: Telegram
+/// drops a `{"type":"document"}` media entry, so there is no array to answer a
+/// reference, and the marker is the reader's sole anchor to the document. The
+/// detached file floor is the leg that puts a bubble behind it.
+///
+/// Rejected candidates are [`extract_local_files`]'s to report, for the same
+/// reason a strip buffer would be wrong here: it walks the same references, so a
+/// copy of that list would be a second home for one predicate.
 #[derive(Debug, Clone, Default)]
 pub struct LocalFileRewrite {
-    /// Input with every resolvable local-file link replaced IN PLACE by
-    /// `[📎 <label>](tg://document?id=<prefix><n>)` — LINK syntax, never image
-    /// syntax (#800). Links inside code spans,
-    /// remote targets and existing Telegram media refs are left byte-identical.
-    /// The id prefix is passed by the caller (`doc` at the delivery site) so the
-    /// document namespace cannot collide with the image or video ones inside a
-    /// single message's `media` array, where entries are matched to references
-    /// BY ID.
+    /// Input with every resolvable local-file link replaced IN PLACE by the
+    /// plain `📎 <label>` marker. Links inside code spans, remote targets and
+    /// existing Telegram media refs are left byte-identical.
+    ///
+    /// #1918 briefly wrote `[📎 <label>](tg://document?id=<prefix><n>)` here —
+    /// LINK syntax, never image syntax (#800) — and #801 retired it: the
+    /// reference pointed at a media entry Telegram silently drops, so it
+    /// rendered as a clickable dead link with no bubble behind it.
     pub rich: String,
-    /// Resolved files in order of appearance, with the id each got.
+    /// Resolved files in order of appearance, with the id each got. Always
+    /// EMPTY since #801 — see [`ResolvedFileRef`] for why the field stays.
     pub entries: Vec<ResolvedFileRef>,
 }
 
@@ -2270,15 +2256,7 @@ pub struct LocalFileRewrite {
 /// the walk itself stays a single readable loop.
 struct FileRewriter<'a> {
     base_dir: Option<&'a Path>,
-    id_prefix: &'a str,
     already_delivered: &'a [PathBuf],
-    /// #1968: when false, a MARKDOWN document is left as the plain
-    /// `📎 <label>` marker instead of being rewritten to an inlined
-    /// `tg://document` reference. Telegram's Android client opens a `.md`
-    /// ATTACHMENT but not a document inlined into a rich message. No entry is
-    /// recorded for it either, so the file falls to the detached file floor
-    /// rather than to the rich plane's media array.
-    inline_markdown_documents: bool,
     rich: String,
     entries: Vec<ResolvedFileRef>,
 }
@@ -2304,44 +2282,38 @@ impl FileRewriter<'_> {
                     // nothing: a delivered document is not a lost one.
                     return true;
                 }
-                // #1968: the markdown inline gate. A markdown document is left
-                // as the plain `📎 <label>` marker the TEXT plane already
-                // shows — same buffer shape, same disarmed label — and no entry
-                // is recorded, so the rich plane never inlines it and the
-                // detached file floor delivers it instead. Telegram's Android
-                // client opens a `.md` ATTACHMENT but not a document inlined
-                // into a rich message, so the marker is the reader's anchor
-                // either way and nothing is lost by declining the inline form.
+                // #801: a document can NEVER inline in a rich message, so there
+                // is no form to choose between — the marker is the only shape
+                // that leads the reader to a real file.
+                //
+                // Telegram accepts a `{"type":"document"}` media entry with
+                // `ok:true` and then silently DROPS it. Measured live on
+                // 2026-10-28 with five multipart `sendRichMessage` probes: a
+                // `document` entry delivered no attachment in link syntax, in
+                // image syntax, or with an explicit `file_name`; a `video` entry
+                // behaved the same way; only `photo` attached. Image syntax aimed
+                // at a document entry is worse still — a hard
+                // `RICH_MESSAGE_DOCUMENT_INVALID`. So the `tg://document?id=docN`
+                // reference #1918 introduced always rendered as an INERT link:
+                // clickable, and dead, with no bubble behind it (owner report).
+                //
+                // Every resolvable document is therefore left as the plain
+                // `📎 <label>` marker the TEXT plane already shows — same buffer
+                // shape, same disarmed label — and NO entry is recorded, so the
+                // rich plane never claims it and the detached file floor
+                // delivers it as its own bubble. That is the shape that already
+                // worked before #1918, and the only one a client can open.
+                //
+                // #1968 reached the same conclusion for markdown alone, on the
+                // narrower ground that the Android client will not open an
+                // inlined `.md`. The real rule is wider: no document of any kind
+                // inlines. That carve-out is gone, not generalised.
+                //
                 // Emitted through [`push_file_marker`], the single home of the
                 // marker's shape, so a model-written `📎 ` is consumed rather
                 // than doubled (#2001).
-                if !self.inline_markdown_documents && is_markdown_path(&path) {
-                    push_file_marker(&mut self.rich, label, target);
-                    return true;
-                }
-                let id = format!("{}{}", self.id_prefix, self.entries.len());
-                let caption = if label.trim().is_empty() {
-                    None
-                } else {
-                    Some(label.to_string())
-                };
-                // The link text carries the same `📎 <label>` the text plane's
-                // marker does, so the reader's anchor is identical in both
-                // planes; an empty label falls back to the file's own name.
-                // #2001: the emission consumes a model-written `📎 ` first, so
-                // the marker never doubles (`📎 [📎 <label>](…)`).
-                // #800: LINK syntax — image syntax aimed at a document entry is
-                // what Telegram rejects with `RICH_MESSAGE_PHOTO_INVALID`.
-                push_document_ref(&mut self.rich, label, target, &id);
-                self.entries.push(ResolvedFileRef {
-                    id,
-                    file: LocalFile {
-                        path,
-                        caption,
-                        // Not from a scan: no position in any scan buffer.
-                        marker_span: None,
-                    },
-                });
+                push_file_marker(&mut self.rich, label, target);
+                return true;
             }
             // A remote link, an in-page anchor or any other URI scheme has
             // nothing to embed here: the rich plane's media array is built from
@@ -2355,22 +2327,9 @@ impl FileRewriter<'_> {
     }
 }
 
-/// Whether a local path names a MARKDOWN document, by extension.
-///
-/// The one predicate behind `channels.telegram.inline_markdown_documents` (#1968): a
-/// markdown document is the single kind Telegram's Android client cannot open
-/// when the rich plane inlines it, so it is the kind that flag detaches. Kept
-/// here rather than inline at the call site so the delivery gate and any
-/// future consumer answer the question the same way.
-pub fn is_markdown_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
-}
-
 /// Scan a reply for markdown links to local files and hand back the rich form
-/// with each resolvable link replaced in place by a `tg://document` media
-/// reference (#1918), together with the validated files and the id each got.
+/// with each resolvable link replaced in place by the plain `📎 <label>`
+/// marker the text plane already shows.
 ///
 /// The document twin of [`rewrite_local_images`], and it obeys the same two
 /// rules the scan does: a link inside a code span stays byte-identical, and a
@@ -2380,23 +2339,21 @@ pub fn is_markdown_path(path: &std::path::Path) -> bool {
 /// own label and a silent strip would delete the reader's only clue about what
 /// was referenced.
 ///
-/// `inline_markdown_documents` mirrors `channels.telegram.inline_markdown_documents`
-/// (#1968): when false (the default), a markdown document is left as the plain
-/// `📎 <label>` marker instead of a `tg://document` reference and records no
-/// entry, so the caller delivers it detached.
+/// #801: NO document inlines in a rich message, so this walk emits no
+/// reference and records no entry — every resolvable file falls to the detached
+/// file floor, which is the only delivery leg that produces a bubble a client
+/// can open. The `entries` field is therefore always empty from this walk; it
+/// survives because the promoted-intermediate path reads it to learn which
+/// files were already delivered (see `already_delivered`).
 pub fn rewrite_local_files(
     text: &str,
     base_dir: Option<&Path>,
-    id_prefix: &str,
     already_delivered: &[PathBuf],
-    inline_markdown_documents: bool,
 ) -> LocalFileRewrite {
     let regions = code_regions(text);
     let mut rw = FileRewriter {
         base_dir,
-        id_prefix,
         already_delivered,
-        inline_markdown_documents,
         rich: String::with_capacity(text.len()),
         entries: Vec::new(),
     };

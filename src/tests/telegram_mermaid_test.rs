@@ -740,26 +740,32 @@ fn build_body_markdown_media_target_neutralises_orphan_refs() {
     );
 }
 
-/// #800: a `tg://document?id=` reference rides LINK syntax, never markdown IMAGE
+/// #800: a non-photo `tg://` reference rides LINK syntax, never markdown IMAGE
 /// syntax. Telegram resolves `![alt](tg://…)` as a PHOTO embed: aimed at an entry
-/// whose `media[].media.type` is `document` it answers `RICH_MESSAGE_PHOTO_INVALID`
-/// and rejects the WHOLE rich send, so the reply loses its text and every attachment
-/// in it. Measured live with the identical media array — the `!` was the only
-/// variable between the 400 and the 200.
+/// of any other kind it answers `RICH_MESSAGE_PHOTO_INVALID` and rejects the WHOLE
+/// rich send, so the reply loses its text and every attachment in it. Measured live
+/// with the identical media array — the `!` was the only variable between the 400
+/// and the 200.
 ///
 /// The shield is the last line before the wire, so it repairs the shape too: a
 /// reference naming a LIVE entry that image syntax cannot render loses its `!` (the
 /// link form Telegram accepts), and only a reference naming NOTHING is escaped.
-/// #1921's own half survives — a document reference is still judged against THIS
-/// request's media array, never by scheme alone.
+/// #1921's own half survives — a reference is still judged against THIS request's
+/// media array, never by scheme alone.
+///
+/// #801: the fixture is a VIDEO entry. The document kind was this test's original
+/// subject, but no document ever rides the media array now — Telegram accepts a
+/// `{"type":"document"}` entry and delivers nothing — so a document fixture would
+/// pin a shape the producer cannot emit. The video family still writes image syntax
+/// (`![clip](tg://video?id=v0)`), which is exactly the 400 class this guards.
 #[test]
-fn document_refs_ride_link_syntax_never_image_syntax() {
+fn non_photo_refs_ride_link_syntax_never_image_syntax() {
     let media = vec![MediaEntry {
-        kind: MediaKind::Document,
-        id: "q3".into(),
+        kind: MediaKind::Video,
+        id: "v0".into(),
         url: None,
-        bytes: Some(b"%PDF-1.7".to_vec()),
-        name: Some("q3-report.pdf".into()),
+        bytes: Some(b"\x00\x00\x00\x18ftypmp42".to_vec()),
+        name: None,
     }];
 
     // The shipped form: a LINK. It must reach the wire exactly as written.
@@ -767,7 +773,7 @@ fn document_refs_ride_link_syntax_never_image_syntax() {
         -100,
         None,
         None,
-        "kept [📎 q3](tg://document?id=q3)",
+        "kept [clip](tg://video?id=v0)",
         &media,
         None,
     );
@@ -775,7 +781,7 @@ fn document_refs_ride_link_syntax_never_image_syntax() {
         .as_str()
         .expect("rich markdown");
     assert_eq!(
-        md, "kept [📎 q3](tg://document?id=q3)",
+        md, "kept [clip](tg://video?id=v0)",
         "the link form is the one Telegram accepts and must pass through untouched"
     );
 
@@ -785,7 +791,7 @@ fn document_refs_ride_link_syntax_never_image_syntax() {
         -100,
         None,
         None,
-        "kept ![📎 q3](tg://document?id=q3)",
+        "kept ![clip](tg://video?id=v0)",
         &media,
         None,
     );
@@ -793,12 +799,12 @@ fn document_refs_ride_link_syntax_never_image_syntax() {
         .as_str()
         .expect("rich markdown");
     assert_eq!(
-        md, "kept [📎 q3](tg://document?id=q3)",
-        "image syntax at a document entry is the 400 class — demote it to the link form"
+        md, "kept [clip](tg://video?id=v0)",
+        "image syntax at a video entry is the 400 class — demote it to the link form"
     );
     assert!(
-        !md.contains("![📎"),
-        "no image syntax may reach the wire for a document entry: {md}"
+        !md.contains("![clip"),
+        "no image syntax may reach the wire for a video entry: {md}"
     );
 
     // CONTROL: the same syntax with a PHOTO entry keeps its inline render, so the
@@ -826,13 +832,13 @@ fn document_refs_ride_link_syntax_never_image_syntax() {
         "a photo entry keeps image syntax — the fix must not flatten photos"
     );
 
-    // #1921 orphan half: a document reference naming NOTHING is neutralised, never
-    // left live for Telegram to reject the whole message over.
+    // #1921 orphan half: a reference naming NOTHING is neutralised, never left live
+    // for Telegram to reject the whole message over.
     let body = build_body_markdown_media_target(
         -100,
         None,
         None,
-        "dropped [📎 x](tg://document?id=absent)",
+        "dropped [x](tg://video?id=absent)",
         &media,
         None,
     );
@@ -840,12 +846,12 @@ fn document_refs_ride_link_syntax_never_image_syntax() {
         .as_str()
         .expect("rich markdown");
     assert!(
-        !md.contains("tg://document?id=absent"),
-        "an orphan document ref must not reach the wire: {md}"
+        !md.contains("tg://video?id=absent"),
+        "an orphan reference must not reach the wire: {md}"
     );
     assert!(
-        md.contains("tg:document?id=absent"),
-        "the orphan document ref must be neutralised in place: {md}"
+        md.contains("tg:video?id=absent"),
+        "the orphan reference must be neutralised in place: {md}"
     );
 }
 
@@ -1262,10 +1268,14 @@ fn orphan_photo_refs_are_neutralised_but_resolved_ones_survive() {
 
 /// #334 (H2) / #1921: the orphan neutralizer covers EVERY scheme in the register,
 /// `attach://` included — it was previously only reached by the markdown image shield, so a
-/// BARE prose `attach://X` in a rich body still took the whole message down. #1921 added
-/// `tg://document?id=` — the fourth documented `tg://` kind, absent from this register until then.
-/// included — it was previously only reached by the markdown image shield, so a
 /// BARE prose `attach://X` in a rich body still took the whole message down.
+///
+/// #801 keeps the `tg://document` row even though nothing GENERATES that reference any
+/// more (every document now takes the detached floor and a `📎` marker). The register's job
+/// is not to describe our own output — it is to defuse a reference that ARRIVES in the body,
+/// and prose can carry one as an example of the construct (see `ORPHAN_MEDIA_SCHEMES` in
+/// `rich/mermaid.rs`). Dropping the row would leave that path able to reject a whole message
+/// over a scheme Telegram still resolves, so it stays and this test keeps covering it.
 #[test]
 fn attach_and_tg_refs_are_neutralised_by_media_presence() {
     let media = vec![MediaEntry {

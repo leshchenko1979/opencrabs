@@ -512,11 +512,16 @@ pub(crate) enum MediaKind {
     /// uploaded as `video/mp4`; a file that is not MPEG4 belongs on the send
     /// floor as a document instead (D3), so it never becomes this kind.
     Video,
-    /// A local document (#1918) — a PDF, an archive, any file the reply linked
-    /// to and the rich plane inlines. The bytes are uploaded with the file's own
-    /// name (Step 1's `document_part_name`), so the reader sees `q3-report.pdf`
-    /// rather than a bare `file`. `as_str` emits the fourth documented
-    /// `tg://` kind, which the shield has recognised since #1921.
+    /// A local document (#1918) — the kind #1918 built to inline a PDF or an
+    /// archive in the rich message. **No producer emits it since #801:** Telegram
+    /// accepts a `{"type":"document"}` entry with `ok:true` and then delivers
+    /// nothing, so every document now takes the detached send floor and rides a
+    /// `📎 <label>` marker instead (`utils/image.rs`). The variant and its
+    /// `as_str` arm stay as a GUARD, not as a live path: `as_str` is what the
+    /// shield and the orphan register key on, and a kind whose string mapping
+    /// silently vanished would make a stray entry unrepresentable rather than
+    /// visible. `tg://document?id=` remains in the shield's register for the
+    /// same reason — a reference can still ARRIVE in a body as prose.
     Document,
 }
 

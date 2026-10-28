@@ -1015,21 +1015,37 @@ mod local_file_links {
 }
 
 // ---------------------------------------------------------------------------
-// The rich plane's document twin (#1918)
+// The rich plane's document walk (#1918 → #801)
 // ---------------------------------------------------------------------------
 
 /// `rewrite_local_files` — the document twin of `rewrite_local_images`. Where
-/// `extract_local_files` emits the `📎 <label>` MARKER the HTML plane needs, this
-/// one replaces a resolvable link IN PLACE with the `tg://document?id=docN`
-/// reference the rich plane's media array answers. The two walk the same
-/// references in the same order and share `resolve_file_target`, so they can
-/// never disagree about which links are files.
+/// the image walk replaces a resolvable picture IN PLACE with a `tg://photo`
+/// reference the rich plane's media array answers, the DOCUMENT walk does not
+/// inline at all: every resolvable document becomes the plain `📎 <label>`
+/// marker the text plane already shows, and NO entry is recorded, so the
+/// detached file floor delivers it as its own bubble.
+///
+/// #801: a document can never inline in a rich message. Telegram accepts a
+/// `{"type":"document"}` media entry with `ok:true` and then silently drops it —
+/// measured live on 2026-10-28 across five multipart `sendRichMessage` probes,
+/// where `document` delivered no attachment in link syntax, in image syntax, or
+/// with an explicit `file_name`, and `video` behaved identically; only `photo`
+/// attached. Image syntax aimed at a document entry is worse: a hard
+/// `RICH_MESSAGE_DOCUMENT_INVALID`. So the `tg://document?id=docN` reference
+/// #1918 introduced was ALWAYS an inert link — clickable and dead, with no
+/// bubble behind it.
+///
+/// These legs therefore assert the marker, not a reference. A leg that expects a
+/// `tg://document` string is asserting the defect, and one that expects an entry
+/// is asserting a claim the API does not honour.
 mod local_file_rewrite {
-    use crate::utils::image::{DOC_ID_PREFIX, rewrite_local_files};
+    use crate::utils::image::rewrite_local_files;
     use std::path::{Path, PathBuf};
 
     const PDF_BYTES: &[u8] = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n";
     const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x01\x02\x03\x04\x05\x06\x07";
+    const PY_BYTES: &[u8] = b"print('deck')\n";
+    const MD_BYTES: &[u8] = b"# state\n";
 
     fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
         let path = dir.join(name);
@@ -1038,32 +1054,27 @@ mod local_file_rewrite {
     }
 
     #[test]
-    fn a_local_file_link_becomes_a_document_reference_in_place() {
+    fn a_local_file_link_becomes_the_plain_marker_in_place() {
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3-report.pdf", PDF_BYTES);
         let rw = rewrite_local_files(
             &format!("before [Q3 report]({}) after", pdf.display()),
             Some(dir.path()),
-            DOC_ID_PREFIX,
             &[],
-            true,
         );
         assert_eq!(
-            rw.rich, "before [📎 Q3 report](tg://document?id=doc0) after",
-            "the link is replaced AT its position, never stripped"
+            rw.rich, "before 📎 Q3 report after",
+            "the link is replaced AT its position by the marker, never stripped"
         );
-        assert_eq!(rw.entries.len(), 1);
-        assert_eq!(rw.entries[0].id, "doc0");
-        assert_eq!(rw.entries[0].file.path, pdf);
-        assert_eq!(rw.entries[0].file.caption.as_deref(), Some("Q3 report"));
-        assert_eq!(
-            rw.entries[0].file.marker_span, None,
-            "a file that came from the rewrite has no position in any scan buffer"
+        assert!(
+            rw.entries.is_empty(),
+            "no entry: the rich plane must not claim a document it cannot attach, \
+             so the detached file floor is its delivery leg"
         );
     }
 
     #[test]
-    fn a_space_bearing_path_becomes_a_document_reference() {
+    fn a_space_bearing_path_becomes_a_marker() {
         // #793, rewrite half: the rich plane walks the same references through
         // the same parser, so the repair must reach it too — otherwise the scan
         // would ship the document while the rich body kept a dead raw path.
@@ -1072,134 +1083,109 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("see [Q3]({}) here", pdf.display()),
             Some(dir.path()),
-            DOC_ID_PREFIX,
             &[],
-            true,
         );
-        assert_eq!(rw.rich, "see [📎 Q3](tg://document?id=doc0) here");
-        assert_eq!(rw.entries.len(), 1);
-        assert_eq!(rw.entries[0].file.path, pdf);
+        assert_eq!(rw.rich, "see 📎 Q3 here");
+        assert!(rw.entries.is_empty());
     }
 
     #[test]
-    fn two_files_get_their_own_ids_in_order_of_appearance() {
+    fn every_file_in_the_reply_falls_to_the_marker_floor() {
+        // Kills the mutant that detaches only the FIRST file: a reply carrying
+        // two documents must leave two markers and no entries, or the second
+        // file is silently orphaned.
         let dir = tempfile::tempdir().expect("tempdir");
         let q3 = write_file(dir.path(), "q3.pdf", PDF_BYTES);
         let q4 = write_file(dir.path(), "q4.pdf", PDF_BYTES);
         let rw = rewrite_local_files(
             &format!("[Q3]({}) and [Q4]({})", q3.display(), q4.display()),
             Some(dir.path()),
-            DOC_ID_PREFIX,
             &[],
-            true,
+        );
+        assert_eq!(rw.rich, "📎 Q3 and 📎 Q4");
+        assert!(rw.entries.is_empty());
+    }
+
+    #[test]
+    fn no_document_reference_is_ever_emitted() {
+        // The #801 guard: the defect was a `tg://document?id=` reference that
+        // rendered as a dead link, so no document kind may produce one. Covers
+        // the four kinds that actually reach a rich reply — a mutant that
+        // re-inlines ANY one of them reintroduces the dead link for that kind.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let files = [
+            write_file(dir.path(), "state.md", MD_BYTES),
+            write_file(dir.path(), "q3.pdf", PDF_BYTES),
+            write_file(dir.path(), "slide.png", PNG_BYTES),
+            write_file(dir.path(), "ogre_deck.py", PY_BYTES),
+        ];
+        let text = files
+            .iter()
+            .map(|p| format!("[{}]({})", p.display(), p.display()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let rw = rewrite_local_files(&text, Some(dir.path()), &[]);
+        assert!(
+            !rw.rich.contains("tg://"),
+            "no document reference may survive the walk: {:?}",
+            rw.rich
         );
         assert_eq!(
-            rw.rich,
-            "[📎 Q3](tg://document?id=doc0) and [📎 Q4](tg://document?id=doc1)"
+            rw.rich.matches('📎').count(),
+            files.len(),
+            "one marker per file: {:?}",
+            rw.rich
         );
-        let ids: Vec<&str> = rw.entries.iter().map(|e| e.id.as_str()).collect();
-        assert_eq!(ids, vec!["doc0", "doc1"]);
-        let paths: Vec<PathBuf> = rw.entries.iter().map(|e| e.file.path.clone()).collect();
-        assert_eq!(paths, vec![q3, q4]);
+        assert!(rw.entries.is_empty());
     }
 
     #[test]
     fn an_empty_label_falls_back_to_the_files_own_name() {
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3-report.pdf", PDF_BYTES);
-        let rw = rewrite_local_files(
-            &format!("[]({})", pdf.display()),
-            Some(dir.path()),
-            DOC_ID_PREFIX,
-            &[],
-            true,
-        );
+        let rw = rewrite_local_files(&format!("[]({})", pdf.display()), Some(dir.path()), &[]);
         assert_eq!(
-            rw.rich,
-            "[📎 q3-report.\u{200b}pdf](tg://document?id=doc0)",
+            rw.rich, "📎 q3-report.\u{200b}pdf",
             "the reader always has something to anchor on — the name, disarmed of \
              the autolinker (#1938) so the marker is not read as a domain"
         );
-        assert_eq!(rw.entries.len(), 1);
-        assert!(
-            rw.entries[0].file.caption.is_none(),
-            "an empty label is no caption — the name is the marker's text, not its caption"
-        );
+        assert!(rw.entries.is_empty());
     }
 
     #[test]
-    fn a_dotted_label_is_disarmed_in_the_rich_alt_too() {
+    fn a_dotted_label_is_disarmed_in_the_marker_too() {
         // The live specimen (#1938, topic `Telegram: Rich Text`): the label
         // `1918-fix-state.md` was autolinked by the client as the Moldova
-        // ccTLD. The rich plane carries the same marker text in the `alt`, so
-        // the disarmer has to reach this plane as well as the HTML marker.
+        // ccTLD. The disarmer has to reach this plane as well as the HTML marker.
         let dir = tempfile::tempdir().expect("tempdir");
-        let md = write_file(dir.path(), "1918-fix-state.md", b"# state\n");
+        let md = write_file(dir.path(), "1918-fix-state.md", MD_BYTES);
         let rw = rewrite_local_files(
             &format!("[1918-fix-state.md]({})", md.display()),
             Some(dir.path()),
-            DOC_ID_PREFIX,
             &[],
-            true,
         );
         assert_eq!(
-            rw.rich,
-            "[📎 1918-fix-state.\u{200b}md](tg://document?id=doc0)",
-            "the alt is disarmed exactly as the HTML marker is"
+            rw.rich, "📎 1918-fix-state.\u{200b}md",
+            "the marker is disarmed exactly as the HTML marker is"
         );
-        assert_eq!(
-            rw.entries[0].file.caption.as_deref(),
-            Some("1918-fix-state.md"),
-            "the CAPTION is not a marker and stays verbatim — only the visible \
-             marker text is disarmed"
-        );
+        assert!(rw.entries.is_empty());
     }
 
     #[test]
-    fn markdown_is_left_as_a_marker_when_inlining_is_off() {
-        // #1968: Telegram's Android client opens a `.md` ATTACHMENT in its
-        // markdown viewer but NOT a document inlined into a rich message. With
-        // `inline_markdown_documents` off the walk must therefore leave the plain marker
-        // the text plane already shows AND record no entry — no entry is what
-        // keeps the document out of the media array, so the detached file floor
-        // delivers it instead.
+    fn markdown_takes_the_same_marker_as_any_other_document() {
+        // #1968 detached markdown on the narrow ground that Android will not
+        // open an inlined `.md`. #801 widened the rule to every document, so the
+        // carve-out is GONE — not special-cased, not configurable. A mutant that
+        // reinstates a markdown-only branch leaves every other kind inlining.
         let dir = tempfile::tempdir().expect("tempdir");
-        let md = write_file(dir.path(), "state.md", b"# state\n");
+        let md = write_file(dir.path(), "state.md", MD_BYTES);
         let rw = rewrite_local_files(
             &format!("before [state]({}) after", md.display()),
             Some(dir.path()),
-            DOC_ID_PREFIX,
             &[],
-            false,
         );
-        assert_eq!(
-            rw.rich, "before 📎 state after",
-            "the reference becomes the plain marker, not an inlined document \
-             reference — an inlined `.md` is unopenable on Android"
-        );
-        assert!(
-            rw.entries.is_empty(),
-            "no entry: the rich plane must not carry the document, so the \
-             detached file floor is its delivery leg"
-        );
-    }
-
-    #[test]
-    fn a_non_markdown_document_still_inlines_when_markdown_inlining_is_off() {
-        // The flag is scoped to MARKDOWN. A PDF in the same reply keeps the
-        // inline form, or turning markdown inlining off would silently detach
-        // every other document kind too.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
-        let rw = rewrite_local_files(
-            &format!("[Q3]({})", pdf.display()),
-            Some(dir.path()),
-            DOC_ID_PREFIX,
-            &[],
-            false,
-        );
-        assert_eq!(rw.rich, "[📎 Q3](tg://document?id=doc0)");
-        assert_eq!(rw.entries.len(), 1);
+        assert_eq!(rw.rich, "before 📎 state after");
+        assert!(rw.entries.is_empty());
     }
 
     #[test]
@@ -1207,7 +1193,7 @@ mod local_file_rewrite {
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
         let text = format!("`[Q3]({})`", pdf.display());
-        let rw = rewrite_local_files(&text, Some(dir.path()), DOC_ID_PREFIX, &[], true);
+        let rw = rewrite_local_files(&text, Some(dir.path()), &[]);
         assert_eq!(rw.rich, text, "a code span is documentation, not a link");
         assert!(rw.entries.is_empty());
     }
@@ -1218,7 +1204,7 @@ mod local_file_rewrite {
         // reference must survive so the reader still sees what was named. The
         // failure is the SCAN's to report — one predicate, one home.
         let text = "before [Q3 report](/definitely/not/here-q3.pdf) after";
-        let rw = rewrite_local_files(text, None, DOC_ID_PREFIX, &[], true);
+        let rw = rewrite_local_files(text, None, &[]);
         assert_eq!(rw.rich, text);
         assert!(rw.entries.is_empty());
     }
@@ -1228,7 +1214,7 @@ mod local_file_rewrite {
         // It may be ordinary prose that merely looks like a link, so with no
         // working directory to resolve against it is left alone.
         let text = "see [report](reports/q3.pdf) here";
-        let rw = rewrite_local_files(text, None, DOC_ID_PREFIX, &[], true);
+        let rw = rewrite_local_files(text, None, &[]);
         assert_eq!(rw.rich, text);
         assert!(rw.entries.is_empty());
     }
@@ -1236,25 +1222,23 @@ mod local_file_rewrite {
     #[test]
     fn a_remote_link_stays_byte_identical() {
         let text = "see [the site](https://example.com/a) for details";
-        let rw = rewrite_local_files(text, None, DOC_ID_PREFIX, &[], true);
+        let rw = rewrite_local_files(text, None, &[]);
         assert_eq!(rw.rich, text);
         assert!(rw.entries.is_empty());
     }
 
     #[test]
     fn an_already_delivered_file_is_consumed_without_a_second_reference() {
-        // The document is already in the chat (a promoted intermediate sent
-        // it). The reference is CONSUMED — nothing is left to answer — but no
-        // entry is recorded: a delivered document is not a lost one, and a
-        // reference with no entry would be neutralised by the shield anyway.
+        // The document is already in the chat (a promoted intermediate sent it).
+        // The reference is CONSUMED — nothing is left to answer — and no marker
+        // is written either: a second `📎` would tell the reader about a file
+        // that is already above them.
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
         let rw = rewrite_local_files(
             &format!("before [Q3]({}) after", pdf.display()),
             Some(dir.path()),
-            DOC_ID_PREFIX,
             std::slice::from_ref(&pdf),
-            true,
         );
         assert_eq!(rw.rich, "before  after");
         assert!(rw.entries.is_empty());
@@ -1263,16 +1247,13 @@ mod local_file_rewrite {
     #[test]
     fn a_model_written_marker_prefix_is_not_doubled_in_the_rich_plane() {
         // #2001, rich plane: a model's own `📎 ` before the reference must not
-        // survive beside the harness alt, or the reader gets
-        // `📎 [📎 <label>](tg://document?id=…)`.
+        // survive beside the harness marker, or the reader gets `📎 📎 <label>`.
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
         let rw = rewrite_local_files(
             &format!("before 📎 [Q3 report]({}) after", pdf.display()),
             Some(dir.path()),
-            DOC_ID_PREFIX,
             &[],
-            true,
         );
         assert_eq!(
             rw.rich.matches('📎').count(),
@@ -1281,11 +1262,10 @@ mod local_file_rewrite {
             rw.rich
         );
         assert_eq!(
-            rw.rich,
-            "before [📎 Q3 report](tg://document?id=doc0) after",
+            rw.rich, "before 📎 Q3 report after",
             "the model's own 📎 is consumed, not doubled"
         );
-        assert_eq!(rw.entries.len(), 1);
+        assert!(rw.entries.is_empty());
     }
 
     #[test]
@@ -1296,27 +1276,9 @@ mod local_file_rewrite {
         let dir = tempfile::tempdir().expect("tempdir");
         let png = write_file(dir.path(), "pic.png", PNG_BYTES);
         let text = format!("![pic]({})", png.display());
-        let rw = rewrite_local_files(&text, Some(dir.path()), DOC_ID_PREFIX, &[], true);
+        let rw = rewrite_local_files(&text, Some(dir.path()), &[]);
         assert_eq!(rw.rich, text);
         assert!(rw.entries.is_empty());
-    }
-
-    #[test]
-    fn the_id_prefix_is_the_callers_choice() {
-        // Entries are matched to references BY ID inside one message's media
-        // array, so the prefix is a parameter: the delivery site passes `doc`
-        // so a document entry can never answer a picture's reference.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
-        let rw = rewrite_local_files(
-            &format!("[Q3]({})", pdf.display()),
-            Some(dir.path()),
-            "xyz",
-            &[],
-            true,
-        );
-        assert_eq!(rw.rich, "[📎 Q3](tg://document?id=xyz0)");
-        assert_eq!(rw.entries[0].id, "xyz0");
     }
 
     #[test]
@@ -1326,10 +1288,8 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("\n\n  before [Q3]({})", pdf.display()),
             Some(dir.path()),
-            DOC_ID_PREFIX,
             &[],
-            true,
         );
-        assert_eq!(rw.rich, "before [📎 Q3](tg://document?id=doc0)");
+        assert_eq!(rw.rich, "before 📎 Q3");
     }
 }

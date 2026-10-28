@@ -46,7 +46,7 @@ pub use approval::{
 pub use directives::extract_leaked_suggestions;
 pub use file_extract::{FileContent, classify_file, inject_file_content, process_file_with_vision};
 pub use image::{
-    DOC_ID_PREFIX, IMG_ID_PREFIX, ImageTarget, LocalFile, LocalFileRewrite, LocalFileScan,
+    IMG_ID_PREFIX, ImageTarget, LocalFile, LocalFileRewrite, LocalFileScan,
     LocalImage, LocalImageFailure, LocalImageFailureReason, LocalImageScan, LocalVideo,
     LocalVideoRewrite, LocalVideoScan, ResolvedFileRef, ResolvedVideoRef,
     TELEGRAM_DOCUMENT_MAX_BYTES, VID_ID_PREFIX, append_failure_notice, append_file_failure_notice,
