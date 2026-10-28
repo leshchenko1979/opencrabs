@@ -14,8 +14,12 @@ mod request_body {
     /// 1024, or an explicit `null` some gateways reject).
     #[test]
     fn no_cap_means_the_field_is_absent() {
-        let body =
-            vision_request_body("some-vision-model", "what is this?", "https://x/i.png", None);
+        let body = vision_request_body(
+            "some-vision-model",
+            "what is this?",
+            "https://x/i.png",
+            None,
+        );
         let obj = body.as_object().expect("body must be a JSON object");
         assert!(
             !obj.contains_key("max_tokens"),
