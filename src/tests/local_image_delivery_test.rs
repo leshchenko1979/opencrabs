@@ -1049,7 +1049,7 @@ mod local_file_rewrite {
             true,
         );
         assert_eq!(
-            rw.rich, "before ![📎 Q3 report](tg://document?id=doc0) after",
+            rw.rich, "before [📎 Q3 report](tg://document?id=doc0) after",
             "the link is replaced AT its position, never stripped"
         );
         assert_eq!(rw.entries.len(), 1);
@@ -1076,7 +1076,7 @@ mod local_file_rewrite {
             &[],
             true,
         );
-        assert_eq!(rw.rich, "see ![📎 Q3](tg://document?id=doc0) here");
+        assert_eq!(rw.rich, "see [📎 Q3](tg://document?id=doc0) here");
         assert_eq!(rw.entries.len(), 1);
         assert_eq!(rw.entries[0].file.path, pdf);
     }
@@ -1095,7 +1095,7 @@ mod local_file_rewrite {
         );
         assert_eq!(
             rw.rich,
-            "![📎 Q3](tg://document?id=doc0) and ![📎 Q4](tg://document?id=doc1)"
+            "[📎 Q3](tg://document?id=doc0) and [📎 Q4](tg://document?id=doc1)"
         );
         let ids: Vec<&str> = rw.entries.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, vec!["doc0", "doc1"]);
@@ -1116,7 +1116,7 @@ mod local_file_rewrite {
         );
         assert_eq!(
             rw.rich,
-            "![📎 q3-report.\u{200b}pdf](tg://document?id=doc0)",
+            "[📎 q3-report.\u{200b}pdf](tg://document?id=doc0)",
             "the reader always has something to anchor on — the name, disarmed of \
              the autolinker (#1938) so the marker is not read as a domain"
         );
@@ -1144,7 +1144,7 @@ mod local_file_rewrite {
         );
         assert_eq!(
             rw.rich,
-            "![📎 1918-fix-state.\u{200b}md](tg://document?id=doc0)",
+            "[📎 1918-fix-state.\u{200b}md](tg://document?id=doc0)",
             "the alt is disarmed exactly as the HTML marker is"
         );
         assert_eq!(
@@ -1198,7 +1198,7 @@ mod local_file_rewrite {
             &[],
             false,
         );
-        assert_eq!(rw.rich, "![📎 Q3](tg://document?id=doc0)");
+        assert_eq!(rw.rich, "[📎 Q3](tg://document?id=doc0)");
         assert_eq!(rw.entries.len(), 1);
     }
 
@@ -1264,7 +1264,7 @@ mod local_file_rewrite {
     fn a_model_written_marker_prefix_is_not_doubled_in_the_rich_plane() {
         // #2001, rich plane: a model's own `📎 ` before the reference must not
         // survive beside the harness alt, or the reader gets
-        // `📎 ![📎 <label>](tg://document?id=…)`.
+        // `📎 [📎 <label>](tg://document?id=…)`.
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
         let rw = rewrite_local_files(
@@ -1282,7 +1282,7 @@ mod local_file_rewrite {
         );
         assert_eq!(
             rw.rich,
-            "before ![📎 Q3 report](tg://document?id=doc0) after",
+            "before [📎 Q3 report](tg://document?id=doc0) after",
             "the model's own 📎 is consumed, not doubled"
         );
         assert_eq!(rw.entries.len(), 1);
@@ -1315,7 +1315,7 @@ mod local_file_rewrite {
             &[],
             true,
         );
-        assert_eq!(rw.rich, "![📎 Q3](tg://document?id=xyz0)");
+        assert_eq!(rw.rich, "[📎 Q3](tg://document?id=xyz0)");
         assert_eq!(rw.entries[0].id, "xyz0");
     }
 
@@ -1330,6 +1330,6 @@ mod local_file_rewrite {
             &[],
             true,
         );
-        assert_eq!(rw.rich, "before ![📎 Q3](tg://document?id=doc0)");
+        assert_eq!(rw.rich, "before [📎 Q3](tg://document?id=doc0)");
     }
 }

@@ -740,37 +740,105 @@ fn build_body_markdown_media_target_neutralises_orphan_refs() {
     );
 }
 
-/// #1921: `tg://document?id=` is the FOURTH documented `tg://` kind (Bot API 10.3),
-/// and the shield knew three. Before the fix `telegram_media_id` returned `None` for
-/// `kind == "document"`, so `is_valid_telegram_photo_url` judged a resolvable document
-/// reference unresolvable and the shield escaped its `!` — a documented reference
-/// degraded to literal text instead of resolving. The orphan half is the same
-/// register, so an UNRESOLVABLE document reference must be neutralised like the other
-/// three kinds rather than left live for Telegram to reject the whole message over.
+/// #800: a `tg://document?id=` reference rides LINK syntax, never markdown IMAGE
+/// syntax. Telegram resolves `![alt](tg://…)` as a PHOTO embed: aimed at an entry
+/// whose `media[].media.type` is `document` it answers `RICH_MESSAGE_PHOTO_INVALID`
+/// and rejects the WHOLE rich send, so the reply loses its text and every attachment
+/// in it. Measured live with the identical media array — the `!` was the only
+/// variable between the 400 and the 200.
+///
+/// The shield is the last line before the wire, so it repairs the shape too: a
+/// reference naming a LIVE entry that image syntax cannot render loses its `!` (the
+/// link form Telegram accepts), and only a reference naming NOTHING is escaped.
+/// #1921's own half survives — a document reference is still judged against THIS
+/// request's media array, never by scheme alone.
 #[test]
-fn document_refs_are_shielded_like_the_other_tg_kinds() {
+fn document_refs_ride_link_syntax_never_image_syntax() {
     let media = vec![MediaEntry {
-        kind: MediaKind::Photo,
+        kind: MediaKind::Document,
         id: "q3".into(),
+        url: None,
+        bytes: Some(b"%PDF-1.7".to_vec()),
+        name: Some("q3-report.pdf".into()),
+    }];
+
+    // The shipped form: a LINK. It must reach the wire exactly as written.
+    let body = build_body_markdown_media_target(
+        -100,
+        None,
+        None,
+        "kept [📎 q3](tg://document?id=q3)",
+        &media,
+        None,
+    );
+    let md = body["rich_message"]["markdown"]
+        .as_str()
+        .expect("rich markdown");
+    assert_eq!(
+        md, "kept [📎 q3](tg://document?id=q3)",
+        "the link form is the one Telegram accepts and must pass through untouched"
+    );
+
+    // Image syntax aimed at that same live entry is DEMOTED — never escaped, never
+    // shipped: the `!` is dropped and the reference survives as a link.
+    let body = build_body_markdown_media_target(
+        -100,
+        None,
+        None,
+        "kept ![📎 q3](tg://document?id=q3)",
+        &media,
+        None,
+    );
+    let md = body["rich_message"]["markdown"]
+        .as_str()
+        .expect("rich markdown");
+    assert_eq!(
+        md, "kept [📎 q3](tg://document?id=q3)",
+        "image syntax at a document entry is the 400 class — demote it to the link form"
+    );
+    assert!(
+        !md.contains("![📎"),
+        "no image syntax may reach the wire for a document entry: {md}"
+    );
+
+    // CONTROL: the same syntax with a PHOTO entry keeps its inline render, so the
+    // demotion is not a blanket flattening of every image reference.
+    let photo_media = vec![MediaEntry {
+        kind: MediaKind::Photo,
+        id: "p0".into(),
         url: None,
         bytes: Some(vec![0x89, b'P']),
         name: None,
     }];
-
-    let raw = "kept ![d](tg://document?id=q3) dropped ![x](tg://document?id=absent)";
-    let body = build_body_markdown_media_target(-100, None, None, raw, &media, None);
+    let body = build_body_markdown_media_target(
+        -100,
+        None,
+        None,
+        "![p](tg://photo?id=p0)",
+        &photo_media,
+        None,
+    );
     let md = body["rich_message"]["markdown"]
         .as_str()
         .expect("rich markdown");
+    assert_eq!(
+        md, "![p](tg://photo?id=p0)",
+        "a photo entry keeps image syntax — the fix must not flatten photos"
+    );
 
-    assert!(
-        md.contains("tg://document?id=q3"),
-        "a document ref naming a live media entry must survive into the body: {md}"
+    // #1921 orphan half: a document reference naming NOTHING is neutralised, never
+    // left live for Telegram to reject the whole message over.
+    let body = build_body_markdown_media_target(
+        -100,
+        None,
+        None,
+        "dropped [📎 x](tg://document?id=absent)",
+        &media,
+        None,
     );
-    assert!(
-        !md.contains(r"\![d](tg://document?id=q3)"),
-        "the shield must not escape a RESOLVABLE document ref (#1921): {md}"
-    );
+    let md = body["rich_message"]["markdown"]
+        .as_str()
+        .expect("rich markdown");
     assert!(
         !md.contains("tg://document?id=absent"),
         "an orphan document ref must not reach the wire: {md}"

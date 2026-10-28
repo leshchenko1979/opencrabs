@@ -189,6 +189,82 @@ fn test_shield_tg_and_attach_refs_are_media_aware() {
     );
 }
 
+/// #800: image syntax is a PHOTO reference to Telegram. A reference that names a
+/// LIVE entry of any other kind — a document, a video, or a scheme the entry's kind
+/// contradicts — is REPAIRED by dropping the `!` (the link form Telegram accepts),
+/// not escaped into literal text: the file is actually being delivered, so the
+/// reader's anchor must survive. Only a reference that names NOTHING is escaped.
+///
+/// The demote leg is what keeps `RICH_MESSAGE_PHOTO_INVALID` off the wire, and that
+/// error costs the WHOLE rich send — the reply's text and every attachment in it,
+/// not just the one reference.
+#[test]
+fn test_shield_demotes_image_syntax_for_non_photo_entries() {
+    let doc = MediaEntry {
+        kind: MediaKind::Document,
+        id: "doc0".into(),
+        url: None,
+        bytes: Some(vec![1, 2, 3]),
+        name: Some("q3-report.pdf".into()),
+    };
+
+    assert_eq!(
+        shield_unresolvable_markdown_images("![q3](tg://document?id=doc0)", std::slice::from_ref(&doc)),
+        "[q3](tg://document?id=doc0)",
+        "a document entry cannot ride image syntax — the `!` is dropped, not escaped"
+    );
+    // `attach://` is the bytes reference for documents as well as photos, so the
+    // entry's kind is what decides here.
+    assert_eq!(
+        shield_unresolvable_markdown_images("![q3](attach://doc0)", std::slice::from_ref(&doc)),
+        "[q3](attach://doc0)",
+        "an attach:// reference at a document entry is demoted too"
+    );
+    // A scheme the entry's kind contradicts is the same 400 class (#465's shape):
+    // the reference is live, so demote rather than escape.
+    assert_eq!(
+        shield_unresolvable_markdown_images("![q3](tg://photo?id=doc0)", std::slice::from_ref(&doc)),
+        "[q3](tg://photo?id=doc0)",
+        "the scheme says photo, the entry says document — never ship that"
+    );
+
+    // A VIDEO entry is the #465 family: image syntax must not reach the wire either.
+    let video = MediaEntry {
+        kind: MediaKind::Video,
+        id: "v0".into(),
+        url: None,
+        bytes: Some(vec![1, 2, 3]),
+        name: None,
+    };
+    assert_eq!(
+        shield_unresolvable_markdown_images("![v](tg://video?id=v0)", std::slice::from_ref(&video)),
+        "[v](tg://video?id=v0)"
+    );
+
+    // CONTROL: the identical syntax with a PHOTO entry keeps its inline render, so
+    // the demotion cannot be a blanket flattening of every image reference.
+    let photo = MediaEntry {
+        kind: MediaKind::Photo,
+        id: "p0".into(),
+        url: None,
+        bytes: Some(vec![1, 2, 3]),
+        name: None,
+    };
+    assert_eq!(
+        shield_unresolvable_markdown_images("![p](tg://photo?id=p0)", std::slice::from_ref(&photo)),
+        "![p](tg://photo?id=p0)",
+        "a photo entry keeps image syntax"
+    );
+
+    // A reference naming NOTHING has no entry to demote to — it is escaped, which is
+    // the pre-existing orphan contract, unchanged by #800.
+    assert_eq!(
+        shield_unresolvable_markdown_images("![q](tg://document?id=absent)", std::slice::from_ref(&doc)),
+        "\\![q](tg://document?id=absent)",
+        "an orphan reference is escaped, never demoted"
+    );
+}
+
 /// #334 (step 9): the markdown image shield is fence- and code-span-safe. A
 /// fenced or backticked reference is a LITERAL region — escaping the `!` there
 /// would rewrite text the user asked to see verbatim — so those regions pass
