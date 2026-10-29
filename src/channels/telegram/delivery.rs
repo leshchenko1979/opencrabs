@@ -879,17 +879,8 @@ pub(crate) async fn deliver_final_response(
             // fact about the chat hostage to a fact about the message. A path
             // absent from `delivered` is absent here too, so a refused file
             // keeps its plain marker.
-            // #802: the bot's own username is what a DM deep link is addressed
-            // by — a DM has no message-link form, but it does have
-            // `t.me/<bot>?start=file_<token>`, and that needs the username. Read
-            // once here rather than per file: it is a lock on cached state.
-            let file_link_username = telegram_state.bot_username().await;
-            let mut file_links: Vec<(std::path::PathBuf, String)> = delivered_file_links(
-                &delivered,
-                chat_id.0,
-                thread_id,
-                file_link_username.as_deref(),
-            );
+            let mut file_links: Vec<(std::path::PathBuf, String)> =
+                delivered_file_links(&delivered, chat_id.0, thread_id);
             // #1939: a document delivered by a promoted INTERMEDIATE is in the
             // chat but absent from `delivered` — the rich plane owned it, so
             // this floor sent nothing and there is no id here to build a link
@@ -908,13 +899,7 @@ pub(crate) async fn deliver_final_response(
                 if file_links.iter().any(|(p, _)| p == &path) {
                     continue;
                 }
-                if let Some(link) = file_message_link(
-                    chat_id.0,
-                    thread_id,
-                    message_id,
-                    file_link_username.as_deref(),
-                    &path,
-                ) {
+                if let Some(link) = file_message_link(chat_id.0, thread_id, message_id) {
                     file_links.push((path, link));
                 }
             }
@@ -2093,24 +2078,26 @@ pub(crate) struct DeliveredFile {
 /// the reader lands on the bubble inside the right topic rather than at the top
 /// of a thread they then have to search.
 ///
-/// A **bot DM** has no MESSAGE link this side can build, and #802 is the record
-/// of learning that the hard way. `t.me/<bot_username>/<message_id>` IS a URL
-/// the clients resolve, so the first fix (commit `1eb7a355c`) emitted exactly
-/// that — and every such link was DEAD, because a bot DM carries TWO message-id
-/// spaces and the Bot API only ever shows one of them. Measured 2026-10-29, ONE
-/// bubble read from both sides in the `oc_l1979_bot` DM:
+/// A **bot DM** has no form this side can build, and #802 is the record of
+/// learning that the hard way. `t.me/<bot_username>/<message_id>` IS a URL the
+/// clients resolve, so the first fix (commit `1eb7a355c`) emitted exactly that —
+/// and every such link was DEAD, because a bot DM carries TWO message-id spaces
+/// and the Bot API only ever shows one of them. Measured 2026-10-29 in the ops
+/// bot's DM with the owner, ONE bubble read from both sides:
 ///
-/// - `sendMessage` through `api.telegram.org` answered `message_id 60451` for
-///   `notes.txt`, in chat `133526395` — the peer's user id, which is how a bot
-///   addresses a DM;
-/// - the same bubble, read by MTProto from the owner's account, is id `975269`;
-/// - and `messages.getHistory` over the id window 60000..=60452 in that chat
-///   returns ZERO messages, so the Bot API's ids name nothing there at all.
+/// - `sendMessage` through `api.telegram.org` answered `message_id 152540` for
+///   chat `133526395` (the peer's user id — how a bot addresses a DM);
+/// - the same message, read by MTProto from the owner's account, is id `975245`
+///   in that chat, and `152540` there is "Message not found or inaccessible".
 ///
 /// The two counters drift rather than differing by a constant — the first probe
-/// that day sat 822701 apart, the second 914818 — so the client id is not
+/// that day sat 822701 apart, the second 822705 — so the client id is not
 /// recoverable by arithmetic either. `t.me/<bot>/<id>` resolves its id in the
-/// CLIENT's space, which a bot never sees.
+/// CLIENT's space, which a bot never sees, so the form is unreachable from here
+/// and the marker stays plain text in a DM. What a DM offers instead is the
+/// bubble itself: the document arrives as its own message carrying the real file
+/// name, and tapping that is the affordance — no link needed, no dead one
+/// offered.
 ///
 /// The trap that made the first fix look verified: `https://t.me/<bot>/<any id>`
 /// answers `200` and carries a `tg://resolve?domain=<bot>&post=<id>` page for
@@ -2118,43 +2105,25 @@ pub(crate) struct DeliveredFile {
 /// there proves the URL SHAPE parses, never that the message is reachable. The
 /// reachability read is MTProto, and it said no.
 ///
-/// What a DM does offer is a DEEP link, addressed by the bot's username and so
-/// involving no message id at all (#802). With the bot's username in hand the
-/// marker becomes `t.me/<bot>?start=file_<token>`: [`super::file_links`] holds
-/// the token map, and the `/start` branch in the handler re-sends the file. That
-/// link resolves, and it delivers the document rather than pointing at a bubble.
-///
-/// A **basic group** (negative id without the `-100` marker) has no form at all:
-/// no username to address it by, and message ids as unaddressable as a DM's, so
-/// it gets `None` and the caller leaves the marker as plain text. A link that
-/// goes nowhere is worse than no link, and the marker's job — naming the file —
-/// is done by the label either way.
+/// A **basic group** (negative id without the `-100` marker) has no form either,
+/// so it gets `None` too and the caller leaves the marker as plain text: a link
+/// that goes nowhere is worse than no link, and the marker's job — pointing at
+/// the file — is done by the label either way.
 pub(crate) fn file_message_link(
     chat_id: i64,
     thread_id: Option<teloxide::types::ThreadId>,
     message_id: i32,
-    bot_username: Option<&str>,
-    path: &std::path::Path,
 ) -> Option<String> {
     // `t.me/c/` takes the id WITHOUT the `-100` marker that identifies a
     // supergroup or channel. An id lacking the prefix is a DM or a basic group,
-    // and neither has a MESSAGE-link form this side can address (#802), so the
-    // strip is what separates the two cases.
+    // and neither has a message-link form this side can address (#802), so
+    // `None` falls out of the same strip that produces the internal id.
     let chat = chat_id.to_string();
-    if let Some(internal) = chat.strip_prefix("-100") {
-        return Some(match thread_id {
-            Some(thread) => format!("https://t.me/c/{internal}/{}/{message_id}", thread.0.0),
-            None => format!("https://t.me/c/{internal}/{message_id}"),
-        });
-    }
-    // A DM is a POSITIVE id; a basic group is negative and has no username to
-    // build a deep link against.
-    if chat_id < 0 {
-        return None;
-    }
-    let username = bot_username?;
-    let token = super::file_links::register(path)?;
-    Some(super::file_links::deep_link(username, &token))
+    let internal = chat.strip_prefix("-100")?;
+    Some(match thread_id {
+        Some(thread) => format!("https://t.me/c/{internal}/{}/{message_id}", thread.0.0),
+        None => format!("https://t.me/c/{internal}/{message_id}"),
+    })
 }
 
 /// The `(path, t.me link)` pairs for the files a delivery leg actually sent
@@ -2169,12 +2138,11 @@ pub(crate) fn delivered_file_links(
     delivered: &[DeliveredFile],
     chat_id: i64,
     thread_id: Option<teloxide::types::ThreadId>,
-    bot_username: Option<&str>,
 ) -> Vec<(std::path::PathBuf, String)> {
     delivered
         .iter()
         .filter_map(|file| {
-            file_message_link(chat_id, thread_id, file.message_id, bot_username, &file.path)
+            file_message_link(chat_id, thread_id, file.message_id)
                 .map(|link| (file.path.clone(), link))
         })
         .collect()

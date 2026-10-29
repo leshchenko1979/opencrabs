@@ -447,7 +447,7 @@ const BASIC_GROUP_CHAT_ID: i64 = -987_654_321;
 
 #[test]
 fn a_supergroup_bubble_links_by_internal_id() {
-    let link = file_message_link(FORUM_CHAT_ID, None, 91_047, None, Path::new(Q3));
+    let link = file_message_link(FORUM_CHAT_ID, None, 91_047);
     assert_eq!(
         link.as_deref(),
         Some("https://t.me/c/1234567890/91047"),
@@ -458,7 +458,7 @@ fn a_supergroup_bubble_links_by_internal_id() {
 #[test]
 fn a_topic_bubble_links_with_the_topic_in_the_middle() {
     let thread = teloxide::types::ThreadId(teloxide::types::MessageId(321));
-    let link = file_message_link(FORUM_CHAT_ID, Some(thread), 91_047, None, Path::new(Q3));
+    let link = file_message_link(FORUM_CHAT_ID, Some(thread), 91_047);
     assert_eq!(
         link.as_deref(),
         Some("https://t.me/c/1234567890/321/91047"),
@@ -473,12 +473,12 @@ fn a_channel_links_by_the_same_rule_as_a_supergroup() {
     // the `-100` marker — and they share one link form, so one rule covers both.
     // The old `ChatKind` match spelled the two arms out separately and produced
     // the same URL either way; the id states it once.
-    let link = file_message_link(FORUM_CHAT_ID, None, 5, None, Path::new(Q3));
+    let link = file_message_link(FORUM_CHAT_ID, None, 5);
     assert_eq!(link.as_deref(), Some("https://t.me/c/1234567890/5"));
 }
 
 #[test]
-fn a_dm_links_by_deep_link_and_a_basic_group_gets_none() {
+fn a_dm_and_a_basic_group_have_no_message_link() {
     // #802, the owner report: "I saw the links… when I click them nothing
     // happens". Two rounds of learning live in this one assertion.
     //
@@ -496,56 +496,27 @@ fn a_dm_links_by_deep_link_and_a_basic_group_gets_none() {
     // account has that same message at `975245` — and the gap DRIFTS between
     // probes (822701, then 822705), so no arithmetic recovers one from the
     // other. `t.me/<bot>/<id>` resolves its id in the CLIENT's space, which a
-    // bot never sees.
-    //
-    // The second round is the fix this test pins: a DM is addressed by the BOT'S
-    // USERNAME instead, through `?start=file_<token>`. No message id is
-    // involved, so the id space that cannot be bridged is not consulted at all,
-    // and the link delivers the document rather than naming a bubble.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let home = dir.path().join(".opencrabs");
-    std::fs::create_dir_all(&home).expect("create home");
-    let doc = dir.path().join("q3-report.pdf");
-    std::fs::write(&doc, b"%PDF-1.4 fixture").expect("write fixture");
-    crate::config::profile::with_home_override(home, || {
-        let link = file_message_link(DM_CHAT_ID, None, 5, Some("oc_l1979_bot"), &doc)
-            .expect("a DM with the bot's username has a deep link");
-        let token = link
-            .strip_prefix("https://t.me/oc_l1979_bot?start=file_")
-            .unwrap_or_else(|| panic!("unexpected link shape: {link}"));
-        assert_eq!(token.len(), 12, "the payload is the registered token");
-        assert_eq!(
-            crate::channels::telegram::file_links::resolve(token).as_deref(),
-            Some(doc.as_path()),
-            "the token in the link resolves back to the delivered file"
-        );
-
-        // Without the username there is no link to build: the caller keeps the
-        // plain marker rather than splicing one that goes nowhere.
-        assert_eq!(
-            file_message_link(DM_CHAT_ID, None, 5, None, &doc),
-            None,
-            "no bot username, no deep link"
-        );
-    });
-    // A basic group has no form at all: not a `-100` chat (so no `t.me/c/`
-    // link) and no username of its own to deep-link against.
+    // bot never sees. A DM therefore has no link this side can build, and the
+    // marker stays plain text: the document bubble below it — carrying the real
+    // file name — is the tappable affordance.
     assert_eq!(
-        file_message_link(BASIC_GROUP_CHAT_ID, None, 5, Some("oc_l1979_bot"), Path::new(Q3)),
+        file_message_link(DM_CHAT_ID, None, 5),
         None,
-        "a basic group has no t.me form: neither a message link nor a deep link"
+        "a DM's client-space id is not the id a bot is given, so no link is \
+         offered rather than one that goes nowhere"
+    );
+    // A basic group has no form either: it is not a `-100` chat, and a bot's own
+    // history does not address it.
+    assert_eq!(
+        file_message_link(BASIC_GROUP_CHAT_ID, None, 5),
+        None,
+        "a basic group has no t.me message-link form"
     );
     // The thread is only ever the MIDDLE segment of a link that already exists;
     // it cannot conjure one for a chat that has no link form at all.
     let thread = teloxide::types::ThreadId(teloxide::types::MessageId(321));
     assert_eq!(
-        file_message_link(
-            BASIC_GROUP_CHAT_ID,
-            Some(thread),
-            5,
-            Some("oc_l1979_bot"),
-            Path::new(Q3)
-        ),
+        file_message_link(BASIC_GROUP_CHAT_ID, Some(thread), 5),
         None,
         "a topic cannot rescue a chat that has no link form"
     );
@@ -570,7 +541,7 @@ fn a_delivered_file_links_with_no_inbound_message() {
         },
     ];
     assert_eq!(
-        delivered_file_links(&delivered, FORUM_CHAT_ID, None, None),
+        delivered_file_links(&delivered, FORUM_CHAT_ID, None),
         vec![
             (
                 PathBuf::from(Q3),
@@ -595,19 +566,18 @@ fn a_delivered_file_links_with_no_inbound_message() {
         link_file_markers(
             body,
             &scan,
-            &delivered_file_links(&delivered, FORUM_CHAT_ID, None, None)
+            &delivered_file_links(&delivered, FORUM_CHAT_ID, None)
         ),
         "Reports: [📎 Q3 report](https://t.me/c/1234567890/91047) and \
          [📎 Q4 report](https://t.me/c/1234567890/91048).",
         "with no inbound message the markers still point at the bubbles that \
          hold the files"
     );
-    // A DM takes the DEEP-link form instead (#802): the chat has no
-    // message-link form, but it does have the bot's username, and the token map
-    // turns that into an address that re-sends the file. Without the username
-    // the caller keeps the plain marker — see
-    // `a_dm_links_by_deep_link_and_a_basic_group_gets_none`.
-    assert!(delivered_file_links(&delivered, DM_CHAT_ID, None, None).is_empty());
+    // A DM gets no link at all (#802) — see
+    // `a_dm_and_a_basic_group_have_no_message_link` for the measurement that
+    // settled it. This fix removes the message dependency; it does not invent an
+    // address this side cannot give.
+    assert!(delivered_file_links(&delivered, DM_CHAT_ID, None).is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -683,13 +653,12 @@ fn each_marker_links_to_its_own_bubble() {
 fn a_dm_or_an_unsent_file_keeps_the_plain_marker() {
     let body = "Report: 📎 Q3 report.";
     let scan = scan_over(body, &[(Path::new(Q3), "📎 Q3 report")]);
-    // A DM whose bot username is unknown has no address this side can give
-    // (#802), so the caller builds no link and the marker is passed through
-    // untouched.
+    // A DM has no address this side can give (#802), so the caller builds no
+    // link and the marker is passed through untouched.
     assert_eq!(
-        file_message_link(DM_CHAT_ID, None, 91_047, None, Path::new(Q3)),
+        file_message_link(DM_CHAT_ID, None, 91_047),
         None,
-        "a DM with no bot username offers no link for the caller to pass"
+        "a DM offers no link for the caller to pass"
     );
     assert_eq!(
         link_file_markers(body, &scan, &[]),
@@ -868,7 +837,7 @@ fn the_link_form_and_the_marker_rewrite_agree() {
         path: PathBuf::from(Q3),
         message_id: 91047,
     }];
-    let link = file_message_link(FORUM_CHAT_ID, None, delivered[0].message_id, None, Path::new(Q3))
+    let link = file_message_link(FORUM_CHAT_ID, None, delivered[0].message_id)
         .expect("a supergroup bubble has a message link");
     let links: Vec<(PathBuf, String)> = delivered
         .iter()
@@ -981,7 +950,7 @@ fn the_fallback_links_a_marker_to_the_intermediates_bubble() {
     let links: Vec<(PathBuf, String)> = recovered
         .into_iter()
         .filter_map(|(path, id)| {
-            file_message_link(FORUM_CHAT_ID, None, id, None, &path).map(|link| (path, link))
+            file_message_link(FORUM_CHAT_ID, None, id).map(|link| (path, link))
         })
         .collect();
     assert_eq!(
@@ -990,14 +959,12 @@ fn the_fallback_links_a_marker_to_the_intermediates_bubble() {
         "the marker points at the bubble that actually holds the document"
     );
 
-    // A DM has no MESSAGE-link form (#802), so with no bot username in hand the
-    // same recovery yields no link and the marker stays plain rather than
-    // pointing nowhere. (With a username it takes the deep-link form, pinned in
-    // `a_dm_links_by_deep_link_and_a_basic_group_gets_none`.)
+    // A DM has no message-link form (#802), so the same recovery yields no link
+    // and the marker stays plain rather than pointing nowhere.
     let dm_links: Vec<(PathBuf, String)> = vec![(PathBuf::from(Q3), 91_047)]
         .into_iter()
         .filter_map(|(path, id)| {
-            file_message_link(DM_CHAT_ID, None, id, None, &path).map(|link| (path, link))
+            file_message_link(DM_CHAT_ID, None, id).map(|link| (path, link))
         })
         .collect();
     assert!(dm_links.is_empty());
