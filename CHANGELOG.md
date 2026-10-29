@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `b5b4adde1` **vision**: send no `max_tokens` cap and retry once only when the endpoint names the field, so a reasoning vision model can spend its budget on thinking and still answer instead of coming back empty (#796)
 - `6b87dbd29` **telegram**: emit a document reference in link syntax and demote any live-entry image ref to a link, so a reply's files stop 400-ing the whole rich send and arriving as dead text (#800)
 - `ff1425cc5` **telegram**: route every document to the detached attachment floor and retire `inline_markdown_documents`, because Telegram accepts a `document` media entry with `ok:true` and delivers nothing — the inline arm left a `📎` marker with no bubble behind it (#801)
+- `1eb7a355c` **telegram**: link a DM's `📎` file marker through the bot's own username, because a private chat has no `-100` prefix and the old rule refused it — the marker was a working link in a group and inert text in every DM (#802)
 
 ## [0.5.4] - 2026-09-26
 
