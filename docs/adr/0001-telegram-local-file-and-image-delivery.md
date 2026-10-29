@@ -167,7 +167,31 @@ A deep link sidesteps the id space entirely:
 
 ## 8. Issue census — everything filed about inlining local files and images
 
-Fork `leshchenko1979/opencrabs` unless marked *upstream* (`opencrabs/opencrabs`).
+### Source and method (read this before trusting the tables)
+
+The census is an **exhaustive enumeration**, not a recollection. Enumerated in one pass on 2026-10-29:
+
+| Population | Count | Command |
+|---|---|---|
+| Fork issues (open + closed) | **782** | `gh issue list -R leshchenko1979/opencrabs --state all --limit 2000` |
+| Upstream issues (open + closed) | **1760** | `gh issue list -R opencrabs/opencrabs --state all --limit 3000` |
+| Fork PRs | **20** | `gh pr list -R leshchenko1979/opencrabs --state all` |
+| Upstream PRs | **403** | `gh pr list -R opencrabs/opencrabs --state all` |
+
+Selection was two-stage, because a title regex alone under-counts:
+
+1. **Title regex** over all 2,542 issues — `inlin|attach|local (file|image)|image ref|photo ref|media entr|tg://|📎|file link|file marker|markdown file|detach|own bubble|sendDocument|document bubble|caption` — which returned 40 fork and 74 upstream candidates, then hand-filtered to the rows below.
+2. **Body search** with `gh search issues --repo <R>` on `inline_markdown_documents`, `tg://document`, `📎`, `local file attachment`, which is what surfaces an issue whose *title* never names the surface (that is how `#2125` and `#406` were found).
+
+**What the first pass missed, and why** — recorded because it is the reusable lesson: the initial census was assembled from this lane's own session history plus targeted lookups, and it under-counted. Three classes fell through:
+
+- **Ancestors and ordering decisions** filed before the reference-extraction work was named as such — upstream `#406` ("deliver generated attachments before the final response") is the origin of the *attachments-then-body* ordering the ADR §4 depends on, and its title never says "inline".
+- **Same surface, different failure** — upstream `#2125` (two attachments resolving to one offset, splice panic) is an attachment-extraction defect, filed under `panic`, invisible to any keyword sweep for inlining.
+- **Residuals of a closed shield** — fork `#334` (orphan `tg://photo?id=` / `attach://` refs still 400ing after `#289`) and fork `#645` (media captions ship raw markdown). Both are live defects on the delivery plane and both were absent.
+
+The general lesson, which belongs to this repo's read discipline rather than to this ADR: **a census keyed on the vocabulary of a decision finds the issues filed in that vocabulary, not the issues about that surface.** Enumerate the population, then filter — and check the filter's own blind spot against a body search.
+
+Fork `leshchenko1979/opencrabs` unless marked *upstream* (`opencrabs/opencrabs`). **38 issues**, of which **11 open** (8 on the image plane, 3 on the shields/captions/fallback group).
 
 **Images (inline plane)**
 
@@ -200,6 +224,15 @@ Fork `leshchenko1979/opencrabs` unless marked *upstream* (`opencrabs/opencrabs`)
 | [801](https://github.com/leshchenko1979/opencrabs/issues/801) | CLOSED | **the decision of this ADR**: no document inlines, ever |
 | [802](https://github.com/leshchenko1979/opencrabs/issues/802) | CLOSED | a DM marker gets a deep link (§6) |
 
+**Both planes — shields, captions, fallback (the group the first pass missed)**
+
+| # | State | What it settled |
+|---|---|---|
+| [334](https://github.com/leshchenko1979/opencrabs/issues/334) | OPEN | `#289`'s shield covers the rich dialect only — orphan `tg://photo?id=` / `attach://` refs still 400 on the generic rich path |
+| [620](https://github.com/leshchenko1979/opencrabs/issues/620) | OPEN | the rich fallback deletes intermediates it never re-sent — a file marker inside one is lost silently |
+| [645](https://github.com/leshchenko1979/opencrabs/issues/645) | OPEN | a media **caption** declares no parse mode, so markdown in a caption ships literal |
+| [788](https://github.com/leshchenko1979/opencrabs/issues/788) | CLOSED | the rich fallback compared two text forms, re-sent the body and deleted nothing |
+
 **Upstream lineage**
 
 | # | State | What it settled |
@@ -212,6 +245,11 @@ Fork `leshchenko1979/opencrabs` unless marked *upstream* (`opencrabs/opencrabs`)
 | [#1940](https://github.com/opencrabs/opencrabs/issues/1940) | CLOSED | the capabilities preamble went stale |
 | [#1968](https://github.com/opencrabs/opencrabs/issues/1968) | CLOSED | the `inline_markdown_documents` flag (§5) |
 | [#2001](https://github.com/opencrabs/opencrabs/issues/2001) | CLOSED | the model's own `📎` doubled the marker |
+| [#406](https://github.com/opencrabs/opencrabs/issues/406) | CLOSED | **the ordering guarantee this ADR's §4 depends on**: attachments ship before the final body, so a turn never ends on a dangling document |
+| [#1079](https://github.com/opencrabs/opencrabs/issues/1079) | CLOSED | `send_photo` / `send_document` skipped `resolve_thread_id` — a file could land in General instead of its topic |
+| [#933](https://github.com/opencrabs/opencrabs/issues/933) | CLOSED | the compiled `/attach` and `/architecture` commands ([PR #1751](https://github.com/opencrabs/opencrabs/pull/1751)) — a **third** entry point to the detached floor, beside markdown refs and `<<IMG:…>>` |
+| [#1773](https://github.com/opencrabs/opencrabs/issues/1773) | CLOSED | the compiled preamble now tells the model to attach a report file, not just name its path (§5, prompt side) |
+| [#2125](https://github.com/opencrabs/opencrabs/issues/2125) | CLOSED | two refs resolving to one offset spliced twice and panicked — the extraction plane's own crash |
 
 ## 9. Consequences and open items
 
@@ -225,8 +263,13 @@ The floor always produces a real bubble, so the affordance is the bubble plus a 
    it is a choice: tapping the marker then appends `/start file_<token>` to the chat and re-sends the file.
 2. A plain-text marker in a **basic group** cannot be made tappable — no link form exists.
 3. The token map grows by one entry per distinct path and is never pruned.
-4. #464, #502, #617, #368 remain open on the image plane; each is a path where a reference is lost or
-   mis-owned, not a disagreement with this ADR.
+4. **Eight open on the image plane** — #286, #368, #464, #487, #502, #515, #617, #731. Each is a path where
+   a reference is lost, mis-owned or mis-rendered; none disagrees with this ADR.
+5. **Three open on the shields/captions/fallback group** — #334 (the `#289` shield never reached the generic
+   rich path, so an orphan ref can still 400 a whole reply), #620 (the rich fallback deletes an intermediate
+   it never re-sent, taking any marker inside it), #645 (a caption declares no parse mode, so markdown in a
+   caption ships literal). These are the residuals of fixes this ADR's decision depends on, which is exactly
+   why they were the group the first census pass missed.
 
 ## 10. Verification
 
