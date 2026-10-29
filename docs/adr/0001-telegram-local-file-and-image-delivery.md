@@ -1,9 +1,10 @@
 # ADR 0001 — Local file and image delivery on Telegram ("inlining")
 
-- **Status:** Accepted — this is the **intended** behaviour (owner ruling 2026-10-29). The tree does not
-  fully implement it yet; §10 lists every gap between this document and the code, so a reader never has to
-  guess which half is real.
-- **Date:** 2026-10-29 (revision 2 — §2, §4, §5, §6 and §7 rewritten to the owner's ruling)
+- **Status:** Accepted — the owner's intended behaviour (ruling 2026-10-29), **corrected by measurement**
+  (revision 3). §2 and §4 now state what the wire actually does; §10 lists every gap between this document
+  and the tree, so a reader never has to guess which half is real.
+- **Date:** 2026-10-29 (revision 3 — §2, §3.2, §4, §5 and §7 rewritten after twelve live `sendRichMessage`
+  probes; revision 2 was the ruling before anyone had measured the shapes it assumed)
 - **Scope:** `src/utils/image.rs` (the reference walks), `src/channels/telegram/delivery.rs` (every plane),
   `src/channels/telegram/intermediates.rs` (promoted bubbles), `src/channels/telegram/rich/` (media array and
   the reference normalizer), `src/config/types.rs` (`TelegramConfig`), `src/brain/prompt_builder.rs` (what
@@ -29,33 +30,42 @@ Telegram gives a bot three ways to put bytes in front of a reader, and they beha
 |---|---|---|
 | `sendPhoto` / `sendDocument` / `sendVideo` | its own message ("bubble"), openable | yes — a message id exists |
 | A `media` entry inside `sendRichMessage` | rendered **inside** the message body | no — it is not a message |
-| A `tg://<kind>?id=…` link inside a rich body | a link, **if** the media array answers it | no |
+| An `![…](tg://<kind>?id=…)` **embed** inside a rich body | the media itself, rendered inside the message body — **only** if a `media` entry with an `attach://` source answers that id (§4.1) | no |
 
 The whole history of this area is the discovery of which of those three works for which kind of file.
 It was not obvious, and three separate assumptions were measured false (§7).
 
 ## 2. Decision
 
-**Everything the author references inlines into the rich message body. What decides is the KIND of the
-bytes on disk — not the syntax the reference is written in.** The rich path is the default plane. The
-detached bubble is what remains when there is no rich path at all, or when the `.md` toggle deliberately
-keeps a markdown document out of it.
+**Everything the author references inlines into the rich message body. What decides the ENTRY is the KIND
+of the bytes on disk; what decides whether anything attaches at all is the markdown FORM — and the harness
+controls the form.** The rich path is the default plane. The detached bubble is what remains when there is
+no rich path at all, or when the `.md` toggle deliberately keeps a markdown document out of it.
 
-| # | Rule | Plane |
-|---|---|---|
-| 1 | A resolvable local reference to an **image** (PNG / JPEG / GIF87a / GIF89a / WEBP / BMP, by magic bytes) renders inline; its bytes ride the rich message's `media` array as a `photo` entry | rich |
-| 2 | A resolvable local reference to a **video** renders inline as a `video` entry | rich — **not confirmed live** (§3.2) |
-| 3 | A resolvable local reference to **any other file** — one document kind, every extension — renders inline as a `document` entry | rich — **measured impossible so far** (§4) |
-| 4 | `.md` / `.markdown`, **when `inline_markdown_documents = true`**, are the deliberate exception: they leave the rich body and ship detached | rich path, forced out |
-| 5 | With **no rich path** — `rich_messages = false`, or a rich send that failed and fell back — every kind ships as its own detached bubble | non-rich |
+That second clause is the measurement's contribution, and it inverts revision 2. On the wire a reference
+attaches **only** in **image/embed syntax** — `![label](tg://<kind>?id=<id>)` — naming an entry whose bytes
+arrive as a multipart part (`"media": "attach://<name>"`). Link syntax `[label](tg://<kind>?id=<id>)`
+attaches **nothing, ever, for any kind**, and answers `ok:true` while doing it. So the harness may never
+forward the author's form verbatim: it claims the reference, emits the entry its **kind** demands, and
+always writes it back as `![…]` (§4.1).
+
+| # | Rule | Entry emitted | Plane |
+|---|---|---|---|
+| 1 | A resolvable local reference to an **image** (PNG / JPEG / GIF87a / GIF89a / WEBP / BMP, by magic bytes) renders inline; its bytes ride the rich message's `media` array | `photo` | rich |
+| 2 | A resolvable local reference to a **video** renders inline the same way | `video` — **verified live**: `PageBlockVideo`, `video/mp4`, 46 848 B, filename intact | rich |
+| 3 | A resolvable local reference to **any other file** — one document kind, every extension — renders inline the same way | `document` — **verified live**: `text/markdown` 37 B and `application/pdf` 200 B | rich |
+| 4 | `.md` / `.markdown`, **when `inline_markdown_documents = true`**, are the deliberate exception: they leave the rich body and ship detached | none | rich path, forced out |
+| 5 | With **no rich path** — `rich_messages = false`, or a rich send that failed and fell back — every kind ships as its own detached bubble | none | non-rich |
+| 6 | The reference is **always rewritten into `![…]`** whatever the author wrote, because link syntax cannot attach anything; a caption rides the markdown title (`"…"`) | — | rich |
 
 Three consequences worth stating plainly, because each one used to be the opposite rule:
 
-- **The `!` decides nothing.** `[chart.png](/tmp/chart.png)` and `![chart.png](/tmp/chart.png)` name the
-  same bytes and take the **same** road: both inline. The reference's label (and, for the image form, its
-  `"…"` title) is the caption; the syntax is not a routing signal. A `.png` written as a plain link is
-  still a picture, and the old behaviour — an un-previewable document bubble for the same file the image
-  form renders inline — was an accident of how the author typed it.
+- **The kind picks the entry; the `!` decides whether anything attaches.** `[chart.png](/tmp/chart.png)`
+  and `![chart.png](/tmp/chart.png)` name the same bytes and must end up identical on the wire — the first
+  only because the harness rewrites it. Revision 2 read "the `!` decides nothing" as "syntax is not a
+  routing signal"; the measurement's half is that the `!` is the *only* thing the wire reads. One rule
+  satisfies both: the harness always emits `!` and picks the entry by kind, so the author's form stops
+  mattering at the claim instead of at the send.
 - **The floor never disappears.** Every kind still has a detached leg, and it stays *ungated*: it is what
   carries the bytes when the rich plane declines, fails, or is switched off. An inline entry is an
   *additional* delivery, never a replacement for a bubble that a client can open.
@@ -63,8 +73,9 @@ Three consequences worth stating plainly, because each one used to be the opposi
   `tg://document` reference in the body that no media entry resolves renders as dead markdown. This is why
   the reference rewrite and the entry push are one operation and never two (§3.3).
 
-Rule 3 is the ruling's substance and the tree cannot do it yet: the intent is recorded here, the measured
-limit is in §4, and the shape that has not been tried is named there as the probe that would close the gap.
+Rule 3 is measured, not intended: a document inlines when it is referenced in embed syntax with its bytes
+in the same multipart body (§4.1). What remains is that the tree emits no document entry at all — the gap
+is in the code, not in the API (§10).
 
 Rules 1–3 share one walk order — **video → image → file** — because each family must own a reference
 exactly once (§3.1). That ordering is unchanged by this decision; what changes is that a family's
@@ -99,13 +110,15 @@ Reference ids are namespaced per family (`img` / `vid`, and `doc` for the docume
 because entries are matched to references **by id inside one message's media array** — a shared prefix
 would let an image entry answer a video reference.
 
-**One measurement is outstanding on this plane and it is not cosmetic.** `ff1425cc5`'s comment at
+**That question is now closed, and the tree's comment was the wrong half.** `ff1425cc5`'s note at
 `src/utils/image.rs:2270` records that in #801's five multipart probes a `video` media entry "behaved the
-same way" as a document entry — accepted, then dropped — and that "only `photo` attached". The video plane
-ships a `video` entry regardless (`rich/table.rs`, `telegram_rich_media_kind_test.rs`,
-`telegram_video_intermediate_test.rs` all assert it), so one of the two is wrong. The tree has not
-measured a clip rendering inline inside a rich body since that probe. Until it is re-measured, rule 2 of
-§2 is **intended behaviour, not verified behaviour**, and a video must keep its detached floor leg.
+same way" as a document entry — accepted, then dropped — and that "only `photo` attached". Measured
+2026-10-29: `![v](tg://video?id=vid0)` with the clip uploaded as a multipart part delivered a
+`PageBlockVideo`, `video/mp4`, 46 848 B, filename `v.mp4` — in a DM **and** in a forum topic. The identical
+call in **link** syntax delivered nothing at all. So #801 did not measure video; it measured link syntax,
+and generalised from it. Rule 2 of §2 is verified behaviour. The stale comment is a code fix owed under
+§10 gap 2 — a video still keeps its detached floor leg, like every kind, because the floor is the failure
+path and not a per-kind concession.
 
 ### 3.3 The body is written only if the array answers it
 
@@ -118,30 +131,58 @@ kind renders as **dead visible markdown**. Two rules follow, and both are alread
   entry is rewritten to link syntax rather than sent as a 400 (`rich/table.rs`). A demoted reference is
   inert but readable; a wrong one fails the whole message.
 
-## 4. The document plane — the gap between intent and measurement
+## 4. The document plane — measured working, still absent from the tree
 
 **Intent (§2 rule 3): every non-image, non-video file inlines as a `document` media entry, in the same
 message, whatever its extension.**
 
-**Measured reality: no document entry has ever attached.** #801's five multipart `sendRichMessage` probes
-(2026-10-28) tried a `{"type":"document"}` entry in link syntax, in image syntax, and with an explicit
-`file_name`; every one answered `ok:true` and delivered nothing. Image syntax aimed at a document entry is
-worse — a hard `400 RICH_MESSAGE_DOCUMENT_INVALID`. #1918's `tg://document?id=docN` reference therefore
-always rendered as a clickable dead link, which is the owner report that started this.
+**Measured reality: documents DO inline — in embed syntax, with their bytes in the multipart body.** A
+`.md` landed as `PageBlockDocument`, `text/markdown`, 37 B, filename `s.md`; a `.pdf` landed as
+`application/pdf`, 200 B — in a DM, and again in a forum topic. #801's conclusion ("a document media entry
+is accepted and silently dropped") was a **shape artefact**: every probe it ran used **link** syntax, which
+attaches nothing for *any* kind — its own photo probe, re-run in link syntax, delivers nothing either. The
+API was never refusing documents; the markdown form was.
 
-**The untried shape.** Photos attach because their bytes are uploaded as a multipart part and referenced
-as `attach://<name>`. Every document probe used a URL or a bare entry; none referenced a **multipart part
-in link syntax**, i.e. `[name](attach://doc0)` with the bytes in the same multipart body. That is the one
-asymmetry between the working photo path and the failing document path, so it is the next probe, and it is
-a **probe before it is a design**: if it fails, rule 3 stays intent and the detached floor is the
-permanent answer for documents; if it works, the document family gains the same three pieces the image
-family has (a `doc` id namespace, a rewrite, an entry) and §2 rule 3 becomes real.
+### 4.1 The probes (2026-10-29, direct Bot API `sendRichMessage`, multipart)
 
-**Until then, in the tree:** every resolvable document leaves the body as `📎 <label>` (empty label → the
+DM with `@oc_l1979_bot`, plus one group leg in forum topic 31847. Every row is a real call whose result was
+read back from the **delivered message**, not from the HTTP status — `ok:true` is not delivery, which is the
+whole lesson of #801.
+
+| Probe | Reference written | Entry | Result |
+|---|---|---|---|
+| photo, embed | `![p](tg://photo?id=img0)` | `{type:photo, media:attach://img0}` | **200, delivered** `PageBlockPhoto`, 318 B |
+| photo, link | `[png](tg://photo?id=img0)` | same | 200, **no attachment** — literal `TextUrl` |
+| doc, link | `[📎 s.md](tg://document?id=doc0)` | `{type:document, media:attach://doc0}` | 200, **no attachment**, dead link |
+| **doc, embed** | `![s.md](tg://document?id=doc0)` | same | **200, DELIVERED** `PageBlockDocument`, `text/markdown`, 37 B, `file_name=s.md` |
+| doc, link + `file_name` | link syntax carrying the attribute | same | 200, no attachment |
+| doc, flat entry | `![s.md](tg://document?id=doc0)` | `{id,type,media}` — not nested | **400** `can't parse InputRichMessageMedia: Field "media" must be of type Object` |
+| video, embed | `![v](tg://video?id=vid0)` | `{type:video, media:attach://vid0}` | **200, DELIVERED** `PageBlockVideo`, `video/mp4`, 46 848 B |
+| video, link | `[v](tg://video?id=vid0)` | same | 200, no attachment |
+| audio, embed | `![a](tg://audio?id=aud0)` | `{type:audio, media:attach://aud0}` | **200, DELIVERED** `PageBlockAudio` |
+| mixed, DM | all four kinds in embed syntax | four entries | **200**, every block + 3 documents |
+| group leg | photo + video + `s.md` + `d.pdf`, embed syntax, topic 31847 | four entries | **200**, every block, `application/pdf` 200 B, `text/markdown` 37 B |
+
+**The failure modes, all hard `400`s — each one is a way to lose an entire message:**
+
+| Shape | Error |
+|---|---|
+| an entry present with `"media": ""` | `can't parse InputRichMessageMedia: media not found` |
+| a reference naming an id absent from the array | `RICH_MESSAGE_DOCUMENT_INVALID` |
+| `![…](tg://photo?id=doc0)` aimed at a document entry | `RICH_MESSAGE_PHOTO_INVALID` |
+| `attach://` written in the markdown itself | `RICH_MESSAGE_PHOTO_URL_INVALID` |
+
+The rule the probes leave behind: **`attach://` in the entry's `media` field carries the bytes, `!` in the
+markdown makes the reference an embed, and the `tg://<kind>` scheme must match the entry's `type`.** Miss
+any one of the three and the reference is inert or the send is a 400. The one thing that is *not* required
+is a `file_name` attribute: the filename travels on the multipart part and arrives intact.
+
+**In the tree today, still:** every resolvable document leaves the body as `📎 <label>` (empty label → the
 file's own basename), records no media entry, and ships as one `sendDocument` per file **before** the body,
-with no caption (the caption would repeat the marker one line down). The marker is then rewritten into a
-link to that bubble when the chat has a link form (§6). This is the leg that must survive whatever the
-probe finds: it is what carries a file when the rich plane declines, fails, or is switched off.
+with no caption (the caption would repeat the marker one line down). The marker is rewritten into a link to
+that bubble when the chat has a link form (§6). The document family simply has no inline arm — no `doc` id
+namespace, no rewrite, no entry — so §2 rule 3 is API-verified and code-absent. That floor leg is what must
+survive the fix: it carries a file when the rich plane declines, fails, or is switched off.
 
 Rules that hold on every plane, because a link carries its own label and a silent strip would delete the
 reader's only clue:
@@ -173,8 +214,8 @@ with the rest; with `true`, md alone is held back.
 |---|---|---|
 | `#1968` (upstream) | `.md` shipped detached by default because **Telegram Android** opens a `.md` *attachment* in its viewer but cannot open an inlined `PageBlockDocument`. Gated by `inline_markdown_documents` (default `false`) | right exception, wrong default: it detached md on every install |
 | `#779` | a `.md` in a promoted intermediate was never delivered at all — the floor only sent files the rich plane had skipped, and a `.md` was never skipped | real bug, fixed |
-| `#801` | measured: a `document` media entry is accepted with `ok:true` and **silently dropped** — in link syntax, in image syntax, with an explicit `file_name`. Only `photo` attached | correct measurement, over-broad remedy: it deleted the flag *and* generalised "no document inlines" |
-| this ADR | the flag returns with its original polarity; the exception it encodes is real (a client that will not open an inline document should get an attachment), but it is an **exception**, not the rule | the flag is a no-op while §4's gap is open — it can only ever detach what was already detached — and becomes load-bearing the moment a document inlines |
+| `#801` | reported: a `document` media entry is accepted with `ok:true` and **silently dropped**; only `photo` attached. Re-measured 2026-10-29 (§4.1): every one of those probes used **link** syntax, and link syntax attaches nothing for *any* kind — the document was never the problem | the measurement was an artefact of the form, and the remedy (delete the flag, generalise "no document inlines") inherited it |
+| this ADR | the flag returns with its original polarity; the exception it encodes is real (a client that will not open an inline document should get an attachment), and it is an **exception**, not the rule | **load-bearing as of §4.1**: documents inline, so `true` genuinely holds a `.md` out of the rich body while every other kind goes in |
 
 **The toggle's semantics, stated once so the code has one source:** `false` (default) → md is an ordinary
 document, inlined like every other file when the document plane works, detached otherwise. `true` → md is
@@ -226,15 +267,16 @@ the same answer by different routes: no addressable form exists, so the marker s
 
 | Alternative | Why it failed |
 |---|---|
-| Inline documents as `{"type":"document"}` media entries | API answers `ok:true` and delivers nothing — no attachment, no error, just a dead link (#801). **The one shape never tried is `attach://` link syntax — §4, and it is a probe, not a rejection** |
-| Reference a document entry in **image** syntax to force attachment | hard `400 RICH_MESSAGE_DOCUMENT_INVALID`; the same shape on a *photo* entry 400s as `RICH_MESSAGE_PHOTO_INVALID` (#800) |
+| Inline a document by giving its entry a `media` with no `attach://` source | API answers `ok:true` and delivers nothing — no attachment, no error, just a dead link. That is what #801 measured, and it is a property of the **shape**, not of documents (§4.1) |
+| Reference a document in **image** syntax | **this is the working shape**, not a rejection: `![s.md](tg://document?id=doc0)` with an `attach://doc0` part delivered a `PageBlockDocument`, filename intact. `RICH_MESSAGE_DOCUMENT_INVALID` is a reference naming an id the array does not carry; `RICH_MESSAGE_PHOTO_INVALID` is a `tg://photo` scheme aimed at a document entry — the scheme must match the entry's `type` |
 | Reference a document in **link** syntax | inert for **all** media kinds — a photo entry referenced as `[x](tg://photo?…)` does not attach either. The discriminator is the markdown form, not the kind (#801 arm E) |
-| Delete `inline_markdown_documents` because no document can inline | the measurement was right, the remedy was too broad: it deleted the one exception the owner wants, on the ground that the rule it excepted was broken. A flag for a broken behaviour is dead weight only until the behaviour works (§5) |
+| Delete `inline_markdown_documents` because no document can inline | the measurement was an artefact — documents do inline (§4.1) — so the premise for deleting the flag was false. The flag is the owner's deliberate exception (§5), not dead weight |
 | Address a DM bubble by `t.me/<bot>/<id>` | the bot's id space is not the client's (#802) |
 | **A DM deep link that re-sends the file** (`21d72dd9b`, reverted) | **overengineering, owner ruling.** It works, and it is the wrong idea: a marker names a file, the bubble already carries it. The cost was a token registry, a home-dir JSON map, and a `/start` branch ahead of the admission gate — a delivery transport grafted onto a caption |
 | Delete a link nothing downstream will fetch | silently loses a file the author believed was delivered (#286) |
 | Caption the document bubble with the marker text | the reader reads the same string twice, one line apart (#780) |
-| Let the `!` decide inline vs detached | the same bytes arrived two different ways depending on how the author typed the reference, so a `.png` written as `[x](…)` got an un-previewable document bubble. The kind decides (§2) |
+| Let the author's `!` decide inline vs detached | the same bytes would arrive two different ways depending on how the reference was typed, so a `.png` written as `[x](…)` would get an un-previewable bubble. The wire only attaches embeds, so the harness **normalises every claimed reference to `!`** and picks the entry by kind: the author's form is not a routing signal, and it never reaches the API (§2 rule 6) |
+| Write `attach://` in the markdown itself | `400 RICH_MESSAGE_PHOTO_URL_INVALID` — `attach://` is an entry field, never a link target (§4.1) |
 
 ## 8. Issue census — everything filed about inlining local files and images
 
@@ -465,21 +507,26 @@ cannot inline is the picture-in-the-prose, not the file.
 
 **The gaps between this ADR and `642724791`, in the order a reader would notice them:**
 
-1. **Documents do not inline — rule 3 is intent only.** No document media entry has ever attached (§4).
-   The next action is a probe, not code: upload a document as a multipart part and reference it in link
-   syntax as `[name](attach://doc0)`, the shape that makes photos work. If that fails, rule 3 is
-   permanently unachievable and §2 should be amended to say so rather than left reading as a promise.
-2. **Video inlining is asserted by the tree and contradicted by a comment in it.** `image.rs:2270` records
-   that a `video` entry delivered nothing in #801's probes; three tests assert it renders. Re-measure with
-   one clip before either side is believed (§3.2).
-3. **The kind does not yet decide; the `!` still does.** The image family claims `![…]` only, so
-   `[chart.png](/tmp/chart.png)` reaches the document family and ships as a bubble while
-   `![chart.png](…)` inlines. Rule 1 requires the document family to re-validate a claimable reference as
-   an image and hand it back — the walk order stays, the rejection stops meaning "detach" (§3.1).
+1. **No document ever inlines in the tree — rule 3 is API-verified and code-absent.** The document family
+   has no `doc` id namespace, no rewrite and no entry, so every file leaves the body as `📎`. §4.1 gives
+   the exact shape to emit: an `{"type":"document","media":"attach://docN"}` entry with the bytes as a
+   multipart part, referenced as `![label](tg://document?id=docN)`.
+2. **`image.rs:2270` carries a false comment.** It records that a `video` entry delivered nothing in #801's
+   probes; measured 2026-10-29, video inlines fine in embed syntax (§3.2). The comment needs correcting
+   before the next reader believes it — three tests already assert the true behaviour.
+3. **The walk still routes by syntax, and it must stop.** The image family claims `![…]` only, so
+   `[chart.png](/tmp/chart.png)` reaches the document family and ships as a bubble while `![chart.png](…)`
+   inlines. Under §2 the family a reference lands in is decided by its **bytes**, and every claim is
+   re-emitted as `!` — so the document family must re-validate a claimable reference as an image and hand
+   it back, and every family must rewrite to embed syntax whatever the author wrote (§3.1).
 4. **`inline_markdown_documents` is not in the config.** `ff1425cc5` deleted the field, its `Default` line,
    its prompt text and its README lines; restoring it is a `TelegramConfig` field, a default, and the
-   document family's exclusion arm. It is a no-op until gap 1 closes, which is exactly why it is safe to
-   restore first: the flag cannot misbehave while nothing inlines.
+   document family's exclusion arm. It is **load-bearing the moment gap 1 closes**, so it lands with gap 1
+   or after it — not before, where it would be an inert key that reads as a working toggle.
+5. **The multipart side has to agree with the reference.** An inline document needs three things to line up
+   in one call: a part name, an entry `{"type":"document","media":"attach://<part>"}`, and a
+   `![…](tg://document?id=<id>)` whose id names that entry. Any mismatch is a hard 400 that costs the whole
+   message (§4.1), so this is one operation and never three passes.
 5. **The DM deep link is gone and nothing replaced it.** `21d72dd9b` is reverted in `642724791`; a DM marker
    is plain text, like a basic group's. The running binary (`b2dcf5715`) predates all of this, so nothing
    about the revert is observable to a user until the next ship.
@@ -509,6 +556,8 @@ cannot inline is the picture-in-the-prose, not the file.
 | one bubble per file, in order, no caption | `each_link_ships_its_own_bubble_in_order` · `a_resolved_link_ships_exactly_one_document_with_no_caption` |
 | images inline, kind by bytes | `src/tests/telegram_local_image_media_test.rs`, `src/tests/telegram_rich_media_kind_test.rs` |
 | a reference the array cannot satisfy is demoted, not sent | `src/tests/telegram_rich_markdown_normalize_test.rs`, `src/tests/telegram_mermaid_test.rs` |
-| video inlines in a rich body | `telegram_video_intermediate_test.rs` — **asserted, not measured live; contradicted by `image.rs:2270` (§3.2)** |
+| video inlines in a rich body | `telegram_video_intermediate_test.rs` (assertion) **plus** a live probe 2026-10-29: `PageBlockVideo`, `video/mp4`, 46 848 B (§3.2) |
+| documents inline in a rich body | live probes 2026-10-29: `PageBlockDocument`, `text/markdown` 37 B and `application/pdf` 200 B — in a DM and in a forum topic (§4.1) |
+| only **embed** syntax attaches, for any kind | live probes 2026-10-29: the same entries written in link syntax delivered no attachment, photo included (§4.1) |
 | behaviour on the shipped binary | DM probe 2026-10-29: `.md` / `.txt` / `.png` as three identical document bubbles, three `📎` markers, zero inlining |
 | dependency edges, both trackers | 38 × `gh issue view <N> -R <repo> --json parent,subIssues,blockedBy,blocking` over the then-census, **0 failures**; the walk named 7 issues outside it, 4 of which joined the census (42 rows: 28 fork + 14 upstream, 13 open). `#286` returns `nodes=9` == `totalCount=9`, so the largest child list is untruncated |
