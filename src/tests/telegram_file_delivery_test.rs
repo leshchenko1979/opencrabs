@@ -577,7 +577,7 @@ fn a_delivered_file_links_with_no_inbound_message() {
     // `a_dm_and_a_basic_group_have_no_message_link` for the measurement that
     // settled it. This fix removes the message dependency; it does not invent an
     // address this side cannot give.
-    assert!(delivered_file_links(&delivered, DM_CHAT_ID).is_empty());
+    assert!(delivered_file_links(&delivered, DM_CHAT_ID, None).is_empty());
 }
 
 // ---------------------------------------------------------------------------
