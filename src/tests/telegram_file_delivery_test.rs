@@ -581,8 +581,8 @@ fn a_delivered_file_links_with_no_inbound_message() {
                 "https://t.me/oc_l1979_bot/91048".to_string()
             ),
         ],
-        "with the username in hand a DM links every delivered file too — the "
-         "same list, one fact richer"
+        "with the username in hand a DM links every delivered file too — the \
+         same list, one fact richer"
     );
 }
 
