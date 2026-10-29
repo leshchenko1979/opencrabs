@@ -527,22 +527,22 @@ cannot inline is the picture-in-the-prose, not the file.
    in one call: a part name, an entry `{"type":"document","media":"attach://<part>"}`, and a
    `![…](tg://document?id=<id>)` whose id names that entry. Any mismatch is a hard 400 that costs the whole
    message (§4.1), so this is one operation and never three passes.
-5. **The DM deep link is gone and nothing replaced it.** `21d72dd9b` is reverted in `642724791`; a DM marker
+6. **The DM deep link is gone and nothing replaced it.** `21d72dd9b` is reverted in `642724791`; a DM marker
    is plain text, like a basic group's. The running binary (`b2dcf5715`) predates all of this, so nothing
    about the revert is observable to a user until the next ship.
 
 **Open defects on this surface, in severity order** — none of them disagrees with this ADR:
 
-6. **#334** — the `#289` shield never reached the generic rich path, so an orphan `tg://` / `attach://`
+7. **#334** — the `#289` shield never reached the generic rich path, so an orphan `tg://` / `attach://`
    reference can still 400 a whole reply. Highest severity here: it costs a message, not an attachment.
-7. **#324 is a failing test on `main`** (`image_util_test::non_image_schemes_are_not_remote`), not a
+8. **#324 is a failing test on `main`** (`image_util_test::non_image_schemes_are_not_remote`), not a
    feature gap (§9.3). A red gate on this exact surface.
-8. **#620** — the rich fallback deletes an intermediate it never re-sent, taking any marker inside it; and
+9. **#620** — the rich fallback deletes an intermediate it never re-sent, taking any marker inside it; and
    #502 / #617 / #788 are the same mechanism filed from three other angles (§9.1).
-9. **#645** — a media caption declares no parse mode, so markdown in a caption ships literal.
-10. **Ten open on the image plane** — #286, #324, #368, #445, #464, #487, #502, #515, #617, #731: paths
+10. **#645** — a media caption declares no parse mode, so markdown in a caption ships literal.
+11. **Ten open on the image plane** — #286, #324, #368, #445, #464, #487, #502, #515, #617, #731: paths
     where a reference is lost, mis-owned or mis-rendered.
-11. **Two tracker edges are wrong** (§9.4): `#360` is CLOSED yet still carries a blocker, and `#334` reads
+12. **Two tracker edges are wrong** (§9.4): `#360` is CLOSED yet still carries a blocker, and `#334` reads
     as blocked by `#349`, a timezone fix that touches none of its path. Neither is a code defect; both make
     the tracker lie about what is blocked.
 
