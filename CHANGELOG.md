@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ff1425cc5` **telegram**: route every document to the detached attachment floor and retire `inline_markdown_documents`, because Telegram accepts a `document` media entry with `ok:true` and delivers nothing — the inline arm left a `📎` marker with no bubble behind it (#801)
 - `1eb7a355c` **telegram**: link a DM's `📎` file marker through the bot's own username — **withdrawn by `72f21d1c4`**, which measured the link dead (#802)
 - `72f21d1c4` **telegram**: withdraw that DM link, because a bot DM carries two message-id spaces and `t.me/<bot>/<id>` resolves in the client's, which a bot never sees — one bubble read `152540` from the Bot API and `975245` from the client, the gap drifting between probes, while `t.me/<bot>/<any id>` answers `200` for ids that do not exist; a DM keeps the plain `📎` marker and the document bubble, supergroup links are unchanged (#802)
+- `21d72dd9b` **telegram**: give a DM's `📎` marker a deep link that re-sends the file, since no message-id form is reachable from a bot DM — the marker now points at `t.me/<bot>?start=file_<token>`, the token resolving through a small path registry, and a `/start` branch re-checks the allowlist and re-sends the document under its real filename; supergroups keep `t.me/c/…` and basic groups keep the plain marker (#802)
 
 ## [0.5.4] - 2026-09-26
 
