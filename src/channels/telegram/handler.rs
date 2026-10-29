@@ -907,6 +907,73 @@ pub(crate) async fn handle_message(
             return Ok(());
         }
 
+        // #802: a FILE deep link — `/start file_<token>`. A DM has no
+        // message-link form this side can build: a bot never sees the client's
+        // message ids (see [`super::file_links`] for the measurement), so the
+        // `📎 spec.md` marker in the body points HERE instead of at a bubble.
+        // The reader taps it, Telegram opens this DM with the payload, and the
+        // bot re-sends that document — the link delivers the file rather than
+        // naming a message nobody can resolve.
+        //
+        // The token map is the only authority on what a token names, and
+        // `resolve` refuses one whose file has since been cleaned up, so a
+        // stale marker answers "no longer available" instead of shipping a
+        // path that no longer exists.
+        if let Some(param) = text.strip_prefix("/start ")
+            && let Some(token) = param.strip_prefix(super::file_links::PAYLOAD_PREFIX)
+        {
+            // `/start` is handled BEFORE the allowlist gate below, so this leg
+            // repeats it: a deep link must not be a way around admission. A DM
+            // resolves to the owner/admin only, which is also the only party
+            // the marker was ever shown to.
+            let link_is_dm = matches!(msg.chat.kind, ChatKind::Private { .. });
+            if !cfg.channels.telegram.user_allowed(
+                &user_id.to_string(),
+                &msg.chat.id.0.to_string(),
+                link_is_dm,
+            ) {
+                return Ok(());
+            }
+            match super::file_links::resolve(token) {
+                Some(path) => match tokio::fs::read(&path).await {
+                    Ok(bytes) => {
+                        // The bubble carries the document's own name, the same
+                        // one the marker shows, so a reader who tapped "spec.md"
+                        // gets a file called `spec.md`.
+                        let sent = super::send::document_in_thread(
+                            &bot,
+                            msg.chat.id,
+                            thread_id,
+                            teloxide::types::InputFile::memory(bytes)
+                                .file_name(super::delivery::document_part_name(&path)),
+                            None,
+                        )
+                        .await;
+                        if let Err(e) = sent {
+                            tracing::warn!(
+                                "Telegram: file deep link could not re-send {}: {e}",
+                                path.display()
+                            );
+                        }
+                    }
+                    Err(e) => tracing::warn!(
+                        "Telegram: file deep link could not read {}: {e}",
+                        path.display()
+                    ),
+                },
+                None => {
+                    let _ = message_in_thread(
+                        &bot,
+                        msg.chat.id,
+                        thread_id,
+                        "That file is no longer available.",
+                    )
+                    .await;
+                }
+            }
+            return Ok(());
+        }
+
         let is_group = !matches!(msg.chat.kind, ChatKind::Private { .. });
 
         // In a group, /start self-registration is gated to OPEN groups (#717):
