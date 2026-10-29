@@ -615,18 +615,10 @@ pub(crate) async fn deliver_intermediate_message(
     // pass finds it. A path with no link — a refused file, or a chat kind with
     // no message-link form — keeps its plain marker, which is honest: the marker
     // still names the document sitting below it.
-    // #802: a DM's link names the BOT rather than the chat, so the username
-    // rides beside the id. Read once for this send.
-    let link_username = tg.bot_username().await;
     let rich_linked = super::delivery::link_file_markers(
         rich,
         &stripped_files,
-        &super::delivery::delivered_file_links(
-            &skipped_delivered,
-            chat.0,
-            thread_id,
-            link_username.as_deref(),
-        ),
+        &super::delivery::delivered_file_links(&skipped_delivered, chat.0, thread_id),
     );
     let body = crate::utils::append_failure_notice(&rich_linked, &failures);
     let body = crate::utils::append_file_failure_notice(&body, &file_failures);
@@ -784,22 +776,14 @@ pub(crate) async fn deliver_intermediate_message(
     // leaves every marker it has no link for plain, so the merge cannot
     // mis-point one.
     let fallback_links: Vec<(std::path::PathBuf, String)> = {
-        let mut links = super::delivery::delivered_file_links(
-            &delivered_files,
-            chat.0,
-            thread_id,
-            link_username.as_deref(),
-        );
+        let mut links = super::delivery::delivered_file_links(&delivered_files, chat.0, thread_id);
         for file in &skipped_delivered {
             if links.iter().any(|(path, _)| path == &file.path) {
                 continue;
             }
-            if let Some(link) = super::delivery::file_message_link(
-                chat.0,
-                thread_id,
-                file.message_id,
-                link_username.as_deref(),
-            ) {
+            if let Some(link) =
+                super::delivery::file_message_link(chat.0, thread_id, file.message_id)
+            {
                 links.push((file.path.clone(), link));
             }
         }
