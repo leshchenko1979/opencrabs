@@ -259,14 +259,35 @@ pub(crate) fn compaction_loop_guard(compaction_streak: u32) -> bool {
 /// not come down. Returns whether messages were actually dropped, which is what
 /// the caller's `truncated` bookkeeping and the persist-a-marker rule hang off.
 ///
+/// The target is solved in EFFECTIVE space, not local space, because the 90%
+/// floor that sends us here reads `AgentContext::effective_token_count()`
+/// while `hard_truncate_to` only consumes `token_count`. Those two differ by
+/// the anchor gap — `reported - estimated_at_anchor` — whenever a provider has
+/// anchored the budget. Cutting the local count to 80% then leaves the
+/// effective count at 80% plus that gap, and since `estimated_at_anchor` is a
+/// one-shot snapshot the gap is constant across the cut: any gap wider than
+/// 10% of the window re-trips the floor on the very next turn, every turn,
+/// forever. So subtract the gap from the target and let the local cut run
+/// deeper by exactly that much.
+///
+/// `saturating_sub` does double duty there: a zero gap (no anchor yet) leaves
+/// the target at 80% unchanged, and a provider report LOWER than our own
+/// estimate — a negative gap — clamps to zero rather than raising the target
+/// above 80%.
+///
 /// Blind by design to the two-message floor in `AgentContext::hard_truncate_to`:
 /// a window pinned by two outsized messages cannot be brought down this way, and
 /// claiming otherwise would put a marker on a context that never shrank.
 fn safety_truncate_to_80(context: &mut AgentContext, max_tokens: usize) -> bool {
-    let target = (max_tokens as f64 * 0.80) as usize;
-    if context.token_count <= target {
+    let effective_target = (max_tokens as f64 * 0.80) as usize;
+    let effective_tokens = context.effective_token_count();
+    if effective_tokens <= effective_target {
         return false;
     }
+    // How far the provider's view runs ahead of the local count. Constant for
+    // this call: `estimated_at_anchor` does not move as we drop messages.
+    let anchor_gap = effective_tokens.saturating_sub(context.token_count);
+    let target = effective_target.saturating_sub(anchor_gap);
     let before_len = context.messages.len();
     context.hard_truncate_to(target);
     context.trim_to_fit(0);
@@ -998,5 +1019,89 @@ impl AgentService {
             .ok()
             .and_then(|map| map.get(&session_id).copied())
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::brain::provider::Message;
+
+    /// A message that estimates to a few thousand tokens, so a window can be
+    /// filled with a handful of them and the drop loop has real work to do.
+    fn filler() -> String {
+        "the quick brown fox jumps over the lazy dog ".repeat(400)
+    }
+
+    /// A context filled to roughly `local_tokens` of local estimate, with more
+    /// messages than the two-message floor so truncation is not blocked by it.
+    fn context_with(window: usize, local_tokens: usize) -> AgentContext {
+        let mut c = AgentContext::new(Uuid::new_v4(), window);
+        while c.token_count < local_tokens {
+            c.add_message(Message::user(filler()));
+        }
+        assert!(
+            c.messages.len() > 2,
+            "the two-message floor must not be what bounds this fixture"
+        );
+        c
+    }
+
+    #[test]
+    fn truncation_lands_the_effective_count_under_80_percent() {
+        // The loop this guards: the 90% floor reads `effective_token_count()`
+        // while the cut only moves `token_count`. With an anchor gap wider than
+        // 10% of the window, a local cut to 80% left the effective count back
+        // over 90%, so the floor re-tripped on the next turn — every turn.
+        let mut c = context_with(100_000, 85_000);
+        let local = c.token_count;
+        let gap = 10_000;
+        c.record_provider_reported_tokens(local + gap);
+
+        assert!(c.usage_percentage() > 90.0, "the fixture trips the floor");
+        assert!(c.effective_token_count() > 80_000);
+
+        assert!(safety_truncate_to_80(&mut c, 100_000));
+        assert!(
+            c.effective_token_count() <= 80_000,
+            "the cut must be solved in effective space, or the floor re-trips \
+             forever: local {} + gap {} is still over 80%",
+            c.token_count,
+            gap
+        );
+        assert!(c.usage_percentage() < 90.0, "and the floor stays untripped");
+    }
+
+    #[test]
+    fn without_an_anchor_the_target_is_plain_80_percent() {
+        let mut c = context_with(100_000, 85_000);
+        assert_eq!(c.effective_token_count(), c.token_count);
+
+        assert!(safety_truncate_to_80(&mut c, 100_000));
+        assert!(c.effective_token_count() <= 80_000);
+    }
+
+    #[test]
+    fn a_report_below_our_estimate_does_not_raise_the_target() {
+        // Negative gap: the provider counted less than we did. Subtracting it
+        // must clamp to zero, never lift the target above 80% of the window.
+        let mut c = context_with(100_000, 90_000);
+        let local = c.token_count;
+        c.record_provider_reported_tokens(local - 3_000);
+        assert!(
+            c.effective_token_count() > 80_000,
+            "the fixture must still trip, or this proves nothing"
+        );
+
+        assert!(safety_truncate_to_80(&mut c, 100_000));
+        assert!(c.token_count <= 80_000, "the target stayed at plain 80%");
+    }
+
+    #[test]
+    fn a_context_already_under_the_target_is_left_alone() {
+        let mut c = context_with(100_000, 50_000);
+        let before = c.messages.len();
+        assert!(!safety_truncate_to_80(&mut c, 100_000));
+        assert_eq!(c.messages.len(), before);
     }
 }
