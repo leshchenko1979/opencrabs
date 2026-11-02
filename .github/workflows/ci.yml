@@ -16,6 +16,18 @@ name: CI
 # and trusts the commit already passed CI on its way to main. That also
 # kills the old double-build where ci.yml and release.yml both compiled
 # Windows/macOS on the same tag event.
+# Runner model (measured 2026-11-02): the fork has ZERO registered
+# self-hosted runners (`/actions/runners` -> total_count 0) and no
+# `ci.yml` job in the last 20 runs ever acquired a `runner_name`, so
+# every `self-hosted` job sat `queued` until `concurrency` cancelled it
+# and run 41387292512 queued from 2026-11-02T04:13Z with no end. A gate
+# that never runs is not a cost saving, so Linux work is back on
+# `ubuntu-latest` and the macOS build target on `macos-latest` (native
+# arm64 since macos-14). If the Mac runner is registered again, flip the
+# BUILD matrix entry back to `self-hosted` — do NOT re-flip lint/test/
+# audit, whose `ubuntu-latest` path is what makes the gate actually bite.
+# The `if: runner.environment == 'self-hosted'` steps below stay as
+# guards: they skip cleanly on hosted runners.
 on:
   pull_request:
   push:
@@ -46,7 +58,7 @@ jobs:
   # cross-platform build/test matrix for a PR that won't lint anyway.
   lint:
     name: Lint
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || 'self-hosted' }}
+    runs-on: ubuntu-latest
     # 25: hosted Lint ran 13:43 of its 15 cap on a fork PR (run
     # 36069934718); one noisy neighbor on the hosted fleet is a false red.
     timeout-minutes: 25
@@ -137,7 +149,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: self-hosted
+          - os: macos-latest
             target: aarch64-apple-darwin
             features: --all-features
     steps:
@@ -318,7 +330,7 @@ jobs:
   test:
     name: Test
     needs: [lint, audit]
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || 'self-hosted' }}
+    runs-on: ubuntu-latest
     # 60: fork PRs run this on hosted runners at roughly 3x self-hosted
     # speed, and the 30 cap killed cold-cache fork runs twice (runs
     # 36078125556 and 36069934718, both cancelled at ~30 while green code
@@ -386,7 +398,7 @@ jobs:
 
   audit:
     name: Cargo Audit
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || 'self-hosted' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -494,7 +506,7 @@ jobs:
     # On the Mac, where tarpaulin finishes the whole suite in ~15 min. A
     # hosted runner needed well over 30 for the same work and cost minutes
     # for it, which is not a trade worth making for a metric job.
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || 'self-hosted' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -573,7 +585,7 @@ jobs:
     # gate for exactly that reason. It stays as an advisory signal; Windows
     # remains release-blocking via release.yml's build matrix before any tag.
     needs: [lint, build, test, audit]
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || 'self-hosted' }}
+    runs-on: ubuntu-latest
     steps:
       - name: Check results
         run: |
