@@ -4235,23 +4235,19 @@ impl AgentService {
             } else {
                 tiktoken_estimate()
             };
-            // Anchor the context budget on what the provider counted, so
-            // compaction measures the request that will actually be sent
-            // rather than a local estimate that omits the tool schemas and
-            // disagrees with their tokenizer. Guarded by the same
-            // over-reporting check the ctx counter uses: an endpoint adding a
-            // flat overhead to every call must not drag the budget up and
-            // compact a context that was never close to full.
-            if reported_usage
-                && !is_claude_cli
-                && !is_implausible_token_report(
-                    context.token_count,
-                    self.base_context_tokens() as usize,
-                    call_context_tokens as usize,
-                )
-            {
-                context.record_provider_reported_tokens(call_context_tokens as usize);
-            }
+            // The budget anchor is recorded BELOW, inside the branch that
+            // actually adopts a report — never here. `effective_token_count()`
+            // is `reported + (token_count - estimated_at_anchor)`, and the
+            // calibration branches replace `token_count` with an ABSOLUTE from
+            // the provider's own series. Anchoring before that overwrite left
+            // `estimated_at_anchor` holding the pre-calibration local estimate
+            // (115,961) while `token_count` became the provider figure
+            // (139,183), so the meter counted the 23,222-token calibration gap
+            // TWICE — 162,405, or 81.2% of a 200k window, against a real 69.6%
+            // — and compaction fired on a context that was never close to
+            // full. Anchoring after the overwrite makes the gap zero at the
+            // instant it is taken, and later appends raise `token_count` from
+            // that same absolute, which is the delta the formula wants.
             total_input_tokens += call_input_tokens;
             last_iter_input_tokens = call_context_tokens;
             total_output_tokens += response.usage.output_tokens;
@@ -4319,6 +4315,10 @@ impl AgentService {
                             cli_context,
                         );
                         context.token_count = cli_context;
+                        // Anchor AFTER the overwrite, so `estimated_at_anchor`
+                        // and the adopted absolute are the same number and the
+                        // calibration gap is counted once, not twice (#1677).
+                        context.record_provider_reported_tokens(cli_context);
                     }
                 }
             } else if is_claude_cli {
@@ -4348,6 +4348,12 @@ impl AgentService {
                             actual,
                         );
                         context.token_count = actual;
+                        // Anchor AFTER the overwrite (#1677). Recording it
+                        // before the calibration branches captured the
+                        // pre-calibration local estimate as `estimated_at_anchor`
+                        // while `token_count` became the provider's absolute, so
+                        // `effective_token_count()` added that gap a second time.
+                        context.record_provider_reported_tokens(actual);
                     }
                     TokenReport::RejectImplausible => {
                         let expected = context.token_count + tool_tokens;
