@@ -16,6 +16,11 @@ name: Verify Anchor Fix
 
 on:
   workflow_dispatch:
+  # workflow_dispatch needs the file on the DEFAULT branch, which this scratch
+  # workflow must never be. A push trigger scoped to this one branch fires on
+  # the pushed ref instead, and touches nothing else.
+  push:
+    branches: [verify/1677-anchor]
 
 concurrency:
   group: verify-anchor-${{ github.ref }}
