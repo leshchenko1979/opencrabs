@@ -1,0 +1,50 @@
+name: Verify Anchor Fix
+
+# Scratch verification workflow for the #1677 follow-up (provider anchor
+# recorded after calibration, not before).
+#
+# WHY THIS EXISTS: ci.yml's `test` job declares `needs: [lint, audit]` with no
+# `if:` narrowing, and `audit` is red on a stale Cargo.lock (pre-existing since
+# at least 2026-11-02, tracked in #806). So on main, `test` is SKIPPED and no
+# push to main can compile or test anything. Fixing the lock needs `cargo
+# update`, which box law forbids locally. This workflow runs the same test job
+# steps as ci.yml with the audit gate removed, so the fix can be verified
+# without waiting on that decision and without weakening the audit gate itself.
+#
+# Dispatch-only. No scheduler, no push trigger, no PR trigger. Scratch branch
+# only; this file is not intended to land on main.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-anchor-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install mold + ALSA dev (Linux)
+        run: sudo apt-get update -qq && sudo apt-get install -y mold clang libasound2-dev
+
+      # Compiles every target including the test harness. This alone proves the
+      # change builds; the targeted runs below prove the new tests pass.
+      - name: Compile all test targets
+        run: cargo test --locked --profile ci --all-features --no-run
+
+      - name: claude_cli_context_anchor
+        run: cargo test --locked --profile ci --all-features claude_cli_context_anchor -- --nocapture
+
+      - name: context_provider_anchor
+        run: cargo test --locked --profile ci --all-features context_provider_anchor -- --nocapture
+
+      - name: compaction
+        run: cargo test --locked --profile ci --all-features compaction -- --nocapture
