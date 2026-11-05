@@ -2627,6 +2627,36 @@ pub async fn run_attach_channel(args: &str, session_id: Uuid, agent: &AgentServi
     lines.join("\n")
 }
 
+/// One `/tasks` row, split into CELLS rather than pre-joined into a line
+/// (#810): the command renders as a table, and a table can only be laid out
+/// from its parts. Keeping the split here — instead of formatting the row at
+/// the manager and the disk arm separately — is what stops the two arms from
+/// drifting into different column orders.
+#[derive(Clone)]
+pub(crate) struct TaskRow {
+    /// The label as a table-safe inline-code cell (see [`table_command`]).
+    pub(crate) command: String,
+    /// Elapsed time, or `—` when the record carries none.
+    pub(crate) time: String,
+    /// State glyph, plus the cause where one exists. A clean exit is the tick
+    /// alone: the icon IS "completed", so `✅ exit 0` would say it twice.
+    pub(crate) outcome: String,
+}
+
+/// A command label as a table cell. Two hazards, one function:
+///
+/// - `|` would END the cell — the table parser splits on it before any escape
+///   is honoured, so `\|` does not save a row, it breaks it. The box-drawing
+///   bar reads the same in a terminal command and cannot split anything.
+/// - a bare `` ` `` or `*` would open an inline span that runs past the cell,
+///   swallowing the columns after it. Backticks are already flattened by
+///   [`clip_task_label`]; the code span added here is what protects the rest
+///   of the markdown from the command's own punctuation.
+fn table_command(label: &str) -> String {
+    let safe = clip_task_label(label).replace('|', "\u{2502}");
+    format!("`{safe}`")
+}
+
 /// `/tasks [N]` — the detached runs this session started (#808 cue 12).
 ///
 /// Two sources, because a run changes home when it ends: a LIVE run exists
@@ -2644,16 +2674,16 @@ pub async fn run_attach_channel(args: &str, session_id: Uuid, agent: &AgentServi
 ///
 /// [`status_dir`]: crate::brain::agent::service::work_status::status_dir
 pub fn run_tasks_channel(args: &str, session_id: Uuid, agent: &AgentService) -> String {
-    let mut live: Vec<(String, String)> = Vec::new();
+    let mut live: Vec<(String, TaskRow)> = Vec::new();
     if let Some(bm) = agent.background_manager() {
         for h in bm.handles_for(session_id) {
             live.push((
                 h.id.clone(),
-                format!(
-                    "\u{25b6}\u{fe0f} `{}` \u{b7} running {}",
-                    clip_task_label(&h.label),
-                    fmt_task_elapsed(h.started.elapsed().as_secs())
-                ),
+                TaskRow {
+                    command: table_command(&h.label),
+                    time: fmt_task_elapsed(h.started.elapsed().as_secs()),
+                    outcome: "\u{25b6}\u{fe0f} running".to_string(),
+                },
             ));
         }
     }
@@ -2664,9 +2694,9 @@ pub fn run_tasks_channel(args: &str, session_id: Uuid, agent: &AgentService) -> 
 /// pin the disk scan and the row format without an `AgentService` — same
 /// split as [`render_audit_rows`] and for the same reason (#808 cue 12).
 ///
-/// `live` pairs a run id with its already-rendered row; the ids are what keep
+/// `live` pairs a run id with its already-built cells; the ids are what keep
 /// the disk arm from listing a live run twice.
-pub(crate) fn render_tasks_rows(args: &str, session: &str, live: &[(String, String)]) -> String {
+pub(crate) fn render_tasks_rows(args: &str, session: &str, live: &[(String, TaskRow)]) -> String {
     use crate::brain::agent::service::work_status::{WorkKind, WorkStatus};
 
     let want = args
@@ -2676,7 +2706,7 @@ pub(crate) fn render_tasks_rows(args: &str, session: &str, live: &[(String, Stri
         .unwrap_or(20)
         .clamp(1, 50);
 
-    let mut rows: Vec<String> = live.iter().map(|(_, row)| row.clone()).collect();
+    let mut rows: Vec<TaskRow> = live.iter().map(|(_, row)| row.clone()).collect();
 
     let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(crate::brain::agent::service::work_status::status_dir()) {
@@ -2714,19 +2744,29 @@ pub(crate) fn render_tasks_rows(args: &str, session: &str, live: &[(String, Stri
         if status.kind != WorkKind::Command || status.session_id != session {
             continue;
         }
-        rows.push(render_task_row(&status));
+        rows.push(task_row(&status));
     }
 
     if rows.is_empty() {
         return "no detached runs in this session".to_string();
     }
-    format!("## Detached runs ({})\n\n{}", rows.len(), rows.join("\n"))
+    // A GFM table, not a list of lines: the four facts of a run (what, how
+    // long, how it ended, and — via the row order — how recent) line up in
+    // columns instead of wrapping into a paragraph (#810). The blank line
+    // before the header is load-bearing: a table that starts on the line after
+    // a paragraph renders as literal pipes.
+    let mut out = format!("## Detached runs ({})\n\n", rows.len());
+    out.push_str("| command | time | outcome |\n|---|---|---|\n");
+    for r in &rows {
+        out.push_str(&format!("| {} | {} | {} |\n", r.command, r.time, r.outcome));
+    }
+    out
 }
 
 /// One finished-run row. The cause is the whole point of #786: `137` alone
 /// cannot tell a ceiling kill from a signal from a command that exited 137
 /// itself, so a row that reports only the code reports nothing useful.
-fn render_task_row(status: &crate::brain::agent::service::work_status::WorkStatus) -> String {
+fn task_row(status: &crate::brain::agent::service::work_status::WorkStatus) -> TaskRow {
     let finish = status.finish.as_ref();
     let code = finish.and_then(|f| f.code);
     let success = finish.and_then(|f| f.success);
@@ -2735,10 +2775,7 @@ fn render_task_row(status: &crate::brain::agent::service::work_status::WorkStatu
         Some(false) => "\u{274c}",
         None => "\u{23f3}",
     };
-    let mut row = format!("{icon} `{}`", clip_task_label(&status.label));
-    if let Some(secs) = finish.and_then(|f| f.elapsed_secs) {
-        row.push_str(&format!(" · {}", fmt_task_elapsed(secs as u64)));
-    }
+    let mut outcome = icon.to_string();
     // The state word is restated only where the icon cannot carry it. A row
     // reading `✅ … · completed · 5s · exit 0` says the same thing four times:
     // the tick IS "completed", and `exit 0` is what a tick means. What the
@@ -2750,26 +2787,37 @@ fn render_task_row(status: &crate::brain::agent::service::work_status::WorkStatu
             | crate::brain::agent::service::work_status::WorkState::Failed
     );
     if !terminal {
-        row.push_str(&format!(" · {}", status.state.label()));
+        outcome.push(' ');
+        outcome.push_str(status.state.label());
     }
     match finish.and_then(|f| f.cause) {
         // A clean exit is already said by the tick; repeating it as `exit 0`
         // spends the row's last column on the expected case.
-        Some(cause) if success == Some(true) && code == Some(0) => {
-            let _ = cause;
+        Some(_) if success == Some(true) && code == Some(0) => {}
+        Some(cause) => {
+            outcome.push(' ');
+            outcome.push_str(&cause.describe(code.unwrap_or(-1)));
         }
-        Some(cause) => row.push_str(&format!(" · {}", cause.describe(code.unwrap_or(-1)))),
         // A record written before #786 carries no cause; fall back to the code
         // rather than claiming `ordinary`, which would be a guess.
         None => {
             // Only an unexpected exit is worth the row's last column, so filter
             // the code rather than nesting a second condition (#808).
             if let Some(c) = code.filter(|c| success != Some(true) || *c != 0) {
-                row.push_str(&format!(" · exit {c}"));
+                outcome.push_str(&format!(" exit {c}"));
             }
         }
     }
-    row
+    TaskRow {
+        command: table_command(&status.label),
+        // A missing duration leaves a visible gap in the column rather than a
+        // blank cell, so the row never reads as a formatting error.
+        time: finish
+            .and_then(|f| f.elapsed_secs)
+            .map(|s| fmt_task_elapsed(s as u64))
+            .unwrap_or_else(|| "\u{2014}".to_string()),
+        outcome,
+    }
 }
 
 /// Labels are command text, so they can carry backticks (which would break the

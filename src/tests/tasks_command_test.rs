@@ -14,7 +14,7 @@
 use crate::brain::agent::service::work_status::{
     self, CommandExit, CommandPaths, RunCause, WorkFinish, WorkKind, WorkState, WorkStatus,
 };
-use crate::channels::commands::render_tasks_rows;
+use crate::channels::commands::{render_tasks_rows, TaskRow};
 
 /// A scratch status dir bound to this test's thread. `status_dir()` reads the
 /// override, so `new_command`/`finish_command` write here and nowhere else.
@@ -157,12 +157,16 @@ fn a_live_run_is_listed_once_even_though_it_is_also_on_disk() {
     finished("run-live", "session-a", "sleep 30", true, 0, RunCause::Ordinary, 1.0);
     let live = vec![(
         "run-live".to_string(),
-        "▶️ `sleep 30` · running 12s".to_string(),
+        TaskRow {
+            command: "`sleep 30`".to_string(),
+            time: "12s".to_string(),
+            outcome: "\u{25b6}\u{fe0f} running".to_string(),
+        },
     )];
 
     let out = render_tasks_rows("", "session-a", &live);
     // The live row is the one shown, and the disk arm skips the same id.
-    assert!(out.contains("running 12s"), "got: {out}");
+    assert!(out.contains("| `sleep 30` | 12s | \u{25b6}\u{fe0f} running |"), "got: {out}");
     assert!(out.starts_with("## Detached runs (1)"), "got: {out}");
 }
 
@@ -188,4 +192,64 @@ fn the_row_cap_clamps_and_never_panics_on_junk_args() {
         let out = render_tasks_rows(args, "session-a", &[]);
         assert_eq!(out, "no detached runs in this session", "args={args:?}");
     }
+}
+
+/// #810: the rows are a GFM table, not a wall of wrapped lines. The header and
+/// the delimiter are asserted literally because they are the whole difference
+/// between a grid and a paragraph of pipes.
+#[test]
+fn rows_render_as_a_table_with_a_header_and_a_delimiter() {
+    let _scratch = Scratch::new("table");
+    finished(
+        "run-a",
+        "session-a",
+        "cargo test --all-features",
+        true,
+        0,
+        RunCause::Ordinary,
+        4.0,
+    );
+
+    let out = render_tasks_rows("", "session-a", &[]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "## Detached runs (1)");
+    assert_eq!(
+        lines[1], "",
+        "the blank line keeps the table from reading as a paragraph"
+    );
+    assert_eq!(lines[2], "| command | time | outcome |");
+    assert_eq!(lines[3], "|---|---|---|");
+    assert_eq!(lines[4], "| `cargo test --all-features` | 4s | \u{2705} |");
+}
+
+/// A shell pipe must never split a cell. The table parser splits on `|` BEFORE
+/// any escape is honoured, so a label carrying one would silently lose its
+/// columns — the row would render as two broken rows, not as one wide one.
+#[test]
+fn a_pipe_in_the_command_cannot_split_the_row() {
+    let _scratch = Scratch::new("pipe");
+    finished(
+        "run-pipe",
+        "session-a",
+        "grep -c foo | wc -l",
+        true,
+        0,
+        RunCause::Ordinary,
+        2.0,
+    );
+
+    let out = render_tasks_rows("", "session-a", &[]);
+    let row = out
+        .lines()
+        .find(|l| l.starts_with("| `grep"))
+        .expect("the row is present");
+    assert_eq!(
+        row.matches('|').count(),
+        4,
+        "one boundary per column edge, no more: {row:?}"
+    );
+    assert!(
+        row.contains('\u{2502}'),
+        "the pipe survives as a bar rather than vanishing: {row:?}"
+    );
 }
