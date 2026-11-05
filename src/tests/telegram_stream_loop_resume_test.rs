@@ -202,7 +202,6 @@ async fn resume_shape_loop_edits_tools_in_place_and_never_reacts() {
         tools_started_at: Some(std::time::Instant::now()),
         turn_started_at: std::time::Instant::now(),
         flow_outcome: None,
-        bg_indicator: None,
         bg_count: None,
         subagent_counts: Default::default(),
         queued_count: 0,

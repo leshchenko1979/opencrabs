@@ -32,7 +32,7 @@ use teloxide::prelude::*;
 use teloxide::types::MessageId;
 use uuid::Uuid;
 
-use super::delivery::{bg_indicator_for, subagent_counts_for};
+use super::delivery::{bg_count_for, subagent_counts_for};
 use super::flow::{FlowOutcome, StreamingState, refresh_flow};
 use super::flow_chrome::refresh_sections;
 use super::governor::EditClass;
@@ -78,9 +78,7 @@ pub(crate) async fn settle_turn_block(
     {
         let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
         s.flow_outcome = Some(flow_outcome);
-        let (bg_indicator, bg_count) = bg_indicator_for(agent, session_id);
-        s.bg_indicator = bg_indicator;
-        s.bg_count = bg_count;
+        s.bg_count = bg_count_for(agent, session_id);
         // Sub-agents are the second background registry (#1183): the header
         // must wait on them too, split working vs awaiting collection, or a
         // turn ending with agents mid-work reads "✅ Finished".

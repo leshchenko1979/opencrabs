@@ -89,41 +89,22 @@ pub(crate) fn is_no_media_found(e: &anyhow::Error) -> bool {
 /// BEFORE posting the question message, so the user sees contextual text
 /// above the buttons instead of below (race reported in issue #142).
 ///
-/// Applies the same sanitize/redact/dedup/split/send chain as the edit loop.
-/// Deliver the final agent response for a turn: marker
-/// extraction, sanitize, react directive, dedup, reaction-only handling,
-/// folded-final reclaim, footer, rich-first send with HTML fallback,
-/// chunked sends, history recording, TTS. Extracted VERBATIM from
-/// handle_message (#471 phase 2) — the only edit is early
-/// `return Ok(())` becoming `return Ok(false)` so the caller can
-/// preserve handle_message's original control flow exactly.
+/// Detached-run count for the flow footer and the settled header (#1054,
+/// #1144): `None` when no manager is wired (#722), `Some(n)` otherwise —
+/// including `Some(0)`, which is the value that says "nothing is out of the
+/// turn" and lets the settled header fall back to "✅ Finished".
 ///
-/// Shared by live turns and the crash-recovery resume path (#471 phase 3); the
-/// only difference is `reply_to`, which is `None` on resume because the original
-/// message id is lost across a restart (#771).
-/// Background-task indicator for the settled flow footer (#1054): the first
-/// task's label when exactly one is running, a count when several, `None`
-/// when nothing is detached or no manager is wired (#722). A settled turn
-/// that ends with detached work looks identical to a complete one without
-/// this, and the typing indicator staying alive is too easy to miss.
-///
-/// Returns the footer label **and** the numeric count (the settled header
-/// needs the number to read "Waiting for N background task(s)" — #1144).
-/// Both come from the single `running_tasks(session_id)` read so settle does
-/// not hit the manager twice.
-pub(crate) fn bg_indicator_for(
-    agent: &AgentService,
-    session_id: Uuid,
-) -> (Option<String>, Option<usize>) {
+/// #810 removed the LABEL half this function used to return. It fed a
+/// `🔧 <label> running` footer segment that the owner rejected on sight:
+/// the count is the cue, and naming the run in the footer turned every
+/// detached turn's footer into a second status line. The label still reaches
+/// the user where it belongs — the receipt card and `/tasks` — read from
+/// `BgTaskMeta`, not from here.
+pub(crate) fn bg_count_for(agent: &AgentService, session_id: Uuid) -> Option<usize> {
     let Some(bm) = agent.background_manager() else {
-        return (None, None);
+        return None;
     };
-    let tasks = bm.running_tasks(session_id);
-    match tasks.len() {
-        0 => (None, Some(0)),
-        1 => (Some(format!("{} running", tasks[0].label)), Some(1)),
-        n => (Some(format!("{n} tasks running")), Some(n)),
-    }
+    Some(bm.running_tasks(session_id).len())
 }
 
 /// Alive sub-agent counts for the settled header (#1183): how many of THIS
@@ -144,6 +125,18 @@ pub(crate) fn subagent_counts_for(
     super::flow::SubagentCounts { working, awaiting }
 }
 
+/// Applies the same sanitize/redact/dedup/split/send chain as the edit loop.
+/// Deliver the final agent response for a turn: marker
+/// extraction, sanitize, react directive, dedup, reaction-only handling,
+/// folded-final reclaim, footer, rich-first send with HTML fallback,
+/// chunked sends, history recording, TTS. Extracted VERBATIM from
+/// handle_message (#471 phase 2) — the only edit is early
+/// `return Ok(())` becoming `return Ok(false)` so the caller can
+/// preserve handle_message's original control flow exactly.
+///
+/// Shared by live turns and the crash-recovery resume path (#471 phase 3); the
+/// only difference is `reply_to`, which is `None` on resume because the original
+/// message id is lost across a restart (#771).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn deliver_final_response(
     bot: &Bot,

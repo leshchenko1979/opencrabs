@@ -284,16 +284,13 @@ pub(crate) fn spawn_edit_loop(
                             // permanent zero and the `N 🤖` segment is suppressed
                             // for the whole time the agents are actually alive.
                             s.subagent_counts = super::delivery::subagent_counts_for(&agent, sid);
-                            // #808 cue 3: the footer's `🔧 <label> running`
-                            // segment had a writer ONLY in `turn_settle`, so
-                            // the whole point of the cue — saying work is
-                            // still happening WHILE it happens — could never
-                            // fire during a turn. Same live-stamp argument as
-                            // the #585 sub-agent counts directly above.
-                            let (bg_indicator, bg_count) =
-                                super::delivery::bg_indicator_for(&agent, sid);
-                            s.bg_indicator = bg_indicator;
-                            s.bg_count = bg_count;
+                            // #1144/#810: the `N ⏏️` footer segment needs a
+                            // live stamp, not a settle-only one — without it
+                            // the count reads a permanent zero for the whole
+                            // time the work is actually out of the turn. Same
+                            // live-stamp argument as the #585 sub-agent counts
+                            // directly above.
+                            s.bg_count = super::delivery::bg_count_for(&agent, sid);
                             // #808 cue 2, clearing side: the marker means
                             // "this call's work is still out of the turn", so
                             // it must come off the instant the run ends. This

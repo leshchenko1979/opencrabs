@@ -457,16 +457,6 @@ pub(crate) struct FooterParts<'a> {
     pub(crate) elapsed_secs: u64,
     /// Whether an active/retained goal is set for this session/turn.
     pub(crate) has_goal: bool,
-    /// Background-work indicator (#1054): `Some(label)` while detached tasks
-    /// are running. Renders as the final footer segment `🔧 <label> running`
-    /// (or `🔧 N tasks running`) after the clock.
-    ///
-    /// #808 cue 3: this field spent its whole life `#[allow(dead_code)]` with
-    /// ZERO readers — threaded through three renderers and drawn by none, so
-    /// the footer never showed detached work no matter how long it ran. The
-    /// `allow` was the symptom, not the licence: it silenced the one warning
-    /// that would have said so.
-    pub(crate) bg: Option<&'a str>,
 }
 
 /// Extract context percentage from formatted ctx string and format as `<pct>% 🧠`.
@@ -558,24 +548,15 @@ pub(crate) fn standalone_telemetry_line(
         "⚙️"
     };
 
-    // #808 cue 3: the background indicator is the FINAL segment on both
-    // branches. It must sit after the clock (and after telemetry) so a footer
-    // that grows a new segment never pushes the one signal that says "work is
-    // still happening" into the middle of the line, where it reads as another
-    // counter rather than as a live state.
-    //
-    // The wrench is prefixed HERE rather than in `bg_indicator_for`: that
-    // producer returns a bare label because the settled HEADER consumes the
-    // count, not the label. One render point, one contract — and this field's
-    // own doc promises `\u{1f527} <label> running`, which it never delivered
-    // while it had no reader.
-    let bg_seg = parts.bg.map(|bg| format!("\u{1f527} {bg}"));
+    // #808 cue 3, owner-corrected by #810: the footer carries the detached
+    // COUNT (`N ⏏️`, via `TelemetryMetrics.detached_tasks`) and nothing else.
+    // #808 also drew the run's LABEL here as `🔧 <label> running`; the owner
+    // rejected that segment on sight — the count already says work is out of
+    // the turn, and the label made every footer with a detached run read like
+    // a second status line. Removed, field and all, rather than left as a
+    // writerless field the next reader would try to revive.
     if let Some(telem) = telemetry {
-        let mut line = telem.format_telemetry_line(state_icon, parts.ctx, parts.has_goal);
-        if let Some(bg) = &bg_seg {
-            line.push_str(" • ");
-            line.push_str(bg);
-        }
+        let line = telem.format_telemetry_line(state_icon, parts.ctx, parts.has_goal);
         esc(&line)
     } else {
         let mut segs: Vec<String> = Vec::new();
@@ -586,9 +567,6 @@ pub(crate) fn standalone_telemetry_line(
         segs.push(clock_glyph(parts.elapsed_secs));
         if let Some(brain_ctx) = format_brain_ctx(parts.ctx) {
             segs.push(esc(&brain_ctx));
-        }
-        if let Some(bg) = &bg_seg {
-            segs.push(esc(bg));
         }
         segs.join(" • ")
     }

@@ -350,17 +350,13 @@ pub(crate) struct StreamingState {
     /// (`✅ Finished (N tool calls, 45s)` / `❌ Failed` / `⏱ Timed out`, #480).
     /// `None` while the turn is live.
     pub(crate) flow_outcome: Option<FlowOutcome>,
-    /// Background-work indicator for the settled footer (#1054): computed at
-    /// settle time from `agent.background_manager().running_tasks(session_id)`
-    /// — `Some("<label> running")` for one task, `Some("N tasks running")`
-    /// for several, `None` when nothing is detached. Rendered as the final
-    /// footer segment after the clock.
-    pub(crate) bg_indicator: Option<String>,
-    /// Background-task count at settle time (#1144): `None` when no manager is
-    /// wired, `Some(n)` otherwise. Drives the settled-header override so a turn
-    /// that ends with detached work reads "Waiting for N background task(s)"
-    /// instead of "✅ Finished". Parallel to [`Self::bg_indicator`] (the footer
-    /// label) but carries the numeric count the header needs.
+    /// Background-task count (#1144), from `agent.background_manager()`
+    /// `.running_tasks(session_id)`: `None` when no manager is wired, `Some(n)`
+    /// otherwise. Drives BOTH remaining detached cues — the settled-header
+    /// override ("Waiting for N background task(s)" instead of "✅ Finished")
+    /// and the `N ⏏️` telemetry segment. #810 removed the sibling label field
+    /// that used to feed a `🔧 … running` footer segment; the count is the
+    /// whole surface now.
     pub(crate) bg_count: Option<usize>,
     /// Alive sub-agent counts (#1183), from the session-scoped read of the
     /// (process-global) sub-agent manager: `working` vs `awaiting` collection.
@@ -640,7 +636,6 @@ pub(crate) fn render_flow_html_chrome(
         sections,
         FOLDED_NARRATION_CAP,
         elapsed_secs,
-        None,
         false,
         None,
     )
@@ -661,7 +656,6 @@ fn footer_parts<'a>(
     tool_count: usize,
     has_log: bool,
     elapsed_secs: u64,
-    bg: Option<&'a str>,
 ) -> super::flow_chrome::FooterParts<'a> {
     let outcome = match header {
         FlowHeader::Settled { icon, verb, .. } => Some((*icon, *verb)),
@@ -680,7 +674,6 @@ fn footer_parts<'a>(
         ctx: sections.ctx.as_deref(),
         elapsed_secs,
         has_goal,
-        bg,
     }
 }
 
@@ -783,7 +776,6 @@ pub(crate) fn render_flow_html_chrome_pref(
     sections: &super::flow_chrome::FlowSections,
     narration_cap: usize,
     elapsed_secs: u64,
-    bg: Option<&str>,
     compacting: bool,
     telemetry: Option<&super::flow_chrome::TelemetryMetrics>,
 ) -> String {
@@ -815,7 +807,6 @@ pub(crate) fn render_flow_html_chrome_pref(
         tool_count,
         has_log,
         elapsed_secs,
-        bg,
     );
     let telem_line =
         super::flow_chrome::standalone_telemetry_line(&parts, telemetry, HeaderMarkup::Html);
@@ -890,7 +881,6 @@ pub(crate) fn render_flow_details_chrome(
         sections,
         FOLDED_NARRATION_CAP,
         elapsed_secs,
-        None,
         false,
         None,
     )
@@ -911,7 +901,6 @@ pub(crate) fn render_flow_details_chrome_pref(
     sections: &super::flow_chrome::FlowSections,
     narration_cap: usize,
     elapsed_secs: u64,
-    bg: Option<&str>,
     compacting: bool,
     telemetry: Option<&super::flow_chrome::TelemetryMetrics>,
 ) -> String {
@@ -940,7 +929,6 @@ pub(crate) fn render_flow_details_chrome_pref(
         tool_count,
         has_log,
         elapsed_secs,
-        bg,
     );
     let telem_line =
         super::flow_chrome::standalone_telemetry_line(&parts, telemetry, HeaderMarkup::Html);
@@ -1605,7 +1593,6 @@ pub(crate) fn render_flow(s: &StreamingState) -> String {
                 &s.sections,
                 narration_cap,
                 elapsed,
-                s.bg_indicator.as_deref(),
                 false, // settled renders drop the activity segment regardless
                 Some(&telem),
             )
@@ -1617,7 +1604,6 @@ pub(crate) fn render_flow(s: &StreamingState) -> String {
             &s.sections,
             narration_cap,
             elapsed,
-            s.bg_indicator.as_deref(),
             s.compacting,
             Some(&telem),
         ),
@@ -1653,7 +1639,6 @@ pub(crate) fn render_flow_details_state(s: &StreamingState) -> String {
                 &s.sections,
                 narration_cap,
                 elapsed,
-                s.bg_indicator.as_deref(),
                 false, // settled renders drop the activity segment regardless
                 Some(&telem),
             )
@@ -1665,7 +1650,6 @@ pub(crate) fn render_flow_details_state(s: &StreamingState) -> String {
             &s.sections,
             narration_cap,
             elapsed,
-            s.bg_indicator.as_deref(),
             s.compacting,
             Some(&telem),
         ),

@@ -40,7 +40,6 @@ fn base_state(with_card: bool) -> StreamingState {
         tools_started_at: None,
         turn_started_at: std::time::Instant::now(),
         flow_outcome: Some(FlowOutcome::Finished),
-        bg_indicator: None,
         bg_count: None,
         subagent_counts: SubagentCounts {
             working: 0,
@@ -73,12 +72,7 @@ fn meta(success: bool, label: &str, tail: &str) -> BgTaskMeta {
 fn fold_appends_system_line_and_stamps_counters() {
     let mut s = base_state(true);
     let line = bg_ack_line(&meta(true, "cargo test", "test result: ok"));
-    let folded = apply_bg_ack_fold(
-        &mut s,
-        line.clone(),
-        Some("1 task running".to_string()),
-        Some(1),
-    );
+    let folded = apply_bg_ack_fold(&mut s, line.clone(), Some(1));
     assert!(folded);
     assert_eq!(s.flow_entries.len(), 1);
     match &s.flow_entries[0] {
@@ -86,7 +80,6 @@ fn fold_appends_system_line_and_stamps_counters() {
         other => panic!("expected System entry, got {other:?}"),
     }
     assert_eq!(s.bg_count, Some(1));
-    assert_eq!(s.bg_indicator.as_deref(), Some("1 task running"));
 }
 
 #[test]
@@ -94,7 +87,7 @@ fn fold_refuses_cardless_state_and_touches_nothing() {
     // No registered card: the fold must refuse WITHOUT mutating — the caller
     // then falls back to the #1221 standalone bubble lane.
     let mut s = base_state(false);
-    let folded = apply_bg_ack_fold(&mut s, "✅ `x` 🕒 1s".into(), None, Some(0));
+    let folded = apply_bg_ack_fold(&mut s, "✅ `x` 🕒 1s".into(), Some(0));
     assert!(!folded);
     assert!(s.flow_entries.is_empty());
     assert_eq!(s.bg_count, None);
@@ -147,23 +140,12 @@ fn two_folds_decrement_then_flip_to_finished() {
     // settled header flips to Finished on the last stamp.
     let mut s = base_state(true);
     s.bg_count = Some(2);
-    s.bg_indicator = Some("2 tasks running".to_string());
 
-    let folded = apply_bg_ack_fold(
-        &mut s,
-        bg_ack_line(&meta(true, "task a", "")),
-        Some("1 task running".to_string()),
-        Some(1),
-    );
+    let folded = apply_bg_ack_fold(&mut s, bg_ack_line(&meta(true, "task a", "")), Some(1));
     assert!(folded);
     assert_eq!(s.bg_count, Some(1));
 
-    let folded = apply_bg_ack_fold(
-        &mut s,
-        bg_ack_line(&meta(false, "task b", "")),
-        None,
-        Some(0),
-    );
+    let folded = apply_bg_ack_fold(&mut s, bg_ack_line(&meta(false, "task b", "")), Some(0));
     assert!(folded);
     assert_eq!(s.bg_count, Some(0));
     assert_eq!(s.flow_entries.len(), 2);

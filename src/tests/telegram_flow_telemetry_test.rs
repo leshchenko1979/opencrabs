@@ -57,7 +57,6 @@ pub(crate) fn base_test_state() -> StreamingState {
         tools_started_at: None,
         turn_started_at: std::time::Instant::now() - std::time::Duration::from_secs(42),
         flow_outcome: None,
-        bg_indicator: None,
         bg_count: None,
         subagent_counts: SubagentCounts {
             working: 0,

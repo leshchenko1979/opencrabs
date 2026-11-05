@@ -721,7 +721,6 @@ pub(crate) async fn resume_session_inner(
         tools_started_at: Some(std::time::Instant::now()),
         turn_started_at: std::time::Instant::now(),
         flow_outcome: None,
-        bg_indicator: None,
         bg_count: None,
         subagent_counts: Default::default(),
         queued_count: 0,
@@ -1531,7 +1530,6 @@ pub(crate) fn bg_ack_line(meta: &crate::brain::agent::BgTaskMeta) -> String {
 pub(crate) fn apply_bg_ack_fold(
     s: &mut crate::channels::telegram::flow::StreamingState,
     line: String,
-    bg_indicator: Option<String>,
     bg_count: Option<usize>,
 ) -> bool {
     if s.open_group_msg_id.is_none() {
@@ -1539,7 +1537,6 @@ pub(crate) fn apply_bg_ack_fold(
     }
     s.flow_entries
         .push(crate::channels::telegram::flow::FlowEntry::System(line));
-    s.bg_indicator = bg_indicator;
     s.bg_count = bg_count;
     true
 }
@@ -1564,10 +1561,10 @@ pub(crate) async fn fold_bg_ack_into_flow_card(
         return false;
     };
     let line = bg_ack_line(meta);
-    let (bg_indicator, bg_count) = super::delivery::bg_indicator_for(agent, session_id);
+    let bg_count = super::delivery::bg_count_for(agent, session_id);
     let folded = {
         let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
-        apply_bg_ack_fold(&mut s, line, bg_indicator, bg_count)
+        apply_bg_ack_fold(&mut s, line, bg_count)
     };
     if !folded {
         return false;

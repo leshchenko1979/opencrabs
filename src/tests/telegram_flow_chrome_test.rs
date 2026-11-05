@@ -837,15 +837,12 @@ fn settled_footer_drops_the_cog() {
     assert!(out.contains("✅ • 2:04 ⏱️"));
 }
 
-/// #808 cue 3: the `🔧 <label> running` segment must actually reach the
-/// rendered footer, on BOTH telemetry branches.
-///
-/// The previous version of this test asserted only the line PREFIX, which is
-/// byte-identical with and without the indicator — so it passed while the
-/// field had zero readers and the footer never showed detached work at all.
-/// Presence of a test is not behaviour; these assert the SEGMENT.
+/// #810 (owner order): the `\u{1f527} <label> running` segment is GONE — it was
+/// added by #808 and the owner rejected it outright ("it should not have been
+/// added"). This is the negative control that keeps it dead: the detached
+/// count still rides the telemetry bar, and no wrench segment follows it.
 #[test]
-fn footer_renders_the_bg_segment_with_telemetry() {
+fn footer_carries_the_detached_count_and_no_wrench_segment() {
     let parts = FooterParts {
         outcome: Some(("✅", "Finished")),
         compacting: false,
@@ -858,7 +855,6 @@ fn footer_renders_the_bg_segment_with_telemetry() {
         has_log: true,
         elapsed_secs: 517,
         has_goal: false,
-        bg: Some("pytest -q running"),
     };
     let telem = TelemetryMetrics {
         tool_count: 2,
@@ -869,19 +865,23 @@ fn footer_renders_the_bg_segment_with_telemetry() {
     };
     let line = standalone_telemetry_line(&parts, Some(&telem), HeaderMarkup::Html);
     assert!(
-        line.ends_with("\u{1f527} pytest -q running"),
-        "the indicator is the FINAL segment and carries the wrench: {line:?}"
+        line.contains("1 \u{23cf}\u{fe0f}"),
+        "the detached count still rides the telemetry bar: {line:?}"
     );
     assert!(
-        line.contains("1 \u{23cf}\u{fe0f}"),
-        "the detached count rides the telemetry bar too: {line:?}"
+        !line.contains('\u{1f527}'),
+        "the wrench segment must not render: {line:?}"
+    );
+    assert!(
+        !line.contains("running"),
+        "no label segment either: {line:?}"
     );
 }
 
-/// Same segment on the no-telemetry branch — the fallback join must not
-/// silently drop it, which is how the field died the first time.
+/// Same negative control on the no-telemetry branch — the fallback join must
+/// not resurrect the segment the renderer dropped.
 #[test]
-fn footer_renders_the_bg_segment_without_telemetry() {
+fn footer_has_no_wrench_segment_without_telemetry() {
     let parts = FooterParts {
         outcome: Some(("✅", "Finished")),
         compacting: false,
@@ -894,58 +894,27 @@ fn footer_renders_the_bg_segment_without_telemetry() {
         has_log: true,
         elapsed_secs: 517,
         has_goal: false,
-        bg: Some("3 tasks running"),
     };
     let line = standalone_telemetry_line(&parts, None, HeaderMarkup::Html);
     assert!(
-        line.ends_with("\u{1f527} 3 tasks running"),
-        "the indicator is the FINAL segment and carries the wrench: {line:?}"
+        !line.contains('\u{1f527}') && !line.contains("running"),
+        "no indicator when nothing is detached: {line:?}"
     );
 }
 
 /// The whole path, not just the renderer: a live state carrying `bg_count`
-/// and `bg_indicator` must surface BOTH cues — the `N \u{23cf}\u{fe0f}` count in the
-/// telemetry bar and the `\u{1f527} <label> running` segment at the end.
-///
-/// This is the criterion the dead field could never meet: the count was
-/// already wired through `TelemetryMetrics`, but the indicator itself had no
-/// reader, so the footer said "1 \u{23cf}\u{fe0f}" while the run's NAME — the thing
-/// that tells the user WHICH work is out of the turn — was absent.
+/// surfaces the `N \u{23cf}\u{fe0f}` count in the telemetry bar and NOTHING at the
+/// end of the line. #810 removed the `\u{1f527} <label> running` tail; the count
+/// is the only detached-work cue the footer is allowed to carry.
 #[test]
-fn live_state_renders_both_the_count_and_the_indicator() {
+fn live_state_renders_the_count_without_a_wrench_segment() {
     let mut st = crate::tests::telegram_flow_telemetry_test::base_test_state();
     st.bg_count = Some(2);
-    st.bg_indicator = Some("2 tasks running".to_string());
     let out = crate::channels::telegram::flow::render_flow(&st);
     assert!(out.contains("2 \u{23cf}\u{fe0f}"), "count segment: {out:?}");
     assert!(
-        out.contains("\u{1f527} 2 tasks running"),
-        "the indicator names the work, with the wrench: {out:?}"
-    );
-}
-
-/// Negative control: no detached work, no wrench. Every ordinary turn takes
-/// this path, so a stray segment here would decorate the whole surface.
-#[test]
-fn footer_omits_the_bg_segment_when_nothing_runs() {
-    let parts = FooterParts {
-        outcome: Some(("✅", "Finished")),
-        compacting: false,
-        plan_mode: None,
-        working_on: None,
-        ctx: None,
-        thought: None,
-        activity: None,
-        tool_count: 2,
-        has_log: true,
-        elapsed_secs: 517,
-        has_goal: false,
-        bg: None,
-    };
-    let line = standalone_telemetry_line(&parts, None, HeaderMarkup::Html);
-    assert!(
-        !line.contains("running"),
-        "no indicator when nothing is detached: {line:?}"
+        !out.contains('\u{1f527}'),
+        "no wrench in the rendered footer: {out:?}"
     );
 }
 
@@ -1142,7 +1111,6 @@ fn cli_cap_truncates_body_api_keeps_it_full_html() {
         &FlowSections::default(),
         300,
         2,
-        None,
         false,
         None,
     );
@@ -1153,7 +1121,6 @@ fn cli_cap_truncates_body_api_keeps_it_full_html() {
         &FlowSections::default(),
         usize::MAX,
         2,
-        None,
         false,
         None,
     );
@@ -1183,7 +1150,6 @@ fn cli_cap_truncates_body_api_keeps_it_full_details() {
         &FlowSections::default(),
         300,
         2,
-        None,
         false,
         None,
     );
@@ -1194,7 +1160,6 @@ fn cli_cap_truncates_body_api_keeps_it_full_details() {
         &FlowSections::default(),
         usize::MAX,
         2,
-        None,
         false,
         None,
     );
@@ -1224,7 +1189,6 @@ fn short_narration_untouched_by_either_cap() {
             &FlowSections::default(),
             cap,
             2,
-            None,
             false,
             None,
         );

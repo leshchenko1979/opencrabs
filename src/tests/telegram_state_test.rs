@@ -42,7 +42,6 @@ fn open_roll() -> std::sync::Arc<std::sync::Mutex<StreamingState>> {
         tools_started_at: None,
         turn_started_at: std::time::Instant::now(),
         flow_outcome: None,
-        bg_indicator: None,
         bg_count: None,
         subagent_counts: Default::default(),
         queued_count: 0,

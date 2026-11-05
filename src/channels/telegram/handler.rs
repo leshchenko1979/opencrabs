@@ -45,7 +45,7 @@ pub(crate) use super::keyboards::*;
 // Crash-recovery resume moved to resume.rs (#471 phase 1).
 pub(crate) use super::resume::resume_session;
 // Final-response delivery moved to delivery.rs (#471 phase 4).
-// #402: `bg_indicator_for` / `subagent_counts_for` dropped from this re-export —
+// #402: `bg_count_for` / `subagent_counts_for` dropped from this re-export —
 // they were used only by the settle tail, which now lives in `turn_settle.rs`
 // and imports them straight from `delivery`.
 pub(crate) use super::delivery::{deliver_final_response, drain_remaining_display};
@@ -2942,7 +2942,6 @@ pub(crate) async fn handle_message(
         tools_started_at: Some(std::time::Instant::now()),
         turn_started_at: std::time::Instant::now(),
         flow_outcome: None,
-        bg_indicator: None,
         bg_count: None,
         subagent_counts: Default::default(),
         queued_count: 0,
