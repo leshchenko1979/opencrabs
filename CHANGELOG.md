@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### ✨ Features
+
+- `ee3886591` **telegram**: add `/tasks [N]` for this session's detached runs, live and finished — the finished half walks the status dir newest-first with a bounded parse budget instead of `list_all()`, whose 25,749-file / 105 MB dir would block a turn (#808)
+
 ### 🐛 Fixes
 
 - `859731882` **tools**: one stream vocabulary across both detached-run readers (#785)
@@ -25,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ff1425cc5` **telegram**: route every document to the detached attachment floor and retire `inline_markdown_documents`, because Telegram accepts a `document` media entry with `ok:true` and delivers nothing — the inline arm left a `📎` marker with no bubble behind it (#801)
 - `1eb7a355c` **telegram**: link a DM's `📎` file marker through the bot's own username — **withdrawn by `72f21d1c4`**, which measured the link dead (#802)
 - `72f21d1c4` **telegram**: withdraw that DM link, because a bot DM carries two message-id spaces and `t.me/<bot>/<id>` resolves in the client's, which a bot never sees — one bubble read `152540` from the Bot API and `975245` from the client, the gap drifting between probes, while `t.me/<bot>/<any id>` answers `200` for ids that do not exist; a DM keeps the plain `📎` marker and the document bubble, supergroup links are unchanged (#802)
+- `9592de20f` **telegram**: announce a detach in the roll instead of going silent — a handed-over or spawned run now says `⏏️ handed over: <label> · deadline 3600s` / `⏏️ started detached: <label>` at the instant it leaves the turn (#808)
+- `2ae1b74ea` **telegram**: keep a handed-over tool row reading as running while its command still is — the completion event the roll consumes arrives at the DEADLINE, so the row already carried `completed: Some(true)` with work live and rendered identically to a finished call; the marker clears by liveness, which also covers a run that ended while the daemon was down (#808)
+- `c53ead0a4` **telegram**: render the footer's background segment — `FooterParts.bg` had zero readers for its entire life, threaded through three renderers and drawn by none, with a test asserting a line PREFIX that is byte-identical with and without it (#808)
+- `f3acbce11` **telegram**: record why a detached run ended on its receipt card — `BgTaskMeta` gains `exit_code` and `cause`, so a ceiling kill stops reading as the shell's `exit 137`; the cause rides the card body and the `<summary>` keeps the icon as the sole outcome signal (#808)
 
 ## [0.5.4] - 2026-09-26
 
