@@ -1115,6 +1115,7 @@ pub mod telegram_topic_reconcile_test;
 pub mod telegram_topic_teardown_test;
 pub mod temp_file_retention_test;
 pub mod text_complete_test;
+pub mod tasks_command_test;
 pub mod theme_catalog_converter_test;
 pub mod theme_pack_test;
 pub mod thinking_loop_fallback_test;

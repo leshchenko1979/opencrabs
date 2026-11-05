@@ -173,6 +173,7 @@ fn variant_name(cmd: &ChannelCommand) -> &'static str {
         ChannelCommand::Architecture(_) => "Architecture",
         ChannelCommand::Attach(_) => "Attach",
         ChannelCommand::Audit(_) => "Audit",
+        ChannelCommand::Tasks(_) => "Tasks",
         ChannelCommand::Profiles(_) => "Profiles",
         ChannelCommand::RespondTo(_) => "RespondTo",
         ChannelCommand::Redact(_) => "Redact",
@@ -372,4 +373,63 @@ async fn bare_plan_still_enters_plan_mode() {
     })
     .await;
     let _ = std::fs::remove_dir_all(home_for_profile(Some(&profile)));
+}
+
+// ── /tasks (#808 cue 12) ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn tasks_is_owner_only_and_says_so() {
+    // A row names the command text of work this surface started, which is the
+    // same trust class as /audit (#1705) — a group member gets the refusal,
+    // never the list.
+    let (agent, session_svc, session_id) = create_test_service_full().await;
+    let cmd = crate::channels::commands::handle_command(
+        "/tasks",
+        session_id,
+        &agent,
+        &session_svc,
+        false, // not the owner
+        None,
+    )
+    .await;
+    match cmd {
+        ChannelCommand::UnknownCommand(msg) => assert!(
+            msg.contains("/tasks"),
+            "the refusal must name the command: {msg}"
+        ),
+        other => panic!("expected UnknownCommand, got {:?}", variant_name(&other)),
+    }
+}
+
+#[tokio::test]
+async fn tasks_renders_for_the_owner_and_accepts_a_count() {
+    // Hermetic: an empty status dir, so the test never reads this box's
+    // 25k-file tmp/detached and never depends on what ran here.
+    let dir = std::env::temp_dir().join(format!("oc-tasks-cmd-{}", uuid::Uuid::new_v4().as_simple()));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    crate::brain::agent::service::work_status::test_override::set(dir.clone());
+
+    let (agent, session_svc, session_id) = create_test_service_full().await;
+    let cmd = crate::channels::commands::handle_command(
+        "/tasks 5",
+        session_id,
+        &agent,
+        &session_svc,
+        true, // owner
+        None,
+    )
+    .await;
+
+    crate::brain::agent::service::work_status::test_override::clear();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    match cmd {
+        ChannelCommand::Tasks(body) => {
+            assert_eq!(
+                body, "no detached runs in this session",
+                "an empty dir is the honest empty answer"
+            );
+        }
+        other => panic!("expected Tasks, got {:?}", variant_name(&other)),
+    }
 }

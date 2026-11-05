@@ -251,6 +251,10 @@ pub enum ChannelCommand {
     /// `/audit [N]` — mechanical audit viewer: ACTION rows always, READ +
     /// OUTCOME when `[features] audit_recording` is on (#1705)
     Audit(String),
+    /// `/tasks [N]` — this session's detached runs, live and finished
+    /// (#808 cue 12). The only surface the user has for a run they cannot
+    /// otherwise see: no command, no button existed before it.
+    Tasks(String),
     /// `/profiles` — profile manager (inline keyboard)
     Profiles(ProfilesResponse),
     /// `/respond_to [all|mention|auto]` — show/switch auto-mention mode (#244)
@@ -642,6 +646,19 @@ pub async fn handle_command(
                 ChannelCommand::Audit(run_audit_channel(n, agent).await)
             }
         }
+        cmd if cmd == "/tasks" || cmd.starts_with("/tasks ") => {
+            // Owner-only, same trust class as /audit (#1705): a row names the
+            // command text and the capture paths of work this surface started,
+            // which is more than a group member needs to see.
+            if !is_owner {
+                ChannelCommand::UnknownCommand(
+                    "\u{1f512} `/tasks` is restricted to the bot owner.".to_string(),
+                )
+            } else {
+                let args = cmd.strip_prefix("/tasks").unwrap_or("").trim();
+                ChannelCommand::Tasks(run_tasks_channel(args, session_id, agent))
+            }
+        }
         "/profiles" => {
             if !is_owner {
                 ChannelCommand::UnknownCommand("🔒 Owner-only command.".to_string())
@@ -766,6 +783,7 @@ pub async fn handle_command(
         ChannelCommand::Architecture(_) => Some("Building directory tree...".to_string()),
         ChannelCommand::Attach(body) => Some(body.clone()),
         ChannelCommand::Audit(body) => Some(body.clone()),
+        ChannelCommand::Tasks(body) => Some(body.clone()),
         ChannelCommand::Evolve => Some("Checking for updates...".to_string()),
         ChannelCommand::Rtk(body) => Some(body.clone()),
         ChannelCommand::ModelSwitched(body) => Some(body.clone()),
@@ -999,6 +1017,10 @@ pub(crate) fn format_help() -> String {
         ("/restart", "Restart OpenCrabs"),
         ("/rtk", "Show RTK token savings statistics"),
         ("/show-plan", "Show the current plan state"),
+        (
+            "/tasks",
+            "Detached runs in this session (`/tasks [N]`)",
+        ),
         (
             "/usage",
             "Token & cost stats (`provider [name]` / `model <name>` / `7d`)",
@@ -2605,6 +2627,160 @@ pub async fn run_attach_channel(args: &str, session_id: Uuid, agent: &AgentServi
     lines.join("\n")
 }
 
+/// `/tasks [N]` — the detached runs this session started (#808 cue 12).
+///
+/// Two sources, because a run changes home when it ends: a LIVE run exists
+/// only in the in-memory manager (it has no terminal record yet), and a
+/// FINISHED one exists only on disk. Reading either alone reports half the
+/// truth — "no runs" for a session whose run just ended, or a run listed
+/// twice. A run leaves the manager the instant it finishes, so the two arms
+/// are disjoint by construction and the id check below is belt-and-braces.
+///
+/// The disk side is deliberately bounded. [`status_dir`] holds every run AND
+/// every sub-agent this box has ever written (25,749 files / 105 MB when this
+/// was written), so `list_all()` + parse-everything is not viable on a
+/// command path: readdir, newest-first by mtime, a bounded lookahead, and a
+/// full parse of only the survivors keeps the cost flat.
+///
+/// [`status_dir`]: crate::brain::agent::service::work_status::status_dir
+pub fn run_tasks_channel(args: &str, session_id: Uuid, agent: &AgentService) -> String {
+    let mut live: Vec<(String, String)> = Vec::new();
+    if let Some(bm) = agent.background_manager() {
+        for h in bm.handles_for(session_id) {
+            live.push((
+                h.id.clone(),
+                format!(
+                    "\u{25b6}\u{fe0f} `{}` \u{b7} running {}",
+                    clip_task_label(&h.label),
+                    fmt_task_elapsed(h.started.elapsed().as_secs())
+                ),
+            ));
+        }
+    }
+    render_tasks_rows(args, &session_id.to_string(), &live)
+}
+
+/// Pure renderer behind `/tasks`, split from the manager lookup so tests can
+/// pin the disk scan and the row format without an `AgentService` — same
+/// split as [`render_audit_rows`] and for the same reason (#808 cue 12).
+///
+/// `live` pairs a run id with its already-rendered row; the ids are what keep
+/// the disk arm from listing a live run twice.
+pub(crate) fn render_tasks_rows(args: &str, session: &str, live: &[(String, String)]) -> String {
+    use crate::brain::agent::service::work_status::{WorkKind, WorkStatus};
+
+    let want = args
+        .split_whitespace()
+        .next()
+        .and_then(|a| a.parse::<usize>().ok())
+        .unwrap_or(20)
+        .clamp(1, 50);
+
+    let mut rows: Vec<String> = live.iter().map(|(_, row)| row.clone()).collect();
+
+    let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(crate::brain::agent::service::work_status::status_dir()) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+                continue;
+            };
+            candidates.push((mtime, stem.to_string()));
+        }
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+    // Lookahead is a cost bound, not a correctness claim: mtime order is only
+    // a cheap "most likely mine first" hint and the filter below decides
+    // membership. A session with older runs than the window sees fewer rows
+    // rather than a slower command.
+    let lookahead = want.saturating_mul(8).max(64);
+    for (_, id) in candidates.into_iter().take(lookahead) {
+        if rows.len() >= want {
+            break;
+        }
+        if live.iter().any(|(live_id, _)| live_id == &id) {
+            continue;
+        }
+        let Some(status) = WorkStatus::read(&id) else {
+            continue;
+        };
+        if status.kind != WorkKind::Command || status.session_id != session {
+            continue;
+        }
+        rows.push(render_task_row(&status));
+    }
+
+    if rows.is_empty() {
+        return "no detached runs in this session".to_string();
+    }
+    format!("## Detached runs ({})\n\n{}", rows.len(), rows.join("\n"))
+}
+
+/// One finished-run row. The cause is the whole point of #786: `137` alone
+/// cannot tell a ceiling kill from a signal from a command that exited 137
+/// itself, so a row that reports only the code reports nothing useful.
+fn render_task_row(status: &crate::brain::agent::service::work_status::WorkStatus) -> String {
+    let finish = status.finish.as_ref();
+    let code = finish.and_then(|f| f.code);
+    let icon = match finish.and_then(|f| f.success) {
+        Some(true) => "\u{2705}",
+        Some(false) => "\u{274c}",
+        None => "\u{23f3}",
+    };
+    let mut row = format!(
+        "{icon} `{}` · {}",
+        clip_task_label(&status.label),
+        status.state.label()
+    );
+    if let Some(secs) = finish.and_then(|f| f.elapsed_secs) {
+        row.push_str(&format!(" · {}", fmt_task_elapsed(secs as u64)));
+    }
+    match finish.and_then(|f| f.cause) {
+        Some(cause) => row.push_str(&format!(" · {}", cause.describe(code.unwrap_or(-1)))),
+        // A record written before #786 carries no cause; fall back to the code
+        // rather than claiming `ordinary`, which would be a guess.
+        None => {
+            if let Some(c) = code {
+                row.push_str(&format!(" · exit {c}"));
+            }
+        }
+    }
+    row
+}
+
+/// Labels are command text, so they can carry backticks (which would break the
+/// code span) and newlines (which would break the row). Flatten, then clip —
+/// by CHARS, not bytes, so a multi-byte label never splits mid-character.
+fn clip_task_label(label: &str) -> String {
+    let flattened: String = label
+        .chars()
+        .map(|c| if c == '`' || c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    let trimmed = flattened.trim();
+    if trimmed.chars().count() <= 60 {
+        return trimmed.to_string();
+    }
+    let head: String = trimmed.chars().take(57).collect();
+    format!("{head}...")
+}
+
+fn fmt_task_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 /// Render the `/audit` viewer (#1705): the last N ACTION rows
 /// (`tool_executions`, always present) joined with the READ count / newest
 /// retrieval and the mechanical OUTCOME verdict when recording is on.
@@ -2680,6 +2856,7 @@ pub async fn try_execute_text_command(cmd: &ChannelCommand) -> Option<String> {
         ChannelCommand::Architecture(path) => Some(run_architecture(path.as_deref())),
         ChannelCommand::Attach(body) => Some(body.clone()),
         ChannelCommand::Audit(body) => Some(body.clone()),
+        ChannelCommand::Tasks(body) => Some(body.clone()),
         ChannelCommand::Evolve => Some(run_evolve().await),
         ChannelCommand::Restart => Some(schedule_restart()),
         ChannelCommand::Exit => Some(schedule_exit()),
