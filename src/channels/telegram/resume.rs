@@ -1624,10 +1624,29 @@ pub(crate) fn build_bg_receipt_card(
     // native RichBlockDetails. <pre> replaces the markdown fence —
     // containment comes from the tag, so receipt_fence's backtick
     // arms-race only survives on the classic leg below.
+    // #808 cue 9: the card's BODY opens with the cause. The <summary> stays
+    // byte-identical to owner lock P3f — the icon is the sole outcome signal
+    // there — so "why did it stop" costs one tap instead of breaking the
+    // lock. A legacy meta (no cause, no code) contributes no line at all,
+    // which keeps an old queue row rendering exactly as it did.
+    // Two spellings of the same line, because the two wires parse
+    // differently: the rich leg takes raw HTML, while the classic leg's body
+    // goes through `markdown_to_html` (build_bg_echo_bubble), where a literal
+    // `<i>` would arrive as text. Escaping is per-wire for the same reason.
+    let cause_text = meta
+        .cause
+        .map(|cause| cause.describe(meta.exit_code.unwrap_or(-1)));
+    let cause_html = cause_text
+        .as_deref()
+        .map(|t| format!("<i>{}</i>\n", super::markdown::escape_html(t)));
+    let cause_md = cause_text
+        .as_deref()
+        .map(|t| format!("_{t}_\n"));
     let rich_html = format!(
         "<details><summary><sub>{icon} <code>{}</code> 🕒 {duration}</sub></summary>\n\
-         <pre>{}</pre>\n</details>",
+         {}<pre>{}</pre>\n</details>",
         super::markdown::escape_html(label),
+        cause_html.as_deref().unwrap_or(""),
         super::markdown::escape_html(&meta.tail)
     );
     // Degraded path: same content as a classic blockquote (non-collapsible
@@ -1635,7 +1654,16 @@ pub(crate) fn build_bg_receipt_card(
     // LIVE since #38: send_rich_html_id returns Err to the caller instead
     // of being swallowed inside the outbox (#1234 fallback discipline).
     let fence = receipt_fence(&meta.tail);
-    let fenced_body = format!("{fence}\n{tail}\n{fence}", tail = meta.tail);
+    let fenced_body = match &cause_md {
+        // The degraded wire cannot collapse, so the cause is the body's first
+        // line here too — same information, no <details> to open.
+        Some(line) => format!(
+            "{cause}{fence}\n{tail}\n{fence}",
+            cause = line,
+            tail = meta.tail
+        ),
+        None => format!("{fence}\n{tail}\n{fence}", tail = meta.tail),
+    };
     let (_, classic_html) = build_bg_echo_bubble(&fenced_body, &flat_title);
     (BubbleWire::Html(rich_html), classic_html)
 }

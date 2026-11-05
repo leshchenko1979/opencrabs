@@ -328,6 +328,8 @@ async fn receipt_cards_route_the_html_wire_issue_85() {
         label: "cmd".to_string(),
         elapsed_secs: 1.0,
         tail: "ok".to_string(),
+        exit_code: None,
+        cause: None,
     };
     let (bg_wire, _) = crate::channels::telegram::resume::build_bg_receipt_card(&meta);
     let BubbleWire::Html(_) = bg_wire else {
@@ -339,6 +341,8 @@ async fn receipt_cards_route_the_html_wire_issue_85() {
         label: "cmd".to_string(),
         elapsed_secs: 1.0,
         tail: "  \n".to_string(),
+        exit_code: None,
+        cause: None,
     };
     let (flat_wire, _) = crate::channels::telegram::resume::build_bg_receipt_card(&empty);
     let BubbleWire::Markdown(flat_md) = flat_wire else {

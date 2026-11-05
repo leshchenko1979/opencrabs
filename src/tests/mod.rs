@@ -1033,6 +1033,7 @@ mod telegram_acl_test;
 mod telegram_attachment_tmp_name_test;
 mod telegram_atx_heading_agreement_test;
 pub mod telegram_bg_ack_fold_test;
+pub mod telegram_bg_card_cause_test;
 pub mod telegram_bg_resume_gate_test;
 pub mod telegram_caption_test;
 pub mod telegram_code_fence_balance_test;

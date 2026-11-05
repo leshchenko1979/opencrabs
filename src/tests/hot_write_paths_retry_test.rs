@@ -100,6 +100,8 @@ async fn clear_matching_retries_a_contended_write() {
         label: "cargo test".into(),
         elapsed_secs: 3.0,
         tail: "test result: ok".into(),
+        exit_code: None,
+        cause: None,
     };
     repo.record(
         Uuid::new_v4(),

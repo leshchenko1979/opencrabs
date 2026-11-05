@@ -64,6 +64,8 @@ fn meta(success: bool, label: &str, tail: &str) -> BgTaskMeta {
         label: label.to_string(),
         elapsed_secs: 5.0,
         tail: tail.to_string(),
+        exit_code: None,
+        cause: None,
     }
 }
 

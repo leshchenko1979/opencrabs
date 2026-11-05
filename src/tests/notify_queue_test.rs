@@ -48,6 +48,8 @@ async fn push_survives_as_row_until_cleared() {
         label: "cargo test".into(),
         elapsed_secs: 12.0,
         tail: "test result: ok".into(),
+        exit_code: None,
+        cause: None,
     };
 
     repo.record(

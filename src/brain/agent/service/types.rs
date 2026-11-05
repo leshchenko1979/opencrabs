@@ -7,6 +7,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::builder::AgentService;
+use super::work_status::RunCause;
 
 /// Result type alias used by approval/sudo callbacks
 pub(super) type Result<T> = super::super::error::Result<T>;
@@ -270,6 +271,27 @@ pub struct BgTaskMeta {
     pub elapsed_secs: f32,
     /// Last 50 lines of merged stdout+stderr, verbatim.
     pub tail: String,
+    /// The run's real exit code (#808 cue 9). `None` on legacy queue rows
+    /// written before the field existed — `#[serde(default)]` is what lets
+    /// the notify queue (#111) round-trip an old JSON column without a
+    /// migration.
+    ///
+    /// This stays OUT of the `<summary>`: owner lock P3f makes the icon the
+    /// sole outcome signal there. It rides the card BODY instead, where the
+    /// exit code and the cause together answer "why did it stop" — the one
+    /// question a bare `137` cannot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Why the run stopped (#786): `Ordinary` / `Signalled { signal }` /
+    /// `Ceiling { limit_secs }`. `None` on legacy rows, same round-trip
+    /// reason as `exit_code`.
+    ///
+    /// Without it the card renders a ceiling kill, a kernel OOM kill and a
+    /// command that ran `exit 137` itself as the same number — the defect
+    /// #786 fixed in the agent-facing surfaces and #808 extends to the
+    /// human-facing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<RunCause>,
 }
 
 /// Origin recorded on a `pending_requests` row for restart recovery (#12).

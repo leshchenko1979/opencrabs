@@ -1865,6 +1865,13 @@ pub(crate) fn completion_message(
         label: label.to_string(),
         elapsed_secs,
         tail,
+        // #808 cue 9: the human-facing card carried the icon and nothing
+        // else, so a ceiling kill and a command that ran `exit 137` itself
+        // were the same bubble. The cause is already known here (#786) —
+        // passing it through costs nothing and the card renders it on the
+        // body's first line, leaving the P3f summary byte-identical.
+        exit_code: Some(result.code),
+        cause: Some(result.cause),
     });
     msg
 }
