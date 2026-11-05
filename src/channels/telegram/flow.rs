@@ -8,7 +8,6 @@
 //! rich markdown), and the flow operations (open/refresh/append/restick/
 //! freeze/fold).
 
-use crate::brain::tools::r#trait::{DetachCause, DetachedHandover};
 use crate::config::Config;
 use std::sync::Arc;
 use teloxide::prelude::*;
@@ -126,12 +125,24 @@ impl FlowEvent {
 
 /// Clean tool entry formatting: strips redundant binary tool names for single-purpose
 /// tools while retaining sub-command verbs for multi-purpose tools (e.g. `📋 show_plan`).
+///
+/// `handed_over` (#811) REPLACES the class icon with `⏏️`: a call whose work has
+/// left the turn is stated by the icon alone. #808 stated it twice — the class
+/// icon plus a trailing `⏏️` marker, and a whole sentence in the roll
+/// (`⏏️ handed over: …`) — and the owner rejected both on sight: one row, one
+/// icon, no prose. The flag is cleared by the liveness prune
+/// ([`prune_handed_over`]), so the row reverts to its class icon on reap.
 pub(crate) fn clean_tool_entry(
     name: &str,
     completed: Option<bool>,
     context: &str,
+    handed_over: bool,
 ) -> (String, String) {
-    let icon = tool_entry_icon(name, completed);
+    let icon = if handed_over {
+        "\u{23cf}\u{fe0f}"
+    } else {
+        tool_entry_icon(name, completed)
+    };
     match name {
         "read_file"
         | "read_opencrabs_file"
@@ -1469,45 +1480,6 @@ pub(crate) fn tool_entry_icon(tool_name: &str, completed: Option<bool>) -> &'sta
     }
 }
 
-/// #808 cue 1: say, in the roll, that a call's work LEFT the turn.
-///
-/// Without this the deadline reads as a completion: the tool line goes quiet
-/// and nothing below it says the command is still running. Chrome text, so it
-/// rides `DisplayItem::System` — never `FlowEvent`, which has no consumer.
-///
-/// The wording differs by cause because the two are different events: a
-/// `Handover` means a deadline expired under a live command, a `Spawn` means
-/// the command was known-long from the start so no deadline ever applied.
-/// The `· deadline {n}s` clause is dropped for a `0` ceiling: that is the
-/// operator choosing "no ceiling", not a missing value, and `deadline 0s`
-/// would describe a run that cannot exist.
-///
-/// Returns the text it queued, so a caller can log it and a test can read it
-/// without draining the queue.
-pub(crate) fn push_handover_cue(
-    s: &mut StreamingState,
-    tool_name: &str,
-    tool_input: &serde_json::Value,
-    detached: Option<&DetachedHandover>,
-) -> Option<String> {
-    let h = detached?;
-    // The same `short_label` the bash tool and `tasks_list` use, so one run
-    // has one name across all three surfaces.
-    let label = tool_input
-        .get("command")
-        .and_then(|v| v.as_str())
-        .map(crate::brain::agent::service::background_tasks::short_label)
-        .unwrap_or_else(|| tool_name.to_string());
-    let text = match h.cause {
-        DetachCause::Handover => match h.deadline_secs {
-            Some(n) => format!("\u{23cf}\u{fe0f} handed over: {label} \u{00b7} deadline {n}s"),
-            None => format!("\u{23cf}\u{fe0f} handed over: {label}"),
-        },
-        DetachCause::Spawn => format!("\u{23cf}\u{fe0f} started detached: {label}"),
-    };
-    s.display_queue.push(DisplayItem::System(text.clone()));
-    Some(text)
-}
 
 /// #808 cue 2, clearing side: drop the marker from every row whose run is no
 /// longer live.
@@ -1541,16 +1513,12 @@ pub(crate) fn flow_lines(s: &StreamingState) -> Vec<FlowLine> {
         .iter()
         .filter_map(|entry| match entry {
             FlowEntry::Tool(idx) => s.tool_msgs.get(*idx).map(|t| {
-                let (label, context) = clean_tool_entry(&t.name, t.completed, &t.context);
-                // #808 cue 2: say the work is still running. The marker rides
-                // the LABEL, not the icon: it then survives both the live and
-                // the settled renderers, and a run that finishes needs no
-                // second edit — the prune clears it.
-                let label = if t.handed_over.is_some() {
-                    format!("{label} \u{23cf}\u{fe0f}")
-                } else {
-                    label
-                };
+                // #811: the detach is an ICON SWAP, not a suffix. `⏏️ <label>`
+                // while the run is out of the turn; the class icon returns when
+                // the liveness prune clears the flag. No second marker, no
+                // sentence — the owner reads one icon per row.
+                let (label, context) =
+                    clean_tool_entry(&t.name, t.completed, &t.context, t.handed_over.is_some());
                 FlowLine::Tool {
                     label,
                     context,

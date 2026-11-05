@@ -1030,22 +1030,22 @@ fn test_tool_class_icons() {
 
     // Clean tool entry mapping
     let (icon, target) =
-        crate::channels::telegram::flow::clean_tool_entry("read_file", Some(true), "foo.rs");
+        crate::channels::telegram::flow::clean_tool_entry("read_file", Some(true), "foo.rs", false);
     assert_eq!(icon, "📄");
     assert_eq!(target, "foo.rs");
 
     let (plan_label, plan_target) =
-        crate::channels::telegram::flow::clean_tool_entry("plan", Some(true), "show_plan");
+        crate::channels::telegram::flow::clean_tool_entry("plan", Some(true), "show_plan", false);
     assert_eq!(plan_label, "📋 plan");
     assert_eq!(plan_target, "show_plan");
 
     let (cron_icon, cron_target) =
-        crate::channels::telegram::flow::clean_tool_entry("cron_manage", Some(true), "list jobs");
+        crate::channels::telegram::flow::clean_tool_entry("cron_manage", Some(true), "list jobs", false);
     assert_eq!(cron_icon, "⏰");
     assert_eq!(cron_target, "list jobs");
 
     let (cron_empty_label, cron_empty_target) =
-        crate::channels::telegram::flow::clean_tool_entry("cron_manage", Some(true), "");
+        crate::channels::telegram::flow::clean_tool_entry("cron_manage", Some(true), "", false);
     assert_eq!(cron_empty_label, "⏰ cron_manage");
     assert_eq!(cron_empty_target, "");
 
@@ -1053,12 +1053,13 @@ fn test_tool_class_icons() {
         "session_notify",
         Some(true),
         "[ISSUE DISPATCH: #273]",
+        false,
     );
     assert_eq!(notify_icon, "✉️");
     assert_eq!(notify_target, "[ISSUE DISPATCH: #273]");
 
     let (notify_empty_label, notify_empty_target) =
-        crate::channels::telegram::flow::clean_tool_entry("session_notify", Some(true), "");
+        crate::channels::telegram::flow::clean_tool_entry("session_notify", Some(true), "", false);
     assert_eq!(notify_empty_label, "✉️ session_notify");
     assert_eq!(notify_empty_target, "");
 

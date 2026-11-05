@@ -129,24 +129,16 @@ pub(crate) fn build_progress_cb(
             }
             ProgressEvent::ToolCompleted {
                 tool_name,
-                tool_input,
                 success,
                 detached,
                 ..
             } => {
                 if let Ok(mut s) = st.lock() {
                     s.tool_round_count += 1;
-                    // #808 cue 1: a call whose work left the turn says so, in
-                    // the roll, once. Without it the deadline reads as a
-                    // completion — the tool line goes quiet while the command
-                    // keeps running, and nothing tells the user to expect a
-                    // later wake.
-                    super::flow::push_handover_cue(
-                        &mut s,
-                        &tool_name,
-                        &tool_input,
-                        detached.as_ref(),
-                    );
+                    // #811: no announcement line. The detach shows as an icon
+                    // swap on the row itself (`⏏️ <label>`), set just below —
+                    // #808's `⏏️ handed over: …` sentence was rejected by the
+                    // owner as prose the user has to read.
                     if let Some(tool) = s
                         .tool_msgs
                         .iter_mut()
