@@ -182,7 +182,16 @@ jobs:
     if: ${{ inputs.mode == 'build' }}
     needs: order-gates
     name: Linux amd64 (${{ inputs.source_ref }}, ${{ inputs.features }})
-    runs-on: ubuntu-latest
+    # PINNED, never `ubuntu-latest`. This artifact RUNS on the ops host
+    # (Ubuntu 24.04, glibc 2.39), so it must be BUILT against a glibc that host
+    # can satisfy. `ubuntu-latest` rolled forward between 2026-10-29 and
+    # 2026-11-05: the 2026-11-05 artifact (run 42041612450) demanded
+    # GLIBC_2.43, the host's loader refused it ("libm.so.6: version
+    # `GLIBC_2.43' not found"), opencrabs-ops restart-looped, and oc-deploy
+    # correctly rolled the swap back (journal swap-f84a7f99-…, seq 8
+    # post-verify exit 1). Pin the OLDEST image we support; bump it only when
+    # the host itself moves.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - name: Sync from origin
