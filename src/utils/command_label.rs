@@ -27,12 +27,22 @@ pub fn command_label(command: &str) -> String {
         return String::new();
     }
 
-    // Strip only LEADING `cd`s. A `cd` in the middle or at the end is doing
-    // something the reader needs to see, and dropping it would misdescribe the
-    // command. Taking only the last segment (the previous behaviour) silently
-    // discarded real work: `cd /x && cargo build && cargo test` labelled as
-    // `cargo test` alone.
-    let mut kept: Vec<&String> = segments.iter().skip_while(|s| is_bare_cd(s)).collect();
+    // Strip only LEADING `cd`s and LEADING bare assignments. A `cd` in the
+    // middle or at the end is doing something the reader needs to see, and
+    // dropping it would misdescribe the command. Taking only the last segment
+    // (the previous behaviour) silently discarded real work:
+    // `cd /x && cargo build && cargo test` labelled as `cargo test` alone.
+    //
+    // A leading `VAR=value` is the same class of preamble as the `cd`: it says
+    // where the run happened and who it ran as, never what it did. Left in, it
+    // wins the label outright, because it comes first and the clip is 60
+    // chars — a smoke command reading `SD=~/.opencrabs/profiles/ops/tmp/…;
+    // SID=facd50af-…; grep …` labelled every row with its own setup and the
+    // actual command never appeared (#808).
+    let mut kept: Vec<&String> = segments
+        .iter()
+        .skip_while(|s| is_bare_cd(s) || is_pure_assignment(s))
+        .collect();
 
     // A command that is nothing but `cd` still has to render as something.
     if kept.is_empty() {
@@ -55,49 +65,72 @@ fn is_bare_cd(segment: &str) -> bool {
         .is_some_and(|rest| !rest.trim().is_empty())
 }
 
-/// Split on top-level `\n`, `;` and `&&`, ignoring separators inside quotes.
+/// Is this segment environment assignments and nothing else?
 ///
-/// Quote tracking is what makes this safe to run on arbitrary commands: a
-/// naive `split(';')` would cut `echo "a; b"` in half and invent a segment.
-/// The scan itself lives in `shell_scan` because the background-task
-/// classifier needs the same distinction between syntax and data.
-fn split_segments(command: &str) -> Vec<String> {
-    let scanned = crate::utils::shell_scan::scan(command);
-    let is_syntax = |c: &crate::utils::shell_scan::ShellChar| !c.literal && !c.quote_mark;
-
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let mut i = 0;
-    while let Some(c) = scanned.get(i) {
-        let double_amp = c.ch == '&'
-            && is_syntax(c)
-            && scanned
-                .get(i + 1)
-                .is_some_and(|n| n.ch == '&' && is_syntax(n));
-        if double_amp {
-            segments.push(std::mem::take(&mut current));
-            i += 2;
-            continue;
+/// `FOO=bar` and `FOO="two words"` are pure setup, and so is a run of them
+/// (`A=1 B=2`). `FOO=bar cargo test` assigns AND runs, so it is kept whole —
+/// dropping it would lose the command. Anything that runs as part of the value
+/// (`X=$(date)`, `` X=`date` ``) is work too, so it is kept: a substitution is a
+/// command the reader may need to see, and a label that hides it describes a
+/// different command.
+fn is_pure_assignment(segment: &str) -> bool {
+    let mut rest = segment.trim();
+    let mut saw_one = false;
+    loop {
+        let Some((name, after_eq)) = rest.split_once('=') else {
+            return false;
+        };
+        if !is_shell_name(name) {
+            // `cargo test FOO=bar` — the assignment is an argument, not setup.
+            return false;
         }
-        if is_syntax(c) && (c.ch == '\n' || c.ch == ';') {
-            segments.push(std::mem::take(&mut current));
-        } else {
-            current.push(c.ch);
+        saw_one = true;
+        match value_word_len(after_eq) {
+            Some(consumed) => rest = after_eq[consumed..].trim_start(),
+            None => return false,
         }
-        i += 1;
+        if rest.is_empty() {
+            return saw_one;
+        }
     }
-    segments.push(current);
-
-    segments
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
 }
 
-/// Collapse runs of whitespace so a command formatted across columns reads as
-/// one line. Any newline inside a segment is impossible (they are separators),
-/// so this only tidies runs of spaces and tabs.
-fn collapse_whitespace(segment: &str) -> String {
-    segment.split_whitespace().collect::<Vec<_>>().join(" ")
+/// `NAME` must be a valid shell identifier, else `=` belongs to something else.
+fn is_shell_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Length of the single shell word at the head of `rest`, or `None` when the
+/// value runs a command (`$(..)`, backticks) or is malformed.
+fn value_word_len(rest: &str) -> Option<usize> {
+    if rest.contains("$(") || rest.contains('`') {
+        return None;
+    }
+    let bytes = rest.as_bytes();
+    let Some(&first) = bytes.first() else {
+        return Some(0);
+    };
+    if first == b'"' || first == b'\'' {
+        let mut i = 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' && first == b'"' {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == first {
+                return Some(i + 1);
+            }
+            i += 1;
+        }
+        return None;
+    }
+    Some(
+        rest.find(char::is_whitespace)
+            .unwrap_or(rest.len()),
+    )
 }

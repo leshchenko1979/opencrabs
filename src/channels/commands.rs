@@ -2729,26 +2729,43 @@ pub(crate) fn render_tasks_rows(args: &str, session: &str, live: &[(String, Stri
 fn render_task_row(status: &crate::brain::agent::service::work_status::WorkStatus) -> String {
     let finish = status.finish.as_ref();
     let code = finish.and_then(|f| f.code);
-    let icon = match finish.and_then(|f| f.success) {
+    let success = finish.and_then(|f| f.success);
+    let icon = match success {
         Some(true) => "\u{2705}",
         Some(false) => "\u{274c}",
         None => "\u{23f3}",
     };
-    let mut row = format!(
-        "{icon} `{}` · {}",
-        clip_task_label(&status.label),
-        status.state.label()
-    );
+    let mut row = format!("{icon} `{}`", clip_task_label(&status.label));
     if let Some(secs) = finish.and_then(|f| f.elapsed_secs) {
         row.push_str(&format!(" · {}", fmt_task_elapsed(secs as u64)));
     }
+    // The state word is restated only where the icon cannot carry it. A row
+    // reading `✅ … · completed · 5s · exit 0` says the same thing four times:
+    // the tick IS "completed", and `exit 0` is what a tick means. What the
+    // reader cannot infer from an icon is a run that never reached a terminal
+    // state, so those keep their wording (#808).
+    let terminal = matches!(
+        status.state,
+        crate::brain::agent::service::work_status::WorkState::Completed
+            | crate::brain::agent::service::work_status::WorkState::Failed
+    );
+    if !terminal {
+        row.push_str(&format!(" · {}", status.state.label()));
+    }
     match finish.and_then(|f| f.cause) {
+        // A clean exit is already said by the tick; repeating it as `exit 0`
+        // spends the row's last column on the expected case.
+        Some(cause) if success == Some(true) && code == Some(0) => {
+            let _ = cause;
+        }
         Some(cause) => row.push_str(&format!(" · {}", cause.describe(code.unwrap_or(-1)))),
         // A record written before #786 carries no cause; fall back to the code
         // rather than claiming `ordinary`, which would be a guess.
         None => {
             if let Some(c) = code {
-                row.push_str(&format!(" · exit {c}"));
+                if success != Some(true) || c != 0 {
+                    row.push_str(&format!(" · exit {c}"));
+                }
             }
         }
     }

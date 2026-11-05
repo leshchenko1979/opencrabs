@@ -118,3 +118,48 @@ fn a_plain_command_is_untouched() {
 fn semicolon_separated_leading_cd_is_dropped() {
     assert_eq!(command_label("cd /srv/app; cargo test"), "cargo test");
 }
+
+/// The `/tasks` regression (#808): the label was `SD=…; SID=…`, i.e. a shell
+/// preamble that ate all 60 characters and named no command at all.
+#[test]
+fn a_leading_assignment_preamble_is_dropped() {
+    assert_eq!(
+        command_label("SD=/tmp/detached; SID=abc123; grep -c foo out.txt"),
+        "grep -c foo out.txt"
+    );
+    assert_eq!(
+        command_label("DB=prod cargo test --lib"),
+        // Assigning AND running is one word: dropping it would rename the command.
+        "DB=prod cargo test --lib"
+    );
+}
+
+#[test]
+fn a_quoted_assignment_value_is_still_a_preamble() {
+    assert_eq!(
+        command_label("GREETING=\"two words\" FOO=1; pytest -q"),
+        "pytest -q"
+    );
+}
+
+#[test]
+fn an_assignment_that_runs_something_is_kept() {
+    // A substitution is work: hiding it describes a different command.
+    assert_eq!(
+        command_label("STAMP=$(date -u) ; echo hi"),
+        "STAMP=$(date -u); echo hi"
+    );
+    assert_eq!(command_label("X=`whoami`; id"), "X=`whoami`; id");
+}
+
+#[test]
+fn an_assignment_after_the_command_is_preserved() {
+    assert_eq!(
+        command_label("cargo test FOO=bar"),
+        "cargo test FOO=bar"
+    );
+    assert_eq!(
+        command_label("cd /srv && MODE=fast pytest -q"),
+        "MODE=fast pytest -q"
+    );
+}
