@@ -1300,7 +1300,7 @@ pub(crate) async fn cmd_agent_interactive(
                 // A detached command finished — resume proactively. Put the
                 // in-flight stdin read back so the user's pending line survives.
                 pending_read = Some(read);
-                println!("\n⚙️  background task finished — resuming\n");
+                println!("\n{} — resuming\n", msg.display_text);
                 run_cli_turn(&agent_service, session.id, msg.context_text, auto_approve).await;
             }
         }

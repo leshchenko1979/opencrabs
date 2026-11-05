@@ -1286,6 +1286,12 @@ pub(crate) const QUEUED_PREVIEW_MAX: usize = 30;
 /// The first readable line of a queued push, for the flow roll's
 /// `📥 in: <tag> "<preview>"` line.
 ///
+/// #811: this preview is NOT rendered for a `BackgroundTask` push — that
+/// origin carries its own ack line (`✅ label 🕒 2m 5s`), and previewing the
+/// producer's display text under it produced `📥 in: task "✅ grep…"`, the
+/// same fact twice in 30 characters. The call sites gate on the origin, not
+/// here, so this function stays a pure shaper.
+///
 /// A cross-session `session_notify` prepends a machine transport envelope —
 /// `📨 notify from <short-id>:\n<message>` (built at `subagent/notify.rs:266`)
 /// — and quoting that line tells the user nothing while printing a raw

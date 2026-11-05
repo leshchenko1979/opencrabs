@@ -164,7 +164,17 @@ pub(crate) fn build_progress_cb(
             }
             ProgressEvent::QueuedUserMessage { text, origin } => {
                 detach_flow_for_followup(&st);
-                if let Ok(mut s) = st.lock() {
+                // #811: a background-task completion is announced by its OWN
+                // ack line — `✅ label 🕒 2m 5s`, folded into this very card by
+                // `fold_bg_ack_into_flow_card` — so this echo stated the same
+                // event a second time, in 30 truncated characters. The owner
+                // read it as `📥 in: task "🔧 background task finished: gh…"`
+                // and called it redundant. Every other origin keeps the line:
+                // for a user follow-up or a cross-session notify the tag IS
+                // the news.
+                if origin != crate::brain::agent::PushOrigin::BackgroundTask
+                    && let Ok(mut s) = st.lock()
+                {
                     // #554: skip the session_notify transport envelope and
                     // truncate char-safely — the roll quotes the body, not a
                     // machine header carrying a raw session uuid.

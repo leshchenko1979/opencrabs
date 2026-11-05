@@ -900,7 +900,12 @@ pub(crate) async fn resume_session_inner(
             }
             ProgressEvent::QueuedUserMessage { text, origin } => {
                 detach_flow_for_followup(&st);
-                if let Ok(mut s) = st.lock() {
+                // #811: the same rule as the live-turn site — a background-task
+                // completion owns its ack line (`✅ label 🕒 2m 5s`), so the
+                // `📥 in: task "…"` echo only ever repeated it.
+                if origin != crate::brain::agent::PushOrigin::BackgroundTask
+                    && let Ok(mut s) = st.lock()
+                {
                     // #554: same shared shaping as the live-turn site — skip
                     // the session_notify transport envelope, then truncate
                     // char-safely.
@@ -1851,10 +1856,10 @@ pub(crate) async fn fold_notify_into_roll(
 }
 
 /// Bubble header for a background-task echo: reuse the producer's display
-/// line, which already names the task ("🔧 background task finished:
-/// <label>") — the generic "⚙️ background task result" said nothing about
-/// which task woke the session (Alexey 2026-08-26). Blank display → generic
-/// fallback; overlong labels are capped so the header stays readable.
+/// line, which already names the task (`✅ <label> 🕒 2m 5s`, #811) — the
+/// generic "⚙️ background task result" said nothing about which task woke the
+/// session (Alexey 2026-08-26). Blank display → generic fallback; overlong
+/// labels are capped so the header stays readable.
 pub(crate) fn background_task_title(display_text: &str) -> String {
     let t = display_text.trim();
     if t.is_empty() {

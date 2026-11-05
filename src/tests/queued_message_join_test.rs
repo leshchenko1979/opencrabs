@@ -17,11 +17,11 @@ fn a_system_entry_keeps_its_compact_display() {
     // The exact shape that leaked: the model must still read the full result.
     let queued = vec![QueuedUserMessage::system(
         "[System: the background task you started has finished. Command: cargo test …]".to_string(),
-        "🔧 background task finished: cargo test".to_string(),
+        "\u{2705} cargo test \u{1f552} 42s".to_string(),
     )];
     let joined = QueuedUserMessage::join(&queued).expect("one entry joins");
     assert_eq!(
-        joined.display_text, "🔧 background task finished: cargo test",
+        joined.display_text, "\u{2705} cargo test \u{1f552} 42s",
         "the transcript must never receive the scaffolding"
     );
     assert!(
@@ -46,13 +46,13 @@ fn mixed_entries_join_each_half_independently() {
         QueuedUserMessage::plain("also check the logs".to_string()),
         QueuedUserMessage::system(
             "[System: task finished. Output: …50 lines…]".to_string(),
-            "🔧 background task finished: cargo clippy".to_string(),
+            "\u{2705} cargo clippy \u{1f552} 1m 3s".to_string(),
         ),
     ];
     let joined = QueuedUserMessage::join(&queued).expect("joins");
     assert_eq!(
         joined.display_text,
-        "also check the logs\n🔧 background task finished: cargo clippy"
+        "also check the logs\n\u{2705} cargo clippy \u{1f552} 1m 3s"
     );
     assert_eq!(
         joined.context_text,

@@ -53,7 +53,9 @@ fn completion_message_reflects_success_and_failure() {
         "the run id must be in the context text: {}",
         ok.context_text
     );
-    assert!(ok.display_text.contains("finished"));
+    // #811: the display line is a headline — outcome ICON, label, duration.
+    // The outcome WORD it used to carry was the same fact twice on the card.
+    assert_eq!(ok.display_text, "\u{2705} cargo test \u{1f552} 12s");
     // #15: the typed receipt payload rides along for the echo card.
     let meta = ok.bg_meta.expect("bg completion carries BgTaskMeta");
     assert!(meta.success);
@@ -80,7 +82,7 @@ fn completion_message_reflects_success_and_failure() {
         "a FAILED run names itself too — that is when the id matters most: {}",
         fail.context_text
     );
-    assert!(fail.display_text.contains("failed"));
+    assert_eq!(fail.display_text, "\u{274c} build \u{1f552} 3s");
     let meta = fail.bg_meta.expect("failed completion still carries meta");
     assert!(!meta.success);
     assert_eq!(meta.elapsed_secs, 3.0);
@@ -122,7 +124,11 @@ fn completion_message_names_why_a_137_ended() {
         ceiling.context_text
     );
     assert!(ceiling.context_text.contains("did not fail"));
-    assert!(ceiling.display_text.contains("killed (ceiling)"));
+    // #811: the ICON is the only outcome signal on the headline, so a
+    // ceiling kill and a command failure read alike there — the distinction
+    // that matters lives in the context text above and on the card body's
+    // first line (#808 cue 9). Asserting a word here would re-add it.
+    assert_eq!(ceiling.display_text, "\u{274c} long build \u{1f552} 1h 0m");
 
     // A signal is a kill too, but not the harness's doing — and it says which
     // signal, which is how an OOM kill (9) is told from a cancellation (15).
@@ -131,7 +137,7 @@ fn completion_message_names_why_a_137_ended() {
 
     // And a command that simply exited 137 still reads as a failure.
     assert!(literal.context_text.contains("exit 137 (failure)"));
-    assert!(literal.display_text.contains("failed"));
+    assert_eq!(literal.display_text, ceiling.display_text);
 
     // All three are different strings — the whole point of the field.
     assert_ne!(ceiling.context_text, oom.context_text);
@@ -540,10 +546,7 @@ fn claude_completion_message_carries_status_and_summary_mechanically() {
     assert!(msg.context_text.contains("Status: completed"));
     assert!(msg.context_text.contains("Summary: tests passed"));
     assert!(msg.context_text.contains("Do not re-run the task"));
-    assert_eq!(
-        msg.display_text,
-        "🔧 background task finished: claude-cli bAAA1111"
-    );
+    assert_eq!(msg.display_text, "\u{2705} claude-cli bAAA1111");
     assert_eq!(msg.origin, PushOrigin::BackgroundTask, "#1221 echo tag");
     assert!(msg.bg_meta.is_none(), "no CmdResult, no fabricated receipt");
 }
@@ -553,8 +556,5 @@ fn claude_completion_message_failed_wording_and_summary_fallback() {
     let msg = claude_completion_message("bBBB2222", "failed", None);
     assert!(msg.context_text.contains("Status: failed"));
     assert!(msg.context_text.contains("Summary: (no summary provided)"));
-    assert_eq!(
-        msg.display_text,
-        "🔧 background task failed: claude-cli bBBB2222"
-    );
+    assert_eq!(msg.display_text, "\u{274c} claude-cli bBBB2222");
 }

@@ -1778,14 +1778,15 @@ pub(crate) fn claude_completion_message(
          waiting on it. Do not re-run the task.]",
         summary.unwrap_or("(no summary provided)"),
     );
-    let display = format!(
-        "🔧 background task {}: {label}",
-        if status == "completed" {
-            "finished"
-        } else {
-            "failed"
-        }
-    );
+    // #811: same headline shape as the command path. The claude path has no
+    // duration to carry (the status arrives with no elapsed), so the icon and
+    // the label are the whole line.
+    let icon = if status == "completed" {
+        "\u{2705}"
+    } else {
+        "\u{274c}"
+    };
+    let display = format!("{icon} {label}");
     let mut msg = QueuedUserMessage::system(context, display);
     // #1221: marks this delivery for the Telegram collapsible echo bubble.
     msg.origin = PushOrigin::BackgroundTask;
@@ -1847,14 +1848,14 @@ pub(crate) fn completion_message(
          Report the result to the user and continue anything that was waiting on it. \
          Do not re-run the command — this IS its result.]"
     );
-    let outcome_word = if result.success {
-        "finished"
-    } else if matches!(result.cause, RunCause::Ceiling { .. }) {
-        "killed (ceiling)"
-    } else {
-        "failed"
-    };
-    let display = format!("🔧 background task {outcome_word}: {label}");
+    // #811: the display line is a HEADLINE, not a sentence. It used to read
+    // `🔧 background task finished: <label>` — an outcome WORD plus a label,
+    // and the surfaces it fed repeated both beside a duration. The owner
+    // called the resulting echo redundant: icon, label and duration are the
+    // three facts worth carrying, and they fit in one line.
+    let icon = if result.success { "\u{2705}" } else { "\u{274c}" };
+    let duration = format_elapsed(elapsed_secs);
+    let display = format!("{icon} {label} \u{1f552} {duration}");
     let mut msg = QueuedUserMessage::system(context, display);
     // #1221: marks this delivery for the Telegram collapsible echo bubble.
     msg.origin = PushOrigin::BackgroundTask;

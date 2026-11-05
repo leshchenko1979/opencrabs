@@ -154,13 +154,17 @@ fn long_output_is_truncated_before_conversion_and_stays_wellformed() {
 
 #[test]
 fn background_title_names_the_task_from_display_text() {
+    // #811: the producer's display line is a headline — outcome icon, label,
+    // duration — and the title carries it verbatim. It used to be a sentence
+    // ("🔧 background task finished: <label>"), which the owner rejected as
+    // redundant beside the ack line that already said the same thing.
     assert_eq!(
-        background_task_title("🔧 background task finished: grep-errors"),
-        "🔧 background task finished: grep-errors"
+        background_task_title("\u{2705} grep-errors \u{1f552} 42s"),
+        "\u{2705} grep-errors \u{1f552} 42s"
     );
     assert_eq!(
-        background_task_title("🔧 background task failed: cleanup-unified"),
-        "🔧 background task failed: cleanup-unified"
+        background_task_title("\u{274c} cleanup-unified \u{1f552} 3m 5s"),
+        "\u{274c} cleanup-unified \u{1f552} 3m 5s"
     );
 }
 
@@ -172,10 +176,10 @@ fn blank_display_text_falls_back_to_generic_title() {
 
 #[test]
 fn overlong_task_label_is_capped_in_title() {
-    let long = format!("🔧 background task finished: {}", "x".repeat(500));
+    let long = format!("\u{2705} {} \u{1f552} 2s", "x".repeat(500));
     let t = background_task_title(&long);
     assert!(t.chars().count() <= 120, "header must stay readable");
-    assert!(t.starts_with("🔧 background task finished:"));
+    assert!(t.starts_with("\u{2705} x"), "the label leads, not a sentence: {t}");
 }
 
 #[test]
