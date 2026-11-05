@@ -1,4 +1,5 @@
 use crate::brain::provider::{ProviderStream, StopReason};
+use crate::brain::tools::r#trait::DetachedHandover;
 use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
@@ -48,6 +49,10 @@ pub enum ProgressEvent {
         tool_input: Value,
         success: bool,
         summary: String,
+        /// Set when this call's work left the turn (#808): the channel layer
+        /// announces the handover from here. `None` for every ordinary call,
+        /// and for a tool that merely stamped a run id without detaching.
+        detached: Option<DetachedHandover>,
     },
     /// Intermediate text the agent sends between tool call batches
     IntermediateText {

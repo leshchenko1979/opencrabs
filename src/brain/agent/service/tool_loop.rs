@@ -7349,6 +7349,9 @@ impl AgentService {
                                         // completion can write the run's real outcome back onto it.
                                         // Taken before `images` is moved out below.
                                         let exec_row_id = result.exec_row_id();
+                                        // #808: the channel layer announces the handover from this.
+                                        // Same reason it must be taken before `images` moves out.
+                                        let detached = result.detached_handover();
                                         let images = result.images;
                                         let content = build_tool_result_content(
                                             result.success,
@@ -7494,6 +7497,7 @@ impl AgentService {
                                                     tool_input: tool_input_for_progress.clone(),
                                                     success,
                                                     summary: output_summary,
+                                                    detached,
                                                 },
                                             );
                                         }
@@ -7597,6 +7601,8 @@ impl AgentService {
                                                     tool_input: tool_input_for_progress.clone(),
                                                     success: false,
                                                     summary: output_summary,
+                                                    // Denied / errored: nothing left the turn.
+                                                    detached: None,
                                                 },
                                             );
                                         }
@@ -7713,6 +7719,8 @@ impl AgentService {
                         // completion can write the run's real outcome back onto it.
                         // Taken before `images` is moved out below.
                         let exec_row_id = result.exec_row_id();
+                        // #808: the channel layer announces the handover from this.
+                        let detached = result.detached_handover();
                         let images = result.images;
                         let result_output_for_evidence = result.output.clone();
                         let content =
@@ -7815,6 +7823,7 @@ impl AgentService {
                                     tool_input: tool_input_for_progress.clone(),
                                     success,
                                     summary: output_summary,
+                                    detached,
                                 },
                             );
                         }
@@ -7906,6 +7915,8 @@ impl AgentService {
                                     tool_input: tool_input_for_progress.clone(),
                                     success: false,
                                     summary: output_summary,
+                                    // Denied / errored: nothing left the turn.
+                                    detached: None,
                                 },
                             );
                         }

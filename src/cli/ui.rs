@@ -780,6 +780,9 @@ async fn cmd_chat_inner(
                     tool_input,
                     success,
                     summary,
+                    // The TUI has no detach cue yet; the field is ignored here
+                    // rather than propagated (#808 is a channel-surface fix).
+                    detached: _,
                 } => progress_sender.send(TuiEvent::ToolCallCompleted {
                     session_id,
                     tool_name,

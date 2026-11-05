@@ -293,6 +293,27 @@ fn ssh_stderr_is_auth_failure(stderr: &str) -> bool {
 /// that wanted to know how far the run had got had to spend a whole
 /// `task_output` call on it — a 14-gate loop did exactly that. A short tail
 /// costs nothing and usually answers the question outright.
+/// #808: stamp the facts the channel layer needs to announce a detached run.
+///
+/// Both detach arms write `run_id`, but a run id alone says a run EXISTS, not
+/// that the work left this turn — `detach_cause` is the explicit signal, and
+/// `ToolResult::detached_handover()` requires both. The deadline carried here
+/// is the run's LIFETIME CEILING (`agent.run_max_lifetime_secs`), never the
+/// inline grace: that window has already expired at handover, so announcing it
+/// would tell the user about a bound that no longer applies.
+fn stamp_detach(result: &mut ToolResult, run_id: &str, cause: &str) {
+    let ceiling = crate::config::Config::current().agent.run_max_lifetime_secs;
+    result
+        .metadata
+        .insert("run_id".to_string(), run_id.to_string());
+    result
+        .metadata
+        .insert("detach_cause".to_string(), cause.to_string());
+    result
+        .metadata
+        .insert("detach_deadline_secs".to_string(), ceiling.to_string());
+}
+
 const HANDOVER_TAIL_BYTES: u64 = 4096;
 const HANDOVER_TAIL_LINES: usize = 15;
 
@@ -648,7 +669,9 @@ impl Tool for BashTool {
                     // run id, so the completion can write the run's REAL outcome
                     // onto it. Without the link the row keeps describing the
                     // spawn — `success`, no exit code — forever.
-                    started.metadata.insert("run_id".to_string(), run_id);
+                    // #808: `spawn` also tells the channel layer this call left
+                    // the turn, so the user gets a cue instead of a silent roll.
+                    stamp_detach(&mut started, &run_id, "spawn");
                     return Ok(started);
                 }
                 // Worth a line: the command looks long to a reader, and the
@@ -1035,7 +1058,9 @@ impl Tool for BashTool {
                         // #787: keys this tool call's `tool_executions` row to
                         // the run, so the completion can write the real outcome
                         // back. Same link as the detached-now arm above.
-                        handed_over.metadata.insert("run_id".to_string(), id);
+                        // #808: `handover` is the distinct cause — this run
+                        // crossed a deadline, it was not classified long.
+                        stamp_detach(&mut handed_over, &id, "handover");
                         return Ok(handed_over);
                     }
                     Err(e) => {

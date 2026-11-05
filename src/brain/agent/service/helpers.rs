@@ -979,6 +979,9 @@ impl AgentService {
                                         tool_input: input.clone(),
                                         success: true,
                                         summary: String::new(),
+                                        // CLI-only synthetic completion: no
+                                        // `ToolResult` exists to read (#808).
+                                        detached: None,
                                     },
                                 );
 

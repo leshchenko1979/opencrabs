@@ -14,7 +14,7 @@ use super::tool_loop::{
 };
 use super::types::{ProgressCallback, ProgressEvent};
 use crate::brain::provider::ContentBlock;
-use crate::brain::tools::r#trait::ToolExecutionContext;
+use crate::brain::tools::r#trait::{DetachedHandover, ToolExecutionContext};
 use futures::StreamExt;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -49,6 +49,9 @@ struct ToolOutcome {
     /// Carried here for the same reason as `exit_code`: it must be read off
     /// `result` before `images` moves a field out.
     exec_row_id: String,
+    /// Set when this call's work left the turn (#808), read off `result`
+    /// before `images` moves it — same constraint as `exit_code`.
+    detached: Option<DetachedHandover>,
 }
 
 /// What the batch produced, in original order.
@@ -186,6 +189,8 @@ impl super::AgentService {
                             // struct intact.
                             exit_code: result.exit_code(),
                             exec_row_id: result.exec_row_id(),
+                            // #808: must be read before `images` moves out.
+                            detached: result.detached_handover(),
                             content: build_tool_result_content(
                                 result.success,
                                 result.error,
@@ -207,6 +212,8 @@ impl super::AgentService {
                             // No result to read a run id off: this call never
                             // reached a tool, so it keys its own row.
                             exec_row_id: Uuid::new_v4().to_string(),
+                            // No result exists, so nothing detached (#808).
+                            detached: None,
                         },
                     };
                     // Completion event fires as each tool finishes (real-time
@@ -223,6 +230,7 @@ impl super::AgentService {
                                 tool_input: outcome.tool_input.clone(),
                                 success: outcome.success,
                                 summary,
+                                detached: outcome.detached.clone(),
                             },
                         );
                     }

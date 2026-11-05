@@ -304,6 +304,49 @@ impl ToolResult {
             .cloned()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
     }
+
+    /// The detach facts, when this call really left the turn (#808).
+    ///
+    /// `run_id` alone is NOT the signal: it says a run exists, not that the
+    /// work left this turn — a tool may stamp one and still return inline. The
+    /// explicit `detach_cause` key is what the channel layer reads to announce
+    /// a handover, so both facts must be present for this to return `Some`.
+    pub fn detached_handover(&self) -> Option<DetachedHandover> {
+        let cause = match self.metadata.get("detach_cause")?.as_str() {
+            "handover" => DetachCause::Handover,
+            "spawn" => DetachCause::Spawn,
+            _ => return None,
+        };
+        Some(DetachedHandover {
+            run_id: self.metadata.get("run_id")?.clone(),
+            cause,
+            // `0` is the operator's "no ceiling" choice, not a missing value:
+            // the cue drops its deadline clause rather than printing 0s.
+            deadline_secs: self
+                .metadata
+                .get("detach_deadline_secs")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|secs| *secs > 0),
+        })
+    }
+}
+
+/// Why a tool call's work left the turn (#808).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetachCause {
+    /// The inline deadline expired and the run was handed over.
+    Handover,
+    /// The command was classified as long and started detached immediately.
+    Spawn,
+}
+
+/// What the channel layer needs in order to say that a run started (#808).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedHandover {
+    pub run_id: String,
+    pub cause: DetachCause,
+    /// The run's lifetime ceiling in seconds; `None` when the operator set `0`.
+    pub deadline_secs: Option<u64>,
 }
 
 /// Tool capability flags
