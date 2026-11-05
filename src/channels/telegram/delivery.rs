@@ -101,9 +101,7 @@ pub(crate) fn is_no_media_found(e: &anyhow::Error) -> bool {
 /// the user where it belongs — the receipt card and `/tasks` — read from
 /// `BgTaskMeta`, not from here.
 pub(crate) fn bg_count_for(agent: &AgentService, session_id: Uuid) -> Option<usize> {
-    let Some(bm) = agent.background_manager() else {
-        return None;
-    };
+    let bm = agent.background_manager()?;
     Some(bm.running_tasks(session_id).len())
 }
 
