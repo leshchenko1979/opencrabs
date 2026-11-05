@@ -426,13 +426,14 @@ async fn markdown_card_empty_inputs_render_nothing() {
 
 #[tokio::test]
 async fn markdown_card_neutralises_prose_media_tags() {
-    // #134: a lone `<img>` in model-authored prose 400'd EVERY rich plan card
+    // A LONE `<img>` in model-authored prose 400'd EVERY rich plan card
     // (RICH_MESSAGE_PHOTO_INVALID, len=19765 in the daemon log) and slid the
     // card into the classic-HTML fallback. Prose is text — the tag must ship
-    // inert while staying readable.
+    // inert while staying readable. The `#134` this once cited is the
+    // compaction-bypass defect and never described this incident.
     let prose = vec![ProseSection {
         heading: Some("What could break".to_string()),
-        body: "Classic path untouched (no `<img>` in classic sendMessage HTML).".to_string(),
+        body: "Classic path untouched (no <img> in classic sendMessage HTML).".to_string(),
     }];
     let md = render_plan_card_markdown(Some(TITLE), None, Some(&prose), None)
         .await
@@ -445,6 +446,32 @@ async fn markdown_card_neutralises_prose_media_tags() {
     assert!(
         md.contains("&lt;img&gt;") || md.contains("&lt;img>") || md.contains("&amp;lt;img&gt;"),
         "the tag must stay readable as text. Got:\n{md}"
+    );
+}
+
+#[tokio::test]
+async fn markdown_card_keeps_media_tag_inside_a_code_span() {
+    // #809: inside a BALANCED inline code span the tag is literal DATA, not
+    // markup — the rich markdown parser does not decode entities in a code
+    // span (which is exactly why the blanket escape shipped a visible `&lt;`
+    // to the reader), and the classic-HTML plane escapes code content before
+    // wrapping it in `<code>`. Escaping the span therefore buys no safety and
+    // costs the reader the text they quoted.
+    let prose = vec![ProseSection {
+        heading: Some("What could break".to_string()),
+        body: "Classic path untouched (no `<img>` in classic sendMessage HTML).".to_string(),
+    }];
+    let md = render_plan_card_markdown(Some(TITLE), None, Some(&prose), None)
+        .await
+        .expect("card with prose must render");
+
+    assert!(
+        md.contains("`<img>`"),
+        "a tag inside a balanced code span must survive verbatim. Got:\n{md}"
+    );
+    assert!(
+        !md.contains("&lt;img"),
+        "the span must not ship an escape the reader would see. Got:\n{md}"
     );
 }
 
