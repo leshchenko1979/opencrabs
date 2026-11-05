@@ -2694,7 +2694,7 @@ pub(crate) fn render_tasks_rows(args: &str, session: &str, live: &[(String, Stri
             candidates.push((mtime, stem.to_string()));
         }
     }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.0));
 
     // Lookahead is a cost bound, not a correctness claim: mtime order is only
     // a cheap "most likely mine first" hint and the filter below decides
