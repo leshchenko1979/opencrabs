@@ -1278,13 +1278,22 @@ pub(crate) fn resolve_markdown_media(text: &str) -> BoxFuture<'static, (String, 
 /// (#134 root cause — a lone `<img>` in a 18.5K card body 400'd every send).
 const PROSE_MEDIA_TAGS: [&str; 3] = ["img", "video", "audio"];
 
-/// Escape the tag opener of every media tag in model-authored prose so the
-/// text still READS `<img>` but can never go live (see [`PROSE_MEDIA_TAGS`]).
-/// Markdown syntax is untouched — only the `<` of a media tag is rewritten.
+/// Escape the tag opener of every media tag in model-authored prose so it can
+/// never go live (see [`PROSE_MEDIA_TAGS`]). Markdown syntax is untouched —
+/// only the `<` of a media tag is rewritten, and only where that tag is LIVE.
+///
+/// A tag inside a BALANCED inline code span or a CLOSED fenced block is already
+/// inert on the rich-markdown wire, and `&lt;` never decodes there (CommonMark
+/// forbids entity decoding inside code spans), so escaping it ships the escape
+/// as literal text — the #809 defect. Those regions are skipped. An UNBALANCED
+/// backtick run, or an unterminated fence, leaves the rest of the text LIVE —
+/// the #134 exposure — so it keeps the escape.
 pub(crate) fn neutralize_prose_media_html(text: &str) -> String {
+    let code = code_ranges(text);
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(pos) = rest.find('<') {
+        let at = text.len() - rest.len() + pos;
         out.push_str(&rest[..pos]);
         let tail = &rest[pos + 1..];
         let bytes = tail.as_bytes();
@@ -1297,11 +1306,112 @@ pub(crate) fn neutralize_prose_media_html(text: &str) -> String {
             && PROSE_MEDIA_TAGS
                 .iter()
                 .any(|t| tail[name_start..n].eq_ignore_ascii_case(t));
-        out.push_str(if is_media { "&lt;" } else { "<" });
+        let live = is_media && !in_code_ranges(&code, at);
+        out.push_str(if live { "&lt;" } else { "<" });
         rest = tail;
     }
     out.push_str(rest);
     out
+}
+
+/// Byte ranges of `text` that CommonMark treats as code — closed fenced blocks
+/// and BALANCED inline code spans. A `<` inside one of them cannot go live on
+/// the rich-markdown wire, so escaping it only corrupts the delivered text.
+///
+/// Deliberately strict: a region counts only when its closer is PRESENT. An
+/// unterminated fence or an unpaired backtick run leaves the remainder of the
+/// text live, which is exactly the #134 exposure that made code-span quoting
+/// unsafe in the first place.
+fn code_ranges(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if ch != b'`' && ch != b'~' {
+            i += 1;
+            continue;
+        }
+        let run_start = i;
+        while i < bytes.len() && bytes[i] == ch {
+            i += 1;
+        }
+        let run_len = i - run_start;
+        let at_line_start = run_start == 0 || bytes[run_start - 1] == b'\n';
+        if run_len >= 3 && at_line_start {
+            let closed = fence_end(bytes, i, ch, run_len);
+            if let Some(end) = closed {
+                ranges.push((run_start, end));
+                i = end;
+            }
+            continue;
+        }
+        if ch != b'`' {
+            continue;
+        }
+        let closed = span_end(bytes, i, run_len);
+        if let Some(end) = closed {
+            ranges.push((run_start, end));
+            i = end;
+        }
+    }
+    ranges
+}
+
+/// End offset (just past the closing fence line) of a fenced block opened at
+/// `from`, or `None` when no closing fence follows. The opening line's own
+/// remainder is never a candidate — a closer must start a later line.
+fn fence_end(bytes: &[u8], from: usize, ch: u8, run_len: usize) -> Option<usize> {
+    let mut line = from + bytes[from..].iter().position(|&b| b == b'\n')? + 1;
+    while line < bytes.len() {
+        let line_end = bytes[line..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(bytes.len(), |p| line + p);
+        let mut k = line;
+        while k < line_end && (bytes[k] == b' ' || bytes[k] == b'\t') {
+            k += 1;
+        }
+        let ticks = k;
+        while k < line_end && bytes[k] == ch {
+            k += 1;
+        }
+        if k - ticks >= run_len {
+            let mut tail = k;
+            while tail < line_end && matches!(bytes[tail], b' ' | b'\t' | b'\r') {
+                tail += 1;
+            }
+            if tail == line_end {
+                return Some(line_end);
+            }
+        }
+        line = line_end + 1;
+    }
+    None
+}
+
+/// End offset of an inline code span opened by a `run_len` backtick run, or
+/// `None` when no run of exactly that length closes it.
+fn span_end(bytes: &[u8], from: usize, run_len: usize) -> Option<usize> {
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i] != b'`' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i] == b'`' {
+            i += 1;
+        }
+        if i - start == run_len {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn in_code_ranges(ranges: &[(usize, usize)], at: usize) -> bool {
+    ranges.iter().any(|&(start, end)| at >= start && at < end)
 }
 
 /// Scheme prefixes that make Telegram try to RESOLVE a media reference, paired with

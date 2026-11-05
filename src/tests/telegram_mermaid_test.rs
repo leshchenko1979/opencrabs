@@ -1207,14 +1207,15 @@ fn png_dims_rejects_non_png_and_short_buffers() {
 // whole-message 400 (RICH_MESSAGE_PHOTO_INVALID); `<video>`/`<audio>` fail the
 // same way with their own codes, and an escaped opener is inert. One unbalanced
 // backtick in prose is enough to expose a tag that was "hidden" inside a code
-// span, so quoting is not a fix.
+// span, so an UNBALANCED span is not a fix — but a balanced one is, and there
+// the escape only corrupts the text (#809).
 // ---------------------------------------------------------------------------
 
 #[test]
 fn prose_media_tags_are_escaped_and_other_html_survives() {
     assert_eq!(
         neutralize_prose_media_html("no `<img>` here"),
-        "no `&lt;img>` here"
+        "no `<img>` here"
     );
     assert_eq!(
         neutralize_prose_media_html(r#"<IMG SRC="x">"#),
@@ -1235,6 +1236,47 @@ fn prose_media_tags_are_escaped_and_other_html_survives() {
     assert_eq!(neutralize_prose_media_html("a < b"), "a < b");
     assert_eq!(neutralize_prose_media_html("images"), "images");
     assert_eq!(neutralize_prose_media_html(""), "");
+}
+
+/// #809: a tag inside a BALANCED code span or a CLOSED fence cannot go live on
+/// the rich-markdown wire, and `&lt;` never decodes inside code — so escaping it
+/// ships the escape as literal text. An unbalanced backtick (or an unterminated
+/// fence) leaves the tag LIVE (#134), so the escape must survive there.
+#[test]
+fn media_tags_inside_balanced_code_keep_their_opener() {
+    assert_eq!(
+        neutralize_prose_media_html("swaps `<img>` on keypress"),
+        "swaps `<img>` on keypress"
+    );
+    // A balanced span shields its own tag only; a live one after it still escapes.
+    assert_eq!(
+        neutralize_prose_media_html("`<img>` then <img>"),
+        "`<img>` then &lt;img>"
+    );
+    // A span opened by a double-backtick run closes on the same-length run.
+    assert_eq!(
+        neutralize_prose_media_html("``<video src=x>`` and `<audio>`"),
+        "``<video src=x>`` and `<audio>`"
+    );
+    // Closed fences, both fence characters.
+    assert_eq!(
+        neutralize_prose_media_html("```html\n<img src=x>\n```"),
+        "```html\n<img src=x>\n```"
+    );
+    assert_eq!(
+        neutralize_prose_media_html("~~~\n<video>\n~~~"),
+        "~~~\n<video>\n~~~"
+    );
+    // UNBALANCED backtick: the tag is live, so the escape stays (#134).
+    assert_eq!(
+        neutralize_prose_media_html("a `b <img>"),
+        "a `b &lt;img>"
+    );
+    // UNTERMINATED fence: treated as live text, so the escape stays (#134).
+    assert_eq!(
+        neutralize_prose_media_html("```\n<img src=x>"),
+        "```\n&lt;img src=x>"
+    );
 }
 
 #[test]
