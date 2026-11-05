@@ -65,6 +65,53 @@ fn is_bare_cd(segment: &str) -> bool {
         .is_some_and(|rest| !rest.trim().is_empty())
 }
 
+/// Split on top-level `\n`, `;` and `&&`, ignoring separators inside quotes.
+///
+/// Quote tracking is what makes this safe to run on arbitrary commands: a
+/// naive `split(';')` would cut `echo "a; b"` in half and invent a segment.
+/// The scan itself lives in `shell_scan` because the background-task
+/// classifier needs the same distinction between syntax and data.
+fn split_segments(command: &str) -> Vec<String> {
+    let scanned = crate::utils::shell_scan::scan(command);
+    let is_syntax = |c: &crate::utils::shell_scan::ShellChar| !c.literal && !c.quote_mark;
+
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut i = 0;
+    while let Some(c) = scanned.get(i) {
+        let double_amp = c.ch == '&'
+            && is_syntax(c)
+            && scanned
+                .get(i + 1)
+                .is_some_and(|n| n.ch == '&' && is_syntax(n));
+        if double_amp {
+            segments.push(std::mem::take(&mut current));
+            i += 2;
+            continue;
+        }
+        if is_syntax(c) && (c.ch == '\n' || c.ch == ';') {
+            segments.push(std::mem::take(&mut current));
+        } else {
+            current.push(c.ch);
+        }
+        i += 1;
+    }
+    segments.push(current);
+
+    segments
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Collapse runs of whitespace so a command formatted across columns reads as
+/// one line. Any newline inside a segment is impossible (they are separators),
+/// so this only tidies runs of spaces and tabs.
+fn collapse_whitespace(segment: &str) -> String {
+    segment.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Is this segment environment assignments and nothing else?
 ///
 /// `FOO=bar` and `FOO="two words"` are pure setup, and so is a run of them
