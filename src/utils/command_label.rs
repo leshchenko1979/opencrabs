@@ -122,7 +122,6 @@ fn collapse_whitespace(segment: &str) -> String {
 /// different command.
 fn is_pure_assignment(segment: &str) -> bool {
     let mut rest = segment.trim();
-    let mut saw_one = false;
     loop {
         let Some((name, after_eq)) = rest.split_once('=') else {
             return false;
@@ -131,13 +130,14 @@ fn is_pure_assignment(segment: &str) -> bool {
             // `cargo test FOO=bar` — the assignment is an argument, not setup.
             return false;
         }
-        saw_one = true;
         match value_word_len(after_eq) {
             Some(consumed) => rest = after_eq[consumed..].trim_start(),
             None => return false,
         }
         if rest.is_empty() {
-            return saw_one;
+            // Consuming at least one `NAME=value` is what got us here, so this
+            // is a pure assignment run. An empty segment never reaches the loop.
+            return true;
         }
     }
 }

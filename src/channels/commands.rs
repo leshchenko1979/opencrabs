@@ -2762,10 +2762,10 @@ fn render_task_row(status: &crate::brain::agent::service::work_status::WorkStatu
         // A record written before #786 carries no cause; fall back to the code
         // rather than claiming `ordinary`, which would be a guess.
         None => {
-            if let Some(c) = code {
-                if success != Some(true) || c != 0 {
-                    row.push_str(&format!(" · exit {c}"));
-                }
+            // Only an unexpected exit is worth the row's last column, so filter
+            // the code rather than nesting a second condition (#808).
+            if let Some(c) = code.filter(|c| success != Some(true) || *c != 0) {
+                row.push_str(&format!(" · exit {c}"));
             }
         }
     }
