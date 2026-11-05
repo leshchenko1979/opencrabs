@@ -1535,12 +1535,12 @@ pub(crate) fn push_handover_cue(
 pub(crate) fn prune_handed_over(s: &mut StreamingState, live: &[String]) -> usize {
     let mut cleared = 0;
     for tool in s.tool_msgs.iter_mut() {
-        if let Some(id) = &tool.handed_over {
-            if !live.iter().any(|l| l == id) {
-                tool.handed_over = None;
-                tool.dirty = true;
-                cleared += 1;
-            }
+        if let Some(id) = &tool.handed_over
+            && !live.iter().any(|l| l == id)
+        {
+            tool.handed_over = None;
+            tool.dirty = true;
+            cleared += 1;
         }
     }
     cleared

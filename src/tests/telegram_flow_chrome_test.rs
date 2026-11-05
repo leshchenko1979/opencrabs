@@ -4,13 +4,13 @@
 //! in one outer expandable; only the processing log collapses.
 
 use crate::channels::telegram::flow::{
-    FlowHeader, FlowLine, FlowOutcome, SubagentCounts, render_flow_details_chrome,
+    FlowHeader, FlowLine, FlowOutcome, HeaderMarkup, SubagentCounts, render_flow_details_chrome,
     render_flow_details_chrome_pref, render_flow_html_chrome, render_flow_html_chrome_pref,
     settled_icon_verb, subagent_waiting_phrase,
 };
 use crate::channels::telegram::flow_chrome::{
-    FlowSections, GoalSection, ProseSection, TelemetryMetrics, clock_glyph,
-    plan_mode_for_chrome, plan_state_chrome, split_plan_prose,
+    FlowSections, FooterParts, GoalSection, ProseSection, TelemetryMetrics, clock_glyph,
+    plan_mode_for_chrome, plan_state_chrome, split_plan_prose, standalone_telemetry_line,
 };
 use crate::utils::plan_files::PlanModeState;
 
@@ -837,73 +837,116 @@ fn settled_footer_drops_the_cog() {
     assert!(out.contains("✅ • 2:04 ⏱️"));
 }
 
+/// #808 cue 3: the `🔧 <label> running` segment must actually reach the
+/// rendered footer, on BOTH telemetry branches.
+///
+/// The previous version of this test asserted only the line PREFIX, which is
+/// byte-identical with and without the indicator — so it passed while the
+/// field had zero readers and the footer never showed detached work at all.
+/// Presence of a test is not behaviour; these assert the SEGMENT.
 #[test]
-fn settled_footer_shows_bg_indicator_when_task_running() {
-    // #1054: a settled turn ending with detached work shows the indicator as
-    // the final segment after the clock; with nothing running the footer is
-    // unchanged (no stray wrench).
-    let lines = [tline("✅ bash", "ls"), tline("✅ grep", "todo")];
-    let header = FlowHeader::Settled {
-        icon: "✅",
-        verb: "Finished",
-        duration: "8:37",
+fn footer_renders_the_bg_segment_with_telemetry() {
+    let parts = FooterParts {
+        outcome: Some(("✅", "Finished")),
+        compacting: false,
+        plan_mode: None,
+        working_on: None,
+        ctx: None,
+        thought: None,
+        activity: None,
+        tool_count: 2,
+        has_log: true,
+        elapsed_secs: 517,
+        has_goal: false,
+        bg: Some("pytest -q running"),
     };
-    let with_bg = render_flow_html_chrome_pref(
-        &lines,
-        &header,
-        None,
-        &FlowSections::default(),
-        usize::MAX,
-        517,
-        Some("cargo test running"),
-        false,
-        None,
+    let telem = TelemetryMetrics {
+        tool_count: 2,
+        elapsed_secs: 517,
+        detached_tasks: 1,
+        subagents: 0,
+        queued_messages: 0,
+    };
+    let line = standalone_telemetry_line(&parts, Some(&telem), HeaderMarkup::Html);
+    assert!(
+        line.ends_with("\u{1f527} pytest -q running"),
+        "the indicator is the FINAL segment and carries the wrench: {line:?}"
     );
     assert!(
-        with_bg.starts_with(
-            "✅ • 8:37 ⏱️
-<blockquote expandable><b>⛏️ grep todo</b>
+        line.contains("1 \u{23cf}\u{fe0f}"),
+        "the detached count rides the telemetry bar too: {line:?}"
+    );
+}
 
-"
-        ),
-        "bg indicator with settled: {with_bg:?}"
-    );
-    let without_bg = render_flow_html_chrome_pref(
-        &lines,
-        &header,
-        None,
-        &FlowSections::default(),
-        usize::MAX,
-        517,
-        None,
-        false,
-        None,
-    );
+/// Same segment on the no-telemetry branch — the fallback join must not
+/// silently drop it, which is how the field died the first time.
+#[test]
+fn footer_renders_the_bg_segment_without_telemetry() {
+    let parts = FooterParts {
+        outcome: Some(("✅", "Finished")),
+        compacting: false,
+        plan_mode: None,
+        working_on: None,
+        ctx: None,
+        thought: None,
+        activity: None,
+        tool_count: 2,
+        has_log: true,
+        elapsed_secs: 517,
+        has_goal: false,
+        bg: Some("3 tasks running"),
+    };
+    let line = standalone_telemetry_line(&parts, None, HeaderMarkup::Html);
     assert!(
-        without_bg.starts_with(
-            "✅ • 8:37 ⏱️
-<blockquote expandable><b>⛏️ grep todo</b>
+        line.ends_with("\u{1f527} 3 tasks running"),
+        "the indicator is the FINAL segment and carries the wrench: {line:?}"
+    );
+}
 
-"
-        ),
-        "no indicator when nothing is detached"
-    );
-    let many = render_flow_details_chrome_pref(
-        &lines,
-        &header,
-        None,
-        &FlowSections::default(),
-        usize::MAX,
-        517,
-        Some("3 tasks running"),
-        false,
-        None,
-    );
+/// The whole path, not just the renderer: a live state carrying `bg_count`
+/// and `bg_indicator` must surface BOTH cues — the `N \u{23cf}\u{fe0f}` count in the
+/// telemetry bar and the `\u{1f527} <label> running` segment at the end.
+///
+/// This is the criterion the dead field could never meet: the count was
+/// already wired through `TelemetryMetrics`, but the indicator itself had no
+/// reader, so the footer said "1 \u{23cf}\u{fe0f}" while the run's NAME — the thing
+/// that tells the user WHICH work is out of the turn — was absent.
+#[test]
+fn live_state_renders_both_the_count_and_the_indicator() {
+    let mut st = crate::tests::telegram_flow_telemetry_test::base_test_state();
+    st.bg_count = Some(2);
+    st.bg_indicator = Some("2 tasks running".to_string());
+    let out = crate::channels::telegram::flow::render_flow(&st);
+    assert!(out.contains("2 \u{23cf}\u{fe0f}"), "count segment: {out:?}");
     assert!(
-        many.starts_with("<p>✅ • 8:37 ⏱️</p><details><summary><sub>⛏️ grep todo</sub></summary>"),
-        "details flow renders with telemetry and summary header: {many:?}"
+        out.contains("\u{1f527} 2 tasks running"),
+        "the indicator names the work, with the wrench: {out:?}"
     );
-    assert!(many.ends_with("</details>"));
+}
+
+/// Negative control: no detached work, no wrench. Every ordinary turn takes
+/// this path, so a stray segment here would decorate the whole surface.
+#[test]
+fn footer_omits_the_bg_segment_when_nothing_runs() {
+    let parts = FooterParts {
+        outcome: Some(("✅", "Finished")),
+        compacting: false,
+        plan_mode: None,
+        working_on: None,
+        ctx: None,
+        thought: None,
+        activity: None,
+        tool_count: 2,
+        has_log: true,
+        elapsed_secs: 517,
+        has_goal: false,
+        bg: None,
+    };
+    let line = standalone_telemetry_line(&parts, None, HeaderMarkup::Html);
+    assert!(
+        !line.contains("running"),
+        "no indicator when nothing is detached: {line:?}"
+    );
 }
 
 #[test]
