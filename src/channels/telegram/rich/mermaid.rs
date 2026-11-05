@@ -1275,7 +1275,8 @@ pub(crate) fn resolve_markdown_media(text: &str) -> BoxFuture<'static, (String, 
 /// `RICH_MESSAGE_AUDIO_INVALID`. `<iframe>` and `<img src="https://…">` pass.
 /// Code-span quoting is NOT a safe hiding place: one unbalanced backtick in
 /// prose shifts span pairing for the rest of the section and exposes the tag
-/// (#134 root cause — a lone `<img>` in a 18.5K card body 400'd every send).
+/// (the surface this neutraliser was added for in `18a9b9d99` — a lone `<img>`
+/// in an 18.5K card body 400'd every send).
 const PROSE_MEDIA_TAGS: [&str; 3] = ["img", "video", "audio"];
 
 /// Escape the tag opener of every media tag in model-authored prose so it can
@@ -1287,7 +1288,8 @@ const PROSE_MEDIA_TAGS: [&str; 3] = ["img", "video", "audio"];
 /// forbids entity decoding inside code spans), so escaping it ships the escape
 /// as literal text — the #809 defect. Those regions are skipped. An UNBALANCED
 /// backtick run, or an unterminated fence, leaves the rest of the text LIVE —
-/// the #134 exposure — so it keeps the escape.
+/// the exposure this neutraliser exists to close (see `18a9b9d99`) — so it
+/// keeps the escape.
 pub(crate) fn neutralize_prose_media_html(text: &str) -> String {
     let code = code_ranges(text);
     let mut out = String::with_capacity(text.len());
@@ -1320,8 +1322,8 @@ pub(crate) fn neutralize_prose_media_html(text: &str) -> String {
 ///
 /// Deliberately strict: a region counts only when its closer is PRESENT. An
 /// unterminated fence or an unpaired backtick run leaves the remainder of the
-/// text live, which is exactly the #134 exposure that made code-span quoting
-/// unsafe in the first place.
+/// text live, which is exactly the exposure that made code-span quoting unsafe
+/// in the first place (`18a9b9d99`).
 fn code_ranges(text: &str) -> Vec<(usize, usize)> {
     let bytes = text.as_bytes();
     let mut ranges: Vec<(usize, usize)> = Vec::new();

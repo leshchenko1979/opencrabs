@@ -1241,7 +1241,7 @@ fn prose_media_tags_are_escaped_and_other_html_survives() {
 /// #809: a tag inside a BALANCED code span or a CLOSED fence cannot go live on
 /// the rich-markdown wire, and `&lt;` never decodes inside code — so escaping it
 /// ships the escape as literal text. An unbalanced backtick (or an unterminated
-/// fence) leaves the tag LIVE (#134), so the escape must survive there.
+/// fence) leaves the tag LIVE, so the escape must survive there.
 #[test]
 fn media_tags_inside_balanced_code_keep_their_opener() {
     assert_eq!(
@@ -1267,9 +1267,9 @@ fn media_tags_inside_balanced_code_keep_their_opener() {
         neutralize_prose_media_html("~~~\n<video>\n~~~"),
         "~~~\n<video>\n~~~"
     );
-    // UNBALANCED backtick: the tag is live, so the escape stays (#134).
+    // UNBALANCED backtick: the tag is live, so the escape stays.
     assert_eq!(neutralize_prose_media_html("a `b <img>"), "a `b &lt;img>");
-    // UNTERMINATED fence: treated as live text, so the escape stays (#134).
+    // UNTERMINATED fence: treated as live text, so the escape stays.
     assert_eq!(
         neutralize_prose_media_html("```\n<img src=x>"),
         "```\n&lt;img src=x>"
