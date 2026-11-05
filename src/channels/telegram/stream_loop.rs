@@ -284,6 +284,25 @@ pub(crate) fn spawn_edit_loop(
                             // permanent zero and the `N 🤖` segment is suppressed
                             // for the whole time the agents are actually alive.
                             s.subagent_counts = super::delivery::subagent_counts_for(&agent, sid);
+                            // #808 cue 2, clearing side: the marker means
+                            // "this call's work is still out of the turn", so
+                            // it must come off the instant the run ends. This
+                            // tick is the only place that holds BOTH the
+                            // stream lock and the manager, and liveness is the
+                            // right predicate: a run that finished while the
+                            // daemon was down folds no notification, so a
+                            // push-driven clear would leave the marker on
+                            // forever.
+                            let live: Vec<String> = agent
+                                .background_manager()
+                                .map(|bm| {
+                                    bm.handles_for(sid)
+                                        .into_iter()
+                                        .map(|h| h.id)
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            super::flow::prune_handed_over(&mut s, &live);
                         }
                         super::flow_chrome::tick_flow_header(
                             &bot,

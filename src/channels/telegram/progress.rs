@@ -121,6 +121,7 @@ pub(crate) fn build_progress_cb(
                         context: ctx,
                         raw_context: raw_ctx,
                         completed: None,
+                        handed_over: None,
                         dirty: true,
                     });
                     s.display_queue.push(DisplayItem::NewTool(idx));
@@ -153,6 +154,13 @@ pub(crate) fn build_progress_cb(
                         .find(|t| t.name == tool_name && t.completed.is_none())
                     {
                         tool.completed = Some(success);
+                        // #808 cue 2: the row must stop reading as finished
+                        // while its command still runs. Same row the arm above
+                        // already marks complete — the heuristic is
+                        // last-uncompleted-by-name, so a parallel batch of
+                        // same-named calls can mark the wrong one; cosmetic,
+                        // and the liveness prune clears it either way.
+                        tool.handed_over = detached.as_ref().map(|d| d.run_id.clone());
                         tool.dirty = true;
                     }
                     // No recreate here (#299): a completion only edits the

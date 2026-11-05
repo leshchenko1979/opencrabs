@@ -27,6 +27,7 @@ pub(crate) fn base_test_state() -> StreamingState {
                 context: "config.toml".to_string(),
                 raw_context: String::new(),
                 completed: Some(true),
+                handed_over: None,
                 dirty: false,
             },
             ToolMsg {
@@ -35,6 +36,7 @@ pub(crate) fn base_test_state() -> StreamingState {
                 context: "src/main.rs".to_string(),
                 raw_context: String::new(),
                 completed: Some(true),
+                handed_over: None,
                 dirty: false,
             },
         ],

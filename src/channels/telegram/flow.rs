@@ -30,6 +30,17 @@ pub(crate) struct ToolMsg {
     pub(crate) raw_context: String,
     /// None = running, Some(true) = success, Some(false) = failed
     pub(crate) completed: Option<bool>,
+    /// #808 cue 2: the run id while this call's work is OUT of the turn.
+    ///
+    /// `completed` cannot express this. The completion event arrives at the
+    /// deadline — the instant the tool hands back its handle — so a
+    /// handed-over call carries `Some(true)` while its command is still
+    /// running, and the row is then indistinguishable from a finished one.
+    ///
+    /// Cleared by LIVENESS (`prune_handed_over`), never by a push: a run that
+    /// ends while the daemon is down folds no notification at all, and asking
+    /// the manager which ids are live heals that case for free.
+    pub(crate) handed_over: Option<String>,
     pub(crate) dirty: bool,
 }
 
@@ -1510,6 +1521,31 @@ pub(crate) fn push_handover_cue(
     Some(text)
 }
 
+/// #808 cue 2, clearing side: drop the marker from every row whose run is no
+/// longer live.
+///
+/// Liveness, not notification. A finished run normally pushes a completion a
+/// push-driven clear could hook, but a run that ends while the daemon is down
+/// folds no push at all — its marker would outlive the run forever. Asking
+/// the manager which ids are live settles both cases with one rule, and a run
+/// that vanished without a word is simply not live.
+///
+/// Returns how many rows it cleared, so a tick can skip a re-render when
+/// nothing changed.
+pub(crate) fn prune_handed_over(s: &mut StreamingState, live: &[String]) -> usize {
+    let mut cleared = 0;
+    for tool in s.tool_msgs.iter_mut() {
+        if let Some(id) = &tool.handed_over {
+            if !live.iter().any(|l| l == id) {
+                tool.handed_over = None;
+                tool.dirty = true;
+                cleared += 1;
+            }
+        }
+    }
+    cleared
+}
+
 /// Resolve the open processing-log flow (tool calls + intermediate text, in
 /// order) into renderable lines.
 pub(crate) fn flow_lines(s: &StreamingState) -> Vec<FlowLine> {
@@ -1518,6 +1554,15 @@ pub(crate) fn flow_lines(s: &StreamingState) -> Vec<FlowLine> {
         .filter_map(|entry| match entry {
             FlowEntry::Tool(idx) => s.tool_msgs.get(*idx).map(|t| {
                 let (label, context) = clean_tool_entry(&t.name, t.completed, &t.context);
+                // #808 cue 2: say the work is still running. The marker rides
+                // the LABEL, not the icon: it then survives both the live and
+                // the settled renderers, and a run that finishes needs no
+                // second edit — the prune clears it.
+                let label = if t.handed_over.is_some() {
+                    format!("{label} \u{23cf}\u{fe0f}")
+                } else {
+                    label
+                };
                 FlowLine::Tool {
                     label,
                     context,

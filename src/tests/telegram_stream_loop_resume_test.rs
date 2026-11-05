@@ -179,6 +179,7 @@ async fn resume_shape_loop_edits_tools_in_place_and_never_reacts() {
             context: String::new(),
             raw_context: String::new(),
             completed: None,
+            handed_over: None,
             dirty: true,
         }],
         display_queue: vec![
