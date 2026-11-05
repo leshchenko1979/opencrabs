@@ -1268,10 +1268,7 @@ fn media_tags_inside_balanced_code_keep_their_opener() {
         "~~~\n<video>\n~~~"
     );
     // UNBALANCED backtick: the tag is live, so the escape stays (#134).
-    assert_eq!(
-        neutralize_prose_media_html("a `b <img>"),
-        "a `b &lt;img>"
-    );
+    assert_eq!(neutralize_prose_media_html("a `b <img>"), "a `b &lt;img>");
     // UNTERMINATED fence: treated as live text, so the escape stays (#134).
     assert_eq!(
         neutralize_prose_media_html("```\n<img src=x>"),
