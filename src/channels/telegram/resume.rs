@@ -866,10 +866,25 @@ pub(crate) async fn resume_session_inner(
                 }
             }
             ProgressEvent::ToolCompleted {
-                tool_name, success, ..
+                tool_name,
+                tool_input,
+                success,
+                detached,
+                ..
             } => {
                 if let Ok(mut s) = st.lock() {
                     s.tool_round_count += 1;
+                    // #808 cue 1, resumed turn: the same announcement as the
+                    // live path. A turn picked back up after a restart hands
+                    // over exactly like a fresh one, so a cue that lived only
+                    // in `progress.rs` would go silent precisely when the user
+                    // has the least context for what is running.
+                    super::flow::push_handover_cue(
+                        &mut s,
+                        &tool_name,
+                        &tool_input,
+                        detached.as_ref(),
+                    );
                     if let Some(tool) = s
                         .tool_msgs
                         .iter_mut()

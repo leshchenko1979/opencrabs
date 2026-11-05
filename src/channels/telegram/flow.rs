@@ -8,6 +8,7 @@
 //! rich markdown), and the flow operations (open/refresh/append/restick/
 //! freeze/fold).
 
+use crate::brain::tools::r#trait::{DetachCause, DetachedHandover};
 use crate::config::Config;
 use std::sync::Arc;
 use teloxide::prelude::*;
@@ -1467,6 +1468,46 @@ pub(crate) fn tool_entry_icon(tool_name: &str, completed: Option<bool>) -> &'sta
         Some(false) => "❌",
         _ => ToolClass::from_tool_name(tool_name).class_icon(),
     }
+}
+
+/// #808 cue 1: say, in the roll, that a call's work LEFT the turn.
+///
+/// Without this the deadline reads as a completion: the tool line goes quiet
+/// and nothing below it says the command is still running. Chrome text, so it
+/// rides `DisplayItem::System` — never `FlowEvent`, which has no consumer.
+///
+/// The wording differs by cause because the two are different events: a
+/// `Handover` means a deadline expired under a live command, a `Spawn` means
+/// the command was known-long from the start so no deadline ever applied.
+/// The `· deadline {n}s` clause is dropped for a `0` ceiling: that is the
+/// operator choosing "no ceiling", not a missing value, and `deadline 0s`
+/// would describe a run that cannot exist.
+///
+/// Returns the text it queued, so a caller can log it and a test can read it
+/// without draining the queue.
+pub(crate) fn push_handover_cue(
+    s: &mut StreamingState,
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+    detached: Option<&DetachedHandover>,
+) -> Option<String> {
+    let h = detached?;
+    // The same `short_label` the bash tool and `tasks_list` use, so one run
+    // has one name across all three surfaces.
+    let label = tool_input
+        .get("command")
+        .and_then(|v| v.as_str())
+        .map(crate::brain::agent::service::background_tasks::short_label)
+        .unwrap_or_else(|| tool_name.to_string());
+    let text = match h.cause {
+        DetachCause::Handover => match h.deadline_secs {
+            Some(n) => format!("\u{23cf}\u{fe0f} handed over: {label} \u{00b7} deadline {n}s"),
+            None => format!("\u{23cf}\u{fe0f} handed over: {label}"),
+        },
+        DetachCause::Spawn => format!("\u{23cf}\u{fe0f} started detached: {label}"),
+    };
+    s.display_queue.push(DisplayItem::System(text.clone()));
+    Some(text)
 }
 
 /// Resolve the open processing-log flow (tool calls + intermediate text, in
