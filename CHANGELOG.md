@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### ✨ Features
 
 - `ee3886591` **telegram**: add `/tasks [N]` for this session's detached runs, live and finished — the finished half walks the status dir newest-first with a bounded parse budget instead of `list_all()`, whose 25,749-file / 105 MB dir would block a turn (#808)
+- `61495d346` **telegram**: render `/tasks` as a rich table — rows become cells (`command` / `time` / `outcome`) instead of prose, so the four facts of a run line up in columns; a `|` in a command becomes `│` because the table parser splits on a bare pipe before any escape is honoured (#810)
 
 ### 🐛 Fixes
 
@@ -31,9 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `72f21d1c4` **telegram**: withdraw that DM link, because a bot DM carries two message-id spaces and `t.me/<bot>/<id>` resolves in the client's, which a bot never sees — one bubble read `152540` from the Bot API and `975245` from the client, the gap drifting between probes, while `t.me/<bot>/<any id>` answers `200` for ids that do not exist; a DM keeps the plain `📎` marker and the document bubble, supergroup links are unchanged (#802)
 - `9592de20f` **telegram**: announce a detach in the roll instead of going silent — a handed-over or spawned run now says `⏏️ handed over: <label> · deadline 3600s` / `⏏️ started detached: <label>` at the instant it leaves the turn (#808)
 - `2ae1b74ea` **telegram**: keep a handed-over tool row reading as running while its command still is — the completion event the roll consumes arrives at the DEADLINE, so the row already carried `completed: Some(true)` with work live and rendered identically to a finished call; the marker clears by liveness, which also covers a run that ended while the daemon was down (#808)
-- `c53ead0a4` **telegram**: render the footer's background segment — `FooterParts.bg` had zero readers for its entire life, threaded through three renderers and drawn by none, with a test asserting a line PREFIX that is byte-identical with and without it (#808)
+- `c53ead0a4` **telegram**: render the footer's background segment — `FooterParts.bg` had zero readers for its entire life, threaded through three renderers and drawn by none, with a test asserting a line PREFIX that is byte-identical with and without it (#808) — **withdrawn by `2142b0216`**, which removed the segment on the owner's word
 - `f3acbce11` **telegram**: record why a detached run ended on its receipt card — `BgTaskMeta` gains `exit_code` and `cause`, so a ceiling kill stops reading as the shell's `exit 137`; the cause rides the card body and the `<summary>` keeps the icon as the sole outcome signal (#808)
 - `03a17e10d` **telegram**: stop escaping a media tag that sits inside a balanced code span or a closed fence — `neutralize_prose_media_html` rewrote the `<` of every `<img>`/`<video>`/`<audio>` in prose regardless of code context, and `&lt;` never decodes on the markdown plane that actually ships, so a quoted tag was delivered as literal `&lt;img>`; an unbalanced backtick or an unterminated fence still keeps the escape, because that is the exposure the neutraliser exists to close (#809)
+- `2142b0216` **telegram**: drop the `🔧 <label> running` footer segment — the `N ⏏️` count already says work is out of the turn, and repeating the label after the clock in a bar of counters read as a second status line; `bg_indicator_for` becomes `bg_count_for` and `FooterParts.bg` / `StreamingState.bg_indicator` are gone rather than left writerless (#810)
 
 ## [0.5.4] - 2026-09-26
 
