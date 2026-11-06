@@ -293,25 +293,20 @@ fn ssh_stderr_is_auth_failure(stderr: &str) -> bool {
 /// that wanted to know how far the run had got had to spend a whole
 /// `task_output` call on it — a 14-gate loop did exactly that. A short tail
 /// costs nothing and usually answers the question outright.
-/// #808: stamp the facts the channel layer needs to announce a detached run.
+/// #808: stamp the facts the channel layer needs to state a detached run.
 ///
 /// Both detach arms write `run_id`, but a run id alone says a run EXISTS, not
 /// that the work left this turn — `detach_cause` is the explicit signal, and
-/// `ToolResult::detached_handover()` requires both. The deadline carried here
-/// is the run's LIFETIME CEILING (`agent.run_max_lifetime_secs`), never the
-/// inline grace: that window has already expired at handover, so announcing it
-/// would tell the user about a bound that no longer applies.
+/// `ToolResult::detached_handover()` requires both. #812 dropped the lifetime
+/// ceiling this used to carry beside them: its only reader was the `deadline
+/// 10800s` clause of the announcement sentence #811 deleted.
 fn stamp_detach(result: &mut ToolResult, run_id: &str, cause: &str) {
-    let ceiling = crate::config::Config::current().agent.run_max_lifetime_secs;
     result
         .metadata
         .insert("run_id".to_string(), run_id.to_string());
     result
         .metadata
         .insert("detach_cause".to_string(), cause.to_string());
-    result
-        .metadata
-        .insert("detach_deadline_secs".to_string(), ceiling.to_string());
 }
 
 const HANDOVER_TAIL_BYTES: u64 = 4096;

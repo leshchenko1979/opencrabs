@@ -309,44 +309,35 @@ impl ToolResult {
     ///
     /// `run_id` alone is NOT the signal: it says a run exists, not that the
     /// work left this turn — a tool may stamp one and still return inline. The
-    /// explicit `detach_cause` key is what the channel layer reads to announce
-    /// a handover, so both facts must be present for this to return `Some`.
+    /// explicit `detach_cause` key is the signal, so both facts must be present
+    /// for this to return `Some`.
+    ///
+    /// The key's VALUE is only a validity check (#812). #808 also carried the
+    /// cause as an enum, because the channel layer announced a detach in words
+    /// and the two arms read differently; #811 deleted those words, so both
+    /// causes now render the same `⏏️` row and nothing consumes the
+    /// distinction. The key itself stays — it is what separates "a run exists"
+    /// from "the work left this turn".
     pub fn detached_handover(&self) -> Option<DetachedHandover> {
-        let cause = match self.metadata.get("detach_cause")?.as_str() {
-            "handover" => DetachCause::Handover,
-            "spawn" => DetachCause::Spawn,
+        match self.metadata.get("detach_cause")?.as_str() {
+            "handover" | "spawn" => {}
             _ => return None,
-        };
+        }
         Some(DetachedHandover {
             run_id: self.metadata.get("run_id")?.clone(),
-            cause,
-            // `0` is the operator's "no ceiling" choice, not a missing value:
-            // the cue drops its deadline clause rather than printing 0s.
-            deadline_secs: self
-                .metadata
-                .get("detach_deadline_secs")
-                .and_then(|v| v.parse::<u64>().ok())
-                .filter(|secs| *secs > 0),
         })
     }
 }
 
-/// Why a tool call's work left the turn (#808).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DetachCause {
-    /// The inline deadline expired and the run was handed over.
-    Handover,
-    /// The command was classified as long and started detached immediately.
-    Spawn,
-}
-
-/// What the channel layer needs in order to say that a run started (#808).
+/// What the channel layer needs in order to state that a run left the turn (#808).
+///
+/// `run_id` is the whole payload: it is what the liveness prune keys on, and
+/// what a completion writes back onto the row that described the spawn. The
+/// cause and the lifetime ceiling that #808 carried here were only ever read by
+/// the announcement sentence #811 deleted (#812).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetachedHandover {
     pub run_id: String,
-    pub cause: DetachCause,
-    /// The run's lifetime ceiling in seconds; `None` when the operator set `0`.
-    pub deadline_secs: Option<u64>,
 }
 
 /// Tool capability flags

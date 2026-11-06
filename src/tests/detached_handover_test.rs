@@ -1,11 +1,18 @@
-//! #808: the detach signal the channel layer announces a run from.
+//! #808: the detach signal the channel layer states a run from.
 //!
 //! Both `bash` detach arms stamp `run_id` (#787), but a run id alone says a run
-//! EXISTS — not that this call left the turn. The cue therefore keys on the
-//! explicit `detach_cause`, and these tests pin that distinction: a result
-//! carrying only `run_id` must announce nothing.
+//! EXISTS — not that this call left the turn. The signal therefore keys on the
+//! explicit `detach_cause` key, and these tests pin the gate: a result carrying
+//! only `run_id` must state nothing.
+//!
+//! #812: the PAYLOAD is the run id alone. #808 also carried the cause and the
+//! run's lifetime ceiling, because the channel layer announced a detach in
+//! words and the two arms read differently ("started detached" vs "handed
+//! over"); #811 deleted those words, so both arms now render the same `⏏️` row
+//! and nothing consumes either field. The two arms are still VALID inputs — the
+//! distinction is simply not surfaced.
 
-use crate::brain::tools::r#trait::{DetachCause, DetachedHandover, ToolResult};
+use crate::brain::tools::r#trait::{DetachedHandover, ToolResult};
 
 fn result_with(pairs: &[(&str, &str)]) -> ToolResult {
     let mut r = ToolResult::success("ok".to_string());
@@ -18,64 +25,48 @@ fn result_with(pairs: &[(&str, &str)]) -> ToolResult {
 #[test]
 fn run_id_alone_is_not_a_detach_signal() {
     // The classifier-detach arm of `bash` writes `run_id` on every spawn. If
-    // that alone counted, every spawn would announce a handover it never made.
+    // that alone counted, every spawn would state a detach it never made.
     let r = result_with(&[("run_id", "abc-123")]);
     assert_eq!(r.detached_handover(), None);
 }
 
 #[test]
-fn handover_carries_its_cause_and_ceiling() {
-    let r = result_with(&[
-        ("run_id", "abc-123"),
-        ("detach_cause", "handover"),
-        ("detach_deadline_secs", "3600"),
-    ]);
+fn a_handover_carries_its_run_id() {
+    let r = result_with(&[("run_id", "abc-123"), ("detach_cause", "handover")]);
     assert_eq!(
         r.detached_handover(),
         Some(DetachedHandover {
             run_id: "abc-123".to_string(),
-            cause: DetachCause::Handover,
-            deadline_secs: Some(3600),
         })
     );
 }
 
 #[test]
-fn spawn_is_distinguishable_from_handover() {
-    // The two arms read differently to the user ("started detached" vs
-    // "handed over"), so the cause must survive the round trip.
-    let r = result_with(&[
-        ("run_id", "abc-123"),
-        ("detach_cause", "spawn"),
-        ("detach_deadline_secs", "3600"),
-    ]);
-    assert_eq!(
-        r.detached_handover().map(|h| h.cause),
-        Some(DetachCause::Spawn)
-    );
+fn both_detach_arms_yield_the_same_payload() {
+    // #812 pins what #811 established: the row renders identically for both
+    // causes, so the payload must too. If a future change reintroduces a
+    // user-visible difference between spawn and handover, this is the test
+    // that has to be rewritten deliberately rather than by accident.
+    let handover = result_with(&[("run_id", "abc-123"), ("detach_cause", "handover")]);
+    let spawn = result_with(&[("run_id", "abc-123"), ("detach_cause", "spawn")]);
+    assert_eq!(handover.detached_handover(), spawn.detached_handover());
 }
 
 #[test]
-fn zero_ceiling_means_no_deadline_not_zero() {
-    // `0` is the operator's "no ceiling" choice, not a missing value: the cue
-    // drops its `· deadline Ns` clause rather than printing `deadline 0s`.
-    let r = result_with(&[
+fn the_lifetime_ceiling_is_not_part_of_the_payload() {
+    // The ceiling's only reader was the `· deadline 10800s` clause of the
+    // announcement sentence #811 deleted. A stale stamp must change nothing.
+    let plain = result_with(&[("run_id", "abc-123"), ("detach_cause", "handover")]);
+    let stamped = result_with(&[
         ("run_id", "abc-123"),
         ("detach_cause", "handover"),
-        ("detach_deadline_secs", "0"),
+        ("detach_deadline_secs", "3600"),
     ]);
-    assert_eq!(
-        r.detached_handover(),
-        Some(DetachedHandover {
-            run_id: "abc-123".to_string(),
-            cause: DetachCause::Handover,
-            deadline_secs: None,
-        })
-    );
+    assert_eq!(plain.detached_handover(), stamped.detached_handover());
 }
 
 #[test]
-fn unknown_cause_announces_nothing() {
+fn unknown_cause_states_nothing() {
     // A typo or a future arm must fail closed: an unrecognised cause is not a
     // licence to guess, because a wrong cue is worse than a missing one.
     let r = result_with(&[("run_id", "abc-123"), ("detach_cause", "whatever")]);

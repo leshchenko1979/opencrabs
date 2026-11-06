@@ -9,7 +9,7 @@ use teloxide::types::{ChatAction, ChatId, ThreadId};
 
 use super::flow::{
     COMPACTING_HEADER_TEXT, DisplayItem, StreamingState, ToolMsg, compacted_flow_line,
-    compacting_flow_line, detach_flow_for_followup, queued_preview,
+    compacting_flow_line, detach_flow_for_followup, echoes_as_system_line, queued_preview,
 };
 use super::handler::tool_context;
 use super::send::fire_chat_action;
@@ -172,7 +172,7 @@ pub(crate) fn build_progress_cb(
                 // and called it redundant. Every other origin keeps the line:
                 // for a user follow-up or a cross-session notify the tag IS
                 // the news.
-                if origin != crate::brain::agent::PushOrigin::BackgroundTask
+                if echoes_as_system_line(&origin)
                     && let Ok(mut s) = st.lock()
                 {
                     // #554: skip the session_notify transport envelope and

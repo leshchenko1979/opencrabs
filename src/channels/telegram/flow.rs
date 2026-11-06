@@ -1283,6 +1283,22 @@ pub(crate) fn strip_leading_notify_echo(first: &str) -> &str {
 /// #554: cap for the flow roll's queued-push preview (chars, not bytes).
 pub(crate) const QUEUED_PREVIEW_MAX: usize = 30;
 
+/// Whether a queued push also earns the `📥 in: <tag> "<preview>"` line.
+///
+/// #811: a background-task completion is announced by its OWN ack line
+/// (`✅ label 🕒 2m 5s`, folded into the card), so echoing the same event again
+/// under a 30-character truncation — `📥 in: task "🔧 background task
+/// finished: gh…"` — was the line the owner called redundant and uninformative.
+/// Every other origin keeps it: for a user follow-up or a cross-session notify
+/// the tag IS the news.
+///
+/// ONE home (#812): the two call sites (`progress.rs` live turn, `resume.rs`
+/// resumed turn) each carried their own copy of this predicate inline, where
+/// no test could reach it.
+pub(crate) fn echoes_as_system_line(origin: &crate::brain::agent::PushOrigin) -> bool {
+    *origin != crate::brain::agent::PushOrigin::BackgroundTask
+}
+
 /// The first readable line of a queued push, for the flow roll's
 /// `📥 in: <tag> "<preview>"` line.
 ///

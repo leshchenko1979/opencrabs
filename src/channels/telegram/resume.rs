@@ -903,7 +903,7 @@ pub(crate) async fn resume_session_inner(
                 // #811: the same rule as the live-turn site — a background-task
                 // completion owns its ack line (`✅ label 🕒 2m 5s`), so the
                 // `📥 in: task "…"` echo only ever repeated it.
-                if origin != crate::brain::agent::PushOrigin::BackgroundTask
+                if super::flow::echoes_as_system_line(&origin)
                     && let Ok(mut s) = st.lock()
                 {
                     // #554: same shared shaping as the live-turn site — skip

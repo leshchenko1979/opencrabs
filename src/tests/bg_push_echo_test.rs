@@ -687,3 +687,34 @@ async fn notify_verdict_reports_what_each_leg_would_drop() {
         "a body exactly AT the classic budget is not over it"
     );
 }
+
+#[test]
+fn only_a_completion_push_skips_the_echo_line() {
+    // #811/#812: a background-task completion is announced by its own ack line
+    // (`✅ label 🕒 2m 5s`), so it must NOT also push
+    // `📥 in: task "<30-char preview>"` — the owner read that as the same fact
+    // twice, the second time truncated. Every other origin keeps the line:
+    // for a user follow-up or a cross-session notify the tag IS the news.
+    //
+    // This predicate had two inline copies (progress.rs, resume.rs) and no
+    // test; it now has one home and this test.
+    use crate::brain::agent::PushOrigin;
+    use crate::channels::telegram::flow::echoes_as_system_line;
+
+    assert!(
+        !echoes_as_system_line(&PushOrigin::BackgroundTask),
+        "a completion owns its ack line; the echo would repeat it truncated"
+    );
+    for origin in [
+        PushOrigin::SessionNotify,
+        PushOrigin::SubAgent,
+        PushOrigin::Recovery,
+        PushOrigin::Ingress,
+        PushOrigin::Other,
+    ] {
+        assert!(
+            echoes_as_system_line(&origin),
+            "{origin:?} must keep its `📥 in:` line — the tag is the news"
+        );
+    }
+}
