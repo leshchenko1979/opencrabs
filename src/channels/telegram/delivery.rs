@@ -1849,6 +1849,69 @@ pub(crate) async fn deliver_final_response(
     Ok(true)
 }
 
+/// Backoff before the one transport retry (#815).
+///
+/// The measured flap — Telegram's edge answering 502 for ~12 s while both
+/// document uploads died on the connection — closed within ~35 s, so a short
+/// pause lands on the far side of it without parking a turn behind a dead edge.
+pub(crate) const MEDIA_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Send one local media item, retrying where a retry can actually help (#815).
+///
+/// The attachment floor was the only outbound leg with no recovery at all: it
+/// called `document_in_thread` once and turned every error into a
+/// `DeliveryFailed` entry, so a throttle that handed us the exact window
+/// ("Retry after 3s") and a transport blip both became a missing file behind an
+/// honest notice. Measured 2026-11-09: four failures in 44 uploads over six
+/// days, every one of them recoverable by a single retry.
+///
+/// The two classes are handled differently on purpose:
+///
+/// - **429** goes through `send_retrying_rate_limit`, the ladder the command
+///   replies already use (#297/#1110): the window is slept in full, a window
+///   over the inline bound defers instead of parking the turn, and a multi-hour
+///   ban bails immediately. Telegram refused the upload, so a retry cannot
+///   duplicate it.
+/// - **A transport error that never reached the server** gets one backoff.
+///   `is_undelivered_transport` is the gate, and it is narrow deliberately: a
+///   TIMEOUT may mean the upload landed and only the reply was lost, and
+///   retrying that would post the same file twice — a duplicate bubble is worse
+///   than the notice the caller already sends.
+async fn send_media_with_retry<T, F, Fut>(
+    what: &str,
+    mut send: F,
+) -> std::result::Result<T, teloxide::RequestError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::IntoFuture<Output = std::result::Result<T, teloxide::RequestError>>,
+{
+    match super::intermediates::send_retrying_rate_limit(what, &mut send).await {
+        Err(e) if is_undelivered_transport(&e) => {
+            tracing::warn!(
+                "Telegram: {what} never reached the server, one retry in {}s: {e}",
+                MEDIA_RETRY_BACKOFF.as_secs()
+            );
+            tokio::time::sleep(MEDIA_RETRY_BACKOFF).await;
+            super::intermediates::send_retrying_rate_limit(what, &mut send).await
+        }
+        other => other,
+    }
+}
+
+/// Whether a transport error PROVES the request never reached Telegram.
+///
+/// `is_connect` (no connection was ever established) and `is_request` (the
+/// connection died while sending) both mean the bytes did not land, so one
+/// retry is safe. `is_timeout` is excluded even though it looks similar: the
+/// server may have accepted the upload and lost only the reply. Body and decode
+/// errors happen after the server has spoken — also not ours to retry.
+pub(crate) fn is_undelivered_transport(e: &teloxide::RequestError) -> bool {
+    match e {
+        teloxide::RequestError::Network(inner) => inner.is_connect() || inner.is_request(),
+        _ => false,
+    }
+}
+
 /// Send each resolved image as its own bubble, routing by the photo ceiling
 /// exactly as the final leg does (#286). Returns the paths that landed and the
 /// failures the channel itself refused.
@@ -1859,6 +1922,10 @@ pub(crate) async fn deliver_final_response(
 /// Both halves of the outcome are returned because the callers need both and
 /// they are set in different arms — inferring one from the other would couple
 /// two independent facts.
+///
+/// #815: the upload itself goes through [`send_media_with_retry`] — one 429
+/// wait and one transport retry — because this loop used to turn both into a
+/// `DeliveryFailed` entry on the first attempt.
 pub(crate) async fn send_local_images(
     session_id: Uuid,
     bot: &Bot,
@@ -1892,23 +1959,29 @@ pub(crate) async fn send_local_images(
         };
         let len = bytes.len();
         let kind = telegram_media_kind(len as u64);
+        // #815: each upload gets its own retry budget — see
+        // `send_media_with_retry` for what is retried and why.
         let sent = match kind {
-            TelegramMediaKind::Photo => photo_in_thread(
-                bot,
-                chat_id,
-                thread_id,
-                InputFile::memory(bytes),
-                image.caption.clone(),
-            )
+            TelegramMediaKind::Photo => send_media_with_retry("send_photo", || {
+                photo_in_thread(
+                    bot,
+                    chat_id,
+                    thread_id,
+                    InputFile::memory(bytes.clone()),
+                    image.caption.clone(),
+                )
+            })
             .await
             .map(|m| m.id.0),
-            TelegramMediaKind::Document => document_in_thread(
-                bot,
-                chat_id,
-                thread_id,
-                InputFile::memory(bytes),
-                image.caption.clone(),
-            )
+            TelegramMediaKind::Document => send_media_with_retry("send_document", || {
+                document_in_thread(
+                    bot,
+                    chat_id,
+                    thread_id,
+                    InputFile::memory(bytes.clone()),
+                    image.caption.clone(),
+                )
+            })
             .await
             .map(|m| m.id.0),
         };
@@ -2264,21 +2337,26 @@ pub(crate) async fn send_local_files(
             }
         };
         let len = bytes.len();
-        let sent = document_in_thread(
-            bot,
-            chat_id,
-            thread_id,
-            InputFile::memory(bytes).file_name(document_part_name(path)),
-            // #780: no caption. The caption a file carries IS the markdown
-            // label, and the label is also the text of the `📎 <label>` marker
-            // the reader sees in the body directly above this bubble — so the
-            // caption repeats, one line down, what the message already said. The
-            // bubble needs no caption to be understood: Telegram renders the
-            // document's own file name (`document_part_name`), which is the same
-            // name the marker carries. Dropping it also keeps the reader from
-            // reading the same string twice in two different type sizes.
-            None,
-        )
+        let file_name = document_part_name(path);
+        // #815: the upload retries once on a throttle or a transport blip
+        // instead of turning either into a missing attachment.
+        let sent = send_media_with_retry("send_document", || {
+            document_in_thread(
+                bot,
+                chat_id,
+                thread_id,
+                InputFile::memory(bytes.clone()).file_name(file_name.clone()),
+                // #780: no caption. The caption a file carries IS the markdown
+                // label, and the label is also the text of the `📎 <label>` marker
+                // the reader sees in the body directly above this bubble — so the
+                // caption repeats, one line down, what the message already said. The
+                // bubble needs no caption to be understood: Telegram renders the
+                // document's own file name (`document_part_name`), which is the same
+                // name the marker carries. Dropping it also keeps the reader from
+                // reading the same string twice in two different type sizes.
+                None,
+            )
+        })
         .await
         .map(|m| m.id.0);
         match sent {
@@ -2369,22 +2447,26 @@ pub(crate) async fn send_local_videos(
         let format = sniff_video_format(&bytes[..VIDEO_FORMAT_HEAD_BYTES.min(len)]);
         let kind = telegram_video_media_kind(len as u64, format);
         let sent = match kind {
-            TelegramVideoKind::Video => video_in_thread(
-                bot,
-                chat_id,
-                thread_id,
-                InputFile::memory(bytes),
-                video.caption.clone(),
-            )
+            TelegramVideoKind::Video => send_media_with_retry("send_video", || {
+                video_in_thread(
+                    bot,
+                    chat_id,
+                    thread_id,
+                    InputFile::memory(bytes.clone()),
+                    video.caption.clone(),
+                )
+            })
             .await
             .map(|m| m.id.0),
-            TelegramVideoKind::Document => document_in_thread(
-                bot,
-                chat_id,
-                thread_id,
-                InputFile::memory(bytes),
-                video.caption.clone(),
-            )
+            TelegramVideoKind::Document => send_media_with_retry("send_document", || {
+                document_in_thread(
+                    bot,
+                    chat_id,
+                    thread_id,
+                    InputFile::memory(bytes.clone()),
+                    video.caption.clone(),
+                )
+            })
             .await
             .map(|m| m.id.0),
         };

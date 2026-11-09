@@ -24,8 +24,8 @@
 //! the notice wording. Each has its own home.
 
 use crate::channels::telegram::delivery::{
-    DeliveredFile, delivered_file_links, document_part_name, file_message_link, link_file_markers,
-    send_local_files,
+    DeliveredFile, MEDIA_RETRY_BACKOFF, delivered_file_links, document_part_name,
+    file_message_link, is_undelivered_transport, link_file_markers, send_local_files,
 };
 use crate::utils::image::{
     LocalFile, LocalFileScan, LocalImageFailureReason, disarm_autolink, file_marker_text,
@@ -161,6 +161,9 @@ async fn a_file_the_channel_refuses_returns_a_delivery_failure() {
         LocalImageFailureReason::DeliveryFailed,
         "a file the channel refused is a DELIVERY problem — the reference itself was fine"
     );
+    // #815's negative control: `expect(1)` above means a second attempt would
+    // fail this test. A refusal the server MEANT is terminal, and without that
+    // arm a wrapper that retried everything would still pass the 429 test.
 }
 
 // ---------------------------------------------------------------------------
@@ -1082,4 +1085,191 @@ fn every_file_the_rich_plane_cannot_take_still_has_a_delivery_leg() {
             .is_empty(),
         "a path already in the chat must not ship again"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #815 — the floor recovers instead of dropping the attachment
+// ---------------------------------------------------------------------------
+
+/// Flood control as Telegram sends it: the window is in the body AND in the
+/// `Retry-After` header.
+const FOUR29_BODY: &str = r#"{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1","parameters":{"retry_after":1}}"#;
+
+/// A 429 on an upload is waited out and re-sent, not turned into a lost file.
+///
+/// This was the measured failure (three of the four in six days): Telegram
+/// handed the floor the exact window — "Retry after 3s" — and the floor pushed a
+/// `DeliveryFailed` entry without ever reading it.
+#[tokio::test]
+async fn a_throttled_document_upload_is_waited_out_and_delivered() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_fixture(dir.path(), "report.pdf", PDF_BYTES);
+    let mut server = mockito::Server::new_async().await;
+    // Attempt 1 — the throttle, carrying the window Telegram really sends.
+    let throttled = server
+        .mock("POST", "/botTESTTOKEN/SendDocument")
+        .with_status(429)
+        .with_header("content-type", "application/json")
+        .with_header("retry-after", "1")
+        .with_body(FOUR29_BODY)
+        .expect(1)
+        .create_async()
+        .await;
+    // Attempt 2 — the retry — lands.
+    let landed = server
+        .mock("POST", "/botTESTTOKEN/SendDocument")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(SEND_MESSAGE_OK)
+        .expect(1)
+        .create_async()
+        .await;
+    let bot = test_bot(&server);
+
+    let (delivered, failures) = send_local_files(
+        uuid::Uuid::new_v4(),
+        &bot,
+        teloxide::types::ChatId(CHAT),
+        None,
+        &[file_at(path.clone(), None)],
+    )
+    .await;
+
+    // `expect(1)` on BOTH mocks makes `assert_async` a two-sided receipt: the
+    // 429 was drawn exactly once, and exactly one retry followed it. A floor
+    // that gave up would leave the second mock at zero hits; one that retried
+    // in a loop would overshoot the first.
+    throttled.assert_async().await;
+    landed.assert_async().await;
+    assert!(
+        failures.is_empty(),
+        "the throttle was waited out, so nothing failed: {failures:?}"
+    );
+    assert_eq!(delivered_paths(&delivered), vec![path]);
+
+    // The wait arms the process-global cooldown (window + RETRY_MARGIN) and
+    // every other send in this binary reads it, so hand the box back clean.
+    crate::channels::telegram::rate_limit::reset_global_cooldown();
+}
+
+/// The retry gate takes only errors that PROVE the request never landed.
+///
+/// The narrowness is the point: a timeout may mean the upload was accepted and
+/// only the reply was lost, and retrying that posts the same file twice — a
+/// duplicate bubble is worse than the notice the caller already sends.
+#[tokio::test]
+async fn the_transport_gate_takes_only_proven_undelivered_errors() {
+    // Negatives. A throttle already waited its window; an API refusal was the
+    // server speaking. Neither may reach the backoff arm.
+    assert!(!is_undelivered_transport(
+        &teloxide::RequestError::RetryAfter(teloxide::types::Seconds::from_seconds(3))
+    ));
+    assert!(!is_undelivered_transport(&teloxide::RequestError::Api(
+        teloxide::ApiError::BotBlocked
+    )));
+
+    // Positive control, from a REAL failed request: the two negatives above
+    // prove nothing unless the predicate can still say yes to the class it
+    // exists for.
+    let bot = unreachable_bot();
+    let err = {
+        use teloxide::prelude::Requester;
+        bot.send_document(
+            teloxide::types::ChatId(CHAT),
+            teloxide::types::InputFile::memory(PDF_BYTES.to_vec()),
+        )
+        .await
+        .expect_err("a closed port cannot deliver")
+    };
+    assert!(
+        is_undelivered_transport(&err),
+        "a connection that was never established is exactly the retryable class: {err}"
+    );
+}
+
+/// A connection that never reached Telegram is retried once, then reported.
+///
+/// The 2026-11-09 12:54 pair died this way — `A network error: error sending
+/// request for url` — while text was flowing again seconds later.
+#[tokio::test]
+async fn an_undelivered_transport_error_is_retried_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_fixture(dir.path(), "report.pdf", PDF_BYTES);
+    let bot = unreachable_bot();
+
+    let started = std::time::Instant::now();
+    let (delivered, failures) = send_local_files(
+        uuid::Uuid::new_v4(),
+        &bot,
+        teloxide::types::ChatId(CHAT),
+        None,
+        &[file_at(path.clone(), None)],
+    )
+    .await;
+
+    assert!(delivered.is_empty(), "nothing can land on a closed port");
+    assert_eq!(
+        failures.len(),
+        1,
+        "the failure is still NAMED, not swallowed"
+    );
+    assert_eq!(failures[0].reason, LocalImageFailureReason::DeliveryFailed);
+    assert_eq!(failures[0].raw, path.display().to_string());
+
+    // The backoff is the observable proof the transport arm ran at all: a
+    // single-attempt floor returns in microseconds.
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= MEDIA_RETRY_BACKOFF,
+        "the transport arm backs off {MEDIA_RETRY_BACKOFF:?} before its one retry; \
+         elapsed {elapsed:?} says it never did"
+    );
+}
+
+/// A bot pointed at a port nothing listens on, so every attempt dies at connect
+/// time — the one transport class the retry is allowed to take.
+fn unreachable_bot() -> teloxide::Bot {
+    teloxide::Bot::with_client(
+        "TESTTOKEN",
+        reqwest_teloxide::Client::builder().build().unwrap(),
+    )
+    .set_api_url("http://127.0.0.1:1".parse().unwrap())
+}
+
+/// #815 regression guard: all three floor legs upload through the wrapper.
+///
+/// The defect was a leg that silently did NOT follow the crate's own pattern —
+/// the attachment floor alone called `document_in_thread` once while every text
+/// leg waited out a 429. A behavioural test on the wrapper cannot see a leg that
+/// stops calling it, so the call sites are counted here: every direct
+/// `*_in_thread` call must sit inside a `send_media_with_retry` closure.
+#[test]
+fn every_local_media_upload_goes_through_the_retrying_floor() {
+    const SRC: &str = include_str!("../channels/telegram/delivery.rs");
+    for floor in ["send_local_files", "send_local_images", "send_local_videos"] {
+        let body = floor_body(SRC, floor);
+        let wrapped = body.matches("send_media_with_retry(").count();
+        let direct = body.matches("_in_thread(").count();
+        assert_eq!(
+            direct, wrapped,
+            "{floor} has {direct} direct *_in_thread call(s) but {wrapped} retrying \
+             wrapper(s) — an unpaired call is the single-attempt path #815 removed"
+        );
+        assert!(
+            wrapped > 0,
+            "{floor} must upload through send_media_with_retry (#815)"
+        );
+    }
+}
+
+/// One top-level function's source, from its signature to the bare `}` that
+/// closes it. Top-level items in `delivery.rs` close at column 0, which is what
+/// bounds the slice.
+fn floor_body<'a>(src: &'a str, name: &str) -> &'a str {
+    let start = src
+        .find(&format!("async fn {name}("))
+        .unwrap_or_else(|| panic!("{name} not found in delivery.rs"));
+    let rest = &src[start..];
+    let end = rest.find("\n}\n").map_or(rest.len(), |i| i + 2);
+    &rest[..end]
 }
