@@ -1159,8 +1159,13 @@ mod vision_fallback_chain {
             ..Default::default()
         };
         assert_eq!(no_timeout.timeout_secs, None);
+        // A pinned name that doesn't resolve falls back to the configured
+        // chain — the candidate list is a preference, not a hard requirement.
         let cands = vision_candidates_for(&config, Some("custom:no-such"));
-        assert!(cands.is_empty(), "no such provider: {cands:?}");
+        assert!(
+            cands.iter().any(|c| c.0 == "slow-key" && c.3 == Some(300)),
+            "chain fallback: {cands:?}"
+        );
     }
 
     #[test]
