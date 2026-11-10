@@ -8,6 +8,58 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// #817 — section 7 of the continuation-document prompt: the recovery plan.
+///
+/// The plan written here IS the plan the next agent follows, so it must not be able to
+/// describe a turn that changes nothing. The pre-#817 example was `git status` -> `git diff`
+/// -> `read_file` -> `session_search`: four reads and no action, terminating in nothing. A
+/// summariser copying it faithfully produced plans that could never complete — measured
+/// 2026-11-10 on one lane: ten consecutive compactions, eight rounds of re-reading the same
+/// two source files, zero commits in 4h28m while the edit itself was ~40 minutes of work.
+/// Every individual check passed, which is exactly why nothing ever stopped.
+pub(crate) const RECOVERY_PLAYBOOK_GUIDANCE: &str = "Write a SPECIFIC recovery plan: which \
+             tools to call with which arguments to get back up to speed. Be concrete — include \
+             actual file paths, search queries, and commands.\n\
+             HARD RULE for every step you list: it must produce something THIS DOCUMENT DOES \
+             NOT ALREADY CONTAIN. A call that re-reads a file, re-runs `git status`/`git diff`, \
+             or repeats a `session_search` to confirm state recorded above is NOT a step — it \
+             returns the same answer, this document records it again, and the next compaction \
+             reproduces the same plan forever. Never open the playbook with a state check; open \
+             it with the action named in section 8.\n\
+             CORRECT step: \"edit `src/brain/tools/provider_vision.rs:57` — change \
+             `with_candidates` to take the 4-tuple\". WRONG step: \"run `git status` to see \
+             whether the edit landed\".\n\
+             And never name a step the project's own rules forbid (a build command whose law \
+             makes CI the only compile gate, a write outside the worktree): a plan that names \
+             an unlawful action is worse than no plan.";
+
+/// #817 — section 8 of the continuation-document prompt: the next step.
+///
+/// "State the single most important thing" accepted a state check, and a state check is
+/// always satisfiable — so it was re-run indefinitely and never looked wrong.
+pub(crate) const NEXT_STEP_GUIDANCE: &str = "State the single most important thing the agent \
+             should do when it wakes up, as ONE concrete call carrying its exact value: the \
+             file and line to edit (with the change), the command to run (with its arguments), \
+             the URL to read. If the task is clear, continue immediately. If ambiguous, ask the \
+             user ONE focused follow-up question.\n\
+             NEVER phrase this as a state check — \"confirm the tree is clean\", \"verify X is \
+             still there\", \"check whether the build passed\": section 0 has already stated that \
+             state, so re-reading it cannot advance the work. A state check is always \
+             satisfiable, so it is never done.";
+
+/// #817 — section 0 of the continuation-document prompt: the progress stamp.
+///
+/// `Obligation status: OPEN` in section 0 plus `Files Modified: NONE` in section 2 read as
+/// *mid-flight*; on one line they read as *recon paid, work not started*. Two facts in two
+/// sections is what made a clean tree misreadable as "not started at all".
+pub(crate) const PROGRESS_STAMP_GUIDANCE: &str = "SECOND LINE OF THIS SECTION, always: a \
+             PROGRESS stamp, one line, no prose:\n\
+             \"PROGRESS: <what is ALREADY landed — commits and shas, files written, commands \
+             that ran> · next: <the one call from section 8>\".\n\
+             Never write \"nothing done yet\" or \"files untouched\" on its own: a clean tree is \
+             not evidence that no work happened, and this line is what lets the next agent tell \
+             \"recon paid, work not started\" apart from \"not started at all\".";
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ContextManifest {
     #[serde(default)]
@@ -1311,6 +1363,7 @@ impl AgentService {
              Do NOT deviate to any other topic.\"\n\n\
              This is the MOST IMPORTANT section. If nothing else survives compaction, this must. \
              The fresh agent will read this section FIRST and act on it IMMEDIATELY.\n\n\
+             {progress_guidance}\n\n\
              ## 10. Context Manifest (MANDATORY MACHINE-READABLE BLOCK)\n\
              Write this block EARLY — immediately after section 0, ahead of all prose — NOT at the end: \
              the document can be CUT at the tail, so this block must survive any cut. You MUST \
@@ -1353,15 +1406,9 @@ impl AgentService {
              - `ls` — list directory contents\n\
              - `gh` — GitHub CLI for ALL GitHub operations (repos, releases, issues, PRs). \
              NEVER use HTTP requests to GitHub — always use `gh` CLI.\n\n\
-             Write a SPECIFIC recovery plan: which tools to call with which arguments to get back \
-             up to speed. Example: \"Run `git status` and `git diff` to see uncommitted changes, \
-             then `read_file src/main.rs` to verify the current state of the fix, then \
-             `session_search 'vision fallback'` to recover details from the investigation.\"\n\
-             Be concrete — include actual file paths, search queries, and commands.\n\n\
+             {recovery_guidance}\n\n\
              ## 8. Next Step\n\
-             State the single most important thing the agent should do when it wakes up. \
-             If the task is clear, continue immediately. If ambiguous, ask the user ONE focused \
-             follow-up question.\n\n\
+             {next_step_guidance}\n\n\
              ## 1. Chronological Analysis\n\
              Walk through every task the user requested, in order. For each task include:\n\
              - What was requested\n\
@@ -1425,6 +1472,9 @@ impl AgentService {
             budget = crate::brain::skills::retained_set_budget_tokens(snapshot_max_tokens),
             ratio = crate::brain::skills::RETAINED_SET_BUDGET_RATIO * 100.0,
             window = snapshot_max_tokens,
+            progress_guidance = PROGRESS_STAMP_GUIDANCE,
+            recovery_guidance = RECOVERY_PLAYBOOK_GUIDANCE,
+            next_step_guidance = NEXT_STEP_GUIDANCE,
         );
 
         // #1649: the scope prelude rides in front of the unchanged body;

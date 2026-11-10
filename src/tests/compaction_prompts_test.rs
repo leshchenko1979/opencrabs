@@ -465,3 +465,62 @@ fn no_body_carries_an_ungated_continue_directive() {
          measuring the wrong surface"
     );
 }
+
+// ── #817: the summariser prompt must not teach a read-only loop ──────────────
+//
+// The pre-#817 §7 example was `git status` -> `git diff` -> `read_file` ->
+// `session_search`: four reads and no action. A summariser copying it produced
+// plans that could never complete — measured 2026-11-10, ten consecutive
+// compactions on one lane, zero commits in 4h28m. These three guards lock the
+// prompt to action-carrying guidance so the example cannot be reintroduced.
+
+#[test]
+fn recovery_playbook_guidance_forbids_a_state_check() {
+    let g = crate::brain::agent::service::context::RECOVERY_PLAYBOOK_GUIDANCE;
+    assert!(
+        g.contains("must produce something THIS DOCUMENT DOES NOT ALREADY CONTAIN"),
+        "§7 must require each step to add information the document lacks: {g}"
+    );
+    assert!(
+        g.contains("NOT a step"),
+        "§7 must name a state-confirming read as not-a-step: {g}"
+    );
+    assert!(
+        !g.contains("Run `git status` and `git diff`"),
+        "§7 must not re-introduce the read-only example that produced the loop: {g}"
+    );
+}
+
+#[test]
+fn next_step_guidance_requires_one_concrete_call() {
+    let g = crate::brain::agent::service::context::NEXT_STEP_GUIDANCE;
+    assert!(
+        g.contains("ONE concrete call carrying its exact value"),
+        "§8 must demand a single call with its exact value: {g}"
+    );
+    assert!(
+        g.contains("NEVER phrase this as a state check"),
+        "§8 must forbid a state check, which is satisfiable forever: {g}"
+    );
+    assert!(
+        g.contains("always satisfiable, so it is never done"),
+        "§8 must state WHY a state check is rejected: {g}"
+    );
+}
+
+#[test]
+fn progress_stamp_guidance_forces_landed_state_on_one_line() {
+    let g = crate::brain::agent::service::context::PROGRESS_STAMP_GUIDANCE;
+    assert!(
+        g.contains("PROGRESS:"),
+        "§0 must mandate a PROGRESS stamp line: {g}"
+    );
+    assert!(
+        g.contains("clean tree is not evidence that no work happened"),
+        "§0 must say a clean tree is not evidence of no work: {g}"
+    );
+    assert!(
+        g.contains("recon paid, work not started"),
+        "§0 must name the misreading it prevents: {g}"
+    );
+}
