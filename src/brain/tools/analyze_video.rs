@@ -56,7 +56,7 @@ pub struct AnalyzeVideoTool {
     /// on non-Gemini setups. Lets the frame-extraction fallback describe frames
     /// with the provider's own vision model when Gemini native video isn't
     /// available.
-    provider_vision: Option<(String, String, String)>,
+    provider_vision: Option<(String, String, String, Option<u64>)>,
 }
 
 impl AnalyzeVideoTool {
@@ -365,7 +365,7 @@ impl AnalyzeVideoTool {
                 self.api_key.clone(),
                 self.model.clone(),
             ))
-        } else if let Some((key, base_url, vision_model)) = &self.provider_vision {
+        } else if let Some((key, base_url, vision_model, timeout_secs)) = &self.provider_vision {
             // Non-Gemini setup: describe each frame with the active provider's
             // own vision model. ffmpeg extracted the frames locally, so any
             // provider with image vision can analyze them. This is what makes
@@ -373,7 +373,7 @@ impl AnalyzeVideoTool {
             // Single-candidate list: video frames ride the first resolved
             // vision candidate; frame-level roll-through can come later.
             Box::new(super::provider_vision::ProviderVisionTool::with_candidates(
-                vec![(key.clone(), base_url.clone(), vision_model.clone())],
+                vec![(key.clone(), base_url.clone(), vision_model.clone(), timeout_secs.clone())],
             ))
         } else {
             return Ok(ToolResult::error(format!(

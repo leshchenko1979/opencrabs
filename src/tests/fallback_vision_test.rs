@@ -599,7 +599,7 @@ mod active_provider_vision {
 
         let result = active_provider_vision(&config);
         assert!(result.is_some());
-        let (api_key, base_url, vision_model) = result.unwrap();
+        let (api_key, base_url, vision_model, _) = result.unwrap();
         assert_eq!(api_key, "minimax-key");
         assert!(base_url.contains("minimax"));
         assert_eq!(vision_model, "MiniMax-Text-01");
@@ -656,7 +656,7 @@ mod active_provider_vision {
             },
             ..Default::default()
         };
-        let (api_key, _, vision_model) = active_provider_vision(&config)
+        let (api_key, _, vision_model, _) = active_provider_vision(&config)
             .expect("keyless provider with vision_model must resolve");
         assert_eq!(api_key, "");
         assert_eq!(vision_model, "llava");
@@ -691,7 +691,7 @@ mod active_provider_vision {
             ..Default::default()
         };
 
-        let (api_key, _, vision_model) = active_provider_vision(&config).unwrap();
+        let (api_key, _, vision_model, _) = active_provider_vision(&config).unwrap();
         // OpenAI is earlier in REGISTRATIONS priority order
         assert_eq!(api_key, "openai-key");
         assert_eq!(vision_model, "gpt-5-nano");
@@ -726,7 +726,7 @@ mod active_provider_vision {
 
         // opencode is the active provider (first enabled in provider_registry),
         // but has no vision_model — minimax's should still be found
-        let (api_key, _, vision_model) = active_provider_vision(&config).unwrap();
+        let (api_key, _, vision_model, _) = active_provider_vision(&config).unwrap();
         assert_eq!(api_key, "minimax-key");
         assert_eq!(vision_model, "MiniMax-Text-01");
     }
@@ -781,7 +781,7 @@ mod vision_fallback_chain {
             ..Default::default()
         });
 
-        let (_, _, vision_model) = active_provider_vision(&config).unwrap();
+        let (_, _, vision_model, _) = active_provider_vision(&config).unwrap();
         // openai is earlier in REGISTRATIONS
         assert_eq!(vision_model, "gpt-5-nano");
     }
@@ -792,7 +792,7 @@ mod vision_fallback_chain {
         let config = two_providers_config();
         assert!(config.providers.fallback.is_none());
 
-        let (_, _, vision_model) = active_provider_vision(&config).unwrap();
+        let (_, _, vision_model, _) = active_provider_vision(&config).unwrap();
         assert_eq!(vision_model, "gpt-5-nano");
     }
 
@@ -906,7 +906,7 @@ mod vision_fallback_chain {
 
         let cands = vision_candidates(&config);
         assert_eq!(cands.len(), 1);
-        let (api_key, _, vision_model) = active_provider_vision(&config).unwrap();
+        let (api_key, _, vision_model, _) = active_provider_vision(&config).unwrap();
         assert_eq!(api_key, "minimax-key");
         assert_eq!(vision_model, "MiniMax-Text-01");
     }
@@ -948,7 +948,7 @@ mod vision_fallback_chain {
 
         // openai has no vision_model in chain, falls through to scan-all
         // where minimax wins (only one with vision_model).
-        let (api_key, _, vision_model) = active_provider_vision(&config).unwrap();
+        let (api_key, _, vision_model, _) = active_provider_vision(&config).unwrap();
         assert_eq!(api_key, "minimax-key");
         assert_eq!(vision_model, "MiniMax-Text-01");
     }
@@ -965,7 +965,7 @@ mod vision_fallback_chain {
         });
 
         // nonexistent is skipped, falls through to scan-all where openai wins.
-        let (_, _, vision_model) = active_provider_vision(&config).unwrap();
+        let (_, _, vision_model, _) = active_provider_vision(&config).unwrap();
         assert_eq!(vision_model, "gpt-5-nano");
     }
 
@@ -989,7 +989,7 @@ mod vision_fallback_chain {
             ..Default::default()
         };
 
-        let (api_key, base_url, vision_model) = active_provider_vision(&config).unwrap();
+        let (api_key, base_url, vision_model, _) = active_provider_vision(&config).unwrap();
         assert_eq!(api_key, "tp-test-key");
         assert!(
             base_url.contains("token-plan-ams.xiaomimimo.com"),
@@ -1114,6 +1114,53 @@ mod vision_fallback_chain {
                 .any(|c| c.0 == "custom-key" && c.2 == "my-model"),
             "custom: prefixed chain entry resolves: {cands:?}"
         );
+    }
+
+    #[test]
+    fn timeout_secs_rides_the_candidate() {
+        // #816: a provider's own `[providers.<name>].timeout_secs` governs its
+        // vision calls the way it governs its chat calls — the candidate
+        // carries it, so a demanding vision model can be given a longer wall
+        // than the 120 s default. Unset = None = the default, unchanged.
+        let mut custom_map = BTreeMap::new();
+        custom_map.insert(
+            "slow-eyes".to_string(),
+            ProviderConfig {
+                enabled: true,
+                api_key: Some("slow-key".into()),
+                base_url: Some("https://llm.example/v1".into()),
+                vision_model: Some("slow-eyes-model".into()),
+                timeout_secs: Some(300),
+                ..Default::default()
+            },
+        );
+        let mut config = two_providers_config();
+        config.providers.custom = Some(custom_map);
+        config.providers.fallback = Some(FallbackProviderConfig {
+            generation: vec![],
+            enabled: true,
+            vision: vec!["custom:slow-eyes".into()],
+            ..Default::default()
+        });
+
+        let cands = vision_candidates(&config);
+        assert_eq!(cands.len(), 1, "one candidate: {cands:?}");
+        assert_eq!(cands[0].0, "slow-key");
+        assert_eq!(cands[0].2, "slow-eyes-model");
+        assert_eq!(cands[0].3, Some(300), "timeout_secs rides the candidate");
+
+        // A provider without a timeout carries None — the default, so the
+        // 120 s wall is unchanged behaviour for everything else.
+        let no_timeout = ProviderConfig {
+            enabled: true,
+            api_key: Some("k".into()),
+            base_url: Some("https://llm.example/v1".into()),
+            vision_model: Some("m".into()),
+            ..Default::default()
+        };
+        assert_eq!(no_timeout.timeout_secs, None);
+        let cands = vision_candidates_for(&config, Some("custom:no-such"));
+        assert!(cands.is_empty(), "no such provider: {cands:?}");
     }
 
     #[test]

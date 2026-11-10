@@ -1013,8 +1013,12 @@ async fn create_fallback(config: &Config, fallback_type: &str) -> Result<Arc<dyn
     ))
 }
 
-/// Returns `(api_key, base_url, vision_model)` for the first enabled provider
-/// that has a `vision_model` configured.
+/// Returns `(api_key, base_url, vision_model, timeout_secs)` for the first
+/// enabled provider that has a `vision_model` configured. `timeout_secs` is
+/// the provider's own `[providers.<name>].timeout_secs` (#816): the vision
+/// path honours it the same way the chat path does, so a demanding vision
+/// call can be given a longer wall than the 120 s default. `None` = the
+/// default, unchanged behaviour.
 ///
 /// Resolution order:
 /// 1. User-configured `[providers.fallback] vision = [...]` chain (first
@@ -1028,7 +1032,7 @@ async fn create_fallback(config: &Config, fallback_type: &str) -> Result<Arc<dyn
 ///
 /// Used to register the provider-native `analyze_image` tool when Gemini
 /// vision isn't set up.  See issue #253.
-pub fn active_provider_vision(config: &Config) -> Option<(String, String, String)> {
+pub fn active_provider_vision(config: &Config) -> Option<(String, String, String, Option<u64>)> {
     any_provider_vision(config).into_iter().next()
 }
 
@@ -1047,9 +1051,9 @@ pub fn active_provider_vision(config: &Config) -> Option<(String, String, String
 ///
 /// `enabled = false` is NOT a filter. That flag governs chat; seeing needs
 /// only an endpoint and a `vision_model`.
-pub fn any_provider_vision(config: &Config) -> Vec<(String, String, String)> {
-    let mut out: Vec<(String, String, String)> = Vec::new();
-    let push = |cand: (String, String, String), out: &mut Vec<(String, String, String)>| {
+pub fn any_provider_vision(config: &Config) -> Vec<(String, String, String, Option<u64>)> {
+    let mut out: Vec<(String, String, String, Option<u64>)> = Vec::new();
+    let push = |cand: (String, String, String, Option<u64>), out: &mut Vec<(String, String, String, Option<u64>)>| {
         if !out.contains(&cand) {
             out.push(cand);
         }
@@ -1122,9 +1126,9 @@ pub fn any_provider_vision(config: &Config) -> Vec<(String, String, String)> {
 pub fn vision_candidates_for(
     config: &Config,
     session_provider: Option<&str>,
-) -> Vec<(String, String, String)> {
-    let mut out: Vec<(String, String, String)> = Vec::new();
-    let push = |cand: (String, String, String), out: &mut Vec<(String, String, String)>| {
+) -> Vec<(String, String, String, Option<u64>)> {
+    let mut out: Vec<(String, String, String, Option<u64>)> = Vec::new();
+    let push = |cand: (String, String, String, Option<u64>), out: &mut Vec<(String, String, String, Option<u64>)>| {
         if !out.contains(&cand) {
             out.push(cand);
         }
@@ -1148,7 +1152,7 @@ pub fn vision_candidates_for(
 }
 
 /// Chain-only resolution, for callers with no session in hand.
-pub fn vision_candidates(config: &Config) -> Vec<(String, String, String)> {
+pub fn vision_candidates(config: &Config) -> Vec<(String, String, String, Option<u64>)> {
     vision_candidates_for(config, None)
 }
 
@@ -1186,12 +1190,13 @@ fn vision_base_url(session_id: &str, cfg: &ProviderConfig) -> Option<String> {
     }
 }
 
-/// Candidate for a built-in provider: derived endpoint + usable key.
+/// Candidate for a built-in provider: derived endpoint + usable key. The
+/// provider's own `timeout_secs` rides the candidate (#816).
 fn builtin_vision_candidate(
     session_id: &str,
     cfg: &ProviderConfig,
     vision_model: &str,
-) -> Option<(String, String, String)> {
+) -> Option<(String, String, String, Option<u64>)> {
     let base_url = normalize_vision_url(vision_base_url(session_id, cfg)?);
     let api_key = cfg.api_key.clone().filter(|k| !k.is_empty());
     if api_key.is_none() && !is_local_base_url(&base_url) {
@@ -1201,6 +1206,7 @@ fn builtin_vision_candidate(
         api_key.unwrap_or_default(),
         base_url,
         vision_model.to_string(),
+        cfg.timeout_secs,
     ))
 }
 
@@ -1210,12 +1216,13 @@ fn builtin_vision_candidate(
 fn custom_vision_candidate(
     cfg: &ProviderConfig,
     vision_model: &str,
-) -> Option<(String, String, String)> {
+) -> Option<(String, String, String, Option<u64>)> {
     let base_url = normalize_vision_url(cfg.base_url.clone()?);
     Some((
         cfg.api_key.clone().unwrap_or_default(),
         base_url,
         vision_model.to_string(),
+        cfg.timeout_secs,
     ))
 }
 
@@ -1231,8 +1238,9 @@ fn normalize_vision_url(base_url: String) -> String {
 /// or custom map key) and return its `(api_key, base_url, vision_model)`
 /// if it has a `vision_model` configured. `enabled` is deliberately NOT
 /// checked (#401): it gates chat usage only — vision needs a vision_model
-/// and a valid key, which is what `vision_tuple` extracts.
-fn vision_by_name(config: &Config, name: &str) -> Option<(String, String, String)> {
+/// and a valid key, which is what `vision_by_name` extracts (4-tuple with
+/// `timeout_secs`, #816).
+fn vision_by_name(config: &Config, name: &str) -> Option<(String, String, String, Option<u64>)> {
     // Custom entries take precedence (same convention as create_fallback).
     if !name.starts_with("custom:")
         && config

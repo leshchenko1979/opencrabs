@@ -433,7 +433,7 @@ fn vision_anthropic() {
     };
     let result = active_provider_vision(&config);
     assert!(result.is_some());
-    let (key, url, model) = result.unwrap();
+    let (key, url, model, _) = result.unwrap();
     assert_eq!(key, "key");
     assert_eq!(model, "claude-3-opus");
     // Anthropic's own OpenAI-compatible endpoint — an Anthropic key posted
@@ -458,7 +458,7 @@ fn vision_openai() {
     };
     let result = active_provider_vision(&config);
     assert!(result.is_some());
-    let (_, _, model) = result.unwrap();
+    let (_, _, model, _) = result.unwrap();
     assert_eq!(model, "gpt-4o");
 }
 
@@ -479,7 +479,7 @@ fn vision_openrouter() {
     };
     let result = active_provider_vision(&config);
     assert!(result.is_some());
-    let (_, _, model) = result.unwrap();
+    let (_, _, model, _) = result.unwrap();
     assert_eq!(model, "anthropic/claude-3.5-sonnet");
 }
 
@@ -500,7 +500,7 @@ fn vision_minimax() {
     };
     let result = active_provider_vision(&config);
     assert!(result.is_some());
-    let (_, _, model) = result.unwrap();
+    let (_, _, model, _) = result.unwrap();
     assert_eq!(model, "MiniMax-Text-01");
 }
 
@@ -547,7 +547,7 @@ fn vision_registers_keyless_provider_with_vision_model() {
     };
     let result = active_provider_vision(&config);
     assert!(result.is_some());
-    let (key, _, model) = result.unwrap();
+    let (key, _, model, _) = result.unwrap();
     assert_eq!(key, "");
     assert_eq!(model, "llava");
 }
@@ -580,7 +580,7 @@ fn vision_custom_provider() {
     // This test verifies the custom: prefix routing works.
     let result = active_provider_vision(&config);
     assert!(result.is_some());
-    let (key, _, model) = result.unwrap();
+    let (key, _, model, _) = result.unwrap();
     assert_eq!(key, "custom-key");
     assert_eq!(model, "custom-vision-model");
 }

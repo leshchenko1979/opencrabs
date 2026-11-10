@@ -33,7 +33,7 @@ pub struct ProviderVisionTool {
     /// `analyze_video` extracts frames locally and hands them to a vision
     /// backend it has already picked, so it pins that rather than re-deriving
     /// it. `None` is the ordinary case: resolve from config per request.
-    pinned: Option<Vec<(String, String, String)>>,
+    pinned: Option<Vec<(String, String, String, Option<u64>)>>,
     /// Gemini fallback, tried only after EVERY candidate fails. Gemini is
     /// never primary while any provider can serve vision (owner contract).
     gemini_fallback: Option<AnalyzeImageTool>,
@@ -54,7 +54,7 @@ impl ProviderVisionTool {
     }
 
     /// Pin an explicit candidate list, skipping config resolution.
-    pub fn with_candidates(candidates: Vec<(String, String, String)>) -> Self {
+    pub fn with_candidates(candidates: Vec<(String, String, String, Option<u64>)>) -> Self {
         Self {
             pinned: Some(candidates),
             gemini_fallback: None,
@@ -63,7 +63,9 @@ impl ProviderVisionTool {
 
     /// Candidates for THIS request: current provider, then the configured
     /// chain, read from config now so an edit needs no restart (#1318).
-    fn candidates_for(session_provider: Option<&str>) -> Vec<(String, String, String)> {
+    fn candidates_for(
+        session_provider: Option<&str>,
+    ) -> Vec<(String, String, String, Option<u64>)> {
         crate::brain::provider::factory::vision_candidates_for(
             &crate::config::Config::current(),
             session_provider,
@@ -174,7 +176,6 @@ impl Tool for ProviderVisionTool {
         };
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
             .build()
             .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
 
@@ -192,12 +193,15 @@ impl Tool for ProviderVisionTool {
         if candidates.is_empty() && self.gemini_fallback.is_none() {
             return Ok(ToolResult::error(VISION_SETUP_HINT.to_string()));
         }
-        for (api_key, base_url, vision_model) in &candidates {
+        for (idx, (api_key, base_url, vision_model, timeout_secs)) in
+            candidates.iter().enumerate()
+        {
             match try_vision_candidate(
                 &client,
                 api_key,
                 base_url,
                 vision_model,
+                *timeout_secs,
                 &question,
                 &image_url,
             )
@@ -205,10 +209,25 @@ impl Tool for ProviderVisionTool {
             {
                 Ok(text) => return Ok(ToolResult::success(text)),
                 Err(reason) => {
-                    tracing::warn!(
-                        "analyze_image: vision candidate model={vision_model} url={base_url} \
-                         failed: {reason} — trying next candidate"
-                    );
+                    // #816: name the roll only when one actually happens —
+                    // the last candidate announcing a "next candidate" that
+                    // does not exist reads as a configured fallback that was
+                    // never configured.
+                    if idx + 1 < candidates.len() {
+                        tracing::warn!(
+                            "analyze_image: vision candidate {}/{} model={vision_model} \
+                             url={base_url} failed: {reason} — trying next candidate",
+                            idx + 1,
+                            candidates.len(),
+                        );
+                    } else {
+                        tracing::warn!(
+                            "analyze_image: vision candidate {}/{} model={vision_model} \
+                             url={base_url} failed: {reason}",
+                            idx + 1,
+                            candidates.len(),
+                        );
+                    }
                     last_failure = reason;
                 }
             }
@@ -298,15 +317,21 @@ pub(crate) fn empty_content_reason(json: &Value) -> String {
 }
 
 /// One [OI]-compatible vision call. `Err` carries the reason so the
-/// caller can log it and roll to the next candidate.
+/// caller can log it and roll to the next candidate. `timeout_secs` rides
+/// the candidate (#816): the provider's own `[providers.<name>].timeout_secs`
+/// governs its vision calls the way it governs its chat calls — applied
+/// per-request, so one slow candidate cannot shorten the wall for another.
+/// `None` = the 120 s default, unchanged behaviour.
 async fn try_vision_candidate(
     client: &reqwest::Client,
     api_key: &str,
     base_url: &str,
     vision_model: &str,
+    timeout_secs: Option<u64>,
     question: &str,
     image_url: &str,
 ) -> std::result::Result<String, String> {
+    let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(120));
     // One request at a given cap. The first attempt always sends NO cap: the
     // candidate list is resolved per request and carries no per-candidate
     // budget, so letting the endpoint pick is the only default that fits a
@@ -316,13 +341,28 @@ async fn try_vision_candidate(
         let request = client
             .post(base_url)
             .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {api_key}"));
+            .header("Authorization", format!("Bearer {api_key}"))
+            .timeout(timeout);
         async move {
             let response = request
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("Vision request failed: {e}"))?;
+                .map_err(|e| {
+                    // #816: name the wall for what it is. reqwest's Display
+                    // ("error sending request for url (…)") drops the source,
+                    // so a timeout is byte-identical to a DNS failure and the
+                    // reader concludes "the vision provider is down" when it
+                    // is only too slow. Classify before formatting.
+                    if e.is_timeout() {
+                        format!(
+                            "Vision request timed out after {}s ({base_url})",
+                            timeout_secs.unwrap_or(120)
+                        )
+                    } else {
+                        format!("Vision request failed: {e}")
+                    }
+                })?;
 
             if !response.status().is_success() {
                 let status = response.status().as_u16();
