@@ -625,7 +625,7 @@ mod active_provider_vision {
             },
             ..Default::default()
         };
-        let (_key, base_url, vision_model) =
+                    let (_key, base_url, vision_model, _) =
             active_provider_vision(&config).expect("disabled + vision_model resolves");
         assert!(base_url.contains("minimax"));
         assert_eq!(vision_model, "MiniMax-Text-01");

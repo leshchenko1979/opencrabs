@@ -6,6 +6,7 @@
 //! (#430). Registered as `analyze_image` whenever any candidate exists.
 
 use super::analyze_image::{AnalyzeImageTool, base64_encode, detect_mime_type};
+use crate::brain::provider::factory::VisionCandidate;
 use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -33,7 +34,7 @@ pub struct ProviderVisionTool {
     /// `analyze_video` extracts frames locally and hands them to a vision
     /// backend it has already picked, so it pins that rather than re-deriving
     /// it. `None` is the ordinary case: resolve from config per request.
-    pinned: Option<Vec<(String, String, String, Option<u64>)>>,
+    pinned: Option<Vec<VisionCandidate>>,
     /// Gemini fallback, tried only after EVERY candidate fails. Gemini is
     /// never primary while any provider can serve vision (owner contract).
     gemini_fallback: Option<AnalyzeImageTool>,
@@ -54,7 +55,7 @@ impl ProviderVisionTool {
     }
 
     /// Pin an explicit candidate list, skipping config resolution.
-    pub fn with_candidates(candidates: Vec<(String, String, String, Option<u64>)>) -> Self {
+    pub fn with_candidates(candidates: Vec<VisionCandidate>) -> Self {
         Self {
             pinned: Some(candidates),
             gemini_fallback: None,
@@ -65,7 +66,7 @@ impl ProviderVisionTool {
     /// chain, read from config now so an edit needs no restart (#1318).
     fn candidates_for(
         session_provider: Option<&str>,
-    ) -> Vec<(String, String, String, Option<u64>)> {
+    ) -> Vec<VisionCandidate> {
         crate::brain::provider::factory::vision_candidates_for(
             &crate::config::Config::current(),
             session_provider,
@@ -193,9 +194,7 @@ impl Tool for ProviderVisionTool {
         if candidates.is_empty() && self.gemini_fallback.is_none() {
             return Ok(ToolResult::error(VISION_SETUP_HINT.to_string()));
         }
-        for (idx, (api_key, base_url, vision_model, timeout_secs)) in
-            candidates.iter().enumerate()
-        {
+        for (idx, (api_key, base_url, vision_model, timeout_secs)) in candidates.iter().enumerate() {
             match try_vision_candidate(
                 &client,
                 api_key,
@@ -305,8 +304,7 @@ pub(crate) fn empty_content_reason(json: &Value) -> String {
         .and_then(|choices| choices.first())
         .and_then(|choice| choice["finish_reason"].as_str())
         .unwrap_or("unknown");
-    let reasoning_tokens =
-        json["usage"]["completion_tokens_details"]["reasoning_tokens"].as_u64();
+    let reasoning_tokens = json["usage"]["completion_tokens_details"]["reasoning_tokens"].as_u64();
     match reasoning_tokens {
         Some(n) => format!(
             "No text response from vision model (finish_reason: {finish_reason}, \
@@ -344,25 +342,21 @@ async fn try_vision_candidate(
             .header("Authorization", format!("Bearer {api_key}"))
             .timeout(timeout);
         async move {
-            let response = request
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| {
-                    // #816: name the wall for what it is. reqwest's Display
-                    // ("error sending request for url (…)") drops the source,
-                    // so a timeout is byte-identical to a DNS failure and the
-                    // reader concludes "the vision provider is down" when it
-                    // is only too slow. Classify before formatting.
-                    if e.is_timeout() {
-                        format!(
-                            "Vision request timed out after {}s ({base_url})",
-                            timeout_secs.unwrap_or(120)
-                        )
-                    } else {
-                        format!("Vision request failed: {e}")
-                    }
-                })?;
+            let response = request.json(&body).send().await.map_err(|e| {
+                // #816: name the wall for what it is. reqwest's Display
+                // ("error sending request for url (…)") drops the source,
+                // so a timeout is byte-identical to a DNS failure and the
+                // reader concludes "the vision provider is down" when it
+                // is only too slow. Classify before formatting.
+                if e.is_timeout() {
+                    format!(
+                        "Vision request timed out after {}s ({base_url})",
+                        timeout_secs.unwrap_or(120)
+                    )
+                } else {
+                    format!("Vision request failed: {e}")
+                }
+            })?;
 
             if !response.status().is_success() {
                 let status = response.status().as_u16();

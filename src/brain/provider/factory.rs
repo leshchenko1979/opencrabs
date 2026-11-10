@@ -1013,6 +1013,11 @@ async fn create_fallback(config: &Config, fallback_type: &str) -> Result<Arc<dyn
     ))
 }
 
+/// One resolved vision candidate: `(api_key, base_url, vision_model, timeout_secs)`.
+/// `timeout_secs` is the provider's own `[providers.<name>].timeout_secs` (#816);
+/// `None` = the default 120 s wall, unchanged behaviour.
+pub type VisionCandidate = (String, String, String, Option<u64>);
+
 /// Returns `(api_key, base_url, vision_model, timeout_secs)` for the first
 /// enabled provider that has a `vision_model` configured. `timeout_secs` is
 /// the provider's own `[providers.<name>].timeout_secs` (#816): the vision
@@ -1032,7 +1037,7 @@ async fn create_fallback(config: &Config, fallback_type: &str) -> Result<Arc<dyn
 ///
 /// Used to register the provider-native `analyze_image` tool when Gemini
 /// vision isn't set up.  See issue #253.
-pub fn active_provider_vision(config: &Config) -> Option<(String, String, String, Option<u64>)> {
+pub fn active_provider_vision(config: &Config) -> Option<VisionCandidate> {
     any_provider_vision(config).into_iter().next()
 }
 
@@ -1051,9 +1056,9 @@ pub fn active_provider_vision(config: &Config) -> Option<(String, String, String
 ///
 /// `enabled = false` is NOT a filter. That flag governs chat; seeing needs
 /// only an endpoint and a `vision_model`.
-pub fn any_provider_vision(config: &Config) -> Vec<(String, String, String, Option<u64>)> {
-    let mut out: Vec<(String, String, String, Option<u64>)> = Vec::new();
-    let push = |cand: (String, String, String, Option<u64>), out: &mut Vec<(String, String, String, Option<u64>)>| {
+pub fn any_provider_vision(config: &Config) -> Vec<VisionCandidate> {
+    let mut out: Vec<VisionCandidate> = Vec::new();
+    let push = |cand: VisionCandidate, out: &mut Vec<VisionCandidate>| {
         if !out.contains(&cand) {
             out.push(cand);
         }
@@ -1126,9 +1131,9 @@ pub fn any_provider_vision(config: &Config) -> Vec<(String, String, String, Opti
 pub fn vision_candidates_for(
     config: &Config,
     session_provider: Option<&str>,
-) -> Vec<(String, String, String, Option<u64>)> {
-    let mut out: Vec<(String, String, String, Option<u64>)> = Vec::new();
-    let push = |cand: (String, String, String, Option<u64>), out: &mut Vec<(String, String, String, Option<u64>)>| {
+) -> Vec<VisionCandidate> {
+    let mut out: Vec<VisionCandidate> = Vec::new();
+    let push = |cand: VisionCandidate, out: &mut Vec<VisionCandidate>| {
         if !out.contains(&cand) {
             out.push(cand);
         }
@@ -1152,7 +1157,7 @@ pub fn vision_candidates_for(
 }
 
 /// Chain-only resolution, for callers with no session in hand.
-pub fn vision_candidates(config: &Config) -> Vec<(String, String, String, Option<u64>)> {
+pub fn vision_candidates(config: &Config) -> Vec<VisionCandidate> {
     vision_candidates_for(config, None)
 }
 
@@ -1196,7 +1201,7 @@ fn builtin_vision_candidate(
     session_id: &str,
     cfg: &ProviderConfig,
     vision_model: &str,
-) -> Option<(String, String, String, Option<u64>)> {
+) -> Option<VisionCandidate> {
     let base_url = normalize_vision_url(vision_base_url(session_id, cfg)?);
     let api_key = cfg.api_key.clone().filter(|k| !k.is_empty());
     if api_key.is_none() && !is_local_base_url(&base_url) {
@@ -1216,7 +1221,7 @@ fn builtin_vision_candidate(
 fn custom_vision_candidate(
     cfg: &ProviderConfig,
     vision_model: &str,
-) -> Option<(String, String, String, Option<u64>)> {
+) -> Option<VisionCandidate> {
     let base_url = normalize_vision_url(cfg.base_url.clone()?);
     Some((
         cfg.api_key.clone().unwrap_or_default(),
@@ -1240,7 +1245,7 @@ fn normalize_vision_url(base_url: String) -> String {
 /// checked (#401): it gates chat usage only — vision needs a vision_model
 /// and a valid key, which is what `vision_by_name` extracts (4-tuple with
 /// `timeout_secs`, #816).
-fn vision_by_name(config: &Config, name: &str) -> Option<(String, String, String, Option<u64>)> {
+fn vision_by_name(config: &Config, name: &str) -> Option<VisionCandidate> {
     // Custom entries take precedence (same convention as create_fallback).
     if !name.starts_with("custom:")
         && config

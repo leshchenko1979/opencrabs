@@ -23,6 +23,7 @@
 use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
 use serde_json::Value;
+use crate::brain::provider::factory::VisionCandidate;
 use std::time::Duration;
 
 const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
@@ -56,7 +57,7 @@ pub struct AnalyzeVideoTool {
     /// on non-Gemini setups. Lets the frame-extraction fallback describe frames
     /// with the provider's own vision model when Gemini native video isn't
     /// available.
-    provider_vision: Option<(String, String, String, Option<u64>)>,
+    provider_vision: Option<VisionCandidate>,
 }
 
 impl AnalyzeVideoTool {
@@ -372,9 +373,12 @@ impl AnalyzeVideoTool {
             // video work provider-agnostically.
             // Single-candidate list: video frames ride the first resolved
             // vision candidate; frame-level roll-through can come later.
-            Box::new(super::provider_vision::ProviderVisionTool::with_candidates(
-                vec![(key.clone(), base_url.clone(), vision_model.clone(), timeout_secs.clone())],
-            ))
+            Box::new(super::provider_vision::ProviderVisionTool::with_candidates(vec![(
+                key.clone(),
+                base_url.clone(),
+                vision_model.clone(),
+                timeout_secs,
+            )]))
         } else {
             return Ok(ToolResult::error(format!(
                 "Video analysis failed: no vision backend available ({native_err})."
