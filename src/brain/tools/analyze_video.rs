@@ -377,7 +377,7 @@ impl AnalyzeVideoTool {
                 key.clone(),
                 base_url.clone(),
                 vision_model.clone(),
-                timeout_secs,
+                *timeout_secs,
             )]))
         } else {
             return Ok(ToolResult::error(format!(
