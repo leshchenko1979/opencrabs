@@ -419,9 +419,11 @@ fn every_compaction_surface_reads_the_flag() {
     for (name, src) in [("progress.rs", PROGRESS), ("resume.rs", RESUME)] {
         assert_eq!(
             src.matches("compacting_flow_line(").count()
-                + src.matches("compacted_flow_line(").count(),
+                + src.matches("compaction_breakdown(").count(),
             2,
-            "{name} renders exactly two numbered flow lines, both gated"
+            "{name} renders exactly two numbered flow lines, both gated — the \
+             completion line is the #824 breakdown card, whose FIRST line is \
+             the numbered one"
         );
         assert_eq!(
             src.matches(GUARD).count(),

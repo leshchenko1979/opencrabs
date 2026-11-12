@@ -986,13 +986,29 @@ pub(crate) async fn resume_session_inner(
             ProgressEvent::CompactionSummary {
                 before_pct,
                 after_pct,
-                // Not rendered (the ✅ line carries percentages only, #29);
-                // `after_tokens` is read below for the footer slot.
-                before_tokens: _,
+                before_tokens,
                 after_tokens,
                 elapsed,
+                summary,
+                tool_tokens,
                 ..
             } => {
+                // #824: same card as the live path, assembled before the lock
+                // (registry scan + tokenize). `None` when the notice is off.
+                let notice = if Config::current().agent.compaction_notice {
+                    Some(compaction_breakdown(&CompactionBreakdown {
+                        before_tokens,
+                        after_tokens,
+                        before_pct,
+                        after_pct,
+                        ctx_max,
+                        elapsed,
+                        tool_tokens,
+                        summary: &summary,
+                    }))
+                } else {
+                    None
+                };
                 if let Ok(mut s) = st.lock() {
                     s.compacting = false;
                     s.header_preview = None;
@@ -1009,11 +1025,8 @@ pub(crate) async fn resume_session_inner(
                     // inside the compaction window can never strand a pin that
                     // nothing will clear. The lift is what lets the next tick
                     // recompute the header from live data.
-                    if Config::current().agent.compaction_notice {
-                        s.display_queue
-                            .push(DisplayItem::Intermediate(compacted_flow_line(
-                                before_pct, after_pct, elapsed,
-                            )));
+                    if let Some(text) = notice {
+                        s.display_queue.push(DisplayItem::Intermediate(text));
                     }
                 }
             }

@@ -1088,6 +1088,232 @@ pub(crate) fn compacted_flow_line(
     format!("🧹 compact: {:.0}% → {:.0}% 🧠", before_pct, after_pct)
 }
 
+/// Everything the post-compaction breakdown card renders (#824).
+///
+/// The card rides the flow block's EXISTING `<blockquote expandable>`, so it
+/// folds with the turn's log and costs no extra message. It must never be a
+/// second blockquote: the Bot API states that `blockquote` and
+/// `expandable_blockquote` entities "can't be nested", and a nested one
+/// renders flat.
+pub(crate) struct CompactionBreakdown<'a> {
+    pub(crate) before_tokens: usize,
+    pub(crate) after_tokens: usize,
+    pub(crate) before_pct: f64,
+    pub(crate) after_pct: f64,
+    pub(crate) ctx_max: u32,
+    pub(crate) elapsed: std::time::Duration,
+    /// Tool-schema tokens the next request carries (#824 event field).
+    pub(crate) tool_tokens: usize,
+    /// The continuation document, whose `context-manifest` fence declares the
+    /// kept and dropped sets.
+    pub(crate) summary: &'a str,
+}
+
+/// One manifest entry resolved against the skill registry.
+struct BreakdownEntry {
+    label: String,
+    /// `None` when the name matches no skill and no aux file — a tool name or
+    /// a stale slug. Measured, never assumed.
+    tokens: Option<usize>,
+}
+
+/// Resolve manifest names against the registry, weighing each with the same
+/// tokenizer and the same body the request path injects.
+///
+/// A bare slug is measured through `prompt_body()`, so the number matches what
+/// `retained_set_tokens` weighs (review-gate reminder and size warning
+/// included). `skill/aux.md` resolves to that auxiliary document's body.
+fn resolve_breakdown_entries(
+    names: &[String],
+    skills: &[crate::brain::skills::Skill],
+) -> Vec<BreakdownEntry> {
+    names
+        .iter()
+        .filter_map(|raw| {
+            let name = raw.trim();
+            if name.is_empty() {
+                return None;
+            }
+            // `skill/aux.md` — an auxiliary document of a loaded skill.
+            // Resolved through one chain (no nested `if let`: edition 2024
+            // clippy collapses those into let-chains, and the gate is -D).
+            let aux = name.split_once('/').and_then(|(slug, file)| {
+                skills
+                    .iter()
+                    .find(|s| s.name == slug)
+                    .and_then(|s| s.auxiliary_files.iter().find(|a| a.name == file))
+            });
+            if let Some(aux) = aux {
+                return Some(BreakdownEntry {
+                    label: name.to_string(),
+                    tokens: Some(crate::brain::tokenizer::count_tokens(&aux.body)),
+                });
+            }
+            let tokens = skills
+                .iter()
+                .find(|s| s.name == name)
+                .map(|s| crate::brain::tokenizer::count_tokens(&s.prompt_body()));
+            Some(BreakdownEntry {
+                label: name.to_string(),
+                tokens,
+            })
+        })
+        .collect()
+}
+
+/// `21s` / `1m 42s`: the silent window's measured duration.
+///
+/// Whole seconds are TRUNCATED, never rounded: a 21.5 s window must not read
+/// as 22 s, because the number is presented as a measurement.
+fn format_breakdown_elapsed(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// `-24K, -18.7%`: signed, so a compaction that GREW the context reads as
+/// growth instead of as an unsigned lie.
+fn format_breakdown_delta(before: usize, after: usize) -> String {
+    let delta = after as i64 - before as i64;
+    let sign = if delta < 0 { '-' } else { '+' };
+    let pct = if before > 0 {
+        (delta as f64 / before as f64) * 100.0
+    } else {
+        0.0
+    };
+    format!(
+        "{sign}{}, {sign}{:.1}%",
+        crate::utils::format_token_count(delta.unsigned_abs().min(u32::MAX as u64) as u32),
+        pct.abs()
+    )
+}
+
+/// Summary row plus an indented detail row for one manifest list.
+fn breakdown_group(label: &str, entries: &[BreakdownEntry], lines: &mut Vec<String>) {
+    if entries.is_empty() {
+        return;
+    }
+    let tok = |n: usize| crate::utils::format_token_count(n.min(u32::MAX as usize) as u32);
+    let resolved = entries.iter().filter(|e| e.tokens.is_some()).count();
+    let total: usize = entries.iter().filter_map(|e| e.tokens).sum();
+    let noun = if entries.len() == 1 { "entry" } else { "entries" };
+    // `discard_skills` carries TOOL names in practice (measured on session
+    // 2fbfb2f8: five tool names, all inert at `unregister_active_skill`), so
+    // the row states how many entries actually resolve rather than calling
+    // every one a skill.
+    let head = if resolved == 0 {
+        format!("{} {noun} · none resolve to a skill", entries.len())
+    } else if resolved == entries.len() {
+        format!("{} {noun} · {}", entries.len(), tok(total))
+    } else {
+        format!("{} {noun} · {resolved} resolve · {}", entries.len(), tok(total))
+    };
+    lines.push(format!("   {label:<8} {head}"));
+
+    const MAX_NAMES: usize = 8;
+    let mut detail = String::new();
+    for (i, e) in entries.iter().take(MAX_NAMES).enumerate() {
+        if i > 0 {
+            detail.push_str(" · ");
+        }
+        // A backtick span is mandatory, not decoration: bare `editor.md` /
+        // `context.rs` auto-link, because `.md` (Moldova) and `.rs` (Serbia)
+        // are real ccTLDs. Measured live: eight `url` entities on one card
+        // before the wrapper. Backticks, NOT `<code>`: the flow body escapes
+        // the whole line before `format_inline` runs, so an HTML tag emitted
+        // here would render as literal text — the markdown span is the only
+        // form that survives that pipeline. The label is emitted RAW: the
+        // renderer's own `escape_html` already covers it once.
+        detail.push_str(&format!("`{}`", e.label));
+        if let Some(t) = e.tokens {
+            detail.push_str(&format!(" {}", tok(t)));
+        }
+    }
+    if entries.len() > MAX_NAMES {
+        detail.push_str(&format!(" · +{}", entries.len() - MAX_NAMES));
+    }
+    lines.push(format!("     {detail}"));
+}
+
+/// The post-compaction breakdown card (#824): the headline plus what the
+/// compaction actually did.
+///
+/// Rows are sourced from data that already exists — the event's token counts,
+/// percentages and duration, plus the continuation document's own
+/// `context-manifest` fence — so nothing here is estimated except the skill
+/// bodies, which are measured with the request path's own tokenizer.
+pub(crate) fn compaction_breakdown(b: &CompactionBreakdown<'_>) -> String {
+    let tok = |n: usize| crate::utils::format_token_count(n.min(u32::MAX as usize) as u32);
+    let mut lines: Vec<String> = Vec::with_capacity(8);
+    lines.push(compacted_flow_line(b.before_pct, b.after_pct, b.elapsed));
+    lines.push(format!(
+        "   {:<8} {} → {}   ({})",
+        "tokens",
+        tok(b.before_tokens),
+        tok(b.after_tokens),
+        format_breakdown_delta(b.before_tokens, b.after_tokens),
+    ));
+    lines.push(format!(
+        "   {:<8} {:.0}% → {:.0}% of {}",
+        "fill",
+        b.before_pct,
+        b.after_pct,
+        tok(b.ctx_max as usize),
+    ));
+    lines.push(format!(
+        "   {:<8} {}",
+        "took",
+        format_breakdown_elapsed(b.elapsed)
+    ));
+
+    let manifest = crate::brain::agent::service::context::parse_context_manifest(b.summary);
+    if let Some(m) = manifest.as_ref() {
+        let skills = crate::brain::skills::load_all_skills();
+        breakdown_group(
+            "kept",
+            &resolve_breakdown_entries(&m.active_skills, &skills),
+            &mut lines,
+        );
+        breakdown_group(
+            "dropped",
+            &resolve_breakdown_entries(&m.discard_skills, &skills),
+            &mut lines,
+        );
+    }
+
+    // The tools row stands even without a manifest: the schema cost is known
+    // from the event, and it is the row that says how much of the window the
+    // tool set alone occupies.
+    let mut row = format!("   {:<8} {}", "tools", tok(b.tool_tokens));
+    // Flattened, not nested: edition 2024 clippy collapses `if let` + `if`.
+    let required_tools = manifest
+        .as_ref()
+        .map(|m| m.required_tools.as_slice())
+        .unwrap_or_default();
+    if !required_tools.is_empty() {
+        const MAX_TOOLS: usize = 6;
+        let mut names = String::new();
+        for (i, t) in required_tools.iter().take(MAX_TOOLS).enumerate() {
+            if i > 0 {
+                names.push_str(" · ");
+            }
+            // Backticks, not `<code>` — see `breakdown_group` for why the HTML
+            // form cannot survive the flow body's escape-then-format pipeline.
+            names.push_str(&format!("`{}`", t.trim()));
+        }
+        if required_tools.len() > MAX_TOOLS {
+            names.push_str(&format!(" · +{}", required_tools.len() - MAX_TOOLS));
+        }
+        row.push_str(" · ");
+        row.push_str(&names);
+    }
+    lines.push(row);
+    lines.join("\n")
+}
+
 /// Terminal state of a turn, shown in the settled flow-block header (#480).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum FlowOutcome {

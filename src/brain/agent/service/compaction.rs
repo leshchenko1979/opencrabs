@@ -713,6 +713,14 @@ impl AgentService {
             // log recorded at 17% was receipted at 19% (session bee04b00,
             // #1686): one compaction, two different after-numbers.
             let after_pct = context.usage_percentage();
+            // #824: the breakdown's tools row. Measured on the set the next
+            // request actually carries (`tool_schemas_for_session`), never the
+            // registry upper bound — the card describes what the window pays
+            // for, and a lazy-tools session sends a filtered subset.
+            let tool_tokens = crate::brain::tokenizer::count_tokens(
+                &serde_json::to_string(&self.tool_schemas_for_session(session_id))
+                    .unwrap_or_default(),
+            );
             cb(
                 session_id,
                 ProgressEvent::CompactionSummary {
@@ -721,6 +729,7 @@ impl AgentService {
                     after_pct,
                     before_tokens,
                     after_tokens: context.token_count,
+                    tool_tokens,
                     elapsed,
                 },
             );

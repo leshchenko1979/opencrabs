@@ -91,6 +91,11 @@ pub enum ProgressEvent {
         elapsed: std::time::Duration,
         before_tokens: usize,
         after_tokens: usize,
+        /// Token cost of the tool schemas the session's NEXT request carries
+        /// (#824). Measured at emit with `tool_schemas_for_session` — the set
+        /// actually sent, health annotations included — not the registry's
+        /// upper bound. The post-compaction breakdown renders it as one row.
+        tool_tokens: usize,
     },
     /// A single build-output line (e.g. "Compiling foo v1.0"). The TUI keeps a
     /// rolling window of the last few lines and clears them on RestartReady.

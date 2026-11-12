@@ -8,8 +8,9 @@ use teloxide::Bot;
 use teloxide::types::{ChatAction, ChatId, ThreadId};
 
 use super::flow::{
-    COMPACTING_HEADER_TEXT, DisplayItem, StreamingState, ToolMsg, compacted_flow_line,
-    compacting_flow_line, detach_flow_for_followup, echoes_as_system_line, queued_preview,
+    COMPACTING_HEADER_TEXT, CompactionBreakdown, DisplayItem, StreamingState, ToolMsg,
+    compaction_breakdown, compacting_flow_line, detach_flow_for_followup, echoes_as_system_line,
+    queued_preview,
 };
 use super::handler::tool_context;
 use super::send::fire_chat_action;
@@ -262,13 +263,31 @@ pub(crate) fn build_progress_cb(
             ProgressEvent::CompactionSummary {
                 before_pct,
                 after_pct,
-                // The token counts are not rendered: the ✅ line carries the
-                // percentages only (the header is number-free by design, #29).
-                before_tokens: _,
-                after_tokens: _,
+                before_tokens,
+                after_tokens,
                 elapsed,
+                summary,
+                tool_tokens,
                 ..
             } => {
+                // #824: assemble the breakdown BEFORE taking the lock — it
+                // scans the skill registry and tokenizes each body, and the
+                // state mutex guards rendering, not disk work. `None` when the
+                // notice is off, so the flag costs nothing when disabled.
+                let notice = if Config::current().agent.compaction_notice {
+                    Some(compaction_breakdown(&CompactionBreakdown {
+                        before_tokens,
+                        after_tokens,
+                        before_pct,
+                        after_pct,
+                        ctx_max,
+                        elapsed,
+                        tool_tokens,
+                        summary: &summary,
+                    }))
+                } else {
+                    None
+                };
                 if let Ok(mut s) = st.lock() {
                     // Lift the header pin FIRST so the next tick recomputes
                     // from live data; the ✅ line leads the body until newer
@@ -280,11 +299,8 @@ pub(crate) fn build_progress_cb(
                     // inside the compaction window can never strand a pin that
                     // nothing will clear. The lift is what lets the next tick
                     // recompute the header from live data.
-                    if Config::current().agent.compaction_notice {
-                        s.display_queue
-                            .push(DisplayItem::Intermediate(compacted_flow_line(
-                                before_pct, after_pct, elapsed,
-                            )));
+                    if let Some(text) = notice {
+                        s.display_queue.push(DisplayItem::Intermediate(text));
                     }
                 }
             }
