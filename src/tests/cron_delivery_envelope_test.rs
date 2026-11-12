@@ -2,10 +2,10 @@
 //!
 //! Until #819 the turn message was `job.prompt` byte-for-byte, so a job that
 //! decided to "post its report" called a send tool and the scheduler delivered
-//! the same content again. On 2026-11-12 the tool was an MCP `tg_send_message`
-//! on the owner's account, and the bound chat ingested the copy as an inbound
-//! instruction from the owner — the self-echo, which is worse than the
-//! duplicate.
+//! the same content again. On 2026-11-12 the tool was a third-party MCP
+//! messaging tool on the owner's account, and the bound chat ingested the copy
+//! as an inbound instruction from the owner — the self-echo, which is worse
+//! than the duplicate.
 //!
 //! These pin the envelope's CONTENT and its PLACEMENT. The content is what the
 //! model reads; the placement is what stops a future refactor from going back
@@ -42,7 +42,6 @@ fn envelope_forbids_send_tools_by_name() {
     );
     for tool in [
         "telegram_send",
-        "tg_send_message",
         "discord_send",
         "slack_send",
         "whatsapp_send",
@@ -54,10 +53,26 @@ fn envelope_forbids_send_tools_by_name() {
         );
     }
     assert!(
-        e.contains("MCP `tg_*`"),
-        "the envelope must cover the MCP owner-account family by pattern, not just the one tool \
-         that fired: {e}"
+        e.contains("any other tool that posts a message"),
+        "the envelope must also cover the tools it CANNOT name — a third-party MCP server's \
+         tools are not in this binary's registry, so the list has to be open-ended: {e}"
     );
+}
+
+#[test]
+fn envelope_never_names_a_tool_family_this_binary_does_not_ship() {
+    // This text is compiled into every build and read by every cron turn. A
+    // tool namespace that exists only on one operator's MCP server must not
+    // appear in it: to every other user that name is a tool that does not
+    // exist, and a named non-existent tool is an invitation to hallucinate one.
+    let e = delivery_envelope(JOB, Some(TARGET));
+    for foreign in ["tg_", "mcp_"] {
+        assert!(
+            !e.contains(foreign),
+            "the envelope must not name the `{foreign}` family — those tools come from an MCP \
+             server on one machine, not from this binary: {e}"
+        );
+    }
 }
 
 #[test]

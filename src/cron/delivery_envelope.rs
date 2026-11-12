@@ -7,8 +7,8 @@
 //! report" called a send tool, and the scheduler then delivered the same
 //! content again.
 //!
-//! The duplicate is the smaller half. On 2026-11-12 a job used an MCP
-//! `tg_send_message`, which sends on the OWNER's account; the bound chat then
+//! The duplicate is the smaller half. On 2026-11-12 a job used a third-party
+//! MCP messaging tool, which posts on the OWNER's account; the bound chat then
 //! ingested those five messages as inbound instructions from the owner and
 //! executed them (six drafts, fixture edits, two commits). The envelope names
 //! that failure mode explicitly, because "you will duplicate the post" is a
@@ -17,8 +17,8 @@
 //! Placement is the turn message, not the system prompt: the envelope carries
 //! per-job facts (name, targets) that the system brain has no identity to key
 //! on, and the turn message is part of the history the compactor summarizes,
-//! so the rule reaches the next context as well. Enforcement — bringing MCP
-//! `tg_*` sends under the send scope — is #819 leg 2, and closing the
+//! so the rule reaches the next context as well. Enforcement — bringing
+//! MCP-provided sends under the send scope — is #819 leg 2, and closing the
 //! self-echo loop is leg 3.
 
 /// Marker line opening the envelope. Tests pin it, and a grep for it finds
@@ -47,8 +47,9 @@ fn with_targets(job_name: &str, targets: &[&str]) -> String {
          \n\
          - Do NOT call a send tool to publish your result. The scheduler already does it; a \
          send tool delivers the same content a second time.\n\
-         - Do not call `telegram_send`, `tg_send_message`, `discord_send`, `slack_send`, \
-         `whatsapp_send`, or any MCP `tg_*` send for this.\n\
+         - Do not call `telegram_send`, `discord_send`, `slack_send`, `whatsapp_send`, or any \
+         other tool that posts a message on your behalf. Some of those tools live in MCP \
+         servers rather than in this binary, so this list cannot name them all.\n\
          - Never post on the owner's own account. A message sent that way is ingested by the \
          chat as an INBOUND instruction from the owner, and that session will execute it as \
          an order. That is worse than a duplicate.\n\

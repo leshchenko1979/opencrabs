@@ -752,8 +752,8 @@ async fn execute_job(
     // prompt was reaching the model with no statement of what happens to its
     // output, so a job that decided to "post the report" called a send tool and
     // the scheduler delivered the same content again. On 2026-11-12 that tool
-    // was an MCP `tg_send_message`, sent on the owner's account, and the bound
-    // chat ingested the copy as an inbound instruction from the owner.
+    // was a third-party MCP messaging tool, sent on the owner's account, and
+    // the bound chat ingested the copy as an inbound instruction from the owner.
     // The prompt itself is passed through unchanged; the envelope is added
     // information, never a rewrite.
     let turn_prompt = crate::cron::delivery_envelope::wrap_turn_prompt(
