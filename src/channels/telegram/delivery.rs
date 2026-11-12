@@ -350,10 +350,12 @@ pub(crate) async fn deliver_final_response(
                 //
                 // It DOES record entries now (#820): a document inlines as a
                 // `PageBlockDocument` in the same array as images and videos,
-                // and the reference it emits is answered by that entry. The
-                // `📎` marker survives only for a file this turn already
-                // delivered, which keeps the detached floor as its delivery
-                // leg. #823 removed the other carve-out: `.md` is a document
+                // and the reference it emits is answered by that entry. A file
+                // this turn already delivered emits NOTHING here — the bytes are
+                // already in the chat, and the `delivered` filter on the file
+                // attachments is what declines a second copy. The `📎` marker
+                // lives on the text plane alone, for a file this plane declines.
+                // #823 removed the other carve-out: `.md` is a document
                 // like any other, with no config key to hold it back.
                 let fw = crate::utils::image::rewrite_local_files(
                     &rw.rich,

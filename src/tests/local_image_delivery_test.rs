@@ -1053,11 +1053,12 @@ mod local_file_links {
 ///
 /// So these legs now assert the reference AND its entry. A leg that expects a
 /// `📎` marker for an ordinary file is asserting the #801 defect; one that
-/// expects no entry is asserting a claim the API honours the opposite of. The
-/// marker survives for ONE case — a file this turn already delivered. There is
-/// no file the walk refuses: #823 deleted the last exception, the `.md` held out
-/// by `inline_markdown_documents`, once the owner observed an inlined markdown
-/// file opening correctly in the client.
+/// expects no entry is asserting a claim the API honours the opposite of. On
+/// this plane there is NO marker at all: a file this turn already delivered is
+/// consumed silently, and the marker survives only on the text plane, for a file
+/// the rich plane declines. There is no file the walk refuses: #823 deleted the
+/// last exception, the `.md` held out by `inline_markdown_documents`, once the
+/// owner observed an inlined markdown file opening correctly in the client.
 mod local_file_rewrite {
     use crate::utils::image::rewrite_local_files;
     use std::path::{Path, PathBuf};
@@ -1253,22 +1254,34 @@ mod local_file_rewrite {
     }
 
     #[test]
-    fn an_already_delivered_file_still_disarms_the_autolinker_in_the_marker() {
-        // #1938: a dotted label such as `1918-fix-state.md` is autolinked by the
-        // client as a bare domain (`.md` is a real TLD). The disarmer must still
-        // reach this plane on the one path that still emits a marker — a file
-        // this turn already delivered. Since #823 deleted the markdown
-        // exception that is the ONLY way a `📎` leaves this family, so this leg
-        // is the whole surviving guard for #1938 here.
+    fn an_already_delivered_file_leaves_neither_marker_nor_entry() {
+        // The REWRITER consumes a reference whose bytes are already in the chat
+        // and writes NOTHING back: a second anchor would point at a file the
+        // reader already has above them, and the floor's `delivered` filter is
+        // what keeps it from shipping twice. #1938's disarm lives on the plane
+        // that still writes a marker — the SCAN, for a file the rich plane
+        // declines (`an_empty_label_yields_no_caption` pins `📎 q3.\u{200b}pdf`)
+        // — never here.
+        //
+        // #823 briefly asserted the opposite in this very test: that an
+        // already-delivered file emits a disarmed marker. It does not, and never
+        // did (the branch dates from 2026-10-08); the module's PDF twin
+        // (`an_already_delivered_file_is_consumed_without_a_second_reference`)
+        // and the code both say consumed-and-silent. The dotted label is kept
+        // here because a `.md` name is exactly the shape #1938 was about, so a
+        // mutant that starts emitting a marker on this plane must fail a test
+        // that names it.
         let dir = tempfile::tempdir().expect("tempdir");
         let md = write_file(dir.path(), "1918-fix-state.md", MD_BYTES);
         let rw = rewrite_local_files(
-            &format!("[1918-fix-state.md]({})", md.display()),
+            &format!("before [1918-fix-state.md]({}) after", md.display()),
             Some(dir.path()),
             std::slice::from_ref(&md));
-        assert_eq!(
-            rw.rich, "📎 1918-fix-state.\u{200b}md",
-            "the marker is disarmed exactly as the HTML marker is"
+        assert_eq!(rw.rich, "before  after", "the reference is consumed");
+        assert!(
+            !rw.rich.contains('📎'),
+            "no marker for bytes already in the chat: {:?}",
+            rw.rich
         );
         assert!(rw.entries.is_empty());
     }

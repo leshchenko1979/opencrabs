@@ -244,9 +244,14 @@ with a config key.
 **What the code does now, stated once so there is one source:** every resolvable local file — `.md`,
 `.markdown`, `.pdf`, `.zip`, `.txt`, anything — becomes an EMBED reference `![label](tg://document?id=docN)`
 with its `MediaKind::Document` entry pushed in the same call, so the reference and its bytes can never
-disagree (ADR §3.3). The `📎 <label>` marker survives for exactly one case: a file this turn already
-delivered, where the marker keeps the reader's anchor and the floor declines to send a second copy. No
-extension is special.
+disagree (ADR §3.3). **The `📎 <label>` marker no longer appears on the rich plane at all** — a file this
+turn already delivered is *consumed* there and emits nothing, because a second anchor would point at bytes
+the reader already has above them, and the floor's `delivered` filter is what declines the second copy
+(`an_already_delivered_file_is_consumed_without_a_second_reference`). The marker survives on the TEXT plane
+alone, for a file the rich plane declines — no rich path, a failed send, a detached bubble — where
+`push_file_marker` still disarms the autolinker (#1938, `an_empty_label_yields_no_caption`). No
+extension is special. (#823's first cut of this paragraph claimed the marker survived *for* the
+already-delivered case; the code never did that, and the test was corrected to match.)
 
 **Configuration surface:** `rich_messages` gates the rich plane at all (off → everything is a detached
 bubble, §2 rule 5); the `mermaid_*` trio is unrelated. `inline_markdown_documents` no longer exists, and
