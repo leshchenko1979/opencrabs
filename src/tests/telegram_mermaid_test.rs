@@ -1309,12 +1309,14 @@ fn orphan_photo_refs_are_neutralised_but_resolved_ones_survive() {
 /// `attach://` included — it was previously only reached by the markdown image shield, so a
 /// BARE prose `attach://X` in a rich body still took the whole message down.
 ///
-/// #801 keeps the `tg://document` row even though nothing GENERATES that reference any
-/// more (every document now takes the detached floor and a `📎` marker). The register's job
-/// is not to describe our own output — it is to defuse a reference that ARRIVES in the body,
-/// and prose can carry one as an example of the construct (see `ORPHAN_MEDIA_SCHEMES` in
-/// `rich/mermaid.rs`). Dropping the row would leave that path able to reject a whole message
-/// over a scheme Telegram still resolves, so it stays and this test keeps covering it.
+/// The `tg://document` row has a stronger reason to stay than #801 gave it: #820 emits that
+/// reference again (the document family inlines), so the row covers our own output as well as
+/// a reference that ARRIVES in the body. The register's job is not to describe what we
+/// generate — it is to defuse a reference Telegram would resolve but the media array cannot
+/// satisfy, and prose can carry one as an example of the construct (see
+/// `ORPHAN_MEDIA_SCHEMES` in `rich/mermaid.rs`). Dropping the row would leave that path able
+/// to reject a whole message over a scheme Telegram still resolves, so it stays and this test
+/// keeps covering it.
 #[test]
 fn attach_and_tg_refs_are_neutralised_by_media_presence() {
     let media = vec![MediaEntry {
