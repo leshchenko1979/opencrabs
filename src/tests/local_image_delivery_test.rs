@@ -842,6 +842,25 @@ mod local_file_links {
     }
 
     #[test]
+    fn a_clip_reference_is_not_claimed_by_the_file_family() {
+        // #820: the decline is a BYTES test covering both earlier families, so
+        // a clip must be left standing exactly as a picture is. Without this
+        // leg, a decline that only knew `is_supported_image` would pass every
+        // other test here while turning a `.mp4` into a `📎` marker.
+        const MP4_BYTES: &[u8] = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let clip = write_file(dir.path(), "render.mp4", MP4_BYTES);
+        let text = format!("x ![clip]({}) y", clip.display());
+        let scan = extract_local_files(&text, None);
+        assert_eq!(scan.text, text, "the video family owns `![…](clip.mp4)`");
+        assert!(scan.attachments.is_empty());
+        assert!(
+            scan.failures.is_empty(),
+            "and a clip is not a broken file either"
+        );
+    }
+
+    #[test]
     fn an_image_reference_is_not_claimed_by_the_file_family() {
         let dir = tempfile::tempdir().expect("tempdir");
         let png = write_file(dir.path(), "chart.png", super::PNG_BYTES);

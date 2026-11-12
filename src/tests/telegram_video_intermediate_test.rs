@@ -436,10 +436,12 @@ fn the_intermediate_file_pass_marks_a_link_in_both_planes() {
             scan.text
         );
     }
-    // The file pass never eats the picture's rich reference: the `!` guard in
-    // `extract_local_files` is what stops the two families claiming one
-    // reference (#1918). If it ever regressed, the picture would lose its
-    // marker position in the very body the media array answers.
+    // The file pass never eats the picture's rich reference. The `tg://` scheme
+    // is what leaves it standing here (a resolved URI is not a local file), and
+    // on a LOCAL picture the bytes-ownership decline does the same job — the
+    // two families can no longer claim one reference by either route (#820).
+    // If either ever regressed, the picture would lose its position in the very
+    // body the media array answers.
     let rich_files = crate::utils::extract_local_files(&rw_rich.rich, Some(dir.path()));
     assert!(
         rich_files.text.contains("![pic](tg://photo?id=img0)"),

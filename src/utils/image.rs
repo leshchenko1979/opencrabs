@@ -2090,6 +2090,29 @@ pub fn validate_local_file(path: &Path) -> Result<(), LocalImageFailureReason> {
     Ok(())
 }
 
+/// Whether the bytes at `path` belong to a family that walks BEFORE the file
+/// family: a picture the image family sends, or a clip the video family sends.
+///
+/// The walk order is `VID → IMG → FILE` (ADR §3.1), so by the time a file
+/// reference is considered, the two richer families have already had their
+/// turn. A reference whose bytes are a picture or a clip is therefore either
+/// already claimed (the text no longer carries it) or was left standing because
+/// that family is not on this path — and in the second case the file family
+/// must still decline it. Claiming it would hand the reader a `📎` marker where
+/// a render was possible, which is the #286 loss in the opposite direction.
+///
+/// This is a BYTES test, never an extension test: `shot.png` holding MP4 bytes
+/// is a clip, and `render.mp4` holding PNG bytes is a picture. The name is the
+/// author's, the bytes are Telegram's.
+fn bytes_owned_by_an_earlier_family(path: &Path) -> bool {
+    let mut head = [0u8; VIDEO_HEAD_BYTES];
+    let read = std::fs::File::open(path)
+        .and_then(|mut file| std::io::Read::read(&mut file, &mut head))
+        .unwrap_or(0);
+    let head = &head[..read];
+    is_supported_image(head) || is_supported_video_head(head)
+}
+
 /// File one parsed link into the scan accumulators. Returns `true` when the
 /// reference was consumed and must leave the reply text — which happens ONLY for
 /// a resolved, validated file. A rejected candidate or a non-file target returns
@@ -2104,6 +2127,12 @@ fn record_file_candidate(
 ) -> bool {
     match resolve_file_target(target, base_dir) {
         Resolution::Local(path) => {
+            // A picture or a clip is an earlier family's to deliver, even when
+            // this walk reaches it first (ADR §3.1). Declining is silent: this
+            // is not a failure, it is a reference that belongs elsewhere.
+            if bytes_owned_by_an_earlier_family(&path) {
+                return false;
+            }
             let caption = if label.trim().is_empty() {
                 None
             } else {
@@ -2389,6 +2418,32 @@ pub struct LocalFileRewrite {
 /// One home for the form question, because both the document walk and the
 /// floor scan now read both forms and must agree about where a reference begins.
 fn markdown_ref_bracket_len(text: &str, start: usize) -> Option<usize> {
+    // An ESCAPED opening bracket is literal text, not a reference: `\[alt](p)`
+    // is how an author shows the construct, and rewriting it would put a file
+    // on the wire that was only ever an example. The escape counts when the
+    // backslash run before the bracket is ODD — `\\[x](p)` is a literal
+    // backslash followed by a live reference.
+    let bytes = text.as_bytes();
+    let escaped = |pos: usize| {
+        let mut backslashes = 0;
+        let mut j = pos;
+        while j > 0 && bytes[j - 1] == b'\\' {
+            backslashes += 1;
+            j -= 1;
+        }
+        backslashes % 2 == 1
+    };
+    if escaped(start) {
+        return None;
+    }
+    // `\![alt](p)`: the `!` is escaped, so it renders as a literal `!` and the
+    // `[alt](p)` that follows is the tail of the example the author suppressed.
+    // Reading it as a standalone link would deliver the very file they escaped
+    // — the escape is the author saying "not this one", and it outranks ADR §2
+    // rule 6's both-forms rule.
+    if start > 0 && bytes[start - 1] == b'!' && escaped(start - 1) {
+        return None;
+    }
     if text[start..].starts_with("![") {
         Some(2)
     } else if text[start..].starts_with('[') {
@@ -2480,6 +2535,14 @@ impl FileRewriter<'_> {
     fn file(&mut self, label: &str, target: &str, caption: Option<String>) -> bool {
         match resolve_file_target(target, self.base_dir) {
             Resolution::Local(path) => {
+                // The scan and the rewrite must agree on WHICH references are
+                // this family's (see this method's doc), so the bytes-ownership
+                // decline lives here too: a picture or a clip is an earlier
+                // family's to deliver, and rewriting it to a marker would hand
+                // the reader `📎` where a render was possible.
+                if bytes_owned_by_an_earlier_family(&path) {
+                    return false;
+                }
                 // Comparison is on the RESOLVED ABSOLUTE path, which is what
                 // resolve_file_target returns, so two spellings of one file
                 // dedup correctly — the same rule the image family uses.

@@ -100,31 +100,38 @@ fn a_remote_video_marker_stays_verbatim_on_the_tool_arm() {
 }
 
 #[test]
-fn a_markdown_clip_reference_is_lost_if_the_image_scan_walks_first() {
-    // The hazard the tool arm's order exists to avoid, DEMONSTRATED rather
-    // than asserted: the image walk consumes a reference whose bytes fail
-    // image validation, so an image-first order leaves the video family
-    // nothing to claim and the clip is never delivered.
+fn a_markdown_clip_reference_survives_an_image_first_walk() {
+    // #820: the old hazard — the image walk consumed a reference whose bytes
+    // failed image validation, so an image-first order left the video family
+    // nothing to claim and the clip was never delivered — is gone. The image
+    // family now DECLINES a non-image embed instead of judging it (ADR §3.1,
+    // "hand on, never fail"), so the reference is still standing for whoever
+    // walks next. The video-first order at the real site is kept for the
+    // reason it always had, but it is no longer load-bearing against loss.
     let dir = tempfile::tempdir().expect("tempdir");
     let clip = fixture(dir.path(), "render.mp4", MP4_BYTES);
     let text = format!("rendered ![clip]({})", clip.display());
 
-    // Image-first — the wrong order.
+    // Image-first — no longer destructive.
     let image_first = extract_local_images(&text, None);
     assert!(
         image_first.attachments.is_empty(),
         "a clip is not a picture, so the image family cannot deliver it"
     );
+    assert!(
+        image_first.failures.is_empty(),
+        "…and it no longer JUDGES it either: a clip is not a broken image, so \
+         there is no false 'Image not attached' notice to send"
+    );
     assert_eq!(
-        image_first.failures.len(),
-        1,
-        "…but it still JUDGES it, and that verdict is the false notice"
+        image_first.text, text,
+        "the reference is handed on untouched, not consumed"
     );
     let video_after = extract_local_videos(&image_first.text, None);
-    assert!(
-        video_after.attachments.is_empty(),
-        "the image walk consumed the reference, so the clip is LOST — this is \
-         exactly the outcome the video-first order avoids"
+    assert_eq!(
+        video_after.attachments.len(),
+        1,
+        "so the clip is still there to be claimed, whichever family walks first"
     );
 
     // Video-first — the order the site uses.
