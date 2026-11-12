@@ -187,6 +187,49 @@ fn data_url_markdown_image_counts_as_remote() {
     assert_eq!(scan.remote, vec![url]);
 }
 
+/// #825: the walk reads BOTH markdown forms (ADR §2 rule 6), so before the
+/// `embed` gate a plain hyperlink became a fetch candidate. A link is prose —
+/// the server answers with HTML, magic-byte validation fails, and the reply
+/// grows a "could not be delivered" trailer over something that was never an
+/// image. The author's syntax decides ONLY whether a REMOTE target is fetched.
+#[test]
+fn a_link_syntax_remote_url_is_never_a_fetch_candidate() {
+    let text = "see [#823](https://github.com/leshchenko1979/opencrabs/issues/823) for receipts";
+    let scan = extract_local_images(text, None);
+    assert_eq!(
+        scan.text, text,
+        "an ordinary hyperlink must survive byte-identical"
+    );
+    assert!(scan.remote.is_empty(), "a link is not an image request");
+    assert!(scan.failures.is_empty(), "and never a failed attachment");
+}
+
+/// The contrast that keeps the gate honest: the SAME url in embed syntax IS a
+/// fetch request, because `![…]` is how the author asks for a picture.
+#[test]
+fn the_same_remote_url_fetches_in_embed_syntax_and_not_in_link_syntax() {
+    let url = "https://example.com/chart.png";
+    let embed = extract_local_images(&format!("![chart]({url})"), None);
+    assert_eq!(embed.remote, vec![url.to_string()]);
+
+    let link = extract_local_images(&format!("[chart]({url})"), None);
+    assert!(link.remote.is_empty());
+    assert_eq!(link.text, format!("[chart]({url})"));
+}
+
+/// ADR §2 rule 6, the half #825 must not break: for a LOCAL target the two
+/// forms stay equivalent — the bytes decide the entry, never the syntax.
+#[test]
+fn a_local_image_path_is_claimed_in_both_markdown_forms() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png = write_file(dir.path(), "chart.png", PNG_BYTES);
+    let embed = extract_local_images(&format!("![chart]({})", png.display()), None);
+    let link = extract_local_images(&format!("[chart]({})", png.display()), None);
+    assert_eq!(resolved_paths(&embed), vec![png.clone()]);
+    assert_eq!(resolved_paths(&link), vec![png]);
+    assert!(link.failures.is_empty());
+}
+
 #[test]
 fn non_image_schemes_stay_literal() {
     let text = "![a](mailto:x@y.z) and ![b](ftp://h/x.png)";

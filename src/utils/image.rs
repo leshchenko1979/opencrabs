@@ -971,12 +971,24 @@ enum RemoteRefs {
 ///
 /// `caption` is the markdown title the reference carried, bound to the image it
 /// captions. A marker has no title form, so it always passes `None`.
+///
+/// `embed` says whether the author wrote EMBED syntax (`![alt](target)`) rather
+/// than a link (`[label](target)`). It decides exactly one thing: whether a
+/// REMOTE target is a fetch candidate. ADR §2 rule 6 makes the two forms
+/// equivalent for LOCAL paths — the harness is the only thing that can attach
+/// those, so the author's syntax never routes the file — but a remote URL stays
+/// verbatim (ADR §3.2) unless the author asked for an image, because
+/// `[#1](https://…)` is an ordinary hyperlink: fetching it returns HTML, fails
+/// magic-byte validation, and reports a "could not be delivered" trailer over a
+/// link that was never an image (#825, introduced when #820 widened this walk to
+/// both markdown forms). Markers pass `true`: machine syntax is never prose.
 fn record_candidate(
     raw: String,
     caption: Option<String>,
     base_dir: Option<&Path>,
     strip_unresolved: bool,
     remote: RemoteRefs,
+    embed: bool,
     scan: &mut LocalImageScan,
 ) -> bool {
     match classify_image_target(&raw, base_dir) {
@@ -1006,6 +1018,13 @@ fn record_candidate(
             true
         }
         ImageTarget::Remote(url) => {
+            // ADR §3.2: a remote URL stays verbatim unless the author asked for
+            // an image with EMBED syntax. A link-syntax target is an ordinary
+            // hyperlink — prose, not an attachment request — so it is never a
+            // fetch candidate and never becomes a failure notice (#825).
+            if !embed {
+                return false;
+            }
             // Only a delivery scan has a fetch step, and `LocalImageScan::remote`
             // means "awaiting a fetch" — so a strip-only scan records nothing and
             // removal falls back to the marker/markdown distinction.
@@ -1326,18 +1345,28 @@ fn scan_image_references(
             && let Some((end, raw)) = parse_marker_at(text, i, IMG_PREFIX)
         {
             if !raw.is_empty() {
-                record_candidate(raw, None, base_dir, true, remote, &mut scan);
+                record_candidate(raw, None, base_dir, true, remote, true, &mut scan);
             }
             i = end;
             continue;
         }
         // ADR §2 rule 6: both markdown forms, so the author's syntax never
-        // routes the file (see the rewriter's twin above).
+        // routes the file (see the rewriter's twin above). The form still
+        // decides whether a REMOTE target is fetched (#825) — that distinction
+        // is passed through as `embed`, not acted on here.
         if !regions[i]
             && let Some(bracket_len) = markdown_ref_bracket_len(text, i)
             && let Some((end, _label, raw, caption)) =
                 parse_markdown_ref(text, i, bracket_len, base_dir)
-            && record_candidate(raw, caption, base_dir, false, remote, &mut scan)
+            && record_candidate(
+                raw,
+                caption,
+                base_dir,
+                false,
+                remote,
+                bracket_len == 2,
+                &mut scan,
+            )
         {
             i = end;
             continue;
