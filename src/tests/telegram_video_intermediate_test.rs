@@ -454,8 +454,9 @@ fn the_intermediate_file_pass_marks_a_link_in_both_planes() {
 /// deliberately does NOT cover. The file walk runs on the image family's RICH
 /// form, and what it leaves there is a `![label](tg://document?id=docN)`
 /// reference plus the media entry that answers it — the marker is reserved for
-/// the two declared exceptions (a `.md` under `inline_markdown_documents`, an
-/// already-delivered file).
+/// one case only, an already-delivered file. (#823 deleted the other, the `.md`
+/// that `inline_markdown_documents` used to hold out, so markdown rides this
+/// same document plane.)
 ///
 /// The reference scheme this test used to pin (`tg://document?id=docN` feeding
 /// a `MediaKind::Document` media entry) is LIVE again (#820). #801 had deleted
@@ -489,7 +490,7 @@ fn the_intermediate_rich_body_carries_the_document_reference_and_owns_the_floor(
 
     // The file walk runs LAST, on the image family's rich form — the order the
     // intermediate performs.
-    let fw = rewrite_local_files(&rw_rich.rich, Some(dir.path()), &[], false);
+    let fw = rewrite_local_files(&rw_rich.rich, Some(dir.path()), &[]);
     assert_eq!(
         fw.entries.len(),
         1,

@@ -417,10 +417,11 @@ pub(crate) struct IntermediateMedia<'a> {
     /// since #820 it records a real `tg://document` reference plus its entry per
     /// file, so a document inlines like a picture. `entries` is no longer empty
     /// by construction: it is empty only when the family declined every
-    /// reference — a markdown file under the `inline_markdown_documents` toggle,
-    /// a file this turn already delivered, or a link that never resolved — and
-    /// those are exactly the references that keep the `📎 <label>` marker and
-    /// fall to the detached floor.
+    /// reference — a file this turn already delivered, or a link that never
+    /// resolved — and those are exactly the references that keep the
+    /// `📎 <label>` marker and fall to the detached floor. There is no file the
+    /// family refuses: #823 deleted the last such carve-out, the `.md` that
+    /// `inline_markdown_documents` used to hold out.
     pub(crate) rich_files: &'a crate::utils::image::LocalFileRewrite,
 }
 

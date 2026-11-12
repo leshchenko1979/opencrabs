@@ -2253,8 +2253,8 @@ fn consume_marker_prefix(buf: &mut String) {
 /// consumed first, so the marker is emitted once whichever side wrote it
 /// (#2001). The single home of the marker's shape — and since #820 the marker is
 /// what a document gets when the rich plane declines it (no rich path, a failed
-/// send, a `.md` under `inline_markdown_documents`, an already-delivered file),
-/// not the shape of every document as #801 held.
+/// send, an already-delivered file), not the shape of every document as #801
+/// held. #823 removed the last carve-out: a `.md` is a document like any other.
 fn push_file_marker(out: &mut String, label: &str, target: &str) -> std::ops::Range<usize> {
     consume_marker_prefix(out);
     let start = out.len();
@@ -2378,13 +2378,10 @@ impl MediaSource for ResolvedFileRef {
 /// The document twin of [`rewrite_local_images`]. Every resolvable file becomes
 /// an EMBED reference `![label](tg://document?id=docN)` in place, with a
 /// [`ResolvedFileRef`] recorded so the rich request can carry the bytes — with
-/// two deliberate exceptions that fall back to the plain `📎 <label>` marker and
-/// record no entry:
-///
-/// - a markdown document under `inline_markdown_documents = true` (ADR §5 — the
-///   md exception, because a client that cannot open an inlined document can
-///   still open the attachment);
-/// - a file this turn already delivered, which needs no second bubble.
+/// ONE deliberate exception that falls back to the plain `📎 <label>` marker and
+/// records no entry: a file this turn already delivered, which needs no second
+/// bubble. (#823 removed the other one: a `.md` was once held out by
+/// `inline_markdown_documents`, and markdown is now a document like any other.)
 ///
 /// A marker records no entry, so the rich plane does not claim that file and the
 /// detached file floor ships it — the leg that carries the bytes when the rich
@@ -2395,19 +2392,22 @@ impl MediaSource for ResolvedFileRef {
 /// copy of that list would be a second home for one predicate.
 #[derive(Debug, Clone, Default)]
 pub struct LocalFileRewrite {
-    /// Input with every resolvable local-file link replaced IN PLACE by the
-    /// plain `📎 <label>` marker. Links inside code spans, remote targets and
-    /// existing Telegram media refs are left byte-identical.
+    /// Input with every resolvable local-file reference replaced IN PLACE by an
+    /// EMBED reference `![alt](tg://document?id=docN)`. Links inside code
+    /// spans, remote targets and existing Telegram media refs are left
+    /// byte-identical; a file the rich plane declines gets the plain
+    /// `📎 <label>` marker instead.
     ///
-    /// #1918 briefly wrote `[📎 <label>](tg://document?id=<prefix><n>)` here —
-    /// LINK syntax, never image syntax (#800) — and #801 retired it: the
-    /// reference pointed at a media entry Telegram silently drops, so it
-    /// rendered as a clickable dead link with no bubble behind it.
+    /// #1918 wrote the reference in LINK syntax `[📎 <label>](tg://document?…)`
+    /// and #801 retired the whole plane, having measured only that form — which
+    /// attaches nothing for ANY media kind, its own photo control included,
+    /// while still returning `ok:true` (ADR §4.1). #820 re-measured the EMBED
+    /// form: it delivers a `PageBlockDocument`, so the plane is back and the
+    /// form is the thing that decides, never the kind.
     pub rich: String,
     /// Resolved documents in order of appearance, with the id each got — the
     /// entries the rich plane turns into `attach://` parts. Empty only when
-    /// every reference was refused, already delivered, or held back by the
-    /// `inline_markdown_documents` exception.
+    /// every reference was refused or already delivered.
     pub entries: Vec<ResolvedFileRef>,
 }
 
@@ -2460,25 +2460,8 @@ fn markdown_ref_bracket_len(text: &str, start: usize) -> Option<usize> {
 struct FileRewriter<'a> {
     base_dir: Option<&'a Path>,
     already_delivered: &'a [PathBuf],
-    /// `[channels.telegram] inline_markdown_documents` — the one deliberate
-    /// exception to "every document inlines" (ADR §5). When set, a `.md` /
-    /// `.markdown` target is held out of the rich body and takes the detached
-    /// floor, because a client that cannot open an inlined `PageBlockDocument`
-    /// can still open the attachment.
-    inline_markdown: bool,
     rich: String,
     entries: Vec<ResolvedFileRef>,
-}
-
-/// Whether `path` names a markdown document — the kind the
-/// `inline_markdown_documents` exception is about.
-fn is_markdown_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            let ext = ext.to_ascii_lowercase();
-            ext == "md" || ext == "markdown"
-        })
 }
 
 /// The `alt` text of a document's rewritten reference — the label, made safe to
@@ -2527,9 +2510,10 @@ impl FileRewriter<'_> {
     ///
     /// - **inline** — `![label](tg://document?id=docN)`, with the entry pushed
     ///   in the SAME call so the reference and its bytes can never disagree
-    ///   (ADR §3.3, §10 gap 5). This is the default for every file.
-    /// - **the plain `📎 <label>` marker** — for a markdown document under
-    ///   `inline_markdown_documents = true`, and for a file this turn already
+    ///   (ADR §3.3, §10 gap 5). This is the shape for every file, whatever its
+    ///   extension — `.md` included (#823: a markdown file is a document like
+    ///   any other, and the carve-out that held it out is gone).
+    /// - **the plain `📎 <label>` marker** — for a file this turn already
     ///   delivered. The marker records no entry, so the rich plane does not
     ///   claim it and the detached file floor ships it.
     fn file(&mut self, label: &str, target: &str, caption: Option<String>) -> bool {
@@ -2552,16 +2536,7 @@ impl FileRewriter<'_> {
                     // nothing: a delivered document is not a lost one.
                     return true;
                 }
-                // ADR §5: the md exception. With the toggle set, a markdown
-                // document is forced out of the rich body — the detached floor
-                // is the shape a client that cannot open an inlined
-                // `PageBlockDocument` can still open. It is an exception, never
-                // the rule, and it never touches images or videos.
-                if self.inline_markdown && is_markdown_path(&path) {
-                    push_file_marker(&mut self.rich, label, target);
-                    return true;
-                }
-                // ADR §2 rule 3: every other file inlines as a `document`
+                // ADR §2 rule 3: every file inlines as a `document`
                 // entry, in the SAME message, whatever its extension. The id is
                 // namespaced per family (`doc` / `img` / `vid`) because entries
                 // are matched to references BY ID inside one message's media
@@ -2633,13 +2608,11 @@ pub fn rewrite_local_files(
     text: &str,
     base_dir: Option<&Path>,
     already_delivered: &[PathBuf],
-    inline_markdown: bool,
 ) -> LocalFileRewrite {
     let regions = code_regions(text);
     let mut rw = FileRewriter {
         base_dir,
         already_delivered,
-        inline_markdown,
         rich: String::with_capacity(text.len()),
         entries: Vec::new(),
     };

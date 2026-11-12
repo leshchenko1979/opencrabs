@@ -3,15 +3,18 @@
 - **Status:** Accepted — the owner's intended behaviour (ruling 2026-10-29), **corrected by measurement**
   (revision 3). §2 and §4 now state what the wire actually does; §10 lists every gap between this document
   and the tree, so a reader never has to guess which half is real.
-- **Date:** 2026-10-29 (revision 3 — §2, §3.2, §4, §5 and §7 rewritten after twelve live `sendRichMessage`
-  probes; revision 2 was the ruling before anyone had measured the shapes it assumed)
+- **Date:** 2026-11-12 (revision 4 — §5 deleted the `.md` exception and §2 lost rule 4, after the owner
+  opened an inlined markdown file in the client; revision 3 was the twelve-live-probe rewrite of §2, §3.2,
+  §4, §5 and §7; revision 2 was the ruling before anyone had measured the shapes it assumed)
 - **Scope:** `src/utils/image.rs` (the reference walks), `src/channels/telegram/delivery.rs` (every plane),
   `src/channels/telegram/intermediates.rs` (promoted bubbles), `src/channels/telegram/rich/` (media array and
   the reference normalizer), `src/config/types.rs` (`TelegramConfig`), `src/brain/prompt_builder.rs` (what
   the model is told)
-- **Supersedes:** `ff1425cc5`'s **blanket** retirement of `inline_markdown_documents` — the flag returns,
-  because the ruling makes it the one deliberate exception to inlining (§5). The DM deep link
-  (`21d72dd9b`) is reverted in `642724791` and recorded as a rejected alternative (§7).
+- **Supersedes:** `ff1425cc5`'s blanket retirement of the document plane (reversed — documents do inline)
+  **and** this document's own revision 3, which restored `inline_markdown_documents` as a deliberate
+  exception. Revision 4 deletes that exception outright (#823): the client premise it rested on is dead,
+  and there is no longer any file the walk refuses (§5). The DM deep link (`21d72dd9b`) is reverted in
+  `642724791` and recorded as a rejected alternative (§7).
 - **Code state:** `642724791` on fork `main`. Shipped binary is `b2dcf5715` — see §10.
 
 ## 1. Context
@@ -40,7 +43,8 @@ It was not obvious, and three separate assumptions were measured false (§7).
 **Everything the author references inlines into the rich message body. What decides the ENTRY is the KIND
 of the bytes on disk; what decides whether anything attaches at all is the markdown FORM — and the harness
 controls the form.** The rich path is the default plane. The detached bubble is what remains when there is
-no rich path at all, or when the `.md` toggle deliberately keeps a markdown document out of it.
+no rich path at all, or when a rich send fails and the fallback ladder takes over. Nothing else holds a
+file out: as of revision 4 there is no per-extension exception left (§5).
 
 That second clause is the measurement's contribution, and it inverts revision 2. On the wire a reference
 attaches **only** in **image/embed syntax** — `![label](tg://<kind>?id=<id>)` — naming an entry whose bytes
@@ -54,7 +58,7 @@ always writes it back as `![…]` (§4.1).
 | 1 | A resolvable local reference to an **image** (PNG / JPEG / GIF87a / GIF89a / WEBP / BMP, by magic bytes) renders inline; its bytes ride the rich message's `media` array | `photo` | rich |
 | 2 | A resolvable local reference to a **video** renders inline the same way | `video` — **verified live**: `PageBlockVideo`, `video/mp4`, 46 848 B, filename intact | rich |
 | 3 | A resolvable local reference to **any other file** — one document kind, every extension — renders inline the same way | `document` — **verified live**: `text/markdown` 37 B and `application/pdf` 200 B | rich |
-| 4 | `.md` / `.markdown`, **when `inline_markdown_documents = true`**, are the deliberate exception: they leave the rich body and ship detached | none | rich path, forced out |
+| 4 | *(deleted in revision 4 — `.md` was the one exception; #823 removed it. Markdown is rule 3.)* | — | — |
 | 5 | With **no rich path** — `rich_messages = false`, or a rich send that failed and fell back — every kind ships as its own detached bubble | none | non-rich |
 | 6 | The reference is **always rewritten into `![…]`** whatever the author wrote, because link syntax cannot attach anything; a caption rides the markdown title (`"…"`) | — | rich |
 
@@ -100,7 +104,8 @@ reference is claimed exactly once — the same one-owner invariant the text floo
 Under this ADR the order keeps its meaning but loses one inference: a family that *declines* a reference
 does not decide the reference is detached. It hands the reference to the next family, and the last family
 (the document one) decides. That is the difference between "the image walk saw a `.md` and detached it" —
-today's tree — and "the image walk saw a `.md`, declined, and the document walk inlined it".
+the tree before #820, where the document family had no producer at all — and "the image walk saw a `.md`,
+declined, and the document walk inlined it", which is what ships now.
 
 ### 3.2 Images and videos
 
@@ -206,39 +211,41 @@ reader's only clue:
 Size ceiling for a document: **50 MiB** (`TELEGRAM_DOCUMENT_MAX_BYTES`), enforced *before* delivery so the
 model is told "too large" instead of the channel silently refusing.
 
-## 5. The `.md` path — the one deliberate exception
+## 5. The `.md` path — the exception that died (#823)
 
-**A `.md` file inlines like every other document, unless `[channels.telegram] inline_markdown_documents` is
-`true` — then it is forced out of the rich path and ships detached.**
+**A `.md` file inlines like every other document. There is no toggle, no carve-out, and no config key.**
 
-The flag is the *reason* this ADR needed a ruling. It was introduced by `#1968` with the opposite
-polarity (`true` = inline), deleted outright by `#801`, and now returns under the owner's rule: **md
-detaches when the toggle is set**. Name and polarity are kept from `#1968` so the default (`false`)
-reproduces today's behaviour and no config migrates — with `false`, md is just another document and inlines
-with the rest; with `true`, md alone is held back.
+Revision 3 made markdown the one deliberate exception, gated by
+`[channels.telegram] inline_markdown_documents`. Revision 4 deletes it, and the deletion is the owner's
+observation rather than an argument: **an inlined `.md` opens correctly in the Telegram client.** The
+capability premise the exception rested on — "the client cannot open an inlined `PageBlockDocument`, so give
+it an attachment instead" — is therefore false, and an exception whose premise is false is just a defect
+with a config key.
 
 | Stage | What it did | Verdict |
 |---|---|---|
-| `#1968` (upstream) | `.md` shipped detached by default because **Telegram Android** opens a `.md` *attachment* in its viewer but cannot open an inlined `PageBlockDocument`. Gated by `inline_markdown_documents` (default `false`) | right exception, wrong default: it detached md on every install |
+| `#1968` (upstream) | `.md` shipped detached by default because **Telegram Android** reportedly opens a `.md` *attachment* in its viewer but cannot open an inlined `PageBlockDocument`. Gated by `inline_markdown_documents` (default `false`) | the premise is now falsified in the client, so the exception had no subject left |
 | `#779` | a `.md` in a promoted intermediate was never delivered at all — the floor only sent files the rich plane had skipped, and a `.md` was never skipped | real bug, fixed |
 | `#801` | reported: a `document` media entry is accepted with `ok:true` and **silently dropped**; only `photo` attached. Re-measured 2026-10-29 (§4.1): every one of those probes used **link** syntax, and link syntax attaches nothing for *any* kind — the document was never the problem | the measurement was an artefact of the form, and the remedy (delete the flag, generalise "no document inlines") inherited it |
-| this ADR | the flag returns with its original polarity; the exception it encodes is real (a client that will not open an inline document should get an attachment), and it is an **exception**, not the rule | **load-bearing as of §4.1**: documents inline, so `true` genuinely holds a `.md` out of the rich body while every other kind goes in |
+| revision 3 | the flag returned with its original polarity: `true` held a `.md` out of the rich body while every other kind went in | correct given the premise, and the premise was never tested in the client until it was |
+| **`#823` (revision 4)** | **the flag is deleted**, along with its helper, its two call sites, the `is_markdown_path` test and the arm in `FileRewriter::file`. A `.md` takes the document plane exactly as a `.pdf` does | the exception is gone because its reason is gone |
 
-**The toggle's semantics, stated once so the code has one source:** `false` (default) → md is an ordinary
-document, inlined like every other file when the document plane works, detached otherwise. `true` → md is
-excluded from the document family's inline arm and always takes the detached floor, in every chat kind
-(the exception is about the client's viewer, not about DMs). It never affects images or videos.
-
-Live baseline on the shipped binary (DM `oc_l1979_bot`, 2026-10-29, before the flag existed): `[spec.md]` →
-its own bubble, `text/markdown`, 71 B; `[notes.txt]` → own bubble, `text/plain`, 35 B;
-`[chart.png]` → own bubble, `image/png`, 102 119 B. Three bubbles, identical shape, zero inlining — note
-the `.png` there is a *file link*, not an image reference, which under §2 now inlines and under the
-shipped binary cannot.
+**What the code does now, stated once so there is one source:** every resolvable local file — `.md`,
+`.markdown`, `.pdf`, `.zip`, `.txt`, anything — becomes an EMBED reference `![label](tg://document?id=docN)`
+with its `MediaKind::Document` entry pushed in the same call, so the reference and its bytes can never
+disagree (ADR §3.3). The `📎 <label>` marker survives for exactly one case: a file this turn already
+delivered, where the marker keeps the reader's anchor and the floor declines to send a second copy. No
+extension is special.
 
 **Configuration surface:** `rich_messages` gates the rich plane at all (off → everything is a detached
-bubble, §2 rule 5); `inline_markdown_documents` is the md exception; the `mermaid_*` trio is unrelated.
-`deny_unknown_fields` is not used in `src/config/`, so a stale or restored key in a user's file is inert
-rather than fatal.
+bubble, §2 rule 5); the `mermaid_*` trio is unrelated. `inline_markdown_documents` no longer exists, and
+because `deny_unknown_fields` is not used in `src/config/`, a user's stale copy of the key is inert rather
+than fatal — no migration, no warning, no behaviour.
+
+**The test that guards the deletion:** `markdown_inlines_like_any_other_document` in the
+`local_file_rewrite` module asserts a `.md` produces the same `tg://document?id=doc0` shape as a PDF. A
+mutant that reintroduces a markdown-only branch fails it, which is the point: the defect this closes was a
+per-extension branch nobody had questioned.
 
 ## 6. DM vs group separation
 
@@ -277,7 +284,7 @@ the same answer by different routes: no addressable form exists, so the marker s
 | Inline a document by giving its entry a `media` with no `attach://` source | API answers `ok:true` and delivers nothing — no attachment, no error, just a dead link. That is what #801 measured, and it is a property of the **shape**, not of documents (§4.1) |
 | Reference a document in **image** syntax | **this is the working shape**, not a rejection: `![s.md](tg://document?id=doc0)` with an `attach://doc0` part delivered a `PageBlockDocument`, filename intact. `RICH_MESSAGE_DOCUMENT_INVALID` is a reference naming an id the array does not carry; `RICH_MESSAGE_PHOTO_INVALID` is a `tg://photo` scheme aimed at a document entry — the scheme must match the entry's `type` |
 | Reference a document in **link** syntax | inert for **all** media kinds — a photo entry referenced as `[x](tg://photo?…)` does not attach either. The discriminator is the markdown form, not the kind (#801 arm E) |
-| Delete `inline_markdown_documents` because no document can inline | the measurement was an artefact — documents do inline (§4.1) — so the premise for deleting the flag was false. The flag is the owner's deliberate exception (§5), not dead weight |
+| Delete `inline_markdown_documents` **because no document can inline** | the measurement was an artefact — documents do inline (§4.1) — so that premise was false, and a deletion resting on it is not a decision. The flag was later deleted anyway, for the opposite reason: the *client* opens an inlined `.md` fine, so the exception had no subject (#823, §5) |
 | Address a DM bubble by `t.me/<bot>/<id>` | the bot's id space is not the client's (#802) |
 | **A DM deep link that re-sends the file** (`21d72dd9b`, reverted) | **overengineering, owner ruling.** It works, and it is the wrong idea: a marker names a file, the bubble already carries it. The cost was a token registry, a home-dir JSON map, and a `/start` branch ahead of the admission gate — a delivery transport grafted onto a caption |
 | Delete a link nothing downstream will fetch | silently loses a file the author believed was delivered (#286) |
@@ -367,7 +374,7 @@ Fork `leshchenko1979/opencrabs` unless marked *upstream* (`opencrabs/opencrabs`)
 | [#1938](https://github.com/opencrabs/opencrabs/issues/1938) | CLOSED | marker auto-linkified into a fake domain |
 | [#1939](https://github.com/opencrabs/opencrabs/issues/1939) | CLOSED | rich fallback duplicated a media-bearing intermediate |
 | [#1940](https://github.com/opencrabs/opencrabs/issues/1940) | CLOSED | the capabilities preamble went stale |
-| [#1968](https://github.com/opencrabs/opencrabs/issues/1968) | CLOSED | the `inline_markdown_documents` flag (§5) |
+| [#1968](https://github.com/opencrabs/opencrabs/issues/1968) | CLOSED | the `inline_markdown_documents` flag (§5) — restored in revision 3, **deleted again in revision 4** when the client premise it rested on was falsified (#823) |
 | [#2001](https://github.com/opencrabs/opencrabs/issues/2001) | CLOSED | the model's own `📎` doubled the marker |
 | [#406](https://github.com/opencrabs/opencrabs/issues/406) | CLOSED | **the ordering guarantee this ADR's §4 depends on**: attachments ship before the final body, so a turn never ends on a dangling document |
 | [#1079](https://github.com/opencrabs/opencrabs/issues/1079) | CLOSED | `send_photo` / `send_document` skipped `resolve_thread_id` — a file could land in General instead of its topic |
@@ -442,7 +449,7 @@ together and linked correctly; the rest were filed as standalone defects.
 flowchart TD
   1916["#1916 CLOSED local file links not delivered"] --> 1918["#1918 CLOSED the marker shape"]
   1916 --> 1937["#1937 CLOSED document arrives named file"]
-  1916 --> 1968["#1968 CLOSED the inline_markdown_documents flag"]
+  1916 --> 1968["#1968 CLOSED the inline_markdown_documents flag (re-deleted by #823)"]
   1918 --> 1938["#1938 CLOSED marker auto-linkified"]
   1918 --> 1939["#1939 CLOSED fallback duplicated a media intermediate"]
   1918 --> 1940["#1940 CLOSED stale capabilities preamble"]
@@ -497,9 +504,11 @@ Nothing in the decision, and three things in the reading:
    reference is lost, mis-owned or mis-rendered. The decision is stable under its own backlog. A 14th,
    fork `#636`, sits adjacent (the mermaid failure block, rich plane rather than the file plane).
 2. **`#801`'s subtree is closed, and this ADR now partly supersedes it** — the issue is CLOSED, its
-   measurement stands (no document entry attaches), but its remedy did not: the blanket retirement of
-   `inline_markdown_documents` is undone here (§5) and its DM follow-up `#802` is reverted (§6). Closed
-   on the tracker is not the same as still being the decision.
+   measurement stands **only in link syntax** (§4.1), and its remedy did not: the blanket retirement of the
+   document plane is undone here (§5) and its DM follow-up `#802` is reverted (§6). The
+   `inline_markdown_documents` flag travelled a stranger path — restored by revision 3, deleted again by
+   revision 4 (#823) on a *different* and measured ground. Closed on the tracker is not the same as still
+   being the decision.
 3. **The census method was the weak leg, twice.** First pass: 29 issues, missing ancestors and residuals.
    Second pass: 38, missing everything the tracker links but no title names. The graph found 7 more in one
    command per issue: **4 joined the census** (42 rows — 38 + 4), 1 is adjacent (`#636`), 2 are off surface
@@ -539,13 +548,15 @@ cross-references elsewhere in this document still land.
    now *declines* a reference whose bytes it cannot render (`UnsupportedFormat` with `!strip_unresolved`)
    instead of recording a user-visible failure, so the reference hands on to the document family rather than
    dying in the middle of the walk (§3.1).
-4. **CLOSED — `inline_markdown_documents` is back in the config.** `ff1425cc5` deleted the field, its
-   `Default` line, its prompt text and its README lines; all four are restored. `#[serde(default)]` with a
-   `false` default, threaded through both `rewrite_local_files` call sites via a single
-   `inline_markdown_documents()` helper, so the toggle has exactly one read point. It landed *with* gap 1,
-   never before it — a toggle whose subject cannot inline is an inert key that reads as working. The
-   channel-capabilities preamble now promises the inline render and names the detached fallback; the test
-   that forbade the phrase "never inlined into the reply" asserts the new text.
+4. **CLOSED AS REMOVED — `inline_markdown_documents` no longer exists (#823).** Revision 3 restored the
+   field `ff1425cc5` had deleted, `#[serde(default)]` with a `false` default, threaded through both
+   `rewrite_local_files` call sites from one read point. It landed *with* gap 1, never before it — a toggle
+   whose subject cannot inline is an inert key that reads as working. Then the owner opened an inlined `.md`
+   in the client, which killed `#1968`'s premise, and revision 4 deleted the field, its `Default` line, its
+   helper and its two call sites, plus `is_markdown_path` and the markdown arm in `FileRewriter::file`. A
+   stale key in a user's config is inert, not fatal (`deny_unknown_fields` is unused in `src/config/`). The
+   channel-capabilities preamble still promises the inline render and names the detached fallback; what
+   changed is that no extension is held back from it.
 5. **CLOSED — the reference, the entry and the part line up by construction.** They are produced in one
    `FileRewriter::file` call from one resolved `LocalFile`, so the three-way mismatch that §4.1 measured as
    a hard 400 has no window in which to occur. The ordering constraint survives for anyone editing this:
@@ -583,7 +594,7 @@ cross-references elsewhere in this document still land.
 | video inlines in a rich body | `telegram_video_intermediate_test.rs` (assertion) **plus** a live probe 2026-10-29: `PageBlockVideo`, `video/mp4`, 46 848 B (§3.2) |
 | documents inline in a rich body | live probes 2026-10-29: `PageBlockDocument`, `text/markdown` 37 B and `application/pdf` 200 B — in a DM and in a forum topic (§4.1) |
 | only **embed** syntax attaches, for any kind | live probes 2026-10-29: the same entries written in link syntax delivered no attachment, photo included (§4.1) |
-| behaviour on the shipped binary | DM probe 2026-10-29: `.md` / `.txt` / `.png` as three identical document bubbles, three `📎` markers, zero inlining |
+| behaviour on the shipped binary | **before #820** (DM probe 2026-10-29): `.md` / `.txt` / `.png` as three identical document bubbles, three `📎` markers, zero inlining. **After #820/#823** the owner opened an inlined `.md` from the client and reported it renders correctly — the first client-side confirmation this surface has had, and the observation that killed the `.md` exception (§5) |
 | dependency edges, both trackers | 38 × `gh issue view <N> -R <repo> --json parent,subIssues,blockedBy,blocking` over the then-census, **0 failures**; the walk named 7 issues outside it, 4 of which joined the census (42 rows: 28 fork + 14 upstream, 13 open). `#286` returns `nodes=9` == `totalCount=9`, so the largest child list is untruncated |
 
 ### 11.1 Coverage, and what it does not cover
@@ -599,7 +610,7 @@ contradicting the decision.
 | 1 · image inlines, kind by bytes | `telegram_local_image_media_test.rs`, `telegram_rich_media_kind_test.rs`, plus the image legs of `local_image_delivery_test.rs` |
 | 2 · video inlines | `telegram_video_delivery_test.rs`, `telegram_video_intermediate_test.rs` |
 | 3 · any other file inlines as a document | the inverted `local_file_rewrite` module (`local_image_delivery_test.rs`): entry count, id, part name, embed in body, no marker |
-| 4 · `inline_markdown_documents` detaches `.md` only | the toggle leg of `local_file_rewrite` + the three arms of `every_file_the_rich_plane_cannot_take_still_has_a_delivery_leg` |
+| ~~4~~ · *deleted by #823* | `markdown_inlines_like_any_other_document` asserts a `.md` and a `.pdf` produce the same `tg://document?id=docN` shape — the mutant this guards against is a per-extension branch |
 | 5 · no rich path → everything detached | `every_file_the_rich_plane_cannot_take_still_has_a_delivery_leg`, `each_link_ships_its_own_bubble_in_order` |
 | 6 · the reference is always rewritten to `!` | the embed assertions in `local_file_rewrite` for both input forms |
 | the floor is attempted, and retried | `#815`'s legs in `telegram_file_delivery_test.rs`: 429→land, 413 terminal, closed-port backoff, and a call-site guard counting `*_in_thread(` against `send_media_with_retry(` per floor |
@@ -614,10 +625,11 @@ contradicting the decision.
 2. **The tests assert the shape of the request, not what Telegram did with it.** Every leg above reads the
    multipart body we built. A body that satisfies §4.1's constraints is necessary and not sufficient: the
    only instrument that can tell you a `PageBlockDocument` came back is a probe against the real API.
-3. **The `.md` toggle's default is pinned, its rendering is not.** `inline_markdown_documents = false`
-   means a `.md` inlines; whether a given client can *open* an inlined `PageBlockDocument` is
-   `#1968`'s question and no test in this tree answers it. That is why the toggle exists and why the
-   detached floor is never removed.
+3. **A file inlines by default; whether a given client can *open* an inlined `PageBlockDocument` is still
+   not something this tree tests.** `#1968` assumed it could not (for `.md` on Android) and revision 4
+   falsified that assumption by observation rather than by a test. No leg here would notice if the client
+   regressed, which is the same class of hole as point 1: the detached floor is never removed precisely
+   because a rich send can fail on the client side and leave nothing.
 
 **One class of defect this surface has already shipped twice, now pinned:** a marker whose link target is
 the *intermediates* bubble rather than the file bubble. `the_fallback_links_a_marker_to_the_intermediates_bubble`

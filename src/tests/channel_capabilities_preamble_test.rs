@@ -203,13 +203,14 @@ fn test_local_file_link_line_is_telegram_only_and_stated_once() {
     );
     assert!(
         !telegram.contains("except a markdown (.md) document"),
-        "the #1968 carve-out is a CONFIG decision now, not a rule the model must \
-         apply — teaching it here would have the model second-guess the harness"
+        "the #1968 carve-out is DEAD (#823): markdown inlines like any other \
+         document, so the model must not be taught an exception that no longer \
+         exists"
     );
     assert!(
         !telegram.contains("inline_markdown_documents"),
-        "the config key is a user-facing switch; the model's instructions do not \
-         need its name"
+        "the config key is gone entirely (#823); the prompt must not name a \
+         switch a user cannot set"
     );
     assert!(
         !telegram.contains("the link label as its caption"),

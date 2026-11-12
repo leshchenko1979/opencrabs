@@ -991,8 +991,10 @@ fn every_file_the_rich_plane_cannot_take_still_has_a_delivery_leg() {
     // attaches nothing for any media kind). So the contract of
     // `files_the_rich_plane_skipped` is no longer "every file" — it is exactly
     // "what the rich plane did not take, and what the chat does not already
-    // hold". Three arms: a file the rich plane TOOK is not skipped; a `.md`
-    // under the toggle is; an already-delivered file is not.
+    // hold". Two arms: a file the rich plane TOOK is not skipped; an
+    // already-delivered file is not. (#823 deleted the third: a `.md` under
+    // `inline_markdown_documents` used to be held out, and markdown is now a
+    // document like any other — there is no file the walk refuses.)
     use crate::channels::telegram::intermediates::files_the_rich_plane_skipped;
     use crate::utils::image::{extract_local_files, rewrite_local_files};
 
@@ -1027,7 +1029,7 @@ fn every_file_the_rich_plane_cannot_take_still_has_a_delivery_leg() {
     // ARM 1 — the default. The rich walk takes the document: a reference the
     // array answers, plus the entry that carries the bytes. Nothing is skipped,
     // so the floor does not ship a second bubble for the same file.
-    let rich = rewrite_local_files(&text, Some(dir.path()), &[], false);
+    let rich = rewrite_local_files(&text, Some(dir.path()), &[]);
     assert_eq!(
         rich.entries.len(),
         1,
@@ -1049,38 +1051,12 @@ fn every_file_the_rich_plane_cannot_take_still_has_a_delivery_leg() {
         "a document the rich plane took must not ship twice"
     );
 
-    // ARM 2 — the ONE declared exception (ADR §5). With
-    // `inline_markdown_documents`, a `.md` is held out of the rich body, records
-    // no entry, and the floor owns it — which is the #779 leg, now scoped to the
-    // case it was written for instead of to every file.
-    let md_detached = rewrite_local_files(&text, Some(dir.path()), &[], true);
-    assert!(
-        md_detached.entries.is_empty(),
-        "the toggle holds markdown out of the rich plane"
-    );
-    assert!(
-        md_detached.rich.contains(marker),
-        "and the body carries the marker, got {:?}",
-        md_detached.rich
-    );
-    let skipped = files_the_rich_plane_skipped(&scan, &md_detached.entries, &[]);
-    assert_eq!(
-        skipped.len(),
-        1,
-        "a document the rich plane skipped must still have a delivery leg"
-    );
-    assert_eq!(skipped[0].path, doc, "and it is the resolved document");
-
-    // ARM 3 — the turn's delivered-media list. This is not only the #502/#1916
+    // ARM 2 — the turn's delivered-media list. This is not only the #502/#1916
     // double-send rule: the REWRITER's own `already_delivered` leg consumes such
     // a reference and records nothing, so without this filter the same path
     // would come back as a skipped file and ship twice.
-    let pre_delivered = rewrite_local_files(
-        &text,
-        Some(dir.path()),
-        std::slice::from_ref(&doc),
-        false,
-    );
+    let pre_delivered =
+        rewrite_local_files(&text, Some(dir.path()), std::slice::from_ref(&doc));
     assert!(
         pre_delivered.entries.is_empty() && !pre_delivered.rich.contains(marker),
         "a reference the rewriter consumed as already delivered leaves neither marker nor entry"

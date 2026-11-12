@@ -1054,8 +1054,10 @@ mod local_file_links {
 /// So these legs now assert the reference AND its entry. A leg that expects a
 /// `📎` marker for an ordinary file is asserting the #801 defect; one that
 /// expects no entry is asserting a claim the API honours the opposite of. The
-/// marker survives only for the two declared exceptions — a `.md` under
-/// `inline_markdown_documents`, and a file this turn already delivered.
+/// marker survives for ONE case — a file this turn already delivered. There is
+/// no file the walk refuses: #823 deleted the last exception, the `.md` held out
+/// by `inline_markdown_documents`, once the owner observed an inlined markdown
+/// file opening correctly in the client.
 mod local_file_rewrite {
     use crate::utils::image::rewrite_local_files;
     use std::path::{Path, PathBuf};
@@ -1078,9 +1080,7 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("before [Q3 report]({}) after", pdf.display()),
             Some(dir.path()),
-            &[],
-            false,
-        );
+            &[]);
         assert_eq!(
             rw.rich, "before ![Q3 report](tg://document?id=doc0) after",
             "the reference is replaced AT its position by the embed, never stripped"
@@ -1105,9 +1105,7 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("see [Q3]({}) here", pdf.display()),
             Some(dir.path()),
-            &[],
-            false,
-        );
+            &[]);
         assert_eq!(rw.rich, "see ![Q3](tg://document?id=doc0) here");
         assert_eq!(rw.entries.len(), 1);
     }
@@ -1124,9 +1122,7 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("[Q3]({}) and [Q4]({})", q3.display(), q4.display()),
             Some(dir.path()),
-            &[],
-            false,
-        );
+            &[]);
         assert_eq!(
             rw.rich,
             "![Q3](tg://document?id=doc0) and ![Q4](tg://document?id=doc1)"
@@ -1164,7 +1160,7 @@ mod local_file_rewrite {
             .map(|p| format!("[{}]({})", p.display(), p.display()))
             .collect::<Vec<_>>()
             .join(" ");
-        let rw = rewrite_local_files(&text, Some(dir.path()), &[], false);
+        let rw = rewrite_local_files(&text, Some(dir.path()), &[]);
         assert_eq!(
             rw.rich.matches("tg://document?id=").count(),
             3,
@@ -1205,9 +1201,7 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("[]({})", pdf.display()),
             Some(dir.path()),
-            &[],
-            false,
-        );
+            &[]);
         assert_eq!(
             rw.rich, "![q3-report.pdf](tg://document?id=doc0)",
             "the reader always has something to anchor on — the file's own name"
@@ -1229,9 +1223,7 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("[Q3 (final) report]({})", pdf.display()),
             Some(dir.path()),
-            &[],
-            false,
-        );
+            &[]);
         assert_eq!(
             rw.rich, "![Q3 final report](tg://document?id=doc0)",
             "parens are folded out of the alt and the runs they leave collapse"
@@ -1240,67 +1232,40 @@ mod local_file_rewrite {
     }
 
     #[test]
-    fn markdown_inlines_by_default_like_any_other_document() {
+    fn markdown_inlines_like_any_other_document() {
         // #1968 detached markdown on the narrow ground that Android will not
-        // open an inlined `.md`; #801 widened it to every document. #820 makes
-        // markdown an OPT-IN exception and nothing more: with the toggle off it
-        // inlines exactly like a PDF. A mutant that reinstates a markdown-only
-        // branch leaves the default wrong for every markdown file.
+        // open an inlined `.md`; #801 widened it to every document; #820 made
+        // markdown an OPT-IN exception. #823 deleted that exception: the owner
+        // opened an inlined `.md` in the client, so the capability premise it
+        // rested on is dead and there is nothing left to opt into. A mutant that
+        // reinstates a markdown-only branch leaves every markdown file wrong.
         let dir = tempfile::tempdir().expect("tempdir");
         let md = write_file(dir.path(), "state.md", MD_BYTES);
         let rw = rewrite_local_files(
             &format!("before [state]({}) after", md.display()),
             Some(dir.path()),
-            &[],
-            false,
-        );
+            &[]);
         assert_eq!(
             rw.rich, "before ![state](tg://document?id=doc0) after",
-            "markdown is not special unless the toggle says so"
+            "markdown is not special: no toggle, no branch, no exception"
         );
         assert_eq!(rw.entries.len(), 1);
     }
 
     #[test]
-    fn the_markdown_toggle_detaches_only_markdown() {
-        // ADR §5: `inline_markdown_documents = true` is the ONE declared
-        // exception, and it must be narrow. A toggle that also detached the PDF
-        // would silently undo rule 3 for every file the moment a user set it for
-        // one client limitation.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let md = write_file(dir.path(), "state.md", MD_BYTES);
-        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
-        let rw = rewrite_local_files(
-            &format!("[state]({}) and [Q3]({})", md.display(), pdf.display()),
-            Some(dir.path()),
-            &[],
-            true,
-        );
-        assert_eq!(
-            rw.rich, "📎 state and ![Q3](tg://document?id=doc0)",
-            "markdown takes the marker, the PDF still inlines"
-        );
-        assert_eq!(
-            rw.entries.len(),
-            1,
-            "the detached markdown records no entry, so the floor still owns it"
-        );
-        assert_eq!(rw.entries[0].file.path, pdf);
-    }
-
-    #[test]
-    fn the_toggle_still_disarms_the_autolinker_in_the_marker() {
+    fn an_already_delivered_file_still_disarms_the_autolinker_in_the_marker() {
         // #1938: a dotted label such as `1918-fix-state.md` is autolinked by the
-        // client as a bare domain. The disarmer must still reach this plane on
-        // the one path that still emits a marker.
+        // client as a bare domain (`.md` is a real TLD). The disarmer must still
+        // reach this plane on the one path that still emits a marker — a file
+        // this turn already delivered. Since #823 deleted the markdown
+        // exception that is the ONLY way a `📎` leaves this family, so this leg
+        // is the whole surviving guard for #1938 here.
         let dir = tempfile::tempdir().expect("tempdir");
         let md = write_file(dir.path(), "1918-fix-state.md", MD_BYTES);
         let rw = rewrite_local_files(
             &format!("[1918-fix-state.md]({})", md.display()),
             Some(dir.path()),
-            &[],
-            true,
-        );
+            std::slice::from_ref(&md));
         assert_eq!(
             rw.rich, "📎 1918-fix-state.\u{200b}md",
             "the marker is disarmed exactly as the HTML marker is"
@@ -1313,7 +1278,7 @@ mod local_file_rewrite {
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
         let text = format!("`[Q3]({})`", pdf.display());
-        let rw = rewrite_local_files(&text, Some(dir.path()), &[], false);
+        let rw = rewrite_local_files(&text, Some(dir.path()), &[]);
         assert_eq!(rw.rich, text, "a code span is documentation, not a link");
         assert!(rw.entries.is_empty());
     }
@@ -1324,7 +1289,7 @@ mod local_file_rewrite {
         // reference must survive so the reader still sees what was named. The
         // failure is the SCAN's to report — one predicate, one home.
         let text = "before [Q3 report](/definitely/not/here-q3.pdf) after";
-        let rw = rewrite_local_files(text, None, &[], false);
+        let rw = rewrite_local_files(text, None, &[]);
         assert_eq!(rw.rich, text);
         assert!(rw.entries.is_empty());
     }
@@ -1334,7 +1299,7 @@ mod local_file_rewrite {
         // It may be ordinary prose that merely looks like a link, so with no
         // working directory to resolve against it is left alone.
         let text = "see [report](reports/q3.pdf) here";
-        let rw = rewrite_local_files(text, None, &[], false);
+        let rw = rewrite_local_files(text, None, &[]);
         assert_eq!(rw.rich, text);
         assert!(rw.entries.is_empty());
     }
@@ -1342,7 +1307,7 @@ mod local_file_rewrite {
     #[test]
     fn a_remote_link_stays_byte_identical() {
         let text = "see [the site](https://example.com/a) for details";
-        let rw = rewrite_local_files(text, None, &[], false);
+        let rw = rewrite_local_files(text, None, &[]);
         assert_eq!(rw.rich, text);
         assert!(rw.entries.is_empty());
     }
@@ -1358,9 +1323,7 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("before [Q3]({}) after", pdf.display()),
             Some(dir.path()),
-            std::slice::from_ref(&pdf),
-            false,
-        );
+            std::slice::from_ref(&pdf));
         assert_eq!(rw.rich, "before  after");
         assert!(rw.entries.is_empty());
     }
@@ -1374,9 +1337,7 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("before 📎 [Q3 report]({}) after", pdf.display()),
             Some(dir.path()),
-            &[],
-            false,
-        );
+            &[]);
         assert_eq!(
             rw.rich, "before ![Q3 report](tg://document?id=doc0) after",
             "the model's own 📎 is consumed, not left beside the reference"
@@ -1396,9 +1357,7 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("![Q3 report]({})", pdf.display()),
             Some(dir.path()),
-            &[],
-            false,
-        );
+            &[]);
         assert_eq!(
             rw.rich, "![Q3 report](tg://document?id=doc0)",
             "an embed-syntax document is claimed, not passed through as an image ref"
@@ -1413,9 +1372,7 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("\n\n  before [Q3]({})", pdf.display()),
             Some(dir.path()),
-            &[],
-            false,
-        );
+            &[]);
         assert_eq!(rw.rich, "before ![Q3](tg://document?id=doc0)");
     }
 }

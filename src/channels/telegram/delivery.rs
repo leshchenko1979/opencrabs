@@ -74,20 +74,6 @@ fn options_pending(streaming: &Arc<std::sync::Mutex<StreamingState>>) -> bool {
         .is_some()
 }
 
-/// `[channels.telegram] inline_markdown_documents` — the ONE declared exception
-/// to "every document inlines" (#820, ADR §5).
-///
-/// Read once here rather than threaded through every caller, because both file
-/// walks (the final leg and the promoted-intermediate leg) must make the same
-/// decision from the same value: two reads of a config that cannot change
-/// mid-turn would only invite them to diverge.
-fn inline_markdown_documents() -> bool {
-    crate::config::Config::current()
-        .channels
-        .telegram
-        .inline_markdown_documents
-}
-
 /// True when a rich-send failure means Telegram could not fetch the embedded
 /// media (the mermaid.ink diagram) — a transient renderer or network window
 /// that a single re-send can sail (#tg-mermaid-delivery-hardening). Our
@@ -365,15 +351,14 @@ pub(crate) async fn deliver_final_response(
                 // It DOES record entries now (#820): a document inlines as a
                 // `PageBlockDocument` in the same array as images and videos,
                 // and the reference it emits is answered by that entry. The
-                // `📎` marker survives only for the two declared exceptions —
-                // a `.md` under `inline_markdown_documents`, and a file this
-                // turn already delivered — and those keep the detached floor as
-                // their delivery leg.
+                // `📎` marker survives only for a file this turn already
+                // delivered, which keeps the detached floor as its delivery
+                // leg. #823 removed the other carve-out: `.md` is a document
+                // like any other, with no config key to hold it back.
                 let fw = crate::utils::image::rewrite_local_files(
                     &rw.rich,
                     Some(image_cwd.as_path()),
                     &delivered,
-                    inline_markdown_documents(),
                 );
                 (rw, vw, fw)
             };
@@ -2618,17 +2603,16 @@ pub(crate) async fn handle_intermediate(
         crate::utils::image::rewrite_local_images(&vw.stripped, Some(cwd), "img", &delivered);
     // The FILE family walks LAST, on the image family's rich form — the same
     // one-owner-per-reference order the final leg uses. It records entries for
-    // an inlined document (#820); a `.md` under `inline_markdown_documents`, or
-    // a file this turn already delivered, comes back as the plain `📎 <label>`
-    // marker and rides the detached floor like every other file. #1918 put the
-    // entry in the media array as `MediaKind::Document` so it would render "at
-    // its reference"; the API accepts it only in EMBED syntax, which is what
-    // this walk now emits (ADR §4.1).
+    // an inlined document (#820); a file this turn already delivered comes back
+    // as the plain `📎 <label>` marker and rides the detached floor like every
+    // other file. #1918 put the entry in the media array as
+    // `MediaKind::Document` so it would render "at its reference"; the API
+    // accepts it only in EMBED syntax, which is what this walk now emits
+    // (ADR §4.1).
     let fw_rich = crate::utils::image::rewrite_local_files(
         &rw_rich.rich,
         Some(cwd),
         &delivered,
-        inline_markdown_documents(),
     );
 
     // 4. A fresh picture is report-shaped content on its own (#502); anything
