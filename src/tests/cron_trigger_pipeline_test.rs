@@ -685,10 +685,24 @@ fn test_non_fired_outcomes_never_build_a_prompt() {
     // against the real call site. A local `None.unwrap_or(x)` would be a
     // tautology that can never fail (clippy::unnecessary_literal_unwrap) — the
     // behavioural identity itself is covered by the placeholder tests above.
+    //
+    // #819 wraps that fallback in the delivery envelope, so the expression now
+    // sits inside a call rather than standing alone. The pin is on the ORDER,
+    // not on the layout: the fallback must be handed to the wrapper, which
+    // passes the prompt through unchanged and only adds the envelope around it.
+    let fallback = SRC
+        .find("fired_prompt.unwrap_or(job.prompt.as_str())")
+        .expect(
+            "the None path must fall back to the job's own prompt — the turn \
+             message is byte-identical when nothing fired",
+        );
+    let envelope = SRC
+        .find("delivery_envelope::wrap_turn_prompt(")
+        .expect("the turn message must be wrapped in the #819 delivery envelope");
     assert!(
-        SRC.contains("fired_prompt.unwrap_or(job.prompt.as_str())"),
-        "the None path must fall back to the job's own prompt — the turn message \
-         is byte-identical when nothing fired"
+        envelope < fallback,
+        "the job-prompt fallback must be passed INTO the envelope wrapper, found \
+         the wrapper at {envelope} and the fallback at {fallback}"
     );
 }
 

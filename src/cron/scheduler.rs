@@ -747,7 +747,20 @@ async fn execute_job(
     // prompt. None on every other outcome (and the rebuild path returned before
     // this line), so the turn message stays byte-identical to pre-fix behaviour
     // when nothing fired.
-    let turn_prompt = fired_prompt.unwrap_or(job.prompt.as_str());
+    //
+    // #819 — the envelope is prepended here, and only here. The job's own
+    // prompt was reaching the model with no statement of what happens to its
+    // output, so a job that decided to "post the report" called a send tool and
+    // the scheduler delivered the same content again. On 2026-11-12 that tool
+    // was an MCP `tg_send_message`, sent on the owner's account, and the bound
+    // chat ingested the copy as an inbound instruction from the owner.
+    // The prompt itself is passed through unchanged; the envelope is added
+    // information, never a rewrite.
+    let turn_prompt = crate::cron::delivery_envelope::wrap_turn_prompt(
+        fired_prompt.unwrap_or(job.prompt.as_str()),
+        &job.name,
+        job.deliver_to.as_deref(),
+    );
 
     let send_scope: Option<crate::cron::send_scope::SendScope> = Some(
         crate::cron::send_scope::cron_job_scope_async(&ctx.pool(), job.deliver_to.as_deref()).await,
@@ -758,7 +771,7 @@ async fn execute_job(
         send_scope,
         agent.send_message_with_tools_and_callback(
             session_id,
-            turn_prompt.to_string(),
+            turn_prompt,
             effective_model,
             None, // no cancel token
             Some(Arc::new(|_| {

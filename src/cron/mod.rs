@@ -5,6 +5,7 @@
 //! follows the user, falls back to initial session. Results are optionally
 //! delivered to a configured channel (Telegram, Discord, Slack).
 
+pub mod delivery_envelope;
 pub mod pipeline;
 mod schedule_util;
 pub(crate) mod scheduler;

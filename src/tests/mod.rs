@@ -258,6 +258,7 @@ pub mod cowork_connect_test;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod crash_signal_test;
 pub mod cron_deliver_to_thread_test;
+pub mod cron_delivery_envelope_test;
 pub mod cron_delivery_outcome_test;
 pub mod cron_in_flight_guard_test;
 pub mod cron_next_run_at_test;
