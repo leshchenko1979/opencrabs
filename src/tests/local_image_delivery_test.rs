@@ -1143,17 +1143,23 @@ mod local_file_rewrite {
     #[test]
     fn every_document_kind_emits_a_reference_and_an_entry() {
         // The #801 guard, inverted: the defect was a document that could NOT
-        // inline, so no document kind may be left on the marker floor. Covers
-        // the four kinds that actually reach a rich reply — a mutant that
-        // detaches ANY one of them reintroduces the dead end for that kind.
+        // inline, so no DOCUMENT kind may be left on the marker floor. A mutant
+        // that detaches any one of them reintroduces the dead end for that kind.
+        //
+        // The picture in the fixture is deliberate and is NOT expected to
+        // inline HERE: this walk is the document family, and a `.png` belongs to
+        // the image family, which runs before it (ADR §3.1, VID → IMG → FILE).
+        // The file family must DECLINE those bytes and leave the reference
+        // untouched for the earlier walk — the alternative, claiming them,
+        // ships a document bubble beside the picture's marker. That ownership
+        // boundary is the assertion below, and it is the bug this leg caught:
+        // the first draft of this test demanded a document entry for the PNG.
         let dir = tempfile::tempdir().expect("tempdir");
-        let files = [
-            write_file(dir.path(), "state.md", MD_BYTES),
-            write_file(dir.path(), "q3.pdf", PDF_BYTES),
-            write_file(dir.path(), "slide.png", PNG_BYTES),
-            write_file(dir.path(), "ogre_deck.py", PY_BYTES),
-        ];
-        let text = files
+        let md = write_file(dir.path(), "state.md", MD_BYTES);
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let png = write_file(dir.path(), "slide.png", PNG_BYTES);
+        let py = write_file(dir.path(), "ogre_deck.py", PY_BYTES);
+        let text = [&md, &pdf, &png, &py]
             .iter()
             .map(|p| format!("[{}]({})", p.display(), p.display()))
             .collect::<Vec<_>>()
@@ -1161,14 +1167,28 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(&text, Some(dir.path()), &[], false);
         assert_eq!(
             rw.rich.matches("tg://document?id=").count(),
-            files.len(),
-            "one document reference per file: {:?}",
+            3,
+            "one document reference for each of the three DOCUMENT kinds: {:?}",
             rw.rich
         );
         assert_eq!(
             rw.entries.len(),
-            files.len(),
-            "one entry per file: {:?}",
+            3,
+            "one entry per document kind: {:?}",
+            rw.rich
+        );
+        assert_eq!(
+            rw.entries
+                .iter()
+                .map(|e| e.file.path.as_path())
+                .collect::<Vec<_>>(),
+            vec![md.as_path(), pdf.as_path(), py.as_path()],
+            "the picture is not one of the document family's entries"
+        );
+        assert!(
+            rw.rich.contains(&format!("[{}]({})", png.display(), png.display())),
+            "the picture's reference is left EXACTLY as written, for the image \
+             walk to claim: {:?}",
             rw.rich
         );
         assert!(
