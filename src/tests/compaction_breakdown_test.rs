@@ -79,7 +79,11 @@ fn card_keeps_the_headline_and_states_the_measured_numbers() {
     );
     assert!(lines[1].contains("131K → 106K"), "tokens row: {}", lines[1]);
     assert!(lines[1].contains("-24K, -18.7%"), "delta row: {}", lines[1]);
-    assert!(lines[2].contains("65% → 53% of 200K"), "fill row: {}", lines[2]);
+    assert!(
+        lines[2].contains("65% → 53% of 200K"),
+        "fill row: {}",
+        lines[2]
+    );
     // Truncated, not rounded: 21.5 s is reported as 21 s.
     assert!(lines[3].contains("21s"), "took row: {}", lines[3]);
 }
@@ -93,7 +97,10 @@ fn tools_row_survives_a_document_with_no_manifest() {
     assert!(tools.contains("tools"), "{tools}");
     assert!(tools.contains("7K"), "{tools}");
     assert!(!out.contains("kept"), "no manifest, no kept row: {out}");
-    assert!(!out.contains("dropped"), "no manifest, no dropped row: {out}");
+    assert!(
+        !out.contains("dropped"),
+        "no manifest, no dropped row: {out}"
+    );
 }
 
 #[test]
