@@ -560,6 +560,28 @@ pub struct TelegramConfig {
     /// rendering (which works on every client) is used instead.
     #[serde(default = "default_true")]
     pub rich_messages: bool,
+    /// Send a markdown document as a separate attachment instead of an inlined
+    /// document block inside the rich message (#820, ADR §5).
+    ///
+    /// OFF by default, which is the same rule every other file follows: a
+    /// `.md` inlines as a `PageBlockDocument` like a `.pdf` does, and the reply
+    /// carries a tappable reference to it. Set this to `true` to keep `.md` /
+    /// `.markdown` on the detached floor instead — a client that cannot open an
+    /// inlined document block can still open an attachment, so this is the
+    /// escape hatch for readers on old clients, never the default.
+    ///
+    /// It is the ONE exception to "every document inlines": it never touches
+    /// images, videos or any non-markdown file. Requires `rich_messages`; with
+    /// rich messages off every file takes the detached floor anyway.
+    ///
+    /// Historical note (#801): this key was deleted along with the document
+    /// plane on the false premise that no document could ever inline. That
+    /// premise came from five multipart probes written in LINK syntax, which
+    /// attaches nothing for any media kind — its own photo control delivered
+    /// nothing too. Re-measured in EMBED syntax on 2026-10-29 (ADR §4.1),
+    /// documents inline. The key is restored with its original meaning.
+    #[serde(default)]
+    pub inline_markdown_documents: bool,
     /// Render ```mermaid code fences as inline diagram images inside rich
     /// messages (#1044). Diagrams are rendered by mermaid.ink over HTTP and
     /// embedded as `<img>` in the Telegram rich-HTML message; a diagram the
@@ -660,6 +682,7 @@ impl Default for TelegramConfig {
             respond_to: RespondTo::default(),
             session_idle_hours: None,
             rich_messages: true,
+            inline_markdown_documents: false,
             mermaid_render: true,
             mermaid_theme: default_auto(),
             mermaid_bg: default_auto(),

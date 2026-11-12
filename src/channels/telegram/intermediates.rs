@@ -356,12 +356,13 @@ pub(crate) fn intermediate_file_links(
 /// The files an intermediate's SCAN resolved but the rich plane did NOT take
 /// (#779).
 ///
-/// The rich plane's entries are the wrong source for "which documents need a
-/// bubble of their own": #801 made the file walk record NO entry for any
-/// document, so every resolvable file comes back from it as a plain
-/// `📎 <label>` marker and a list derived from `entries` drops all of them. The
-/// scan is the walk that saw every reference, so the skipped set is read off it
-/// and then narrowed twice:
+/// The SCAN is the source of "every file this reply referenced", because it is
+/// the walk that saw every reference and it always resolves one whether or not
+/// the rich plane will carry it. The rich walk's `entries` are then the
+/// subtraction: since #820 a document that inlines leaves an entry, so a list
+/// derived from `entries` alone would name only the INLINED files and drop
+/// exactly the ones that need a bubble. Read off the scan, the skipped set is
+/// then narrowed twice:
 ///
 /// - by the rich plane's own entries — those ride the media array and must not
 ///   ship a second time as their own bubble;
@@ -410,13 +411,16 @@ pub(crate) struct IntermediateMedia<'a> {
     /// the pictures, each carrying its own `MediaKind::Video`; only when the
     /// rich send is refused does a clip fall back to its own bubble.
     pub(crate) videos: &'a crate::utils::image::LocalVideoRewrite,
-    /// The file family's rewrite for the RICH plane (#1918, #801). Built on the
-    /// image family's rich form, so every family's `tg://` reference survives in
-    /// `rich` for the shared media array to answer — but it records NO entry for
-    /// any document: Telegram accepts a `{"type":"document"}` media entry with
-    /// `ok:true` and then delivers nothing (owner report, 2026-10-28), so the
-    /// only leg a document has is the detached floor, which reads `rich`'s
-    /// `📎 <label>` markers and ships a bubble per file.
+    /// The file family's rewrite for the RICH plane (#1918, live again #820).
+    /// Built on the image family's rich form, so every family's `tg://`
+    /// reference survives in `rich` for the shared media array to answer, and
+    /// since #820 it records a real `tg://document` reference plus its entry per
+    /// file, so a document inlines like a picture. `entries` is no longer empty
+    /// by construction: it is empty only when the family declined every
+    /// reference — a markdown file under the `inline_markdown_documents` toggle,
+    /// a file this turn already delivered, or a link that never resolved — and
+    /// those are exactly the references that keep the `📎 <label>` marker and
+    /// fall to the detached floor.
     pub(crate) rich_files: &'a crate::utils::image::LocalFileRewrite,
 }
 
@@ -452,12 +456,12 @@ pub(crate) async fn deliver_intermediate_message(
     // dedup record, the rich send and the HTML fallback all see the same
     // expanded shape. The HTML path reflows again internally but is idempotent.
     let stripped_expanded = super::rich::reflow_collapsed_tables(&rw_stripped.stripped);
-    // #1918: the FILE family's rich form is still the body's source, but since
-    // #801 it carries no document reference — only the image and video families
-    // put `tg://` refs in it, and every document comes back as the `📎 <label>`
-    // marker the shared media array below has nothing to answer. The marker form
-    // is therefore what the reader gets, and the detached file floor is the leg
-    // that puts a bubble behind each marker.
+    // #1918: the FILE family's rich form is the body's source, and since #820 it
+    // carries a `tg://document` reference per file beside the image and video
+    // families' refs — the shared media array below answers all three kinds in
+    // one send. A file the family declined still comes back as the `📎 <label>`
+    // marker, which the array has nothing to answer, and the detached file floor
+    // is the leg that puts a bubble behind it.
     //
     // The HTML fallback and the dedup record keep the MARKER form, deliberately:
     // that plane has no media array, so a `tg://document` reference there would
@@ -529,14 +533,14 @@ pub(crate) async fn deliver_intermediate_message(
     media.extend(entries);
     failures.extend(video_failures);
 
-    // #1918: the documents WOULD ride the SAME array, each carrying its own kind
-    // and the file's OWN name — but #801 made this read a no-op by construction:
-    // the file walk records no entry for any document, because Telegram accepts
-    // a `{"type":"document"}` media entry with `ok:true` and then delivers
-    // nothing (owner report, 2026-10-28). It stays as the guard rather than
-    // being deleted: a path that starts emitting a document entry again must
-    // land in this array, not ship the same bytes twice. A read that fails here
-    // joins the failure list, never a panic.
+    // #1918: the documents ride the SAME array, each carrying its own kind and
+    // the file's OWN name, which is what makes a document inline (#820). The
+    // read is live again: #801 had emptied the producer, which left this as a
+    // guard over an always-empty list. It must stay a read and not a bypass —
+    // the entry's bytes are what the `tg://document` reference in the body
+    // resolves against, and shipping the same bytes twice (inline AND floor) is
+    // the failure mode to avoid. A read that fails here joins the failure list,
+    // never a panic.
     let (entries, file_read_failures, file_read_paths) = super::delivery::read_media_entries(
         &walks.rich_files.entries,
         super::rich::mermaid::MediaKind::Document,
@@ -560,13 +564,15 @@ pub(crate) async fn deliver_intermediate_message(
         .filter(|entry| file_read_paths.contains(&entry.file.path))
         .map(|entry| entry.file.clone())
         .collect();
-    // #779: the documents the RICH plane did NOT take — which since #801 is
-    // every one of them. A reference comes back as the plain `📎 <label>` marker
-    // with NO entry in `rich_files.entries`, so a list derived from those
-    // entries alone has no leg on EITHER plane: the marker is emitted with
-    // nothing behind it and no address to link to — the dead-anchor shape the
-    // owner reported on bubble 93966. The predicate lives in
-    // `files_the_rich_plane_skipped` above, where it is unit-tested.
+    // #779: the documents the RICH plane did NOT take — since #820 a minority,
+    // not every one of them: a markdown file under the toggle, a file already
+    // delivered this turn, or a reference the family declined. Such a reference
+    // comes back as the plain `📎 <label>` marker with NO entry in
+    // `rich_files.entries`, so a list derived from those entries alone has no
+    // leg on EITHER plane: the marker is emitted with nothing behind it and no
+    // address to link to — the dead-anchor shape the owner reported on bubble
+    // 93966. The predicate lives in `files_the_rich_plane_skipped` above, where
+    // it is unit-tested.
     let skipped_files: Vec<crate::utils::image::LocalFile> = {
         let delivered = {
             let s = streaming.lock().unwrap_or_else(|e| e.into_inner());

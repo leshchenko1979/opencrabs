@@ -66,16 +66,23 @@ Three consequences worth stating plainly, because each one used to be the opposi
   routing signal"; the measurement's half is that the `!` is the *only* thing the wire reads. One rule
   satisfies both: the harness always emits `!` and picks the entry by kind, so the author's form stops
   mattering at the claim instead of at the send.
-- **The floor never disappears.** Every kind still has a detached leg, and it stays *ungated*: it is what
-  carries the bytes when the rich plane declines, fails, or is switched off. An inline entry is an
-  *additional* delivery, never a replacement for a bubble that a client can open.
+- **The floor never disappears — but it is *attempted*, not *delivered*.** Every kind still has a detached
+  leg, and it stays *ungated*: it is what carries the bytes when the rich plane declines, fails, or is
+  switched off. An inline entry is an *additional* delivery, never a replacement for a bubble a client can
+  open. Revision 3 called that leg "always on", which read as a guarantee; measured over six days it was
+  **4 failures in 44 uploads (9.09 %)** — three of them a `Retry after 3s` handed to us and declined, one a
+  transport flap. [#815](https://github.com/leshchenko1979/opencrabs/issues/815) closed the retry hole, so
+  the leg now sleeps the window it is given and backoffs once on a transport error; a timeout is still
+  **not** retried, because an upload that may have landed must not be shipped twice. Ungated means nothing
+  gates the attempt. It has never meant the bubble arrives.
 - **The rich body is written only if the array answers it.** A `tg://photo` / `tg://video` /
   `tg://document` reference in the body that no media entry resolves renders as dead markdown. This is why
   the reference rewrite and the entry push are one operation and never two (§3.3).
 
 Rule 3 is measured, not intended: a document inlines when it is referenced in embed syntax with its bytes
-in the same multipart body (§4.1). What remains is that the tree emits no document entry at all — the gap
-is in the code, not in the API (§10).
+in the same multipart body (§4.1). The tree emitted no document entry at all until
+[#820](https://github.com/leshchenko1979/opencrabs/issues/820) built the producer; it now emits one, and the
+tests that pinned the opposite are inverted (§10).
 
 Rules 1–3 share one walk order — **video → image → file** — because each family must own a reference
 exactly once (§3.1). That ordering is unchanged by this decision; what changes is that a family's
@@ -505,31 +512,48 @@ Nothing in the decision, and three things in the reading:
 kind keeps its detached floor leg, so the reader can always open the file; what they lose when a kind
 cannot inline is the picture-in-the-prose, not the file.
 
-**The gaps between this ADR and `642724791`, in the order a reader would notice them:**
+**The gaps between this ADR and `642724791`, in the order a reader would notice them.** Five of the six
+closed in [#820](https://github.com/leshchenko1979/opencrabs/issues/820); the numbering is kept so the
+cross-references elsewhere in this document still land.
 
-1. **No document ever inlines in the tree — rule 3 is API-verified and code-absent.** The document family
-   has no `doc` id namespace, no rewrite and no entry, so every file leaves the body as `📎`. §4.1 gives
-   the exact shape to emit: an `{"type":"document","media":"attach://docN"}` entry with the bytes as a
-   multipart part, referenced as `![label](tg://document?id=docN)`.
-2. **`image.rs:2270` carries a false comment.** It records that a `video` entry delivered nothing in #801's
-   probes; measured 2026-10-29, video inlines fine in embed syntax (§3.2). The comment needs correcting
-   before the next reader believes it — three tests already assert the true behaviour.
-3. **The walk still routes by syntax, and it must stop.** The image family claims `![…]` only, so
-   `[chart.png](/tmp/chart.png)` reaches the document family and ships as a bubble while `![chart.png](…)`
-   inlines. Under §2 the family a reference lands in is decided by its **bytes**, and every claim is
-   re-emitted as `!` — so the document family must re-validate a claimable reference as an image and hand
-   it back, and every family must rewrite to embed syntax whatever the author wrote (§3.1).
-4. **`inline_markdown_documents` is not in the config.** `ff1425cc5` deleted the field, its `Default` line,
-   its prompt text and its README lines; restoring it is a `TelegramConfig` field, a default, and the
-   document family's exclusion arm. It is **load-bearing the moment gap 1 closes**, so it lands with gap 1
-   or after it — not before, where it would be an inert key that reads as a working toggle.
-5. **The multipart side has to agree with the reference.** An inline document needs three things to line up
-   in one call: a part name, an entry `{"type":"document","media":"attach://<part>"}`, and a
-   `![…](tg://document?id=<id>)` whose id names that entry. Any mismatch is a hard 400 that costs the whole
-   message (§4.1), so this is one operation and never three passes.
-6. **The DM deep link is gone and nothing replaced it.** `21d72dd9b` is reverted in `642724791`; a DM marker
-   is plain text, like a basic group's. The running binary (`b2dcf5715`) predates all of this, so nothing
-   about the revert is observable to a user until the next ship.
+1. **CLOSED — no document ever inlined; rule 3 was API-verified and code-absent.** The tree now has the
+   producer it never had: `FileRewriter::file` emits `![{alt}](tg://document?id=doc{n})` **and** pushes the
+   matching `ResolvedFileRef` in the same call, so reference and entry cannot drift apart (gap 5). The id
+   namespace is `DOC_ID_PREFIX = "doc"`; the part name is the file's own name, so the bubble the reader gets
+   is named as they named it. `read_media_entries(…, MediaKind::Document, …)` and `rich_owns_documents` were
+   already live and needed no change — the consumer was never the gap. Pinned by the inverted
+   `local_file_rewrite` module: an inlined `.md` yields `entries.len() == 1`, the body carries the embed, and
+   **no** `📎` marker is emitted.
+2. **CLOSED — the false `#801` comment.** The claim that a `video` entry delivered nothing, and that a
+   document "can never inline", are both gone from `utils/image.rs`, `delivery.rs` and `mermaid.rs`; the
+   doc comments now state the measured behaviour with the probe receipt beside it. Correcting them mattered
+   more than it looks: three tests assert the true behaviour, so the comment was the only artifact in the
+   tree still arguing against its own suite.
+3. **CLOSED — the walk routed by syntax; it now routes by bytes.** `markdown_ref_bracket_len` replaced the
+   four `text[i..].starts_with("![")` gates, so every family reads both `[label](p)` and `![alt](p)` and
+   re-emits embed syntax whatever the author wrote (§2 rule 6). Routing is by content: `markdown_target_is_video`
+   is now a **positive** container test (`is_supported_video_head` — an aligned ISO-BMFF box walk accepting
+   `ftyp` only at a box boundary and refusing M4A/M4B/M4P, plus EBML, RIFF-AVI and FLV), where it used to
+   answer "not an image". That old test was a live defect, not a gap: a PDF written `![d](x.pdf)` was being
+   claimed by the video family and shipped as a `tg://video` entry, which is a hard 400. The image family
+   now *declines* a reference whose bytes it cannot render (`UnsupportedFormat` with `!strip_unresolved`)
+   instead of recording a user-visible failure, so the reference hands on to the document family rather than
+   dying in the middle of the walk (§3.1).
+4. **CLOSED — `inline_markdown_documents` is back in the config.** `ff1425cc5` deleted the field, its
+   `Default` line, its prompt text and its README lines; all four are restored. `#[serde(default)]` with a
+   `false` default, threaded through both `rewrite_local_files` call sites via a single
+   `inline_markdown_documents()` helper, so the toggle has exactly one read point. It landed *with* gap 1,
+   never before it — a toggle whose subject cannot inline is an inert key that reads as working. The
+   channel-capabilities preamble now promises the inline render and names the detached fallback; the test
+   that forbade the phrase "never inlined into the reply" asserts the new text.
+5. **CLOSED — the reference, the entry and the part line up by construction.** They are produced in one
+   `FileRewriter::file` call from one resolved `LocalFile`, so the three-way mismatch that §4.1 measured as
+   a hard 400 has no window in which to occur. The ordering constraint survives for anyone editing this:
+   the reference rewrite and the entry push are one operation and never two passes.
+6. **OPEN — the DM deep link is gone and nothing replaced it.** `21d72dd9b` is reverted in `642724791`; a DM
+   marker is plain text, like a basic group's. This one is a decision, not a backlog item: a marker is a
+   label, not a transport. The binary that ships this ADR is the first in which any of it is observable, so
+   nothing about the revert was visible to a user before that ship.
 
 **Open defects on this surface, in severity order** — none of them disagrees with this ADR:
 
@@ -561,3 +585,43 @@ cannot inline is the picture-in-the-prose, not the file.
 | only **embed** syntax attaches, for any kind | live probes 2026-10-29: the same entries written in link syntax delivered no attachment, photo included (§4.1) |
 | behaviour on the shipped binary | DM probe 2026-10-29: `.md` / `.txt` / `.png` as three identical document bubbles, three `📎` markers, zero inlining |
 | dependency edges, both trackers | 38 × `gh issue view <N> -R <repo> --json parent,subIssues,blockedBy,blocking` over the then-census, **0 failures**; the walk named 7 issues outside it, 4 of which joined the census (42 rows: 28 fork + 14 upstream, 13 open). `#286` returns `nodes=9` == `totalCount=9`, so the largest child list is untruncated |
+
+### 11.1 Coverage, and what it does not cover
+
+The §11 table names the instrument for each claim. This section states the honest limit of that coverage,
+because a suite that pins the wrong thing is worse than one that pins nothing — it goes green while
+contradicting the decision.
+
+**What the suite now pins, per rule:**
+
+| Rule | Test |
+|---|---|
+| 1 · image inlines, kind by bytes | `telegram_local_image_media_test.rs`, `telegram_rich_media_kind_test.rs`, plus the image legs of `local_image_delivery_test.rs` |
+| 2 · video inlines | `telegram_video_delivery_test.rs`, `telegram_video_intermediate_test.rs` |
+| 3 · any other file inlines as a document | the inverted `local_file_rewrite` module (`local_image_delivery_test.rs`): entry count, id, part name, embed in body, no marker |
+| 4 · `inline_markdown_documents` detaches `.md` only | the toggle leg of `local_file_rewrite` + the three arms of `every_file_the_rich_plane_cannot_take_still_has_a_delivery_leg` |
+| 5 · no rich path → everything detached | `every_file_the_rich_plane_cannot_take_still_has_a_delivery_leg`, `each_link_ships_its_own_bubble_in_order` |
+| 6 · the reference is always rewritten to `!` | the embed assertions in `local_file_rewrite` for both input forms |
+| the floor is attempted, and retried | `#815`'s legs in `telegram_file_delivery_test.rs`: 429→land, 413 terminal, closed-port backoff, and a call-site guard counting `*_in_thread(` against `send_media_with_retry(` per floor |
+
+**What it does not cover — three holes, stated so the next reader does not mistake green for proven:**
+
+1. **§4.1 has no automated regression.** The twelve live probes are the load-bearing measurement of this
+   whole document — embed syntax attaches, link syntax attaches nothing for any kind, and the API answers
+   `ok:true` either way — and they exist only as a table in §4.1. If Telegram changes that wire, every test
+   in the table above stays green and this ADR keeps lying, which is precisely how `#801` survived for
+   months. Until a live probe runs on demand, treat §4.1 as a measurement with a date, not a guarantee.
+2. **The tests assert the shape of the request, not what Telegram did with it.** Every leg above reads the
+   multipart body we built. A body that satisfies §4.1's constraints is necessary and not sufficient: the
+   only instrument that can tell you a `PageBlockDocument` came back is a probe against the real API.
+3. **The `.md` toggle's default is pinned, its rendering is not.** `inline_markdown_documents = false`
+   means a `.md` inlines; whether a given client can *open* an inlined `PageBlockDocument` is
+   `#1968`'s question and no test in this tree answers it. That is why the toggle exists and why the
+   detached floor is never removed.
+
+**One class of defect this surface has already shipped twice, now pinned:** a marker whose link target is
+the *intermediates* bubble rather than the file bubble. `the_fallback_links_a_marker_to_the_intermediates_bubble`
+built its `SentBubble` with `text: body` — the one shape where the text-equality predicate in
+`intermediate_file_links` holds — so nothing covered a caption-less document bubble with an empty `text` and
+a populated `delivered_files`, which is the production shape. A fixture that only ever builds the happy
+shape is a test of the fixture.

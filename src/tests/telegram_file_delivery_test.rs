@@ -975,27 +975,24 @@ fn the_fallback_links_a_marker_to_the_intermediates_bubble() {
 }
 
 // ---------------------------------------------------------------------------
-// the intermediate's document floor (#779)
+// the intermediate's document floor (#779, #820)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn every_file_the_rich_plane_cannot_take_still_has_a_delivery_leg() {
-    // #779 — the dead anchor the owner hit on bubble 93966; #801 — why it can
-    // never be repaired by teaching the rich plane to carry the file. A
-    // markdown reference comes back from the file walk as the plain
-    // `📎 <label>` marker and records NO rich entry. Every file list the
-    // intermediate built was derived from those entries, so the document had no
-    // leg on EITHER plane: the marker was emitted with nothing behind it and no
-    // address to link to.
+    // #779 — the dead anchor the owner hit on bubble 93966. #801 answered it by
+    // teaching the rich plane to take NO document at all, which is why the
+    // anchor could not be repaired: every file came back as the plain
+    // `📎 <label>` marker with no entry, so the document had no leg on the rich
+    // plane and the marker had no address to link to.
     //
-    // #1968 detached markdown alone, on the narrow ground that Android will not
-    // open an inlined `.md`; #801 widened the rule to every document kind,
-    // because Telegram answers a `{"type":"document"}` media entry with
-    // `ok:true` and then delivers nothing at all (measured 2026-10-28, five
-    // multipart probes — only `photo` attached). The skipped set is therefore
-    // EVERY resolved file, and the three arms below are the predicate's whole
-    // contract: what the rich plane did not take AND the chat does not already
-    // hold.
+    // #820 is the other half: the rich plane CAN take a document (ADR §4.1,
+    // re-measured in EMBED syntax — #801's probes used link syntax, which
+    // attaches nothing for any media kind). So the contract of
+    // `files_the_rich_plane_skipped` is no longer "every file" — it is exactly
+    // "what the rich plane did not take, and what the chat does not already
+    // hold". Three arms: a file the rich plane TOOK is not skipped; a `.md`
+    // under the toggle is; an already-delivered file is not.
     use crate::channels::telegram::intermediates::files_the_rich_plane_skipped;
     use crate::utils::image::{extract_local_files, rewrite_local_files};
 
@@ -1018,7 +1015,7 @@ fn every_file_the_rich_plane_cannot_take_still_has_a_delivery_leg() {
     let marker = "📎 harvest-workorder.\u{200b}md";
 
     // The plane-independent read: the scan resolves the reference and replaces
-    // it with the marker the reader actually sees.
+    // it with the marker the reader sees in the HTML plane.
     let scan = extract_local_files(&text, Some(dir.path()));
     assert_eq!(scan.attachments.len(), 1, "the scan resolves the document");
     assert!(
@@ -1027,28 +1024,46 @@ fn every_file_the_rich_plane_cannot_take_still_has_a_delivery_leg() {
         scan.text
     );
 
-    // The rich walk: the marker survives and no entry is recorded — the exact
-    // asymmetry that produced the dead anchor, and the ONLY shape this walk can
-    // ever produce now.
-    let rich = rewrite_local_files(&text, Some(dir.path()), &[]);
-    assert!(
-        rich.entries.is_empty(),
-        "the rich plane can never take a document, so it records no entry"
+    // ARM 1 — the default. The rich walk takes the document: a reference the
+    // array answers, plus the entry that carries the bytes. Nothing is skipped,
+    // so the floor does not ship a second bubble for the same file.
+    let rich = rewrite_local_files(&text, Some(dir.path()), &[], false);
+    assert_eq!(
+        rich.entries.len(),
+        1,
+        "the rich plane takes a document by default (#820)"
     );
+    assert_eq!(rich.entries[0].file.path, doc);
     assert!(
-        rich.rich.contains(marker),
-        "the rich body carries the marker, got {:?}",
+        rich.rich.contains("tg://document?id=doc0"),
+        "and the body points at it, got {:?}",
         rich.rich
     );
     assert!(
-        !rich.rich.contains("tg://"),
-        "and no reference: nothing on the rich plane answers one, got {:?}",
+        !rich.rich.contains(marker),
+        "no marker for a file the rich plane took, got {:?}",
         rich.rich
+    );
+    assert!(
+        files_the_rich_plane_skipped(&scan, &rich.entries, &[]).is_empty(),
+        "a document the rich plane took must not ship twice"
     );
 
-    // ARM 1 — the bug. A list built from `entries` is empty here, so the
-    // document would ship nowhere and the marker above would stay plain.
-    let skipped = files_the_rich_plane_skipped(&scan, &rich.entries, &[]);
+    // ARM 2 — the ONE declared exception (ADR §5). With
+    // `inline_markdown_documents`, a `.md` is held out of the rich body, records
+    // no entry, and the floor owns it — which is the #779 leg, now scoped to the
+    // case it was written for instead of to every file.
+    let md_detached = rewrite_local_files(&text, Some(dir.path()), &[], true);
+    assert!(
+        md_detached.entries.is_empty(),
+        "the toggle holds markdown out of the rich plane"
+    );
+    assert!(
+        md_detached.rich.contains(marker),
+        "and the body carries the marker, got {:?}",
+        md_detached.rich
+    );
+    let skipped = files_the_rich_plane_skipped(&scan, &md_detached.entries, &[]);
     assert_eq!(
         skipped.len(),
         1,
@@ -1056,26 +1071,16 @@ fn every_file_the_rich_plane_cannot_take_still_has_a_delivery_leg() {
     );
     assert_eq!(skipped[0].path, doc, "and it is the resolved document");
 
-    // ARM 2 — the retired #1968 arm, kept as the guard on the widening: this
-    // walk has ONE behaviour, so the skipped set does not depend on any body or
-    // flag the caller might have passed. A mutant that reintroduces an
-    // inlining-on path records an entry here and orphans the document.
-    let again = rewrite_local_files(&rich.rich, Some(dir.path()), &[]);
-    assert!(
-        again.entries.is_empty(),
-        "the walk is idempotent: no arm may ever record a document entry"
+    // ARM 3 — the turn's delivered-media list. This is not only the #502/#1916
+    // double-send rule: the REWRITER's own `already_delivered` leg consumes such
+    // a reference and records nothing, so without this filter the same path
+    // would come back as a skipped file and ship twice.
+    let pre_delivered = rewrite_local_files(
+        &text,
+        Some(dir.path()),
+        std::slice::from_ref(&doc),
+        false,
     );
-    assert_eq!(
-        files_the_rich_plane_skipped(&scan, &again.entries, &[]).len(),
-        1,
-        "and the floor still owns the file after a second pass"
-    );
-
-    // ARM 3 — the turn's delivered-media list. This is not only the
-    // #502/#1916 double-send rule: the REWRITER's own `already_delivered` leg
-    // consumes such a reference and records nothing, so without this filter the
-    // same path would come back as a skipped file and ship twice.
-    let pre_delivered = rewrite_local_files(&text, Some(dir.path()), std::slice::from_ref(&doc));
     assert!(
         pre_delivered.entries.is_empty() && !pre_delivered.rich.contains(marker),
         "a reference the rewriter consumed as already delivered leaves neither marker nor entry"

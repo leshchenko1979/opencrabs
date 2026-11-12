@@ -512,16 +512,21 @@ pub(crate) enum MediaKind {
     /// uploaded as `video/mp4`; a file that is not MPEG4 belongs on the send
     /// floor as a document instead (D3), so it never becomes this kind.
     Video,
-    /// A local document (#1918) — the kind #1918 built to inline a PDF or an
-    /// archive in the rich message. **No producer emits it since #801:** Telegram
-    /// accepts a `{"type":"document"}` entry with `ok:true` and then delivers
-    /// nothing, so every document now takes the detached send floor and rides a
-    /// `📎 <label>` marker instead (`utils/image.rs`). The variant and its
-    /// `as_str` arm stay as a GUARD, not as a live path: `as_str` is what the
-    /// shield and the orphan register key on, and a kind whose string mapping
-    /// silently vanished would make a stray entry unrepresentable rather than
-    /// visible. `tg://document?id=` remains in the shield's register for the
-    /// same reason — a reference can still ARRIVE in a body as prose.
+    /// A local document (#1918, live again since #820) — the kind that inlines a
+    /// PDF, an archive or any other file in the rich message. #801 retired it on
+    /// five multipart probes that all used LINK syntax, which attaches nothing
+    /// for ANY kind (its own photo probe delivered nothing either, while every
+    /// call returned `ok:true`); re-measured in EMBED syntax, a document entry
+    /// delivers `PageBlockDocument` — `text/markdown` 37 B, `application/pdf`
+    /// 200 B, in a DM and in a forum topic (ADR-0001 §4.1). `utils/image.rs`
+    /// emits it again, one entry per file, and the reference in the body is the
+    /// `![label](tg://document?id=docN)` the same call wrote.
+    ///
+    /// `as_str` stays the ONE string mapping the shield and the orphan register
+    /// key on: a kind whose mapping silently vanished would make a stray entry
+    /// unrepresentable rather than visible, and `tg://document?id=` must stay in
+    /// the shield's register because a reference can still ARRIVE in a body as
+    /// prose — which is what #334 is about.
     Document,
 }
 

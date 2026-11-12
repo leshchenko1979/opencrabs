@@ -409,6 +409,17 @@ pub const IMG_ID_PREFIX: &str = "img";
 /// side by side.
 pub const VID_ID_PREFIX: &str = "vid";
 
+/// The media-id prefix the document family gives a rewritten reference: the
+/// `docN` in `tg://document?id=docN`. See [`IMG_ID_PREFIX`] for why the three
+/// live side by side.
+///
+/// The prefix is load-bearing, not decorative: the media array matches a
+/// reference to an entry BY ID inside one message, so a document sharing a
+/// prefix with an image would let one family's entry answer the other's
+/// reference — which the API rejects with `RICH_MESSAGE_DOCUMENT_INVALID` and
+/// costs the whole message (ADR §4.1).
+pub const DOC_ID_PREFIX: &str = "doc";
+
 /// Why a local media candidate could not become an attachment.
 ///
 /// One enum for every local-media family — images, video (#465) and files
@@ -972,6 +983,20 @@ fn record_candidate(
         ImageTarget::Local(path) => {
             match validate_local_image(&path) {
                 Ok(()) => scan.attachments.push(LocalImage { path, caption }),
+                // ADR §3.1: a family's REJECTION is not a verdict that the
+                // reference is detached — it hands the reference to the next
+                // family, which under this ADR is the document one. Bytes that
+                // are not an image are therefore not an image FAILURE when the
+                // author wrote a markdown reference: the reference stays in the
+                // text and the file family claims it.
+                //
+                // The machine form (`strip_unresolved`, i.e. a `<<IMG:…>>`
+                // marker) is the exception: no other reader parses it, so a
+                // marker that is not an image is a genuine failure and must be
+                // reported rather than silently handed on.
+                Err(LocalImageFailureReason::UnsupportedFormat) if !strip_unresolved => {
+                    return false;
+                }
                 Err(reason) => scan.failures.push(LocalImageFailure {
                     raw,
                     resolved: Some(path),
@@ -1137,6 +1162,15 @@ impl Rewriter<'_> {
                         image: LocalImage { path, caption },
                     });
                 }
+                // ADR §3.1: a rejection hands the reference to the next
+                // family rather than detaching it. Bytes that are not an image
+                // stay in the text so the document family can claim them; the
+                // machine marker form keeps its failure, because no other
+                // reader parses a `<<IMG:…>>` and a silent hand-on would lose
+                // the model's own directive.
+                Err(LocalImageFailureReason::UnsupportedFormat) if !strip_unresolved => {
+                    return false;
+                }
                 Err(reason) => self.out.failures.push(LocalImageFailure {
                     raw: raw.to_string(),
                     resolved: Some(path),
@@ -1248,9 +1282,15 @@ pub fn rewrite_local_images(
             i = end;
             continue;
         }
+        // ADR §2 rule 6: BOTH forms are read. The kind of the bytes decides the
+        // entry, the `!` decides only whether anything attaches on the wire, and
+        // the harness always writes `!` back — so `[chart.png](p)` and
+        // `![chart.png](p)` must end up identical. Reading only the embed form
+        // let the author's syntax route the file.
         if !regions[i]
-            && text[i..].starts_with("![")
-            && let Some((end, label, raw, caption)) = parse_markdown_ref(text, i, 2, base_dir)
+            && let Some(bracket_len) = markdown_ref_bracket_len(text, i)
+            && let Some((end, label, raw, caption)) =
+                parse_markdown_ref(text, i, bracket_len, base_dir)
             && rw.file(&raw, &label, caption, false)
         {
             i = end;
@@ -1291,9 +1331,12 @@ fn scan_image_references(
             i = end;
             continue;
         }
+        // ADR §2 rule 6: both markdown forms, so the author's syntax never
+        // routes the file (see the rewriter's twin above).
         if !regions[i]
-            && text[i..].starts_with("![")
-            && let Some((end, _label, raw, caption)) = parse_markdown_ref(text, i, 2, base_dir)
+            && let Some(bracket_len) = markdown_ref_bracket_len(text, i)
+            && let Some((end, _label, raw, caption)) =
+                parse_markdown_ref(text, i, bracket_len, base_dir)
             && record_candidate(raw, caption, base_dir, false, remote, &mut scan)
         {
             i = end;
@@ -1479,25 +1522,90 @@ pub struct LocalVideoRewrite {
     pub failures: Vec<LocalImageFailure>,
 }
 
+/// How many leading bytes [`is_supported_video_head`] needs to classify a
+/// container: enough to walk the box-aligned `ftyp` marker plus its major brand.
+const VIDEO_HEAD_BYTES: usize = 64;
+
+/// ISO base-media brands that carry AUDIO ONLY, so a file whose `ftyp` box
+/// declares one of them is not a video and must not be claimed by the video
+/// family (ADR §3.1: the bytes decide the family, and an `.m4a` is a document).
+const AUDIO_ONLY_BRANDS: [&[u8; 4]; 3] = [b"M4A ", b"M4B ", b"M4P "];
+
+/// Whether these leading bytes open a video container — a POSITIVE test.
+///
+/// The positive direction is the whole point. The previous test here asked "are
+/// these bytes a supported image?" and answered the video family's claim from
+/// the NEGATIVE, so every non-image file — a PDF, a `.md`, a zip — was claimed
+/// by the video family and offered to Telegram as a `tg://video` entry, which is
+/// a hard 400 for that media type (the video-side twin of #800). A family's
+/// claim must rest on its own evidence, not on another family's refusal.
+///
+/// The container set is ADR §3.2's: MPEG-4 / QuickTime / 3GP (any `ftyp` brand
+/// that is not audio-only), Matroska and WebM (EBML), AVI (RIFF), and FLV.
+/// Playability is a SEPARATE question, asked later by `sniff_video_format` at
+/// the send site — a container Telegram will not preview still belongs to the
+/// video family here, because the family decides ownership, not the send arm.
+fn is_supported_video_head(head: &[u8]) -> bool {
+    // ISO base media: a box header (big-endian length, then type), the first of
+    // which is `ftyp`. Some writers emit a leading `free`/`wide`/`skip` box
+    // before it, so the walk steps over those and refuses on any other type —
+    // searching for the bare bytes `ftyp` anywhere in the head would let a PDF
+    // or a text file whose first 64 bytes happen to contain them claim the
+    // video family, which is the same class of mistake as the negative test
+    // this replaced.
+    let mut off = 0usize;
+    while off + 8 <= head.len() {
+        let size = u32::from_be_bytes([head[off], head[off + 1], head[off + 2], head[off + 3]])
+            as usize;
+        let box_type = &head[off + 4..off + 8];
+        if box_type == b"ftyp" {
+            return match head.get(off + 8..off + 12) {
+                Some(brand) => !AUDIO_ONLY_BRANDS.iter().any(|b| b.as_slice() == brand),
+                // A type box too short to carry a brand is not one we can claim.
+                None => false,
+            };
+        }
+        if box_type == b"free" || box_type == b"wide" || box_type == b"skip" {
+            if size < 8 {
+                return false;
+            }
+            off += size;
+        } else {
+            return false;
+        }
+    }
+    // EBML — Matroska (`.mkv`) and WebM share the same magic.
+    if head.starts_with(b"\x1a\x45\xdf\xa3") {
+        return true;
+    }
+    // RIFF-AVI. A RIFF-WEBP is an IMAGE and is excluded by the fourcc.
+    if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"AVI " {
+        return true;
+    }
+    // FLV.
+    head.starts_with(b"FLV")
+}
+
 /// The markdown form's ownership test: ours only when the target resolves to a
-/// file whose leading bytes are NOT a supported image.
+/// file whose leading bytes open a video CONTAINER.
 ///
-/// A markdown reference is the one form the image family also reads, so exactly
-/// one family must claim each reference or one file is judged twice and
-/// delivered in the wrong plane. The partition is by CONTENT, not by extension
-/// — an extension is a claim the bytes may not honour.
+/// A markdown reference is read by every family, so exactly one must claim each
+/// reference or one file is judged twice and delivered in the wrong plane. The
+/// partition is by CONTENT, not by extension — an extension is a claim the bytes
+/// may not honour — and each family answers it POSITIVELY: the video family
+/// claims video bytes, the image family claims image bytes, and the document
+/// family claims whatever neither took (ADR §3.1).
 ///
-/// The unreadable/absent case answers `false` on purpose, which is the stricter
-/// direction than the marker form takes: a missing target must stay the image
-/// family's to report, or one dead reference would produce two failure notices.
-/// A marker is read by nobody else, so it is always ours (see
-/// [`record_video_candidate`]).
+/// The unreadable/absent case answers `false` on purpose: a missing target must
+/// stay out of this family, because a marker is the only form that is ours
+/// whatever the bytes say (see [`record_video_candidate`]), and a markdown
+/// reference with no readable bytes has no evidence for any family to claim it.
 fn markdown_target_is_video(path: &Path) -> bool {
     match std::fs::File::open(path) {
         Ok(mut file) => {
-            let mut head = [0u8; 12];
+            let mut head = [0u8; VIDEO_HEAD_BYTES];
             let read = std::io::Read::read(&mut file, &mut head).unwrap_or(0);
-            !is_supported_image(&head[..read])
+            is_supported_video_head(&head[..read])
         }
         Err(_) => false,
     }
@@ -1614,9 +1722,13 @@ pub fn extract_local_videos(text: &str, base_dir: Option<&Path>) -> LocalVideoSc
                 continue;
             }
         }
+        // ADR §2 rule 6: both markdown forms. `markdown_target_is_video` still
+        // decides ownership by BYTES, so a link to a `.pdf` declines here and
+        // reaches the document family — the form never routes the file.
         if !regions[i]
-            && text[i..].starts_with("![")
-            && let Some((end, _label, raw, caption)) = parse_markdown_ref(text, i, 2, base_dir)
+            && let Some(bracket_len) = markdown_ref_bracket_len(text, i)
+            && let Some((end, _label, raw, caption)) =
+                parse_markdown_ref(text, i, bracket_len, base_dir)
             && record_video_candidate(raw, caption, base_dir, false, &mut scan)
         {
             i = end;
@@ -1735,9 +1847,11 @@ pub fn rewrite_local_videos(
             i = end;
             continue;
         }
+        // ADR §2 rule 6: both markdown forms, matching the image rewriter.
         if !regions[i]
-            && text[i..].starts_with("![")
-            && let Some((end, label, raw, caption)) = parse_markdown_ref(text, i, 2, base_dir)
+            && let Some(bracket_len) = markdown_ref_bracket_len(text, i)
+            && let Some((end, label, raw, caption)) =
+                parse_markdown_ref(text, i, bracket_len, base_dir)
             && rw.file(&raw, &label, caption, false)
         {
             i = end;
@@ -2108,9 +2222,10 @@ fn consume_marker_prefix(buf: &mut String) {
 /// Append the text-plane marker for a resolved file — `📎 <label>` — and return
 /// the byte span it occupies in `out` (#1918). A `📎 ` the model wrote itself is
 /// consumed first, so the marker is emitted once whichever side wrote it
-/// (#2001). The single home of the marker's shape, and since #801 the only shape
-/// a document gets in EITHER plane — the rich plane has no document form left to
-/// differ from.
+/// (#2001). The single home of the marker's shape — and since #820 the marker is
+/// what a document gets when the rich plane declines it (no rich path, a failed
+/// send, a `.md` under `inline_markdown_documents`, an already-delivered file),
+/// not the shape of every document as #801 held.
 fn push_file_marker(out: &mut String, label: &str, target: &str) -> std::ops::Range<usize> {
     consume_marker_prefix(out);
     let start = out.len();
@@ -2146,12 +2261,15 @@ pub fn extract_local_files(text: &str, base_dir: Option<&Path>) -> LocalFileScan
 
     while i < text.len() {
         if !regions[i]
-            && text[i..].starts_with('[')
-            // `![alt](path)` is the image family's reference, not a file link:
-            // its `[` is preceded by `!`, and copying the `!` first must not let
-            // the link parser claim the span on the next iteration.
-            && !text[..i].ends_with('!')
-            && let Some((end, label, target, _title)) = parse_markdown_ref(text, i, 1, base_dir)
+            // Both markdown forms reach the floor, because both name the same
+            // bytes: an `![label](path)` the rich plane declined (no rich path,
+            // a failed send, the md toggle) must still get a bubble. The old
+            // `!`-guard here existed only because the image family owned that
+            // form exclusively — under the ADR the form is the harness's, not
+            // the author's, so the floor reads both.
+            && let Some(bracket_len) = markdown_ref_bracket_len(text, i)
+            && let Some((end, label, target, _title)) =
+                parse_markdown_ref(text, i, bracket_len, base_dir)
             && record_file_candidate(&text[i..end], &label, &target, base_dir, &mut scan)
         {
             // #1918: the reference becomes a visible marker, not a hole — the
@@ -2195,15 +2313,19 @@ pub fn extract_local_files(text: &str, base_dir: Option<&Path>) -> LocalFileScan
 }
 
 /// A resolved local file together with the media-array id its rewritten
-/// reference WOULD point at: `tg://document?id=<id>`.
+/// reference points at: `tg://document?id=<id>`.
 ///
-/// #801: no walk produces one of these any more. Telegram accepts a
-/// `{"type":"document"}` media entry with `ok:true` and then delivers nothing
-/// (measured 2026-10-28, five multipart probes), so a reference pointing at such
-/// an entry was always an inert link. The type survives as the element of
-/// [`LocalFileRewrite::entries`], which is empty by construction and read as a
-/// guard: a path that starts recording one again must suppress the detached
-/// floor rather than ship the same bytes twice.
+/// The document family's producer record. It exists so the reference rewrite and
+/// the media entry are one operation (ADR §3.3, §10 gap 5): the id in the body
+/// and the id in the array are the same value from the same call, so they can
+/// never disagree — a disagreement is a hard 400 that costs the whole message
+/// (`RICH_MESSAGE_DOCUMENT_INVALID`).
+///
+/// #801 held that no walk should produce one of these, on a measurement that
+/// turned out to be an artefact of LINK syntax. Re-measured 2026-10-29 in embed
+/// syntax, documents inline (§4.1), so [`LocalFileRewrite::entries`] is a live
+/// list again and the detached floor is suppressed per family by
+/// `rich_owns_documents`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedFileRef {
     /// The id the rewritten reference points at.
@@ -2222,16 +2344,22 @@ impl MediaSource for ResolvedFileRef {
     }
 }
 
-/// A text prepared for the rich media plane's file half (#1918 → #801).
+/// A text prepared for the rich media plane's file half (#1918 → #820).
 ///
-/// The document twin of [`rewrite_local_images`], and it carries ONE text buffer
-/// where that one carries two. #801 leaves this walk with a single behaviour:
-/// every resolvable file becomes the plain `📎 <label>` MARKER, in place, and NO
-/// entry is recorded — so `rich` and `entries` are the marker form and an empty
-/// list respectively. The marker is the only honest shape on this plane: Telegram
-/// drops a `{"type":"document"}` media entry, so there is no array to answer a
-/// reference, and the marker is the reader's sole anchor to the document. The
-/// detached file floor is the leg that puts a bubble behind it.
+/// The document twin of [`rewrite_local_images`]. Every resolvable file becomes
+/// an EMBED reference `![label](tg://document?id=docN)` in place, with a
+/// [`ResolvedFileRef`] recorded so the rich request can carry the bytes — with
+/// two deliberate exceptions that fall back to the plain `📎 <label>` marker and
+/// record no entry:
+///
+/// - a markdown document under `inline_markdown_documents = true` (ADR §5 — the
+///   md exception, because a client that cannot open an inlined document can
+///   still open the attachment);
+/// - a file this turn already delivered, which needs no second bubble.
+///
+/// A marker records no entry, so the rich plane does not claim that file and the
+/// detached file floor ships it — the leg that carries the bytes when the rich
+/// plane declines, fails or is switched off.
 ///
 /// Rejected candidates are [`extract_local_files`]'s to report, for the same
 /// reason a strip buffer would be wrong here: it walks the same references, so a
@@ -2247,30 +2375,109 @@ pub struct LocalFileRewrite {
     /// reference pointed at a media entry Telegram silently drops, so it
     /// rendered as a clickable dead link with no bubble behind it.
     pub rich: String,
-    /// Resolved files in order of appearance, with the id each got. Always
-    /// EMPTY since #801 — see [`ResolvedFileRef`] for why the field stays.
+    /// Resolved documents in order of appearance, with the id each got — the
+    /// entries the rich plane turns into `attach://` parts. Empty only when
+    /// every reference was refused, already delivered, or held back by the
+    /// `inline_markdown_documents` exception.
     pub entries: Vec<ResolvedFileRef>,
 }
 
+/// Which markdown reference form starts at `start`, as the `bracket_len`
+/// [`parse_markdown_ref`] wants: `2` for an embed (`![alt](target)`), `1` for a
+/// link (`[label](target)`), `None` when the byte opens neither.
+///
+/// One home for the form question, because both the document walk and the
+/// floor scan now read both forms and must agree about where a reference begins.
+fn markdown_ref_bracket_len(text: &str, start: usize) -> Option<usize> {
+    if text[start..].starts_with("![") {
+        Some(2)
+    } else if text[start..].starts_with('[') {
+        Some(1)
+    } else {
+        None
+    }
+}
+
 /// Walk state for [`rewrite_local_files`], holding the per-reference policy so
-/// the walk itself stays a single readable loop.
+/// the walk itself stays a single readable loop. Its `file` is the document
+/// family's PRODUCER: it emits the `![…](tg://document?id=docN)` reference and
+/// pushes the matching entry in one call, so the two can never disagree.
 struct FileRewriter<'a> {
     base_dir: Option<&'a Path>,
     already_delivered: &'a [PathBuf],
+    /// `[channels.telegram] inline_markdown_documents` — the one deliberate
+    /// exception to "every document inlines" (ADR §5). When set, a `.md` /
+    /// `.markdown` target is held out of the rich body and takes the detached
+    /// floor, because a client that cannot open an inlined `PageBlockDocument`
+    /// can still open the attachment.
+    inline_markdown: bool,
     rich: String,
     entries: Vec<ResolvedFileRef>,
 }
 
+/// Whether `path` names a markdown document — the kind the
+/// `inline_markdown_documents` exception is about.
+fn is_markdown_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            let ext = ext.to_ascii_lowercase();
+            ext == "md" || ext == "markdown"
+        })
+}
+
+/// The `alt` text of a document's rewritten reference — the label, made safe to
+/// sit inside `![…]`.
+///
+/// A `]` closes the alt, `(`/`)` would let the target parse wrong, and a newline
+/// ends the reference: any of them turns a working embed into a malformed one,
+/// and a malformed reference fails the WHOLE message rather than one attachment
+/// (ADR §4.1). An empty label falls back to the file's own name, which is the
+/// same fallback the plain marker uses, so the reader always has an anchor.
+fn document_alt(label: &str, path: &Path) -> String {
+    let raw = if label.trim().is_empty() {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".to_string())
+    } else {
+        label.trim().to_string()
+    };
+    let cleaned: String = raw
+        .chars()
+        .map(|ch| match ch {
+            ']' | '[' | '(' | ')' | '\\' | '\n' | '\r' => ' ',
+            ch => ch,
+        })
+        .collect();
+    let folded = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if folded.is_empty() {
+        "file".to_string()
+    } else {
+        folded
+    }
+}
+
 impl FileRewriter<'_> {
-    /// File one parsed link. Returns `true` when the reference was consumed and
-    /// must leave the buffer — which happens ONLY for a resolved, validated
-    /// file. A rejected candidate or a non-file target returns `false`, so the
-    /// link is copied through byte-identical: a remote link Telegram resolves
-    /// itself, and a missing one is a nudge, never a silent strip. This is
+    /// File one parsed reference. Returns `true` when the reference was consumed
+    /// and must leave the buffer — which happens for a resolved, validated file,
+    /// whether it becomes an inline document or the plain marker. A rejected
+    /// candidate or a non-file target returns `false`, so the link is copied
+    /// through byte-identical: a remote link Telegram resolves itself, and a
+    /// missing one is a nudge, never a silent strip. This is
     /// [`record_file_candidate`]'s policy, kept identical so the scan and the
     /// rewrite never disagree about which links were files — and the scan is
     /// what reports the rejection, so returning `false` loses nothing.
-    fn file(&mut self, label: &str, target: &str) -> bool {
+    ///
+    /// Two shapes come out of here, and the choice between them is the ADR's:
+    ///
+    /// - **inline** — `![label](tg://document?id=docN)`, with the entry pushed
+    ///   in the SAME call so the reference and its bytes can never disagree
+    ///   (ADR §3.3, §10 gap 5). This is the default for every file.
+    /// - **the plain `📎 <label>` marker** — for a markdown document under
+    ///   `inline_markdown_documents = true`, and for a file this turn already
+    ///   delivered. The marker records no entry, so the rich plane does not
+    ///   claim it and the detached file floor ships it.
+    fn file(&mut self, label: &str, target: &str, caption: Option<String>) -> bool {
         match resolve_file_target(target, self.base_dir) {
             Resolution::Local(path) => {
                 // Comparison is on the RESOLVED ABSOLUTE path, which is what
@@ -2282,37 +2489,49 @@ impl FileRewriter<'_> {
                     // nothing: a delivered document is not a lost one.
                     return true;
                 }
-                // #801: a document can NEVER inline in a rich message, so there
-                // is no form to choose between — the marker is the only shape
-                // that leads the reader to a real file.
+                // ADR §5: the md exception. With the toggle set, a markdown
+                // document is forced out of the rich body — the detached floor
+                // is the shape a client that cannot open an inlined
+                // `PageBlockDocument` can still open. It is an exception, never
+                // the rule, and it never touches images or videos.
+                if self.inline_markdown && is_markdown_path(&path) {
+                    push_file_marker(&mut self.rich, label, target);
+                    return true;
+                }
+                // ADR §2 rule 3: every other file inlines as a `document`
+                // entry, in the SAME message, whatever its extension. The id is
+                // namespaced per family (`doc` / `img` / `vid`) because entries
+                // are matched to references BY ID inside one message's media
+                // array.
                 //
-                // Telegram accepts a `{"type":"document"}` media entry with
-                // `ok:true` and then silently DROPS it. Measured live on
-                // 2026-10-28 with five multipart `sendRichMessage` probes: a
-                // `document` entry delivered no attachment in link syntax, in
-                // image syntax, or with an explicit `file_name`; a `video` entry
-                // behaved the same way; only `photo` attached. Image syntax aimed
-                // at a document entry is worse still — a hard
-                // `RICH_MESSAGE_DOCUMENT_INVALID`. So the `tg://document?id=docN`
-                // reference #1918 introduced always rendered as an INERT link:
-                // clickable, and dead, with no bubble behind it (owner report).
-                //
-                // Every resolvable document is therefore left as the plain
-                // `📎 <label>` marker the TEXT plane already shows — same buffer
-                // shape, same disarmed label — and NO entry is recorded, so the
-                // rich plane never claims it and the detached file floor
-                // delivers it as its own bubble. That is the shape that already
-                // worked before #1918, and the only one a client can open.
-                //
-                // #1968 reached the same conclusion for markdown alone, on the
-                // narrower ground that the Android client will not open an
-                // inlined `.md`. The real rule is wider: no document of any kind
-                // inlines. That carve-out is gone, not generalised.
-                //
-                // Emitted through [`push_file_marker`], the single home of the
-                // marker's shape, so a model-written `📎 ` is consumed rather
-                // than doubled (#2001).
-                push_file_marker(&mut self.rich, label, target);
+                // #801 held the opposite — "no document can ever inline" — on
+                // five multipart probes that all used LINK syntax, which
+                // attaches nothing for ANY kind, its own photo probe included.
+                // Re-measured 2026-10-29 (§4.1): the same entries in EMBED
+                // syntax deliver `PageBlockDocument`, `text/markdown` 37 B and
+                // `application/pdf` 200 B, in a DM and in a forum topic. The
+                // API was never refusing documents; the markdown form was.
+                let id = format!("{}{}", DOC_ID_PREFIX, self.entries.len());
+                let alt = document_alt(label, &path);
+                // The caption rides the markdown TITLE, because the rich media
+                // array has no caption field (§3.2) — the same channel the
+                // image and video families use, through the same gate.
+                let title = rich_title(caption.as_deref());
+                // #2001, both planes: a `📎 ` the model wrote itself must not
+                // survive beside the emitted reference, exactly as it is
+                // consumed before the plain marker. The reader gets one anchor
+                // whichever form this file took.
+                consume_marker_prefix(&mut self.rich);
+                self.rich
+                    .push_str(&format!("![{alt}](tg://document?id={id}{title})"));
+                self.entries.push(ResolvedFileRef {
+                    id,
+                    file: LocalFile {
+                        path,
+                        caption,
+                        marker_span: None,
+                    },
+                });
                 true
             }
             // A remote link, an in-page anchor or any other URI scheme has
@@ -2326,33 +2545,38 @@ impl FileRewriter<'_> {
     }
 }
 
-/// Scan a reply for markdown links to local files and hand back the rich form
-/// with each resolvable link replaced in place by the plain `📎 <label>`
-/// marker the text plane already shows.
+/// Scan a reply for markdown references to local files and hand back the rich
+/// form with each resolvable reference rewritten in place — an inline document
+/// embed where the ADR says inline, the plain `📎 <label>` marker where it does
+/// not (ADR §2 rule 6, §5).
 ///
-/// The document twin of [`rewrite_local_images`], and it obeys the same two
-/// rules the scan does: a link inside a code span stays byte-identical, and a
-/// relative target with no base directory stays verbatim because it may be
-/// ordinary prose that merely looks like a link. A rejected candidate is left
-/// byte-identical — the file family's declared policy, since a link carries its
-/// own label and a silent strip would delete the reader's only clue about what
-/// was referenced.
+/// Both markdown forms are read: `[label](path)` and `![label](path)` name the
+/// same bytes, so the form the author wrote must not decide the route. That was
+/// §10 gap 3 — a `![d](x.pdf)` was claimed by the video family's negative test
+/// and shipped as a `tg://video` entry, while `[d](x.pdf)` fell to a marker.
 ///
-/// #801: NO document inlines in a rich message, so this walk emits no
-/// reference and records no entry — every resolvable file falls to the detached
-/// file floor, which is the only delivery leg that produces a bubble a client
-/// can open. The `entries` field is therefore always empty from this walk; it
-/// survives because the promoted-intermediate path reads it to learn which
-/// files were already delivered (see `already_delivered`).
+/// It obeys the same two rules the scan does: a reference inside a code span
+/// stays byte-identical, and a relative target with no base directory stays
+/// verbatim because it may be ordinary prose that merely looks like a link. A
+/// rejected candidate is left byte-identical — the file family's declared
+/// policy, since a link carries its own label and a silent strip would delete
+/// the reader's only clue about what was referenced.
+///
+/// `entries` is the media array's document half: each element's `id` is the one
+/// the rewritten reference points at, produced in the same call so the two can
+/// never disagree. A marker records no entry, which is exactly how the detached
+/// file floor learns it still owns those bytes.
 pub fn rewrite_local_files(
     text: &str,
     base_dir: Option<&Path>,
     already_delivered: &[PathBuf],
+    inline_markdown: bool,
 ) -> LocalFileRewrite {
     let regions = code_regions(text);
     let mut rw = FileRewriter {
         base_dir,
         already_delivered,
+        inline_markdown,
         rich: String::with_capacity(text.len()),
         entries: Vec::new(),
     };
@@ -2360,13 +2584,21 @@ pub fn rewrite_local_files(
 
     while i < text.len() {
         if !regions[i]
-            && text[i..].starts_with('[')
-            // `![alt](path)` is the image family's reference, not a file link:
-            // its `[` is preceded by `!`, and copying the `!` first must not let
-            // the link parser claim the span on the next iteration.
-            && !text[..i].ends_with('!')
-            && let Some((end, label, target, _title)) = parse_markdown_ref(text, i, 1, base_dir)
-            && rw.file(&label, &target)
+            // BOTH markdown forms are candidates here, because §2 rule 6 makes
+            // the harness the author of the form: `[label](path)` and
+            // `![label](path)` name the same bytes, so both must reach the same
+            // claim. The `!` is not a routing signal — it is the only thing the
+            // WIRE reads, which is why every claim is re-emitted as `![…]`.
+            //
+            // Before this, the file family read only the link form: a document
+            // written as `![d](x.pdf)` was claimed by the video family's
+            // negative test and shipped as a `tg://video` entry, and a document
+            // written as `[d](x.pdf)` shipped as a marker — the same file
+            // routed by syntax instead of by bytes (ADR §10 gap 3).
+            && let Some(bracket_len) = markdown_ref_bracket_len(text, i)
+            && let Some((end, label, target, title)) =
+                parse_markdown_ref(text, i, bracket_len, base_dir)
+            && rw.file(&label, &target, title)
         {
             i = end;
             continue;

@@ -151,23 +151,26 @@ fn test_compaction_preserves_capabilities_in_system_brain() {
 
 #[test]
 fn test_local_file_link_line_is_telegram_only_and_stated_once() {
-    // #1916, reworded by #1940 and again by #801: the preamble teaches the model
-    // what a markdown link to a local file becomes. The line belongs to the
-    // TELEGRAM block — a document bubble is a Telegram renderer fact, and the
-    // generic block exists precisely so a channel with no capability block is
-    // not taught renderer behaviour it may not have.
+    // #1916, reworded by #1940, by #801 and again by #820: the preamble teaches
+    // the model what a markdown link to a local file becomes. The line belongs
+    // to the TELEGRAM block — a document bubble is a Telegram renderer fact, and
+    // the generic block exists precisely so a channel with no capability block
+    // is not taught renderer behaviour it may not have.
     //
     // The wording is mode-agnostic on purpose (#1940): the note is injected for
     // every Telegram-bound session and `rich_messages` is not consulted, so it
-    // has to hold in BOTH modes — hence the marker, which both modes carry.
+    // has to hold in BOTH modes. That is why it names BOTH legs — the inline
+    // render in a rich reply and the marker-plus-attachment when the rich plane
+    // cannot carry the file — instead of picking whichever one is default.
     //
-    // #801 is why there is no mode split left to state. #1918 promised that the
-    // rich plane inlines the document at its reference, with #1968 carving out
-    // `.md`; Telegram answers a `{"type":"document"}` media entry with `ok:true`
-    // and then delivers nothing, so the inline arm never worked for ANY document
-    // (owner report, 2026-10-28 — the dead anchor on bubble 93966). Every
-    // document now takes the detached floor, which is why the block must say
-    // "always as its OWN attachment" and must not promise an inline render.
+    // #820 restores the inline promise #801 had deleted. #801 concluded that no
+    // document could ever inline; its evidence was five multipart probes in LINK
+    // syntax, which attaches nothing for ANY media kind (its own photo control
+    // delivered nothing either) while every probe returned `ok:true`.
+    // Re-measured in EMBED syntax on 2026-10-29 (ADR §4.1), a document inlines
+    // at its reference. The note must therefore promise the inline render AND
+    // still describe the fallback, because the rich plane is not always there
+    // (#1940: this block is injected without consulting `rich_messages`).
     let telegram = telegram_channel_capabilities();
     let generic = channel_file_delivery_capabilities();
     assert_eq!(
@@ -180,26 +183,33 @@ fn test_local_file_link_line_is_telegram_only_and_stated_once() {
         "the line must state the OUTCOME, not just the syntax"
     );
     assert!(
+        telegram.contains("renders INLINE at the spot you referenced"),
+        "a document inlines at its reference in a rich reply (#820, ADR §2 rule 3)"
+    );
+    assert!(
+        telegram.contains("its OWN attachment instead"),
+        "the detached floor is still the fallback when the rich plane cannot carry \
+         the file, and the note must say so (#801 was right about the floor, wrong \
+         about it being the only leg)"
+    );
+    assert!(
+        !telegram.contains("never inlined into the reply"),
+        "the dead promise: #801 told the model a document can never inline, which \
+         is the conclusion its own link-syntax probes could not support (#820)"
+    );
+    assert!(
         telegram.contains("visible marker naming the file"),
-        "the marker is what the reader actually sees in place of the link (#1918)"
-    );
-    assert!(
-        telegram.contains("always as its OWN attachment"),
-        "every document rides the detached floor; the note must say so plainly (#801)"
-    );
-    assert!(
-        !telegram.contains("inlined at that spot"),
-        "the inline promise is dead: Telegram accepts a document entry and delivers \
-         nothing, so the model must not be told the file renders at its reference (#801)"
-    );
-    assert!(
-        !telegram.contains("inline_markdown_documents"),
-        "the retired config key must not survive in the model's instructions (#801)"
+        "the marker is what the reader sees when the floor is the leg (#1918)"
     );
     assert!(
         !telegram.contains("except a markdown (.md) document"),
-        "the #1968 carve-out described a split that no longer exists — the rule is \
-         uniform now, so a carve-out would teach a distinction the code cannot make"
+        "the #1968 carve-out is a CONFIG decision now, not a rule the model must \
+         apply — teaching it here would have the model second-guess the harness"
+    );
+    assert!(
+        !telegram.contains("inline_markdown_documents"),
+        "the config key is a user-facing switch; the model's instructions do not \
+         need its name"
     );
     assert!(
         !telegram.contains("the link label as its caption"),

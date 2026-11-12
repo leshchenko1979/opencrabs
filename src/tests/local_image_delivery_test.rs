@@ -1015,29 +1015,28 @@ mod local_file_links {
 }
 
 // ---------------------------------------------------------------------------
-// The rich plane's document walk (#1918 → #801)
+// The rich plane's document walk (#1918 → #801 → #820)
 // ---------------------------------------------------------------------------
 
-/// `rewrite_local_files` — the document twin of `rewrite_local_images`. Where
-/// the image walk replaces a resolvable picture IN PLACE with a `tg://photo`
-/// reference the rich plane's media array answers, the DOCUMENT walk does not
-/// inline at all: every resolvable document becomes the plain `📎 <label>`
-/// marker the text plane already shows, and NO entry is recorded, so the
-/// detached file floor delivers it as its own bubble.
+/// `rewrite_local_files` — the document twin of `rewrite_local_images`. Every
+/// resolvable document becomes an EMBED reference `![label](tg://document?id=docN)`
+/// in place, with a matching entry in [`LocalFileRewrite::entries`], so the rich
+/// request carries the bytes and the reference is answered by them.
 ///
-/// #801: a document can never inline in a rich message. Telegram accepts a
-/// `{"type":"document"}` media entry with `ok:true` and then silently drops it —
-/// measured live on 2026-10-28 across five multipart `sendRichMessage` probes,
-/// where `document` delivered no attachment in link syntax, in image syntax, or
-/// with an explicit `file_name`, and `video` behaved identically; only `photo`
-/// attached. Image syntax aimed at a document entry is worse: a hard
-/// `RICH_MESSAGE_DOCUMENT_INVALID`. So the `tg://document?id=docN` reference
-/// #1918 introduced was ALWAYS an inert link — clickable and dead, with no
-/// bubble behind it.
+/// #801 held the opposite — that a document can never inline — and this module
+/// used to assert it. That conclusion came from five multipart `sendRichMessage`
+/// probes written in LINK syntax `[label](tg://document?id=doc0)`, which attaches
+/// nothing for ANY media kind: #801's own photo control delivered nothing either,
+/// and every probe still returned `ok:true`. Re-measured 2026-10-29 in EMBED
+/// syntax (ADR §4.1), `PageBlockDocument` delivers `text/markdown` 37 B and
+/// `application/pdf` 200 B in both a DM and a forum topic. The API was never
+/// refusing documents; the markdown form was.
 ///
-/// These legs therefore assert the marker, not a reference. A leg that expects a
-/// `tg://document` string is asserting the defect, and one that expects an entry
-/// is asserting a claim the API does not honour.
+/// So these legs now assert the reference AND its entry. A leg that expects a
+/// `📎` marker for an ordinary file is asserting the #801 defect; one that
+/// expects no entry is asserting a claim the API honours the opposite of. The
+/// marker survives only for the two declared exceptions — a `.md` under
+/// `inline_markdown_documents`, and a file this turn already delivered.
 mod local_file_rewrite {
     use crate::utils::image::rewrite_local_files;
     use std::path::{Path, PathBuf};
@@ -1054,46 +1053,52 @@ mod local_file_rewrite {
     }
 
     #[test]
-    fn a_local_file_link_becomes_the_plain_marker_in_place() {
+    fn a_local_file_link_becomes_an_inline_document_in_place() {
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3-report.pdf", PDF_BYTES);
         let rw = rewrite_local_files(
             &format!("before [Q3 report]({}) after", pdf.display()),
             Some(dir.path()),
             &[],
+            false,
         );
         assert_eq!(
-            rw.rich, "before 📎 Q3 report after",
-            "the link is replaced AT its position by the marker, never stripped"
+            rw.rich, "before ![Q3 report](tg://document?id=doc0) after",
+            "the reference is replaced AT its position by the embed, never stripped"
         );
-        assert!(
-            rw.entries.is_empty(),
-            "no entry: the rich plane must not claim a document it cannot attach, \
-             so the detached file floor is its delivery leg"
+        assert_eq!(
+            rw.entries.len(),
+            1,
+            "the entry is what carries the bytes and suppresses the detached floor"
         );
+        assert_eq!(rw.entries[0].id, "doc0");
+        assert_eq!(rw.entries[0].file.path, pdf);
     }
 
     #[test]
-    fn a_space_bearing_path_becomes_a_marker() {
+    fn a_space_bearing_path_still_embeds() {
         // #793, rewrite half: the rich plane walks the same references through
-        // the same parser, so the repair must reach it too — otherwise the scan
-        // would ship the document while the rich body kept a dead raw path.
+        // the same parser, so a path with spaces must resolve here too —
+        // otherwise the scan would ship the document while the rich body kept a
+        // dead raw path.
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "Q3 final.pdf", PDF_BYTES);
         let rw = rewrite_local_files(
             &format!("see [Q3]({}) here", pdf.display()),
             Some(dir.path()),
             &[],
+            false,
         );
-        assert_eq!(rw.rich, "see 📎 Q3 here");
-        assert!(rw.entries.is_empty());
+        assert_eq!(rw.rich, "see ![Q3](tg://document?id=doc0) here");
+        assert_eq!(rw.entries.len(), 1);
     }
 
     #[test]
-    fn every_file_in_the_reply_falls_to_the_marker_floor() {
-        // Kills the mutant that detaches only the FIRST file: a reply carrying
-        // two documents must leave two markers and no entries, or the second
-        // file is silently orphaned.
+    fn every_file_in_the_reply_gets_its_own_reference_and_entry() {
+        // Kills the mutant that inlines only the FIRST file: a reply carrying
+        // two documents must leave two references with DISTINCT ids, or the
+        // second reference answers an id the array already spent — a hard 400
+        // (`RICH_MESSAGE_DOCUMENT_INVALID`) that costs the whole message.
         let dir = tempfile::tempdir().expect("tempdir");
         let q3 = write_file(dir.path(), "q3.pdf", PDF_BYTES);
         let q4 = write_file(dir.path(), "q4.pdf", PDF_BYTES);
@@ -1101,17 +1106,27 @@ mod local_file_rewrite {
             &format!("[Q3]({}) and [Q4]({})", q3.display(), q4.display()),
             Some(dir.path()),
             &[],
+            false,
         );
-        assert_eq!(rw.rich, "📎 Q3 and 📎 Q4");
-        assert!(rw.entries.is_empty());
+        assert_eq!(
+            rw.rich,
+            "![Q3](tg://document?id=doc0) and ![Q4](tg://document?id=doc1)"
+        );
+        assert_eq!(rw.entries.len(), 2);
+        assert_eq!(rw.entries[0].id, "doc0");
+        assert_eq!(rw.entries[1].id, "doc1");
+        assert_ne!(
+            rw.entries[0].file.path, rw.entries[1].file.path,
+            "the two entries are two different files"
+        );
     }
 
     #[test]
-    fn no_document_reference_is_ever_emitted() {
-        // The #801 guard: the defect was a `tg://document?id=` reference that
-        // rendered as a dead link, so no document kind may produce one. Covers
+    fn every_document_kind_emits_a_reference_and_an_entry() {
+        // The #801 guard, inverted: the defect was a document that could NOT
+        // inline, so no document kind may be left on the marker floor. Covers
         // the four kinds that actually reach a rich reply — a mutant that
-        // re-inlines ANY one of them reintroduces the dead link for that kind.
+        // detaches ANY one of them reintroduces the dead end for that kind.
         let dir = tempfile::tempdir().expect("tempdir");
         let files = [
             write_file(dir.path(), "state.md", MD_BYTES),
@@ -1124,45 +1139,128 @@ mod local_file_rewrite {
             .map(|p| format!("[{}]({})", p.display(), p.display()))
             .collect::<Vec<_>>()
             .join(" ");
-        let rw = rewrite_local_files(&text, Some(dir.path()), &[]);
-        assert!(
-            !rw.rich.contains("tg://"),
-            "no document reference may survive the walk: {:?}",
+        let rw = rewrite_local_files(&text, Some(dir.path()), &[], false);
+        assert_eq!(
+            rw.rich.matches("tg://document?id=").count(),
+            files.len(),
+            "one document reference per file: {:?}",
             rw.rich
         );
         assert_eq!(
-            rw.rich.matches('📎').count(),
+            rw.entries.len(),
             files.len(),
-            "one marker per file: {:?}",
+            "one entry per file: {:?}",
             rw.rich
         );
-        assert!(rw.entries.is_empty());
+        assert!(
+            !rw.rich.contains('📎'),
+            "no document is left on the marker floor: {:?}",
+            rw.rich
+        );
     }
 
     #[test]
-    fn an_empty_label_falls_back_to_the_files_own_name() {
+    fn an_empty_label_falls_back_to_the_files_own_name_in_the_alt() {
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3-report.pdf", PDF_BYTES);
-        let rw = rewrite_local_files(&format!("[]({})", pdf.display()), Some(dir.path()), &[]);
-        assert_eq!(
-            rw.rich, "📎 q3-report.\u{200b}pdf",
-            "the reader always has something to anchor on — the name, disarmed of \
-             the autolinker (#1938) so the marker is not read as a domain"
+        let rw = rewrite_local_files(
+            &format!("[]({})", pdf.display()),
+            Some(dir.path()),
+            &[],
+            false,
         );
-        assert!(rw.entries.is_empty());
+        assert_eq!(
+            rw.rich, "![q3-report.pdf](tg://document?id=doc0)",
+            "the reader always has something to anchor on — the file's own name"
+        );
+        assert_eq!(rw.entries.len(), 1);
     }
 
     #[test]
-    fn a_dotted_label_is_disarmed_in_the_marker_too() {
-        // The live specimen (#1938, topic `Telegram: Rich Text`): the label
-        // `1918-fix-state.md` was autolinked by the client as the Moldova
-        // ccTLD. The disarmer has to reach this plane as well as the HTML marker.
+    fn a_label_that_would_break_the_embed_is_sanitised() {
+        // `(` and `)` in an alt would let the target parse wrong, and a
+        // malformed reference fails the WHOLE message rather than one
+        // attachment (ADR §4.1) — so the producer folds them out. A `]` cannot
+        // reach the alt at all: `parse_markdown_ref` ends the label at the FIRST
+        // `]`, so a label carrying one never parses as a reference in the first
+        // place and passes through verbatim, which is why parens are the shape
+        // this leg tests.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let rw = rewrite_local_files(
+            &format!("[Q3 (final) report]({})", pdf.display()),
+            Some(dir.path()),
+            &[],
+            false,
+        );
+        assert_eq!(
+            rw.rich, "![Q3 final report](tg://document?id=doc0)",
+            "parens are folded out of the alt and the runs they leave collapse"
+        );
+        assert_eq!(rw.entries.len(), 1);
+    }
+
+    #[test]
+    fn markdown_inlines_by_default_like_any_other_document() {
+        // #1968 detached markdown on the narrow ground that Android will not
+        // open an inlined `.md`; #801 widened it to every document. #820 makes
+        // markdown an OPT-IN exception and nothing more: with the toggle off it
+        // inlines exactly like a PDF. A mutant that reinstates a markdown-only
+        // branch leaves the default wrong for every markdown file.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let md = write_file(dir.path(), "state.md", MD_BYTES);
+        let rw = rewrite_local_files(
+            &format!("before [state]({}) after", md.display()),
+            Some(dir.path()),
+            &[],
+            false,
+        );
+        assert_eq!(
+            rw.rich, "before ![state](tg://document?id=doc0) after",
+            "markdown is not special unless the toggle says so"
+        );
+        assert_eq!(rw.entries.len(), 1);
+    }
+
+    #[test]
+    fn the_markdown_toggle_detaches_only_markdown() {
+        // ADR §5: `inline_markdown_documents = true` is the ONE declared
+        // exception, and it must be narrow. A toggle that also detached the PDF
+        // would silently undo rule 3 for every file the moment a user set it for
+        // one client limitation.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let md = write_file(dir.path(), "state.md", MD_BYTES);
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let rw = rewrite_local_files(
+            &format!("[state]({}) and [Q3]({})", md.display(), pdf.display()),
+            Some(dir.path()),
+            &[],
+            true,
+        );
+        assert_eq!(
+            rw.rich, "📎 state and ![Q3](tg://document?id=doc0)",
+            "markdown takes the marker, the PDF still inlines"
+        );
+        assert_eq!(
+            rw.entries.len(),
+            1,
+            "the detached markdown records no entry, so the floor still owns it"
+        );
+        assert_eq!(rw.entries[0].file.path, pdf);
+    }
+
+    #[test]
+    fn the_toggle_still_disarms_the_autolinker_in_the_marker() {
+        // #1938: a dotted label such as `1918-fix-state.md` is autolinked by the
+        // client as a bare domain. The disarmer must still reach this plane on
+        // the one path that still emits a marker.
         let dir = tempfile::tempdir().expect("tempdir");
         let md = write_file(dir.path(), "1918-fix-state.md", MD_BYTES);
         let rw = rewrite_local_files(
             &format!("[1918-fix-state.md]({})", md.display()),
             Some(dir.path()),
             &[],
+            true,
         );
         assert_eq!(
             rw.rich, "📎 1918-fix-state.\u{200b}md",
@@ -1172,28 +1270,11 @@ mod local_file_rewrite {
     }
 
     #[test]
-    fn markdown_takes_the_same_marker_as_any_other_document() {
-        // #1968 detached markdown on the narrow ground that Android will not
-        // open an inlined `.md`. #801 widened the rule to every document, so the
-        // carve-out is GONE — not special-cased, not configurable. A mutant that
-        // reinstates a markdown-only branch leaves every other kind inlining.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let md = write_file(dir.path(), "state.md", MD_BYTES);
-        let rw = rewrite_local_files(
-            &format!("before [state]({}) after", md.display()),
-            Some(dir.path()),
-            &[],
-        );
-        assert_eq!(rw.rich, "before 📎 state after");
-        assert!(rw.entries.is_empty());
-    }
-
-    #[test]
     fn a_link_inside_a_code_span_is_left_byte_identical() {
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
         let text = format!("`[Q3]({})`", pdf.display());
-        let rw = rewrite_local_files(&text, Some(dir.path()), &[]);
+        let rw = rewrite_local_files(&text, Some(dir.path()), &[], false);
         assert_eq!(rw.rich, text, "a code span is documentation, not a link");
         assert!(rw.entries.is_empty());
     }
@@ -1204,7 +1285,7 @@ mod local_file_rewrite {
         // reference must survive so the reader still sees what was named. The
         // failure is the SCAN's to report — one predicate, one home.
         let text = "before [Q3 report](/definitely/not/here-q3.pdf) after";
-        let rw = rewrite_local_files(text, None, &[]);
+        let rw = rewrite_local_files(text, None, &[], false);
         assert_eq!(rw.rich, text);
         assert!(rw.entries.is_empty());
     }
@@ -1214,7 +1295,7 @@ mod local_file_rewrite {
         // It may be ordinary prose that merely looks like a link, so with no
         // working directory to resolve against it is left alone.
         let text = "see [report](reports/q3.pdf) here";
-        let rw = rewrite_local_files(text, None, &[]);
+        let rw = rewrite_local_files(text, None, &[], false);
         assert_eq!(rw.rich, text);
         assert!(rw.entries.is_empty());
     }
@@ -1222,7 +1303,7 @@ mod local_file_rewrite {
     #[test]
     fn a_remote_link_stays_byte_identical() {
         let text = "see [the site](https://example.com/a) for details";
-        let rw = rewrite_local_files(text, None, &[]);
+        let rw = rewrite_local_files(text, None, &[], false);
         assert_eq!(rw.rich, text);
         assert!(rw.entries.is_empty());
     }
@@ -1231,7 +1312,7 @@ mod local_file_rewrite {
     fn an_already_delivered_file_is_consumed_without_a_second_reference() {
         // The document is already in the chat (a promoted intermediate sent it).
         // The reference is CONSUMED — nothing is left to answer — and no marker
-        // is written either: a second `📎` would tell the reader about a file
+        // is written either: a second anchor would tell the reader about a file
         // that is already above them.
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
@@ -1239,46 +1320,51 @@ mod local_file_rewrite {
             &format!("before [Q3]({}) after", pdf.display()),
             Some(dir.path()),
             std::slice::from_ref(&pdf),
+            false,
         );
         assert_eq!(rw.rich, "before  after");
         assert!(rw.entries.is_empty());
     }
 
     #[test]
-    fn a_model_written_marker_prefix_is_not_doubled_in_the_rich_plane() {
+    fn a_model_written_marker_prefix_is_not_doubled_before_the_embed() {
         // #2001, rich plane: a model's own `📎 ` before the reference must not
-        // survive beside the harness marker, or the reader gets `📎 📎 <label>`.
+        // survive beside the emitted anchor, or the reader gets `📎 📎 <label>`.
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
         let rw = rewrite_local_files(
             &format!("before 📎 [Q3 report]({}) after", pdf.display()),
             Some(dir.path()),
             &[],
+            false,
         );
         assert_eq!(
-            rw.rich.matches('📎').count(),
-            1,
-            "exactly one marker: {:?}",
-            rw.rich
+            rw.rich, "before ![Q3 report](tg://document?id=doc0) after",
+            "the model's own 📎 is consumed, not left beside the reference"
         );
-        assert_eq!(
-            rw.rich, "before 📎 Q3 report after",
-            "the model's own 📎 is consumed, not doubled"
-        );
-        assert!(rw.entries.is_empty());
+        assert_eq!(rw.rich.matches('📎').count(), 0);
     }
 
     #[test]
-    fn the_image_familys_reference_is_not_a_file_link() {
-        // `![alt](path)` belongs to the image family: the `!` guard is what
-        // keeps one reference from being claimed twice. Without it the file
-        // walk would eat a picture the image walk had already resolved.
+    fn an_embed_reference_is_read_by_the_file_family_too() {
+        // ADR §2 rule 6 / §10 gap 3: the FORM the author wrote must not decide
+        // the route. Before this, the file walk read only `[label](path)` and
+        // skipped `![label](path)` on a `!` guard, so a PDF written in embed
+        // syntax was claimed by the video family and shipped as a `tg://video`
+        // entry — a hard 400 for that media type.
         let dir = tempfile::tempdir().expect("tempdir");
-        let png = write_file(dir.path(), "pic.png", PNG_BYTES);
-        let text = format!("![pic]({})", png.display());
-        let rw = rewrite_local_files(&text, Some(dir.path()), &[]);
-        assert_eq!(rw.rich, text);
-        assert!(rw.entries.is_empty());
+        let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+        let rw = rewrite_local_files(
+            &format!("![Q3 report]({})", pdf.display()),
+            Some(dir.path()),
+            &[],
+            false,
+        );
+        assert_eq!(
+            rw.rich, "![Q3 report](tg://document?id=doc0)",
+            "an embed-syntax document is claimed, not passed through as an image ref"
+        );
+        assert_eq!(rw.entries.len(), 1);
     }
 
     #[test]
@@ -1289,7 +1375,8 @@ mod local_file_rewrite {
             &format!("\n\n  before [Q3]({})", pdf.display()),
             Some(dir.path()),
             &[],
+            false,
         );
-        assert_eq!(rw.rich, "before 📎 Q3");
+        assert_eq!(rw.rich, "before ![Q3](tg://document?id=doc0)");
     }
 }

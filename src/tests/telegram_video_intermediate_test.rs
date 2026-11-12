@@ -448,21 +448,27 @@ fn the_intermediate_file_pass_marks_a_link_in_both_planes() {
     );
 }
 
-/// #801: the RICH half of the intermediate composition, which the test above
+/// #820: the RICH half of the intermediate composition, which the test above
 /// deliberately does NOT cover. The file walk runs on the image family's RICH
-/// form, and what it leaves there is the `📎 <label>` MARKER for every
-/// resolvable file — no `tg://document` reference, no media entry.
+/// form, and what it leaves there is a `![label](tg://document?id=docN)`
+/// reference plus the media entry that answers it — the marker is reserved for
+/// the two declared exceptions (a `.md` under `inline_markdown_documents`, an
+/// already-delivered file).
 ///
 /// The reference scheme this test used to pin (`tg://document?id=docN` feeding
-/// a `MediaKind::Document` media entry) is GONE, and not because it was ugly:
-/// Telegram answered the send with `ok:true` and then delivered the document
-/// nowhere, so a reply that meant to inline a file produced a dead anchor (the
-/// owner's bubble 93966, #779). A document has exactly one delivery leg a
-/// client can open — a bubble of its own — and the file floor below is it.
-/// That is why this walk records no entry, and why the ownership predicate owns
-/// nothing for the file family: the floor is never suppressed.
+/// a `MediaKind::Document` media entry) is LIVE again (#820). #801 had deleted
+/// it on a measurement that was an artefact of LINK syntax: every probe used
+/// `[label](tg://document?id=doc0)`, which attaches nothing for ANY media kind —
+/// #801's own photo control delivered nothing too, and every probe still
+/// returned `ok:true`. Re-measured 2026-10-29 in EMBED syntax (ADR §4.1), the
+/// same entries deliver `PageBlockDocument`, `text/markdown` 37 B and
+/// `application/pdf` 200 B, in a DM and in a forum topic.
+///
+/// So the intermediate's file walk records entries again, the ownership
+/// predicate owns the file family when it does, and the floor ships only what
+/// the rich plane skipped.
 #[test]
-fn the_intermediate_rich_body_carries_the_marker_and_never_owns_the_floor() {
+fn the_intermediate_rich_body_carries_the_document_reference_and_owns_the_floor() {
     use crate::channels::telegram::rich::mermaid::{MediaEntry, MediaKind, rich_media_ownership};
     use crate::utils::image::rewrite_local_files;
 
@@ -481,19 +487,22 @@ fn the_intermediate_rich_body_carries_the_marker_and_never_owns_the_floor() {
 
     // The file walk runs LAST, on the image family's rich form — the order the
     // intermediate performs.
-    let fw = rewrite_local_files(&rw_rich.rich, Some(dir.path()), &[]);
-    assert!(
-        fw.entries.is_empty(),
-        "no document may ride the media array: the rich plane cannot deliver one"
+    let fw = rewrite_local_files(&rw_rich.rich, Some(dir.path()), &[], false);
+    assert_eq!(
+        fw.entries.len(),
+        1,
+        "the document rides the media array: the rich plane can deliver one"
     );
+    assert_eq!(fw.entries[0].id, "doc0");
+    assert_eq!(fw.entries[0].file.path, doc);
     assert!(
-        fw.rich.contains("📎 Q3 report"),
-        "the resolved document leaves the visible marker: {:?}",
+        fw.rich.contains("![Q3 report](tg://document?id=doc0)"),
+        "the resolved document leaves a reference the array answers: {:?}",
         fw.rich
     );
     assert!(
-        !fw.rich.contains("tg://document"),
-        "no document reference may survive — nothing answers it: {:?}",
+        !fw.rich.contains('📎'),
+        "no marker for a document the rich plane took: {:?}",
         fw.rich
     );
     assert!(
@@ -501,27 +510,24 @@ fn the_intermediate_rich_body_carries_the_marker_and_never_owns_the_floor() {
         "no raw path may survive in the rich body: {:?}",
         fw.rich
     );
-    // The picture's own reference survives the file walk untouched: the `!`
-    // guard is what keeps one reference from being claimed twice.
+    // The picture's own reference survives the file walk untouched: a `tg://`
+    // target classifies as a media ref, so the file family cannot claim it.
     assert!(
         fw.rich.contains("![pic](tg://photo?id=img0)"),
         "the file walk must leave the image family's rich reference verbatim: {:?}",
         fw.rich
     );
 
-    // The consequence the delivery path depends on: an empty entry list owns
-    // nothing, so `files_the_rich_plane_skipped` hands every resolved file to
-    // the floor and the document gets its bubble.
+    // The consequence the delivery path depends on: the entry list owns the file
+    // family, so `files_the_rich_plane_skipped` hands the document to NOBODY and
+    // the floor does not ship the same bytes twice.
     let owned = rich_media_ownership(true, &[]);
     assert!(
         !owned.documents,
-        "the rich plane owns no document, so the floor must ship every one"
+        "an empty array owns nothing — every file falls to the floor"
     );
-    assert!(!owned.any(), "nothing is owned for the file family");
+    assert!(!owned.any(), "nothing is owned without entries");
 
-    // The predicate still recognises the kind it can no longer receive — kept
-    // as the guard on `MediaKind::Document`, so a path that starts emitting one
-    // again cannot silently double-send it.
     let document_entry = MediaEntry {
         kind: MediaKind::Document,
         id: "doc0".into(),
@@ -531,7 +537,7 @@ fn the_intermediate_rich_body_carries_the_marker_and_never_owns_the_floor() {
     };
     assert!(
         rich_media_ownership(true, std::slice::from_ref(&document_entry)).documents,
-        "a document entry, if one ever appears again, must still own the family"
+        "a document entry owns the family, so the floor stays quiet"
     );
     assert!(
         !rich_media_ownership(false, std::slice::from_ref(&document_entry)).any(),
