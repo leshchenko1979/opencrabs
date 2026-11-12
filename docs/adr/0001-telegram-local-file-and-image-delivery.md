@@ -3,9 +3,11 @@
 - **Status:** Accepted — the owner's intended behaviour (ruling 2026-10-29), **corrected by measurement**
   (revision 3). §2 and §4 now state what the wire actually does; §10 lists every gap between this document
   and the tree, so a reader never has to guess which half is real.
-- **Date:** 2026-11-12 (revision 4 — §5 deleted the `.md` exception and §2 lost rule 4, after the owner
-  opened an inlined markdown file in the client; revision 3 was the twelve-live-probe rewrite of §2, §3.2,
-  §4, §5 and §7; revision 2 was the ruling before anyone had measured the shapes it assumed)
+- **Date:** 2026-11-12 (revision 5 — §3.2's Target row now separates a remote target's two forms, after #825
+  showed the row's "never fetched" contradicting the fetch step beside it; revision 4 deleted the `.md`
+  exception and §2 lost rule 4, after the owner opened an inlined markdown file in the client; revision 3 was
+  the twelve-live-probe rewrite of §2, §3.2, §4, §5 and §7; revision 2 was the ruling before anyone had
+  measured the shapes it assumed)
 - **Scope:** `src/utils/image.rs` (the reference walks), `src/channels/telegram/delivery.rs` (every plane),
   `src/channels/telegram/intermediates.rs` (promoted bubbles), `src/channels/telegram/rich/` (media array and
   the reference normalizer), `src/config/types.rs` (`TelegramConfig`), `src/brain/prompt_builder.rs` (what
@@ -111,7 +113,7 @@ declined, and the document walk inlined it", which is what ships now.
 
 | Step | Rule |
 |---|---|
-| Target | local path (absolute, `~`, relative to the session cwd) → claimed. Remote URL or an existing `tg://` ref → left verbatim, never fetched, never deleted (#286's loss mode) |
+| Target | local path (absolute, `~`, relative to the session cwd) → claimed, in **either** markdown form (a local path is a local path; the author's syntax never routes the file, §2 rule 6). A remote URL is a fetch candidate **only in embed syntax** — `![alt](https://…)` asks for a picture; `[label](https://…)` is prose and stays verbatim, never fetched, never deleted (#286's loss mode, #825). An existing `tg://` ref → left verbatim |
 | Validate | stat + 12-byte header; PNG / JPEG / GIF87a / GIF89a / WEBP / BMP only (video: mp4 / m4v / mov / webm / mkv / avi / 3gp / flv) |
 | Dedup | compared on the **resolved absolute** path, so `~/x.png` and `/root/x.png` dedup; an already-delivered picture is consumed and re-sent nothing |
 | Rewrite | `![alt](tg://photo?id=imgN)` / `![alt](tg://video?id=vidN)`; a caption rides the markdown **title** (`"…"`), because the rich media array has no caption field |
@@ -121,6 +123,15 @@ declined, and the document walk inlined it", which is what ships now.
 Reference ids are namespaced per family (`img` / `vid`, and `doc` for the document family this ADR adds)
 because entries are matched to references **by id inside one message's media array** — a shared prefix
 would let an image entry answer a video reference.
+
+**The form decides exactly one thing about a remote target, and #825 is why it is now written down.** Revision 3's
+Target row said a remote URL is "never fetched", which was true of the walk it described and false of the fetch
+step it never covered: `scan_image_references` has always queued an `![…](https://…)` target for a fetch, and
+`data_url_markdown_image_counts_as_remote` pins that. When #820 widened the walk to read link syntax too, the two
+halves met and `[#823](https://…)` was fetched as a picture — an HTML body, a magic-byte failure, and a "not a
+supported image format" trailer over an ordinary hyperlink. The gate is the author's own syntax: `!` means "fetch
+this", its absence means "this is prose, leave it alone". Local targets are untouched by the gate — §2 rule 6 still
+makes the two forms identical there, because the harness is the only thing that can attach local bytes.
 
 **That question is now closed, and the tree's comment was the wrong half.** `ff1425cc5`'s note at
 `src/utils/image.rs:2270` records that in #801's five multipart probes a `video` media entry "behaved the
