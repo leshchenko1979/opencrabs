@@ -164,7 +164,10 @@ fn a_resolvable_skill_carries_kb_share_and_loc() {
         .expect("a kept row");
     assert!(kept_head.contains("1 entry"), "{kept_head}");
     // The group's own totals, in the same units as its rows.
-    assert!(kept_head.contains("KB"), "kept head carries KB: {kept_head}");
+    assert!(
+        kept_head.contains("KB"),
+        "kept head carries KB: {kept_head}"
+    );
     assert!(kept_head.contains('%'), "kept head carries %: {kept_head}");
 
     let kept_detail = out
