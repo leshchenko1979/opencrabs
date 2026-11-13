@@ -174,6 +174,123 @@ def check_live(probe, evidence):
     return ok, f"{key} verdict {rec.get('verdict')}", detail
 
 
+CAVEATS = """## What this instrument cannot see
+
+- **Client rendering.** `tg_get_messages` returns what the API stored; whether a client *draws* a
+  reference is a different instrument (#827 was exactly that gap \u2014 the API accepted a form the client
+  would not open). A row marked PASS here means the wire is right, not that a human eye confirmed it.
+- **Stale evidence.** An observation recorded before a swap says nothing about the binary after it.
+  Every live row above carries its `sent_at`, and the `binary` line at the top names what was running
+  when the evidence was written. Re-probe after a swap; a PASS carried across one is not a measurement.
+- **Load behaviour.** One probe, one message. A rate-limited or partially-failing send is not exercised.
+- **Which PLANE a verdict speaks for.** \u00a72 rule 1 (a resolvable image arrives as a photo, its bytes in
+  the rich message's `media` array) and \u00a72 rule 5 (with no rich path, the bytes ship as their own
+  detached bubble \u2014 the floor) are DIFFERENT planes, and a probe only measures the one it travelled.
+  The local-image rule 1 probe rides the turn plane (`delivery.rs`); the tool plane (`telegram_send`
+  \u2192 `send.rs`) has no rich path at all and is recorded separately as the rule 5 floor. Reading either
+  one as evidence for the other is how a suite certifies a defect.
+"""
+
+def write_report(path, manifest, evidence, rows, passed, failed, missing, exit_code):
+    """Write the compliance report FROM the run, so no number can be hand-typed.
+
+    The page this replaces claimed to be generated while its counts were
+    transcribed by hand, and they drifted (it read 20/20 while the runner
+    printed 21/21). A report that asserts its own provenance and then drifts is
+    worse than no report: it launders a stale number into a compliance claim.
+    """
+    obs = evidence.get("observations", {})
+    by_id = {p["id"]: p for p in manifest["probes"]}
+    total = len(rows)
+    out = []
+    a = out.append
+
+    a("# ADR 0001 compliance report")
+    a("")
+    a("**ADR:** `%s` (revision %s)" % (manifest["adr"], manifest.get("adr_revision")))
+    a("**Binary under test:** %s" % evidence.get("binary", "unknown"))
+    a("**Evidence recorded at:** %s" % evidence.get("recorded_at", "unknown"))
+    if evidence.get("binary_delta"):
+        a("**Since then:** %s" % evidence["binary_delta"])
+    a("**Runner:** `python3 docs/adr/probes/run.py` \u2014 **exit %d**" % exit_code)
+    a("**%d/%d passed \u00b7 %d failed \u00b7 %d missing (missing counts as failed)**"
+      % (passed, total, failed, missing))
+    a("")
+    a("> **GENERATED FILE \u2014 do not hand-edit.** Written by `python3 docs/adr/probes/run.py --report`")
+    a("> from `manifest.json` + `live-evidence.json` in the same run that printed these counts, so a")
+    a("> number here cannot drift from the probe that produced it. Re-generate after any probe or")
+    a("> evidence change; a stale page is a false claim, not a rounding error.")
+    a("")
+    a("## Rule \u2192 probe coverage")
+    a("")
+    a("| ADR rule | Probe | Kind | State |")
+    a("|---|---|---|---|")
+    for r in rows:
+        a("| %s | `%s` | %s | %s |" % (r["rule"], r["id"], r["kind"], r["state"]))
+    a("")
+    a("## Live probes \u2014 the wire as Telegram stored it")
+    for r in rows:
+        if r["kind"] != "live":
+            continue
+        probe = by_id.get(r["id"], {})
+        rec = obs.get(probe.get("evidence_id", ""), {})
+        a("")
+        a("### `%s` \u2014 %s \u2192 **%s**" % (r["id"], r["rule"], r["state"]))
+        a("")
+        a("- **Claim under test:** %s" % r["claim"])
+        if not rec:
+            a("- **No observation recorded** \u2014 runner verdict: %s" % r["why"])
+            continue
+        a("- **tg_get_messages** (msg `%s`, chat `%s`): %s"
+          % (rec.get("message_id"), rec.get("chat_id"), rec.get("stored_form", "")))
+        a("- **Bubbles observed:** %s \u00b7 **sent at:** %s"
+          % (rec.get("bubbles"), rec.get("sent_at")))
+        a("- **Probe:** %s" % rec.get("probe", ""))
+        for line in rec.get("log_excerpt", []):
+            a("- **log:** `%s`" % line)
+        if rec.get("note"):
+            a("- **Analysis:** %s" % rec["note"])
+
+    withdrawn = [
+        (k, v) for k, v in obs.items() if v.get("verdict") == "WITHDRAWN"
+    ]
+    if withdrawn:
+        a("")
+        a("## Withdrawn observations (UNMEASURED, not compliant)")
+        for k, v in withdrawn:
+            a("")
+            a("- **%s** (msg `%s`): %s" % (k, v.get("message_id"), v.get("note", "")))
+
+    a("")
+    a("## Section 11 \u2014 the tree compiles and its tests pass")
+    a("")
+    for r in rows:
+        if r["kind"] != "ci":
+            continue
+        probe = by_id.get(r["id"], {})
+        a("`%s` \u2192 **%s** \u00b7 run **%s** on `%s` \u00b7 %s"
+          % (r["id"], r["state"], probe.get("run_id"), probe.get("repo"), r["why"]))
+        if probe.get("note"):
+            a("")
+            a(probe["note"])
+        for line in r["detail"]:
+            if line:
+                a("")
+                a("`%s`" % line)
+    a("")
+    a(CAVEATS)
+    a("")
+    a("## Reproduce")
+    a("")
+    a("```")
+    a("cd <repo> && python3 docs/adr/probes/run.py            # verdicts, exit 0 iff all pass")
+    a("cd <repo> && python3 docs/adr/probes/run.py --report docs/adr/probes/COMPLIANCE.md")
+    a("```")
+
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(out) + "\n")
+
+
 def main():
     ap = argparse.ArgumentParser()
     # HERE is <repo>/docs/adr/probes, so the repo root is three levels up.
@@ -183,6 +300,11 @@ def main():
         "--allow-missing",
         action="store_true",
         help="report MISSING without failing (pre-ship run)",
+    )
+    ap.add_argument(
+        "--report",
+        default="",
+        help="write the compliance report (markdown) from this run",
     )
     args = ap.parse_args()
 
@@ -259,6 +381,19 @@ def main():
                 indent=2,
             )
         print(f"wrote {args.json}")
+
+    if args.report:
+        write_report(
+            args.report,
+            manifest,
+            evidence,
+            rows,
+            passed,
+            failed,
+            missing,
+            0 if failed == 0 else 1,
+        )
+        print("wrote %s" % args.report)
 
     return 0 if failed == 0 else 1
 

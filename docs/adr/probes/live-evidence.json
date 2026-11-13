@@ -74,19 +74,33 @@
     },
     "L6": {
       "verdict": "PASS",
+      "message_id": 96148,
+      "chat_id": "-1003936827469",
+      "sent_at": "2026-11-13T18:55:29Z",
+      "probe": "a LOCAL 5180-byte 512x512 PNG referenced in embed syntax, delivered on the TURN plane (the rich path) — §2 rule 1 local case",
+      "stored_form": "ONE rich message (rich=true) whose media array carries the photo: rich_kind=photo, rich_media_id=5456183027160524023, image/jpeg, 22568 bytes; the body carries the inline reference [media: photo 5456183027160524023] and the caption as the markdown title",
+      "bubbles": 1,
+      "log_excerpt": [
+        "18:55:2x Telegram rich verdict: true (rich_messages=true, structured=false, media_forced=true, table=false, len=742)  [rich/detect.rs:112]",
+        "18:55:29 Telegram send ok: origin=turn detail=- session=- kind=rich_api path=sendRichMessage chat=-1003936827469 thread=Some(31847) msg=96148 len=742 hash8=28cbe125"
+      ],
+      "note": "§2 rule 1 local case, measured on the plane the rule NAMES. Rule 1 requires the image bytes to ride the rich message's media array; msg 96148 is exactly that — a rich=true message whose media array carries rich_media_id 5456183027160524023 as a photo, with the reference inline in the body. CORRECTION, recorded rather than quietly overwritten: this probe was first filed citing msg 96143, which is the TOOL plane's detached upload (telegram_send → send.rs, which never consults rich_messages). That observation measures rule 5's floor and is now recorded separately as L7. The 2026-11-12 withdrawal of this probe was for a truncated FIXTURE, not a binary defect; the fixture is structurally validated (fixture-l6 PASS: 512x512, CRCs OK, ends on IEND, IDAT inflates to 1049088 = expected)."
+    },
+    "L7": {
+      "verdict": "PASS",
       "message_id": 96143,
       "chat_id": "-1003936827469",
       "sent_at": "2026-11-13T18:27:52Z",
-      "probe": "a LOCAL 5180-byte 512x512 PNG referenced in embed syntax (§2 rule 1, local case)",
-      "stored_form": "media.type=photo, image/jpeg, 22568 bytes (Telegram re-encodes the 5180 B PNG); text caption in the preceding chunk 96142",
+      "probe": "a LOCAL 5180-byte 512x512 PNG sent through the TOOL plane (telegram_send), which has no rich path at all — §2 rule 5 detached floor",
+      "stored_form": "TWO bubbles: a text chunk (msg 96142, html, len 218) and a detached photo bubble (msg 96143, media.type=photo, image/jpeg, 22568 bytes)",
       "bubbles": 2,
       "log_excerpt": [
         "18:27:52.216350 Telegram send ok: origin=tool detail=send kind=html_or_plain path=html chat=-1003936827469 thread=Some(31847) msg=96142 len=218 hash8=4f7c5689",
-        "18:27:52.725532 Telegram send ok: origin=tool detail=send kind=outbox path=image_photo chat=-1003936827469 thread=Some(31847) msg=96143 len=5180 hash8=697081ce",
-        "no 'rich markdown+media send failed' / IMAGE_PROCESS_FAILED / 'falling back' line in 18:27:40-18:27:59 (absence sweep, empty)"
+        "18:27:52.725532 Telegram send ok: origin=tool detail=send kind=outbox path=image_photo chat=-1003936827469 thread=Some(31847) msg=96143 len=5180 hash8=697081ce"
       ],
-      "note": "§2 rule 1 local case on the swapped binary bf74d9e93. The claim under test is that a resolvable local image reference ARRIVES AS A PHOTO — not a 📎 document and not a bare path string. Measured: it does. msg 96143 is media.type=photo/image/jpeg and the send line's len=5180 is the fixture's exact byte count, so the bytes are provably the fixture and not a stray file. Mechanism note, recorded so this verdict is not read for more than it measures: on the TOOL plane (telegram_send → send.rs) the text ships as html and the image bytes ride the detached leg (rule 5's floor, which is un-gated by design); the rich media-array leg for local images is the TURN plane (delivery.rs), which the earlier truncated-fixture probe msg 96054 proved is attempted there too (it failed with 400 IMAGE_PROCESS_FAILED on the invalid PNG). The old L6 observation was withdrawn for a bad FIXTURE, not for a bad binary; with the fixture structurally validated (fixture-l6 PASS: 512x512, CRCs OK, ends on IEND, inflates to 1049088 = expected) the same reference now delivers a photo."
+      "note": "§2 rule 5: with no rich path, every kind ships as its own detached bubble. The tool plane IS that case by construction — send.rs never reads rich_messages, so no rich path exists there — and it is measured: the bytes ship as a detached photo bubble beside an html text chunk, with len=5180 (the fixture's exact byte count) proving which file rode. This is the floor, not the rich plane; it is recorded here so rule 5 has a LIVE receipt, and so L6 cannot be read as measuring it."
     }
   },
-  "binary": "opencrabs 0.5.4 @ bf74d9e93317124c5a33978951488d17dac45e51"
+  "binary": "opencrabs 0.5.4 @ bf74d9e93317124c5a33978951488d17dac45e51",
+  "binary_delta": "docs-only, measured: `git diff --name-only bf74d9e93..25e83b5c4 -- src/` is EMPTY, and the three paths that changed are docs/adr/probes/{COMPLIANCE.md,live-evidence.json,manifest.json}. The box runs opencrabs 0.5.4 @ 25e83b5c4, whose compiled code is identical to the binary these observations were taken on, so the verdicts are not stale in the sense the caveat warns about."
 }
