@@ -1038,18 +1038,26 @@ mod local_file_links {
 // ---------------------------------------------------------------------------
 
 /// `rewrite_local_files` — the document twin of `rewrite_local_images`. Every
-/// resolvable document becomes an EMBED reference `![label](tg://document?id=docN)`
+/// resolvable document becomes a LINK reference `[label](tg://document?id=docN)`
 /// in place, with a matching entry in [`LocalFileRewrite::entries`], so the rich
 /// request carries the bytes and the reference is answered by them.
 ///
 /// #801 held the opposite — that a document can never inline — and this module
 /// used to assert it. That conclusion came from five multipart `sendRichMessage`
-/// probes written in LINK syntax `[label](tg://document?id=doc0)`, which attaches
-/// nothing for ANY media kind: #801's own photo control delivered nothing either,
-/// and every probe still returned `ok:true`. Re-measured 2026-10-29 in EMBED
-/// syntax (ADR §4.1), `PageBlockDocument` delivers `text/markdown` 37 B and
-/// `application/pdf` 200 B in both a DM and a forum topic. The API was never
-/// refusing documents; the markdown form was.
+/// probes written in LINK syntax, which delivered nothing, its own photo control
+/// included, while every probe still returned `ok:true`. Re-measured 2026-10-29
+/// (ADR §4.1) the entries DO deliver: `PageBlockDocument`, `text/markdown` 37 B
+/// and `application/pdf` 200 B, in a DM and in a forum topic. The API was never
+/// refusing documents.
+///
+/// #827 settled the FORM in the client rather than in the API response. An embed
+/// `![alt](tg://document?id=docN)` asks the client for a picture and is answered
+/// with a document id, so it draws nothing; the same reference in link syntax is
+/// accepted and tappable. Measured on one daemon a day apart: the link-form
+/// bubble opened on a tap, the embed-form bubble was neither visible nor
+/// tappable. So these legs assert LINK syntax, and
+/// `shield_unresolvable_markdown_images` — which already demotes a live document
+/// entry to link syntax at send time — is no longer load-bearing for them.
 ///
 /// So these legs now assert the reference AND its entry. A leg that expects a
 /// `📎` marker for an ordinary file is asserting the #801 defect; one that
@@ -1083,8 +1091,8 @@ mod local_file_rewrite {
             Some(dir.path()),
             &[]);
         assert_eq!(
-            rw.rich, "before ![Q3 report](tg://document?id=doc0) after",
-            "the reference is replaced AT its position by the embed, never stripped"
+            rw.rich, "before [Q3 report](tg://document?id=doc0) after",
+            "the reference is replaced AT its position by the link, never stripped"
         );
         assert_eq!(
             rw.entries.len(),
@@ -1096,7 +1104,7 @@ mod local_file_rewrite {
     }
 
     #[test]
-    fn a_space_bearing_path_still_embeds() {
+    fn a_space_bearing_path_still_inlines() {
         // #793, rewrite half: the rich plane walks the same references through
         // the same parser, so a path with spaces must resolve here too —
         // otherwise the scan would ship the document while the rich body kept a
@@ -1107,7 +1115,7 @@ mod local_file_rewrite {
             &format!("see [Q3]({}) here", pdf.display()),
             Some(dir.path()),
             &[]);
-        assert_eq!(rw.rich, "see ![Q3](tg://document?id=doc0) here");
+        assert_eq!(rw.rich, "see [Q3](tg://document?id=doc0) here");
         assert_eq!(rw.entries.len(), 1);
     }
 
@@ -1126,7 +1134,7 @@ mod local_file_rewrite {
             &[]);
         assert_eq!(
             rw.rich,
-            "![Q3](tg://document?id=doc0) and ![Q4](tg://document?id=doc1)"
+            "[Q3](tg://document?id=doc0) and [Q4](tg://document?id=doc1)"
         );
         assert_eq!(rw.entries.len(), 2);
         assert_eq!(rw.entries[0].id, "doc0");
@@ -1204,14 +1212,14 @@ mod local_file_rewrite {
             Some(dir.path()),
             &[]);
         assert_eq!(
-            rw.rich, "![q3-report.pdf](tg://document?id=doc0)",
+            rw.rich, "[q3-report.pdf](tg://document?id=doc0)",
             "the reader always has something to anchor on — the file's own name"
         );
         assert_eq!(rw.entries.len(), 1);
     }
 
     #[test]
-    fn a_label_that_would_break_the_embed_is_sanitised() {
+    fn a_label_that_would_break_the_reference_is_sanitised() {
         // `(` and `)` in an alt would let the target parse wrong, and a
         // malformed reference fails the WHOLE message rather than one
         // attachment (ADR §4.1) — so the producer folds them out. A `]` cannot
@@ -1226,7 +1234,7 @@ mod local_file_rewrite {
             Some(dir.path()),
             &[]);
         assert_eq!(
-            rw.rich, "![Q3 final report](tg://document?id=doc0)",
+            rw.rich, "[Q3 final report](tg://document?id=doc0)",
             "parens are folded out of the alt and the runs they leave collapse"
         );
         assert_eq!(rw.entries.len(), 1);
@@ -1247,7 +1255,7 @@ mod local_file_rewrite {
             Some(dir.path()),
             &[]);
         assert_eq!(
-            rw.rich, "before ![state](tg://document?id=doc0) after",
+            rw.rich, "before [state](tg://document?id=doc0) after",
             "markdown is not special: no toggle, no branch, no exception"
         );
         assert_eq!(rw.entries.len(), 1);
@@ -1342,7 +1350,7 @@ mod local_file_rewrite {
     }
 
     #[test]
-    fn a_model_written_marker_prefix_is_not_doubled_before_the_embed() {
+    fn a_model_written_marker_prefix_is_not_doubled_before_the_reference() {
         // #2001, rich plane: a model's own `📎 ` before the reference must not
         // survive beside the emitted anchor, or the reader gets `📎 📎 <label>`.
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1352,7 +1360,7 @@ mod local_file_rewrite {
             Some(dir.path()),
             &[]);
         assert_eq!(
-            rw.rich, "before ![Q3 report](tg://document?id=doc0) after",
+            rw.rich, "before [Q3 report](tg://document?id=doc0) after",
             "the model's own 📎 is consumed, not left beside the reference"
         );
         assert_eq!(rw.rich.matches('📎').count(), 0);
@@ -1372,7 +1380,7 @@ mod local_file_rewrite {
             Some(dir.path()),
             &[]);
         assert_eq!(
-            rw.rich, "![Q3 report](tg://document?id=doc0)",
+            rw.rich, "[Q3 report](tg://document?id=doc0)",
             "an embed-syntax document is claimed, not passed through as an image ref"
         );
         assert_eq!(rw.entries.len(), 1);
@@ -1386,6 +1394,6 @@ mod local_file_rewrite {
             &format!("\n\n  before [Q3]({})", pdf.display()),
             Some(dir.path()),
             &[]);
-        assert_eq!(rw.rich, "before ![Q3](tg://document?id=doc0)");
+        assert_eq!(rw.rich, "before [Q3](tg://document?id=doc0)");
     }
 }

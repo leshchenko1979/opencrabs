@@ -516,11 +516,13 @@ pub(crate) enum MediaKind {
     /// PDF, an archive or any other file in the rich message. #801 retired it on
     /// five multipart probes that all used LINK syntax, which attaches nothing
     /// for ANY kind (its own photo probe delivered nothing either, while every
-    /// call returned `ok:true`); re-measured in EMBED syntax, a document entry
-    /// delivers `PageBlockDocument` — `text/markdown` 37 B, `application/pdf`
-    /// 200 B, in a DM and in a forum topic (ADR-0001 §4.1). `utils/image.rs`
-    /// emits it again, one entry per file, and the reference in the body is the
-    /// `![label](tg://document?id=docN)` the same call wrote.
+    /// call returned `ok:true`); re-measured, a document entry returns
+    /// `PageBlockDocument` — `text/markdown` 37 B, `application/pdf` 200 B, in a
+    /// DM and in a forum topic (ADR-0001 §4.1). `utils/image.rs` emits it again,
+    /// one entry per file, and the reference in the body is the
+    /// `[label](tg://document?id=docN)` the same call wrote — LINK syntax, since
+    /// #827 measured in the client that an embed aimed at a document id draws
+    /// nothing (ADR-0001 §4.2).
     ///
     /// `as_str` stays the ONE string mapping the shield and the orphan register
     /// key on: a kind whose mapping silently vanished would make a stray entry

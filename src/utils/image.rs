@@ -2405,7 +2405,7 @@ impl MediaSource for ResolvedFileRef {
 /// A text prepared for the rich media plane's file half (#1918 → #820).
 ///
 /// The document twin of [`rewrite_local_images`]. Every resolvable file becomes
-/// an EMBED reference `![label](tg://document?id=docN)` in place, with a
+/// a LINK reference `[label](tg://document?id=docN)` in place, with a
 /// [`ResolvedFileRef`] recorded so the rich request can carry the bytes — with
 /// ONE deliberate exception that falls back to the plain `📎 <label>` marker and
 /// records no entry: a file this turn already delivered, which needs no second
@@ -2421,18 +2421,19 @@ impl MediaSource for ResolvedFileRef {
 /// copy of that list would be a second home for one predicate.
 #[derive(Debug, Clone, Default)]
 pub struct LocalFileRewrite {
-    /// Input with every resolvable local-file reference replaced IN PLACE by an
-    /// EMBED reference `![alt](tg://document?id=docN)`. Links inside code
+    /// Input with every resolvable local-file reference replaced IN PLACE by a
+    /// LINK reference `[alt](tg://document?id=docN)`. Links inside code
     /// spans, remote targets and existing Telegram media refs are left
     /// byte-identical; a file the rich plane declines gets the plain
     /// `📎 <label>` marker instead.
     ///
     /// #1918 wrote the reference in LINK syntax `[📎 <label>](tg://document?…)`
-    /// and #801 retired the whole plane, having measured only that form — which
-    /// attaches nothing for ANY media kind, its own photo control included,
-    /// while still returning `ok:true` (ADR §4.1). #820 re-measured the EMBED
-    /// form: it delivers a `PageBlockDocument`, so the plane is back and the
-    /// form is the thing that decides, never the kind.
+    /// and #801 retired the whole plane, reading that form as "documents never
+    /// attach" (ADR §4.1). #820 re-measured with EMBED syntax and the API
+    /// answered `PageBlockDocument`, so the plane came back. #827 then measured
+    /// the CLIENT and found the two instruments disagree: the API accepts either
+    /// form for a document, and only LINK renders — so the emit is link again,
+    /// for a measured reason this time (ADR §4.2).
     pub rich: String,
     /// Resolved documents in order of appearance, with the id each got — the
     /// entries the rich plane turns into `attach://` parts. Empty only when
@@ -2484,7 +2485,7 @@ fn markdown_ref_bracket_len(text: &str, start: usize) -> Option<usize> {
 
 /// Walk state for [`rewrite_local_files`], holding the per-reference policy so
 /// the walk itself stays a single readable loop. Its `file` is the document
-/// family's PRODUCER: it emits the `![…](tg://document?id=docN)` reference and
+/// family's PRODUCER: it emits the `[…](tg://document?id=docN)` reference and
 /// pushes the matching entry in one call, so the two can never disagree.
 struct FileRewriter<'a> {
     base_dir: Option<&'a Path>,
@@ -2494,7 +2495,7 @@ struct FileRewriter<'a> {
 }
 
 /// The `alt` text of a document's rewritten reference — the label, made safe to
-/// sit inside `![…]`.
+/// sit inside `[…](…)`.
 ///
 /// A `]` closes the alt, `(`/`)` would let the target parse wrong, and a newline
 /// ends the reference: any of them turns a working embed into a malformed one,
@@ -2537,11 +2538,21 @@ impl FileRewriter<'_> {
     ///
     /// Two shapes come out of here, and the choice between them is the ADR's:
     ///
-    /// - **inline** — `![label](tg://document?id=docN)`, with the entry pushed
-    ///   in the SAME call so the reference and its bytes can never disagree
-    ///   (ADR §3.3, §10 gap 5). This is the shape for every file, whatever its
-    ///   extension — `.md` included (#823: a markdown file is a document like
-    ///   any other, and the carve-out that held it out is gone).
+    /// - **inline** — `[label](tg://document?id=docN)`, in LINK syntax, with the
+    ///   entry pushed in the SAME call so the reference and its bytes can never
+    ///   disagree (ADR §3.3, §10 gap 5). This is the shape for every file,
+    ///   whatever its extension — `.md` included (#823: a markdown file is a
+    ///   document like any other, and the carve-out that held it out is gone).
+    ///
+    ///   LINK, not image syntax: `![…](tg://document?id=…)` is read by the
+    ///   client as a PHOTO embed whose source is a document, and it draws
+    ///   nothing (#827). Measured in the client, same daemon, one day apart: the
+    ///   link-form bubble (12:01) opened when the owner tapped it, and the
+    ///   embed-form bubble (18:33) was neither visible nor tappable. The same
+    ///   reference in link syntax is also what
+    ///   `shield_unresolvable_markdown_images` demotes it to at send time, so
+    ///   emitting it here is the shape that reaches the wire either way — this
+    ///   just stops depending on that repair running.
     /// - **the plain `📎 <label>` marker** — for a file this turn already
     ///   delivered. The marker records no entry, so the rich plane does not
     ///   claim it and the detached file floor ships it.
@@ -2574,10 +2585,20 @@ impl FileRewriter<'_> {
                 // #801 held the opposite — "no document can ever inline" — on
                 // five multipart probes that all used LINK syntax, which
                 // attaches nothing for ANY kind, its own photo probe included.
-                // Re-measured 2026-10-29 (§4.1): the same entries in EMBED
-                // syntax deliver `PageBlockDocument`, `text/markdown` 37 B and
+                // Re-measured 2026-10-29 (§4.1): the same entries deliver
+                // `PageBlockDocument`, `text/markdown` 37 B and
                 // `application/pdf` 200 B, in a DM and in a forum topic. The
                 // API was never refusing documents; the markdown form was.
+                //
+                // #827: the FORM is LINK, not image syntax. An embed
+                // `![alt](tg://document?id=docN)` asks the client for a picture
+                // and is answered with a document id, so it draws nothing —
+                // measured in the client on one daemon: the link-form bubble
+                // (12:01) opened on a tap, the embed-form bubble (18:33) was
+                // absent. `shield_unresolvable_markdown_images` already demotes
+                // a live document entry to link syntax at send time; emitting it
+                // here is the same wire form without depending on that repair
+                // having run.
                 let id = format!("{}{}", DOC_ID_PREFIX, self.entries.len());
                 let alt = document_alt(label, &path);
                 // The caption rides the markdown TITLE, because the rich media
@@ -2590,7 +2611,7 @@ impl FileRewriter<'_> {
                 // whichever form this file took.
                 consume_marker_prefix(&mut self.rich);
                 self.rich
-                    .push_str(&format!("![{alt}](tg://document?id={id}{title})"));
+                    .push_str(&format!("[{alt}](tg://document?id={id}{title})"));
                 self.entries.push(ResolvedFileRef {
                     id,
                     file: LocalFile {

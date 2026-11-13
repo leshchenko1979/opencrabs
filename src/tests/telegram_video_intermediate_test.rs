@@ -452,7 +452,7 @@ fn the_intermediate_file_pass_marks_a_link_in_both_planes() {
 
 /// #820: the RICH half of the intermediate composition, which the test above
 /// deliberately does NOT cover. The file walk runs on the image family's RICH
-/// form, and what it leaves there is a `![label](tg://document?id=docN)`
+/// form, and what it leaves there is a `[label](tg://document?id=docN)`
 /// reference plus the media entry that answers it — the marker is reserved for
 /// one case only, an already-delivered file. (#823 deleted the other, the `.md`
 /// that `inline_markdown_documents` used to hold out, so markdown rides this
@@ -463,9 +463,14 @@ fn the_intermediate_file_pass_marks_a_link_in_both_planes() {
 /// it on a measurement that was an artefact of LINK syntax: every probe used
 /// `[label](tg://document?id=doc0)`, which attaches nothing for ANY media kind —
 /// #801's own photo control delivered nothing too, and every probe still
-/// returned `ok:true`. Re-measured 2026-10-29 in EMBED syntax (ADR §4.1), the
-/// same entries deliver `PageBlockDocument`, `text/markdown` 37 B and
-/// `application/pdf` 200 B, in a DM and in a forum topic.
+/// returned `ok:true`. Re-measured 2026-10-29 (ADR §4.1), the same entries
+/// deliver `PageBlockDocument`, `text/markdown` 37 B and `application/pdf` 200 B,
+/// in a DM and in a forum topic.
+///
+/// #827: the reference is written in LINK syntax, not image syntax. An embed
+/// `![alt](tg://document?id=docN)` asks the client for a picture and is answered
+/// with a document id, so it draws nothing — measured in the client, one daemon,
+/// one day apart: link form opened on a tap, embed form was absent.
 ///
 /// So the intermediate's file walk records entries again, the ownership
 /// predicate owns the file family when it does, and the floor ships only what
@@ -499,7 +504,7 @@ fn the_intermediate_rich_body_carries_the_document_reference_and_owns_the_floor(
     assert_eq!(fw.entries[0].id, "doc0");
     assert_eq!(fw.entries[0].file.path, doc);
     assert!(
-        fw.rich.contains("![Q3 report](tg://document?id=doc0)"),
+        fw.rich.contains("[Q3 report](tg://document?id=doc0)"),
         "the resolved document leaves a reference the array answers: {:?}",
         fw.rich
     );
