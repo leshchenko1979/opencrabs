@@ -540,6 +540,8 @@ pub mod telegram_file_delivery_test;
 pub mod telegram_rich_media_kind_test;
 pub mod telegram_rich_media_rejection_test;
 #[cfg(feature = "telegram")]
+pub mod telegram_dedup_reference_spelling_test;
+#[cfg(feature = "telegram")]
 pub mod telegram_video_delivery_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_video_intermediate_test;

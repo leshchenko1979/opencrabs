@@ -187,6 +187,35 @@ dropped file is therefore lost from the bubble rather than degraded to `📎`, w
 rule is weaker than the fallback it replaced; making a dropped entry reach the floor needs the entry's
 path threaded back to `delivery.rs`, and is filed as the follow-up on #826.
 
+### 3.5 One reply, one delivery — the reference spelling is not the reply (#826)
+
+A reply is delivered TWICE in one turn by design: the drain ships whatever the turn streamed as
+intermediates, and the final leg ships the answer. They are supposed to be one bubble, and the dedup
+between them is what makes that true — the final leg suppresses its text when a recorded intermediate
+already carries it.
+
+That comparison was whitespace-only, and the two sides never match when the reply names a file, because
+each plane records a DIFFERENT SPELLING of the same reference:
+
+| plane | the reference reads |
+|---|---|
+| the model's answer, which the final leg compares | `[report.pdf](/tmp/x.pdf)` |
+| the rich body that actually goes out | `[report.pdf](tg://document?id=doc0)` |
+| the `📎` marker recorded in `sent_bubbles` | `📎 report.pdf` |
+
+Measured 2026-11-12 on this box: a reply carrying six documents went out as rich message `96054`, the
+dedup found no match, and a second bubble `96056` followed 0.9 s later with every document detached and
+both pictures consumed. The reply was identical; only the spelling differed.
+
+So the SUPPRESSION arm compares with the reference spelling erased — every `tg://`, `file://` and
+absolute-path target collapses to its label, and the `📎` marker to its label. A remote `https://`
+hyperlink is NOT erased: two replies that link different pages are different replies.
+
+The DELETION arm (`superseded_ids`) keeps the strict comparison. Loosening it would delete a bubble whose
+file reference spelled a different file under the same label, and a deleted bubble is unrecoverable; a
+suppressed re-send costs nothing. The two arms therefore differ on purpose, and the difference is the
+safety direction.
+
 ## 4. The document plane — measured working, still absent from the tree
 
 **Intent (§2 rule 3): every non-image, non-video file inlines as a `document` media entry, in the same
@@ -658,13 +687,15 @@ cross-references elsewhere in this document still land.
     as blocked by `#349`, a timezone fix that touches none of its path. Neither is a code defect; both make
     the tracker lie about what is blocked.
 
-13. **#826 — a refused media entry used to cost the whole plane.** Fixed in §3.4: the sender retries the
-    identical body once for the `IMAGE_PROCESS_FAILED` flake, then sacrifices entries of the family the
-    error names, and downgrades to the HTML dialect only when both legs fail. The remaining half of #826 is
-    the duplicate bubble: a reply whose rich leg is retried and lands must not also deliver its degraded
-    HTML copy. §3.4 removes the *trigger* (the refusal no longer reaches the fallback), which is not the
-    same as removing the *seam* — a rich failure followed by a successful retry can still pair with an
-    HTML copy, and the guard for that is still owed.
+13. **#826 — a refused media entry used to cost the whole plane, and the reply could ship twice.**
+    Fixed in §3.4 and §3.5: the sender retries the identical body once for the `IMAGE_PROCESS_FAILED`
+    flake, then sacrifices entries of the family the error names, and downgrades to the HTML dialect only
+    when both legs fail. The duplicate bubble was a SECOND seam, not a consequence of the first: the final
+    leg's dedup compared its own text against the recorded intermediate, and the two never matched because
+    each plane records a different SPELLING of the same reference (`[report.pdf](/tmp/x.pdf)` on the model's
+    plane, `[report.pdf](tg://document?id=doc0)` on the rich plane, `📎 report.pdf` in `sent_bubbles`). The
+    suppression arm now compares with the reference spelling erased (§3.5); the DELETION arm keeps the
+    strict whitespace comparison, because a delete is unrecoverable and a label is not a file identity.
 
 ## 11. Verification
 

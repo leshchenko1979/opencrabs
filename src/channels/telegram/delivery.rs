@@ -476,20 +476,31 @@ pub(crate) async fn deliver_final_response(
                 sent.len(),
             );
             let pre_dedup_text = text_only.clone();
-            // Whitespace-normalized comparison. The predicate has ONE home
-            // (#620) — `normalize_for_dedup` — shared with the supersession
-            // cleanup below: if the two arms normalized differently, one could
-            // delete a bubble the other never matched, which is the same silent
-            // loss this fix removes.
+            // Whitespace-normalized comparison, then reference-SPELLING
+            // erasure (#826 AC-1/2). The two arms of the dedup deliberately
+            // differ here, and the difference is the safety direction:
+            //
+            // * SUPPRESSION (this arm) may compare more loosely. The recorded
+            //   bubble is the same turn's answer written on the stripped plane
+            //   (`📎 report.pdf`) while the final response carries the model's
+            //   own form (`[report.pdf](/tmp/x.pdf)`), so a whitespace-only
+            //   comparison never matches them and the reply ships twice — the
+            //   duplicate the owner saw as `96056` beside the rich `96054`.
+            //   Erasing the spelling can at worst drop a re-send that only
+            //   differed in how a reference was written, which is the outcome
+            //   wanted.
+            // * DELETION (`superseded_ids`) must NOT loosen: it would delete a
+            //   bubble whose file reference spelled a DIFFERENT file with the
+            //   same label, and a deleted bubble is unrecoverable.
             let mut suppressed_final = false;
             let text_only = if !sent.is_empty() {
-                let norm_final = super::intermediates::normalize_for_dedup(&text_only);
-                if sent
-                    .iter()
-                    .any(|i| super::intermediates::normalize_for_dedup(i) == norm_final)
-                {
+                let norm_final = super::intermediates::normalize_reference_spelling(&text_only);
+                if sent.iter().any(|i| {
+                    super::intermediates::normalize_reference_spelling(i) == norm_final
+                }) {
                     tracing::info!(
-                        "Telegram dedup: match found among {} intermediates (normalized) — suppressing final response",
+                        "Telegram dedup: match found among {} intermediates (reference-spelling \
+                         normalized) — suppressing final response",
                         sent.len()
                     );
                     suppressed_final = true;

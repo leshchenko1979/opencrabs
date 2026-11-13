@@ -283,6 +283,114 @@ pub(crate) fn normalize_for_dedup(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Is a link target a MEDIA/FILE reference rather than a real hyperlink?
+///
+/// Only the three forms this crate's own walks produce count: a `tg://` media
+/// reference, a `file://` URI, and an absolute filesystem path. A remote
+/// `https://` link is deliberately NOT one — two replies that link different
+/// web pages are different replies, and erasing that difference would let the
+/// dedup swallow a genuinely new answer.
+fn is_media_or_file_target(target: &str) -> bool {
+    target.starts_with("tg://") || target.starts_with("file://") || target.starts_with('/')
+}
+
+/// Rewrite a text so that the SPELLING of a media/file reference cannot make
+/// two identical replies compare unequal (#826 AC-1/2).
+///
+/// The same reply is written differently on each plane, and each plane records
+/// its own form:
+///
+/// | plane | the reference reads |
+/// |---|---|
+/// | the model's answer (the final response) | `[report.pdf](/tmp/x.pdf)` |
+/// | the rich body that goes out | `[report.pdf](tg://document?id=doc0)` |
+/// | the `📎` marker, recorded in `sent_bubbles` | `📎 report.pdf` |
+///
+/// A whitespace comparison (`normalize_for_dedup`) therefore NEVER matches
+/// them, and the final leg re-ships a reply that already landed. Measured
+/// 2026-11-12 on this box: one reply carrying six documents went out as rich
+/// message `96054`, the dedup found no match among the recorded bubbles, and a
+/// second, degraded bubble `96056` followed 0.9 s later with every document
+/// detached. The reply text was identical; only the reference spelling
+/// differed.
+///
+/// Every form collapses to the LABEL, so the comparison answers "does this
+/// bubble already say this?" and never "was this the same file?" — the file
+/// question is the `delivered_image_paths` filter's, and conflating the two
+/// would make a re-send look delivered.
+pub(crate) fn normalize_reference_spelling(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        // The `📎 <label>` marker the stripped form records for a file it
+        // declined. It is the reference's whole spelling on that plane, so the
+        // emoji goes and the label stays.
+        if chars[i] == '📎' {
+            i += 1;
+            while i < chars.len() && chars[i].is_whitespace() {
+                i += 1;
+            }
+            continue;
+        }
+        let image = chars[i] == '!' && chars.get(i + 1) == Some(&'[');
+        let open = if image { i + 1 } else { i };
+        if chars[open] == '['
+            && let Some((label, target, end)) = parse_link_at(&chars, open)
+            && is_media_or_file_target(&target)
+        {
+            out.push_str(&label);
+            i = end;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Parse `[label](target)` starting at the `[` on `open`.
+///
+/// Returns the label, the target and the index just past the closing `)`.
+/// `None` for anything that is not exactly that shape — a half-written link, a
+/// nested bracket, a target carrying its own parentheses — because guessing
+/// there would rewrite text the author wrote deliberately.
+fn parse_link_at(chars: &[char], open: usize) -> Option<(String, String, usize)> {
+    let mut i = open + 1;
+    let label_start = i;
+    let mut depth = 0usize;
+    while i < chars.len() {
+        match chars[i] {
+            '[' => depth += 1,
+            ']' if depth == 0 => break,
+            ']' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    if i >= chars.len() || chars.get(i + 1) != Some(&'(') {
+        return None;
+    }
+    let label: String = chars[label_start..i].iter().collect();
+    let target_start = i + 2;
+    let mut j = target_start;
+    let mut parens = 0usize;
+    while j < chars.len() {
+        match chars[j] {
+            '(' => parens += 1,
+            ')' if parens == 0 => break,
+            ')' => parens -= 1,
+            _ => {}
+        }
+        j += 1;
+    }
+    if j >= chars.len() || parens != 0 {
+        return None;
+    }
+    let target: String = chars[target_start..j].iter().collect();
+    Some((label, target, j + 1))
+}
+
 /// Which intermediates does re-sending `rich_text` as one rich bubble REPLACE?
 ///
 /// #620: the burial arm deleted EVERY id in the list on the premise that the
