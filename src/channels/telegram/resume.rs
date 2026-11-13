@@ -990,7 +990,7 @@ pub(crate) async fn resume_session_inner(
                 after_tokens,
                 elapsed,
                 summary,
-                tool_tokens,
+                tool_sizes,
                 ..
             } => {
                 // #824: same card as the live path, assembled before the lock
@@ -1003,7 +1003,7 @@ pub(crate) async fn resume_session_inner(
                         after_pct,
                         ctx_max,
                         elapsed,
-                        tool_tokens,
+                        tool_sizes: &tool_sizes,
                         summary: &summary,
                     }))
                 } else {

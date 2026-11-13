@@ -267,7 +267,7 @@ pub(crate) fn build_progress_cb(
                 after_tokens,
                 elapsed,
                 summary,
-                tool_tokens,
+                tool_sizes,
                 ..
             } => {
                 // #824: assemble the breakdown BEFORE taking the lock — it
@@ -282,7 +282,7 @@ pub(crate) fn build_progress_cb(
                         after_pct,
                         ctx_max,
                         elapsed,
-                        tool_tokens,
+                        tool_sizes: &tool_sizes,
                         summary: &summary,
                     }))
                 } else {

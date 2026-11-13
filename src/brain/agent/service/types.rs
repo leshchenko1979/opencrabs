@@ -37,6 +37,23 @@ pub type ApprovalCallback = Arc<
         + Sync,
 >;
 
+/// Measured cost of one tool schema in the session's next request (#824).
+///
+/// Two units, because the breakdown card renders both: `bytes` is the schema's
+/// own JSON size (the card's KB column) and `tokens` is that same JSON through
+/// the request path's tokenizer (its share-of-window column). Carried per tool
+/// rather than as one total so the card's total is the SUM of the rows it
+/// prints — a stated total and its breakdown must never disagree.
+#[derive(Debug, Clone)]
+pub struct ToolSize {
+    /// Tool name, exactly as the request sends it.
+    pub name: String,
+    /// Tokens this schema alone costs, measured on its own JSON.
+    pub tokens: usize,
+    /// Bytes of that same JSON.
+    pub bytes: usize,
+}
+
 /// Progress event emitted during tool execution
 #[derive(Debug, Clone)]
 pub enum ProgressEvent {
@@ -91,11 +108,12 @@ pub enum ProgressEvent {
         elapsed: std::time::Duration,
         before_tokens: usize,
         after_tokens: usize,
-        /// Token cost of the tool schemas the session's NEXT request carries
-        /// (#824). Measured at emit with `tool_schemas_for_session` — the set
-        /// actually sent, health annotations included — not the registry's
-        /// upper bound. The post-compaction breakdown renders it as one row.
-        tool_tokens: usize,
+        /// Per-tool schema cost of the session's NEXT request (#824), one row
+        /// per tool actually sent (`tool_schemas_for_session` — lazy sessions
+        /// send a filtered subset, health annotations included), never the
+        /// registry's upper bound. The breakdown card's total is the SUM of
+        /// these rows, so its parts always reconcile with the number above them.
+        tool_sizes: Vec<ToolSize>,
     },
     /// A single build-output line (e.g. "Compiling foo v1.0"). The TUI keeps a
     /// rolling window of the last few lines and clears them on RestartReady.

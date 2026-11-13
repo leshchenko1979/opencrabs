@@ -8,6 +8,7 @@
 //! rich markdown), and the flow operations (open/refresh/append/restick/
 //! freeze/fold).
 
+use crate::brain::agent::service::ToolSize;
 use crate::config::Config;
 use std::sync::Arc;
 use teloxide::prelude::*;
@@ -1102,8 +1103,12 @@ pub(crate) struct CompactionBreakdown<'a> {
     pub(crate) after_pct: f64,
     pub(crate) ctx_max: u32,
     pub(crate) elapsed: std::time::Duration,
-    /// Tool-schema tokens the next request carries (#824 event field).
-    pub(crate) tool_tokens: usize,
+    /// Per-tool schema cost the next request carries (#824 event field).
+    ///
+    /// Per tool, never a single total: the card prints a KB and a
+    /// share-of-window figure beside each name, and its own total is the SUM
+    /// of those rows.
+    pub(crate) tool_sizes: &'a [ToolSize],
     /// The continuation document, whose `context-manifest` fence declares the
     /// kept and dropped sets.
     pub(crate) summary: &'a str,
@@ -1115,6 +1120,35 @@ struct BreakdownEntry {
     /// `None` when the name matches no skill and no aux file — a tool name or
     /// a stale slug. Measured, never assumed.
     tokens: Option<usize>,
+    /// The document's own byte length: the card's KB column.
+    bytes: Option<usize>,
+    /// Line count — skills and their auxiliary documents carry LOC; a tool
+    /// schema does not (its line count would be an accident of JSON layout).
+    lines: Option<usize>,
+}
+
+impl BreakdownEntry {
+    /// Weigh one resolved document with the request path's own tokenizer, and
+    /// record its byte size and line count beside it.
+    fn measured(label: &str, body: &str) -> Self {
+        Self {
+            label: label.to_string(),
+            tokens: Some(crate::brain::tokenizer::count_tokens(body)),
+            bytes: Some(body.len()),
+            lines: Some(body.lines().count()),
+        }
+    }
+
+    /// A name that resolves to nothing measurable (a tool name in
+    /// `discard_skills`, or a slug this box no longer carries).
+    fn unresolved(label: &str) -> Self {
+        Self {
+            label: label.to_string(),
+            tokens: None,
+            bytes: None,
+            lines: None,
+        }
+    }
 }
 
 /// Resolve manifest names against the registry, weighing each with the same
@@ -1144,18 +1178,15 @@ fn resolve_breakdown_entries(
                     .and_then(|s| s.auxiliary_files.iter().find(|a| a.name == file))
             });
             if let Some(aux) = aux {
-                return Some(BreakdownEntry {
-                    label: name.to_string(),
-                    tokens: Some(crate::brain::tokenizer::count_tokens(&aux.body)),
-                });
+                return Some(BreakdownEntry::measured(name, &aux.body));
             }
-            let tokens = skills
+            let body = skills
                 .iter()
                 .find(|s| s.name == name)
-                .map(|s| crate::brain::tokenizer::count_tokens(&s.prompt_body()));
-            Some(BreakdownEntry {
-                label: name.to_string(),
-                tokens,
+                .map(|s| s.prompt_body());
+            Some(match body {
+                Some(body) => BreakdownEntry::measured(name, &body),
+                None => BreakdownEntry::unresolved(name),
             })
         })
         .collect()
@@ -1191,14 +1222,47 @@ fn format_breakdown_delta(before: usize, after: usize) -> String {
     )
 }
 
+/// `57.0KB` — the card's size column.
+///
+/// One decimal, so a 0.4 KB tool schema and a 57 KB skill are legible on the
+/// same scale. Bytes, not tokens: the token columns are already on the card
+/// (`tokens`, `fill`) and the owner asked for a size beside each name.
+fn format_breakdown_kb(bytes: usize) -> String {
+    format!("{:.1}KB", bytes as f64 / 1024.0)
+}
+
+/// `7.2%` — this entry's share of the context window.
+///
+/// Same denominator the `fill` row prints (`ctx_max`), so a percentage here
+/// and a percentage there mean the same thing. `—` when the ceiling is
+/// unknown: an unmeasurable share is stated, never invented as 0%.
+fn format_breakdown_share(tokens: usize, ctx_max: u32) -> String {
+    if ctx_max == 0 {
+        return "—".to_string();
+    }
+    format!(
+        "{:.1}%",
+        (tokens as f64 / ctx_max as f64) * 100.0
+    )
+}
+
 /// Summary row plus an indented detail row for one manifest list.
-fn breakdown_group(label: &str, entries: &[BreakdownEntry], lines: &mut Vec<String>) {
+///
+/// Every entry carries KB, share-of-window and (for a document) LOC, because a
+/// bare name says nothing about what the window is paying for. The head states
+/// the group's own totals in the same units, so the rows reconcile with it.
+fn breakdown_group(
+    label: &str,
+    entries: &[BreakdownEntry],
+    ctx_max: u32,
+    lines: &mut Vec<String>,
+) {
     if entries.is_empty() {
         return;
     }
-    let tok = |n: usize| crate::utils::format_token_count(n.min(u32::MAX as usize) as u32);
     let resolved = entries.iter().filter(|e| e.tokens.is_some()).count();
-    let total: usize = entries.iter().filter_map(|e| e.tokens).sum();
+    let total_tokens: usize = entries.iter().filter_map(|e| e.tokens).sum();
+    let total_bytes: usize = entries.iter().filter_map(|e| e.bytes).sum();
     let noun = if entries.len() == 1 { "entry" } else { "entries" };
     // `discard_skills` carries TOOL names in practice (measured on session
     // 2fbfb2f8: five tool names, all inert at `unregister_active_skill`), so
@@ -1207,9 +1271,19 @@ fn breakdown_group(label: &str, entries: &[BreakdownEntry], lines: &mut Vec<Stri
     let head = if resolved == 0 {
         format!("{} {noun} · none resolve to a skill", entries.len())
     } else if resolved == entries.len() {
-        format!("{} {noun} · {}", entries.len(), tok(total))
+        format!(
+            "{} {noun} · {} · {}",
+            entries.len(),
+            format_breakdown_kb(total_bytes),
+            format_breakdown_share(total_tokens, ctx_max),
+        )
     } else {
-        format!("{} {noun} · {resolved} resolve · {}", entries.len(), tok(total))
+        format!(
+            "{} {noun} · {resolved} resolve · {} · {}",
+            entries.len(),
+            format_breakdown_kb(total_bytes),
+            format_breakdown_share(total_tokens, ctx_max),
+        )
     };
     lines.push(format!("   {label:<8} {head}"));
 
@@ -1228,8 +1302,15 @@ fn breakdown_group(label: &str, entries: &[BreakdownEntry], lines: &mut Vec<Stri
         // form that survives that pipeline. The label is emitted RAW: the
         // renderer's own `escape_html` already covers it once.
         detail.push_str(&format!("`{}`", e.label));
-        if let Some(t) = e.tokens {
-            detail.push_str(&format!(" {}", tok(t)));
+        if let (Some(tokens), Some(bytes)) = (e.tokens, e.bytes) {
+            detail.push_str(&format!(
+                " {} · {}",
+                format_breakdown_kb(bytes),
+                format_breakdown_share(tokens, ctx_max),
+            ));
+        }
+        if let Some(n) = e.lines {
+            detail.push_str(&format!(" · {n} LOC"));
         }
     }
     if entries.len() > MAX_NAMES {
@@ -1238,17 +1319,70 @@ fn breakdown_group(label: &str, entries: &[BreakdownEntry], lines: &mut Vec<Stri
     lines.push(format!("     {detail}"));
 }
 
-/// The post-compaction breakdown card (#824): the headline plus what the
-/// compaction actually did.
+/// The tools rows: the measured schema set, largest first.
+///
+/// Sourced from the event's per-tool measurements rather than the manifest's
+/// `required_tools`, because those are two different sets: the manifest names
+/// what the next turn *needs*, the event measures what the request *carries*.
+/// The card describes the window's cost, so it prints the measured set and
+/// orders it by cost — the row worth acting on leads.
+fn breakdown_tools(tool_sizes: &[ToolSize], ctx_max: u32, lines: &mut Vec<String>) {
+    let total_tokens: usize = tool_sizes.iter().map(|t| t.tokens).sum();
+    let total_bytes: usize = tool_sizes.iter().map(|t| t.bytes).sum();
+    lines.push(format!(
+        "   {:<8} {} · {} · {}",
+        "tools",
+        tool_sizes.len(),
+        format_breakdown_kb(total_bytes),
+        format_breakdown_share(total_tokens, ctx_max),
+    ));
+    if tool_sizes.is_empty() {
+        return;
+    }
+
+    let mut ordered: Vec<&ToolSize> = tool_sizes.iter().collect();
+    ordered.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.name.cmp(&b.name)));
+
+    const MAX_TOOLS: usize = 6;
+    let mut detail = String::new();
+    for (i, t) in ordered.iter().take(MAX_TOOLS).enumerate() {
+        if i > 0 {
+            detail.push_str(" · ");
+        }
+        // Backticks, not `<code>` — see `breakdown_group` for why the HTML
+        // form cannot survive the flow body's escape-then-format pipeline.
+        detail.push_str(&format!(
+            "`{}` {} · {}",
+            t.name,
+            format_breakdown_kb(t.bytes),
+            format_breakdown_share(t.tokens, ctx_max),
+        ));
+    }
+    if ordered.len() > MAX_TOOLS {
+        detail.push_str(&format!(" · +{}", ordered.len() - MAX_TOOLS));
+    }
+    lines.push(format!("     {detail}"));
+}
+
+/// The post-compaction breakdown card (#824): the headline, a labelled
+/// section header, and what the compaction actually did.
 ///
 /// Rows are sourced from data that already exists — the event's token counts,
-/// percentages and duration, plus the continuation document's own
-/// `context-manifest` fence — so nothing here is estimated except the skill
-/// bodies, which are measured with the request path's own tokenizer.
+/// percentages, duration and per-tool schema measurements, plus the
+/// continuation document's own `context-manifest` fence — so nothing here is
+/// estimated. Each kept/dropped entry states its KB, its share of the window
+/// and (for a document) its LOC, because a bare name does not say what the
+/// window is paying for.
+///
+/// The `**post-compaction context**` header is emitted as a markdown span, the
+/// same form the entry names use: the flow body escapes the whole line and
+/// only then runs `format_inline`, so an HTML tag would render literally while
+/// a span survives.
 pub(crate) fn compaction_breakdown(b: &CompactionBreakdown<'_>) -> String {
     let tok = |n: usize| crate::utils::format_token_count(n.min(u32::MAX as usize) as u32);
-    let mut lines: Vec<String> = Vec::with_capacity(8);
+    let mut lines: Vec<String> = Vec::with_capacity(12);
     lines.push(compacted_flow_line(b.before_pct, b.after_pct, b.elapsed));
+    lines.push("   **post-compaction context**".to_string());
     lines.push(format!(
         "   {:<8} {} → {}   ({})",
         "tokens",
@@ -1275,42 +1409,21 @@ pub(crate) fn compaction_breakdown(b: &CompactionBreakdown<'_>) -> String {
         breakdown_group(
             "kept",
             &resolve_breakdown_entries(&m.active_skills, &skills),
+            b.ctx_max,
             &mut lines,
         );
         breakdown_group(
             "dropped",
             &resolve_breakdown_entries(&m.discard_skills, &skills),
+            b.ctx_max,
             &mut lines,
         );
     }
 
-    // The tools row stands even without a manifest: the schema cost is known
-    // from the event, and it is the row that says how much of the window the
+    // The tools rows stand even without a manifest: the schema cost is
+    // measured at emit, and it is the row that says how much of the window the
     // tool set alone occupies.
-    let mut row = format!("   {:<8} {}", "tools", tok(b.tool_tokens));
-    // Flattened, not nested: edition 2024 clippy collapses `if let` + `if`.
-    let required_tools = manifest
-        .as_ref()
-        .map(|m| m.required_tools.as_slice())
-        .unwrap_or_default();
-    if !required_tools.is_empty() {
-        const MAX_TOOLS: usize = 6;
-        let mut names = String::new();
-        for (i, t) in required_tools.iter().take(MAX_TOOLS).enumerate() {
-            if i > 0 {
-                names.push_str(" · ");
-            }
-            // Backticks, not `<code>` — see `breakdown_group` for why the HTML
-            // form cannot survive the flow body's escape-then-format pipeline.
-            names.push_str(&format!("`{}`", t.trim()));
-        }
-        if required_tools.len() > MAX_TOOLS {
-            names.push_str(&format!(" · +{}", required_tools.len() - MAX_TOOLS));
-        }
-        row.push_str(" · ");
-        row.push_str(&names);
-    }
-    lines.push(row);
+    breakdown_tools(b.tool_sizes, b.ctx_max, &mut lines);
     lines.join("\n")
 }
 

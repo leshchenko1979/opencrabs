@@ -15,7 +15,7 @@
 
 use super::builder::AgentService;
 use super::compaction_notice::CompactionNotifier;
-use super::types::{ProgressCallback, ProgressEvent};
+use super::types::{ProgressCallback, ProgressEvent, ToolSize};
 use crate::brain::agent::context::{AgentContext, CompactionScope};
 use uuid::Uuid;
 
@@ -713,14 +713,25 @@ impl AgentService {
             // log recorded at 17% was receipted at 19% (session bee04b00,
             // #1686): one compaction, two different after-numbers.
             let after_pct = context.usage_percentage();
-            // #824: the breakdown's tools row. Measured on the set the next
+            // #824: the breakdown's tools rows. Measured on the set the next
             // request actually carries (`tool_schemas_for_session`), never the
             // registry upper bound — the card describes what the window pays
-            // for, and a lazy-tools session sends a filtered subset.
-            let tool_tokens = crate::brain::tokenizer::count_tokens(
-                &serde_json::to_string(&self.tool_schemas_for_session(session_id))
-                    .unwrap_or_default(),
-            );
+            // for, and a lazy-tools session sends a filtered subset. Measured
+            // PER TOOL, each on its own JSON, because the card prints a KB and
+            // a share-of-window figure beside every name and a total that is
+            // the sum of those rows.
+            let tool_sizes: Vec<ToolSize> = self
+                .tool_schemas_for_session(session_id)
+                .iter()
+                .map(|def| {
+                    let json = serde_json::to_string(def).unwrap_or_default();
+                    ToolSize {
+                        name: def.name.clone(),
+                        tokens: crate::brain::tokenizer::count_tokens(&json),
+                        bytes: json.len(),
+                    }
+                })
+                .collect();
             cb(
                 session_id,
                 ProgressEvent::CompactionSummary {
@@ -729,7 +740,7 @@ impl AgentService {
                     after_pct,
                     before_tokens,
                     after_tokens: context.token_count,
-                    tool_tokens,
+                    tool_sizes,
                     elapsed,
                 },
             );

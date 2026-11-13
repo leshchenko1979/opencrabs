@@ -1,27 +1,52 @@
 //! #824: the post-compaction breakdown card.
 //!
-//! Pins the rendered shape and the two rules the live prototype exposed:
-//! every emitted name is wrapped in a backtick span (bare `.md` and `.rs`
-//! auto-link — both are real ccTLDs), and a `discard_skills` entry that
-//! resolves to no skill is never counted as one.
+//! Pins the rendered shape and the rules the live prototype exposed: every
+//! emitted name is wrapped in a backtick span (bare `.md` and `.rs` auto-link —
+//! both are real ccTLDs), a `discard_skills` entry that resolves to no skill is
+//! never counted as one, and every entry states its own size (KB), its share of
+//! the window (%) and, for a document, its line count (LOC).
 //!
-//! Backticks rather than `<code>`: the card lands in the flow body, which
-//! runs `escape_html` over the whole line BEFORE `format_inline` converts
-//! markdown spans. An HTML tag emitted by the card would therefore render as
-//! literal text; a backtick span is the form that survives that pipeline.
+//! Backticks rather than `<code>`: the card lands in the flow body, which runs
+//! `escape_html` over the whole line BEFORE `format_inline` converts markdown
+//! spans. An HTML tag emitted by the card would therefore render as literal
+//! text; a markdown span is the form that survives that pipeline.
 //!
 //! Pure: no agent, no locks, no network. `load_all_skills()` reads the local
 //! skill registry, which always contains the built-ins.
 
 use std::time::Duration;
 
+use crate::brain::agent::service::ToolSize;
 use crate::channels::telegram::flow::{
     CompactionBreakdown, compacted_flow_line, compaction_breakdown,
 };
 
+/// The measured tool set the next request carries. Sizes chosen so every
+/// rendered figure is exact: 16_384 B = 16.0 KB, 4_000 tok of 200 K = 2.0 %.
+fn tool_sizes() -> Vec<ToolSize> {
+    vec![
+        ToolSize {
+            name: "bash".to_string(),
+            tokens: 4_000,
+            bytes: 16_384,
+        },
+        ToolSize {
+            name: "read_file".to_string(),
+            tokens: 2_000,
+            bytes: 8_192,
+        },
+        ToolSize {
+            name: "oc_questions".to_string(),
+            tokens: 1_400,
+            bytes: 4_096,
+        },
+    ]
+}
+
 /// A card built from the live receipt the prototype used: session `2fbfb2f8`,
 /// 130,600 → 106,186 tokens (65% → 53%), 21.5 s.
 fn card(summary: &str) -> String {
+    let sizes = tool_sizes();
     compaction_breakdown(&CompactionBreakdown {
         before_tokens: 130_600,
         after_tokens: 106_186,
@@ -29,7 +54,7 @@ fn card(summary: &str) -> String {
         after_pct: 53.0,
         ctx_max: 200_000,
         elapsed: Duration::from_millis(21_500),
-        tool_tokens: 7_400,
+        tool_sizes: &sizes,
         summary,
     })
 }
@@ -77,25 +102,36 @@ fn card_keeps_the_headline_and_states_the_measured_numbers() {
         compacted_flow_line(65.0, 53.0, Duration::from_millis(21_500)),
         "headline must be the unchanged numbered line"
     );
-    assert!(lines[1].contains("131K → 106K"), "tokens row: {}", lines[1]);
-    assert!(lines[1].contains("-24K, -18.7%"), "delta row: {}", lines[1]);
+    // The section label the owner asked to have back: without it the rows read
+    // as part of the tool log rather than as a post-compaction report.
     assert!(
-        lines[2].contains("65% → 53% of 200K"),
+        lines[1].contains("post-compaction context"),
+        "section header: {}",
+        lines[1]
+    );
+    assert!(lines[2].contains("131K → 106K"), "tokens row: {}", lines[2]);
+    assert!(lines[2].contains("-24K, -18.7%"), "delta row: {}", lines[2]);
+    assert!(
+        lines[3].contains("65% → 53% of 200K"),
         "fill row: {}",
-        lines[2]
+        lines[3]
     );
     // Truncated, not rounded: 21.5 s is reported as 21 s.
-    assert!(lines[3].contains("21s"), "took row: {}", lines[3]);
+    assert!(lines[4].contains("21s"), "took row: {}", lines[4]);
 }
 
 #[test]
 fn tools_row_survives_a_document_with_no_manifest() {
-    // The schema cost comes from the event, so the row stands even when the
+    // The schema cost is measured at emit, so the rows stand even when the
     // summariser omitted its fence — the number is known either way.
     let out = card(no_manifest());
-    let tools = out.lines().last().expect("a last line");
-    assert!(tools.contains("tools"), "{tools}");
-    assert!(tools.contains("7K"), "{tools}");
+    let tools = out
+        .lines()
+        .find(|l| l.contains("tools"))
+        .expect("a tools row");
+    // Count · total KB · total share. Total = the sum of the three rows:
+    // 28_672 B = 28.0 KB, 7_400 tok of 200 K = 3.7 %.
+    assert!(tools.contains("3 · 28.0KB · 3.7%"), "{tools}");
     assert!(!out.contains("kept"), "no manifest, no kept row: {out}");
     assert!(
         !out.contains("dropped"),
@@ -104,36 +140,93 @@ fn tools_row_survives_a_document_with_no_manifest() {
 }
 
 #[test]
+fn every_tool_carries_its_own_kb_and_share() {
+    // "size indication similar to skills": a bare name says nothing about what
+    // the schema costs, so each row carries both units.
+    let out = card(no_manifest());
+    let detail = out
+        .lines()
+        .find(|l| l.contains("`bash`"))
+        .expect("a tool detail row");
+    assert!(detail.contains("`bash` 16.0KB · 2.0%"), "{detail}");
+    // Ordered by cost: the row worth acting on leads.
+    let bash = detail.find("`bash`").expect("bash");
+    let read = detail.find("`read_file`").expect("read_file");
+    assert!(bash < read, "largest schema first: {detail}");
+}
+
+#[test]
+fn a_resolvable_skill_carries_kb_share_and_loc() {
+    let out = card(mixed_manifest());
+    let kept_head = out
+        .lines()
+        .find(|l| l.contains("kept"))
+        .expect("a kept row");
+    assert!(kept_head.contains("1 entry"), "{kept_head}");
+    // The group's own totals, in the same units as its rows.
+    assert!(kept_head.contains("KB"), "kept head carries KB: {kept_head}");
+    assert!(kept_head.contains('%'), "kept head carries %: {kept_head}");
+
+    let kept_detail = out
+        .lines()
+        .skip_while(|l| !l.contains("kept"))
+        .nth(1)
+        .expect("a kept detail row");
+    assert!(kept_detail.contains("`cost-estimate`"), "{kept_detail}");
+    assert!(kept_detail.contains("KB"), "size: {kept_detail}");
+    assert!(kept_detail.contains('%'), "share: {kept_detail}");
+    assert!(kept_detail.contains(" LOC"), "line count: {kept_detail}");
+}
+
+#[test]
 fn a_discarded_tool_name_is_not_reported_as_a_skill() {
     // Measured on session 2fbfb2f8: every `discard_skills` entry was a TOOL
     // name. They reach `unregister_active_skill`, which no-ops — inert, but
     // calling them skills would be a false statement on the card.
     let out = card(mixed_manifest());
-    assert!(out.contains("dropped"), "{out}");
+    let dropped_head = out
+        .lines()
+        .find(|l| l.contains("dropped"))
+        .expect("a dropped row");
     assert!(
-        out.contains("none resolve to a skill"),
-        "tool names must be reported as unresolved: {out}"
+        dropped_head.contains("none resolve to a skill"),
+        "tool names must be reported as unresolved: {dropped_head}"
     );
-    assert!(
-        out.contains("`a2a_send`"),
-        "the names are still listed: {out}"
-    );
+    let dropped_detail = out
+        .lines()
+        .skip_while(|l| !l.contains("dropped"))
+        .nth(1)
+        .expect("a dropped detail row");
+    assert!(dropped_detail.contains("`a2a_send`"), "{dropped_detail}");
+    // Unmeasured is stated as unmeasured: no invented KB, no invented LOC.
+    let segment = dropped_detail
+        .split(" · ")
+        .find(|s| s.contains("a2a_send"))
+        .expect("the a2a_send segment");
+    assert!(!segment.contains("KB"), "no invented size: {segment}");
+    assert!(!segment.contains("LOC"), "no invented LOC: {segment}");
 }
 
 #[test]
-fn a_resolvable_skill_carries_a_measured_size() {
-    let out = card(mixed_manifest());
-    let kept_line = out
+fn an_unknown_ceiling_states_no_share() {
+    // A percentage needs a denominator. With none, the card says so rather
+    // than printing a 0% that reads as "this entry costs nothing".
+    let sizes = tool_sizes();
+    let out = compaction_breakdown(&CompactionBreakdown {
+        before_tokens: 1_000,
+        after_tokens: 500,
+        before_pct: 1.0,
+        after_pct: 0.5,
+        ctx_max: 0,
+        elapsed: Duration::from_secs(1),
+        tool_sizes: &sizes,
+        summary: no_manifest(),
+    });
+    let tools = out
         .lines()
-        .find(|l| l.contains("kept"))
-        .expect("a kept row");
-    assert!(kept_line.contains("1 entry"), "{kept_line}");
-    // A size, not just the name: the number is what makes the row useful.
-    assert!(
-        kept_line.chars().any(|c| c.is_ascii_digit()),
-        "the kept row must carry a measured token count: {kept_line}"
-    );
-    assert!(out.contains("`cost-estimate`"), "{out}");
+        .find(|l| l.contains("tools"))
+        .expect("a tools row");
+    assert!(tools.contains('—'), "unmeasurable share: {tools}");
 }
 
 #[test]
@@ -156,6 +249,7 @@ fn every_emitted_name_is_wrapped_in_code() {
 fn a_compaction_that_grew_the_context_reads_as_growth() {
     // Signed, never unsigned: a compaction can leave the window larger, and an
     // unsigned figure would present that as a saving.
+    let sizes = tool_sizes();
     let out = compaction_breakdown(&CompactionBreakdown {
         before_tokens: 100_000,
         after_tokens: 120_000,
@@ -163,7 +257,7 @@ fn a_compaction_that_grew_the_context_reads_as_growth() {
         after_pct: 60.0,
         ctx_max: 200_000,
         elapsed: Duration::from_secs(5),
-        tool_tokens: 1_000,
+        tool_sizes: &sizes,
         summary: no_manifest(),
     });
     assert!(out.contains("+20K, +20.0%"), "{out}");
@@ -171,6 +265,7 @@ fn a_compaction_that_grew_the_context_reads_as_growth() {
 
 #[test]
 fn a_long_silent_window_reads_in_minutes() {
+    let sizes = tool_sizes();
     let out = compaction_breakdown(&CompactionBreakdown {
         before_tokens: 130_600,
         after_tokens: 106_186,
@@ -178,7 +273,7 @@ fn a_long_silent_window_reads_in_minutes() {
         after_pct: 53.0,
         ctx_max: 200_000,
         elapsed: Duration::from_secs(102),
-        tool_tokens: 7_400,
+        tool_sizes: &sizes,
         summary: no_manifest(),
     });
     assert!(out.contains("1m 42s"), "{out}");
