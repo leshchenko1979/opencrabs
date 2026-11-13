@@ -1,0 +1,90 @@
+{
+  "recorded_at": "2026-11-13T15:17:46Z",
+  "chat_id": "-1003936827469",
+  "topic": "Telegram: Rich Text (31847)",
+  "method": "Each observation is a message sent through the daemon's real delivery path and read back with tg_get_messages, paired with the daemon log line for the same instant. The stored form is quoted verbatim from the API response, not reconstructed.",
+  "observations": {
+    "L1": {
+      "verdict": "PASS",
+      "message_id": 96084,
+      "chat_id": "-1003936827469",
+      "sent_at": "2026-11-13T10:19:48Z",
+      "probe": "one local .md referenced in link syntax, nothing else",
+      "stored_form": "[827-smoke.md](tg://document?id=doc0)",
+      "bubbles": 1,
+      "log_excerpt": [
+        "10:19:49.150 Telegram send ok: kind=rich_api path=sendRichMessage chat=-1003936827469",
+        "10:19:50.235 delivery.rs:491 Telegram dedup: match found among 1 intermediates (normalized) — suppressing final response"
+      ],
+      "note": "§2 rule 3 + rule 6: the document plane emits LINK syntax and the reply lands as ONE bubble. The owner opened a link-form document bubble by tapping it (2026-11-12 12:01); the embed-form twin (18:33) was not tappable. That client-side half is the owner's observation, not mine."
+    },
+    "L2": {
+      "verdict": "PASS",
+      "message_id": 96031,
+      "chat_id": "-1003936827469",
+      "sent_at": "2026-11-12T15:04:46Z",
+      "probe": "a remote URL written as [label](https://...)",
+      "stored_form": "[#823](https://github.com/leshchenko1979/opencrabs/issues/823)",
+      "trailer_present": false,
+      "log_excerpt": [
+        "no 'not a supported image format' line after the 15:03 swap; the only two hits that day quote PRE-fix messages inside reply-context lines"
+      ],
+      "note": "#825 holds: link syntax is never a fetch candidate. Before the fix the same shape produced a ⚠️ 'not a supported image format' trailer."
+    },
+    "L3": {
+      "verdict": "PASS",
+      "message_id": 96054,
+      "chat_id": "-1003936827469",
+      "sent_at": "2026-11-12T18:33:02Z",
+      "probe": "an unbracketed absolute path in prose",
+      "stored_form": "/tmp/oc-probes/probe-bare.txt",
+      "bubbles": 1,
+      "log_excerpt": [
+        "18:33:02.702 Telegram send ok: kind=rich_api (the same body that carried six document refs)"
+      ],
+      "note": "§3.1: no walk claims an unbracketed path — the text stayed inert, no marker, no attachment."
+    },
+    "L4": {
+      "verdict": "PASS",
+      "message_id": 96055,
+      "chat_id": "-1003936827469",
+      "sent_at": "2026-11-12T18:33:03Z",
+      "probe": "a REMOTE image referenced in embed syntax",
+      "stored_form": "photo, 7462 bytes, image/jpeg",
+      "bubbles": 1,
+      "log_excerpt": [
+        "18:33:03.338 Telegram send ok: kind=delivery_media path=image_photo"
+      ],
+      "note": "§2 rule 1 for the remote case: fetched and attached as a photo in its own bubble."
+    },
+    "L5": {
+      "verdict": "FAIL",
+      "message_id": 96056,
+      "chat_id": "-1003936827469",
+      "sent_at": "2026-11-12T18:33:03Z",
+      "probe": "one reply carrying six document references",
+      "stored_form": "a SECOND bubble beside 96054, every document degraded to 📎 and both pictures gone",
+      "bubbles": 2,
+      "log_excerpt": [
+        "18:33:01.819 send failed: kind=rich_api (400 IMAGE_PROCESS_FAILED)",
+        "18:33:02.702 send ok: kind=rich_api msg=96054",
+        "18:33:03.583 send ok: kind=html_or_plain path=html msg=96056"
+      ],
+      "note": "§3.5 violated by the SHIPPED binary (db7d3b603): the rich leg failed, its retry landed as 96054, and the degraded HTML copy 96056 shipped beside it. The fix is in the tree (5577e9208) and unshipped — this verdict must stay FAIL until a re-probe on the new binary."
+    },
+    "L6": {
+      "verdict": "FAIL",
+      "message_id": 96054,
+      "chat_id": "-1003936827469",
+      "sent_at": "2026-11-12T18:33:02Z",
+      "probe": "a LOCAL 116-byte PNG referenced in embed syntax",
+      "stored_form": "![probe-embed.png](tg://photo?id=img0) — reference present, NO photo arrived",
+      "bubbles": 1,
+      "log_excerpt": [
+        "18:33:01.819 send failed: kind=rich_api (400 IMAGE_PROCESS_FAILED)",
+        "fixture: /tmp/oc-probes/probe-embed.png — 'PNG image data, 16 x 16, 8-bit/color RGBA, non-interlaced', 116 bytes, valid"
+      ],
+      "note": "§2 rule 1 violated for the LOCAL case: a valid PNG is refused by the API and the picture never lands. Distinct from #826 AC-3 (which keeps the rest of the message alive) — this is the image entry itself failing. Not yet explained."
+    }
+  }
+}

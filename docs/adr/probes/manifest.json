@@ -1,0 +1,143 @@
+{
+  "adr": "docs/adr/0001-telegram-local-file-and-image-delivery.md",
+  "adr_revision": 5,
+  "note": "Every normative rule in ADR 0001 maps to at least one probe. A 'static' probe is a shell command run from the repo root and passes on exit 0. A 'live' probe is a message sent through the real daemon delivery path and read back with tg_get_messages; its observation is recorded in live-evidence.json and re-validated here, so the runner checks the recorded observation rather than trusting a claim. A 'ci' probe reads a GitHub Actions conclusion. Run: python3 docs/adr/probes/run.py",
+  "probes": [
+    {
+      "id": "r1-image-entry-by-magic-bytes",
+      "rule": "§2 rule 1",
+      "claim": "a local image reference is claimed by the image family and rendered inline as a photo entry",
+      "kind": "static",
+      "cmd": "grep -qF 'pub(crate) fn is_supported_image' src/utils/image.rs && grep -qF '![{alt}](tg://photo?id={id}{title})' src/utils/image.rs"
+    },
+    {
+      "id": "r1-image-kind-not-extension",
+      "rule": "§2 rule 1",
+      "claim": "the image kind is decided by the head BYTES (PNG/JPEG/GIF87a/GIF89a/RIFF-WEBP/BMP signatures), not by the file extension",
+      "kind": "static",
+      "cmd": "grep -qF 'b\"\\x89PNG\\r\\n\\x1a\\n\"' src/utils/image.rs && grep -qF 'b\"\\xff\\xd8\\xff\"' src/utils/image.rs && grep -qF 'GIF89a' src/utils/image.rs && grep -qF 'WEBP' src/utils/image.rs"
+    },
+    {
+      "id": "r2-video-entry-by-head-walk",
+      "rule": "§2 rule 2",
+      "claim": "a local video reference is claimed by the video family via an ISO-BMFF box walk and rendered as a video entry",
+      "kind": "static",
+      "cmd": "grep -qF 'fn is_supported_video_head' src/utils/image.rs && grep -qF '![{alt}](tg://video?id={id}{title})' src/utils/image.rs"
+    },
+    {
+      "id": "r3-document-producer-exists",
+      "rule": "§2 rule 3",
+      "claim": "every other file kind gets a document media entry with a recorded ResolvedFileRef",
+      "kind": "static",
+      "cmd": "grep -qF 'pub const DOC_ID_PREFIX' src/utils/image.rs && grep -qF 'self.entries.push(ResolvedFileRef' src/utils/image.rs"
+    },
+    {
+      "id": "r4-md-exception-deleted",
+      "rule": "§2 rule 4",
+      "claim": [
+        "the .md exception is gone from the CONFIG and the CODE; the only surviving mentions are comments and the test that asserts its absence"
+      ],
+      "kind": "static",
+      "cmd": "! grep -rqE 'inline_markdown_documents\\s*:' src/config/ src/channels/ && grep -qF '!telegram.contains(\"inline_markdown_documents\")' src/tests/channel_capabilities_preamble_test.rs"
+    },
+    {
+      "id": "r5-detached-floor-exists",
+      "rule": "§2 rule 5",
+      "claim": "with no rich path every kind still ships as its own detached bubble",
+      "kind": "static",
+      "cmd": "grep -qF 'every_file_the_rich_plane_cannot_take_still_has_a_delivery_leg' src/tests/telegram_file_delivery_test.rs"
+    },
+    {
+      "id": "r6-document-emit-is-link",
+      "rule": "§2 rule 6",
+      "claim": "a document reference is emitted in LINK syntax and never in image syntax",
+      "kind": "static",
+      "cmd": "grep -qF '[{alt}](tg://document?id={id}{title})' src/utils/image.rs && ! grep -qF '![{alt}](tg://document' src/utils/image.rs"
+    },
+    {
+      "id": "r6-photo-and-video-emit-embed",
+      "rule": "§2 rule 6",
+      "claim": "a photo and a video reference are emitted in image syntax, because that is what the client renders for a media block",
+      "kind": "static",
+      "cmd": "grep -qF '![{alt}](tg://photo?id={id}{title})' src/utils/image.rs && grep -qF '![{alt}](tg://video?id={id}{title})' src/utils/image.rs"
+    },
+    {
+      "id": "r6-both-forms-read",
+      "rule": "§2 rule 6",
+      "claim": "the walk reads both markdown forms, so the form the author typed does not decide the route",
+      "kind": "static",
+      "cmd": "grep -qF 'fn markdown_ref_bracket_len' src/utils/image.rs && grep -qF 'a_local_image_path_is_claimed_in_both_markdown_forms' src/tests/image_util_test.rs"
+    },
+    {
+      "id": "s33-orphan-reference-neutralised",
+      "rule": "§3.3",
+      "claim": "a reference the media array cannot answer is neutralised before the send, never left to 400 the message",
+      "kind": "static",
+      "cmd": "grep -qF 'pub(crate) fn neutralize_orphan_photo_refs' src/channels/telegram/rich/mermaid.rs && grep -qF 'neutralize_orphan_photo_refs' src/channels/telegram/rich/api.rs"
+    },
+    {
+      "id": "s34-refused-entry-costs-one-entry",
+      "rule": "§3.4",
+      "claim": "a media entry Telegram refuses costs that entry, not the whole rich plane",
+      "kind": "static",
+      "cmd": "grep -qF 'fn retry_rich_media_around_offender' src/channels/telegram/rich/api.rs && grep -qF 'fn is_media_entry_rejection' src/channels/telegram/rich/api.rs"
+    },
+    {
+      "id": "s35-one-reply-one-delivery",
+      "rule": "§3.5",
+      "claim": "the final leg suppresses itself when a recorded intermediate already carries the same reply, comparing reference spelling rather than whitespace",
+      "kind": "static",
+      "cmd": "grep -qF 'normalize_reference_spelling' src/channels/telegram/delivery.rs && grep -qF 'pub(crate) fn normalize_reference_spelling' src/channels/telegram/intermediates.rs"
+    },
+    {
+      "id": "live-l1-document-link-renders",
+      "rule": "§2 rules 3 and 6",
+      "claim": "a local document sent through the daemon is stored as a link-form tg://document reference and lands as one bubble",
+      "kind": "live",
+      "evidence_id": "L1"
+    },
+    {
+      "id": "live-l2-remote-link-not-fetched",
+      "rule": "§2 rule 6, #825",
+      "claim": "a remote URL written in link syntax stays a hyperlink: no fetch, no unsupported-format trailer",
+      "kind": "live",
+      "evidence_id": "L2"
+    },
+    {
+      "id": "live-l3-bare-path-inert",
+      "rule": "§3.1",
+      "claim": "an unbracketed path in prose is claimed by no family and stays inert text",
+      "kind": "live",
+      "evidence_id": "L3"
+    },
+    {
+      "id": "live-l4-remote-image-embed-is-a-photo",
+      "rule": "§2 rule 1",
+      "claim": "a REMOTE image reference written in embed syntax is fetched and arrives as a photo",
+      "kind": "live",
+      "evidence_id": "L4"
+    },
+    {
+      "id": "live-l5-one-bubble-per-reply",
+      "rule": "§3.5, #826",
+      "claim": "a reply carrying documents lands as one bubble, with no degraded HTML copy beside it",
+      "kind": "live",
+      "evidence_id": "L5"
+    },
+    {
+      "id": "live-l6-local-image-embed-is-a-photo",
+      "rule": "§2 rule 1",
+      "claim": "a LOCAL image reference written in embed syntax is attached as a photo; the measured failure is that its bytes are refused and the picture never arrives",
+      "kind": "live",
+      "evidence_id": "L6"
+    },
+    {
+      "id": "ci-gate",
+      "rule": "§11",
+      "claim": "the tree that carries every rule above compiles and passes its tests on the CI gate",
+      "kind": "ci",
+      "run_id": 0,
+      "repo": "leshchenko1979/opencrabs"
+    }
+  ]
+}
