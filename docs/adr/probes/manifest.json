@@ -143,8 +143,9 @@
       "rule": "§11",
       "claim": "the tree that carries every rule above compiles and passes its tests on the CI gate",
       "kind": "ci",
-      "run_id": 0,
-      "repo": "leshchenko1979/opencrabs"
+      "run_id": 43466381479,
+      "repo": "leshchenko1979/opencrabs",
+      "note": "green gate run for bf74d9e93317124c5a33978951488d17dac45e51 (job 'gate / PR-lane gates (bf74d9e93...)', conclusion success, updatedAt 2026-11-13T17:21:46Z)"
     }
   ]
 }

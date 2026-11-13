@@ -1,5 +1,5 @@
 {
-  "recorded_at": "2026-11-13T15:17:46Z",
+  "recorded_at": "2026-11-13T18:27:52Z",
   "chat_id": "-1003936827469",
   "topic": "Telegram: Rich Text (31847)",
   "method": "Each observation is a message sent through the daemon's real delivery path and read back with tg_get_messages, paired with the daemon log line for the same instant. The stored form is quoted verbatim from the API response, not reconstructed.",
@@ -58,33 +58,35 @@
       "note": "§2 rule 1 for the remote case: fetched and attached as a photo in its own bubble."
     },
     "L5": {
-      "verdict": "FAIL",
-      "message_id": 96056,
+      "verdict": "PASS",
+      "message_id": 96139,
       "chat_id": "-1003936827469",
-      "sent_at": "2026-11-12T18:33:03Z",
-      "probe": "one reply carrying six document references",
-      "stored_form": "a SECOND bubble beside 96054, every document degraded to 📎 and both pictures gone",
-      "bubbles": 2,
-      "log_excerpt": [
-        "18:33:01.819 send failed: kind=rich_api (400 IMAGE_PROCESS_FAILED)",
-        "18:33:02.702 send ok: kind=rich_api msg=96054",
-        "18:33:03.583 send ok: kind=html_or_plain path=html msg=96056"
-      ],
-      "note": "§3.5 violated by the SHIPPED binary (db7d3b603): the rich leg failed, its retry landed as 96054, and the degraded HTML copy 96056 shipped beside it. The fix is in the tree (5577e9208) and unshipped — this verdict must stay FAIL until a re-probe on the new binary."
-    },
-    "L6": {
-      "verdict": "WITHDRAWN",
-      "withdrawn_at": "2026-11-13T16:45:00Z",
-      "message_id": 96054,
-      "chat_id": "-1003936827469",
-      "sent_at": "2026-11-12T18:33:02Z",
-      "probe": "a LOCAL 116-byte PNG referenced in embed syntax",
-      "stored_form": "![probe-embed.png](tg://photo?id=img0) — reference present, NO photo arrived",
+      "sent_at": "2026-11-13T18:25:06Z",
+      "probe": "one reply carrying SIX local document references, embed syntax (§3.5 / #826)",
+      "stored_form": "ONE rich bubble (rich=true), six document references in the body, no second bubble after it",
       "bubbles": 1,
       "log_excerpt": [
-        "18:33:01.819 send failed: kind=rich_api (400 IMAGE_PROCESS_FAILED)"
+        "18:25:06.875167 Telegram send ok: origin=tool detail=send kind=rich_api path=sendRichMessage chat=-1003936827469 thread=Some(31847) msg=96139 len=691 hash8=85a30967",
+        "absence sweep 18:25:00-18:26:30 chat 3936827469 for 'send failed|html_or_plain|degrad|fallback' -> EMPTY",
+        "positive control, same sweep, old binary 2026-11-12T18:33:01-03: 'Telegram send failed: kind=rich_api path=sendRichMessage' -> 'rich markdown+media send failed (400 Bad Request: IMAGE_PROCESS_FAILED); falling back' -> 'kind=html_or_plain path=html msg=96056' (CAUGHT)"
       ],
-      "note": "WITHDRAWN 2026-11-13: the fixture was a TRUNCATED PNG, not a valid one. Chunk walk over /tmp/oc-probes/probe-embed.png: IHDR ok, IDAT ok, then 13 bytes remain where a 12-byte IEND chunk must sit — one stray 0x74 precedes it, so the file ends 0x...740000000049454E44AE426082. `file(1)` still called it 'PNG image data, 16 x 16', which is how the earlier record came to say 'valid'. Telegram's IMAGE_PROCESS_FAILED was therefore CORRECT. #829 closed as not-a-defect; §2 rule 1 is UNMEASURED for the local case until a valid fixture is probed. The harness now validates fixtures structurally (probe fixture-l6-local-photo-valid)."
+      "note": "§3.5 re-probed on the swapped binary bf74d9e93. The old observation (msg 96056) was a degraded HTML copy landing beside the retried rich reply; that bubble is absent now, and the sweep that would have caught it is proven live by the positive control above."
+    },
+    "L6": {
+      "verdict": "PASS",
+      "message_id": 96143,
+      "chat_id": "-1003936827469",
+      "sent_at": "2026-11-13T18:27:52Z",
+      "probe": "a LOCAL 5180-byte 512x512 PNG referenced in embed syntax (§2 rule 1, local case)",
+      "stored_form": "media.type=photo, image/jpeg, 22568 bytes (Telegram re-encodes the 5180 B PNG); text caption in the preceding chunk 96142",
+      "bubbles": 2,
+      "log_excerpt": [
+        "18:27:52.216350 Telegram send ok: origin=tool detail=send kind=html_or_plain path=html chat=-1003936827469 thread=Some(31847) msg=96142 len=218 hash8=4f7c5689",
+        "18:27:52.725532 Telegram send ok: origin=tool detail=send kind=outbox path=image_photo chat=-1003936827469 thread=Some(31847) msg=96143 len=5180 hash8=697081ce",
+        "no 'rich markdown+media send failed' / IMAGE_PROCESS_FAILED / 'falling back' line in 18:27:40-18:27:59 (absence sweep, empty)"
+      ],
+      "note": "§2 rule 1 local case on the swapped binary bf74d9e93. The claim under test is that a resolvable local image reference ARRIVES AS A PHOTO — not a 📎 document and not a bare path string. Measured: it does. msg 96143 is media.type=photo/image/jpeg and the send line's len=5180 is the fixture's exact byte count, so the bytes are provably the fixture and not a stray file. Mechanism note, recorded so this verdict is not read for more than it measures: on the TOOL plane (telegram_send → send.rs) the text ships as html and the image bytes ride the detached leg (rule 5's floor, which is un-gated by design); the rich media-array leg for local images is the TURN plane (delivery.rs), which the earlier truncated-fixture probe msg 96054 proved is attempted there too (it failed with 400 IMAGE_PROCESS_FAILED on the invalid PNG). The old L6 observation was withdrawn for a bad FIXTURE, not for a bad binary; with the fixture structurally validated (fixture-l6 PASS: 512x512, CRCs OK, ends on IEND, inflates to 1049088 = expected) the same reference now delivers a photo."
     }
-  }
+  },
+  "binary": "opencrabs 0.5.4 @ bf74d9e93317124c5a33978951488d17dac45e51"
 }
