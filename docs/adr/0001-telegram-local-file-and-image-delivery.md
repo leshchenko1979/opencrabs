@@ -160,6 +160,33 @@ kind renders as **dead visible markdown**. Two rules follow, and both are alread
   entry is rewritten to link syntax rather than sent as a 400 (`rich/table.rs`). A demoted reference is
   inert but readable; a wrong one fails the whole message.
 
+### 3.4 A refused entry costs one entry, never the plane (#826)
+
+Telegram answers a `media` array it cannot use with a NAME and never an index — `IMAGE_PROCESS_FAILED`
+when its own image processor refuses the bytes, `RICH_MESSAGE_{PHOTO,VIDEO,DOCUMENT}_INVALID` when a
+reference and its entry disagree about the kind, `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND` when the reference
+has no entry at all. Every one of those is repairable by changing the ARRAY, so none is a verdict on the
+message text. Before #826 the sender treated all of them alike and downgraded the whole reply to the HTML
+dialect, which flattens tables and detaches every document.
+
+The sender now retries before it downgrades, in two legs:
+
+1. **The identical retry, for the flake class only.** `IMAGE_PROCESS_FAILED` is a flake in Telegram's own
+   processor, not a property of the bytes: measured 2026-11-12, a body carrying six documents and two
+   pictures was refused at 18:33:01.819 and the *same* body was accepted 0.9 s later. Re-sending it costs
+   one round trip and sacrifices nothing.
+2. **Sacrifice, most-likely-guilty first.** The error names a family, so entries of that family are
+   dropped before any other, one at a time, up to two. Each sacrifice neutralises that entry's now-dead
+   reference (§3.3) before the retry goes out, because a reference the array cannot answer is itself a
+   whole-message 400.
+
+The HTML dialect stays the last resort, for a rejection that survives both legs or one that never named
+an entry. **Known limit, stated rather than hidden:** a sacrificed entry is not re-delivered detached —
+the floors run only when the rich send failed outright, and a retry that lands makes that false. The
+dropped file is therefore lost from the bubble rather than degraded to `📎`, which is the one place this
+rule is weaker than the fallback it replaced; making a dropped entry reach the floor needs the entry's
+path threaded back to `delivery.rs`, and is filed as the follow-up on #826.
+
 ## 4. The document plane — measured working, still absent from the tree
 
 **Intent (§2 rule 3): every non-image, non-video file inlines as a `document` media entry, in the same
@@ -630,6 +657,14 @@ cross-references elsewhere in this document still land.
 12. **Two tracker edges are wrong** (§9.4): `#360` is CLOSED yet still carries a blocker, and `#334` reads
     as blocked by `#349`, a timezone fix that touches none of its path. Neither is a code defect; both make
     the tracker lie about what is blocked.
+
+13. **#826 — a refused media entry used to cost the whole plane.** Fixed in §3.4: the sender retries the
+    identical body once for the `IMAGE_PROCESS_FAILED` flake, then sacrifices entries of the family the
+    error names, and downgrades to the HTML dialect only when both legs fail. The remaining half of #826 is
+    the duplicate bubble: a reply whose rich leg is retried and lands must not also deliver its degraded
+    HTML copy. §3.4 removes the *trigger* (the refusal no longer reaches the fallback), which is not the
+    same as removing the *seam* — a rich failure followed by a successful retry can still pair with an
+    HTML copy, and the guard for that is still owed.
 
 ## 11. Verification
 

@@ -538,6 +538,7 @@ pub mod telegram_userbot_session_test;
 pub mod telegram_file_delivery_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_rich_media_kind_test;
+pub mod telegram_rich_media_rejection_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_video_delivery_test;
 #[cfg(feature = "telegram")]

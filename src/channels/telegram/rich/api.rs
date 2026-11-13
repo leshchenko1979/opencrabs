@@ -1030,6 +1030,186 @@ pub(crate) async fn send_rich_with_mermaid_target_id(
     .await
 }
 
+/// Rejection names that indict ONE media entry rather than the message body.
+///
+/// Telegram answers a `media` array it cannot use with a NAME, never an index:
+/// `IMAGE_PROCESS_FAILED` when its own image processor refuses the bytes,
+/// `*_INVALID` when a reference and its entry disagree about the kind, and
+/// `*_NO_MEDIA_FOUND` when the reference has no entry to resolve against. Every
+/// one of them is repairable by changing the ARRAY, so none is a verdict on the
+/// text — which is what the pre-#826 code assumed when it downgraded the whole
+/// reply to the HTML dialect on any error at all.
+const MEDIA_ENTRY_REJECTIONS: [&str; 6] = [
+    "IMAGE_PROCESS_FAILED",
+    "PHOTO_INVALID",
+    "PHOTO_NO_MEDIA_FOUND",
+    "VIDEO_INVALID",
+    "DOCUMENT_INVALID",
+    "MEDIA_INVALID",
+];
+
+/// How many entries may be sacrificed before the HTML dialect is the better
+/// answer. Each sacrifice is a round trip, and a rejection that survives two of
+/// them is not about a single entry.
+const MAX_MEDIA_SACRIFICES: usize = 2;
+
+/// Whether `err` names a media entry as the reason the rich send was refused.
+pub(crate) fn is_media_entry_rejection(err: &str) -> bool {
+    MEDIA_ENTRY_REJECTIONS
+        .iter()
+        .any(|marker| err.contains(marker))
+}
+
+/// The family a rejection name points at, so the first entry sacrificed is the
+/// one Telegram was talking about.
+fn rejection_family(err: &str) -> Option<super::mermaid::MediaKind> {
+    use super::mermaid::MediaKind;
+    if err.contains("IMAGE_PROCESS_FAILED") || err.contains("PHOTO_") {
+        Some(MediaKind::Photo)
+    } else if err.contains("VIDEO_") {
+        Some(MediaKind::Video)
+    } else if err.contains("DOCUMENT_") {
+        Some(MediaKind::Document)
+    } else {
+        None
+    }
+}
+
+/// Indices into `media`, most-likely-guilty first.
+///
+/// The rejection names a family and never an entry, so this order is a
+/// hypothesis the retry TESTS: entries of the family the error names come
+/// first, then every other entry in array order. A refused photo therefore
+/// costs a photo, not the six documents travelling beside it (#826).
+pub(crate) fn sacrifice_order(media: &[super::mermaid::MediaEntry], err: &str) -> Vec<usize> {
+    let family = rejection_family(err);
+    let mut order: Vec<usize> = (0..media.len()).collect();
+    order.sort_by_key(|i| match family {
+        Some(kind) if media[*i].kind != kind => 1,
+        _ => 0,
+    });
+    order
+}
+
+/// Retry a refused rich media send with offending entries removed (#826 AC-3):
+/// one entry Telegram will not process must not cost the whole media plane.
+///
+/// Two legs, in the order the evidence supports:
+///
+/// 1. `IMAGE_PROCESS_FAILED` is a FLAKE in Telegram's own image processor, not a
+///    property of the bytes — measured 2026-11-12 on this box: a body carrying
+///    six documents and two pictures was refused at 18:33:01.819 and the SAME
+///    body was accepted 0.9 s later. The identical retry is tried first, and
+///    when it lands nothing is lost at all.
+/// 2. Failing that, entries are sacrificed one at a time in [`sacrifice_order`],
+///    each sacrifice rewriting the body's now-dead reference into its
+///    non-triggering form — a reference its array cannot answer is exactly the
+///    whole-message 400 §3.3 and #334 are about.
+///
+/// `Err` means every leg failed and the caller falls back to the HTML dialect.
+#[allow(clippy::too_many_arguments)]
+async fn retry_rich_media_around_offender(
+    api_url: &str,
+    token: &str,
+    chat_id: i64,
+    thread_id: Option<ThreadId>,
+    reply_to: Option<i32>,
+    markdown: &str,
+    media: &[super::mermaid::MediaEntry],
+    origin: &str,
+    origin_detail: &str,
+    err: &str,
+) -> anyhow::Result<i32> {
+    use super::mermaid::neutralize_orphan_photo_refs;
+
+    if err.contains("IMAGE_PROCESS_FAILED") {
+        tracing::warn!(
+            "rich media send refused ({err}) — retrying the identical request once \
+             (Telegram image-processor flake, not a property of the bytes)"
+        );
+        if let Ok(id) = send_rich_markdown_media_target_id(
+            api_url,
+            token,
+            chat_id,
+            thread_id,
+            reply_to,
+            markdown,
+            media,
+            None,
+            origin,
+            origin_detail,
+        )
+        .await
+        {
+            return Ok(id);
+        }
+    }
+
+    let order = sacrifice_order(media, err);
+    let mut dropped: Vec<usize> = Vec::new();
+    for index in order.into_iter().take(MAX_MEDIA_SACRIFICES) {
+        dropped.push(index);
+        let kept: Vec<super::mermaid::MediaEntry> = media
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !dropped.contains(i))
+            .map(|(_, entry)| entry.clone())
+            .collect();
+        let lost: Vec<String> = dropped
+            .iter()
+            .map(|i| {
+                let entry = &media[*i];
+                match entry.name.as_deref() {
+                    Some(name) => format!("{} ({name})", entry.id),
+                    None => entry.id.clone(),
+                }
+            })
+            .collect();
+        tracing::warn!(
+            "rich media send refused ({err}) — retrying without {} entr{} [{}]; \
+             the dropped reference is neutralised so it cannot 400 the retry",
+            dropped.len(),
+            if dropped.len() == 1 { "y" } else { "ies" },
+            lost.join(", ")
+        );
+        // The reference for a dropped entry is now unanswered by the array, so
+        // it is rewritten into its inert form before the retry goes out (§3.3).
+        let body = neutralize_orphan_photo_refs(markdown, &kept);
+        let retried = if kept.is_empty() {
+            send_rich_markdown_target_id(
+                api_url,
+                token,
+                chat_id,
+                thread_id,
+                reply_to,
+                &body,
+                origin,
+                origin_detail,
+            )
+            .await
+        } else {
+            send_rich_markdown_media_target_id(
+                api_url,
+                token,
+                chat_id,
+                thread_id,
+                reply_to,
+                &body,
+                &kept,
+                None,
+                origin,
+                origin_detail,
+            )
+            .await
+        };
+        if let Ok(id) = retried {
+            return Ok(id);
+        }
+    }
+
+    anyhow::bail!("rich media retry exhausted after {MAX_MEDIA_SACRIFICES} sacrifices ({err})")
+}
+
 #[allow(clippy::too_many_arguments)]
 /// [`send_rich_with_mermaid_target_id`] with a caller-supplied media array
 /// (#502): the composition core both senders now share.
@@ -1102,6 +1282,36 @@ pub(crate) async fn send_rich_with_media_target_id(
     {
         Ok(id) => Ok(id),
         Err(e) => {
+            // #826 AC-3: a media entry Telegram refuses to process is not a
+            // verdict on the message. Before #826 every error here — a single
+            // refused picture included — downgraded the WHOLE reply to the HTML
+            // dialect, which flattens tables and detaches every document. The
+            // retry ladder tries to keep the rich plane instead.
+            let err_text = format!("{e}");
+            if is_media_entry_rejection(&err_text) && !media.is_empty() {
+                match retry_rich_media_around_offender(
+                    api_url,
+                    token,
+                    chat_id,
+                    thread_id,
+                    reply_to,
+                    &resolved,
+                    &media,
+                    origin,
+                    origin_detail,
+                    &err_text,
+                )
+                .await
+                {
+                    Ok(id) => return Ok(id),
+                    Err(retry_err) => {
+                        tracing::warn!(
+                            "rich media retry did not recover ({retry_err}); \
+                             falling back to html dialect"
+                        );
+                    }
+                }
+            }
             // Fallback: HTML dialect (Bot API < 10.2 or a media-field
             // rejection). Tables degrade there, but the message still lands.
             //
