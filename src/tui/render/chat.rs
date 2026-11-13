@@ -770,8 +770,8 @@ pub(super) fn render_chat(f: &mut Frame, app: &mut App, area: Rect) {
                 if stack_expanded {
                     // Show each group's last call as a tree entry
                     let mut group_idx = 0;
-                    for i in msg_idx..lookahead {
-                        if let Some(ref g) = app.messages[i].tool_group {
+                    for message in app.messages.iter().take(lookahead).skip(msg_idx) {
+                        if let Some(ref g) = message.tool_group {
                             let connector = if group_idx == stack_count - 1 {
                                 "└─"
                             } else {

@@ -745,19 +745,12 @@ pub(crate) fn is_empty_scaffold_line(line: &str) -> bool {
     }
     // Empty `N.` numbered step.
     let digits_len = body.chars().take_while(char::is_ascii_digit).count();
-    let empty_numbered_step = if digits_len > 0 {
-        body[digits_len..]
+    digits_len > 0
+        && body[digits_len..]
             .trim_start()
             .strip_prefix('.')
             .map(|after| after.trim().is_empty())
             .unwrap_or(false)
-    } else {
-        false
-    };
-    if empty_numbered_step {
-        return true;
-    }
-    false
 }
 
 /// Live `GoalManager` entry for the session as `(text, completed)`: an

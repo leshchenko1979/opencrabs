@@ -31,7 +31,9 @@ impl Store {
             // all store access removes that race. A personal bot's WhatsApp
             // throughput is tiny, so one connection costs nothing.
             .builder(Runtime::Tokio1)
-            .map_err(|e| StoreError::Connection(e.to_string().into()))?
+            // `Config::builder` cannot fail: deadpool-sqlite's `ConfigError`
+            // is `Infallible`, so there is no error to map (#828).
+            .expect("Config::builder is infallible")
             .max_size(1)
             .post_create(Hook::async_fn(|conn, _| {
                 Box::pin(async move {
