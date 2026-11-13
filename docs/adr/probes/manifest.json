@@ -125,6 +125,13 @@
       "evidence_id": "L5"
     },
     {
+      "id": "fixture-l6-local-photo-valid",
+      "rule": "§2 rule 1 (probe input)",
+      "claim": "the LOCAL photo fixture the live probe feeds the delivery path is a structurally valid PNG: signature, per-chunk CRC32, exact end on IEND, IDAT inflating to h*(1+w*4). `file(1)` is not a validator — it reads IHDR and stops, which is how a truncated fixture certified itself as `valid` and produced #829",
+      "kind": "fixture",
+      "path": "docs/adr/probes/fixtures/local-photo-512.png"
+    },
+    {
       "id": "live-l6-local-image-embed-is-a-photo",
       "rule": "§2 rule 1",
       "claim": "a LOCAL image reference written in embed syntax is attached as a photo; the measured failure is that its bytes are refused and the picture never arrives",

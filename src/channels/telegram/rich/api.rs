@@ -1094,17 +1094,25 @@ pub(crate) fn sacrifice_order(media: &[super::mermaid::MediaEntry], err: &str) -
 /// Retry a refused rich media send with offending entries removed (#826 AC-3):
 /// one entry Telegram will not process must not cost the whole media plane.
 ///
-/// Two legs, in the order the evidence supports:
+/// Two legs, in the order of what is actually known:
 ///
-/// 1. `IMAGE_PROCESS_FAILED` is a FLAKE in Telegram's own image processor, not a
-///    property of the bytes — measured 2026-11-12 on this box: a body carrying
-///    six documents and two pictures was refused at 18:33:01.819 and the SAME
-///    body was accepted 0.9 s later. The identical retry is tried first, and
-///    when it lands nothing is lost at all.
-/// 2. Failing that, entries are sacrificed one at a time in [`sacrifice_order`],
-///    each sacrifice rewriting the body's now-dead reference into its
+/// 1. One identical retry, as a HEDGE — not a measurement. The claim this leg
+///    originally rested on ("the SAME body was accepted 0.9 s later, so
+///    `IMAGE_PROCESS_FAILED` is a flake") was FALSE, corrected 2026-11-13 from
+///    the same log: the refused request carried six documents and two pictures
+///    at `len=2176`, and the send that succeeded 0.9 s later was the HTML
+///    dialect at `len=2588` with NO media array — the fallback, not a retry of
+///    the same body. Nothing has ever measured this rejection as transient, and
+///    the one case attributed to it turned out to be a corrupt input file
+///    (#829: a truncated PNG that Telegram correctly refused). The retry stays
+///    because one extra request is cheap insurance against a processor that is
+///    momentarily unhappy, and it is labelled a hedge so no reader inherits a
+///    flake theory the bytes do not support.
+/// 2. Entries are then sacrificed one at a time in [`sacrifice_order`], each
+///    sacrifice rewriting the body's now-dead reference into its
 ///    non-triggering form — a reference its array cannot answer is exactly the
-///    whole-message 400 §3.3 and #334 are about.
+///    whole-message 400 §3.3 and #334 are about. THIS leg is the one the
+///    evidence supports: a bad file costs its own entry, never the plane.
 ///
 /// `Err` means every leg failed and the caller falls back to the HTML dialect.
 #[allow(clippy::too_many_arguments)]
@@ -1125,7 +1133,7 @@ async fn retry_rich_media_around_offender(
     if err.contains("IMAGE_PROCESS_FAILED") {
         tracing::warn!(
             "rich media send refused ({err}) — retrying the identical request once \
-             (Telegram image-processor flake, not a property of the bytes)"
+             before sacrificing any entry (hedge: the refusal may be transient)"
         );
         if let Ok(id) = send_rich_markdown_media_target_id(
             api_url,

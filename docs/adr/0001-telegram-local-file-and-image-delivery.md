@@ -171,10 +171,13 @@ dialect, which flattens tables and detaches every document.
 
 The sender now retries before it downgrades, in two legs:
 
-1. **The identical retry, for the flake class only.** `IMAGE_PROCESS_FAILED` is a flake in Telegram's own
-   processor, not a property of the bytes: measured 2026-11-12, a body carrying six documents and two
-   pictures was refused at 18:33:01.819 and the *same* body was accepted 0.9 s later. Re-sending it costs
-   one round trip and sacrifices nothing.
+1. **The identical retry, as a hedge.** Nothing has measured `IMAGE_PROCESS_FAILED` as transient. This
+   ADR asserted the opposite until 2026-11-13, on a reading its own bytes disprove: the request refused
+   at 18:33:01.819 carried `len=2176` WITH a media array, and the send that landed 0.9 s later carried
+   `len=2588` with NO media array — that was the HTML fallback, not the refused body re-sent. The one
+   case blamed on a flaky processor was a truncated PNG Telegram was right to refuse (#829, withdrawn).
+   The identical retry stays because it is cheap and the class is unmeasured, not because it is known to
+   work; the tests pin the ORDER of the legs, never a flake theory.
 2. **Sacrifice, most-likely-guilty first.** The error names a family, so entries of that family are
    dropped before any other, one at a time, up to two. Each sacrifice neutralises that entry's now-dead
    reference (§3.3) before the retry goes out, because a reference the array cannot answer is itself a
@@ -688,9 +691,9 @@ cross-references elsewhere in this document still land.
     the tracker lie about what is blocked.
 
 13. **#826 — a refused media entry used to cost the whole plane, and the reply could ship twice.**
-    Fixed in §3.4 and §3.5: the sender retries the identical body once for the `IMAGE_PROCESS_FAILED`
-    flake, then sacrifices entries of the family the error names, and downgrades to the HTML dialect only
-    when both legs fail. The duplicate bubble was a SECOND seam, not a consequence of the first: the final
+    Fixed in §3.4 and §3.5: the sender retries the identical body once (a hedge — the flake class is
+    unmeasured, see §3.4), then sacrifices entries of the family the error names, and downgrades to the
+    HTML dialect only when both legs fail. The duplicate bubble was a SECOND seam, not a consequence of the first: the final
     leg's dedup compared its own text against the recorded intermediate, and the two never matched because
     each plane records a different SPELLING of the same reference (`[report.pdf](/tmp/x.pdf)` on the model's
     plane, `[report.pdf](tg://document?id=doc0)` on the rich plane, `📎 report.pdf` in `sent_bubbles`). The

@@ -73,7 +73,8 @@
       "note": "§3.5 violated by the SHIPPED binary (db7d3b603): the rich leg failed, its retry landed as 96054, and the degraded HTML copy 96056 shipped beside it. The fix is in the tree (5577e9208) and unshipped — this verdict must stay FAIL until a re-probe on the new binary."
     },
     "L6": {
-      "verdict": "FAIL",
+      "verdict": "WITHDRAWN",
+      "withdrawn_at": "2026-11-13T16:45:00Z",
       "message_id": 96054,
       "chat_id": "-1003936827469",
       "sent_at": "2026-11-12T18:33:02Z",
@@ -81,10 +82,9 @@
       "stored_form": "![probe-embed.png](tg://photo?id=img0) — reference present, NO photo arrived",
       "bubbles": 1,
       "log_excerpt": [
-        "18:33:01.819 send failed: kind=rich_api (400 IMAGE_PROCESS_FAILED)",
-        "fixture: /tmp/oc-probes/probe-embed.png — 'PNG image data, 16 x 16, 8-bit/color RGBA, non-interlaced', 116 bytes, valid"
+        "18:33:01.819 send failed: kind=rich_api (400 IMAGE_PROCESS_FAILED)"
       ],
-      "note": "§2 rule 1 violated for the LOCAL case: a valid PNG is refused by the API and the picture never lands. Distinct from #826 AC-3 (which keeps the rest of the message alive) — this is the image entry itself failing. Not yet explained."
+      "note": "WITHDRAWN 2026-11-13: the fixture was a TRUNCATED PNG, not a valid one. Chunk walk over /tmp/oc-probes/probe-embed.png: IHDR ok, IDAT ok, then 13 bytes remain where a 12-byte IEND chunk must sit — one stray 0x74 precedes it, so the file ends 0x...740000000049454E44AE426082. `file(1)` still called it 'PNG image data, 16 x 16', which is how the earlier record came to say 'valid'. Telegram's IMAGE_PROCESS_FAILED was therefore CORRECT. #829 closed as not-a-defect; §2 rule 1 is UNMEASURED for the local case until a valid fixture is probed. The harness now validates fixtures structurally (probe fixture-l6-local-photo-valid)."
     }
   }
 }

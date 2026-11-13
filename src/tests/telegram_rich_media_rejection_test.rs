@@ -10,9 +10,14 @@
 //! * the refusal is about ONE entry, and Telegram names a family, never an
 //!   index — so the repair has to try entries rather than read an index out of
 //!   the error;
-//! * the SAME body was accepted 0.9 s later, so `IMAGE_PROCESS_FAILED` is a
-//!   flake in Telegram's own image processor and an identical retry can land it
-//!   with nothing sacrificed at all.
+//! * the identical retry is a HEDGE, and was mis-described here as a measured
+//!   flake until 2026-11-13: the send that succeeded 0.9 s after the refusal
+//!   was the HTML dialect (`len=2588`, no media array), not the refused body
+//!   (`len=2176`) re-sent, so that gap measured the fallback. Nothing has
+//!   measured `IMAGE_PROCESS_FAILED` as transient, and the one case blamed on
+//!   it was a truncated PNG Telegram was right to refuse (#829, withdrawn).
+//!   The retry is kept as cheap insurance and the tests pin the ORDER of the
+//!   legs, not a flake theory.
 //!
 //! The classifier and the sacrifice order are pure, so they are pinned directly;
 //! the ladder itself is pinned against a scripted HTTP server that answers a
@@ -170,9 +175,9 @@ fn declared_content_length(head: &[u8]) -> usize {
     0
 }
 
-/// The identical retry: a flake refusal costs nothing at all.
+/// The identical retry: a refusal that clears on its own costs nothing at all.
 #[tokio::test]
-async fn an_image_process_flake_is_retried_identically_before_anything_is_dropped() {
+async fn a_refused_body_is_retried_identically_before_anything_is_dropped() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(serve_script(
@@ -205,7 +210,7 @@ async fn an_image_process_flake_is_retried_identically_before_anything_is_droppe
     let second = String::from_utf8_lossy(&captured[1]);
     assert!(
         second.contains("attach://doc0") && second.contains("attach://img0"),
-        "a flake retry must carry the SAME media array, not a reduced one"
+        "the identical retry must carry the SAME media array, not a reduced one"
     );
 }
 
