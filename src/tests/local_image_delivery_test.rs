@@ -1068,7 +1068,9 @@ mod local_file_links {
 /// last exception, the `.md` held out by `inline_markdown_documents`, once the
 /// owner observed an inlined markdown file opening correctly in the client.
 mod local_file_rewrite {
-    use crate::utils::image::rewrite_local_files;
+    use crate::utils::image::{
+        TELEGRAM_PHOTO_MAX_BYTES, rewrite_local_files, rewrite_local_images,
+    };
     use std::path::{Path, PathBuf};
 
     const PDF_BYTES: &[u8] = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n";
@@ -1080,6 +1082,59 @@ mod local_file_rewrite {
         let path = dir.join(name);
         std::fs::write(&path, bytes).expect("write fixture");
         path
+    }
+
+    /// #823 L16: the photo wall is not the rewriter's to ignore.
+    ///
+    /// Measured 2026-11-14: a 12 MiB PNG was emitted as `tg://photo?id=img0` and
+    /// Telegram answered `400: file of size 12598410 bytes is too big for a
+    /// photo; the maximum size is 10485760 bytes` — the entry was sacrificed and
+    /// the reader got a dead `!` + link. The TOOL plane already split on this
+    /// wall (`telegram_media_kind`); the rich rewriter now does too, by DECLINING
+    /// the reference so the FILE family ships it as a document.
+    ///
+    /// Both halves are asserted, because either alone is a regression: an image
+    /// family that still claims it emits a doomed photo, and a file family that
+    /// still calls it "already taken" leaves the reference answered by nobody.
+    #[test]
+    fn an_oversize_picture_is_declined_by_the_image_family_and_ships_as_a_document() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let big = dir.path().join("huge.png");
+        // Sparse: a real image head (so the bytes ARE a picture) and a length one
+        // byte past the photo wall, with no 10 MiB of fixture written to disk.
+        let mut file = std::fs::File::create(&big).expect("create");
+        std::io::Write::write_all(&mut file, PNG_BYTES).expect("write head");
+        file.set_len(TELEGRAM_PHOTO_MAX_BYTES + 1).expect("set_len");
+        drop(file);
+        assert!(
+            crate::utils::image::validate_local_image(&big).is_ok(),
+            "the fixture must PASS image validation, or this leg proves the wrong branch"
+        );
+
+        let text = format!("![huge]({})", big.display());
+
+        // The image family declines: no photo entry, reference left verbatim.
+        let img = rewrite_local_images(&text, Some(dir.path()), "img", &[]);
+        assert!(
+            img.entries.is_empty(),
+            "an oversize picture is never a photo entry"
+        );
+        assert!(
+            !img.rich.contains("tg://photo"),
+            "no photo reference is emitted: {:?}",
+            img.rich
+        );
+        assert_eq!(img.rich, text, "the reference is handed on, not deleted");
+
+        // The file family claims it on that same text: LINK syntax, one entry.
+        let fw = rewrite_local_files(&img.rich, Some(dir.path()), &[]);
+        assert_eq!(fw.rich, "[huge](tg://document?id=doc0)");
+        assert_eq!(fw.entries.len(), 1, "the document entry carries the bytes");
+        assert!(
+            !fw.rich.contains('📎'),
+            "a deliverable file is not degraded to the refused marker: {:?}",
+            fw.rich
+        );
     }
 
     #[test]

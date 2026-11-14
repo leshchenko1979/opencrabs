@@ -1172,6 +1172,21 @@ impl Rewriter<'_> {
                         // bubble for a picture the reader has would be noise.
                         return true;
                     }
+                    // The photo wall, and why it is a DECLINE rather than a
+                    // failure (#823 L16): Telegram refuses a `sendPhoto` above
+                    // 10 MiB, so emitting `tg://photo` for one buys a 400, a
+                    // sacrificed entry and a dead `!` + link on screen.
+                    // Returning `false` leaves the reference verbatim, and the
+                    // FILE family — which walks this same text afterwards —
+                    // claims it as a document, the one form that carries bytes
+                    // this large. A file already delivered was consumed above,
+                    // so this can never steal a dedup.
+                    let oversize = std::fs::metadata(&path)
+                        .map(|meta| meta.len() > TELEGRAM_PHOTO_MAX_BYTES)
+                        .unwrap_or(false);
+                    if oversize {
+                        return false;
+                    }
                     let id = format!("{}{}", self.id_prefix, self.out.entries.len());
                     let alt = if alt.trim().is_empty() { "image" } else { alt };
                     let title = rich_title(caption.as_deref());
@@ -2085,6 +2100,21 @@ pub(crate) fn local_file_path_from_uri(raw: &str) -> Option<PathBuf> {
     url.to_file_path().ok()
 }
 
+/// Telegram's `sendPhoto` ceiling in bytes (Bot API).
+///
+/// This is the wall the TOOL plane already respects: `telegram_media_kind`
+/// (`channels::telegram::send`) splits on this same value and picks
+/// `sendDocument` above it. It is DEFINED here because `utils::image` compiles
+/// without the `telegram` feature and the rich rewriter needs the number;
+/// `send.rs` re-exports it, so both planes split on one value rather than two
+/// that can drift.
+///
+/// The rich rewriter did not respect it until #823 L16: it offered a 12 MiB PNG
+/// as a photo, Telegram answered `400: file of size 12598410 bytes is too big
+/// for a photo; the maximum size is 10485760 bytes`, the entry was sacrificed,
+/// and the reader got a dead `!` + link (measured 2026-11-14).
+pub const TELEGRAM_PHOTO_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
 /// Telegram's `sendDocument` ceiling. Documents carry far more than a photo's
 /// 10 MiB (`TELEGRAM_PHOTO_MAX_BYTES`), so the file family gets its own wall: a
 /// larger file is reported as a failure rather than handed to an API that will
@@ -2133,13 +2163,25 @@ pub fn validate_local_file(path: &Path) -> Result<(), LocalImageFailureReason> {
 /// This is a BYTES test, never an extension test: `shot.png` holding MP4 bytes
 /// is a clip, and `render.mp4` holding PNG bytes is a picture. The name is the
 /// author's, the bytes are Telegram's.
+///
+/// A PICTURE IS ONLY AN EARLIER FAMILY'S WHILE IT FITS A PHOTO (#823 L16). Above
+/// `TELEGRAM_PHOTO_MAX_BYTES` the image family declines the reference on
+/// purpose, so owning it here would leave it answered by nobody: the image
+/// family says "not mine", this says "already taken", and the reader gets a dead
+/// reference. Claiming it ships it as a document instead.
 fn bytes_owned_by_an_earlier_family(path: &Path) -> bool {
     let mut head = [0u8; VIDEO_HEAD_BYTES];
     let read = std::fs::File::open(path)
         .and_then(|mut file| std::io::Read::read(&mut file, &mut head))
         .unwrap_or(0);
     let head = &head[..read];
-    is_supported_image(head) || is_supported_video_head(head)
+    if is_supported_video_head(head) {
+        return true;
+    }
+    let fits_a_photo = std::fs::metadata(path)
+        .map(|meta| meta.len() <= TELEGRAM_PHOTO_MAX_BYTES)
+        .unwrap_or(false);
+    is_supported_image(head) && fits_a_photo
 }
 
 /// File one parsed link into the scan accumulators. Returns `true` when the

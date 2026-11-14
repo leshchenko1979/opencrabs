@@ -5,7 +5,7 @@
 **Evidence recorded at:** 2026-11-14T20:48:00Z
 **Since then:** docs-only, measured: `git diff --name-only bf74d9e93..25e83b5c4 -- src/` is EMPTY, and the three paths that changed are docs/adr/probes/{COMPLIANCE.md,live-evidence.json,manifest.json}. The box runs opencrabs 0.5.4 @ 25e83b5c4, whose compiled code is identical to the binary these observations were taken on, so the verdicts are not stale in the sense the caveat warns about.
 **Runner:** `python3 docs/adr/probes/run.py` — **exit 1**
-**38/41 passed · 2 failed · 1 missing (missing counts as failed)**
+**37/41 passed · 3 failed · 1 missing (missing counts as failed)**
 
 > **GENERATED FILE — do not hand-edit.** Written by `python3 docs/adr/probes/run.py --report`
 > from `manifest.json` + `live-evidence.json` in the same run that printed these counts, so a
@@ -31,7 +31,7 @@
 | §3.2 | `s21-mixed-kind-namespace` | static | PASS |
 | §3.2 caption | `s22-caption-gate` | static | PASS |
 | §3.5, #826 | `s23-dedup-canonical-path` | static | PASS |
-| §2 rule 1 floor | `s24-oversize-split-floor` | static | PASS |
+| §2 rule 1 floor | `s24-oversize-split-floor` | static | FAIL |
 | §2 rule 2 floor | `s25-video-kind-floor` | static | PASS |
 | §6 | `s36-thread-id-conditional` | static | PASS |
 | §2 rules 3 and 6 | `live-l1-document-link-renders` | live | PASS |

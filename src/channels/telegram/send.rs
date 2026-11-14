@@ -229,7 +229,11 @@ pub enum TelegramMediaKind {
 }
 
 /// `sendPhoto` upload ceiling in bytes (Telegram Bot API).
-pub const TELEGRAM_PHOTO_MAX_BYTES: u64 = 10 * 1024 * 1024;
+///
+/// Defined in `utils::image` because the rich rewriter splits on the same wall
+/// and compiles without the `telegram` feature; re-exported here so the tool
+/// plane and its tests keep one import path.
+pub use crate::utils::image::TELEGRAM_PHOTO_MAX_BYTES;
 
 /// Which send method an image of `len` bytes needs.
 pub fn telegram_media_kind(len: u64) -> TelegramMediaKind {

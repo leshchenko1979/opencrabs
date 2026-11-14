@@ -124,7 +124,7 @@ declined, and the document walk inlined it", which is what ships now.
 | Dedup | compared on the **resolved absolute** path, so `~/x.png` and `/root/x.png` dedup; an already-delivered picture is consumed and re-sent nothing |
 | Rewrite | `![alt](tg://photo?id=imgN)` / `![alt](tg://video?id=vidN)` for media blocks; `[alt](tg://document?id=docN)` for a document (#827). A caption rides the markdown **title** (`"…"`), because the rich media array has no caption field |
 | Caption gate | dropped if it contains `)`, `"` or `\`, or folds to empty — the media still arrives, merely unnamed |
-| Oversize | no size gate in the rich walk. The **floor** routes images ≤ 10 MiB to `sendPhoto`, above it to `sendDocument` (an un-previewable image beats a missing one) |
+| Oversize | the rich walk **declines** an image above **10 MiB** (`TELEGRAM_PHOTO_MAX_BYTES`) and hands the reference to the file family, which ships it as a `document`. Telegram refuses a larger `sendPhoto` outright (`400: file of size … is too big for a photo`), so offering one costs the entry and leaves a dead `!` + link (#823 L16, measured 2026-11-14). The **floor** splits on the same wall — `sendPhoto` at or below it, `sendDocument` above — and the two planes read the ceiling from ONE constant |
 
 Reference ids are namespaced per family (`img` / `vid`, and `doc` for the document family this ADR adds)
 because entries are matched to references **by id inside one message's media array** — a shared prefix
