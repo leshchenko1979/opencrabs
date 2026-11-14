@@ -756,20 +756,60 @@ impl AgentService {
         Ok((summary, applied_marker))
     }
 
+    /// The documents block for the continuation document (#831).
+    ///
+    /// Paths only, never bodies: a body injected here is paid for on every
+    /// subsequent turn of the new window, while a path costs one line and the
+    /// agent can re-read what the pending work actually needs. Same cap and
+    /// same newest-first order as the inventory table — one source, so the two
+    /// surfaces cannot disagree about what this session read.
+    ///
+    /// `None` when nothing was read, so a session that reads no `.md` files
+    /// gets a continuation document byte-identical to before.
+    fn documents_block(session_id: Uuid) -> Option<String> {
+        use crate::brain::tools::retained_docs::{DocStatus, inventory_documents};
+
+        let (documents, omitted) = inventory_documents(session_id);
+        if documents.is_empty() {
+            return None;
+        }
+        let mut out = String::from(
+            "## Documents read pre-compaction\n\
+             Harness-written: `.md` files this session read whole. Bodies are not included — \
+             re-read one with `read_file` when the pending work depends on it.\n",
+        );
+        for doc in &documents {
+            let detail = match doc.status {
+                DocStatus::Ok => format!("{} lines", doc.lines.unwrap_or(0)),
+                DocStatus::TooLarge => {
+                    format!("large: {} KiB", doc.bytes.unwrap_or(0).div_ceil(1024))
+                }
+                DocStatus::Unreadable => "unreadable".to_string(),
+            };
+            out.push_str(&format!("- {} ({detail})\n", doc.path.display()));
+        }
+        if omitted > 0 {
+            out.push_str(&format!("- (+{omitted} more, older reads)\n"));
+        }
+        Some(out.trim_end().to_string())
+    }
+
     /// Attach the state a model's prose summary cannot be trusted to carry.
     ///
-    /// Both blocks are harness-written so they survive a summary that forgot
-    /// them, and both ride INSIDE the persisted marker rather than arriving as
-    /// separate messages that can scroll away:
+    /// Three blocks are harness-written so they survive a summary that forgot
+    /// them, and all three ride INSIDE the persisted marker rather than arriving
+    /// as separate messages that can scroll away:
     ///
     /// - session plan artifacts, so the post-compaction agent resumes the plan
     ///   instead of rediscovering it;
     /// - live sub-agent IDs, so `wait_agent` / `send_input` / `resume_agent` /
-    ///   `close_agent` still have something to address (#936).
+    ///   `close_agent` still have something to address (#936);
+    /// - documents this session read whole, so project law it obeyed survives
+    ///   the summary that dropped it (#831).
     ///
     /// Owns no `&self` and takes the manager by value: the background
     /// summariser calls it from a spawned task with nothing but a snapshot.
-    pub(super) async fn decorate_compaction_summary(
+    pub(crate) async fn decorate_compaction_summary(
         summary: String,
         session_id: Uuid,
         subagents: Option<Arc<crate::brain::tools::subagent::SubAgentManager>>,
@@ -778,7 +818,11 @@ impl AgentService {
             Some(block) => format!("{summary}\n\n{block}"),
             None => summary,
         };
-        match subagents.and_then(|m| m.format_running_for_compaction()) {
+        let summary = match subagents.and_then(|m| m.format_running_for_compaction()) {
+            Some(block) => format!("{summary}\n\n{block}"),
+            None => summary,
+        };
+        match documents_block(session_id) {
             Some(block) => format!("{summary}\n\n{block}"),
             None => summary,
         }

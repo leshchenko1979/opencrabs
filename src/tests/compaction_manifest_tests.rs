@@ -1,6 +1,7 @@
 use crate::brain::agent::service::AgentService;
 use crate::brain::agent::service::context::{parse_context_manifest, resolve_context_manifest};
 use std::collections::HashSet;
+use uuid::Uuid;
 
 #[test]
 fn test_parse_context_manifest_yaml() {
@@ -498,4 +499,74 @@ fn test_resolve_context_manifest_prefers_a_present_fence() {
     assert_eq!(manifest.active_skills, vec!["opencrabs-dev".to_string()]);
     assert_eq!(manifest.required_tools, vec!["telegram_send".to_string()]);
     assert!(manifest.discard_skills.is_empty());
+}
+
+// ---------------------------------------------------------------------
+// Issue #831 — documents the session read whole ride the continuation
+// document as a harness-written block, after the plan-state and sub-agent
+// blocks, so a summary that forgot the project law cannot drop it.
+// ---------------------------------------------------------------------
+
+/// Register one whole-file `.md` read for a fresh session, the way `ReadTool`
+/// does, and hand back the temp dir the file lives in.
+fn register_one_document(lines: usize) -> (Uuid, std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("manifest_docs_{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("CLAUDE.md");
+    let body: String = (0..lines).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(&path, body).unwrap();
+    let sid = Uuid::new_v4();
+    crate::brain::tools::read_state::mark_document_read(sid, &path);
+    (sid, path, dir)
+}
+
+#[tokio::test]
+async fn documents_block_lists_paths_and_line_counts() {
+    let (sid, path, dir) = register_one_document(7);
+    let summary = "## 0. IMMEDIATE TASK\nContinue.\n".to_string();
+
+    let out = AgentService::decorate_compaction_summary(summary.clone(), sid, None).await;
+
+    assert!(out.contains("## Documents read pre-compaction"), "got: {out}");
+    assert!(
+        out.contains("Harness-written: `.md` files this session read whole"),
+        "got: {out}"
+    );
+    assert!(
+        out.contains(&format!("- {} (7 lines)", path.canonicalize().unwrap().display())),
+        "path + line count missing, got: {out}"
+    );
+    // The block is appended, never substituted for the summary.
+    assert!(out.starts_with(&summary));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Nothing read ⇒ the continuation document is byte-identical to before #831.
+#[tokio::test]
+async fn documents_block_is_absent_when_nothing_was_read() {
+    let sid = Uuid::new_v4();
+    let summary = "## 0. IMMEDIATE TASK\nContinue.\n".to_string();
+
+    let out = AgentService::decorate_compaction_summary(summary.clone(), sid, None).await;
+
+    assert_eq!(out, summary);
+}
+
+/// A degraded summary — one that ignored the section spec and emitted no
+/// `context-manifest` fence at all — still carries the block, because the
+/// harness writes it after the model's prose, not inside it.
+#[tokio::test]
+async fn documents_block_survives_a_degraded_summary() {
+    let (sid, path, dir) = register_one_document(3);
+    let degraded = "I could not follow the format. Here is a prose summary.\n".to_string();
+    assert!(!degraded.contains("context-manifest"));
+
+    let out = AgentService::decorate_compaction_summary(degraded.clone(), sid, None).await;
+
+    assert!(out.starts_with(&degraded));
+    assert!(out.contains("## Documents read pre-compaction"));
+    assert!(out.contains(&path.canonicalize().unwrap().display().to_string()));
+
+    std::fs::remove_dir_all(&dir).ok();
 }
