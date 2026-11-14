@@ -404,7 +404,13 @@ def main():
     evidence = load(EVIDENCE) if os.path.exists(EVIDENCE) else {"observations": {}}
 
     rows = []
-    failed = 0
+    # `fails` counts real FAIL rows; `unresolved` is what the exit code gates on
+    # (fails + missing unless --allow-missing). Keeping them separate is what
+    # stops the summary line from double-counting a MISSING probe as a FAILURE:
+    # "4 failed + 4 missing" and "8 failed, 4 missing" describe the same 8 rows,
+    # and only the first is arithmetic that adds up to the suite size.
+    fails = 0
+    unresolved = 0
     missing = 0
     for probe in manifest["probes"]:
         kind = probe["kind"]
@@ -425,12 +431,13 @@ def main():
             state = "MISSING"
             missing += 1
             if not args.allow_missing:
-                failed += 1
+                unresolved += 1
         elif ok:
             state = "PASS"
         else:
             state = "FAIL"
-            failed += 1
+            fails += 1
+            unresolved += 1
         rows.append(
             {
                 "id": probe["id"],
@@ -451,10 +458,10 @@ def main():
                 print(f"{'':<8}  · {line}")
 
     total = len(rows)
-    passed = total - failed - (missing if args.allow_missing else 0)
+    passed = total - fails - missing
     print(
-        f"\n{passed}/{total} passed · {failed} failed · {missing} missing"
-        + ("" if args.allow_missing else " (missing counts as failed)")
+        f"\n{passed}/{total} passed · {fails} failed · {missing} missing"
+        + ("" if args.allow_missing else f" · {unresolved} unresolved")
     )
     if evidence.get("recorded_at"):
         print(f"live evidence recorded at {evidence['recorded_at']}")
@@ -468,8 +475,9 @@ def main():
                     "generated_at": evidence.get("recorded_at"),
                     "rows": rows,
                     "passed": passed,
-                    "failed": failed,
+                    "failed": fails,
                     "missing": missing,
+                    "unresolved": unresolved,
                 },
                 fh,
                 indent=2,
@@ -483,13 +491,13 @@ def main():
             evidence,
             rows,
             passed,
-            failed,
+            fails,
             missing,
-            0 if failed == 0 else 1,
+            0 if unresolved == 0 else 1,
         )
         print("wrote %s" % args.report)
 
-    return 0 if failed == 0 else 1
+    return 0 if unresolved == 0 else 1
 
 
 if __name__ == "__main__":
