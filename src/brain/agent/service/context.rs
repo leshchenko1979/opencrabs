@@ -2164,8 +2164,8 @@ pub(crate) fn format_plan_reminder(plan: &crate::tui::plan::PlanDocument) -> Opt
     let mut out = format!(
         "[ACTIVE PLAN REMINDER — injected by the harness, not from the user]\n\
          📋 Plan: \"{}\" ({done}/{total} done). Keep executing it; do not abandon it. \
-         Use the plan tool's `complete` as you finish each task (it auto-starts the next), and \
-         `start` to (re)surface a task's full details.\n\
+         Use the plan tool's `complete` as you finish each task — it names the next eligible \
+         one — then `start` that task; `start` also (re)surfaces its full details.\n\
          Do NOT repeat the plan title or this reminder text in your response — the \
          plan is already displayed to the user by the surface they are reading.\n",
         plan.title

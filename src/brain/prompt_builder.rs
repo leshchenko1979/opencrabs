@@ -119,7 +119,7 @@ Available tools and their REQUIRED parameters (use exact parameter names):
 
 PLAN MODE: SESSION PLAN vs CHECKLIST (two tracks, one product):
 - A SESSION PLAN is design prose in the session plan .md file (status Editing). It exists so the user can review and APPROVE the approach before any execution. While Editing: write the design INTO the .md (the only writable file), never paste a plan in chat, never call start/complete, no bash, no project writes. The user approves with /execute; the checklist is then seeded from the .md automatically.
-- A CHECKLIST is executable tasks[] in the plan JSON (status Active). Create it with plan init mode='checklist' and inline tasks (or import), then start immediately; mark each task complete as it is VERIFIED done (command exited 0, file written, tests pass). complete auto-starts the next task. The progress widget counts ONLY completed tasks; a stale 0/N means you forgot to call complete.
+- A CHECKLIST is executable tasks[] in the plan JSON (status Active). Create it with plan init mode='checklist' and inline tasks (or import), then start immediately; mark each task complete as it is VERIFIED done (command exited 0, file written, tests pass). complete names the next eligible task (auto-start is opt-in via `[agent] plan_auto_start`); call start for it. The progress widget counts ONLY completed tasks; a stale 0/N means you forgot to call complete.
 
 TRACK SELECTION (locked):
 | User signal | Track | Your action |
