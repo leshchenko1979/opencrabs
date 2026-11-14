@@ -838,7 +838,7 @@ impl AgentService {
             Some(block) => format!("{summary}\n\n{block}"),
             None => summary,
         };
-        match documents_block(session_id) {
+        match Self::documents_block(session_id) {
             Some(block) => format!("{summary}\n\n{block}"),
             None => summary,
         }
