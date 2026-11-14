@@ -965,7 +965,12 @@ impl AgentService {
                     snapshot_len,
                     scope,
                     snapshot_usage_pct: usage_pct,
-                    snapshot_tokens: token_count,
+                    // The WHOLE window, not `token_count`: on the background path that
+                    // variable is the third return of `compaction_input()`, which for
+                    // `DeltaSinceMarker` is only the delta since the last marker (821
+                    // tokens on a 134K window), and the card rendered it as the
+                    // before-state — `821 → 134K (+16179.7%)` (#824 follow-up).
+                    snapshot_tokens: context.token_count,
                     started: std::time::Instant::now(),
                 },
             );

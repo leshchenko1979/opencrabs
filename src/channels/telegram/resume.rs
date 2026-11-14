@@ -996,6 +996,13 @@ pub(crate) async fn resume_session_inner(
                 // #824: same card as the live path, assembled before the lock
                 // (registry scan + tokenize). `None` when the notice is off.
                 let notice = if Config::current().agent.compaction_notice {
+                    // #824 follow-up: same rich-plane condition as the live
+                    // path — tables render only on rich MARKDOWN, and only a
+                    // non-quiet room promotes a table-bearing card out of the
+                    // flow block.
+                    let tg = Config::current();
+                    let rich = tg.channels.telegram.rich_messages
+                        && !tg.channels.telegram.is_quiet_for(&chat_id.0.to_string());
                     Some(compaction_breakdown(&CompactionBreakdown {
                         before_tokens,
                         after_tokens,
@@ -1005,6 +1012,7 @@ pub(crate) async fn resume_session_inner(
                         elapsed,
                         tool_sizes: &tool_sizes,
                         summary: &summary,
+                        rich,
                     }))
                 } else {
                     None
