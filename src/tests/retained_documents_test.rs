@@ -34,16 +34,16 @@ fn register_accepts_only_documents_this_session_read() {
     let unread = dir.join("AGENTS.md");
     std::fs::write(&unread, "# agents\n").unwrap();
 
-    let requested = vec![
-        read.display().to_string(),
-        unread.display().to_string(),
-    ];
+    let requested = vec![read.display().to_string(), unread.display().to_string()];
     let (registered, rejected) = register(sid, &requested);
 
     assert_eq!(registered.len(), 1, "only the read document is carried");
     assert_eq!(registered[0].path, read);
     assert_eq!(registered[0].status, DocStatus::Ok);
-    assert!(registered[0].tokens > 0, "a measured row carries a token count");
+    assert!(
+        registered[0].tokens > 0,
+        "a measured row carries a token count"
+    );
     assert_eq!(rejected.len(), 1);
     assert!(
         rejected[0].contains("(not read in this process)"),
@@ -70,22 +70,20 @@ fn register_rejects_skill_and_confidential_paths() {
     // terms rather than lean on an empty read list.
     mark_document_read(sid, &skill);
     mark_document_read(sid, &brain);
-    assert!(!crate::brain::tools::read_state::was_document_read(sid, &skill));
-    assert!(!crate::brain::tools::read_state::was_document_read(sid, &brain));
+    assert!(!crate::brain::tools::read_state::was_document_read(
+        sid, &skill
+    ));
+    assert!(!crate::brain::tools::read_state::was_document_read(
+        sid, &brain
+    ));
 
-    let requested = vec![
-        skill.display().to_string(),
-        brain.display().to_string(),
-    ];
+    let requested = vec![skill.display().to_string(), brain.display().to_string()];
     let (registered, rejected) = register(sid, &requested);
 
     assert!(registered.is_empty(), "neither path is a project document");
     assert_eq!(rejected.len(), 2);
     for line in &rejected {
-        assert!(
-            line.contains("(not a project document)"),
-            "got: {line}"
-        );
+        assert!(line.contains("(not a project document)"), "got: {line}");
     }
 }
 
@@ -147,7 +145,10 @@ fn register_is_idempotent() {
 
     let first = register(sid, &requested);
     let second = register(sid, &requested);
-    assert_eq!(first.0, second.0, "re-registering the same list changes nothing");
+    assert_eq!(
+        first.0, second.0,
+        "re-registering the same list changes nothing"
+    );
     assert_eq!(second.1.len(), 0);
 
     // …and a manifest that names only one of them supersedes, not merges.
@@ -202,8 +203,14 @@ fn render_header_and_body_are_present_for_a_small_document() {
 
     assert!(block.contains("## Retained documents"), "got: {block}");
     assert!(block.contains(&format!("### {path}")), "got: {block}");
-    assert!(block.contains("obey the law"), "the BODY is what was retained");
-    assert!(block.starts_with("\n\n"), "the separator matches skill bodies");
+    assert!(
+        block.contains("obey the law"),
+        "the BODY is what was retained"
+    );
+    assert!(
+        block.starts_with("\n\n"),
+        "the separator matches skill bodies"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -215,7 +222,9 @@ fn render_header_and_body_are_present_for_a_small_document() {
 fn render_respects_the_leftover_budget() {
     let sid = Uuid::new_v4();
     let dir = tmp_dir("render_budget");
-    let body: String = (0..200).map(|i| format!("line {i} of the project law\n")).collect();
+    let body: String = (0..200)
+        .map(|i| format!("line {i} of the project law\n"))
+        .collect();
     let a = write_document(sid, &dir, "a.md", &body);
     let b = write_document(sid, &dir, "b.md", &body);
     let c = write_document(sid, &dir, "c.md", &body);
@@ -238,7 +247,10 @@ fn render_respects_the_leftover_budget() {
     );
     // Whatever did fit is the NEWEST read (c.md), never the oldest.
     assert!(tight.contains("c.md"), "got: {tight}");
-    assert!(!tight.contains("a.md"), "the oldest must be the one dropped");
+    assert!(
+        !tight.contains("a.md"),
+        "the oldest must be the one dropped"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -1467,10 +1467,9 @@ impl AgentService {
             let total = crate::brain::skills::retained_set_budget_tokens(context.max_tokens);
             let used =
                 crate::brain::skills::retained_set_tokens(&active_skills, &skills, &seen_aux);
-            if let Some(section) = crate::brain::tools::retained_docs::render(
-                session_id,
-                total.saturating_sub(used),
-            ) && let Some(ref mut brain) = context.system_brain
+            if let Some(section) =
+                crate::brain::tools::retained_docs::render(session_id, total.saturating_sub(used))
+                && let Some(ref mut brain) = context.system_brain
             {
                 brain.push_str(&section);
                 context.token_count += AgentContext::estimate_tokens(&section);

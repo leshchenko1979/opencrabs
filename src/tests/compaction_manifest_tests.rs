@@ -312,9 +312,11 @@ fn test_format_context_inventory_with_documents() {
     let gone = table.find("/root/proj/gone.md").unwrap();
     assert!(claude < huge && huge < gone, "document rows out of order");
     // The budget sentence appears only when there is something to budget for.
-    assert!(table.contains(
-        "Documents re-injected on wake count against the same 5% retained-set budget."
-    ));
+    assert!(
+        table.contains(
+            "Documents re-injected on wake count against the same 5% retained-set budget."
+        )
+    );
 }
 
 /// Acceptance #3 of #831: with no documents read, the inventory is exactly what
@@ -337,7 +339,10 @@ fn test_format_context_inventory_without_documents_is_unchanged() {
     );
 
     assert!(!table.contains("| Document |"), "no document rows expected");
-    assert!(!table.contains("more documents read"), "no omission row expected");
+    assert!(
+        !table.contains("more documents read"),
+        "no omission row expected"
+    );
     assert!(!table.contains("Documents re-injected on wake"));
     assert!(table.contains("| `cost-estimate` | Skill |"));
     assert!(table.contains("| `telegram_send` | Lazy Tool |"));
@@ -527,13 +532,19 @@ async fn documents_block_lists_paths_and_line_counts() {
 
     let out = AgentService::decorate_compaction_summary(summary.clone(), sid, None).await;
 
-    assert!(out.contains("## Documents read pre-compaction"), "got: {out}");
+    assert!(
+        out.contains("## Documents read pre-compaction"),
+        "got: {out}"
+    );
     assert!(
         out.contains("Harness-written: `.md` files this session read whole"),
         "got: {out}"
     );
     assert!(
-        out.contains(&format!("- {} (7 lines)", path.canonicalize().unwrap().display())),
+        out.contains(&format!(
+            "- {} (7 lines)",
+            path.canonicalize().unwrap().display()
+        )),
         "path + line count missing, got: {out}"
     );
     // The block is appended, never substituted for the summary.

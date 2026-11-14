@@ -145,16 +145,22 @@ pub fn register(session_id: Uuid, requested: &[String]) -> (Vec<DocEntry>, Vec<S
         }
         let path = PathBuf::from(trimmed);
         if !read_state::is_document_candidate(&path) {
-            rejected.push(format!("not registered: {trimmed} (not a project document)"));
+            rejected.push(format!(
+                "not registered: {trimmed} (not a project document)"
+            ));
             continue;
         }
         if !read_state::was_document_read(session_id, &path) {
-            rejected.push(format!("not registered: {trimmed} (not read in this process)"));
+            rejected.push(format!(
+                "not registered: {trimmed} (not read in this process)"
+            ));
             continue;
         }
         let canonical = read_state::key_path(&path);
         let Some(position) = read_order.iter().position(|p| p == &canonical) else {
-            rejected.push(format!("not registered: {trimmed} (not read in this process)"));
+            rejected.push(format!(
+                "not registered: {trimmed} (not read in this process)"
+            ));
             continue;
         };
         if accepted.iter().any(|(_, p)| p == &canonical) {
