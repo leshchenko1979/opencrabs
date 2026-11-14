@@ -194,3 +194,59 @@ pub fn registered_for_session(session_id: Uuid) -> Vec<DocEntry> {
         .cloned()
         .unwrap_or_default()
 }
+
+/// Re-inject the registered bodies, inside whatever budget the skills left.
+///
+/// `budget_tokens` is the LEFTOVER of the retained-set budget, not a second
+/// allowance: skills and documents share one 5 % envelope, so a session that
+/// carries heavy skills gets proportionally less room for documents and no
+/// constant in this module can drift from that.
+///
+/// Newest-read first, and the first document that does not fit STOPS the walk
+/// rather than being skipped over: the order is by recency, so a body that
+/// overflows is evidence the older ones — smaller only by accident — are not
+/// the ones to spend the remaining room on. A body over
+/// [`MAX_DOC_BODY_BYTES`] is skipped whole; half a document is worse than a
+/// path to it.
+///
+/// `None` when nothing was included, so a session with no registered documents
+/// gets a system brain byte-identical to before #831.
+pub fn render(session_id: Uuid, budget_tokens: usize) -> Option<String> {
+    let entries = registered_for_session(session_id);
+    if entries.is_empty() || budget_tokens == 0 {
+        return None;
+    }
+
+    let mut section = String::from("\n\n## Retained documents\n");
+    let mut used = crate::brain::tokenizer::count_tokens(&section);
+    let mut included = 0usize;
+
+    for entry in &entries {
+        if entry.status != DocStatus::Ok {
+            continue;
+        }
+        match std::fs::metadata(&entry.path) {
+            Ok(meta) if meta.len() > MAX_DOC_BODY_BYTES as u64 => continue,
+            Ok(_) => {}
+            Err(_) => continue,
+        }
+        let Ok(raw) = std::fs::read(&entry.path) else {
+            continue;
+        };
+        let body = String::from_utf8_lossy(&raw);
+        let chunk = format!(
+            "\n\n### {}\n```\n{}\n```",
+            entry.path.display(),
+            body.trim_end()
+        );
+        let cost = crate::brain::tokenizer::count_tokens(&chunk);
+        if used + cost > budget_tokens {
+            break;
+        }
+        used += cost;
+        section.push_str(&chunk);
+        included += 1;
+    }
+
+    if included == 0 { None } else { Some(section) }
+}

@@ -1452,6 +1452,31 @@ impl AgentService {
             }
         }
 
+        // Re-inject the bodies of documents a compaction registered (#831).
+        // Deliberately OUTSIDE the `active_skills` guard above: a session that
+        // carries no skill can still have read project law, and that law is
+        // exactly what a compaction is most likely to drop.
+        //
+        // The budget is the retained set's LEFTOVER, so documents and skills
+        // share one envelope. The registered set is read first because
+        // computing the leftover loads every skill from disk — a session with
+        // no registered documents must not pay that.
+        if !crate::brain::tools::retained_docs::registered_for_session(session_id).is_empty() {
+            let skills = crate::brain::skills::load_all_skills();
+            let seen_aux = crate::brain::tools::seen_skills::aux_seen_for_session(session_id);
+            let total = crate::brain::skills::retained_set_budget_tokens(context.max_tokens);
+            let used =
+                crate::brain::skills::retained_set_tokens(&active_skills, &skills, &seen_aux);
+            if let Some(section) = crate::brain::tools::retained_docs::render(
+                session_id,
+                total.saturating_sub(used),
+            ) && let Some(ref mut brain) = context.system_brain
+            {
+                brain.push_str(&section);
+                context.token_count += AgentContext::estimate_tokens(&section);
+            }
+        }
+
         // Emit token count immediately after DB reload so the TUI reflects the
         // real post-compaction value. Without this, the TUI shows the stale
         // pre-compaction count from the previous request until the API responds.
