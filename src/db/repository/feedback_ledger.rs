@@ -2,7 +2,9 @@
 //!
 //! Append-only observations for recursive self-improvement.
 //! Records tool outcomes, user corrections, provider errors, and performance
-//! signals. Entries are never deleted — consumed by analysis tools.
+//! signals. Rows are written by the RSI machinery and consumed by analysis
+//! tools; retention is opt-in via `[agent].feedback_ledger_retention_days`
+//! (#836) — `0` (the default) keeps every row forever.
 
 use crate::db::Pool;
 use crate::db::database::interact_err;
@@ -248,6 +250,29 @@ impl FeedbackLedgerRepository {
             .await
             .map_err(interact_err)?
             .context("Failed to count feedback since timestamp")
+    }
+
+    /// Delete feedback rows older than `cutoff_iso` (#836).
+    ///
+    /// `feedback_ledger.created_at` is TEXT ISO8601 (`%Y-%m-%dT%H:%M:%SZ`), so a
+    /// lexicographic comparison is chronological and the range uses
+    /// `idx_feedback_ledger_created` — no table scan, unlike the
+    /// `LIKE 'tool_%'` aggregates this table's readers run.
+    ///
+    /// Returns the number of rows deleted.
+    pub async fn prune_older_than(&self, cutoff_iso: String) -> Result<usize> {
+        write_with_retry(
+            &self.pool,
+            &write_retry_config(),
+            move |conn| -> rusqlite::Result<usize> {
+                conn.execute(
+                    "DELETE FROM feedback_ledger WHERE created_at < ?1",
+                    params![cutoff_iso],
+                )
+            },
+        )
+        .await
+        .context("Failed to prune feedback ledger")
     }
 
     /// Get summary: total events, unique dimensions, event type breakdown

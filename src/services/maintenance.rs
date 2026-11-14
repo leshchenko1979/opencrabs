@@ -5,7 +5,8 @@
 //! - Memory store GC: orphan vector embeddings, unreferenced content chunks, stale symbols/call_edges
 //! - Periodic SQLite `VACUUM` on `memory.db` and `opencrabs.db`
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use chrono::Utc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -42,6 +43,8 @@ pub struct MaintenanceReport {
     pub subagents_pruned: usize,
     /// Number of expired messages pruned (#278).
     pub messages_pruned: usize,
+    /// Number of `feedback_ledger` rows pruned (#836).
+    pub feedback_ledger_pruned: usize,
     /// Memory GC report (if memory store is available).
     pub memory_gc: Option<crate::memory::MemoryGcReport>,
     /// Whether the bulk memory GC was skipped because the freelist was already
@@ -61,6 +64,33 @@ pub struct MaintenanceService {
 impl MaintenanceService {
     pub fn new(context: ServiceContext) -> Self {
         Self { context }
+    }
+
+    /// Prune `feedback_ledger` rows older than `retention_days` (#836).
+    ///
+    /// `retention_days == 0` disables pruning and returns `Ok(0)`, matching
+    /// `SessionService::prune_expired_messages` — so an upgrade never deletes
+    /// ledger history by itself.
+    ///
+    /// `feedback_ledger.created_at` is TEXT ISO8601 (`%Y-%m-%dT%H:%M:%SZ`), so
+    /// the cutoff is formatted identically and the DELETE's range walks
+    /// `idx_feedback_ledger_created` instead of scanning the table.
+    pub(crate) async fn prune_expired_feedback_ledger(
+        &self,
+        retention_days: u32,
+    ) -> Result<usize> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = (Utc::now() - chrono::Duration::days(i64::from(retention_days)))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let repo = crate::db::repository::feedback_ledger::FeedbackLedgerRepository::new(
+            self.context.pool(),
+        );
+        repo.prune_older_than(cutoff)
+            .await
+            .context("Failed to prune expired feedback ledger")
     }
 
     /// Run one complete maintenance cycle across databases, with the default
@@ -107,6 +137,21 @@ impl MaintenanceService {
         match session_svc.prune_expired_messages(msg_retention_days).await {
             Ok(pruned) => report.messages_pruned = pruned,
             Err(e) => tracing::warn!("Maintenance: failed to prune expired messages: {e:#}"),
+        }
+
+        // 1c. Prune the feedback ledger (#836)
+        //
+        // `feedback_ledger` is append-only and had NO pruning path, so a busy
+        // profile grew it past 1M rows / 3.75 GiB and every `feedback_analyze`,
+        // RSI digest and `self_improve` call aggregated over the whole table —
+        // `tool_%` is 90 % of the rows, so no index makes those scans selective.
+        let ledger_retention_days = config.agent.feedback_ledger_retention_days;
+        match self
+            .prune_expired_feedback_ledger(ledger_retention_days)
+            .await
+        {
+            Ok(pruned) => report.feedback_ledger_pruned = pruned,
+            Err(e) => tracing::warn!("Maintenance: failed to prune feedback ledger: {e:#}"),
         }
 
         // 2. Memory Store GC & Vacuum
@@ -170,6 +215,7 @@ impl MaintenanceService {
         tracing::info!(
             subagents_pruned = report.subagents_pruned,
             messages_pruned = report.messages_pruned,
+            feedback_ledger_pruned = report.feedback_ledger_pruned,
             database_vacuumed = report.database_vacuumed,
             memory_vacuumed = report.memory_vacuumed,
             memory_gc_skipped = report.memory_gc_skipped,

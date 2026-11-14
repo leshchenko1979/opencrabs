@@ -1668,6 +1668,21 @@ pub struct AgentConfig {
     #[serde(default = "default_message_retention_days")]
     pub message_retention_days: u32,
 
+    /// Days to retain rows in the `feedback_ledger` table before pruning them
+    /// during maintenance sweeps (#836).
+    ///
+    /// The ledger is append-only by design — every tool outcome, provider error
+    /// and compaction writes a row — and nothing pruned it, so it reached
+    /// 1.04M rows / 3.75 GiB on a busy profile and every `feedback_analyze`,
+    /// RSI digest and `self_improve` call aggregated over the whole table.
+    /// `tool_%` is 90 % of the rows, so no index can make those scans
+    /// selective; only retention bounds them.
+    ///
+    /// Default: `0` (disabled / retain forever), matching
+    /// `message_retention_days` — upgrading never deletes data silently.
+    #[serde(default = "default_feedback_ledger_retention_days")]
+    pub feedback_ledger_retention_days: u32,
+
     /// Days to retain throwaway files before the startup purge removes them
     /// (#345). Covers the profile's `tmp/` tree (channel image uploads, loose
     /// scratch files) and the tool-output spill dir
@@ -2030,6 +2045,10 @@ fn default_message_retention_days() -> u32 {
     0
 }
 
+fn default_feedback_ledger_retention_days() -> u32 {
+    0
+}
+
 fn default_tool_output_retention_days() -> u32 {
     7
 }
@@ -2058,6 +2077,7 @@ impl Default for AgentConfig {
             evolve_allow_root: default_evolve_allow_root(),
             subagent_session_ttl_days: default_subagent_session_ttl_days(),
             message_retention_days: default_message_retention_days(),
+            feedback_ledger_retention_days: default_feedback_ledger_retention_days(),
             tool_output_retention_days: default_tool_output_retention_days(),
             self_improvement_provider: None,
             rsi_enabled: None,

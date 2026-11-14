@@ -327,3 +327,66 @@ fn test_activity_clock_advances() {
     assert!(after.is_some(), "a note must leave a readable instant");
     assert!(after >= before, "the clock must never move backwards");
 }
+
+/// #836: `feedback_ledger` had no retention at all — 1.04M rows / 3.75 GiB on
+/// a busy profile, and every `feedback_analyze` aggregate scanned the lot.
+///
+/// `created_at` is TEXT ISO8601 with a column default, so the fixture sets it
+/// EXPLICITLY: a test that relied on the default could not tell an old row from
+/// a fresh one, and would pass against a prune that deleted nothing.
+#[tokio::test]
+async fn test_prune_expired_feedback_ledger() {
+    let _g = guard().await;
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+
+    let old_iso = (chrono::Utc::now() - chrono::Duration::days(120))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let fresh_iso = (chrono::Utc::now() - chrono::Duration::days(5))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+
+    // The in-memory pool is max_size(1), so the connection is released before
+    // the prune (which needs its own) is called.
+    let conn = db.pool().get().await.expect("pool connection");
+    for (event_type, created_at) in [
+        ("tool_failure".to_string(), old_iso.clone()),
+        ("tool_success".to_string(), fresh_iso.clone()),
+    ] {
+        conn.interact(move |c| {
+            c.execute(
+                "INSERT INTO feedback_ledger (session_id, event_type, dimension, value, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params!["sess-836", event_type, "bash", 1.0_f64, created_at],
+            )
+        })
+        .await
+        .expect("interact should succeed")
+        .expect("insert should succeed");
+    }
+    drop(conn);
+
+    let ctx = ServiceContext::new(db.pool().clone());
+    let svc = MaintenanceService::new(ctx);
+
+    // Retention disabled (0 days) -> no-op, both rows survive.
+    let pruned_disabled = svc.prune_expired_feedback_ledger(0).await.unwrap();
+    assert_eq!(pruned_disabled, 0, "0 days must disable pruning");
+
+    let ledger_repo =
+        crate::db::repository::feedback_ledger::FeedbackLedgerRepository::new(db.pool().clone());
+    assert_eq!(
+        ledger_repo.recent(10).await.unwrap().len(),
+        2,
+        "0 days must keep every row"
+    );
+
+    // Retention 90 days -> prunes exactly the 120-day-old row.
+    let pruned = svc.prune_expired_feedback_ledger(90).await.unwrap();
+    assert_eq!(pruned, 1, "the returned count must match the rows deleted");
+
+    let remaining = ledger_repo.recent(10).await.unwrap();
+    assert_eq!(remaining.len(), 1, "the fresh row must survive");
+    assert_eq!(remaining[0].event_type, "tool_success");
+}
