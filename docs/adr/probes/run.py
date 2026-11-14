@@ -15,6 +15,13 @@ maps to at least one probe here. Three kinds:
           claim without evidence is a FAIL, and a stale evidence file is caught
           by the `recorded_at` stamp it prints.
 
+  fixture a probe INPUT file, structurally validated (PNG chunks/CRC/IDAT, or
+          the MP4 box walk), so a broken fixture cannot masquerade as a defect.
+
+  fixture-negative  a probe input that MUST fail validation: the corrupt PNG
+          that passes the code's magic-byte gate and is refused by Telegram.
+          The positive control for the `fixture` kind and the trigger for §3.4.
+
   ci      a GitHub Actions conclusion, read from the API.
 
 Exit 0 iff every probe passes. A probe with no evidence at all reports MISSING
@@ -27,6 +34,7 @@ Usage:
 import argparse
 import json
 import os
+import struct
 import subprocess
 import sys
 
@@ -68,6 +76,78 @@ def run_ci(probe):
     return verdict == "completed success", f"run {run_id}: {verdict}", [verdict]
 
 
+def check_mp4(probe, repo):
+    """Structurally validate an MP4 fixture: the box walk the detector relies on.
+
+    §2 rule 2 claims a video is recognised by walking the ISO base-media box
+    header to `ftyp` and reading its major brand. A fixture that does not carry
+    that shape measures nothing about the rule — a renamed `.txt` would sail
+    through a `file(1)` check and then be refused by the delivery path, and the
+    refusal would be read as a product defect (the `live-l6` fixture lesson,
+    #829, one container over). So the boxes are walked here: `ftyp` first, a
+    non-audio-only brand, `moov` and `mdat` both present, and every box length
+    inside the file.
+    """
+    path = os.path.join(repo, probe["path"])
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as exc:
+        return False, f"unreadable: {exc}", [path]
+    if len(data) < 16:
+        return False, f"too short ({len(data)} bytes)", [path]
+
+    offset = 0
+    boxes = []
+    brands = []
+    while offset + 8 <= len(data):
+        (length,) = struct.unpack(">I", data[offset : offset + 4])
+        kind = data[offset + 4 : offset + 8]
+        if length < 8:
+            return False, f"box {kind!r} declares {length} bytes", [f"offset {offset}"]
+        if offset + length > len(data):
+            return False, (
+                f"box {kind!r} declares {length} at {offset}, file ends at {len(data)}"
+            ), [f"size {len(data)}"]
+        boxes.append(kind.decode("ascii", "replace"))
+        if kind == b"ftyp":
+            brands = [data[offset + 8 : offset + 12].decode("ascii", "replace")]
+            end = offset + length
+            for brand_at in range(offset + 16, end - 3, 4):
+                brands.append(data[brand_at : brand_at + 4].decode("ascii", "replace"))
+        offset += length
+    if offset != len(data):
+        return False, f"trailing bytes after last box ({len(data) - offset})", []
+    if not boxes or boxes[0] != "ftyp":
+        return False, f"first box is {boxes[:1]}, expected ftyp", [str(boxes[:4])]
+    # Audio-only brands are deliberately NOT video: the detector's own exclusion,
+    # so a fixture carrying one would be measuring the refusal, not rule 2.
+    audio_only = {"M4A ", "M4B ", "M4P ", "F4A ", "mp4a"}
+    if not (set(brands) - audio_only):
+        return False, f"audio-only brand set {brands}", []
+    if "moov" not in boxes or "mdat" not in boxes:
+        return False, f"missing moov/mdat: {boxes}", []
+    detail = [f"boxes {boxes}", f"brands {brands}", f"{len(data)} bytes"]
+    return True, f"ftyp {brands[0]}, moov+mdat, {len(data)} bytes", detail
+
+
+def check_fixture_negative(probe, repo):
+    """A fixture that MUST fail validation — the control for the fixture checks.
+
+    `corrupt-photo.png` is built to be accepted by the code's own gate (a PNG
+    signature is all `validate_local_image` reads) and refused by Telegram's
+    processor (a CRC-broken IDAT). That is the trigger for §3.4: the daemon
+    claims the file, uploads it, and the API answers `IMAGE_PROCESS_FAILED`.
+    A probe of that rule is worthless unless the file is genuinely broken, so
+    this kind passes only when the structural check FAILS — and fails when the
+    file is silently repaired, which would turn the AC-3 probe into a no-op.
+    """
+    ok, why, detail = check_fixture(probe, repo)
+    if ok:
+        return False, "fixture is VALID — it cannot trigger a refusal", detail
+    return True, f"refusable by design: {why}", detail
+
+
 def check_fixture(probe, repo):
     """Structurally validate a live probe's input file.
 
@@ -88,6 +168,8 @@ def check_fixture(probe, repo):
     import zlib
 
     path = os.path.join(repo, probe["path"])
+    if path.lower().endswith((".mp4", ".mov", ".m4v")):
+        return check_mp4(probe, repo)
     try:
         with open(path, "rb") as fh:
             data = fh.read()
@@ -126,9 +208,19 @@ def check_fixture(probe, repo):
     width, height, depth, colour, _, _, interlace = struct.unpack(
         ">IIBBBBB", data[16:29]
     )
+    # A large PNG carries one IDAT per ~8 KiB of compressed data, so the raw
+    # chunk list is a wall of the same word. Summarise it: the STRUCTURE is what
+    # this check asserts, and `len(chunks)` plus the head/tail says it without
+    # burying the report.
+    if len(chunks) > 8:
+        chunk_note = (
+            f"{len(chunks)} chunks: {chunks[0]} + {len(chunks) - 2} IDAT + {chunks[-1]}"
+        )
+    else:
+        chunk_note = f"chunks {chunks}"
     detail = [
         f"{width}x{height} depth={depth} colour={colour} interlace={interlace}",
-        f"{len(data)} bytes, chunks {chunks}",
+        f"{len(data)} bytes, {chunk_note}",
     ]
     if interlace == 0 and colour == 6 and depth == 8:
         try:
@@ -322,6 +414,8 @@ def main():
             ok, why, detail = check_live(probe, evidence)
         elif kind == "fixture":
             ok, why, detail = check_fixture(probe, args.repo)
+        elif kind == "fixture-negative":
+            ok, why, detail = check_fixture_negative(probe, args.repo)
         elif kind == "ci":
             ok, why, detail = run_ci(probe)
         else:

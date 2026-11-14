@@ -1,6 +1,6 @@
 {
   "adr": "docs/adr/0001-telegram-local-file-and-image-delivery.md",
-  "adr_revision": 5,
+  "adr_revision": 6,
   "note": "Every normative rule in ADR 0001 maps to at least one probe. A 'static' probe is a shell command run from the repo root and passes on exit 0. A 'live' probe is a message sent through the real daemon delivery path and read back with tg_get_messages; its observation is recorded in live-evidence.json and re-validated here, so the runner checks the recorded observation rather than trusting a claim. A 'ci' probe reads a GitHub Actions conclusion. Run: python3 docs/adr/probes/run.py",
   "probes": [
     {
@@ -90,6 +90,48 @@
       "cmd": "grep -qF 'normalize_reference_spelling' src/channels/telegram/delivery.rs && grep -qF 'pub(crate) fn normalize_reference_spelling' src/channels/telegram/intermediates.rs"
     },
     {
+      "id": "s21-mixed-kind-namespace",
+      "rule": "§3.2",
+      "claim": "the three media families namespace their ids (`img`/`vid`/`doc`) so a reference can only ever be answered by an entry of its own kind — the property that lets one message carry mixed kinds",
+      "kind": "static",
+      "cmd": "grep -qF 'pub const IMG_ID_PREFIX: &str = \"img\";' src/utils/image.rs && grep -qF 'pub const VID_ID_PREFIX: &str = \"vid\";' src/utils/image.rs && grep -qF 'pub const DOC_ID_PREFIX: &str = \"doc\";' src/utils/image.rs"
+    },
+    {
+      "id": "s22-caption-gate",
+      "rule": "§3.2 caption",
+      "claim": "a caption rides the markdown title, and a caption that cannot be expressed with the one measured delimiter is DROPPED rather than emitted malformed (the image still arrives, merely unnamed)",
+      "kind": "static",
+      "cmd": "grep -qF 'folded.is_empty() || folded.contains(' src/utils/image.rs && grep -qF 'an_inexpressible_caption_is_dropped_rather_than_mangling_the_reference' src/tests/telegram_local_image_promotion_test.rs"
+    },
+    {
+      "id": "s23-dedup-canonical-path",
+      "rule": "§3.5, #826",
+      "claim": "dedup compares the RESOLVED ABSOLUTE path in all three families (image, video, file), so two spellings of one file (`~/x.png` and `/root/x.png`) cannot ship twice",
+      "kind": "static",
+      "cmd": "test \"$(grep -cF 'already_delivered.contains(&path)' src/utils/image.rs)\" = 3"
+    },
+    {
+      "id": "s24-oversize-split-floor",
+      "rule": "§2 rule 1 floor",
+      "claim": "the photo/document split is a property of the byte length at the floor: at or below the 10 MiB `sendPhoto` ceiling the image ships as a photo, above it as a document, so an un-previewable picture beats a missing one",
+      "kind": "static",
+      "cmd": "grep -qF 'pub const TELEGRAM_PHOTO_MAX_BYTES: u64 = 10 * 1024 * 1024;' src/channels/telegram/send.rs && grep -qF 'if len <= TELEGRAM_PHOTO_MAX_BYTES {' src/channels/telegram/send.rs"
+    },
+    {
+      "id": "s25-video-kind-floor",
+      "rule": "§2 rule 2 floor",
+      "claim": "a video ships as `sendVideo` only when it is MPEG-4 within the 50 MiB ceiling; anything else falls to `sendDocument`, which has no container gate and therefore cannot silently drop the file",
+      "kind": "static",
+      "cmd": "grep -qF 'if len <= TELEGRAM_VIDEO_MAX_BYTES && format == VideoFormat::Mpeg4' src/channels/telegram/send.rs"
+    },
+    {
+      "id": "s36-thread-id-conditional",
+      "rule": "§6",
+      "claim": "`message_thread_id` is set only when a thread exists, on BOTH planes (the floor's per-method wrappers and the rich body builder), so a message without a topic lands in the chat's main area rather than in a wrong thread or in none",
+      "kind": "static",
+      "cmd": "test \"$(grep -c 'Some(t) => req.message_thread_id(t)' src/channels/telegram/send.rs)\" -ge 4 && grep -qF 'if let Some(t) = thread_id {' src/channels/telegram/rich/api.rs"
+    },
+    {
       "id": "live-l1-document-link-renders",
       "rule": "§2 rules 3 and 6",
       "claim": "a local document sent through the daemon is stored as a link-form tg://document reference and lands as one bubble",
@@ -132,6 +174,41 @@
       "path": "docs/adr/probes/fixtures/local-photo-512.png"
     },
     {
+      "id": "fixture-corrupt-photo-refusable",
+      "rule": "§3.4 (probe input)",
+      "claim": "the corrupt PNG that triggers a refusal is genuinely broken: a valid PNG signature (all the daemon's `validate_local_image` reads) with a CRC-broken IDAT, so the file IS claimed locally and IS refused by Telegram's processor. A fixture that healed would turn the AC-3 probe into a no-op",
+      "kind": "fixture-negative",
+      "path": "docs/adr/probes/fixtures/corrupt-photo.png"
+    },
+    {
+      "id": "fixture-video-64-valid",
+      "rule": "§2 rule 2 (probe input)",
+      "claim": "the video fixture carries the shape rule 2 detects: `ftyp` as the FIRST box, a non-audio-only brand, and both `moov` and `mdat` inside the file. A renamed text file would satisfy `file(1)` and measure nothing",
+      "kind": "fixture",
+      "path": "docs/adr/probes/fixtures/local-video-64.mp4"
+    },
+    {
+      "id": "fixture-oversize-photo-valid",
+      "rule": "§2 rule 1 floor (probe input)",
+      "claim": "the oversize fixture is a structurally VALID PNG above the 10 MiB photo ceiling (12.01 MiB), so the floor's size split is measured with a real image rather than a truncated one. Generated by `fixtures/make_oversize.py`, kept out of git",
+      "kind": "fixture",
+      "path": "/tmp/oc-probes/oversize-photo.png"
+    },
+    {
+      "id": "fixture-caption-ok-valid",
+      "rule": "§3.2 caption (probe input)",
+      "claim": "the captioned-image fixture is a structurally valid PNG distinct in bytes from every other fixture, so a caption probe cannot be answered by a file another reference already claimed",
+      "kind": "fixture",
+      "path": "docs/adr/probes/fixtures/caption-ok.png"
+    },
+    {
+      "id": "fixture-caption-bad-valid",
+      "rule": "§3.2 caption (probe input)",
+      "claim": "the inexpressible-caption fixture is a structurally valid PNG, distinct in bytes, so the caption-drop probe measures the GATE rather than a file that failed for its own reasons",
+      "kind": "fixture",
+      "path": "docs/adr/probes/fixtures/caption-bad.png"
+    },
+    {
       "id": "live-l6-local-image-embed-is-a-photo",
       "rule": "§2 rule 1",
       "claim": "a LOCAL image reference written in embed syntax is attached as a photo; the measured failure is that its bytes are refused and the picture never arrives",
@@ -153,6 +230,69 @@
       "claim": "with no rich path the local image's bytes still ship, as their own detached bubble (the floor), rather than being held back",
       "kind": "live",
       "evidence_id": "L7"
+    },
+    {
+      "id": "live-l8-local-image-link-syntax-attaches",
+      "rule": "§2 rule 6",
+      "claim": "a LOCAL image referenced in LINK syntax `[label](path)` is still claimed by the image family and arrives as a photo entry — the two markdown forms are equivalent for local targets, which is the property that makes link syntax safe to author",
+      "kind": "live",
+      "evidence_id": "L8"
+    },
+    {
+      "id": "live-l9-mixed-kinds-one-message",
+      "rule": "§3.2",
+      "claim": "one reply carrying an image, a video and a document produces THREE distinct entries in ONE rich message, with the `img`/`vid`/`doc` namespaces keeping each reference answered by its own kind",
+      "kind": "live",
+      "evidence_id": "L9"
+    },
+    {
+      "id": "live-l10-document-embed-demoted-to-link",
+      "rule": "§2 rule 6, #827",
+      "claim": "a document authored in EMBED syntax is demoted to link syntax at send time (`shield_unresolvable_markdown_images`), so it lands tappable instead of drawing nothing — the #827 failure mode cannot be re-authored from a reply",
+      "kind": "live",
+      "evidence_id": "L10"
+    },
+    {
+      "id": "live-l11-video-embed-is-a-video",
+      "rule": "§2 rule 2",
+      "claim": "a local MP4 in embed syntax arrives as a `video` media entry (playable), not as a document and not as a dead reference",
+      "kind": "live",
+      "evidence_id": "L11"
+    },
+    {
+      "id": "live-l12-caption-rides-the-title",
+      "rule": "§3.2 caption",
+      "claim": "an expressible caption rides the reference's markdown title and arrives as the media caption, which is the only caption channel the rich plane offers",
+      "kind": "live",
+      "evidence_id": "L12"
+    },
+    {
+      "id": "live-l13-inexpressible-caption-dropped",
+      "rule": "§3.2 caption",
+      "claim": "a caption containing `)` is DROPPED rather than emitted malformed: the image still arrives, merely unnamed, and the reference is not mangled",
+      "kind": "live",
+      "evidence_id": "L13"
+    },
+    {
+      "id": "live-l14-dedup-two-spellings-one-file",
+      "rule": "§3.5, #826",
+      "claim": "one file referenced twice in one reply under two spellings (`~/…` and `/root/…`) is delivered ONCE: dedup compares the resolved absolute path",
+      "kind": "live",
+      "evidence_id": "L14"
+    },
+    {
+      "id": "live-l15-refused-entry-costs-one-entry",
+      "rule": "§3.4, #826",
+      "claim": "a reply whose media plane contains a file Telegram refuses (`IMAGE_PROCESS_FAILED`) still lands as ONE bubble carrying the healthy entries, instead of downgrading the whole reply to the HTML dialect",
+      "kind": "live",
+      "evidence_id": "L15"
+    },
+    {
+      "id": "live-l16-oversize-image-ships-as-document",
+      "rule": "§2 rule 1 floor",
+      "claim": "a structurally valid 12.01 MiB image is above the `sendPhoto` ceiling, so the floor ships it as a document: it arrives as a file rather than being refused",
+      "kind": "live",
+      "evidence_id": "L16"
     }
   ]
 }
