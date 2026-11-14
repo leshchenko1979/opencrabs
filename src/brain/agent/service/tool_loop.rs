@@ -721,6 +721,22 @@ impl AgentService {
                 self.tool_registry
                     .activate_tools(session_id, manifest.required_tools);
             }
+            // #831: the summariser names the documents it judged load-bearing.
+            // Registration is validated against what this session actually
+            // read — a named path the process never opened is refused and the
+            // refusal is logged, never silently carried.
+            if !manifest.retained_documents.is_empty() {
+                let (registered, rejected) = crate::brain::tools::retained_docs::register(
+                    session_id,
+                    &manifest.retained_documents,
+                );
+                tracing::debug!(
+                    "compaction: retained {} document(s) across the marker, refused {}: {:?}",
+                    registered.len(),
+                    rejected.len(),
+                    rejected
+                );
+            }
         }
 
         // #438 A5: the manifest is the model's answer to the retained-set

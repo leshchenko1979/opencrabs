@@ -39,7 +39,11 @@ fn document_registry() -> &'static std::sync::Mutex<HashMap<Uuid, Vec<PathBuf>>>
 
 /// Best-effort canonicalization so `./a.txt`, `a.txt`, and an absolute path
 /// to the same file collapse onto one key.
-fn key_path(path: &Path) -> PathBuf {
+///
+/// `pub(crate)` so `retained_docs` keys the manifest's paths exactly the way
+/// the registry keyed them — two spellings of one path must not become two
+/// documents.
+pub(crate) fn key_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 

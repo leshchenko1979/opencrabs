@@ -11,7 +11,9 @@
 //! The tracking half lives in `read_state` (`mark_document_read` and friends);
 //! nothing here discovers paths on its own.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use uuid::Uuid;
 
 /// Registration cap: how many documents one manifest may name.
@@ -100,4 +102,95 @@ pub fn inventory_documents(session_id: Uuid) -> (Vec<DocEntry>, usize) {
     paths.truncate(MAX_DOC_ROWS);
     let omitted = total - paths.len();
     (paths.iter().map(|p| probe(p)).collect(), omitted)
+}
+
+/// The registered set, process-wide.
+///
+/// It cannot be a `Vec` threaded between call sites: `register` runs while a
+/// compaction is being applied and `render` runs at the next turn's brain
+/// assembly, two different calls with no shared stack. Keyed by session, so
+/// test isolation falls out of the fresh UUID each test context carries.
+fn registered_registry() -> &'static std::sync::Mutex<HashMap<Uuid, Vec<DocEntry>>> {
+    static REGISTERED: OnceLock<std::sync::Mutex<HashMap<Uuid, Vec<DocEntry>>>> = OnceLock::new();
+    REGISTERED.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Resolve the summariser's `retained_documents` list into the set this session
+/// will carry, and say which requests were refused.
+///
+/// REPLACES the session's set: a later compaction's manifest is the model's
+/// current answer, and merging with an earlier one would keep documents the
+/// model has since dropped.
+///
+/// A path is accepted only if it is a document candidate AND this session read
+/// it whole in this process. The second leg is what makes the field safe to
+/// hand a model: naming a path is not evidence of having read it, and a
+/// document the process never opened cannot be re-injected from a stale copy.
+/// Order is newest-read first — independent of the manifest's own order, so the
+/// result is stable and a re-registration of the same list is idempotent.
+pub fn register(session_id: Uuid, requested: &[String]) -> (Vec<DocEntry>, Vec<String>) {
+    use crate::brain::tools::read_state;
+
+    // Oldest-first in the registry; the model cares about the most recent.
+    let mut read_order = read_state::documents_for_session(session_id);
+    read_order.reverse();
+
+    let mut accepted: Vec<(usize, PathBuf)> = Vec::new();
+    let mut rejected: Vec<String> = Vec::new();
+
+    for raw in requested {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(trimmed);
+        if !read_state::is_document_candidate(&path) {
+            rejected.push(format!("not registered: {trimmed} (not a project document)"));
+            continue;
+        }
+        if !read_state::was_document_read(session_id, &path) {
+            rejected.push(format!("not registered: {trimmed} (not read in this process)"));
+            continue;
+        }
+        let canonical = read_state::key_path(&path);
+        let Some(position) = read_order.iter().position(|p| p == &canonical) else {
+            rejected.push(format!("not registered: {trimmed} (not read in this process)"));
+            continue;
+        };
+        if accepted.iter().any(|(_, p)| p == &canonical) {
+            continue;
+        }
+        accepted.push((position, canonical));
+    }
+
+    // Newest-read first, then the cap: the documents the model most recently
+    // obeyed are the ones most likely to govern the pending work, so the cap
+    // must never be decided by the order the manifest happened to list.
+    accepted.sort_by_key(|(position, _)| *position);
+    if accepted.len() > MAX_RETAINED_DOCUMENTS {
+        for (_, path) in accepted.drain(MAX_RETAINED_DOCUMENTS..) {
+            rejected.push(format!(
+                "not registered: {} (over the {MAX_RETAINED_DOCUMENTS}-document cap)",
+                path.display()
+            ));
+        }
+    }
+
+    let entries: Vec<DocEntry> = accepted.iter().map(|(_, p)| probe(p)).collect();
+    registered_registry()
+        .lock()
+        .expect("retained_docs registry poisoned")
+        .insert(session_id, entries.clone());
+    (entries, rejected)
+}
+
+/// What this session is carrying right now: the last successfully registered
+/// set, empty when it has registered nothing.
+pub fn registered_for_session(session_id: Uuid) -> Vec<DocEntry> {
+    registered_registry()
+        .lock()
+        .expect("retained_docs registry poisoned")
+        .get(&session_id)
+        .cloned()
+        .unwrap_or_default()
 }
