@@ -7,7 +7,8 @@
 
 use crate::brain::tools::read_state::mark_document_read;
 use crate::brain::tools::retained_docs::{
-    DocStatus, MAX_DOC_BODY_BYTES, MAX_RETAINED_DOCUMENTS, register, registered_for_session, render,
+    DocStatus, MAX_DOC_BODY_BYTES, MAX_RETAINED_DOCUMENTS, has_retained_set, register,
+    registered_for_session, render,
 };
 use uuid::Uuid;
 
@@ -296,4 +297,52 @@ fn render_returns_none_when_the_budget_is_exhausted() {
     assert!(render(Uuid::new_v4(), 1_000_000).is_none());
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A refusal the model never sees is a silent drop, and the manifest is model
+/// output — so a hallucinated path would otherwise leave the model believing
+/// the document it invented is in its context.
+#[test]
+fn render_reports_a_refused_path_instead_of_dropping_it_silently() {
+    let sid = Uuid::new_v4();
+    let dir = tmp_dir("render_refused");
+    // Present on disk, named by the manifest, never read by this session.
+    let unread = dir.join("architecture.md");
+    std::fs::write(&unread, "# architecture\n").unwrap();
+
+    let (registered, rejected) = register(sid, &[unread.display().to_string()]);
+    assert!(registered.is_empty(), "an unread path is not carried");
+    assert_eq!(rejected.len(), 1);
+    assert!(
+        has_retained_set(sid),
+        "a refusal is something the turn-start assembly must still say"
+    );
+
+    let block = render(sid, 1_000_000).expect("a refusal is rendered, not swallowed");
+    assert!(
+        block.contains("## Documents NOT retained"),
+        "the block must be headed as a refusal, got: {block}"
+    );
+    assert!(
+        block.contains("architecture.md"),
+        "the refused path must be named, got: {block}"
+    );
+    assert!(
+        block.contains("(not read in this process)"),
+        "the block must carry the reason, got: {block}"
+    );
+    assert!(
+        !block.contains("## Retained documents"),
+        "nothing was retained, so no retained-body header may appear: {block}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The other half: a session that registered nothing at all stays silent, so
+/// the turn-start brain is byte-identical to before #831.
+#[test]
+fn has_retained_set_is_false_for_a_session_that_registered_nothing() {
+    assert!(!has_retained_set(Uuid::new_v4()));
+    assert!(render(Uuid::new_v4(), 1_000_000).is_none());
 }

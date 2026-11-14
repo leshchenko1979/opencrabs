@@ -1461,7 +1461,7 @@ impl AgentService {
         // share one envelope. The registered set is read first because
         // computing the leftover loads every skill from disk — a session with
         // no registered documents must not pay that.
-        if !crate::brain::tools::retained_docs::registered_for_session(session_id).is_empty() {
+        if crate::brain::tools::retained_docs::has_retained_set(session_id) {
             let skills = crate::brain::skills::load_all_skills();
             let seen_aux = crate::brain::tools::seen_skills::aux_seen_for_session(session_id);
             let total = crate::brain::skills::retained_set_budget_tokens(context.max_tokens);

@@ -110,8 +110,22 @@ pub fn inventory_documents(session_id: Uuid) -> (Vec<DocEntry>, usize) {
 /// compaction is being applied and `render` runs at the next turn's brain
 /// assembly, two different calls with no shared stack. Keyed by session, so
 /// test isolation falls out of the fresh UUID each test context carries.
-fn registered_registry() -> &'static std::sync::Mutex<HashMap<Uuid, Vec<DocEntry>>> {
-    static REGISTERED: OnceLock<std::sync::Mutex<HashMap<Uuid, Vec<DocEntry>>>> = OnceLock::new();
+/// The registered set, process-wide, paired with the reasons any requested
+/// path was refused.
+///
+/// It cannot be a `Vec` threaded between call sites: `register` runs while a
+/// compaction is being applied and `render` runs at the next turn's brain
+/// assembly, two different calls with no shared stack. Keyed by session, so
+/// test isolation falls out of the fresh UUID each test context carries.
+///
+/// The refusals ride here rather than only reaching a log because a refusal
+/// the MODEL never sees is a silent drop: the manifest is model output, so a
+/// hallucinated path would otherwise leave the model believing the document
+/// it invented is in its context.
+fn registered_registry() -> &'static std::sync::Mutex<HashMap<Uuid, (Vec<DocEntry>, Vec<String>)>>
+{
+    type Registry = std::sync::Mutex<HashMap<Uuid, (Vec<DocEntry>, Vec<String>)>>;
+    static REGISTERED: OnceLock<Registry> = OnceLock::new();
     REGISTERED.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -186,7 +200,7 @@ pub fn register(session_id: Uuid, requested: &[String]) -> (Vec<DocEntry>, Vec<S
     registered_registry()
         .lock()
         .expect("retained_docs registry poisoned")
-        .insert(session_id, entries.clone());
+        .insert(session_id, (entries.clone(), rejected.clone()));
     (entries, rejected)
 }
 
@@ -197,8 +211,18 @@ pub fn registered_for_session(session_id: Uuid) -> Vec<DocEntry> {
         .lock()
         .expect("retained_docs registry poisoned")
         .get(&session_id)
-        .cloned()
+        .map(|(entries, _)| entries.clone())
         .unwrap_or_default()
+}
+
+/// Whether the turn-start assembly has anything to say for this session: a
+/// retained body to inject, or a refusal the model has not been told about.
+pub fn has_retained_set(session_id: Uuid) -> bool {
+    registered_registry()
+        .lock()
+        .expect("retained_docs registry poisoned")
+        .get(&session_id)
+        .is_some_and(|(entries, refusals)| !entries.is_empty() || !refusals.is_empty())
 }
 
 /// Re-inject the registered bodies, inside whatever budget the skills left.
@@ -218,13 +242,19 @@ pub fn registered_for_session(session_id: Uuid) -> Vec<DocEntry> {
 /// `None` when nothing was included, so a session with no registered documents
 /// gets a system brain byte-identical to before #831.
 pub fn render(session_id: Uuid, budget_tokens: usize) -> Option<String> {
-    let entries = registered_for_session(session_id);
-    if entries.is_empty() || budget_tokens == 0 {
+    let (entries, refusals) = registered_registry()
+        .lock()
+        .expect("retained_docs registry poisoned")
+        .get(&session_id)
+        .cloned()
+        .unwrap_or_default();
+    if entries.is_empty() && refusals.is_empty() {
         return None;
     }
 
-    let mut section = String::from("\n\n## Retained documents\n");
-    let mut used = crate::brain::tokenizer::count_tokens(&section);
+    let header = "\n\n## Retained documents\n";
+    let mut section = String::from(header);
+    let mut used = crate::brain::tokenizer::count_tokens(header);
     let mut included = 0usize;
 
     for entry in &entries {
@@ -254,5 +284,23 @@ pub fn render(session_id: Uuid, budget_tokens: usize) -> Option<String> {
         included += 1;
     }
 
-    if included == 0 { None } else { Some(section) }
+    let mut out = String::new();
+    if included > 0 {
+        out.push_str(&section);
+    }
+    // The manifest is model output, so a refused path is a claim the model made
+    // and the harness did not honour. Saying so is what keeps a hallucinated
+    // path from reading as a retained one; silence is the only outcome that
+    // cannot be recovered from, because the model has no way to notice.
+    if !refusals.is_empty() {
+        out.push_str("\n\n## Documents NOT retained\n");
+        out.push_str(
+            "These paths were named in `retained_documents` and refused. They are NOT in your \
+             context — read them again if the pending work depends on them.\n",
+        );
+        for reason in &refusals {
+            out.push_str(&format!("- {reason}\n"));
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
