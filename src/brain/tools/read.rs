@@ -222,6 +222,12 @@ impl Tool for ReadTool {
                 // Whole-file reads unlock later overwrites (#1168); windowed
                 // reads deliberately do not.
                 super::read_state::mark_fully_read(context.session_id, &path);
+                // Documents read whole survive compaction (#831): project law
+                // that lives in a repo (`CLAUDE.md`, `AGENTS.md`, a project's
+                // own docs) is obeyed now and would otherwise be forgotten at
+                // the next compaction. A separate list from the one above,
+                // which `write_file` also feeds.
+                super::read_state::mark_document_read(context.session_id, &path);
             }
             // A whole-file read of a skill definition counts as consuming
             // that skill (issue #131): the post-compaction stamp lists it
