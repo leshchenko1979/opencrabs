@@ -577,3 +577,39 @@ mod persistence {
         );
     }
 }
+
+// ── #831: retained_documents is a manifest section, parsed like the others ──
+
+/// A document the summariser names must come back out of the manifest — both
+/// the block-list form and the inline form. The block form is the one the
+/// section spec shows, and the item handler is what makes it work: without its
+/// own `match` arm the key parses and every `- <path>` line is dropped.
+#[test]
+fn manifest_parses_retained_documents() {
+    let text = "active_skills:\n  - opencrabs-dev\nretained_documents:\n  - /root/proj/CLAUDE.md\n  - /root/proj/docs/law.md\nrequired_tools:\n  - read_file\n";
+    let manifest =
+        crate::brain::agent::service::context::parse_manifest_text(text).expect("parses");
+    assert_eq!(manifest.active_skills, vec!["opencrabs-dev"]);
+    assert_eq!(
+        manifest.retained_documents,
+        vec!["/root/proj/CLAUDE.md", "/root/proj/docs/law.md"]
+    );
+    assert_eq!(manifest.required_tools, vec!["read_file"]);
+
+    // Inline form, like the other three sections accept.
+    let inline = "retained_documents: [/root/a.md, /root/b.md]\n";
+    let manifest =
+        crate::brain::agent::service::context::parse_manifest_text(inline).expect("parses");
+    assert_eq!(manifest.retained_documents, vec!["/root/a.md", "/root/b.md"]);
+}
+
+/// A manifest that names no documents leaves the field empty — the pre-#831
+/// shape keeps parsing, and nothing is re-injected on the strength of silence.
+#[test]
+fn manifest_without_retained_documents_parses_empty() {
+    let text = "active_skills:\n  - opencrabs-dev\ndiscard_skills:\n  - grafana\n";
+    let manifest =
+        crate::brain::agent::service::context::parse_manifest_text(text).expect("parses");
+    assert!(manifest.retained_documents.is_empty());
+    assert_eq!(manifest.active_skills, vec!["opencrabs-dev"]);
+}

@@ -68,6 +68,12 @@ pub struct ContextManifest {
     pub discard_skills: Vec<String>,
     #[serde(default)]
     pub required_tools: Vec<String>,
+    /// Documents the session read whole that must survive the compaction
+    /// (#831). Paths, never bodies: the re-injection at wake reads them again
+    /// inside the retained-set budget, so a document that grew or was deleted
+    /// between compaction and wake is handled by the read, not by a stale copy.
+    #[serde(default)]
+    pub retained_documents: Vec<String>,
 }
 
 /// Extract and parse a machine-readable `ContextManifest` from a compaction summary.
@@ -154,6 +160,13 @@ pub fn parse_manifest_text(text: &str) -> Option<ContextManifest> {
             if !rest_trimmed.is_empty() {
                 parse_inline_items(rest_trimmed, &mut manifest.required_tools);
             }
+        } else if let Some(rest) = line_trimmed.strip_prefix("retained_documents:") {
+            current_section = Some("retained_documents");
+            found_any_key = true;
+            let rest_trimmed = rest.trim();
+            if !rest_trimmed.is_empty() {
+                parse_inline_items(rest_trimmed, &mut manifest.retained_documents);
+            }
         } else if let Some(item) = line_trimmed.strip_prefix('-') {
             let item_clean = item.trim().trim_matches('"').trim_matches('\'').trim();
             if !item_clean.is_empty() {
@@ -161,6 +174,9 @@ pub fn parse_manifest_text(text: &str) -> Option<ContextManifest> {
                     Some("active_skills") => manifest.active_skills.push(item_clean.to_string()),
                     Some("discard_skills") => manifest.discard_skills.push(item_clean.to_string()),
                     Some("required_tools") => manifest.required_tools.push(item_clean.to_string()),
+                    Some("retained_documents") => {
+                        manifest.retained_documents.push(item_clean.to_string());
+                    }
                     _ => {}
                 }
             }
