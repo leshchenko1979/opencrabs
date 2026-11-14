@@ -241,9 +241,10 @@
     {
       "id": "live-l9-mixed-kinds-one-message",
       "rule": "§3.2",
-      "claim": "one reply carrying an image, a video and a document produces THREE distinct entries in ONE rich message, with the `img`/`vid`/`doc` namespaces keeping each reference answered by its own kind",
+      "claim": "one reply carrying an image, a video and a document produces ONE rich bubble in which each reference is answered by its own kind: the image binds as a photo entry, the video as a video entry, and the document as a link-form `tg://document` reference (ADR §4.2 measures that a document deliberately never rides as an entry - its embed form draws nothing in the client). Not three entries: the document is a reference by design.",
       "kind": "live",
-      "evidence_id": "L9"
+      "evidence_id": "L9",
+      "claim_revised": "2026-11-14: the original claim demanded three media ENTRIES, which contradicts ADR §4.2. See live-evidence L9."
     },
     {
       "id": "live-l10-document-embed-demoted-to-link",

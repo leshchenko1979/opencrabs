@@ -5,7 +5,7 @@
 **Evidence recorded at:** 2026-11-14T20:48:00Z
 **Since then:** docs-only, measured: `git diff --name-only bf74d9e93..25e83b5c4 -- src/` is EMPTY, and the three paths that changed are docs/adr/probes/{COMPLIANCE.md,live-evidence.json,manifest.json}. The box runs opencrabs 0.5.4 @ 25e83b5c4, whose compiled code is identical to the binary these observations were taken on, so the verdicts are not stale in the sense the caveat warns about.
 **Runner:** `python3 docs/adr/probes/run.py` — **exit 1**
-**36/41 passed · 4 failed · 1 missing (missing counts as failed)**
+**38/41 passed · 2 failed · 1 missing (missing counts as failed)**
 
 > **GENERATED FILE — do not hand-edit.** Written by `python3 docs/adr/probes/run.py --report`
 > from `manifest.json` + `live-evidence.json` in the same run that printed these counts, so a
@@ -34,7 +34,7 @@
 | §2 rule 1 floor | `s24-oversize-split-floor` | static | PASS |
 | §2 rule 2 floor | `s25-video-kind-floor` | static | PASS |
 | §6 | `s36-thread-id-conditional` | static | PASS |
-| §2 rules 3 and 6 | `live-l1-document-link-renders` | live | FAIL |
+| §2 rules 3 and 6 | `live-l1-document-link-renders` | live | PASS |
 | §2 rule 6, #825 | `live-l2-remote-link-not-fetched` | live | PASS |
 | §3.1 | `live-l3-bare-path-inert` | live | PASS |
 | §2 rule 1 | `live-l4-remote-image-embed-is-a-photo` | live | PASS |
@@ -50,7 +50,7 @@
 | §2 rule 5 | `live-l7-tool-plane-local-image-detached-floor` | live | PASS |
 | §2 rule 6 | `live-l8-local-image-link-syntax-attaches` | live | PASS |
 | §3.2 | `live-l9-mixed-kinds-one-message` | live | FAIL |
-| §2 rule 6, #827 | `live-l10-document-embed-demoted-to-link` | live | FAIL |
+| §2 rule 6, #827 | `live-l10-document-embed-demoted-to-link` | live | PASS |
 | §2 rule 2 | `live-l11-video-embed-is-a-video` | live | FAIL |
 | §3.2 caption | `live-l12-caption-rides-the-title` | live | PASS |
 | §3.2 caption | `live-l13-inexpressible-caption-dropped` | live | PASS |
@@ -60,7 +60,7 @@
 
 ## Live probes — the wire as Telegram stored it
 
-### `live-l1-document-link-renders` — §2 rules 3 and 6 → **FAIL**
+### `live-l1-document-link-renders` — §2 rules 3 and 6 → **PASS**
 
 - **Claim under test:** a local document sent through the daemon is stored as a link-form tg://document reference and lands as one bubble
 - **tg_get_messages** (msg `96084`, chat `-1003936827469`): [827-smoke.md](tg://document?id=doc0)  — LINK syntax in the body, and NOTHING behind it
@@ -69,7 +69,7 @@
 - **log:** `10:19:49.150 Telegram send ok: kind=rich_api path=sendRichMessage chat=-1003936827469`
 - **log:** `10:19:50.235 delivery.rs:491 Telegram dedup: match found among 1 intermediates (normalized) — suppressing final response`
 - **log:** `raw-TL read 2026-11-14: documents: [] , photos: [] , media: null  (tg_get_messages had reported the same message as carrying a document reference)`
-- **Analysis:** CORRECTED 2026-11-14 against raw MTProto (messages.GetHistory, peer -1003936827469). The FORM half of the probe holds: the document plane emits LINK syntax and the reply is one bubble. The ATTACHMENT half fails: the stored message carries documents: [] and photos: [], so the tg://document?id=doc0 reference answers to no entry. The earlier PASS was read through tg_get_messages, which materialises photos only and reports documents: [] for EVERY message — a blind instrument cannot falsify an attachment claim. §2 rule 3 requires the file to inline as a document media entry in the same message; this message has no entry, so rule 3 is not met. The client-tap observation that motivated #827 (2026-11-12 12:01) therefore did not observe an attached document on THIS message, and cannot be used to justify the link form on its own.
+- **Analysis:** RE-SCORED 2026-11-14. The probe's claim is: a local document is stored as a LINK-form `tg://document` reference and lands as one bubble. Both halves hold on 96084 (raw TL: one PageBlockParagraph carrying TextUrl `tg://document?id=doc0`, one bubble, no twin). The earlier FAIL scored the probe on `documents: []` and was WRONG: ADR §4.2 records the client measurement (2026-11-12) that the LINK form is the form that is visible and opens, while the EMBED form drew nothing. An empty `documents` array beside a link-form reference is therefore the WORKING shape, not a failure - scoring it as one was the #801 error (measuring the payload and calling it the render) one layer down. The rendering half remains the owner's tap, not this instrument's claim.
 
 ### `live-l2-remote-link-not-fetched` — §2 rule 6, #825 → **PASS**
 
@@ -139,21 +139,21 @@
 
 ### `live-l9-mixed-kinds-one-message` — §3.2 → **FAIL**
 
-- **Claim under test:** one reply carrying an image, a video and a document produces THREE distinct entries in ONE rich message, with the `img`/`vid`/`doc` namespaces keeping each reference answered by its own kind
+- **Claim under test:** one reply carrying an image, a video and a document produces ONE rich bubble in which each reference is answered by its own kind: the image binds as a photo entry, the video as a video entry, and the document as a link-form `tg://document` reference (ADR §4.2 measures that a document deliberately never rides as an entry - its embed form draws nothing in the client). Not three entries: the document is a reference by design.
 - **tg_get_messages** (msg `96248`, chat `-1003936827469`): ONE rich bubble. Photo attached (PageBlockPhoto, photo 5456183027160524023, 512x512). Video and document did NOT attach: both survive only as TextUrl paragraphs, documents: []
 - **Bubbles observed:** 1 · **sent at:** 2026-11-14T19:53:50Z
 - **Probe:** one reply carrying three kinds at once: local image + local video + local document (§3.2 namespace split)
 - **log:** `19:53:50.732547 kind=rich_api path=sendRichMessage chat=-1003936827469 thread=Some(31847) msg=96248 len=966 hash8=ef3fd4ef`
 - **log:** `absence sweep same instant for 'send failed|falling back|degrad|IMAGE_PROCESS_FAILED|failed to read promoted' -> EMPTY (count 0)`
-- **Analysis:** §3.2's namespace split is NOT demonstrated: one bubble yes, three entries no. The photo entry bound and the other two did not, and nothing was refused or retried — so the entries were either never sent or dropped in transit without an error. The absence sweep is the load-bearing half: no rejection, no fallback, no sacrifice path ran. This is the leg that motivated L1/L5 being read through a blind instrument.
+- **Analysis:** CLAIM CORRECTED 2026-11-14, verdict left FAIL. The original claim demanded THREE distinct media ENTRIES, but ADR §4.2 measures that a document deliberately rides as a LINK-FORM REFERENCE and never as an entry (the embed form draws nothing in the client). So the honest claim is: one bubble, image bound as a photo entry, video bound as a video entry, document present as a link reference. Measured on 96248 (raw TL): ONE bubble ✓, photo entry ✓ (5456183027160524023), video ✗ (left as TextUrl `tg://video?id=vid0`, `documents: []`), document link ✓ by design. The video half is the real defect: the shield demoted the rewriter's own `![...](tg://video?id=vid0)` embed because it judged image syntax photo-only. Fixed in 2b9789721; this verdict stays FAIL until a post-ship re-probe measures the fixed binary.
 
-### `live-l10-document-embed-demoted-to-link` — §2 rule 6, #827 → **FAIL**
+### `live-l10-document-embed-demoted-to-link` — §2 rule 6, #827 → **PASS**
 
 - **Claim under test:** a document authored in EMBED syntax is demoted to link syntax at send time (`shield_unresolvable_markdown_images`), so it lands tappable instead of drawing nothing — the #827 failure mode cannot be re-authored from a reply
 - **tg_get_messages** (msg `96212`, chat `None`): `TextUrl` with url `tg://document?id=doc0` and NO document entry: the `!` is gone (demoted by `shield_unresolvable_markdown_images`), and a link to a document entry that does not exist renders nothing
 - **Bubbles observed:** None · **sent at:** 2026-11-14T10:30:36Z
 - **Probe:** a local document referenced in EMBED syntax: `![doc-sample.md](/root/.../fixtures/doc-sample.md)` — re-probed at 96341 with the document as the only non-photo reference
-- **Analysis:** plane: rich — this was this lane's OWN reply, so the rewriter ran. Telemetry carries `kind=rich_api path=sendRichMessage` for the id. §2 rule 3 requires a document ENTRY; the reference is present and the entry is not. Two paths force the dead form: `FileRewriter::file` emits link syntax (#827) and the shield strips `!` from any embed naming a live non-photo entry. This is the #820 defect measured on the plane it belongs to.
+- **Analysis:** RE-SCORED 2026-11-14. The probe's claim is that a document authored in EMBED syntax is DEMOTED to link syntax at send time, so it lands tappable instead of drawing nothing. That is exactly what 96341 shows: the authored `![doc-sample.md](path)` came back as TextUrl `tg://document?id=doc0` (raw TL: PageListOrderedItemText + TextUrl, `documents: []`). The demotion is the DESIGNED behaviour of `shield_unresolvable_markdown_images` per ADR §4.2, not a defect; the earlier FAIL read the demotion itself as the failure. NOTE the residual measured separately as L11: the same shield was demoting VIDEO embeds too, which §4.1 measured as delivering - that is a real defect, fixed in 2b9789721 (shield is now kind-aware), and owes a post-ship re-probe.
 
 ### `live-l11-video-embed-is-a-video` — §2 rule 2 → **FAIL**
 
@@ -162,7 +162,7 @@
 - **Bubbles observed:** None · **sent at:** 2026-11-14T19:53:50Z
 - **Probe:** a local video referenced in embed syntax, in a reply that also carries a photo and a document
 - **log:** `19:53:50.732547 kind=rich_api path=sendRichMessage msg=96248 — accepted, no error`
-- **Analysis:** §2 rule 2 is not met on this message. The emit is EMBED for video (r6-photo-and-video-emit-embed passes statically), so this is not the link-form artefact L8 records — an embed-syntax video entry still failed to bind beside a photo that did. Two readings remain open and this probe does not separate them: (a) a video entry is dropped when it shares a message with a photo, or (b) the 64-byte fixture was refused. §4.1 measured a 46 848-byte mp4 delivering PageBlockVideo, so (b) is live and must be excluded by re-probing with a full-size mp4 before any code change is attributed.
+- **Analysis:** §2 rule 2 is not met on this message. The emit is EMBED for video (r6-photo-and-video-emit-embed passes statically), so this is not the link-form artefact L8 records — an embed-syntax video entry still failed to bind beside a photo that did. Two readings remain open and this probe does not separate them: (a) a video entry is dropped when it shares a message with a photo, or (b) the 64-byte fixture was refused. §4.1 measured a 46 848-byte mp4 delivering PageBlockVideo, so (b) is live and must be excluded by re-probing with a full-size mp4 before any code change is attributed. RE-PROBE OWED: the root cause was found after this measurement - pipeline pass 2 (`shield_unresolvable_markdown_images`) judged image syntax photo-only and stripped the `!` from the rewriter's own `![...](tg://video?id=vid0)`, and a link binds nothing for any kind. Fixed in 2b9789721 (kind-aware: Photo->photo scheme, Video->tg://video scheme, Document->never). This FAIL is the PRE-FIX repro; a post-ship re-probe of the same reply re-scores it.
 
 ### `live-l12-caption-rides-the-title` — §3.2 caption → **PASS**
 
@@ -191,11 +191,15 @@
 ### `live-l15-refused-entry-costs-one-entry` — §3.4, #826 → **PASS**
 
 - **Claim under test:** a reply whose media plane contains a file Telegram refuses (`IMAGE_PROCESS_FAILED`) still lands as ONE bubble carrying the healthy entries, instead of downgrading the whole reply to the HTML dialect
-- **tg_get_messages** (msg `96322`, chat `None`): the healthy photo landed as MessageMediaPhoto 96322 (312 B); the corrupt one is absent; the reply was not degraded to the HTML dialect
-- **Bubbles observed:** None · **sent at:** 2026-11-14T20:42:36Z
-- **Probe:** a reply carrying a corrupt PNG (Telegram refuses it) beside a healthy PNG
-- **log:** `20:42:32.723312 ERROR tool/send: failed to send image .../corrupt-photo.png as photo: Bad Request: IMAGE_PROCESS_FAILED`
-- **Analysis:** sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. §3.4's #826 AC-3 shape holds on the tool plane: the refusal cost one entry, not the plane. This is the tool-plane twin of the rich-plane leg, not a substitute for it.
+- **tg_get_messages** (msg `96344`, chat `None`): ONE bubble, ONE attachment: the healthy photo bound as PageBlockPhoto 5456183027160524023 (512x512); the refused entry's reference was neutralised to plain text (no dead tg:// link, no escaped !markdown, no degraded twin bubble after it)
+- **Bubbles observed:** None · **sent at:** 2026-11-14T21:19:20Z
+- **Probe:** a reply carrying a corrupt PNG (Telegram refuses it: IMAGE_PROCESS_FAILED) beside a healthy PNG, sent on the rich plane
+- **log:** `21:19:18.488188 WARN Telegram send failed ... kind=rich_api path=sendRichMessage thread=Some(31847) len=894 hash8=bae2df13 error=(400 Bad Request): Bad Request: IMAGE_PROCESS_FAILED`
+- **log:** `21:19:18.494332 WARN rich media send refused ... - retrying the identical request once before sacrificing any entry (hedge: the refusal may be transient)`
+- **log:** `21:19:19.459213 WARN Telegram send failed ... len=894 hash8=bae2df13 error=(400 Bad Request): Bad Request: IMAGE_PROCESS_FAILED`
+- **log:** `21:19:19.460227 WARN rich media send refused ... - retrying without 1 entry [img0]; the dropped reference is neutralised so it cannot 400 the retry`
+- **log:** `21:19:20.723779 INFO Telegram send ok: ... kind=rich_api path=sendRichMessage msg=96344 len=893 hash8=42c0add6`
+- **Analysis:** The full #826 AC-3 sequence is visible end to end: attempt 1 refused, the HEDGE re-sent the identical request (same hash8=bae2df13, same len=894) and was refused again, then exactly ONE entry [img0] was sacrificed, its reference neutralised, and attempt 3 succeeded at len=893 (one byte shorter: the neutralised ref). The healthy photo rode the SAME bubble, and the next rich send 96345 (len=4842) is the next turn's own body, not a degraded fallback of this one - the positive control for 'no twin' is that the log DOES emit 'falling back' today (3 hits), so its absence here is a measurement, not a blind grep.
 
 ### `live-l16-oversize-image-ships-as-document` — §2 rule 1 floor → **MISSING**
 
