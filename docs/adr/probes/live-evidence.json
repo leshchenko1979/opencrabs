@@ -1,5 +1,5 @@
 {
- "recorded_at": "2026-11-13T18:27:52Z",
+ "recorded_at": "2026-11-14T20:48:00Z",
  "chat_id": "-1003936827469",
  "topic": "Telegram: Rich Text (31847)",
  "method": "Each observation is a message sent through the daemon's real delivery path and read back with tg_get_messages, paired with the daemon log line for the same instant. The stored form is quoted verbatim from the API response, not reconstructed.",
@@ -155,6 +155,72 @@
     "19:53:50.732547 kind=rich_api path=sendRichMessage msg=96248 — accepted, no error"
    ],
    "note": "§2 rule 2 is not met on this message. The emit is EMBED for video (r6-photo-and-video-emit-embed passes statically), so this is not the link-form artefact L8 records — an embed-syntax video entry still failed to bind beside a photo that did. Two readings remain open and this probe does not separate them: (a) a video entry is dropped when it shares a message with a photo, or (b) the 64-byte fixture was refused. §4.1 measured a 46 848-byte mp4 delivering PageBlockVideo, so (b) is live and must be excluded by re-probing with a full-size mp4 before any code change is attributed."
+  },
+  "L10": {
+   "verdict": "FAIL",
+   "plane": "tool",
+   "message_id": 96313,
+   "sent_at": "2026-11-14T20:42:12Z",
+   "probe": "a local document referenced in EMBED syntax: `![doc-sample.md](/root/.../fixtures/doc-sample.md)`",
+   "stored_form": "`🔍 PROBE L10 — ...\\n\\n!doc-sample.md` — the link target is gone, the label survives with its leading `!`, and NOTHING was attached (media: null)",
+   "raw_tl": "messages.GetHistory id=96313 → media: null, rich_message: null",
+   "note": "sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. A local non-image file is neither attached nor linked: the reference degrades to a bare `!name` in the body. §2 rule 3 (any other file → document) is not met on this plane."
+  },
+  "L12": {
+   "verdict": "PASS",
+   "plane": "tool",
+   "message_id": 96315,
+   "sent_at": "2026-11-14T20:42:21Z",
+   "probe": "`![cap](caption-ok.png \"L12 caption rides the title\")`",
+   "stored_form": "a MessageMediaPhoto (312 B, image/jpeg) whose caption is `L12 caption rides the title` — the title arrived as the caption, verbatim",
+   "raw_tl": "messages.GetHistory id=96315 → media: MessageMediaPhoto id=5460666680959770736, sizes m 64x64 312 B",
+   "note": "sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. The caption leg passes on the tool plane. It says nothing yet about §3.2's rich-plane title handling."
+  },
+  "L13": {
+   "verdict": "FAIL",
+   "plane": "tool",
+   "message_id": 96317,
+   "sent_at": "2026-11-14T20:42:25Z",
+   "probe": "`![bad](caption-bad.png \"L13 bad ) paren\")` — a title containing `)`, which §3.2's caption gate is supposed to drop",
+   "stored_form": "a MessageMediaPhoto (310 B) whose caption is `L13 bad ) paren` — NOT dropped",
+   "raw_tl": "messages.GetHistory id=96317 → media: MessageMediaPhoto, caption text `L13 bad ) paren`",
+   "note": "sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. The claim behind probe `live-l13-inexpressible-caption-dropped` is contradicted here: a quoted markdown title carrying `)` is legal and arrived intact. Either the gate does not fire, or `)` was never the inexpressible character the ADR names. §3.2 must be re-read against the code before the rule is stated as measured."
+  },
+  "L14": {
+   "verdict": "FAIL",
+   "plane": "tool",
+   "message_id": 96319,
+   "sent_at": "2026-11-14T20:42:29Z",
+   "probe": "the same file under two spellings in one reply: `.../fixtures/local-photo-512.png` and `.../fixtures/../fixtures/local-photo-512.png`",
+   "stored_form": "TWO separate MessageMediaPhoto bubbles (96319 and 96320), both carrying photo id 5456183027160524023",
+   "raw_tl": "messages.GetHistory ids 96319/96320 → two Message messages, each media: MessageMediaPhoto, same photo id",
+   "note": "sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. §3.5's one-reply-one-delivery is broken on the tool plane: one file, two bubbles. Telegram itself deduplicated the UPLOAD (both bubbles reference one photo id), so the duplicate is the sender's, not the wire's. The dedup filter that consumes an already-delivered file is not applied to two spellings of the same path in one reply."
+  },
+  "L15": {
+   "verdict": "PASS",
+   "plane": "tool",
+   "message_id": 96322,
+   "sent_at": "2026-11-14T20:42:36Z",
+   "probe": "a reply carrying a corrupt PNG (Telegram refuses it) beside a healthy PNG",
+   "stored_form": "the healthy photo landed as MessageMediaPhoto 96322 (312 B); the corrupt one is absent; the reply was not degraded to the HTML dialect",
+   "raw_tl": "messages.GetHistory id=96322 → media: MessageMediaPhoto id=5460666680959770736",
+   "log_excerpt": [
+    "20:42:32.723312 ERROR tool/send: failed to send image .../corrupt-photo.png as photo: Bad Request: IMAGE_PROCESS_FAILED"
+   ],
+   "note": "sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. §3.4's #826 AC-3 shape holds on the tool plane: the refusal cost one entry, not the plane. This is the tool-plane twin of the rich-plane leg, not a substitute for it."
+  },
+  "L16": {
+   "verdict": "FAIL",
+   "plane": "tool",
+   "message_id": 96323,
+   "sent_at": "2026-11-14T20:42:39Z",
+   "probe": "a structurally valid 12.01 MiB PNG, past the 10 MiB sendPhoto ceiling",
+   "stored_form": "NOTHING delivered: 96323 is the header text alone, media: null",
+   "raw_tl": "messages.GetHistory id=96323 → media: null, rich_message: null",
+   "log_excerpt": [
+    "20:42:47.298711 ERROR tool/send: failed to send image /tmp/oc-probes/oversize-photo.png as document: Retry after 19s"
+   ],
+   "note": "sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. Two halves, and only the first is a pass: the floor CHOSE the right kind (`as document`, so §2 rule 1's size split is honoured), then Telegram answered `Retry after 19s` and the tool dropped the file without retrying. #815 closed this hole for the turn path; it is still open on the tool path. A rate-limited attachment is silently lost, and the body has already gone out so nothing can announce it."
   }
  },
  "binary": "opencrabs 0.5.4 @ bf74d9e93317124c5a33978951488d17dac45e51",

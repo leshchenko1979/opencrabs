@@ -2,10 +2,10 @@
 
 **ADR:** `docs/adr/0001-telegram-local-file-and-image-delivery.md` (revision 6)
 **Binary under test:** opencrabs 0.5.4 @ bf74d9e93317124c5a33978951488d17dac45e51
-**Evidence recorded at:** 2026-11-13T18:27:52Z
+**Evidence recorded at:** 2026-11-14T20:48:00Z
 **Since then:** docs-only, measured: `git diff --name-only bf74d9e93..25e83b5c4 -- src/` is EMPTY, and the three paths that changed are docs/adr/probes/{COMPLIANCE.md,live-evidence.json,manifest.json}. The box runs opencrabs 0.5.4 @ 25e83b5c4, whose compiled code is identical to the binary these observations were taken on, so the verdicts are not stale in the sense the caveat warns about.
 **Runner:** `python3 docs/adr/probes/run.py` — **exit 1**
-**31/41 passed · 10 failed · 6 missing (missing counts as failed)**
+**33/41 passed · 8 failed · 0 missing (missing counts as failed)**
 
 > **GENERATED FILE — do not hand-edit.** Written by `python3 docs/adr/probes/run.py --report`
 > from `manifest.json` + `live-evidence.json` in the same run that printed these counts, so a
@@ -50,13 +50,13 @@
 | §2 rule 5 | `live-l7-tool-plane-local-image-detached-floor` | live | PASS |
 | §2 rule 6 | `live-l8-local-image-link-syntax-attaches` | live | FAIL |
 | §3.2 | `live-l9-mixed-kinds-one-message` | live | FAIL |
-| §2 rule 6, #827 | `live-l10-document-embed-demoted-to-link` | live | MISSING |
+| §2 rule 6, #827 | `live-l10-document-embed-demoted-to-link` | live | FAIL |
 | §2 rule 2 | `live-l11-video-embed-is-a-video` | live | FAIL |
-| §3.2 caption | `live-l12-caption-rides-the-title` | live | MISSING |
-| §3.2 caption | `live-l13-inexpressible-caption-dropped` | live | MISSING |
-| §3.5, #826 | `live-l14-dedup-two-spellings-one-file` | live | MISSING |
-| §3.4, #826 | `live-l15-refused-entry-costs-one-entry` | live | MISSING |
-| §2 rule 1 floor | `live-l16-oversize-image-ships-as-document` | live | MISSING |
+| §3.2 caption | `live-l12-caption-rides-the-title` | live | PASS |
+| §3.2 caption | `live-l13-inexpressible-caption-dropped` | live | FAIL |
+| §3.5, #826 | `live-l14-dedup-two-spellings-one-file` | live | FAIL |
+| §3.4, #826 | `live-l15-refused-entry-costs-one-entry` | live | PASS |
+| §2 rule 1 floor | `live-l16-oversize-image-ships-as-document` | live | FAIL |
 
 ## Live probes — the wire as Telegram stored it
 
@@ -148,10 +148,13 @@
 - **log:** `absence sweep same instant for 'send failed|falling back|degrad|IMAGE_PROCESS_FAILED|failed to read promoted' -> EMPTY (count 0)`
 - **Analysis:** §3.2's namespace split is NOT demonstrated: one bubble yes, three entries no. The photo entry bound and the other two did not, and nothing was refused or retried — so the entries were either never sent or dropped in transit without an error. The absence sweep is the load-bearing half: no rejection, no fallback, no sacrifice path ran. This is the leg that motivated L1/L5 being read through a blind instrument.
 
-### `live-l10-document-embed-demoted-to-link` — §2 rule 6, #827 → **MISSING**
+### `live-l10-document-embed-demoted-to-link` — §2 rule 6, #827 → **FAIL**
 
 - **Claim under test:** a document authored in EMBED syntax is demoted to link syntax at send time (`shield_unresolvable_markdown_images`), so it lands tappable instead of drawing nothing — the #827 failure mode cannot be re-authored from a reply
-- **No observation recorded** — runner verdict: no observation recorded for L10
+- **tg_get_messages** (msg `96313`, chat `None`): `🔍 PROBE L10 — ...\n\n!doc-sample.md` — the link target is gone, the label survives with its leading `!`, and NOTHING was attached (media: null)
+- **Bubbles observed:** None · **sent at:** 2026-11-14T20:42:12Z
+- **Probe:** a local document referenced in EMBED syntax: `![doc-sample.md](/root/.../fixtures/doc-sample.md)`
+- **Analysis:** sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. A local non-image file is neither attached nor linked: the reference degrades to a bare `!name` in the body. §2 rule 3 (any other file → document) is not met on this plane.
 
 ### `live-l11-video-embed-is-a-video` — §2 rule 2 → **FAIL**
 
@@ -162,30 +165,47 @@
 - **log:** `19:53:50.732547 kind=rich_api path=sendRichMessage msg=96248 — accepted, no error`
 - **Analysis:** §2 rule 2 is not met on this message. The emit is EMBED for video (r6-photo-and-video-emit-embed passes statically), so this is not the link-form artefact L8 records — an embed-syntax video entry still failed to bind beside a photo that did. Two readings remain open and this probe does not separate them: (a) a video entry is dropped when it shares a message with a photo, or (b) the 64-byte fixture was refused. §4.1 measured a 46 848-byte mp4 delivering PageBlockVideo, so (b) is live and must be excluded by re-probing with a full-size mp4 before any code change is attributed.
 
-### `live-l12-caption-rides-the-title` — §3.2 caption → **MISSING**
+### `live-l12-caption-rides-the-title` — §3.2 caption → **PASS**
 
 - **Claim under test:** an expressible caption rides the reference's markdown title and arrives as the media caption, which is the only caption channel the rich plane offers
-- **No observation recorded** — runner verdict: no observation recorded for L12
+- **tg_get_messages** (msg `96315`, chat `None`): a MessageMediaPhoto (312 B, image/jpeg) whose caption is `L12 caption rides the title` — the title arrived as the caption, verbatim
+- **Bubbles observed:** None · **sent at:** 2026-11-14T20:42:21Z
+- **Probe:** `![cap](caption-ok.png "L12 caption rides the title")`
+- **Analysis:** sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. The caption leg passes on the tool plane. It says nothing yet about §3.2's rich-plane title handling.
 
-### `live-l13-inexpressible-caption-dropped` — §3.2 caption → **MISSING**
+### `live-l13-inexpressible-caption-dropped` — §3.2 caption → **FAIL**
 
 - **Claim under test:** a caption containing `)` is DROPPED rather than emitted malformed: the image still arrives, merely unnamed, and the reference is not mangled
-- **No observation recorded** — runner verdict: no observation recorded for L13
+- **tg_get_messages** (msg `96317`, chat `None`): a MessageMediaPhoto (310 B) whose caption is `L13 bad ) paren` — NOT dropped
+- **Bubbles observed:** None · **sent at:** 2026-11-14T20:42:25Z
+- **Probe:** `![bad](caption-bad.png "L13 bad ) paren")` — a title containing `)`, which §3.2's caption gate is supposed to drop
+- **Analysis:** sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. The claim behind probe `live-l13-inexpressible-caption-dropped` is contradicted here: a quoted markdown title carrying `)` is legal and arrived intact. Either the gate does not fire, or `)` was never the inexpressible character the ADR names. §3.2 must be re-read against the code before the rule is stated as measured.
 
-### `live-l14-dedup-two-spellings-one-file` — §3.5, #826 → **MISSING**
+### `live-l14-dedup-two-spellings-one-file` — §3.5, #826 → **FAIL**
 
 - **Claim under test:** one file referenced twice in one reply under two spellings (`~/…` and `/root/…`) is delivered ONCE: dedup compares the resolved absolute path
-- **No observation recorded** — runner verdict: no observation recorded for L14
+- **tg_get_messages** (msg `96319`, chat `None`): TWO separate MessageMediaPhoto bubbles (96319 and 96320), both carrying photo id 5456183027160524023
+- **Bubbles observed:** None · **sent at:** 2026-11-14T20:42:29Z
+- **Probe:** the same file under two spellings in one reply: `.../fixtures/local-photo-512.png` and `.../fixtures/../fixtures/local-photo-512.png`
+- **Analysis:** sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. §3.5's one-reply-one-delivery is broken on the tool plane: one file, two bubbles. Telegram itself deduplicated the UPLOAD (both bubbles reference one photo id), so the duplicate is the sender's, not the wire's. The dedup filter that consumes an already-delivered file is not applied to two spellings of the same path in one reply.
 
-### `live-l15-refused-entry-costs-one-entry` — §3.4, #826 → **MISSING**
+### `live-l15-refused-entry-costs-one-entry` — §3.4, #826 → **PASS**
 
 - **Claim under test:** a reply whose media plane contains a file Telegram refuses (`IMAGE_PROCESS_FAILED`) still lands as ONE bubble carrying the healthy entries, instead of downgrading the whole reply to the HTML dialect
-- **No observation recorded** — runner verdict: no observation recorded for L15
+- **tg_get_messages** (msg `96322`, chat `None`): the healthy photo landed as MessageMediaPhoto 96322 (312 B); the corrupt one is absent; the reply was not degraded to the HTML dialect
+- **Bubbles observed:** None · **sent at:** 2026-11-14T20:42:36Z
+- **Probe:** a reply carrying a corrupt PNG (Telegram refuses it) beside a healthy PNG
+- **log:** `20:42:32.723312 ERROR tool/send: failed to send image .../corrupt-photo.png as photo: Bad Request: IMAGE_PROCESS_FAILED`
+- **Analysis:** sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. §3.4's #826 AC-3 shape holds on the tool plane: the refusal cost one entry, not the plane. This is the tool-plane twin of the rich-plane leg, not a substitute for it.
 
-### `live-l16-oversize-image-ships-as-document` — §2 rule 1 floor → **MISSING**
+### `live-l16-oversize-image-ships-as-document` — §2 rule 1 floor → **FAIL**
 
 - **Claim under test:** a structurally valid 12.01 MiB image is above the `sendPhoto` ceiling, so the floor ships it as a document: it arrives as a file rather than being refused
-- **No observation recorded** — runner verdict: no observation recorded for L16
+- **tg_get_messages** (msg `96323`, chat `None`): NOTHING delivered: 96323 is the header text alone, media: null
+- **Bubbles observed:** None · **sent at:** 2026-11-14T20:42:39Z
+- **Probe:** a structurally valid 12.01 MiB PNG, past the 10 MiB sendPhoto ceiling
+- **log:** `20:42:47.298711 ERROR tool/send: failed to send image /tmp/oc-probes/oversize-photo.png as document: Retry after 19s`
+- **Analysis:** sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. Two halves, and only the first is a pass: the floor CHOSE the right kind (`as document`, so §2 rule 1's size split is honoured), then Telegram answered `Retry after 19s` and the tool dropped the file without retrying. #815 closed this hole for the turn path; it is still open on the tool path. A rate-limited attachment is silently lost, and the body has already gone out so nothing can announce it.
 
 ## Section 11 — the tree compiles and its tests pass
 
