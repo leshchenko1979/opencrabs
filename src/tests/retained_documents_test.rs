@@ -196,7 +196,7 @@ fn render_header_and_body_are_present_for_a_small_document() {
     let sid = Uuid::new_v4();
     let dir = tmp_dir("render_small");
     let path = write_document(sid, &dir, "law.md", "# law\nobey the law\n");
-    register(sid, &[path.clone()]);
+    register(sid, std::slice::from_ref(&path));
 
     let block = render(sid, 100_000).expect("a document that fits is rendered");
 
