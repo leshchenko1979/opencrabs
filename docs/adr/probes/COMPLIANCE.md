@@ -5,7 +5,7 @@
 **Evidence recorded at:** 2026-11-13T18:27:52Z
 **Since then:** docs-only, measured: `git diff --name-only bf74d9e93..25e83b5c4 -- src/` is EMPTY, and the three paths that changed are docs/adr/probes/{COMPLIANCE.md,live-evidence.json,manifest.json}. The box runs opencrabs 0.5.4 @ 25e83b5c4, whose compiled code is identical to the binary these observations were taken on, so the verdicts are not stale in the sense the caveat warns about.
 **Runner:** `python3 docs/adr/probes/run.py` — **exit 1**
-**31/41 passed · 10 failed · 9 missing (missing counts as failed)**
+**31/41 passed · 10 failed · 6 missing (missing counts as failed)**
 
 > **GENERATED FILE — do not hand-edit.** Written by `python3 docs/adr/probes/run.py --report`
 > from `manifest.json` + `live-evidence.json` in the same run that printed these counts, so a
@@ -48,10 +48,10 @@
 | §2 rule 1 | `live-l6-local-image-embed-is-a-photo` | live | PASS |
 | §11 | `ci-gate` | ci | PASS |
 | §2 rule 5 | `live-l7-tool-plane-local-image-detached-floor` | live | PASS |
-| §2 rule 6 | `live-l8-local-image-link-syntax-attaches` | live | MISSING |
-| §3.2 | `live-l9-mixed-kinds-one-message` | live | MISSING |
+| §2 rule 6 | `live-l8-local-image-link-syntax-attaches` | live | FAIL |
+| §3.2 | `live-l9-mixed-kinds-one-message` | live | FAIL |
 | §2 rule 6, #827 | `live-l10-document-embed-demoted-to-link` | live | MISSING |
-| §2 rule 2 | `live-l11-video-embed-is-a-video` | live | MISSING |
+| §2 rule 2 | `live-l11-video-embed-is-a-video` | live | FAIL |
 | §3.2 caption | `live-l12-caption-rides-the-title` | live | MISSING |
 | §3.2 caption | `live-l13-inexpressible-caption-dropped` | live | MISSING |
 | §3.5, #826 | `live-l14-dedup-two-spellings-one-file` | live | MISSING |
@@ -129,25 +129,38 @@
 - **log:** `18:27:52.725532 Telegram send ok: origin=tool detail=send kind=outbox path=image_photo chat=-1003936827469 thread=Some(31847) msg=96143 len=5180 hash8=697081ce`
 - **Analysis:** §2 rule 5: with no rich path, every kind ships as its own detached bubble. The tool plane IS that case by construction — send.rs never reads rich_messages, so no rich path exists there — and it is measured: the bytes ship as a detached photo bubble beside an html text chunk, with len=5180 (the fixture's exact byte count) proving which file rode. This is the floor, not the rich plane; it is recorded here so rule 5 has a LIVE receipt, and so L6 cannot be read as measuring it.
 
-### `live-l8-local-image-link-syntax-attaches` — §2 rule 6 → **MISSING**
+### `live-l8-local-image-link-syntax-attaches` — §2 rule 6 → **FAIL**
 
 - **Claim under test:** a LOCAL image referenced in LINK syntax `[label](path)` is still claimed by the image family and arrives as a photo entry — the two markdown forms are equivalent for local targets, which is the property that makes link syntax safe to author
-- **No observation recorded** — runner verdict: no observation recorded for L8
+- **tg_get_messages** (msg `96084`, chat `-1003936827469`): [827-smoke.md](tg://document?id=doc0) — a bare TextUrl paragraph; photos [], documents [], media null
+- **Bubbles observed:** None · **sent at:** 2026-11-13T10:19:48Z
+- **Probe:** a local document referenced in LINK syntax, nothing else in the reply
+- **log:** `10:19:49.150 Telegram send ok: kind=rich_api path=sendRichMessage chat=-1003936827469 msg=96084 len=... (accepted, no error)`
+- **Analysis:** §2 rule 6 asks which form the WIRE reads. On this message: link syntax produced NO entry at all. It is the same message L1 cites, read the same way — the difference is that L1 was scored on the body's shape and this leg on whether anything is behind it. The suite's own §4.1 table (2026-10-29) says the same: every `link` row delivered no attachment, every `embed` row delivered.
 
-### `live-l9-mixed-kinds-one-message` — §3.2 → **MISSING**
+### `live-l9-mixed-kinds-one-message` — §3.2 → **FAIL**
 
 - **Claim under test:** one reply carrying an image, a video and a document produces THREE distinct entries in ONE rich message, with the `img`/`vid`/`doc` namespaces keeping each reference answered by its own kind
-- **No observation recorded** — runner verdict: no observation recorded for L9
+- **tg_get_messages** (msg `96248`, chat `-1003936827469`): ONE rich bubble. Photo attached (PageBlockPhoto, photo 5456183027160524023, 512x512). Video and document did NOT attach: both survive only as TextUrl paragraphs, documents: []
+- **Bubbles observed:** 1 · **sent at:** 2026-11-14T19:53:50Z
+- **Probe:** one reply carrying three kinds at once: local image + local video + local document (§3.2 namespace split)
+- **log:** `19:53:50.732547 kind=rich_api path=sendRichMessage chat=-1003936827469 thread=Some(31847) msg=96248 len=966 hash8=ef3fd4ef`
+- **log:** `absence sweep same instant for 'send failed|falling back|degrad|IMAGE_PROCESS_FAILED|failed to read promoted' -> EMPTY (count 0)`
+- **Analysis:** §3.2's namespace split is NOT demonstrated: one bubble yes, three entries no. The photo entry bound and the other two did not, and nothing was refused or retried — so the entries were either never sent or dropped in transit without an error. The absence sweep is the load-bearing half: no rejection, no fallback, no sacrifice path ran. This is the leg that motivated L1/L5 being read through a blind instrument.
 
 ### `live-l10-document-embed-demoted-to-link` — §2 rule 6, #827 → **MISSING**
 
 - **Claim under test:** a document authored in EMBED syntax is demoted to link syntax at send time (`shield_unresolvable_markdown_images`), so it lands tappable instead of drawing nothing — the #827 failure mode cannot be re-authored from a reply
 - **No observation recorded** — runner verdict: no observation recorded for L10
 
-### `live-l11-video-embed-is-a-video` — §2 rule 2 → **MISSING**
+### `live-l11-video-embed-is-a-video` — §2 rule 2 → **FAIL**
 
 - **Claim under test:** a local MP4 in embed syntax arrives as a `video` media entry (playable), not as a document and not as a dead reference
-- **No observation recorded** — runner verdict: no observation recorded for L11
+- **tg_get_messages** (msg `96248`, chat `-1003936827469`): no video in the stored message: documents [], and the video reference survives only as TextUrl "tg://video?id=vid0"
+- **Bubbles observed:** None · **sent at:** 2026-11-14T19:53:50Z
+- **Probe:** a local video referenced in embed syntax, in a reply that also carries a photo and a document
+- **log:** `19:53:50.732547 kind=rich_api path=sendRichMessage msg=96248 — accepted, no error`
+- **Analysis:** §2 rule 2 is not met on this message. The emit is EMBED for video (r6-photo-and-video-emit-embed passes statically), so this is not the link-form artefact L8 records — an embed-syntax video entry still failed to bind beside a photo that did. Two readings remain open and this probe does not separate them: (a) a video entry is dropped when it shares a message with a photo, or (b) the 64-byte fixture was refused. §4.1 measured a 46 848-byte mp4 delivering PageBlockVideo, so (b) is live and must be excluded by re-probing with a full-size mp4 before any code change is attributed.
 
 ### `live-l12-caption-rides-the-title` — §3.2 caption → **MISSING**
 
