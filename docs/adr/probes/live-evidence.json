@@ -1,106 +1,114 @@
 {
-  "recorded_at": "2026-11-13T18:27:52Z",
-  "chat_id": "-1003936827469",
-  "topic": "Telegram: Rich Text (31847)",
-  "method": "Each observation is a message sent through the daemon's real delivery path and read back with tg_get_messages, paired with the daemon log line for the same instant. The stored form is quoted verbatim from the API response, not reconstructed.",
-  "observations": {
-    "L1": {
-      "verdict": "PASS",
-      "message_id": 96084,
-      "chat_id": "-1003936827469",
-      "sent_at": "2026-11-13T10:19:48Z",
-      "probe": "one local .md referenced in link syntax, nothing else",
-      "stored_form": "[827-smoke.md](tg://document?id=doc0)",
-      "bubbles": 1,
-      "log_excerpt": [
-        "10:19:49.150 Telegram send ok: kind=rich_api path=sendRichMessage chat=-1003936827469",
-        "10:19:50.235 delivery.rs:491 Telegram dedup: match found among 1 intermediates (normalized) — suppressing final response"
-      ],
-      "note": "§2 rule 3 + rule 6: the document plane emits LINK syntax and the reply lands as ONE bubble. The owner opened a link-form document bubble by tapping it (2026-11-12 12:01); the embed-form twin (18:33) was not tappable. That client-side half is the owner's observation, not mine."
-    },
-    "L2": {
-      "verdict": "PASS",
-      "message_id": 96031,
-      "chat_id": "-1003936827469",
-      "sent_at": "2026-11-12T15:04:46Z",
-      "probe": "a remote URL written as [label](https://...)",
-      "stored_form": "[#823](https://github.com/leshchenko1979/opencrabs/issues/823)",
-      "trailer_present": false,
-      "log_excerpt": [
-        "no 'not a supported image format' line after the 15:03 swap; the only two hits that day quote PRE-fix messages inside reply-context lines"
-      ],
-      "note": "#825 holds: link syntax is never a fetch candidate. Before the fix the same shape produced a ⚠️ 'not a supported image format' trailer."
-    },
-    "L3": {
-      "verdict": "PASS",
-      "message_id": 96054,
-      "chat_id": "-1003936827469",
-      "sent_at": "2026-11-12T18:33:02Z",
-      "probe": "an unbracketed absolute path in prose",
-      "stored_form": "/tmp/oc-probes/probe-bare.txt",
-      "bubbles": 1,
-      "log_excerpt": [
-        "18:33:02.702 Telegram send ok: kind=rich_api (the same body that carried six document refs)"
-      ],
-      "note": "§3.1: no walk claims an unbracketed path — the text stayed inert, no marker, no attachment."
-    },
-    "L4": {
-      "verdict": "PASS",
-      "message_id": 96055,
-      "chat_id": "-1003936827469",
-      "sent_at": "2026-11-12T18:33:03Z",
-      "probe": "a REMOTE image referenced in embed syntax",
-      "stored_form": "photo, 7462 bytes, image/jpeg",
-      "bubbles": 1,
-      "log_excerpt": [
-        "18:33:03.338 Telegram send ok: kind=delivery_media path=image_photo"
-      ],
-      "note": "§2 rule 1 for the remote case: fetched and attached as a photo in its own bubble."
-    },
-    "L5": {
-      "verdict": "PASS",
-      "message_id": 96139,
-      "chat_id": "-1003936827469",
-      "sent_at": "2026-11-13T18:25:06Z",
-      "probe": "one reply carrying SIX local document references, embed syntax (§3.5 / #826)",
-      "stored_form": "ONE rich bubble (rich=true), six document references in the body, no second bubble after it",
-      "bubbles": 1,
-      "log_excerpt": [
-        "18:25:06.875167 Telegram send ok: origin=tool detail=send kind=rich_api path=sendRichMessage chat=-1003936827469 thread=Some(31847) msg=96139 len=691 hash8=85a30967",
-        "absence sweep 18:25:00-18:26:30 chat 3936827469 for 'send failed|html_or_plain|degrad|fallback' -> EMPTY",
-        "positive control, same sweep, old binary 2026-11-12T18:33:01-03: 'Telegram send failed: kind=rich_api path=sendRichMessage' -> 'rich markdown+media send failed (400 Bad Request: IMAGE_PROCESS_FAILED); falling back' -> 'kind=html_or_plain path=html msg=96056' (CAUGHT)"
-      ],
-      "note": "§3.5 re-probed on the swapped binary bf74d9e93. The old observation (msg 96056) was a degraded HTML copy landing beside the retried rich reply; that bubble is absent now, and the sweep that would have caught it is proven live by the positive control above."
-    },
-    "L6": {
-      "verdict": "PASS",
-      "message_id": 96148,
-      "chat_id": "-1003936827469",
-      "sent_at": "2026-11-13T18:55:29Z",
-      "probe": "a LOCAL 5180-byte 512x512 PNG referenced in embed syntax, delivered on the TURN plane (the rich path) — §2 rule 1 local case",
-      "stored_form": "ONE rich message (rich=true) whose media array carries the photo: rich_kind=photo, rich_media_id=5456183027160524023, image/jpeg, 22568 bytes; the body carries the inline reference [media: photo 5456183027160524023] and the caption as the markdown title",
-      "bubbles": 1,
-      "log_excerpt": [
-        "18:55:2x Telegram rich verdict: true (rich_messages=true, structured=false, media_forced=true, table=false, len=742)  [rich/detect.rs:112]",
-        "18:55:29 Telegram send ok: origin=turn detail=- session=- kind=rich_api path=sendRichMessage chat=-1003936827469 thread=Some(31847) msg=96148 len=742 hash8=28cbe125"
-      ],
-      "note": "§2 rule 1 local case, measured on the plane the rule NAMES. Rule 1 requires the image bytes to ride the rich message's media array; msg 96148 is exactly that — a rich=true message whose media array carries rich_media_id 5456183027160524023 as a photo, with the reference inline in the body. CORRECTION, recorded rather than quietly overwritten: this probe was first filed citing msg 96143, which is the TOOL plane's detached upload (telegram_send → send.rs, which never consults rich_messages). That observation measures rule 5's floor and is now recorded separately as L7. The 2026-11-12 withdrawal of this probe was for a truncated FIXTURE, not a binary defect; the fixture is structurally validated (fixture-l6 PASS: 512x512, CRCs OK, ends on IEND, IDAT inflates to 1049088 = expected)."
-    },
-    "L7": {
-      "verdict": "PASS",
-      "message_id": 96143,
-      "chat_id": "-1003936827469",
-      "sent_at": "2026-11-13T18:27:52Z",
-      "probe": "a LOCAL 5180-byte 512x512 PNG sent through the TOOL plane (telegram_send), which has no rich path at all — §2 rule 5 detached floor",
-      "stored_form": "TWO bubbles: a text chunk (msg 96142, html, len 218) and a detached photo bubble (msg 96143, media.type=photo, image/jpeg, 22568 bytes)",
-      "bubbles": 2,
-      "log_excerpt": [
-        "18:27:52.216350 Telegram send ok: origin=tool detail=send kind=html_or_plain path=html chat=-1003936827469 thread=Some(31847) msg=96142 len=218 hash8=4f7c5689",
-        "18:27:52.725532 Telegram send ok: origin=tool detail=send kind=outbox path=image_photo chat=-1003936827469 thread=Some(31847) msg=96143 len=5180 hash8=697081ce"
-      ],
-      "note": "§2 rule 5: with no rich path, every kind ships as its own detached bubble. The tool plane IS that case by construction — send.rs never reads rich_messages, so no rich path exists there — and it is measured: the bytes ship as a detached photo bubble beside an html text chunk, with len=5180 (the fixture's exact byte count) proving which file rode. This is the floor, not the rich plane; it is recorded here so rule 5 has a LIVE receipt, and so L6 cannot be read as measuring it."
-    }
+ "recorded_at": "2026-11-13T18:27:52Z",
+ "chat_id": "-1003936827469",
+ "topic": "Telegram: Rich Text (31847)",
+ "method": "Each observation is a message sent through the daemon's real delivery path and read back with tg_get_messages, paired with the daemon log line for the same instant. The stored form is quoted verbatim from the API response, not reconstructed.",
+ "observations": {
+  "L1": {
+   "verdict": "FAIL",
+   "message_id": 96084,
+   "chat_id": "-1003936827469",
+   "sent_at": "2026-11-13T10:19:48Z",
+   "probe": "one local .md referenced in link syntax, nothing else",
+   "stored_form": "[827-smoke.md](tg://document?id=doc0)  — LINK syntax in the body, and NOTHING behind it",
+   "bubbles": 1,
+   "log_excerpt": [
+    "10:19:49.150 Telegram send ok: kind=rich_api path=sendRichMessage chat=-1003936827469",
+    "10:19:50.235 delivery.rs:491 Telegram dedup: match found among 1 intermediates (normalized) — suppressing final response",
+    "raw-TL read 2026-11-14: documents: [] , photos: [] , media: null  (tg_get_messages had reported the same message as carrying a document reference)"
+   ],
+   "note": "CORRECTED 2026-11-14 against raw MTProto (messages.GetHistory, peer -1003936827469). The FORM half of the probe holds: the document plane emits LINK syntax and the reply is one bubble. The ATTACHMENT half fails: the stored message carries documents: [] and photos: [], so the tg://document?id=doc0 reference answers to no entry. The earlier PASS was read through tg_get_messages, which materialises photos only and reports documents: [] for EVERY message — a blind instrument cannot falsify an attachment claim. §2 rule 3 requires the file to inline as a document media entry in the same message; this message has no entry, so rule 3 is not met. The client-tap observation that motivated #827 (2026-11-12 12:01) therefore did not observe an attached document on THIS message, and cannot be used to justify the link form on its own.",
+   "attachment": "NONE",
+   "documents_array": [],
+   "photos_array": [],
+   "raw_tl": "messages.GetHistory id=96084 → rich_message{photos: [], documents: [], blocks: [PageBlockParagraph(TextUrl url=\"tg://document?id=doc0\", text=\"827-smoke.md\")]}, media: null"
   },
-  "binary": "opencrabs 0.5.4 @ bf74d9e93317124c5a33978951488d17dac45e51",
-  "binary_delta": "docs-only, measured: `git diff --name-only bf74d9e93..25e83b5c4 -- src/` is EMPTY, and the three paths that changed are docs/adr/probes/{COMPLIANCE.md,live-evidence.json,manifest.json}. The box runs opencrabs 0.5.4 @ 25e83b5c4, whose compiled code is identical to the binary these observations were taken on, so the verdicts are not stale in the sense the caveat warns about."
+  "L2": {
+   "verdict": "PASS",
+   "message_id": 96031,
+   "chat_id": "-1003936827469",
+   "sent_at": "2026-11-12T15:04:46Z",
+   "probe": "a remote URL written as [label](https://...)",
+   "stored_form": "[#823](https://github.com/leshchenko1979/opencrabs/issues/823)",
+   "trailer_present": false,
+   "log_excerpt": [
+    "no 'not a supported image format' line after the 15:03 swap; the only two hits that day quote PRE-fix messages inside reply-context lines"
+   ],
+   "note": "#825 holds: link syntax is never a fetch candidate. Before the fix the same shape produced a ⚠️ 'not a supported image format' trailer."
+  },
+  "L3": {
+   "verdict": "PASS",
+   "message_id": 96054,
+   "chat_id": "-1003936827469",
+   "sent_at": "2026-11-12T18:33:02Z",
+   "probe": "an unbracketed absolute path in prose",
+   "stored_form": "/tmp/oc-probes/probe-bare.txt",
+   "bubbles": 1,
+   "log_excerpt": [
+    "18:33:02.702 Telegram send ok: kind=rich_api (the same body that carried six document refs)"
+   ],
+   "note": "§3.1: no walk claims an unbracketed path — the text stayed inert, no marker, no attachment."
+  },
+  "L4": {
+   "verdict": "PASS",
+   "message_id": 96055,
+   "chat_id": "-1003936827469",
+   "sent_at": "2026-11-12T18:33:03Z",
+   "probe": "a REMOTE image referenced in embed syntax",
+   "stored_form": "photo, 7462 bytes, image/jpeg",
+   "bubbles": 1,
+   "log_excerpt": [
+    "18:33:03.338 Telegram send ok: kind=delivery_media path=image_photo"
+   ],
+   "note": "§2 rule 1 for the remote case: fetched and attached as a photo in its own bubble."
+  },
+  "L5": {
+   "verdict": "PASS",
+   "message_id": 96139,
+   "chat_id": "-1003936827469",
+   "sent_at": "2026-11-13T18:25:06Z",
+   "probe": "one reply carrying SIX local document references, embed syntax (§3.5 / #826)",
+   "stored_form": "ONE rich bubble (rich=true), and — correction — ZERO tg:// references in it: six PageListOrderedItemText plain labels, documents: [], photos: []",
+   "bubbles": 1,
+   "log_excerpt": [
+    "18:25:06.875167 Telegram send ok: origin=tool detail=send kind=rich_api path=sendRichMessage chat=-1003936827469 thread=Some(31847) msg=96139 len=691 hash8=85a30967",
+    "absence sweep 18:25:00-18:26:30 chat 3936827469 for 'send failed|html_or_plain|degrad|fallback' -> EMPTY",
+    "positive control, same sweep, old binary 2026-11-12T18:33:01-03: 'Telegram send failed: kind=rich_api path=sendRichMessage' -> 'rich markdown+media send failed (400 Bad Request: IMAGE_PROCESS_FAILED); falling back' -> 'kind=html_or_plain path=html msg=96056' (CAUGHT)"
+   ],
+   "note": "§3.5 re-probed on the swapped binary bf74d9e93. The old observation (msg 96056) was a degraded HTML copy landing beside the retried rich reply; that bubble is absent now, and the sweep that would have caught it is proven live by the positive control above. CORRECTED 2026-11-14 (raw MTProto): this message proves §3.5 (one reply, one bubble) and proves NOTHING about documents — its body carries six plain labels and zero tg:// references, and documents: []. The six files had already been delivered earlier in the conversation, so the already-delivered filter consumed the references silently (ADR §5) and no entry was emitted. The earlier stored_form sentence, 'six document references in the body', was false and is replaced above.",
+   "refs_present": 0,
+   "documents_array": [],
+   "raw_tl": "messages.GetHistory id=96139 → rich_message{photos: [], documents: [], blocks: [..., PageBlockOrderedList(6× PageListOrderedItemText plain)]}"
+  },
+  "L6": {
+   "verdict": "PASS",
+   "message_id": 96148,
+   "chat_id": "-1003936827469",
+   "sent_at": "2026-11-13T18:55:29Z",
+   "probe": "a LOCAL 5180-byte 512x512 PNG referenced in embed syntax, delivered on the TURN plane (the rich path) — §2 rule 1 local case",
+   "stored_form": "ONE rich message (rich=true) whose media array carries the photo: rich_kind=photo, rich_media_id=5456183027160524023, image/jpeg, 22568 bytes; the body carries the inline reference [media: photo 5456183027160524023] and the caption as the markdown title",
+   "bubbles": 1,
+   "log_excerpt": [
+    "18:55:2x Telegram rich verdict: true (rich_messages=true, structured=false, media_forced=true, table=false, len=742)  [rich/detect.rs:112]",
+    "18:55:29 Telegram send ok: origin=turn detail=- session=- kind=rich_api path=sendRichMessage chat=-1003936827469 thread=Some(31847) msg=96148 len=742 hash8=28cbe125"
+   ],
+   "note": "§2 rule 1 local case, measured on the plane the rule NAMES. Rule 1 requires the image bytes to ride the rich message's media array; msg 96148 is exactly that — a rich=true message whose media array carries rich_media_id 5456183027160524023 as a photo, with the reference inline in the body. CORRECTION, recorded rather than quietly overwritten: this probe was first filed citing msg 96143, which is the TOOL plane's detached upload (telegram_send → send.rs, which never consults rich_messages). That observation measures rule 5's floor and is now recorded separately as L7. The 2026-11-12 withdrawal of this probe was for a truncated FIXTURE, not a binary defect; the fixture is structurally validated (fixture-l6 PASS: 512x512, CRCs OK, ends on IEND, IDAT inflates to 1049088 = expected)."
+  },
+  "L7": {
+   "verdict": "PASS",
+   "message_id": 96143,
+   "chat_id": "-1003936827469",
+   "sent_at": "2026-11-13T18:27:52Z",
+   "probe": "a LOCAL 5180-byte 512x512 PNG sent through the TOOL plane (telegram_send), which has no rich path at all — §2 rule 5 detached floor",
+   "stored_form": "TWO bubbles: a text chunk (msg 96142, html, len 218) and a detached photo bubble (msg 96143, media.type=photo, image/jpeg, 22568 bytes)",
+   "bubbles": 2,
+   "log_excerpt": [
+    "18:27:52.216350 Telegram send ok: origin=tool detail=send kind=html_or_plain path=html chat=-1003936827469 thread=Some(31847) msg=96142 len=218 hash8=4f7c5689",
+    "18:27:52.725532 Telegram send ok: origin=tool detail=send kind=outbox path=image_photo chat=-1003936827469 thread=Some(31847) msg=96143 len=5180 hash8=697081ce"
+   ],
+   "note": "§2 rule 5: with no rich path, every kind ships as its own detached bubble. The tool plane IS that case by construction — send.rs never reads rich_messages, so no rich path exists there — and it is measured: the bytes ship as a detached photo bubble beside an html text chunk, with len=5180 (the fixture's exact byte count) proving which file rode. This is the floor, not the rich plane; it is recorded here so rule 5 has a LIVE receipt, and so L6 cannot be read as measuring it."
+  }
+ },
+ "binary": "opencrabs 0.5.4 @ bf74d9e93317124c5a33978951488d17dac45e51",
+ "binary_delta": "docs-only, measured: `git diff --name-only bf74d9e93..25e83b5c4 -- src/` is EMPTY, and the three paths that changed are docs/adr/probes/{COMPLIANCE.md,live-evidence.json,manifest.json}. The box runs opencrabs 0.5.4 @ 25e83b5c4, whose compiled code is identical to the binary these observations were taken on, so the verdicts are not stale in the sense the caveat warns about."
 }

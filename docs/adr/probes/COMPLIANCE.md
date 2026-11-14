@@ -1,11 +1,11 @@
 # ADR 0001 compliance report
 
-**ADR:** `docs/adr/0001-telegram-local-file-and-image-delivery.md` (revision 5)
+**ADR:** `docs/adr/0001-telegram-local-file-and-image-delivery.md` (revision 6)
 **Binary under test:** opencrabs 0.5.4 @ bf74d9e93317124c5a33978951488d17dac45e51
 **Evidence recorded at:** 2026-11-13T18:27:52Z
 **Since then:** docs-only, measured: `git diff --name-only bf74d9e93..25e83b5c4 -- src/` is EMPTY, and the three paths that changed are docs/adr/probes/{COMPLIANCE.md,live-evidence.json,manifest.json}. The box runs opencrabs 0.5.4 @ 25e83b5c4, whose compiled code is identical to the binary these observations were taken on, so the verdicts are not stale in the sense the caveat warns about.
-**Runner:** `python3 docs/adr/probes/run.py` — **exit 0**
-**21/21 passed · 0 failed · 0 missing (missing counts as failed)**
+**Runner:** `python3 docs/adr/probes/run.py` — **exit 1**
+**31/41 passed · 10 failed · 9 missing (missing counts as failed)**
 
 > **GENERATED FILE — do not hand-edit.** Written by `python3 docs/adr/probes/run.py --report`
 > from `manifest.json` + `live-evidence.json` in the same run that printed these counts, so a
@@ -28,27 +28,48 @@
 | §3.3 | `s33-orphan-reference-neutralised` | static | PASS |
 | §3.4 | `s34-refused-entry-costs-one-entry` | static | PASS |
 | §3.5 | `s35-one-reply-one-delivery` | static | PASS |
-| §2 rules 3 and 6 | `live-l1-document-link-renders` | live | PASS |
+| §3.2 | `s21-mixed-kind-namespace` | static | PASS |
+| §3.2 caption | `s22-caption-gate` | static | PASS |
+| §3.5, #826 | `s23-dedup-canonical-path` | static | PASS |
+| §2 rule 1 floor | `s24-oversize-split-floor` | static | PASS |
+| §2 rule 2 floor | `s25-video-kind-floor` | static | PASS |
+| §6 | `s36-thread-id-conditional` | static | PASS |
+| §2 rules 3 and 6 | `live-l1-document-link-renders` | live | FAIL |
 | §2 rule 6, #825 | `live-l2-remote-link-not-fetched` | live | PASS |
 | §3.1 | `live-l3-bare-path-inert` | live | PASS |
 | §2 rule 1 | `live-l4-remote-image-embed-is-a-photo` | live | PASS |
 | §3.5, #826 | `live-l5-one-bubble-per-reply` | live | PASS |
 | §2 rule 1 (probe input) | `fixture-l6-local-photo-valid` | fixture | PASS |
+| §3.4 (probe input) | `fixture-corrupt-photo-refusable` | fixture-negative | PASS |
+| §2 rule 2 (probe input) | `fixture-video-64-valid` | fixture | PASS |
+| §2 rule 1 floor (probe input) | `fixture-oversize-photo-valid` | fixture | PASS |
+| §3.2 caption (probe input) | `fixture-caption-ok-valid` | fixture | PASS |
+| §3.2 caption (probe input) | `fixture-caption-bad-valid` | fixture | PASS |
 | §2 rule 1 | `live-l6-local-image-embed-is-a-photo` | live | PASS |
 | §11 | `ci-gate` | ci | PASS |
 | §2 rule 5 | `live-l7-tool-plane-local-image-detached-floor` | live | PASS |
+| §2 rule 6 | `live-l8-local-image-link-syntax-attaches` | live | MISSING |
+| §3.2 | `live-l9-mixed-kinds-one-message` | live | MISSING |
+| §2 rule 6, #827 | `live-l10-document-embed-demoted-to-link` | live | MISSING |
+| §2 rule 2 | `live-l11-video-embed-is-a-video` | live | MISSING |
+| §3.2 caption | `live-l12-caption-rides-the-title` | live | MISSING |
+| §3.2 caption | `live-l13-inexpressible-caption-dropped` | live | MISSING |
+| §3.5, #826 | `live-l14-dedup-two-spellings-one-file` | live | MISSING |
+| §3.4, #826 | `live-l15-refused-entry-costs-one-entry` | live | MISSING |
+| §2 rule 1 floor | `live-l16-oversize-image-ships-as-document` | live | MISSING |
 
 ## Live probes — the wire as Telegram stored it
 
-### `live-l1-document-link-renders` — §2 rules 3 and 6 → **PASS**
+### `live-l1-document-link-renders` — §2 rules 3 and 6 → **FAIL**
 
 - **Claim under test:** a local document sent through the daemon is stored as a link-form tg://document reference and lands as one bubble
-- **tg_get_messages** (msg `96084`, chat `-1003936827469`): [827-smoke.md](tg://document?id=doc0)
+- **tg_get_messages** (msg `96084`, chat `-1003936827469`): [827-smoke.md](tg://document?id=doc0)  — LINK syntax in the body, and NOTHING behind it
 - **Bubbles observed:** 1 · **sent at:** 2026-11-13T10:19:48Z
 - **Probe:** one local .md referenced in link syntax, nothing else
 - **log:** `10:19:49.150 Telegram send ok: kind=rich_api path=sendRichMessage chat=-1003936827469`
 - **log:** `10:19:50.235 delivery.rs:491 Telegram dedup: match found among 1 intermediates (normalized) — suppressing final response`
-- **Analysis:** §2 rule 3 + rule 6: the document plane emits LINK syntax and the reply lands as ONE bubble. The owner opened a link-form document bubble by tapping it (2026-11-12 12:01); the embed-form twin (18:33) was not tappable. That client-side half is the owner's observation, not mine.
+- **log:** `raw-TL read 2026-11-14: documents: [] , photos: [] , media: null  (tg_get_messages had reported the same message as carrying a document reference)`
+- **Analysis:** CORRECTED 2026-11-14 against raw MTProto (messages.GetHistory, peer -1003936827469). The FORM half of the probe holds: the document plane emits LINK syntax and the reply is one bubble. The ATTACHMENT half fails: the stored message carries documents: [] and photos: [], so the tg://document?id=doc0 reference answers to no entry. The earlier PASS was read through tg_get_messages, which materialises photos only and reports documents: [] for EVERY message — a blind instrument cannot falsify an attachment claim. §2 rule 3 requires the file to inline as a document media entry in the same message; this message has no entry, so rule 3 is not met. The client-tap observation that motivated #827 (2026-11-12 12:01) therefore did not observe an attached document on THIS message, and cannot be used to justify the link form on its own.
 
 ### `live-l2-remote-link-not-fetched` — §2 rule 6, #825 → **PASS**
 
@@ -80,13 +101,13 @@
 ### `live-l5-one-bubble-per-reply` — §3.5, #826 → **PASS**
 
 - **Claim under test:** a reply carrying documents lands as one bubble, with no degraded HTML copy beside it
-- **tg_get_messages** (msg `96139`, chat `-1003936827469`): ONE rich bubble (rich=true), six document references in the body, no second bubble after it
+- **tg_get_messages** (msg `96139`, chat `-1003936827469`): ONE rich bubble (rich=true), and — correction — ZERO tg:// references in it: six PageListOrderedItemText plain labels, documents: [], photos: []
 - **Bubbles observed:** 1 · **sent at:** 2026-11-13T18:25:06Z
 - **Probe:** one reply carrying SIX local document references, embed syntax (§3.5 / #826)
 - **log:** `18:25:06.875167 Telegram send ok: origin=tool detail=send kind=rich_api path=sendRichMessage chat=-1003936827469 thread=Some(31847) msg=96139 len=691 hash8=85a30967`
 - **log:** `absence sweep 18:25:00-18:26:30 chat 3936827469 for 'send failed|html_or_plain|degrad|fallback' -> EMPTY`
 - **log:** `positive control, same sweep, old binary 2026-11-12T18:33:01-03: 'Telegram send failed: kind=rich_api path=sendRichMessage' -> 'rich markdown+media send failed (400 Bad Request: IMAGE_PROCESS_FAILED); falling back' -> 'kind=html_or_plain path=html msg=96056' (CAUGHT)`
-- **Analysis:** §3.5 re-probed on the swapped binary bf74d9e93. The old observation (msg 96056) was a degraded HTML copy landing beside the retried rich reply; that bubble is absent now, and the sweep that would have caught it is proven live by the positive control above.
+- **Analysis:** §3.5 re-probed on the swapped binary bf74d9e93. The old observation (msg 96056) was a degraded HTML copy landing beside the retried rich reply; that bubble is absent now, and the sweep that would have caught it is proven live by the positive control above. CORRECTED 2026-11-14 (raw MTProto): this message proves §3.5 (one reply, one bubble) and proves NOTHING about documents — its body carries six plain labels and zero tg:// references, and documents: []. The six files had already been delivered earlier in the conversation, so the already-delivered filter consumed the references silently (ADR §5) and no entry was emitted. The earlier stored_form sentence, 'six document references in the body', was false and is replaced above.
 
 ### `live-l6-local-image-embed-is-a-photo` — §2 rule 1 → **PASS**
 
@@ -107,6 +128,51 @@
 - **log:** `18:27:52.216350 Telegram send ok: origin=tool detail=send kind=html_or_plain path=html chat=-1003936827469 thread=Some(31847) msg=96142 len=218 hash8=4f7c5689`
 - **log:** `18:27:52.725532 Telegram send ok: origin=tool detail=send kind=outbox path=image_photo chat=-1003936827469 thread=Some(31847) msg=96143 len=5180 hash8=697081ce`
 - **Analysis:** §2 rule 5: with no rich path, every kind ships as its own detached bubble. The tool plane IS that case by construction — send.rs never reads rich_messages, so no rich path exists there — and it is measured: the bytes ship as a detached photo bubble beside an html text chunk, with len=5180 (the fixture's exact byte count) proving which file rode. This is the floor, not the rich plane; it is recorded here so rule 5 has a LIVE receipt, and so L6 cannot be read as measuring it.
+
+### `live-l8-local-image-link-syntax-attaches` — §2 rule 6 → **MISSING**
+
+- **Claim under test:** a LOCAL image referenced in LINK syntax `[label](path)` is still claimed by the image family and arrives as a photo entry — the two markdown forms are equivalent for local targets, which is the property that makes link syntax safe to author
+- **No observation recorded** — runner verdict: no observation recorded for L8
+
+### `live-l9-mixed-kinds-one-message` — §3.2 → **MISSING**
+
+- **Claim under test:** one reply carrying an image, a video and a document produces THREE distinct entries in ONE rich message, with the `img`/`vid`/`doc` namespaces keeping each reference answered by its own kind
+- **No observation recorded** — runner verdict: no observation recorded for L9
+
+### `live-l10-document-embed-demoted-to-link` — §2 rule 6, #827 → **MISSING**
+
+- **Claim under test:** a document authored in EMBED syntax is demoted to link syntax at send time (`shield_unresolvable_markdown_images`), so it lands tappable instead of drawing nothing — the #827 failure mode cannot be re-authored from a reply
+- **No observation recorded** — runner verdict: no observation recorded for L10
+
+### `live-l11-video-embed-is-a-video` — §2 rule 2 → **MISSING**
+
+- **Claim under test:** a local MP4 in embed syntax arrives as a `video` media entry (playable), not as a document and not as a dead reference
+- **No observation recorded** — runner verdict: no observation recorded for L11
+
+### `live-l12-caption-rides-the-title` — §3.2 caption → **MISSING**
+
+- **Claim under test:** an expressible caption rides the reference's markdown title and arrives as the media caption, which is the only caption channel the rich plane offers
+- **No observation recorded** — runner verdict: no observation recorded for L12
+
+### `live-l13-inexpressible-caption-dropped` — §3.2 caption → **MISSING**
+
+- **Claim under test:** a caption containing `)` is DROPPED rather than emitted malformed: the image still arrives, merely unnamed, and the reference is not mangled
+- **No observation recorded** — runner verdict: no observation recorded for L13
+
+### `live-l14-dedup-two-spellings-one-file` — §3.5, #826 → **MISSING**
+
+- **Claim under test:** one file referenced twice in one reply under two spellings (`~/…` and `/root/…`) is delivered ONCE: dedup compares the resolved absolute path
+- **No observation recorded** — runner verdict: no observation recorded for L14
+
+### `live-l15-refused-entry-costs-one-entry` — §3.4, #826 → **MISSING**
+
+- **Claim under test:** a reply whose media plane contains a file Telegram refuses (`IMAGE_PROCESS_FAILED`) still lands as ONE bubble carrying the healthy entries, instead of downgrading the whole reply to the HTML dialect
+- **No observation recorded** — runner verdict: no observation recorded for L15
+
+### `live-l16-oversize-image-ships-as-document` — §2 rule 1 floor → **MISSING**
+
+- **Claim under test:** a structurally valid 12.01 MiB image is above the `sendPhoto` ceiling, so the floor ships it as a document: it arrives as a file rather than being refused
+- **No observation recorded** — runner verdict: no observation recorded for L16
 
 ## Section 11 — the tree compiles and its tests pass
 
