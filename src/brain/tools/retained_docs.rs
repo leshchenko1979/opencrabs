@@ -233,8 +233,10 @@ pub fn has_retained_set(session_id: Uuid) -> bool {
 /// [`MAX_DOC_BODY_BYTES`] is skipped whole; half a document is worse than a
 /// path to it.
 ///
-/// `None` when nothing was included, so a session with no registered documents
-/// gets a system brain byte-identical to before #831.
+/// `None` only when the session registered nothing at all, so a session that
+/// read no documents gets a system brain byte-identical to before #831. A
+/// session that DID register documents always gets a block — if none fitted the
+/// budget, the block names them instead of returning silence.
 pub fn render(session_id: Uuid, budget_tokens: usize) -> Option<String> {
     let (entries, refusals) = registered_registry()
         .lock()
@@ -281,6 +283,25 @@ pub fn render(session_id: Uuid, budget_tokens: usize) -> Option<String> {
     let mut out = String::new();
     if included > 0 {
         out.push_str(&section);
+    } else if !entries.is_empty() {
+        // Nothing fitted the leftover budget — the common shape for a session
+        // that carries a heavy skill, since documents share the skills' 5 %.
+        // Returning `None` here would be the same lie as dropping a refused
+        // path: the model asked for these, the harness did not deliver them,
+        // and silence is the one outcome it cannot notice.
+        out.push_str("\n\n## Documents NOT retained\n");
+        out.push_str(
+            "These paths were registered for retention and are NOT in your context — read \
+             them again if the pending work depends on them.\n",
+        );
+        for entry in &entries {
+            let why = match entry.status {
+                DocStatus::Ok => "no room left in the retained-set budget",
+                DocStatus::TooLarge => "file too large to retain",
+                DocStatus::Unreadable => "unreadable",
+            };
+            out.push_str(&format!("- {} ({why})\n", entry.path.display()));
+        }
     }
     // The manifest is model output, so a refused path is a claim the model made
     // and the harness did not honour. Saying so is what keeps a hallucinated

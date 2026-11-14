@@ -285,14 +285,26 @@ fn render_skips_a_body_over_the_cap() {
 }
 
 #[test]
-fn render_returns_none_when_the_budget_is_exhausted() {
+fn render_names_registered_documents_when_the_budget_is_exhausted() {
     let sid = Uuid::new_v4();
-    let dir = tmp_dir("render_none");
+    let dir = tmp_dir("render_exhausted");
     let path = write_document(sid, &dir, "law.md", "# law\nobey\n");
-    register(sid, &[path]);
+    register(sid, &[path.clone()]);
 
-    assert!(render(sid, 0).is_none(), "zero room injects nothing");
-    assert!(render(sid, 1).is_none(), "one token cannot hold a header");
+    // A registered document that does not fit must be NAMED, never silently
+    // dropped: the model asked for it, so silence reads as "it is in context".
+    let block = render(sid, 0).expect("a registered document always produces a block");
+    assert!(block.contains("## Documents NOT retained"));
+    assert!(block.contains(&path));
+    assert!(
+        !block.contains("## Retained documents"),
+        "nothing fitted, so no retained section may appear"
+    );
+    assert!(!block.contains("obey"), "the body must not leak in");
+
+    let tiny = render(sid, 1).expect("one token still names the path");
+    assert!(tiny.contains(&path));
+
     // …and nothing is registered ⇒ nothing to render, at any budget.
     assert!(render(Uuid::new_v4(), 1_000_000).is_none());
 
