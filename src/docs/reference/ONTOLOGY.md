@@ -50,6 +50,8 @@
 
 **Command** — a user-defined `/<name>` slash command in `commands.toml`, mapping to a prompt or system action. **Not:** "skill".
 
+**Retained document** — a `.md` file a session read WHOLE, outside the three classes that are not documents: a skill body (own class, above), a brain file (the prompt builder's job), and a file the session WROTE (a plan, a report, an evidence file). Tracked per session at the read site (`read_state::mark_document_read`, canonicalised, capped) and carried across compaction in three steps: listed as a `Document` row in the context inventory the summariser reads, named back by the summariser in the manifest's `retained_documents` section, and — only if the session really did read that path in this process — re-injected by absolute path as `## Retained documents` inside the same 5% retained-set budget the skills draw on. The point is project law that lives in a repo (`CLAUDE.md`, `AGENTS.md`, a project's own `docs/*.md`): it is read, obeyed, and would otherwise be forgotten at the next compaction, because the retention machinery knew only `skills/<slug>/`. **Not:** "skill" (a skill is registered by slug and re-injected whole; a document is registered by path and shares the leftover budget), "context manifest" (the manifest is the summariser's ANSWER — the section that names which skills and documents to carry — while a retained document is one of the things it names), "brain file" (brain files are rebuilt from disk by the prompt builder on every turn, so they never needed retaining).
+
 **Dynamic tool** — a runtime tool definition in `tools.toml` adding a callable tool without recompiling. Distinct from an extended tool, which is compiled into the binary and lazily surfaced via `tool_search`.
 
 ### Tools & the loop
