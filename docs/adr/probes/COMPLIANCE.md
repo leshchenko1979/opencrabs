@@ -5,7 +5,7 @@
 **Evidence recorded at:** 2026-11-14T20:48:00Z
 **Since then:** docs-only, measured: `git diff --name-only bf74d9e93..25e83b5c4 -- src/` is EMPTY, and the three paths that changed are docs/adr/probes/{COMPLIANCE.md,live-evidence.json,manifest.json}. The box runs opencrabs 0.5.4 @ 25e83b5c4, whose compiled code is identical to the binary these observations were taken on, so the verdicts are not stale in the sense the caveat warns about.
 **Runner:** `python3 docs/adr/probes/run.py` — **exit 1**
-**33/41 passed · 4 failed · 4 missing (missing counts as failed)**
+**36/41 passed · 4 failed · 1 missing (missing counts as failed)**
 
 > **GENERATED FILE — do not hand-edit.** Written by `python3 docs/adr/probes/run.py --report`
 > from `manifest.json` + `live-evidence.json` in the same run that printed these counts, so a
@@ -48,13 +48,13 @@
 | §2 rule 1 | `live-l6-local-image-embed-is-a-photo` | live | PASS |
 | §11 | `ci-gate` | ci | PASS |
 | §2 rule 5 | `live-l7-tool-plane-local-image-detached-floor` | live | PASS |
-| §2 rule 6 | `live-l8-local-image-link-syntax-attaches` | live | FAIL |
+| §2 rule 6 | `live-l8-local-image-link-syntax-attaches` | live | PASS |
 | §3.2 | `live-l9-mixed-kinds-one-message` | live | FAIL |
-| §2 rule 6, #827 | `live-l10-document-embed-demoted-to-link` | live | MISSING |
+| §2 rule 6, #827 | `live-l10-document-embed-demoted-to-link` | live | FAIL |
 | §2 rule 2 | `live-l11-video-embed-is-a-video` | live | FAIL |
 | §3.2 caption | `live-l12-caption-rides-the-title` | live | PASS |
-| §3.2 caption | `live-l13-inexpressible-caption-dropped` | live | MISSING |
-| §3.5, #826 | `live-l14-dedup-two-spellings-one-file` | live | MISSING |
+| §3.2 caption | `live-l13-inexpressible-caption-dropped` | live | PASS |
+| §3.5, #826 | `live-l14-dedup-two-spellings-one-file` | live | PASS |
 | §3.4, #826 | `live-l15-refused-entry-costs-one-entry` | live | PASS |
 | §2 rule 1 floor | `live-l16-oversize-image-ships-as-document` | live | MISSING |
 
@@ -129,14 +129,13 @@
 - **log:** `18:27:52.725532 Telegram send ok: origin=tool detail=send kind=outbox path=image_photo chat=-1003936827469 thread=Some(31847) msg=96143 len=5180 hash8=697081ce`
 - **Analysis:** §2 rule 5: with no rich path, every kind ships as its own detached bubble. The tool plane IS that case by construction — send.rs never reads rich_messages, so no rich path exists there — and it is measured: the bytes ship as a detached photo bubble beside an html text chunk, with len=5180 (the fixture's exact byte count) proving which file rode. This is the floor, not the rich plane; it is recorded here so rule 5 has a LIVE receipt, and so L6 cannot be read as measuring it.
 
-### `live-l8-local-image-link-syntax-attaches` — §2 rule 6 → **FAIL**
+### `live-l8-local-image-link-syntax-attaches` — §2 rule 6 → **PASS**
 
 - **Claim under test:** a LOCAL image referenced in LINK syntax `[label](path)` is still claimed by the image family and arrives as a photo entry — the two markdown forms are equivalent for local targets, which is the property that makes link syntax safe to author
-- **tg_get_messages** (msg `96084`, chat `-1003936827469`): [827-smoke.md](tg://document?id=doc0) — a bare TextUrl paragraph; photos [], documents [], media null
-- **Bubbles observed:** None · **sent at:** 2026-11-13T10:19:48Z
-- **Probe:** a local document referenced in LINK syntax, nothing else in the reply
-- **log:** `10:19:49.150 Telegram send ok: kind=rich_api path=sendRichMessage chat=-1003936827469 msg=96084 len=... (accepted, no error)`
-- **Analysis:** §2 rule 6 asks which form the WIRE reads. On this message: link syntax produced NO entry at all. It is the same message L1 cites, read the same way — the difference is that L1 was scored on the body's shape and this leg on whether anything is behind it. The suite's own §4.1 table (2026-10-29) says the same: every `link` row delivered no attachment, every `embed` row delivered.
+- **tg_get_messages** (msg `96212`, chat `None`): `PageBlockPhoto` photo_id 5460666680959770737 inside the ordered list, caption TextEmpty — link syntax attaches a photo exactly like embed syntax
+- **Bubbles observed:** None · **sent at:** 2026-11-14T10:30:36Z
+- **Probe:** a local image referenced in LINK syntax: `[caption-ok.png](/root/.../fixtures/caption-ok.png)`
+- **Analysis:** plane: rich — this was this lane's OWN reply, so the rewriter ran. Telemetry carries `kind=rich_api path=sendRichMessage` for the id. §3.2's form-follows-kind rule holds for images: either markdown form attaches.
 
 ### `live-l9-mixed-kinds-one-message` — §3.2 → **FAIL**
 
@@ -148,13 +147,13 @@
 - **log:** `absence sweep same instant for 'send failed|falling back|degrad|IMAGE_PROCESS_FAILED|failed to read promoted' -> EMPTY (count 0)`
 - **Analysis:** §3.2's namespace split is NOT demonstrated: one bubble yes, three entries no. The photo entry bound and the other two did not, and nothing was refused or retried — so the entries were either never sent or dropped in transit without an error. The absence sweep is the load-bearing half: no rejection, no fallback, no sacrifice path ran. This is the leg that motivated L1/L5 being read through a blind instrument.
 
-### `live-l10-document-embed-demoted-to-link` — §2 rule 6, #827 → **MISSING**
+### `live-l10-document-embed-demoted-to-link` — §2 rule 6, #827 → **FAIL**
 
 - **Claim under test:** a document authored in EMBED syntax is demoted to link syntax at send time (`shield_unresolvable_markdown_images`), so it lands tappable instead of drawing nothing — the #827 failure mode cannot be re-authored from a reply
-- **tg_get_messages** (msg `96313`, chat `None`): `🔍 PROBE L10 — ...\n\n!doc-sample.md` — the link target is gone, the label survives with its leading `!`, and NOTHING was attached (media: null)
-- **Bubbles observed:** None · **sent at:** 2026-11-14T20:42:12Z
-- **Probe:** a local document referenced in EMBED syntax: `![doc-sample.md](/root/.../fixtures/doc-sample.md)`
-- **Analysis:** sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. A local non-image file is neither attached nor linked: the reference degrades to a bare `!name` in the body. §2 rule 3 (any other file → document) is not met on this plane.
+- **tg_get_messages** (msg `96212`, chat `None`): `TextUrl` with url `tg://document?id=doc0` and NO document entry: the `!` is gone (demoted by `shield_unresolvable_markdown_images`), and a link to a document entry that does not exist renders nothing
+- **Bubbles observed:** None · **sent at:** 2026-11-14T10:30:36Z
+- **Probe:** a local document referenced in EMBED syntax: `![doc-sample.md](/root/.../fixtures/doc-sample.md)` — re-probed at 96341 with the document as the only non-photo reference
+- **Analysis:** plane: rich — this was this lane's OWN reply, so the rewriter ran. Telemetry carries `kind=rich_api path=sendRichMessage` for the id. §2 rule 3 requires a document ENTRY; the reference is present and the entry is not. Two paths force the dead form: `FileRewriter::file` emits link syntax (#827) and the shield strips `!` from any embed naming a live non-photo entry. This is the #820 defect measured on the plane it belongs to.
 
 ### `live-l11-video-embed-is-a-video` — §2 rule 2 → **FAIL**
 
@@ -168,26 +167,26 @@
 ### `live-l12-caption-rides-the-title` — §3.2 caption → **PASS**
 
 - **Claim under test:** an expressible caption rides the reference's markdown title and arrives as the media caption, which is the only caption channel the rich plane offers
-- **tg_get_messages** (msg `96315`, chat `None`): a MessageMediaPhoto (312 B, image/jpeg) whose caption is `L12 caption rides the title` — the title arrived as the caption, verbatim
-- **Bubbles observed:** None · **sent at:** 2026-11-14T20:42:21Z
-- **Probe:** `![cap](caption-ok.png "L12 caption rides the title")`
-- **Analysis:** sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. The caption leg passes on the tool plane. It says nothing yet about §3.2's rich-plane title handling.
+- **tg_get_messages** (msg `96212`, chat `None`): `PageBlockPhoto` photo_id 5460666680959770736 with caption text `probe caption OK` — the markdown title arrived as the caption verbatim
+- **Bubbles observed:** None · **sent at:** 2026-11-14T10:30:36Z
+- **Probe:** `![caption rides the title](caption-ok.png "probe caption OK")` — an expressible caption
+- **Analysis:** plane: rich — this was this lane's OWN reply, so the rewriter ran. Telemetry carries `kind=rich_api path=sendRichMessage` for the id. §3.2's caption-by-title leg passes on the rich plane. Supersedes the tool-plane reading at 96315, which measured the detached floor instead.
 
-### `live-l13-inexpressible-caption-dropped` — §3.2 caption → **MISSING**
+### `live-l13-inexpressible-caption-dropped` — §3.2 caption → **PASS**
 
 - **Claim under test:** a caption containing `)` is DROPPED rather than emitted malformed: the image still arrives, merely unnamed, and the reference is not mangled
-- **tg_get_messages** (msg `96317`, chat `None`): a MessageMediaPhoto (310 B) whose caption is `L13 bad ) paren` — NOT dropped
-- **Bubbles observed:** None · **sent at:** 2026-11-14T20:42:25Z
-- **Probe:** `![bad](caption-bad.png "L13 bad ) paren")` — a title containing `)`, which §3.2's caption gate is supposed to drop
-- **Analysis:** sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. The claim behind probe `live-l13-inexpressible-caption-dropped` is contradicted here: a quoted markdown title carrying `)` is legal and arrived intact. Either the gate does not fire, or `)` was never the inexpressible character the ADR names. §3.2 must be re-read against the code before the rule is stated as measured.
+- **tg_get_messages** (msg `96212`, chat `None`): `PageBlockPhoto` photo_id 5460666680959770738 with caption TextEmpty — caption dropped, image attached
+- **Bubbles observed:** None · **sent at:** 2026-11-14T10:30:36Z
+- **Probe:** `![bad caption](caption-bad.png "probe ) caption")` — a title containing `)`, which §3.2's caption gate must drop while keeping the image
+- **Analysis:** plane: rich — this was this lane's OWN reply, so the rewriter ran. Telemetry carries `kind=rich_api path=sendRichMessage` for the id. Both halves of §3.2's caption gate hold: expressible captions ride the title (L12), inexpressible ones are dropped without losing the image. Measured twice, at 96212 and again at 96341.
 
-### `live-l14-dedup-two-spellings-one-file` — §3.5, #826 → **MISSING**
+### `live-l14-dedup-two-spellings-one-file` — §3.5, #826 → **PASS**
 
 - **Claim under test:** one file referenced twice in one reply under two spellings (`~/…` and `/root/…`) is delivered ONCE: dedup compares the resolved absolute path
-- **tg_get_messages** (msg `96319`, chat `None`): TWO separate MessageMediaPhoto bubbles (96319 and 96320), both carrying photo id 5456183027160524023
-- **Bubbles observed:** None · **sent at:** 2026-11-14T20:42:29Z
-- **Probe:** the same file under two spellings in one reply: `.../fixtures/local-photo-512.png` and `.../fixtures/../fixtures/local-photo-512.png`
-- **Analysis:** sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. §3.5's one-reply-one-delivery is broken on the tool plane: one file, two bubbles. Telegram itself deduplicated the UPLOAD (both bubbles reference one photo id), so the duplicate is the sender's, not the wire's. The dedup filter that consumes an already-delivered file is not applied to two spellings of the same path in one reply.
+- **tg_get_messages** (msg `96222`, chat `None`): ONE photo entry: `photos: [Photo 5460666680959770736]`, referenced by two `PageBlockPhoto` blocks in the body
+- **Bubbles observed:** None · **sent at:** 2026-11-14T18:38:29Z
+- **Probe:** one file, two spellings, one reply: `~/.../local-photo-512.png` and `/root/.../local-photo-512.png`
+- **Analysis:** plane: rich — this was this lane's OWN reply, so the rewriter ran. Telemetry carries `kind=rich_api path=sendRichMessage` for the id. §3.2's dedup compares the RESOLVED absolute path: two spellings of one file earn one entry and one upload, referenced twice in the body. The counter-case is different CONTENT (PROBE A items 1 and 3 referenced the same file in two forms with different captions and earned two entries), which is by design — a captioned photo is a different payload.
 
 ### `live-l15-refused-entry-costs-one-entry` — §3.4, #826 → **PASS**
 
@@ -208,12 +207,6 @@
 - **Analysis:** sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. Two halves, and only the first is a pass: the floor CHOSE the right kind (`as document`, so §2 rule 1's size split is honoured), then Telegram answered `Retry after 19s` and the tool dropped the file without retrying. #815 closed this hole for the turn path; it is still open on the tool path. A rate-limited attachment is silently lost, and the body has already gone out so nothing can announce it.
 
 ## Withdrawn observations (UNMEASURED, not compliant)
-
-- **L10** (msg `96313`): sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. A local non-image file is neither attached nor linked: the reference degrades to a bare `!name` in the body. §2 rule 3 (any other file → document) is not met on this plane.
-
-- **L13** (msg `96317`): sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. The claim behind probe `live-l13-inexpressible-caption-dropped` is contradicted here: a quoted markdown title carrying `)` is legal and arrived intact. Either the gate does not fire, or `)` was never the inexpressible character the ADR names. §3.2 must be re-read against the code before the rule is stated as measured.
-
-- **L14** (msg `96319`): sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. §3.5's one-reply-one-delivery is broken on the tool plane: one file, two bubbles. Telegram itself deduplicated the UPLOAD (both bubbles reference one photo id), so the duplicate is the sender's, not the wire's. The dedup filter that consumes an already-delivered file is not applied to two spellings of the same path in one reply.
 
 - **L16** (msg `96323`): sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. Two halves, and only the first is a pass: the floor CHOSE the right kind (`as document`, so §2 rule 1's size split is honoured), then Telegram answered `Retry after 19s` and the tool dropped the file without retrying. #815 closed this hole for the turn path; it is still open on the tool path. A rate-limited attachment is silently lost, and the body has already gone out so nothing can announce it.
 

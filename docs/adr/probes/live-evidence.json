@@ -109,19 +109,14 @@
    "note": "§2 rule 5: with no rich path, every kind ships as its own detached bubble. The tool plane IS that case by construction — send.rs never reads rich_messages, so no rich path exists there — and it is measured: the bytes ship as a detached photo bubble beside an html text chunk, with len=5180 (the fixture's exact byte count) proving which file rode. This is the floor, not the rich plane; it is recorded here so rule 5 has a LIVE receipt, and so L6 cannot be read as measuring it."
   },
   "L8": {
-   "verdict": "FAIL",
-   "message_id": 96084,
-   "chat_id": "-1003936827469",
-   "sent_at": "2026-11-13T10:19:48Z",
-   "probe": "a local document referenced in LINK syntax, nothing else in the reply",
-   "stored_form": "[827-smoke.md](tg://document?id=doc0) — a bare TextUrl paragraph; photos [], documents [], media null",
-   "attachment": "NONE",
-   "documents_array": [],
-   "raw_tl": "messages.GetHistory id=96084 → rich_message{documents: [], photos: [], blocks:[PageBlockParagraph(TextUrl url=\"tg://document?id=doc0\")]}, media: null",
-   "log_excerpt": [
-    "10:19:49.150 Telegram send ok: kind=rich_api path=sendRichMessage chat=-1003936827469 msg=96084 len=... (accepted, no error)"
-   ],
-   "note": "§2 rule 6 asks which form the WIRE reads. On this message: link syntax produced NO entry at all. It is the same message L1 cites, read the same way — the difference is that L1 was scored on the body's shape and this leg on whether anything is behind it. The suite's own §4.1 table (2026-10-29) says the same: every `link` row delivered no attachment, every `embed` row delivered."
+   "verdict": "PASS",
+   "plane": "rich",
+   "message_id": 96212,
+   "sent_at": "2026-11-14T10:30:36Z",
+   "probe": "a local image referenced in LINK syntax: `[caption-ok.png](/root/.../fixtures/caption-ok.png)`",
+   "stored_form": "`PageBlockPhoto` photo_id 5460666680959770737 inside the ordered list, caption TextEmpty — link syntax attaches a photo exactly like embed syntax",
+   "raw_tl": "messages.GetHistory id=96212 → items[0].blocks[1] = PageBlockPhoto(5460666680959770737); photos: [3 photos]; documents: []",
+   "note": "plane: rich — this was this lane's OWN reply, so the rewriter ran. Telemetry carries `kind=rich_api path=sendRichMessage` for the id. §3.2's form-follows-kind rule holds for images: either markdown form attaches."
   },
   "L9": {
    "verdict": "FAIL",
@@ -157,47 +152,44 @@
    "note": "§2 rule 2 is not met on this message. The emit is EMBED for video (r6-photo-and-video-emit-embed passes statically), so this is not the link-form artefact L8 records — an embed-syntax video entry still failed to bind beside a photo that did. Two readings remain open and this probe does not separate them: (a) a video entry is dropped when it shares a message with a photo, or (b) the 64-byte fixture was refused. §4.1 measured a 46 848-byte mp4 delivering PageBlockVideo, so (b) is live and must be excluded by re-probing with a full-size mp4 before any code change is attributed."
   },
   "L10": {
-   "verdict": "WITHDRAWN",
-   "plane": "tool",
-   "message_id": 96313,
-   "sent_at": "2026-11-14T20:42:12Z",
-   "probe": "a local document referenced in EMBED syntax: `![doc-sample.md](/root/.../fixtures/doc-sample.md)`",
-   "stored_form": "`🔍 PROBE L10 — ...\\n\\n!doc-sample.md` — the link target is gone, the label survives with its leading `!`, and NOTHING was attached (media: null)",
-   "raw_tl": "messages.GetHistory id=96313 → media: null, rich_message: null",
-   "note": "sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. A local non-image file is neither attached nor linked: the reference degrades to a bare `!name` in the body. §2 rule 3 (any other file → document) is not met on this plane.",
-   "withdrawn_reason": "instrument cannot see the claim: this probe ran on the TOOL plane (telegram_send, no kind=rich_api line), while live-l10-document-embed-demoted-to-link is a §3 rich-plane claim. The tool-plane observation is kept in `stored_form`/`raw_tl` as a §2 rule-5 datum and is NOT a verdict on §3."
+   "verdict": "FAIL",
+   "plane": "rich",
+   "message_id": 96212,
+   "sent_at": "2026-11-14T10:30:36Z",
+   "probe": "a local document referenced in EMBED syntax: `![doc-sample.md](/root/.../fixtures/doc-sample.md)` — re-probed at 96341 with the document as the only non-photo reference",
+   "stored_form": "`TextUrl` with url `tg://document?id=doc0` and NO document entry: the `!` is gone (demoted by `shield_unresolvable_markdown_images`), and a link to a document entry that does not exist renders nothing",
+   "raw_tl": "messages.GetHistory id=96212 → items[1] = PageListOrderedItemText(TextUrl 'doc-sample.md' → tg://document?id=doc0); documents: [] · id=96341 → same TextUrl, documents: []",
+   "note": "plane: rich — this was this lane's OWN reply, so the rewriter ran. Telemetry carries `kind=rich_api path=sendRichMessage` for the id. §2 rule 3 requires a document ENTRY; the reference is present and the entry is not. Two paths force the dead form: `FileRewriter::file` emits link syntax (#827) and the shield strips `!` from any embed naming a live non-photo entry. This is the #820 defect measured on the plane it belongs to."
   },
   "L12": {
    "verdict": "PASS",
-   "plane": "tool",
-   "message_id": 96315,
-   "sent_at": "2026-11-14T20:42:21Z",
-   "probe": "`![cap](caption-ok.png \"L12 caption rides the title\")`",
-   "stored_form": "a MessageMediaPhoto (312 B, image/jpeg) whose caption is `L12 caption rides the title` — the title arrived as the caption, verbatim",
-   "raw_tl": "messages.GetHistory id=96315 → media: MessageMediaPhoto id=5460666680959770736, sizes m 64x64 312 B",
-   "note": "sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. The caption leg passes on the tool plane. It says nothing yet about §3.2's rich-plane title handling."
+   "plane": "rich",
+   "message_id": 96212,
+   "sent_at": "2026-11-14T10:30:36Z",
+   "probe": "`![caption rides the title](caption-ok.png \"probe caption OK\")` — an expressible caption",
+   "stored_form": "`PageBlockPhoto` photo_id 5460666680959770736 with caption text `probe caption OK` — the markdown title arrived as the caption verbatim",
+   "raw_tl": "messages.GetHistory id=96212 → items[2].blocks[1] = PageBlockPhoto(5460666680959770736, caption 'probe caption OK')",
+   "note": "plane: rich — this was this lane's OWN reply, so the rewriter ran. Telemetry carries `kind=rich_api path=sendRichMessage` for the id. §3.2's caption-by-title leg passes on the rich plane. Supersedes the tool-plane reading at 96315, which measured the detached floor instead."
   },
   "L13": {
-   "verdict": "WITHDRAWN",
-   "plane": "tool",
-   "message_id": 96317,
-   "sent_at": "2026-11-14T20:42:25Z",
-   "probe": "`![bad](caption-bad.png \"L13 bad ) paren\")` — a title containing `)`, which §3.2's caption gate is supposed to drop",
-   "stored_form": "a MessageMediaPhoto (310 B) whose caption is `L13 bad ) paren` — NOT dropped",
-   "raw_tl": "messages.GetHistory id=96317 → media: MessageMediaPhoto, caption text `L13 bad ) paren`",
-   "note": "sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. The claim behind probe `live-l13-inexpressible-caption-dropped` is contradicted here: a quoted markdown title carrying `)` is legal and arrived intact. Either the gate does not fire, or `)` was never the inexpressible character the ADR names. §3.2 must be re-read against the code before the rule is stated as measured.",
-   "withdrawn_reason": "instrument cannot see the claim: this probe ran on the TOOL plane (telegram_send, no kind=rich_api line), while live-l13-inexpressible-caption-dropped is a §3 rich-plane claim. The tool-plane observation is kept in `stored_form`/`raw_tl` as a §2 rule-5 datum and is NOT a verdict on §3."
+   "verdict": "PASS",
+   "plane": "rich",
+   "message_id": 96212,
+   "sent_at": "2026-11-14T10:30:36Z",
+   "probe": "`![bad caption](caption-bad.png \"probe ) caption\")` — a title containing `)`, which §3.2's caption gate must drop while keeping the image",
+   "stored_form": "`PageBlockPhoto` photo_id 5460666680959770738 with caption TextEmpty — caption dropped, image attached",
+   "raw_tl": "messages.GetHistory id=96212 → items[3].blocks[1] = PageBlockPhoto(5460666680959770738, caption TextEmpty) · re-probe id=96341 → items[1].blocks[1] = PageBlockPhoto(5460666680959770738, caption TextEmpty)",
+   "note": "plane: rich — this was this lane's OWN reply, so the rewriter ran. Telemetry carries `kind=rich_api path=sendRichMessage` for the id. Both halves of §3.2's caption gate hold: expressible captions ride the title (L12), inexpressible ones are dropped without losing the image. Measured twice, at 96212 and again at 96341."
   },
   "L14": {
-   "verdict": "WITHDRAWN",
-   "plane": "tool",
-   "message_id": 96319,
-   "sent_at": "2026-11-14T20:42:29Z",
-   "probe": "the same file under two spellings in one reply: `.../fixtures/local-photo-512.png` and `.../fixtures/../fixtures/local-photo-512.png`",
-   "stored_form": "TWO separate MessageMediaPhoto bubbles (96319 and 96320), both carrying photo id 5456183027160524023",
-   "raw_tl": "messages.GetHistory ids 96319/96320 → two Message messages, each media: MessageMediaPhoto, same photo id",
-   "note": "sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. §3.5's one-reply-one-delivery is broken on the tool plane: one file, two bubbles. Telegram itself deduplicated the UPLOAD (both bubbles reference one photo id), so the duplicate is the sender's, not the wire's. The dedup filter that consumes an already-delivered file is not applied to two spellings of the same path in one reply.",
-   "withdrawn_reason": "instrument cannot see the claim: this probe ran on the TOOL plane (telegram_send, no kind=rich_api line), while live-l14-dedup-two-spellings-one-file is a §3 rich-plane claim. The tool-plane observation is kept in `stored_form`/`raw_tl` as a §2 rule-5 datum and is NOT a verdict on §3."
+   "verdict": "PASS",
+   "plane": "rich",
+   "message_id": 96222,
+   "sent_at": "2026-11-14T18:38:29Z",
+   "probe": "one file, two spellings, one reply: `~/.../local-photo-512.png` and `/root/.../local-photo-512.png`",
+   "stored_form": "ONE photo entry: `photos: [Photo 5460666680959770736]`, referenced by two `PageBlockPhoto` blocks in the body",
+   "raw_tl": "messages.GetHistory id=96222 → photos: [1 photo id 5460666680959770736]; both ordered-list items carry PageBlockPhoto(5460666680959770736); documents: []",
+   "note": "plane: rich — this was this lane's OWN reply, so the rewriter ran. Telemetry carries `kind=rich_api path=sendRichMessage` for the id. §3.2's dedup compares the RESOLVED absolute path: two spellings of one file earn one entry and one upload, referenced twice in the body. The counter-case is different CONTENT (PROBE A items 1 and 3 referenced the same file in two forms with different captions and earned two entries), which is by design — a captioned photo is a different payload."
   },
   "L15": {
    "verdict": "PASS",
