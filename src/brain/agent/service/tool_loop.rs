@@ -1836,6 +1836,13 @@ impl AgentService {
         // turn whose final prompt was 22K (2026-04-17 05:55 logs).
         let mut last_iter_input_tokens = 0u32;
         let mut final_response: Option<LLMResponse> = None;
+        // #834: the open-task count when the plan hold last fired this turn.
+        // `None` = it has not held yet, so the first nudge is always allowed.
+        // A later hold is only allowed once the count has DROPPED — a task was
+        // completed since — which caps the holds at the number of open tasks
+        // and ends the turn on a model that cannot advance the checklist.
+        // Turn-local by construction: nothing is persisted, no config key.
+        let mut plan_hold_baseline: Option<usize> = None;
         // Registered tool names for the language-agnostic phantom tell (#463).
         let phantom_tool_names: Vec<String> = self.tool_registry.list_tools();
         let mut accumulated_text = String::new(); // Collect text from all iterations (not just final)
@@ -6586,6 +6593,7 @@ impl AgentService {
                 // running detached command or an open plan task short-circuits
                 // the judge entirely inside `evaluate_after_turn`.
                 {
+                    use crate::brain::agent::service::context::format_plan_hold;
                     use crate::brain::goal::GoalManager;
                     use crate::brain::goal::evidence::build_goal_evidence;
                     let goal_mgr = GoalManager::new(self.context.clone());
@@ -6596,6 +6604,40 @@ impl AgentService {
                         turn_tool_files.clone(),
                     )
                     .await;
+
+                    // #834: an Active checklist with open tasks holds the turn
+                    // on its own. `evaluate_after_turn` answers
+                    // `Done { "no active goal" }` (manager.rs:398-403) for the
+                    // normal case — a plan never creates a goal — and that
+                    // return sits ABOVE the mechanical hold which reads
+                    // `evidence.unresolved_tasks` (:463-470), so the evidence
+                    // collected one line up was unreachable. A goal, when one
+                    // exists, still owns continuation entirely: it already
+                    // holds on open plan tasks, already accounts `max_turns`,
+                    // and already tells a wait from a hold (#567).
+                    if goal_mgr.get_goal(session_id).await.ok().flatten().is_none()
+                        && plan_hold_allowed(&evidence.unresolved_tasks, plan_hold_baseline)
+                        && let Some(prompt) = format_plan_hold(&evidence.unresolved_tasks)
+                    {
+                        let open = evidence.unresolved_tasks.len();
+                        plan_hold_baseline = Some(open);
+                        tracing::info!(
+                            "Plan hold: {open} open task(s), re-entering the tool loop"
+                        );
+                        if let Some(ref cb) = progress_callback {
+                            cb(
+                                session_id,
+                                ProgressEvent::SelfHealingAlert {
+                                    message: "Plan continues, re-entering tool loop"
+                                        .to_string(),
+                                },
+                            );
+                        }
+                        context.add_message(Message::user(prompt));
+                        final_response = None;
+                        continue;
+                    }
+
                     match goal_mgr
                         .evaluate_after_turn(
                             self.provider_for_session(session_id).as_ref(),
@@ -8747,5 +8789,32 @@ impl AgentService {
             provider_name: self.provider_name_for_session(session_id),
             started_on_session_provider,
         })
+    }
+}
+/// #834: may the plan hold fire, given the open tasks and this turn's baseline?
+///
+/// The bound lives here, not in `GoalManager`: that struct is rebuilt every
+/// iteration and holds no loop state, while the loop already owns the evidence
+/// and the turn. The rule is one line of arithmetic on a count that only moves
+/// in one useful direction — `start`ing a task leaves it unchanged, `complete`ing
+/// one lowers it:
+///
+/// | hold | baseline | fires? |
+/// |---|---|---|
+/// | 1st | `None` | yes — one nudge is always allowed |
+/// | 2nd, a task completed since | `n` → `n-1` | yes, and the baseline follows down |
+/// | 2nd, nothing completed | `n` → `n` | no — the turn ends |
+///
+/// That caps the holds at the number of open tasks: a model that advances work
+/// is never interrupted, a model that stalls is not re-prompted twice. An empty
+/// list never fires — no plan, an `Editing` plan and a finished checklist all
+/// arrive here as an empty vector (see `build_goal_evidence`).
+pub(crate) fn plan_hold_allowed(unresolved: &[String], baseline: Option<usize>) -> bool {
+    if unresolved.is_empty() {
+        return false;
+    }
+    match baseline {
+        None => true,
+        Some(last) => unresolved.len() < last,
     }
 }

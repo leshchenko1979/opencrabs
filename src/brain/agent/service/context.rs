@@ -2232,6 +2232,37 @@ pub(crate) fn format_plan_reminder(plan: &crate::tui::plan::PlanDocument) -> Opt
     Some(out)
 }
 
+/// #834: the hold prompt injected when an Active checklist is still open at the
+/// end of a text-only iteration.
+///
+/// Pure, like `format_plan_reminder` above: the wording stays unit-testable
+/// without a provider. Whether it is injected at all is the loop's decision
+/// (`tool_loop::plan_hold_allowed`) because that needs turn-local state.
+///
+/// The last sentence is load-bearing: the honest exit has to be cheaper than a
+/// fabricated continuation, or the hold becomes a re-reporting loop.
+pub(crate) fn format_plan_hold(unresolved: &[String]) -> Option<String> {
+    if unresolved.is_empty() {
+        return None;
+    }
+    let n = unresolved.len();
+    let noun = if n == 1 { "task" } else { "tasks" };
+    let mut out = format!(
+        "[PLAN HOLD — injected by the harness, not from the user]\n\
+         The checklist is still Active with {n} {noun} open:\n"
+    );
+    for task in unresolved {
+        out.push_str(&format!("  {task}\n"));
+    }
+    out.push_str(
+        "Advance the next eligible task NOW: `start` it, do its work, then `complete` it. \
+         Do not summarise the plan, restate progress, or ask what to do next — the checklist \
+         is already on the user's screen. If you genuinely cannot proceed, say what blocks \
+         you and stop.\n",
+    );
+    Some(out)
+}
+
 /// The plan's unresolved tasks, as `"<order>. <title>"`, in plan order.
 ///
 /// A task is unresolved unless it is `Completed` or `Skipped`: `Pending`,
