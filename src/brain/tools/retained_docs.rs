@@ -104,12 +104,6 @@ pub fn inventory_documents(session_id: Uuid) -> (Vec<DocEntry>, usize) {
     (paths.iter().map(|p| probe(p)).collect(), omitted)
 }
 
-/// The registered set, process-wide.
-///
-/// It cannot be a `Vec` threaded between call sites: `register` runs while a
-/// compaction is being applied and `render` runs at the next turn's brain
-/// assembly, two different calls with no shared stack. Keyed by session, so
-/// test isolation falls out of the fresh UUID each test context carries.
 /// The registered set, process-wide, paired with the reasons any requested
 /// path was refused.
 ///
@@ -122,10 +116,10 @@ pub fn inventory_documents(session_id: Uuid) -> (Vec<DocEntry>, usize) {
 /// the MODEL never sees is a silent drop: the manifest is model output, so a
 /// hallucinated path would otherwise leave the model believing the document
 /// it invented is in its context.
-fn registered_registry() -> &'static std::sync::Mutex<HashMap<Uuid, (Vec<DocEntry>, Vec<String>)>>
-{
-    type Registry = std::sync::Mutex<HashMap<Uuid, (Vec<DocEntry>, Vec<String>)>>;
-    static REGISTERED: OnceLock<Registry> = OnceLock::new();
+type RegisteredRegistry = std::sync::Mutex<HashMap<Uuid, (Vec<DocEntry>, Vec<String>)>>;
+
+fn registered_registry() -> &'static RegisteredRegistry {
+    static REGISTERED: OnceLock<RegisteredRegistry> = OnceLock::new();
     REGISTERED.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
