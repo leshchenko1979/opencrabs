@@ -56,6 +56,7 @@ fn card(summary: &str) -> String {
         elapsed: Duration::from_millis(21_500),
         tool_sizes: &sizes,
         summary,
+        rich: false,
     })
 }
 
@@ -224,6 +225,7 @@ fn an_unknown_ceiling_states_no_share() {
         elapsed: Duration::from_secs(1),
         tool_sizes: &sizes,
         summary: no_manifest(),
+        rich: false,
     });
     let tools = out
         .lines()
@@ -262,6 +264,7 @@ fn a_compaction_that_grew_the_context_reads_as_growth() {
         elapsed: Duration::from_secs(5),
         tool_sizes: &sizes,
         summary: no_manifest(),
+        rich: false,
     });
     assert!(out.contains("+20K, +20.0%"), "{out}");
 }
@@ -278,6 +281,148 @@ fn a_long_silent_window_reads_in_minutes() {
         elapsed: Duration::from_secs(102),
         tool_sizes: &sizes,
         summary: no_manifest(),
+        rich: false,
     });
     assert!(out.contains("1m 42s"), "{out}");
+}
+
+/// The continuation document's numbered sections, as the summariser writes
+/// them (#824 follow-up): the per-part rows must come from the DELIVERED
+/// string, so this fixture is the delivered form.
+fn numbered_document() -> &'static str {
+    "## 0. IMMEDIATE TASK\n\
+     finish the breakdown card\n\
+     \n\
+     ## 1. Chronological Analysis\n\
+     a longer body that runs on for a while so its size differs from the first\n"
+}
+
+/// A card rendered for the RICH plane, where pipe tables are legal.
+fn rich_card(summary: &str) -> String {
+    let sizes = tool_sizes();
+    compaction_breakdown(&CompactionBreakdown {
+        before_tokens: 130_600,
+        after_tokens: 106_186,
+        before_pct: 65.0,
+        after_pct: 53.0,
+        ctx_max: 200_000,
+        elapsed: Duration::from_millis(21_500),
+        tool_sizes: &sizes,
+        summary,
+        rich: true,
+    })
+}
+
+#[test]
+fn the_classic_leg_states_the_summary_and_each_of_its_parts() {
+    // The summary is the largest thing a compaction leaves in the window, and
+    // the card used to describe the whole window without naming it.
+    let out = card(numbered_document());
+    let head = out
+        .lines()
+        .find(|l| l.contains("summary"))
+        .expect("a summary row");
+    assert!(head.contains("2 parts"), "part count: {head}");
+    assert!(head.contains("KB"), "summary size: {head}");
+    assert!(head.contains('%'), "summary share: {head}");
+    let detail = out
+        .lines()
+        .skip_while(|l| !l.contains("summary"))
+        .nth(1)
+        .expect("a summary detail row");
+    // Document order, each part carrying its own size — §0 is the part the
+    // next turn reads first, so it must not be sorted away.
+    assert!(detail.contains("§0 IMMEDIATE TASK"), "{detail}");
+    assert!(detail.contains("§1 Chronological Analysis"), "{detail}");
+    let first = detail.find("§0").expect("§0");
+    let second = detail.find("§1").expect("§1");
+    assert!(first < second, "document order: {detail}");
+    assert_eq!(detail.matches("KB").count(), 2, "one size per part: {detail}");
+}
+
+#[test]
+fn the_rich_leg_renders_skills_and_tools_as_tables() {
+    // The owner's ask: "for the rich format leg, use tables for skills and
+    // tools lists". A table is only legal on the markdown plane, so this leg
+    // must emit real pipe tables — header, separator, one row per entry.
+    let out = rich_card(mixed_manifest());
+
+    let kept_head = out
+        .lines()
+        .find(|l| l.starts_with("| kept"))
+        .expect("a kept table header");
+    assert!(kept_head.contains("(1 entry)"), "{kept_head}");
+    assert!(kept_head.contains("LOC"), "{kept_head}");
+    let kept_row = out
+        .lines()
+        .find(|l| l.starts_with("| `cost-estimate`"))
+        .expect("a kept table row");
+    assert_eq!(kept_row.matches('|').count(), 5, "4 columns: {kept_row}");
+
+    let tools_head = out
+        .lines()
+        .find(|l| l.starts_with("| tools"))
+        .expect("a tools table header");
+    assert!(tools_head.contains("(3)"), "{tools_head}");
+    // Ordered by cost, largest first — the row worth acting on leads.
+    let rows: Vec<&str> = out
+        .lines()
+        .skip_while(|l| !l.starts_with("| tools"))
+        .skip(2)
+        .take(3)
+        .collect();
+    assert!(rows[0].starts_with("| `bash`"), "largest first: {rows:?}");
+    // The total reconciles with the rows: 28_672 B = 28.0 KB, 7_400 tok of
+    // 200 K = 3.7 %.
+    assert!(
+        out.contains("| **total** | 28.0KB | 3.7% |"),
+        "a reconciling total: {out}"
+    );
+}
+
+#[test]
+fn the_rich_leg_lists_each_summary_part_as_a_row() {
+    let out = rich_card(numbered_document());
+    assert!(
+        out.lines().any(|l| l == "| summary part | size | share |"),
+        "a summary table header: {out}"
+    );
+    // The document's own total leads, so the parts are read against it.
+    let total = out
+        .lines()
+        .position(|l| l.starts_with("| **total** |"))
+        .expect("a summary total row");
+    let first_part = out
+        .lines()
+        .position(|l| l.starts_with("| §0 IMMEDIATE TASK |"))
+        .expect("the §0 row");
+    assert!(total < first_part, "total above the parts: {out}");
+    assert!(
+        out.lines()
+            .any(|l| l.starts_with("| §1 Chronological Analysis |")),
+        "every part gets a row: {out}"
+    );
+}
+
+#[test]
+fn every_table_in_the_rich_leg_is_parseable() {
+    // A table the parser rejects renders as raw pipes in the chat, so the
+    // shape is asserted structurally rather than by eye: every header row must
+    // be followed by a separator row with one cell per column.
+    let out = rich_card(mixed_manifest());
+    let lines: Vec<&str> = out.lines().collect();
+    let mut tables = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if !line.starts_with("| ") {
+            continue;
+        }
+        if lines.get(i + 1).is_some_and(|s| s.starts_with("|---")) {
+            tables += 1;
+            let cols = line.matches('|').count();
+            let sep_cols = lines[i + 1].matches('|').count();
+            assert_eq!(cols, sep_cols, "header/separator width: {line}");
+        }
+    }
+    // summary + kept + dropped + tools.
+    assert_eq!(tables, 4, "one table per section: {out}");
 }

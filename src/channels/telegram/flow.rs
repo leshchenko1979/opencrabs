@@ -1112,6 +1112,20 @@ pub(crate) struct CompactionBreakdown<'a> {
     /// The continuation document, whose `context-manifest` fence declares the
     /// kept and dropped sets.
     pub(crate) summary: &'a str,
+    /// Render the skills and tools rows as markdown TABLES (#824 follow-up).
+    ///
+    /// The classic leg rides the flow block's `<blockquote expandable>`, which
+    /// is Telegram HTML — and the rich HTML input mode returns 200 and then
+    /// FLATTENS a table into a run-on paragraph (`delivery.rs:1314`). The only
+    /// mode that renders a table is rich MARKDOWN, which cannot carry a
+    /// `<details>` collapse (#421 shipped flat and was reverted), so a
+    /// table-bearing card has to leave the flow block and become its own
+    /// bubble: the intermediate pipeline promotes a table-bearing report
+    /// automatically (`is_deliverable_rich_report`). The flag is therefore set
+    /// only where that plane is actually reachable — `rich_messages` on AND the
+    /// room not quiet, because a quiet room suppresses the promotion arm
+    /// (#679) and would fold raw pipes into the collapsed log.
+    pub(crate) rich: bool,
 }
 
 /// One manifest entry resolved against the skill registry.
@@ -1364,6 +1378,253 @@ fn breakdown_tools(tool_sizes: &[ToolSize], ctx_max: u32, lines: &mut Vec<String
     lines.push(format!("     {detail}"));
 }
 
+/// One numbered section of the continuation document (#824 follow-up).
+struct SummaryPart {
+    /// `§0 IMMEDIATE TASK` — the document's own numbering, so a row maps back
+    /// to the part it measures without a second lookup.
+    label: String,
+    tokens: usize,
+    bytes: usize,
+}
+
+impl SummaryPart {
+    fn measured(label: String, body: &str) -> Self {
+        Self {
+            label,
+            tokens: crate::brain::tokenizer::count_tokens(body),
+            bytes: body.len(),
+        }
+    }
+}
+
+/// Split the continuation document into the parts it actually ARRIVED with.
+///
+/// The summariser writes against the numbered prompt in
+/// `service/context.rs`, but this measures the delivered string: a section the
+/// model omitted is simply absent here, and anything before the first `## `
+/// heading becomes its own `preamble` part, so nothing between the headings is
+/// dropped from the accounting. Each part's bytes include its own heading line.
+fn summary_parts(summary: &str) -> Vec<SummaryPart> {
+    let mut parts: Vec<SummaryPart> = Vec::new();
+    let mut current: Option<(String, String)> = None;
+    for line in summary.lines() {
+        if let Some(title) = line.strip_prefix("## ") {
+            if let Some((label, body)) = current.take() {
+                parts.push(SummaryPart::measured(label, &body));
+            }
+            current = Some((summary_part_label(title), format!("## {title}\n")));
+            continue;
+        }
+        match current.as_mut() {
+            Some((_, body)) => {
+                body.push_str(line);
+                body.push('\n');
+            }
+            None if !line.trim().is_empty() => {
+                current = Some(("preamble".to_string(), format!("{line}\n")));
+            }
+            None => {}
+        }
+    }
+    if let Some((label, body)) = current {
+        parts.push(SummaryPart::measured(label, &body));
+    }
+    parts
+}
+
+/// `0. IMMEDIATE TASK` -> `§0 IMMEDIATE TASK`, capped so one part stays one
+/// table cell.
+fn summary_part_label(title: &str) -> String {
+    let t = title.trim();
+    let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
+    let label = if digits > 0 && t[digits..].starts_with('.') {
+        format!("§{} {}", &t[..digits], t[digits + 1..].trim())
+    } else {
+        format!("§ {t}")
+    };
+    const MAX_LABEL: usize = 30;
+    if label.chars().count() <= MAX_LABEL {
+        label
+    } else {
+        let cut: String = label.chars().take(MAX_LABEL - 1).collect();
+        format!("{cut}…")
+    }
+}
+
+/// The continuation document's own size, and the size of each of its parts
+/// (#824 follow-up) — the classic (HTML flow) form.
+///
+/// The summary is the largest single thing a compaction leaves in the window,
+/// and the card described the whole window without ever naming it. Every part
+/// carries its own KB and share, in document order, because `§0` (the
+/// immediate task) and `§9` (the continuation message) are the two the next
+/// turn reads first and they are not the two biggest.
+fn breakdown_summary(summary: &str, ctx_max: u32, lines: &mut Vec<String>) {
+    if summary.is_empty() {
+        return;
+    }
+    let parts = summary_parts(summary);
+    let total_tokens = crate::brain::tokenizer::count_tokens(summary);
+    let noun = if parts.len() == 1 { "part" } else { "parts" };
+    lines.push(format!(
+        "   {:<8} {} · {} · {} {noun}",
+        "summary",
+        format_breakdown_kb(summary.len()),
+        format_breakdown_share(total_tokens, ctx_max),
+        parts.len(),
+    ));
+    if parts.is_empty() {
+        return;
+    }
+    const MAX_PARTS: usize = 8;
+    let mut detail = String::new();
+    for (i, p) in parts.iter().take(MAX_PARTS).enumerate() {
+        if i > 0 {
+            detail.push_str(" · ");
+        }
+        detail.push_str(&format!(
+            "{} {} · {}",
+            p.label,
+            format_breakdown_kb(p.bytes),
+            format_breakdown_share(p.tokens, ctx_max),
+        ));
+    }
+    if parts.len() > MAX_PARTS {
+        detail.push_str(&format!(" · +{}", parts.len() - MAX_PARTS));
+    }
+    lines.push(format!("     {detail}"));
+}
+
+/// The summary table (rich leg): the document's own total first, then one row
+/// per part, so the parts are read against the total they belong to.
+fn breakdown_summary_table(summary: &str, ctx_max: u32, lines: &mut Vec<String>) {
+    if summary.is_empty() {
+        return;
+    }
+    let parts = summary_parts(summary);
+    let total_tokens = crate::brain::tokenizer::count_tokens(summary);
+    lines.push(String::new());
+    lines.push("| summary part | size | share |".to_string());
+    lines.push("|---|---:|---:|".to_string());
+    lines.push(format!(
+        "| **total** | {} | {} |",
+        format_breakdown_kb(summary.len()),
+        format_breakdown_share(total_tokens, ctx_max),
+    ));
+    const MAX_PARTS: usize = 14;
+    for p in parts.iter().take(MAX_PARTS) {
+        lines.push(format!(
+            "| {} | {} | {} |",
+            p.label,
+            format_breakdown_kb(p.bytes),
+            format_breakdown_share(p.tokens, ctx_max),
+        ));
+    }
+    if parts.len() > MAX_PARTS {
+        lines.push(format!("| +{} more | | |", parts.len() - MAX_PARTS));
+    }
+}
+
+/// The kept/dropped table (rich leg): one row per entry, the group's totals in
+/// the header, so the rows reconcile with the number above them.
+fn breakdown_group_table(
+    label: &str,
+    entries: &[BreakdownEntry],
+    ctx_max: u32,
+    lines: &mut Vec<String>,
+) {
+    if entries.is_empty() {
+        return;
+    }
+    let resolved = entries.iter().filter(|e| e.tokens.is_some()).count();
+    let total_tokens: usize = entries.iter().filter_map(|e| e.tokens).sum();
+    let total_bytes: usize = entries.iter().filter_map(|e| e.bytes).sum();
+    let total_lines: usize = entries.iter().filter_map(|e| e.lines).sum();
+    let noun = if entries.len() == 1 { "entry" } else { "entries" };
+    lines.push(String::new());
+    lines.push(format!(
+        "| {label} ({} {noun}) | size | share | LOC |",
+        entries.len()
+    ));
+    lines.push("|---|---:|---:|---:|".to_string());
+
+    const MAX_ROWS: usize = 10;
+    for e in entries.iter().take(MAX_ROWS) {
+        let size = e.bytes.map_or_else(|| "—".to_string(), format_breakdown_kb);
+        let share = e
+            .tokens
+            .map_or_else(|| "—".to_string(), |t| format_breakdown_share(t, ctx_max));
+        let loc = e.lines.map_or_else(|| "—".to_string(), |n| n.to_string());
+        // Backticked for the same reason the classic leg is: bare `editor.md` /
+        // `context.rs` auto-link (`.md` and `.rs` are real ccTLDs).
+        lines.push(format!("| `{}` | {size} | {share} | {loc} |", e.label));
+    }
+    if entries.len() > MAX_ROWS {
+        lines.push(format!("| +{} more | | | |", entries.len() - MAX_ROWS));
+    }
+    // A name that resolves to nothing measurable would make the rows fail to
+    // reconcile with the total, so the gap is stated instead of hidden.
+    if resolved < entries.len() {
+        lines.push(format!(
+            "| *{} of {} resolve* | | | |",
+            resolved,
+            entries.len()
+        ));
+    }
+    if entries.len() > 1 {
+        lines.push(format!(
+            "| **total** | {} | {} | {} |",
+            format_breakdown_kb(total_bytes),
+            format_breakdown_share(total_tokens, ctx_max),
+            total_lines,
+        ));
+    }
+}
+
+/// The tools table (rich leg): the measured schema set, largest first.
+///
+/// Same source and same ordering as the classic leg — the event's per-tool
+/// measurements, not the manifest's `required_tools` — because the card
+/// describes what the request CARRIES. A JSON schema has no meaningful line
+/// count, so this table has no LOC column.
+fn breakdown_tools_table(tool_sizes: &[ToolSize], ctx_max: u32, lines: &mut Vec<String>) {
+    if tool_sizes.is_empty() {
+        // A header with no rows is a table the parser may reject, and a
+        // rejected table renders as raw pipes — so the section is absent
+        // instead of empty. (The classic leg keeps its `tools 0 · …` row: a
+        // text row carries a zero fine, a table does not.)
+        return;
+    }
+    let total_tokens: usize = tool_sizes.iter().map(|t| t.tokens).sum();
+    let total_bytes: usize = tool_sizes.iter().map(|t| t.bytes).sum();
+    lines.push(String::new());
+    lines.push(format!("| tools ({}) | size | share |", tool_sizes.len()));
+    lines.push("|---|---:|---:|".to_string());
+
+    let mut ordered: Vec<&ToolSize> = tool_sizes.iter().collect();
+    ordered.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.name.cmp(&b.name)));
+
+    const MAX_ROWS: usize = 10;
+    for t in ordered.iter().take(MAX_ROWS) {
+        lines.push(format!(
+            "| `{}` | {} | {} |",
+            t.name,
+            format_breakdown_kb(t.bytes),
+            format_breakdown_share(t.tokens, ctx_max),
+        ));
+    }
+    if ordered.len() > MAX_ROWS {
+        lines.push(format!("| +{} more | | |", ordered.len() - MAX_ROWS));
+    }
+    if ordered.len() > 1 {
+        lines.push(format!(
+            "| **total** | {} | {} |",
+            format_breakdown_kb(total_bytes),
+            format_breakdown_share(total_tokens, ctx_max),
+        ));
+    }
+}
+
 /// The post-compaction breakdown card (#824): the headline, a labelled
 /// section header, and what the compaction actually did.
 ///
@@ -1403,27 +1664,40 @@ pub(crate) fn compaction_breakdown(b: &CompactionBreakdown<'_>) -> String {
         format_breakdown_elapsed(b.elapsed)
     ));
 
+    // The continuation document's own size, and the size of each of its parts
+    // (#824 follow-up): the largest single thing a compaction leaves in the
+    // window, and until now the one cost the card never named.
+    if b.rich {
+        breakdown_summary_table(b.summary, b.ctx_max, &mut lines);
+    } else {
+        breakdown_summary(b.summary, b.ctx_max, &mut lines);
+    }
+
     let manifest = crate::brain::agent::service::context::parse_context_manifest(b.summary);
     if let Some(m) = manifest.as_ref() {
         let skills = crate::brain::skills::load_all_skills();
-        breakdown_group(
-            "kept",
-            &resolve_breakdown_entries(&m.active_skills, &skills),
-            b.ctx_max,
-            &mut lines,
-        );
-        breakdown_group(
-            "dropped",
-            &resolve_breakdown_entries(&m.discard_skills, &skills),
-            b.ctx_max,
-            &mut lines,
-        );
+        let kept = resolve_breakdown_entries(&m.active_skills, &skills);
+        let dropped = resolve_breakdown_entries(&m.discard_skills, &skills);
+        // The rich leg emits pipe tables (#824 follow-up), which only the
+        // markdown plane renders — see `CompactionBreakdown::rich` for why that
+        // means this card leaves the flow block there.
+        if b.rich {
+            breakdown_group_table("kept", &kept, b.ctx_max, &mut lines);
+            breakdown_group_table("dropped", &dropped, b.ctx_max, &mut lines);
+        } else {
+            breakdown_group("kept", &kept, b.ctx_max, &mut lines);
+            breakdown_group("dropped", &dropped, b.ctx_max, &mut lines);
+        }
     }
 
     // The tools rows stand even without a manifest: the schema cost is
     // measured at emit, and it is the row that says how much of the window the
     // tool set alone occupies.
-    breakdown_tools(b.tool_sizes, b.ctx_max, &mut lines);
+    if b.rich {
+        breakdown_tools_table(b.tool_sizes, b.ctx_max, &mut lines);
+    } else {
+        breakdown_tools(b.tool_sizes, b.ctx_max, &mut lines);
+    }
     lines.join("\n")
 }
 
