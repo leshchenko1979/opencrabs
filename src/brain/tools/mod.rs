@@ -27,6 +27,7 @@ pub mod hashline;
 pub mod ls;
 pub mod read;
 pub mod read_state;
+pub mod retained_docs;
 pub mod seen_skills;
 pub mod write;
 

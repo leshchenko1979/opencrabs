@@ -208,6 +208,8 @@ fn test_format_context_inventory() {
         &std::collections::HashMap::new(),
         &active_tools,
         None,
+        &[],
+        0,
     );
     // The table must render the canonical bare slug. A slashed cell here would
     // contradict the `<skill-slug>` rule documented in the very same prompt —
@@ -234,9 +236,113 @@ fn test_format_context_inventory_with_auxiliary() {
         &seen_aux,
         &active_tools,
         None,
+        &[],
+        0,
     );
     assert!(table.contains("| `opencrabs-dev` | Skill |"));
     assert!(table.contains("| `opencrabs-dev/editor.md` | Skill aux |"));
+}
+
+/// #831: documents a session read whole are LISTED for the summariser, newest
+/// first, between the skill rows and the lazy-tool rows. Nothing is injected
+/// here — the list is what the summariser chooses from.
+#[test]
+fn test_format_context_inventory_with_documents() {
+    use crate::brain::tools::retained_docs::{DocEntry, DocStatus};
+
+    let active_tools = HashSet::new();
+    let documents = vec![
+        DocEntry {
+            path: std::path::PathBuf::from("/root/proj/CLAUDE.md"),
+            tokens: 1_200,
+            lines: Some(412),
+            bytes: Some(48_000),
+            status: DocStatus::Ok,
+        },
+        DocEntry {
+            path: std::path::PathBuf::from("/root/proj/huge.md"),
+            tokens: 0,
+            lines: None,
+            bytes: Some(300 * 1024),
+            status: DocStatus::TooLarge,
+        },
+        DocEntry {
+            path: std::path::PathBuf::from("/root/proj/gone.md"),
+            tokens: 0,
+            lines: None,
+            bytes: None,
+            status: DocStatus::Unreadable,
+        },
+    ];
+
+    let table = AgentService::format_context_inventory(
+        200_000,
+        &HashSet::new(),
+        &std::collections::HashMap::new(),
+        &active_tools,
+        None,
+        &documents,
+        3,
+    );
+
+    // Measured row, with its percentage of the window.
+    assert!(
+        table.contains("| `/root/proj/CLAUDE.md` | Document | 1200 | 0.6% |"),
+        "measured document row missing, got: {table}"
+    );
+    // A file too large to weigh is listed with its size and no percentage.
+    assert!(
+        table.contains("| `/root/proj/huge.md` | Document | (skipped: 300 KiB) | — |"),
+        "skipped row missing, got: {table}"
+    );
+    // An unreadable file is a row, never a failed compaction.
+    assert!(
+        table.contains("| `/root/proj/gone.md` | Document | (unreadable) | — |"),
+        "unreadable row missing, got: {table}"
+    );
+    // Omission is visible, not silent.
+    assert!(
+        table.contains("| (+3 more documents read, older) | | | |"),
+        "omission row missing, got: {table}"
+    );
+    // Newest-first order is the order the caller hands us.
+    let claude = table.find("/root/proj/CLAUDE.md").unwrap();
+    let huge = table.find("/root/proj/huge.md").unwrap();
+    let gone = table.find("/root/proj/gone.md").unwrap();
+    assert!(claude < huge && huge < gone, "document rows out of order");
+    // The budget sentence appears only when there is something to budget for.
+    assert!(table.contains(
+        "Documents re-injected on wake count against the same 5% retained-set budget."
+    ));
+}
+
+/// Acceptance #3 of #831: with no documents read, the inventory is exactly what
+/// it was before this feature — no extra row, no extra sentence.
+#[test]
+fn test_format_context_inventory_without_documents_is_unchanged() {
+    let mut active_skills = HashSet::new();
+    active_skills.insert("cost-estimate".to_string());
+    let mut active_tools = HashSet::new();
+    active_tools.insert("telegram_send".to_string());
+
+    let table = AgentService::format_context_inventory(
+        200_000,
+        &active_skills,
+        &std::collections::HashMap::new(),
+        &active_tools,
+        None,
+        &[],
+        0,
+    );
+
+    assert!(!table.contains("| Document |"), "no document rows expected");
+    assert!(!table.contains("more documents read"), "no omission row expected");
+    assert!(!table.contains("Documents re-injected on wake"));
+    assert!(table.contains("| `cost-estimate` | Skill |"));
+    assert!(table.contains("| `telegram_send` | Lazy Tool |"));
+    assert!(table.ends_with(
+        "Guidance: aim to keep active skills and lazy tools <= 5% target (~10000 tokens).\n"
+    ));
 }
 
 // ---------------------------------------------------------------------

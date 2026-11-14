@@ -713,12 +713,16 @@ impl AgentService {
         let stamp_skills = crate::brain::tools::seen_skills::stamp_skills_for_session(session_id);
         let seen_aux = crate::brain::tools::seen_skills::aux_seen_for_session(session_id);
         let active_tools = self.tool_registry.active_tools(session_id);
+        let (documents, documents_omitted) =
+            crate::brain::tools::retained_docs::inventory_documents(session_id);
         let context_inventory = Self::format_context_inventory(
             context.max_tokens,
             &stamp_skills,
             &seen_aux,
             &active_tools,
             Some(&self.tool_registry),
+            &documents,
+            documents_omitted,
         );
 
         let summary = Self::compute_compaction_summary(
@@ -1126,17 +1130,21 @@ impl AgentService {
     }
 
     /// Format dynamic markdown table of currently active skills, consumed auxiliary
-    /// skill documents, and lazy tools, their token sizes, and percentage of total context
-    /// window for the compaction prompt.
+    /// skill documents, documents the session read whole, and lazy tools, their token
+    /// sizes, and percentage of total context window for the compaction prompt.
     pub fn format_context_inventory(
         snapshot_max_tokens: usize,
         active_skills: &std::collections::HashSet<String>,
         seen_aux: &std::collections::HashMap<String, Vec<String>>,
         active_tools: &std::collections::HashSet<String>,
         tool_registry: Option<&std::sync::Arc<crate::brain::tools::ToolRegistry>>,
+        documents: &[crate::brain::tools::retained_docs::DocEntry],
+        documents_omitted: usize,
     ) -> String {
         let all_skills = crate::brain::skills::load_all_skills();
-        let mut rows = Vec::new();
+        // Cells are pre-rendered: a document row may carry `(skipped: 12 KiB)`
+        // or `—` where a skill row carries a token count and a percentage.
+        let mut rows: Vec<(String, &'static str, String, String)> = Vec::new();
         let mut total_tokens = 0usize;
 
         let mut sorted_skills: Vec<_> = active_skills.iter().collect();
@@ -1162,7 +1170,12 @@ impl AgentService {
             } else {
                 0.0
             };
-            rows.push((normalized.clone(), "Skill", tokens, pct));
+            rows.push((
+                normalized.clone(),
+                "Skill",
+                tokens.to_string(),
+                format!("{pct:.1}%"),
+            ));
 
             // Issue #216: account consumed auxiliary skill documents.
             if let Some(files) = seen_aux.get(&normalized) {
@@ -1185,11 +1198,52 @@ impl AgentService {
                     rows.push((
                         format!("{normalized}/{file_name}"),
                         "Skill aux",
-                        aux_tokens,
-                        aux_pct,
+                        aux_tokens.to_string(),
+                        format!("{aux_pct:.1}%"),
                     ));
                 }
             }
+        }
+
+        // #831: documents this session read whole. Listed, not injected — the
+        // summariser decides which ones to carry into `retained_documents`.
+        // Their tokens are deliberately NOT added to `total_tokens`: nothing is
+        // active yet, and the footer counts active skills & tools.
+        for doc in documents {
+            let size_cell = match doc.status {
+                crate::brain::tools::retained_docs::DocStatus::Ok => doc.tokens.to_string(),
+                crate::brain::tools::retained_docs::DocStatus::TooLarge => {
+                    format!("(skipped: {} KiB)", doc.bytes.unwrap_or(0).div_ceil(1024))
+                }
+                crate::brain::tools::retained_docs::DocStatus::Unreadable => {
+                    "(unreadable)".to_string()
+                }
+            };
+            let pct_cell = match doc.status {
+                crate::brain::tools::retained_docs::DocStatus::Ok => {
+                    let pct = if snapshot_max_tokens > 0 {
+                        (doc.tokens as f64 / snapshot_max_tokens as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    format!("{pct:.1}%")
+                }
+                _ => "—".to_string(),
+            };
+            rows.push((
+                doc.path.display().to_string(),
+                "Document",
+                size_cell,
+                pct_cell,
+            ));
+        }
+        if documents_omitted > 0 {
+            rows.push((
+                format!("(+{documents_omitted} more documents read, older)"),
+                "",
+                String::new(),
+                String::new(),
+            ));
         }
 
         let mut sorted_tools: Vec<_> = active_tools.iter().collect();
@@ -1210,7 +1264,12 @@ impl AgentService {
             } else {
                 0.0
             };
-            rows.push((tool_name.clone(), "Lazy Tool", tokens, pct));
+            rows.push((
+                tool_name.clone(),
+                "Lazy Tool",
+                tokens.to_string(),
+                format!("{pct:.1}%"),
+            ));
         }
 
         if rows.is_empty() {
@@ -1221,10 +1280,13 @@ impl AgentService {
         out.push_str("| Item | Type | Size (Tokens) | % Context |\n");
         out.push_str("|---|---|---|---|\n");
         for (item, kind, tokens, pct) in rows {
-            out.push_str(&format!(
-                "| `{}` | {} | {} | {:.1}% |\n",
-                item, kind, tokens, pct
-            ));
+            if kind.is_empty() {
+                // Full-width continuation row: an omission has to be visible,
+                // and it is not itself an item with a type and a size.
+                out.push_str(&format!("| {item} | | | |\n"));
+            } else {
+                out.push_str(&format!("| `{item}` | {kind} | {tokens} | {pct} |\n"));
+            }
         }
 
         let total_pct = if snapshot_max_tokens > 0 {
@@ -1238,6 +1300,11 @@ impl AgentService {
              Guidance: aim to keep active skills and lazy tools <= 5% target (~{} tokens).\n",
             total_tokens, total_pct, snapshot_max_tokens, target_tokens
         ));
+        if !documents.is_empty() {
+            out.push_str(
+                "Documents re-injected on wake count against the same 5% retained-set budget.\n",
+            );
+        }
 
         out
     }

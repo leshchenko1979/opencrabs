@@ -221,6 +221,8 @@ fn stamp_union_spans_active_and_seen_while_active_stays_narrow() {
         &std::collections::HashMap::new(),
         &std::collections::HashSet::new(),
         None,
+        &[],
+        0,
     );
     assert!(
         rendered.contains("opencrabs-dev") && rendered.contains("grafana"),

@@ -924,12 +924,16 @@ impl AgentService {
         let stamp_skills = crate::brain::tools::seen_skills::stamp_skills_for_session(session_id);
         let seen_aux = crate::brain::tools::seen_skills::aux_seen_for_session(session_id);
         let active_tools = self.tool_registry.active_tools(session_id);
+        let (documents, documents_omitted) =
+            crate::brain::tools::retained_docs::inventory_documents(session_id);
         let context_inventory = Self::format_context_inventory(
             max_tokens,
             &stamp_skills,
             &seen_aux,
             &active_tools,
             Some(&self.tool_registry),
+            &documents,
+            documents_omitted,
         );
         // Its own token: this task answers to session teardown, never to a
         // context that grew impatient.
