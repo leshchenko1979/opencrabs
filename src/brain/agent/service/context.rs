@@ -1508,6 +1508,11 @@ impl AgentService {
              - `discard_skills`: Skills or specific auxiliary documents whose tasks are complete and should be pruned to save budget.\n\
              - `required_tools`: Extended lazy tools (e.g. telegram_send, browser_navigate, cron_manage, pg_query) \
              that the agent will need immediately on turn 1.\n\
+             - `retained_documents`: absolute paths of the `Document` rows in the inventory above that the \
+             PENDING work depends on. Bodies are re-injected on wake and count against the SAME retained-set \
+             budget as skill bodies, so name only what the next turn genuinely needs — a path competes with the \
+             skills and can be shed. Only documents this session read whole are eligible; any other path is \
+             rejected. Omit the key entirely when nothing qualifies.\n\
              - BUDGET: the retained set you list must fit {budget} tokens — {ratio:.0}% of the \
              {window}-token context window. The harness MEASURES the rendered set once this compaction \
              lands and, if it is still over budget, sheds it mechanically: auxiliary documents first, \
@@ -1522,6 +1527,8 @@ impl AgentService {
                - <skill-slug>\n\
              required_tools:\n\
                - <tool-name>\n\
+             retained_documents:\n\
+               - /abs/path/to/CLAUDE.md\n\
              ```\n\n\
              ## 7. Recovery Playbook\n\
              The fresh agent has these tools available to recover any missing context:\n\

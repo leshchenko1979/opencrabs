@@ -581,3 +581,21 @@ async fn documents_block_survives_a_degraded_summary() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// #831: the manifest SPEC is the only thing that tells the summariser the
+/// `retained_documents` key exists. It lives inside `compute_compaction_summary`
+/// (an LLM-calling fn), so it cannot be reached at runtime — pin it at the
+/// source level instead. Deleting the rule or the YAML example reddens this.
+#[test]
+fn manifest_spec_documents_the_retained_documents_key() {
+    const SRC: &str = include_str!("../brain/agent/service/context.rs");
+
+    assert!(
+        SRC.contains("`retained_documents`: absolute paths"),
+        "the manifest rules must document the retained_documents key"
+    );
+    assert!(
+        SRC.contains("retained_documents:\\n\\\n               - /abs/path/to/CLAUDE.md"),
+        "the manifest YAML example must show the retained_documents key"
+    );
+}
