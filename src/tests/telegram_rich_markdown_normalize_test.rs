@@ -189,23 +189,23 @@ fn test_shield_tg_and_attach_refs_are_media_aware() {
     );
 }
 
-/// #800: image syntax is a PHOTO reference to Telegram. A reference that names a
-/// LIVE entry of any other kind — a video, or a scheme the entry's kind
-/// contradicts — is REPAIRED by dropping the `!` (the link form Telegram accepts),
-/// not escaped into literal text: the file is actually being delivered, so the
-/// reader's anchor must survive. Only a reference that names NOTHING is escaped.
+/// #800 + ADR-0001 §4.1/§4.2: image syntax renders a media BLOCK — a photo and a
+/// video — but has no document render at all. So:
 ///
-/// The demote leg is what keeps `RICH_MESSAGE_PHOTO_INVALID` off the wire, and that
-/// error costs the WHOLE rich send — the reply's text and every attachment in it,
-/// not just the one reference.
-///
-/// #801: the non-photo fixture is a VIDEO entry, not a document one. A document
-/// never rides the media array any more — Telegram accepts a `{"type":"document"}`
-/// entry and drops it — so a document fixture here would assert a shape the
-/// producer cannot emit. The rule under test is kind-generic, and `tg://video` is
-/// the live non-photo reference the video family still writes in image syntax.
+/// - a live **video** entry referenced with its own `tg://video` scheme KEEPS its
+///   embed (§4.1 measured `PageBlockVideo`, `video/mp4`, 46 848 B). Demoting it cost
+///   the reader the clip: message 96248 (2026-11-14) carried a photo and a video in
+///   one reply, and only the photo bound because this shield flattened the video to a
+///   link — and a link attaches nothing for ANY kind;
+/// - a live **document** entry is REPAIRED by dropping the `!` (the link form the
+///   client actually shows, §4.2 / #827), never escaped: the file is being delivered,
+///   so the reader's anchor must survive;
+/// - a scheme the entry's kind contradicts (`![…](tg://photo?id=vid0)`) is demoted for
+///   the same reason: `RICH_MESSAGE_PHOTO_INVALID` costs the WHOLE rich send — the
+///   reply's text and every attachment in it, not just the one reference;
+/// - only a reference that names NOTHING is escaped.
 #[test]
-fn test_shield_demotes_image_syntax_for_non_photo_entries() {
+fn test_shield_keeps_video_embed_and_demotes_documents() {
     let video = MediaEntry {
         kind: MediaKind::Video,
         id: "v0".into(),
@@ -214,30 +214,45 @@ fn test_shield_demotes_image_syntax_for_non_photo_entries() {
         name: None,
     };
 
-    // The #465 family: a video reference is written in image syntax, and image
-    // syntax is a PHOTO embed — so the `!` is dropped, never escaped.
+    // The #465 family writes a video in image syntax BECAUSE image syntax renders a
+    // media block. Keeping it is the whole point of the separate `vid` namespace.
     assert_eq!(
         shield_unresolvable_markdown_images("![v](tg://video?id=v0)", std::slice::from_ref(&video)),
-        "[v](tg://video?id=v0)",
-        "a video entry cannot ride image syntax — the `!` is dropped, not escaped"
+        "![v](tg://video?id=v0)",
+        "a live video entry keeps its inline player — demoting it loses the clip"
     );
-    // `attach://` is the bytes reference for every kind, so the entry's kind is
-    // what decides here.
+    // `attach://` is the bytes reference for every kind, and §4.1 measured delivery
+    // for `tg://<kind>` schemes only — so the mismatched scheme stays demoted.
     assert_eq!(
         shield_unresolvable_markdown_images("![v](attach://v0)", std::slice::from_ref(&video)),
         "[v](attach://v0)",
-        "an attach:// reference at a video entry is demoted too"
+        "attach:// at a video entry is not a measured render — demoted"
     );
-    // A scheme the entry's kind contradicts is the same 400 class: the reference is
-    // live, so demote rather than escape.
+    // A scheme the entry's kind contradicts is the 400 class: the reference is live,
+    // so demote rather than escape.
     assert_eq!(
         shield_unresolvable_markdown_images("![v](tg://photo?id=v0)", std::slice::from_ref(&video)),
         "[v](tg://photo?id=v0)",
         "the scheme says photo, the entry says video — never ship that"
     );
 
+    // A DOCUMENT entry has no image render in the client (§4.2): the `!` is dropped
+    // so the reference survives as the link the reader can tap (#827).
+    let document = MediaEntry {
+        kind: MediaKind::Document,
+        id: "doc0".into(),
+        url: None,
+        bytes: Some(vec![1, 2, 3]),
+        name: Some("s.md".into()),
+    };
+    assert_eq!(
+        shield_unresolvable_markdown_images("![s.md](tg://document?id=doc0)", std::slice::from_ref(&document)),
+        "[s.md](tg://document?id=doc0)",
+        "a document embed draws nothing in the client — demote to the link form"
+    );
+
     // CONTROL: the identical syntax with a PHOTO entry keeps its inline render, so
-    // the demotion cannot be a blanket flattening of every image reference.
+    // the repair cannot be a blanket flattening of every image reference.
     let photo = MediaEntry {
         kind: MediaKind::Photo,
         id: "p0".into(),

@@ -57,7 +57,7 @@ back through the API. **The API accepting a reference is not the client renderin
 client, one daemon, one day apart: the bubble whose document references were written `[label](tg://document?id=…)`
 opened when the owner tapped it, and the bubble whose references were written `![label](tg://document?id=…)` was
 neither visible nor tappable. A document entry is therefore written back as **LINK** syntax — which is also what
-`shield_unresolvable_markdown_images` demotes a live document entry to at send time, so the emit and the repair
+`shield_unresolvable_markdown_images` demotes a live document entry to link syntax at send time, so the emit and the repair
 now agree instead of the emit depending on the repair.
 
 | # | Rule | Entry emitted | Plane |
@@ -156,9 +156,13 @@ kind renders as **dead visible markdown**. Two rules follow, and both are alread
 
 - the reference rewrite and the entry push happen in the **same** operation, from the same resolved
   value — never two passes that could disagree about which references were claimed;
-- the media-array builder **demotes** a reference it cannot satisfy: image syntax aimed at a non-photo
-  entry is rewritten to link syntax rather than sent as a 400 (`rich/table.rs`). A demoted reference is
-  inert but readable; a wrong one fails the whole message.
+- the media-array builder **demotes** a reference it cannot satisfy: image syntax aimed at an entry it
+  cannot render — a **document** entry, or a scheme the entry's kind contradicts (`![…](tg://photo?id=vid0)`)
+  — is rewritten to link syntax rather than sent as a 400 (`rich/table.rs`). A demoted reference is inert
+  but readable; a wrong one fails the whole message. **A video entry is NOT demoted**: image syntax renders a
+  media block, and rule 2 measured `PageBlockVideo` delivering, so `![alt](tg://video?id=vidN)` keeps its
+  embed. Demoting it was a live defect — message 96248 (2026-11-14) carried a photo and a video in one reply
+  and only the photo bound, because the shield flattened the video to a link, and a link attaches nothing.
 
 ### 3.4 A refused entry costs one entry, never the plane (#826)
 

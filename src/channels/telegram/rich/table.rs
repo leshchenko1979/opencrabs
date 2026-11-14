@@ -782,10 +782,11 @@ pub(crate) fn shield_unresolvable_markdown_images(text: &str, media: &[MediaEntr
 }
 
 /// Scan a single line for `![alt](target)` constructs outside inline code spans
-/// and escape `!` if the target is not a resolvable photo reference. `media` is
+/// and repair each one image syntax cannot render: a live entry that has no image
+/// render is demoted to a link, an orphan is escaped. `media` is
 /// the media array of the SAME request, so a `tg`/`attach` reference is judged
 /// against the entries that request actually carries — see
-/// [`is_valid_telegram_photo_url`].
+/// [`is_valid_image_syntax_ref`].
 fn shield_line_unresolvable_images(line: &str, out: &mut String, media: &[MediaEntry]) {
     let bytes = line.as_bytes();
     let mut i = 0;
@@ -821,21 +822,26 @@ fn shield_line_unresolvable_images(line: &str, out: &mut String, media: &[MediaE
 
             // Look for matching `](target)`
             if let Some((target, match_end)) = parse_markdown_image_at(line, i) {
-                if is_valid_telegram_photo_url(target, media) {
+                if is_valid_image_syntax_ref(target, media) {
                     // Valid URL - keep as is
                     out.push_str(&line[i..match_end]);
                 } else if media_ref_names_live_entry(target, media) {
                     // #800: the reference names a LIVE entry that image syntax
-                    // cannot render — a document (or video/audio) entry, or a
-                    // scheme the entry's kind contradicts — and Telegram reads
-                    // `![alt](tg://…)` as a PHOTO reference: it answers
-                    // `RICH_MESSAGE_PHOTO_INVALID` and rejects the WHOLE rich
-                    // send, taking the reply's text and every other attachment
-                    // down with it. The same reference in LINK syntax is
-                    // accepted, so the repair is to DROP the `!`: escaping it
-                    // would leave literal `![…](…)` text on screen and lose the
-                    // reader's anchor to a file that is actually being
+                    // cannot render — a document entry (no document render exists
+                    // in image syntax, §4.2), or a scheme the entry's kind
+                    // contradicts — and Telegram reads `![alt](tg://…)` as a
+                    // PHOTO reference: it answers `RICH_MESSAGE_PHOTO_INVALID` and
+                    // rejects the WHOLE rich send, taking the reply's text and
+                    // every other attachment down with it. The same reference in
+                    // LINK syntax is accepted, so the repair is to DROP the `!`:
+                    // escaping it would leave literal `![…](…)` text on screen and
+                    // lose the reader's anchor to a file that is actually being
                     // delivered.
+                    //
+                    // A LIVE VIDEO entry does NOT reach this branch: it is valid
+                    // image syntax (see [`is_valid_image_syntax_ref`]), so a clip
+                    // keeps its inline player instead of being demoted to a link
+                    // that attaches nothing — the defect message 96248 measured.
                     out.push_str(&line[i + 1..match_end]);
                 } else {
                     // Unresolvable URL - escape leading `!` to `\!`
@@ -988,7 +994,7 @@ fn split_media_refs_onto_own_lines(line: &str, out: &mut String, media: &[MediaE
             && bytes.get(i + 1).copied() == Some(b'[')
             && (i == 0 || bytes[i - 1] != b'\\')
             && let Some((target, end)) = parse_markdown_image_at(line, i)
-            && is_valid_telegram_photo_url(target, media)
+            && is_valid_image_syntax_ref(target, media)
             // Only a titled reference moves. An untitled one has no caption to
             // gain, so splitting it would cost inline placement for nothing —
             // and placement is what issue #360 asks the rich plane to keep.
@@ -1025,47 +1031,64 @@ fn split_media_refs_onto_own_lines(line: &str, out: &mut String, media: &[MediaE
     out.push_str(&parts.join("\n"));
 }
 
-/// Check whether `target` is a valid Telegram photo URL/ref **for this request**.
+/// Check whether `target` is a reference image syntax can actually render **in this
+/// request** — i.e. whether `![alt](target)` may stay an embed.
 ///
 /// - `http://` / `https://` — valid by scheme; Telegram fetches the URL itself.
-/// - `tg://photo?id=<X>` / `attach://<X>` — valid **iff** `<X>` names an entry in
-///   `media`, the media array of the very request this body belongs to, **AND that
-///   entry's kind is a photo**. Scheme alone is NOT sufficient: a reference with no
-///   matching entry is rejected with `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND`, which fails
-///   the whole message rather than that one image (#334).
-/// - `tg://document?id=<X>` / `tg://video?id=<X>` / `tg://audio?id=<X>` — never valid
-///   here, whatever the entry says. Markdown image syntax is a PHOTO reference to
-///   Telegram: aimed at a `document` entry it answers `RICH_MESSAGE_PHOTO_INVALID` and
-///   rejects the entire rich send, dropping the reply's text and every other
-///   attachment with it (#800). The caller demotes these to LINK syntax instead —
-///   see [`media_ref_names_live_entry`].
+/// - `tg://photo?id=<X>` / `attach://<X>` naming a **photo** entry — valid. Scheme
+///   alone is NOT sufficient: a reference with no matching entry is rejected with
+///   `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND`, which fails the whole message rather than
+///   that one image (#334).
+/// - `tg://video?id=<X>` naming a **video** entry — valid, and this is measured, not
+///   inferred: ADR-0001 §4.1 wrote exactly that reference against a `{type:video}`
+///   entry and the API returned `PageBlockVideo`, `video/mp4`, 46 848 B. Image syntax
+///   renders a media BLOCK, and a video is one. Treating this as photo-only was a real
+///   defect: the rewriter emits `![alt](tg://video?id=vidN)` (see
+///   `utils/image.rs`'s video family), and this guard demoted it back to link syntax —
+///   which attaches nothing for ANY kind — so a video could never render. Measured on
+///   message 96248 (2026-11-14): the photo bound, the video did not.
+/// - `tg://document?id=<X>` naming a **document** entry — NOT valid here. The client
+///   measurement in §4.2 is the authority: an embed aimed at a document id drew
+///   nothing at all while the same reference in link syntax was visible and opened
+///   (#827). Image syntax carries no document render, so the caller demotes it to a
+///   link — see [`media_ref_names_live_entry`].
+/// - a scheme the entry's kind contradicts (`![…](tg://photo?id=vid0)`) — NOT valid:
+///   Telegram answers `RICH_MESSAGE_PHOTO_INVALID` and rejects the entire rich send,
+///   dropping the reply's text and every other attachment with it (#800). Demoted by
+///   the caller, never escaped.
 /// - anything else — invalid (a local path, a bare string).
 ///
 /// An empty `media` therefore means every `tg`/`attach` reference is an orphan, which is
 /// the correct reading for the builders that carry no media array at all.
-fn is_valid_telegram_photo_url(target: &str, media: &[MediaEntry]) -> bool {
+fn is_valid_image_syntax_ref(target: &str, media: &[MediaEntry]) -> bool {
     let url = strip_angle_wrappers(target);
 
     if url.starts_with("http://") || url.starts_with("https://") {
         return true;
     }
 
-    // BOTH halves must agree: the reference's own scheme has to be a photo scheme,
-    // and the entry it names has to be a photo. Telegram resolves image syntax as a
-    // photo embed, so a `tg://document` reference is rejected on the scheme alone
-    // and a document ENTRY is rejected on the kind alone.
-    media_ref_is_photo_scheme(url)
-        && media_ref_id(url)
-            .and_then(|id| media_entry(id, media))
-            .is_some_and(|m| m.kind == MediaKind::Photo)
+    // The ENTRY decides which scheme can render it, and both halves must agree: a
+    // `tg://video` reference is rejected on the scheme alone when the entry is a
+    // photo, and a photo reference is rejected on the kind alone when the entry is
+    // not one.
+    match media_ref_id(url).and_then(|id| media_entry(id, media)) {
+        Some(entry) => match entry.kind {
+            MediaKind::Photo => media_ref_is_photo_scheme(url),
+            MediaKind::Video => media_ref_is_video_scheme(url),
+            // No document render exists in image syntax (§4.2), whatever the scheme.
+            MediaKind::Document => false,
+        },
+        None => false,
+    }
 }
 
 /// Whether `target` names an entry in this request's media array — of ANY kind.
 ///
-/// Separated from [`is_valid_telegram_photo_url`] because the two want different
+/// Separated from [`is_valid_image_syntax_ref`] because the two want different
 /// repairs: an orphan reference names nothing, has nothing to render, and is ESCAPED;
-/// a LIVE entry is a file that is actually being delivered, where only the syntax is
-/// wrong — so its `!` is dropped and the reference survives as the link Telegram
+/// a LIVE entry that image syntax cannot render (a document, or a scheme the entry's
+/// kind contradicts) is a file that is actually being delivered, where only the syntax
+/// is wrong — so its `!` is dropped and the reference survives as the link Telegram
 /// accepts, keeping the reader's anchor (#800).
 fn media_ref_names_live_entry(target: &str, media: &[MediaEntry]) -> bool {
     media_ref_id(target)
@@ -1076,9 +1099,19 @@ fn media_ref_names_live_entry(target: &str, media: &[MediaEntry]) -> bool {
 /// Whether the reference's own scheme is a photo scheme — `tg://photo?id=` or
 /// `attach://`. `attach://` is the bytes reference used for photos AND documents
 /// alike, so it defers to the entry's kind; `tg://video` / `tg://document` /
-/// `tg://audio` cannot ride image syntax at all.
+/// `tg://audio` cannot ride a photo entry's image syntax at all.
 fn media_ref_is_photo_scheme(url: &str) -> bool {
     url.strip_prefix("attach://").is_some() || url.starts_with("tg://photo?")
+}
+
+/// Whether the reference's own scheme is the VIDEO scheme — `tg://video?id=`.
+///
+/// Video is its own render in image syntax (ADR-0001 §4.1: `PageBlockVideo`,
+/// `video/mp4`, 46 848 B), so it must be matched to its own scheme and never to the
+/// photo one: `![…](tg://photo?id=vid0)` aimed at a video entry is
+/// `RICH_MESSAGE_PHOTO_INVALID`, which costs the whole rich send.
+fn media_ref_is_video_scheme(url: &str) -> bool {
+    url.starts_with("tg://video?")
 }
 
 /// The `<X>` in a `tg://<kind>?id=<X>` or `attach://<X>` reference, or `None` when

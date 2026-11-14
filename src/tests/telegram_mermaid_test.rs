@@ -753,13 +753,15 @@ fn build_body_markdown_media_target_neutralises_orphan_refs() {
 /// #1921's own half survives — a reference is still judged against THIS request's
 /// media array, never by scheme alone.
 ///
-/// #801: the fixture is a VIDEO entry. The document kind was this test's original
-/// subject, but no document ever rides the media array now — Telegram accepts a
-/// `{"type":"document"}` entry and delivers nothing — so a document fixture would
-/// pin a shape the producer cannot emit. The video family still writes image syntax
-/// (`![clip](tg://video?id=v0)`), which is exactly the 400 class this guards.
+/// ADR-0001 §4.1/§4.2: the form follows the ENTRY's kind, and the two non-photo
+/// kinds differ. A **video** entry renders in image syntax (§4.1: `PageBlockVideo`,
+/// `video/mp4`, 46 848 B), so the video family's `![clip](tg://video?id=v0)` must
+/// reach the wire intact — flattening it to a link is what cost message 96248 its
+/// clip on 2026-11-14. A **document** entry has no image render at all (§4.2: the
+/// embed drew nothing in the client, while the link was visible and opened), so an
+/// image reference at a document entry is repaired by dropping the `!`.
 #[test]
-fn non_photo_refs_ride_link_syntax_never_image_syntax() {
+fn the_form_follows_the_entrys_kind() {
     let media = vec![MediaEntry {
         kind: MediaKind::Video,
         id: "v0".into(),
@@ -785,8 +787,9 @@ fn non_photo_refs_ride_link_syntax_never_image_syntax() {
         "the link form is the one Telegram accepts and must pass through untouched"
     );
 
-    // Image syntax aimed at that same live entry is DEMOTED — never escaped, never
-    // shipped: the `!` is dropped and the reference survives as a link.
+    // Image syntax aimed at that same live VIDEO entry is KEPT: it is the form §4.1
+    // measured delivering a playable block. Demoting it here is what silently cost
+    // the clip in message 96248 — the photo bound, the video did not.
     let body = build_body_markdown_media_target(
         -100,
         None,
@@ -799,12 +802,33 @@ fn non_photo_refs_ride_link_syntax_never_image_syntax() {
         .as_str()
         .expect("rich markdown");
     assert_eq!(
-        md, "kept [clip](tg://video?id=v0)",
-        "image syntax at a video entry is the 400 class — demote it to the link form"
+        md, "kept ![clip](tg://video?id=v0)",
+        "a live video entry keeps image syntax — §4.1 measured the block it renders"
     );
-    assert!(
-        !md.contains("![clip"),
-        "no image syntax may reach the wire for a video entry: {md}"
+
+    // A DOCUMENT entry is the opposite case: no image render exists (§4.2), so the
+    // `!` is dropped and the reference survives as the link the client shows.
+    let doc_media = vec![MediaEntry {
+        kind: MediaKind::Document,
+        id: "doc0".into(),
+        url: None,
+        bytes: Some(b"%PDF-1.4".to_vec()),
+        name: Some("d.pdf".into()),
+    }];
+    let body = build_body_markdown_media_target(
+        -100,
+        None,
+        None,
+        "![d.pdf](tg://document?id=doc0)",
+        &doc_media,
+        None,
+    );
+    let md = body["rich_message"]["markdown"]
+        .as_str()
+        .expect("rich markdown");
+    assert_eq!(
+        md, "[d.pdf](tg://document?id=doc0)",
+        "a document embed draws nothing in the client — demote it to the link form"
     );
 
     // CONTROL: the same syntax with a PHOTO entry keeps its inline render, so the
