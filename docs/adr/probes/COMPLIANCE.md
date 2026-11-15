@@ -4,8 +4,8 @@
 **Binary under test:** opencrabs 0.5.4 @ 90161a32ed32cd20d3e163f95da8b8b1829a4930
 **Evidence recorded at:** 2026-11-15T13:04:10Z
 **Since then:** The L10/L16 observations below were emitted by 90161a32 (swapped 10:22:46Z), not by the tip that is live now. Checked rather than assumed: `git diff --stat 90161a32..3356c99d -- src/utils/image.rs src/channels/telegram/rich/` is EMPTY, so the whole #823 surface is byte-identical in the running binary and these two verdicts are not stale. The rest of the range is another lane's #831 compaction work (13 files under src/, none of them the rich plane).
-**Runner:** `python3 docs/adr/probes/run.py` — **exit 1**
-**39/41 passed · 2 failed · 0 missing (missing counts as failed)**
+**Runner:** `python3 docs/adr/probes/run.py` — **exit 0**
+**41/41 passed · 0 failed · 0 missing (missing counts as failed)**
 
 > **GENERATED FILE — do not hand-edit.** Written by `python3 docs/adr/probes/run.py --report`
 > from `manifest.json` + `live-evidence.json` in the same run that printed these counts, so a
@@ -49,9 +49,9 @@
 | §11 | `ci-gate` | ci | PASS |
 | §2 rule 5 | `live-l7-tool-plane-local-image-detached-floor` | live | PASS |
 | §2 rule 6 | `live-l8-local-image-link-syntax-attaches` | live | PASS |
-| §3.2 | `live-l9-mixed-kinds-one-message` | live | FAIL |
+| §3.2 | `live-l9-mixed-kinds-one-message` | live | PASS |
 | §2 rule 6, §4.3 | `live-l10-document-embed-keeps-its-entry` | live | PASS |
-| §2 rule 2 | `live-l11-video-embed-is-a-video` | live | FAIL |
+| §2 rule 2 | `live-l11-video-embed-is-a-video` | live | PASS |
 | §3.2 caption | `live-l12-caption-rides-the-title` | live | PASS |
 | §3.2 caption | `live-l13-inexpressible-caption-dropped` | live | PASS |
 | §3.5, #826 | `live-l14-dedup-two-spellings-one-file` | live | PASS |
@@ -137,15 +137,15 @@
 - **Probe:** a local image referenced in LINK syntax: `[caption-ok.png](/root/.../fixtures/caption-ok.png)`
 - **Analysis:** plane: rich — this was this lane's OWN reply, so the rewriter ran. Telemetry carries `kind=rich_api path=sendRichMessage` for the id. §3.2's form-follows-kind rule holds for images: either markdown form attaches.
 
-### `live-l9-mixed-kinds-one-message` — §3.2 → **FAIL**
+### `live-l9-mixed-kinds-one-message` — §3.2 → **PASS**
 
-- **Claim under test:** one reply carrying an image, a video and a document produces ONE rich bubble in which each reference is answered by its own kind: the image binds as a photo entry, the video as a video entry, and the document as a link-form `tg://document` reference (ADR §4.2 measures that a document deliberately never rides as an entry - its embed form draws nothing in the client). Not three entries: the document is a reference by design.
-- **tg_get_messages** (msg `96248`, chat `-1003936827469`): ONE rich bubble. Photo attached (PageBlockPhoto, photo 5456183027160524023, 512x512). Video and document did NOT attach: both survive only as TextUrl paragraphs, documents: []
-- **Bubbles observed:** 1 · **sent at:** 2026-11-14T19:53:50Z
-- **Probe:** one reply carrying three kinds at once: local image + local video + local document (§3.2 namespace split)
-- **log:** `19:53:50.732547 kind=rich_api path=sendRichMessage chat=-1003936827469 thread=Some(31847) msg=96248 len=966 hash8=ef3fd4ef`
-- **log:** `absence sweep same instant for 'send failed|falling back|degrad|IMAGE_PROCESS_FAILED|failed to read promoted' -> EMPTY (count 0)`
-- **Analysis:** CLAIM CORRECTED 2026-11-14, verdict left FAIL. The original claim demanded THREE distinct media ENTRIES, but ADR §4.2 measures that a document deliberately rides as a LINK-FORM REFERENCE and never as an entry (the embed form draws nothing in the client). So the honest claim is: one bubble, image bound as a photo entry, video bound as a video entry, document present as a link reference. Measured on 96248 (raw TL): ONE bubble ✓, photo entry ✓ (5456183027160524023), video ✗ (left as TextUrl `tg://video?id=vid0`, `documents: []`), document link ✓ by design. The video half is the real defect: the shield demoted the rewriter's own `![...](tg://video?id=vid0)` embed because it judged image syntax photo-only. Fixed in 2b9789721; this verdict stays FAIL until a post-ship re-probe measures the fixed binary.
+- **Claim under test:** one reply carrying an image, a video and a document produces ONE rich bubble in which each reference is answered by its own kind: the image binds as a photo entry, the video as a video entry, and the document as a document entry. Three entries, one bubble — the document is NOT a link reference: §4.3's A/B measured the link form returning `documents:[]`, so a link-form document would be a file delivered nowhere
+- **tg_get_messages** (msg `96949`, chat `-1003936827469`): ONE rich bubble (grouped_id null). Photo bound as PageBlockPhoto 5456183027160524023 (512x512). Video bound as PageBlockVideo, document_id 5462918480313493543 (video/mp4, 1853 B, vid0.mp4). Two PageBlockDocument blocks: doc-sample.md (text/markdown 73 B) and oversize-photo.png (image/png 12,598,410 B). All three documents present in rich_message.documents.
+- **Bubbles observed:** 1 · **sent at:** 2026-11-15T13:08:11Z
+- **Probe:** one reply carrying three kinds at once: local image + local video + local document (ADR 3.2 namespace split)
+- **log:** `13:08:11.732948 INFO telegram::telemetry: Telegram send ok: origin=turn detail=- session=- kind=rich_api path=sendRichMessage chat=-1003936827469 thread=Some(31847) msg=96949 len=1778`
+- **log:** `same message: rich verdict true (rich_messages=true, structured=true, media_forced=true, table=true)`
+- **Analysis:** RE-PROBED AND PASSED 2026-11-15. The pre-fix measurement (msg 96248, 2026-11-14) delivered the photo only: video and document survived as TextUrl paragraphs with documents: []. Root cause was pipeline pass 2 (shield_unresolvable_markdown_images) judging image syntax photo-only and stripping the '!' from the rewriter's own embed, fixed in 2b9789721 (kind-aware scheme). The earlier note's alternative reading (b) - that the 64-byte fixture was refused - is DEAD: this bubble carries the same small fixtures and every entry bound. Reading (a) is also dead: a video and a document DO bind beside a photo in one bubble. Note also that the old claim demanded three media ENTRIES on the strength of ADR 4.2; 4.3's A/B (L17) falsified 4.2, and the three-entry claim is now met on the wire.
 
 ### `live-l10-document-embed-keeps-its-entry` — §2 rule 6, §4.3 → **PASS**
 
@@ -157,14 +157,15 @@
 - **log:** `11:01:08.666819 INFO telegram::telemetry: Telegram send ok: origin=turn detail=- session=- kind=rich_api path=sendRichMessage chat=-1003936827469 thread=Some(31847) msg=96838 len=1296 hash8=fecc43e9`
 - **Analysis:** RE-SCORED 2026-11-15 against ADR §4.3, and the CLAIM ITSELF INVERTED. The old claim asserted the shield DEMOTES an authored document embed to link syntax, and PASS meant the demotion happened (msgs 96212 / 96341, pre-fix, kept below as history). §4.3's A/B (L17: 96654 embed bound, 96655 link returned `documents:[]`) showed the link form is a DEAD reference — so the demotion was destroying the delivery, not protecting it, and the old PASS certified the defect. The shield now keeps a document embed; 96838 measures the result on the rewriter's own path (`origin=turn`): the entry BOUND.
 
-### `live-l11-video-embed-is-a-video` — §2 rule 2 → **FAIL**
+### `live-l11-video-embed-is-a-video` — §2 rule 2 → **PASS**
 
 - **Claim under test:** a local MP4 in embed syntax arrives as a `video` media entry (playable), not as a document and not as a dead reference
-- **tg_get_messages** (msg `96248`, chat `-1003936827469`): no video in the stored message: documents [], and the video reference survives only as TextUrl "tg://video?id=vid0"
-- **Bubbles observed:** None · **sent at:** 2026-11-14T19:53:50Z
+- **tg_get_messages** (msg `96949`, chat `-1003936827469`): the video BOUND: PageBlockVideo at block index 4, answered by rich_message.documents entry 5462918480313493543 (video/mp4, 1853 B, vid0.mp4). documents is NOT empty (3 entries).
+- **Bubbles observed:** None · **sent at:** 2026-11-15T13:08:11Z
 - **Probe:** a local video referenced in embed syntax, in a reply that also carries a photo and a document
-- **log:** `19:53:50.732547 kind=rich_api path=sendRichMessage msg=96248 — accepted, no error`
-- **Analysis:** §2 rule 2 is not met on this message. The emit is EMBED for video (r6-photo-and-video-emit-embed passes statically), so this is not the link-form artefact L8 records — an embed-syntax video entry still failed to bind beside a photo that did. Two readings remain open and this probe does not separate them: (a) a video entry is dropped when it shares a message with a photo, or (b) the 64-byte fixture was refused. §4.1 measured a 46 848-byte mp4 delivering PageBlockVideo, so (b) is live and must be excluded by re-probing with a full-size mp4 before any code change is attributed. RE-PROBE OWED: the root cause was found after this measurement - pipeline pass 2 (`shield_unresolvable_markdown_images`) judged image syntax photo-only and stripped the `!` from the rewriter's own `![...](tg://video?id=vid0)`, and a link binds nothing for any kind. Fixed in 2b9789721 (kind-aware: Photo->photo scheme, Video->tg://video scheme, Document->never). This FAIL is the PRE-FIX repro; a post-ship re-probe of the same reply re-scores it.
+- **log:** `13:08:11.732948 INFO telegram::telemetry: Telegram send ok: origin=turn detail=- session=- kind=rich_api path=sendRichMessage chat=-1003936827469 thread=Some(31847) msg=96949 len=1778`
+- **log:** `same message: rich verdict true (rich_messages=true, structured=true, media_forced=true, table=true)`
+- **Analysis:** RE-PROBED AND PASSED 2026-11-15, and BOTH open readings of the pre-fix failure are now excluded. (a) 'a video entry is dropped when it shares a message with a photo' - FALSE: this bubble carries a photo AND a video AND two documents, all bound. (b) 'the 64-byte fixture was refused' - FALSE: the same 1853 B fixture binds here. The actual cause was the pass-2 shield stripping the '!' from the rewriter's own embed (2b9789721). ADR 2 rule 2 is met on this message.
 
 ### `live-l12-caption-rides-the-title` — §3.2 caption → **PASS**
 
