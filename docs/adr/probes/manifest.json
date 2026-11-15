@@ -48,11 +48,11 @@
    "cmd": "grep -qF 'every_file_the_rich_plane_cannot_take_still_has_a_delivery_leg' src/tests/telegram_file_delivery_test.rs"
   },
   {
-   "id": "r6-document-emit-is-link",
-   "rule": "§2 rule 6",
-   "claim": "a document reference is emitted in LINK syntax and never in image syntax",
+   "id": "r6-document-emit-is-embed",
+   "rule": "§2 rule 6, §4.3",
+   "claim": "a document reference is emitted in EMBED syntax — the only form that carries an entry (§4.3's A/B: the link form returns `documents:[]`) — and the old LINK emit literal is gone",
    "kind": "static",
-   "cmd": "grep -qF '[{alt}](tg://document?id={id}{title})' src/utils/image.rs && ! grep -qF '![{alt}](tg://document' src/utils/image.rs"
+   "cmd": "grep -qF '![{alt}](tg://document?id={id}{title})' src/utils/image.rs && ! grep -qF 'format!(\"[{alt}](tg://document' src/utils/image.rs"
   },
   {
    "id": "r6-photo-and-video-emit-embed",
@@ -242,15 +242,15 @@
   {
    "id": "live-l9-mixed-kinds-one-message",
    "rule": "§3.2",
-   "claim": "one reply carrying an image, a video and a document produces ONE rich bubble in which each reference is answered by its own kind: the image binds as a photo entry, the video as a video entry, and the document as a link-form `tg://document` reference (ADR §4.2 measures that a document deliberately never rides as an entry - its embed form draws nothing in the client). Not three entries: the document is a reference by design.",
+   "claim": "one reply carrying an image, a video and a document produces ONE rich bubble in which each reference is answered by its own kind: the image binds as a photo entry, the video as a video entry, and the document as a document entry. Three entries, one bubble — the document is NOT a link reference: §4.3's A/B measured the link form returning `documents:[]`, so a link-form document would be a file delivered nowhere",
    "kind": "live",
    "evidence_id": "L9",
    "claim_revised": "2026-11-14: the original claim demanded three media ENTRIES, which contradicts ADR §4.2. See live-evidence L9."
   },
   {
-   "id": "live-l10-document-embed-demoted-to-link",
-   "rule": "§2 rule 6, #827",
-   "claim": "a document authored in EMBED syntax is demoted to link syntax at send time (`shield_unresolvable_markdown_images`), so it lands tappable instead of drawing nothing — the #827 failure mode cannot be re-authored from a reply",
+   "id": "live-l10-document-embed-keeps-its-entry",
+   "rule": "§2 rule 6, §4.3",
+   "claim": "a document authored in EMBED syntax keeps its embed through the send-time shield and binds as a document entry — the rewriter emits `![alt](tg://document?id=docN)` and the message comes back with `PageBlockDocument` and a non-empty `documents` array. The inverse claim (the shield DEMOTES an authored embed to link syntax, #827) is falsified: §4.3's A/B measured the link form returning `documents:[]`, a dead reference that delivers nothing",
    "kind": "live",
    "evidence_id": "L10"
   },

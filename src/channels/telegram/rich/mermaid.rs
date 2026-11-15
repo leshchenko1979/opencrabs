@@ -520,9 +520,14 @@ pub(crate) enum MediaKind {
     /// `PageBlockDocument` — `text/markdown` 37 B, `application/pdf` 200 B, in a
     /// DM and in a forum topic (ADR-0001 §4.1). `utils/image.rs` emits it again,
     /// one entry per file, and the reference in the body is the
-    /// `[label](tg://document?id=docN)` the same call wrote — LINK syntax, since
-    /// #827 measured in the client that an embed aimed at a document id draws
-    /// nothing (ADR-0001 §4.2).
+    /// `![label](tg://document?id=docN)` the same call wrote — EMBED syntax, since
+    /// §4.3's A/B (2026-11-15) measured the two forms against the Bot API with a
+    /// real `attach://docN` part each: the embed returned `PageBlockDocument` +
+    /// `documents:[1]` (73 B, `text/markdown`), the LINK a bare `TextUrl` with
+    /// `documents:[]` — the entry silently discarded, which is why a tapped
+    /// document link did nothing. §4.2's opposite conclusion came from hand-written
+    /// `tg://document?id=doc0` references that carried no media entry at all
+    /// (msg 96084's shape), i.e. a dead reference measured as if it were a form.
     ///
     /// `as_str` stays the ONE string mapping the shield and the orphan register
     /// key on: a kind whose mapping silently vanished would make a stray entry

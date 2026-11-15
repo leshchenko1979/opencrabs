@@ -826,17 +826,23 @@ fn shield_line_unresolvable_images(line: &str, out: &mut String, media: &[MediaE
                     // Valid URL - keep as is
                     out.push_str(&line[i..match_end]);
                 } else if media_ref_names_live_entry(target, media) {
-                    // #800: the reference names a LIVE entry that image syntax
-                    // cannot render — a document entry (no document render exists
-                    // in image syntax, §4.2), or a scheme the entry's kind
-                    // contradicts — and Telegram reads `![alt](tg://…)` as a
-                    // PHOTO reference: it answers `RICH_MESSAGE_PHOTO_INVALID` and
-                    // rejects the WHOLE rich send, taking the reply's text and
-                    // every other attachment down with it. The same reference in
-                    // LINK syntax is accepted, so the repair is to DROP the `!`:
-                    // escaping it would leave literal `![…](…)` text on screen and
-                    // lose the reader's anchor to a file that is actually being
-                    // delivered.
+                    // #800: the reference names a LIVE entry whose SCHEME
+                    // contradicts its kind (`![…](tg://photo?id=doc0)`) and
+                    // Telegram reads `![alt](tg://…)` as a PHOTO reference: it
+                    // answers `RICH_MESSAGE_PHOTO_INVALID` and rejects the WHOLE
+                    // rich send, taking the reply's text and every other
+                    // attachment down with it. The repair is to DROP the `!`:
+                    // escaping it would leave literal `![…](…)` text on screen.
+                    //
+                    // Dropping the `!` costs the ENTRY — it is not a delivery path.
+                    // ADR-0001 §4.3's A/B (2026-11-15) sent one `sendRichMessage`
+                    // per form with a real `attach://docN` part: the embed returned
+                    // `PageBlockDocument` + `documents:[1]`, the link a bare
+                    // `TextUrl` with `documents:[]` — silently discarded. What the
+                    // demote preserves is the reader's TEXT, nothing else, which is
+                    // still better than a rejected send. Our own rewriter never
+                    // produces this shape (it emits the matching scheme per kind),
+                    // so the branch is a guard for hand-written references only.
                     //
                     // A LIVE VIDEO entry does NOT reach this branch: it is valid
                     // image syntax (see [`is_valid_image_syntax_ref`]), so a clip
@@ -1091,10 +1097,15 @@ fn is_valid_image_syntax_ref(target: &str, media: &[MediaEntry]) -> bool {
 ///
 /// Separated from [`is_valid_image_syntax_ref`] because the two want different
 /// repairs: an orphan reference names nothing, has nothing to render, and is ESCAPED;
-/// a LIVE entry that image syntax cannot render (a document, or a scheme the entry's
-/// kind contradicts) is a file that is actually being delivered, where only the syntax
-/// is wrong — so its `!` is dropped and the reference survives as the link Telegram
-/// accepts, keeping the reader's anchor (#800).
+/// a LIVE entry whose SCHEME contradicts its kind (`![…](tg://photo?id=doc0)`) would
+/// fail the whole rich send, where only the syntax is wrong — so its `!` is dropped
+/// and the reference survives as text, keeping the reader's anchor (#800).
+///
+/// A document entry does NOT reach the demote: `tg://document?id=` naming a document
+/// entry is valid image syntax since ADR-0001 §4.3's A/B (2026-11-15), where the
+/// embed returned `PageBlockDocument` + `documents:[1]` and the link returned
+/// `documents:[]`. The demote is a last resort that preserves TEXT only — a link
+/// delivers nothing.
 fn media_ref_names_live_entry(target: &str, media: &[MediaEntry]) -> bool {
     media_ref_id(target)
         .and_then(|id| media_entry(id, media))

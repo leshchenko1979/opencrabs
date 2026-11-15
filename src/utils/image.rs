@@ -2447,7 +2447,7 @@ impl MediaSource for ResolvedFileRef {
 /// A text prepared for the rich media plane's file half (#1918 → #820).
 ///
 /// The document twin of [`rewrite_local_images`]. Every resolvable file becomes
-/// a LINK reference `[label](tg://document?id=docN)` in place, with a
+/// an EMBED reference `![label](tg://document?id=docN)` in place, with a
 /// [`ResolvedFileRef`] recorded so the rich request can carry the bytes — with
 /// ONE deliberate exception that falls back to the plain `📎 <label>` marker and
 /// records no entry: a file this turn already delivered, which needs no second
@@ -2463,8 +2463,8 @@ impl MediaSource for ResolvedFileRef {
 /// copy of that list would be a second home for one predicate.
 #[derive(Debug, Clone, Default)]
 pub struct LocalFileRewrite {
-    /// Input with every resolvable local-file reference replaced IN PLACE by a
-    /// LINK reference `[alt](tg://document?id=docN)`. Links inside code
+    /// Input with every resolvable local-file reference replaced IN PLACE by an
+    /// EMBED reference `![alt](tg://document?id=docN)`. Links inside code
     /// spans, remote targets and existing Telegram media refs are left
     /// byte-identical; a file the rich plane declines gets the plain
     /// `📎 <label>` marker instead.
