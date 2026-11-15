@@ -492,7 +492,7 @@ fn a_retained_document_states_its_size_share_and_loc() {
         .find(|l| l.contains("docs"))
         .expect("a docs row");
     assert!(head.contains("1 entry"), "entry count: {head}");
-    assert!(head.contains("20.0 KB"), "group size: {head}");
+    assert!(head.contains("20.0KB"), "group size: {head}");
     assert!(head.contains("2.0%"), "group share: {head}");
     let detail = out
         .lines()
@@ -500,7 +500,7 @@ fn a_retained_document_states_its_size_share_and_loc() {
         .nth(1)
         .expect("a docs detail row");
     assert!(detail.contains("`/root/proj/AGENTS.md`"), "{detail}");
-    assert!(detail.contains("20.0 KB"), "{detail}");
+    assert!(detail.contains("20.0KB"), "{detail}");
     assert!(detail.contains("2.0%"), "{detail}");
     assert!(detail.contains("312 LOC"), "{detail}");
 }
@@ -577,7 +577,7 @@ fn the_rich_leg_tabulates_documents_with_a_reconciling_total() {
     // The group's own total is the SUM of its rows — the card's standing claim.
     let total = out
         .lines()
-        .find(|l| l.starts_with("| **total** | 25.0 KB | 2.5% | 402 |"))
+        .find(|l| l.starts_with("| **total** | 25.0KB | 2.5% | 402 |"))
         .expect("a docs total row");
     assert!(total.contains("2.5%"), "{total}");
 }
