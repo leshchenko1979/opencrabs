@@ -279,13 +279,6 @@ pub(crate) fn build_progress_cb(
                 // state mutex guards rendering, not disk work. `None` when the
                 // notice is off, so the flag costs nothing when disabled.
                 let notice = if Config::current().agent.compaction_notice {
-                    // #824 follow-up: the tables need the rich MARKDOWN plane,
-                    // which is reachable only with rich messages on and the
-                    // room not quiet (a quiet room suppresses the promotion
-                    // that lifts a table-bearing card out of the flow block).
-                    let tg = Config::current();
-                    let rich = tg.channels.telegram.rich_messages
-                        && !tg.channels.telegram.is_quiet_for(&chat_id.0.to_string());
                     Some(compaction_breakdown(&CompactionBreakdown {
                         before_tokens,
                         after_tokens,
@@ -297,7 +290,6 @@ pub(crate) fn build_progress_cb(
                         summary: &summary,
                         scope,
                         input_tokens,
-                        rich,
                         documents: &retained_documents,
                         document_refusals: &document_refusals,
                     }))

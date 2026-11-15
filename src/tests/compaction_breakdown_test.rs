@@ -58,7 +58,6 @@ fn card(summary: &str) -> String {
         summary,
         scope: "delta",
         input_tokens: 41_300,
-        rich: false,
         documents: &[],
         document_refusals: &[],
     })
@@ -239,7 +238,6 @@ fn an_unknown_ceiling_states_no_share() {
         summary: no_manifest(),
         scope: "delta",
         input_tokens: 41_300,
-        rich: false,
         documents: &[],
         document_refusals: &[],
     });
@@ -282,7 +280,6 @@ fn a_compaction_that_grew_the_context_reads_as_growth() {
         summary: no_manifest(),
         scope: "delta",
         input_tokens: 41_300,
-        rich: false,
         documents: &[],
         document_refusals: &[],
     });
@@ -303,7 +300,6 @@ fn a_long_silent_window_reads_in_minutes() {
         summary: no_manifest(),
         scope: "delta",
         input_tokens: 41_300,
-        rich: false,
         documents: &[],
         document_refusals: &[],
     });
@@ -321,8 +317,9 @@ fn numbered_document() -> &'static str {
      a longer body that runs on for a while so its size differs from the first\n"
 }
 
-/// A card rendered for the RICH plane, where pipe tables are legal.
-fn rich_card(summary: &str) -> String {
+/// A card for a CONSOLIDATION pass, so the two scope labels are proven
+/// distinct rather than both reading `delta`.
+fn consolidate_card(summary: &str) -> String {
     let sizes = tool_sizes();
     compaction_breakdown(&CompactionBreakdown {
         before_tokens: 130_600,
@@ -337,7 +334,6 @@ fn rich_card(summary: &str) -> String {
         // are proven distinct rather than both reading `delta`.
         scope: "consolidate",
         input_tokens: 130_600,
-        rich: true,
         documents: &[],
         document_refusals: &[],
     })
@@ -364,45 +360,46 @@ fn the_classic_leg_states_the_summary_total_only() {
 }
 
 #[test]
-fn the_rich_leg_renders_skills_as_a_table() {
-    // The owner's ask: "for the rich format leg, use tables for skills and
-    // tools lists". The tools LIST is now a single total row (owner order
-    // 2026-11-15), so only the skills groups remain tabular — and a table is
-    // legal only on the markdown plane, so this leg must emit real pipe rows.
-    let out = rich_card(mixed_manifest());
-
-    let kept_head = out
-        .lines()
-        .find(|l| l.starts_with("| kept"))
-        .expect("a kept table header");
-    assert!(kept_head.contains("(1 entry)"), "{kept_head}");
-    assert!(kept_head.contains("LOC"), "{kept_head}");
-    let kept_row = out
-        .lines()
-        .find(|l| l.starts_with("| `cost-estimate`"))
-        .expect("a kept table row");
-    assert_eq!(kept_row.matches('|').count(), 5, "4 columns: {kept_row}");
-
-    // The tool set is a TOTAL, never a table: no pipe row may name a tool.
+fn the_card_emits_no_tables() {
+    // Owner order 2026-11-15 (both tables worthless) plus the message-783
+    // mangling: a pipe table here forces the card out of the flow block onto
+    // the rich markdown plane, where it is re-emitted from parsed cells and
+    // arrives as `: : :` placeholders with the separator gone. The card is
+    // therefore text on EVERY plane, and this test is the guard: one pipe row
+    // would silently re-open that path.
+    let out = card(mixed_manifest());
     assert!(
-        !out.lines().any(|l| l.starts_with("| tools")),
-        "no tools table: {out}"
+        !out.lines().any(|l| l.starts_with('|') || l.starts_with("|---")),
+        "no pipe rows anywhere: {out}"
     );
+
+    // The kept group keeps its CONTENT — a total plus the names it counts —
+    // just not a table around it.
+    let kept = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("kept"))
+        .expect("a kept row");
+    assert!(kept.contains("1 entry"), "{kept}");
+    assert!(kept.contains("KB"), "size: {kept}");
+    assert!(kept.contains('%'), "share: {kept}");
+    assert!(out.contains("`cost-estimate`"), "the name it counts: {out}");
+
+    // The tool set stays a TOTAL: no row may name a tool.
     let tools = out
         .lines()
         .find(|l| l.contains("tools"))
         .expect("a tools total row");
-    // 28_672 B = 28.0 KB, 7_400 tok of 200 K = 3.7 % — the same figures the
-    // rows used to reconcile to, now stated once.
+    // 28_672 B = 28.0 KB, 7_400 tok of 200 K = 3.7 %.
     assert!(tools.contains("3 · 28.0KB · 3.7%"), "{tools}");
+    assert!(!out.contains("`read_file`"), "no tool names: {out}");
 }
 
 #[test]
-fn the_rich_leg_states_the_summary_as_a_row_not_a_table() {
+fn the_summary_is_a_row_not_a_table() {
     // Both tables the owner called worthless are gone. The summary's total
     // rides the same labelled row the classic leg uses, so the two planes
     // agree on the number even though they disagree on the chrome.
-    let out = rich_card(numbered_document());
+    let out = consolidate_card(numbered_document());
     assert!(
         !out.lines().any(|l| l.starts_with("| summary part")),
         "no summary table: {out}"
@@ -416,27 +413,38 @@ fn the_rich_leg_states_the_summary_as_a_row_not_a_table() {
 }
 
 #[test]
-fn every_table_in_the_rich_leg_is_parseable() {
-    // A table the parser rejects renders as raw pipes in the chat, so the
-    // shape is asserted structurally rather than by eye: every header row must
-    // be followed by a separator row with one cell per column.
-    let out = rich_card(mixed_manifest());
+fn every_row_occupies_its_own_line() {
+    // The message-783 defect: on the rich MARKDOWN plane a single `\n` is a
+    // SOFT break, so the whole card arrived as one run-on paragraph — five rows
+    // and a table header flattened into a single line. The card is emitted one
+    // row per line, and the flow plane it now rides (Telegram HTML) keeps `\n`
+    // as a line break. This test pins the emission side of that contract: a row
+    // that shares a line with its neighbour is the bug, whatever the plane.
+    let out = card(mixed_manifest());
     let lines: Vec<&str> = out.lines().collect();
-    let mut tables = 0;
-    for (i, line) in lines.iter().enumerate() {
-        if !line.starts_with("| ") {
-            continue;
-        }
-        if lines.get(i + 1).is_some_and(|s| s.starts_with("|---")) {
-            tables += 1;
-            let cols = line.matches('|').count();
-            let sep_cols = lines[i + 1].matches('|').count();
-            assert_eq!(cols, sep_cols, "header/separator width: {line}");
-        }
+    assert!(lines.len() >= 6, "a row per line, got {}: {out}", lines.len());
+
+    for label in ["tokens", "fill", "took", "scope", "summary", "tools"] {
+        let hits: Vec<&str> = lines
+            .iter()
+            .copied()
+            .filter(|l| l.trim_start().starts_with(label))
+            .collect();
+        assert_eq!(hits.len(), 1, "exactly one `{label}` row: {out}");
     }
-    // kept + dropped. The summary and tools sections are totals rows now
-    // (owner order 2026-11-15), not tables.
-    assert_eq!(tables, 2, "one table per skills group: {out}");
+
+    // No row may carry another row's label inside it, which is what a collapsed
+    // card looks like once the newlines are gone.
+    for line in &lines {
+        let labels_on_this_line = ["tokens", "fill ", "took", "scope"]
+            .iter()
+            .filter(|l| line.contains(*l))
+            .count();
+        assert!(
+            labels_on_this_line <= 1,
+            "collapsed rows on one line: {line}"
+        );
+    }
 }
 
 #[test]
@@ -460,7 +468,7 @@ fn the_scope_row_names_which_compaction_ran() {
     assert!(scope.contains("payoff"), "the trade: {scope}");
 
     // The other scope must read differently, or the label is decoration.
-    let rich = rich_card(numbered_document());
+    let rich = consolidate_card(numbered_document());
     let rich_scope = rich
         .lines()
         .find(|l| l.contains("scope"))
@@ -488,7 +496,6 @@ fn an_unmeasured_document_states_no_payoff_ratio() {
         summary: "",
         scope: "delta",
         input_tokens: 41_300,
-        rich: false,
         documents: &[],
         document_refusals: &[],
     });
@@ -525,7 +532,6 @@ fn doc(path: &str, tokens: usize, bytes: u64, lines: usize) -> DocEntry {
 fn card_with_docs(
     documents: &[DocEntry],
     refusals: &[String],
-    rich: bool,
     summary: &str,
 ) -> String {
     let sizes = tool_sizes();
@@ -540,7 +546,6 @@ fn card_with_docs(
         summary,
         scope: "delta",
         input_tokens: 41_300,
-        rich,
         documents,
         document_refusals: refusals,
     })
@@ -551,7 +556,7 @@ fn a_retained_document_states_its_size_share_and_loc() {
     // 20_480 B = 20.0 KB, 4_000 tok of 200 K = 2.0 %. Exact figures, so a
     // rounding change is caught here rather than in the chat.
     let docs = vec![doc("/root/proj/AGENTS.md", 4_000, 20_480, 312)];
-    let out = card_with_docs(&docs, &[], false, no_manifest());
+    let out = card_with_docs(&docs, &[], no_manifest());
     let head = out
         .lines()
         .find(|l| l.contains("docs"))
@@ -574,7 +579,7 @@ fn a_retained_document_states_its_size_share_and_loc() {
 fn a_documents_path_is_never_bare() {
     // Same ccTLD trap as `.md` / `.rs`: a bare path segment can auto-link.
     let docs = vec![doc("/root/proj/AGENTS.md", 100, 512, 5)];
-    let out = card_with_docs(&docs, &[], false, no_manifest());
+    let out = card_with_docs(&docs, &[], no_manifest());
     let bare = without_code_spans(&out);
     assert!(!bare.contains("AGENTS.md"), "a bare path leaked: {bare}");
 }
@@ -584,7 +589,7 @@ fn a_manifest_that_named_no_documents_adds_no_row() {
     // The pre-#846 shape, byte for byte: a session that read no documents must
     // not pay for a row saying so.
     let plain = card(no_manifest());
-    let explicit = card_with_docs(&[], &[], false, no_manifest());
+    let explicit = card_with_docs(&[], &[], no_manifest());
     assert_eq!(plain, explicit, "an empty document set changes nothing");
     assert!(!plain.contains("docs"), "{plain}");
     assert!(!plain.contains("refused"), "{plain}");
@@ -600,7 +605,7 @@ fn every_refused_path_still_prints_a_row() {
         "not registered: /tmp/w831-marker.log (not a project document)".to_string(),
         "not registered: /root/proj/GEMINI.md (not read in this process)".to_string(),
     ];
-    let out = card_with_docs(&[], &refusals, false, no_manifest());
+    let out = card_with_docs(&[], &refusals, no_manifest());
     let row = out
         .lines()
         .find(|l| l.contains("refused"))
@@ -618,7 +623,7 @@ fn a_partial_refusal_prints_both_the_rows_and_the_reason() {
     let refusals = vec![
         "not registered: /root/proj/CLAUDE.md (not read in this process)".to_string(),
     ];
-    let out = card_with_docs(&docs, &refusals, false, no_manifest());
+    let out = card_with_docs(&docs, &refusals, no_manifest());
     assert!(out.lines().any(|l| l.contains("docs")), "{out}");
     let refused = out
         .lines()
@@ -628,21 +633,29 @@ fn a_partial_refusal_prints_both_the_rows_and_the_reason() {
 }
 
 #[test]
-fn the_rich_leg_tabulates_documents_with_a_reconciling_total() {
+fn documents_render_as_a_row_with_a_reconciling_total() {
+    // The docs group carries the same shape as kept/dropped: one labelled row
+    // stating the group's size and share, then the names it counts. No table
+    // (see `the_card_emits_no_tables`), so the total must reconcile in the
+    // head rather than in a `**total**` row.
     let docs = vec![
         doc("/root/proj/AGENTS.md", 4_000, 20_480, 312),
         doc("/root/proj/docs/ops.md", 1_000, 5_120, 90),
     ];
-    let out = card_with_docs(&docs, &[], true, mixed_manifest());
-    let header = out
+    let out = card_with_docs(&docs, &[], mixed_manifest());
+    assert!(
+        !out.lines().any(|l| l.starts_with('|')),
+        "no docs table: {out}"
+    );
+    let head = out
         .lines()
-        .find(|l| l.starts_with("| docs (2 entries) |"))
-        .expect("a docs table header");
-    assert!(header.contains("LOC"), "{header}");
-    // The group's own total is the SUM of its rows — the card's standing claim.
-    let total = out
-        .lines()
-        .find(|l| l.starts_with("| **total** | 25.0KB | 2.5% | 402 |"))
-        .expect("a docs total row");
-    assert!(total.contains("2.5%"), "{total}");
+        .find(|l| l.trim_start().starts_with("docs"))
+        .expect("a docs row");
+    // 25_600 B = 25.0 KB, 5_000 tok of 200 K = 2.5 % — the sum of both rows.
+    assert!(head.contains("2 entries"), "{head}");
+    assert!(head.contains("25.0KB"), "{head}");
+    assert!(head.contains("2.5%"), "{head}");
+    // The names stay: a total with no entries is a number with no subject.
+    assert!(out.contains("`/root/proj/AGENTS.md`"), "{out}");
+    assert!(out.contains("`/root/proj/docs/ops.md`"), "{out}");
 }

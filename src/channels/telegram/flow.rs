@@ -1127,25 +1127,6 @@ pub(crate) struct CompactionBreakdown<'a> {
     /// The continuation document, whose `context-manifest` fence declares the
     /// kept and dropped sets.
     pub(crate) summary: &'a str,
-    /// Render the kept/dropped skills rows as markdown TABLES (#824 follow-up).
-    ///
-    /// The summary and tools sections are totals ROWS on both planes (owner
-    /// order 2026-11-15); only the skills groups stay tabular, because there a
-    /// row is a document with its own size and line count, not a name in a
-    /// ranked list.
-    ///
-    /// The classic leg rides the flow block's `<blockquote expandable>`, which
-    /// is Telegram HTML — and the rich HTML input mode returns 200 and then
-    /// FLATTENS a table into a run-on paragraph (`delivery.rs:1314`). The only
-    /// mode that renders a table is rich MARKDOWN, which cannot carry a
-    /// `<details>` collapse (#421 shipped flat and was reverted), so a
-    /// table-bearing card has to leave the flow block and become its own
-    /// bubble: the intermediate pipeline promotes a table-bearing report
-    /// automatically (`is_deliverable_rich_report`). The flag is therefore set
-    /// only where that plane is actually reachable — `rich_messages` on AND the
-    /// room not quiet, because a quiet room suppresses the promotion arm
-    /// (#679) and would fold raw pipes into the collapsed log.
-    pub(crate) rich: bool,
     /// The `.md` documents this compaction's manifest resolved and measured
     /// (#846), newest-read first. Empty when the manifest named none — and
     /// then the card renders byte-identical to the pre-#846 shape.
@@ -1378,7 +1359,6 @@ fn breakdown_documents(
     documents: &[crate::brain::tools::retained_docs::DocEntry],
     refusals: &[String],
     ctx_max: u32,
-    rich: bool,
     lines: &mut Vec<String>,
 ) {
     if documents.is_empty() && refusals.is_empty() {
@@ -1401,11 +1381,7 @@ fn breakdown_documents(
                 lines: d.lines,
             })
             .collect();
-        if rich {
-            breakdown_group_table("docs", &entries, ctx_max, "measured", lines);
-        } else {
-            breakdown_group("docs", &entries, ctx_max, "none measurable", lines);
-        }
+        breakdown_group("docs", &entries, ctx_max, "none measurable", lines);
     }
     if refusals.is_empty() {
         return;
@@ -1529,63 +1505,6 @@ fn breakdown_summary(summary: &str, ctx_max: u32, lines: &mut Vec<String>) {
     ));
 }
 
-/// The kept/dropped table (rich leg): one row per entry, the group's totals in
-/// the header, so the rows reconcile with the number above them.
-fn breakdown_group_table(
-    label: &str,
-    entries: &[BreakdownEntry],
-    ctx_max: u32,
-    unmeasured: &str,
-    lines: &mut Vec<String>,
-) {
-    if entries.is_empty() {
-        return;
-    }
-    let resolved = entries.iter().filter(|e| e.tokens.is_some()).count();
-    let total_tokens: usize = entries.iter().filter_map(|e| e.tokens).sum();
-    let total_bytes: usize = entries.iter().filter_map(|e| e.bytes).sum();
-    let total_lines: usize = entries.iter().filter_map(|e| e.lines).sum();
-    let noun = if entries.len() == 1 { "entry" } else { "entries" };
-    lines.push(String::new());
-    lines.push(format!(
-        "| {label} ({} {noun}) | size | share | LOC |",
-        entries.len()
-    ));
-    lines.push("|---|---:|---:|---:|".to_string());
-
-    const MAX_ROWS: usize = 10;
-    for e in entries.iter().take(MAX_ROWS) {
-        let size = e.bytes.map_or_else(|| "—".to_string(), format_breakdown_kb);
-        let share = e
-            .tokens
-            .map_or_else(|| "—".to_string(), |t| format_breakdown_share(t, ctx_max));
-        let loc = e.lines.map_or_else(|| "—".to_string(), |n| n.to_string());
-        // Backticked for the same reason the classic leg is: bare `editor.md` /
-        // `context.rs` auto-link (`.md` and `.rs` are real ccTLDs).
-        lines.push(format!("| `{}` | {size} | {share} | {loc} |", e.label));
-    }
-    if entries.len() > MAX_ROWS {
-        lines.push(format!("| +{} more | | | |", entries.len() - MAX_ROWS));
-    }
-    // A name that resolves to nothing measurable would make the rows fail to
-    // reconcile with the total, so the gap is stated instead of hidden.
-    if resolved < entries.len() {
-        lines.push(format!(
-            "| *{} of {} {unmeasured}* | | | |",
-            resolved,
-            entries.len()
-        ));
-    }
-    if entries.len() > 1 {
-        lines.push(format!(
-            "| **total** | {} | {} | {} |",
-            format_breakdown_kb(total_bytes),
-            format_breakdown_share(total_tokens, ctx_max),
-            total_lines,
-        ));
-    }
-}
-
 /// The post-compaction breakdown card (#824): the headline, a labelled
 /// section header, and what the compaction actually did.
 ///
@@ -1640,22 +1559,21 @@ pub(crate) fn compaction_breakdown(b: &CompactionBreakdown<'_>) -> String {
         let skills = crate::brain::skills::load_all_skills();
         let kept = resolve_breakdown_entries(&m.active_skills, &skills);
         let dropped = resolve_breakdown_entries(&m.discard_skills, &skills);
-        // The rich leg emits pipe tables (#824 follow-up), which only the
-        // markdown plane renders — see `CompactionBreakdown::rich` for why that
-        // means this card leaves the flow block there.
-        if b.rich {
-            breakdown_group_table("kept", &kept, b.ctx_max, "resolve", &mut lines);
-            breakdown_group_table("dropped", &dropped, b.ctx_max, "resolve", &mut lines);
-        } else {
-            breakdown_group("kept", &kept, b.ctx_max, "none resolve to a skill", &mut lines);
-            breakdown_group("dropped", &dropped, b.ctx_max, "none resolve to a skill", &mut lines);
-        }
+        // Text rows on EVERY plane, deliberately (owner order 2026-11-15 +
+        // the message-783 mangling): a pipe table here forces the card out of
+        // the flow block and onto the rich markdown plane, where the table is
+        // re-emitted from its parsed cells and the rows arrive as `: : :`
+        // placeholders with the separator gone. The flow plane is HTML, and
+        // `soft_breaks_to_br` keeps one row per line — which is the shape the
+        // card was read in before the tables existed.
+        breakdown_group("kept", &kept, b.ctx_max, "none resolve to a skill", &mut lines);
+        breakdown_group("dropped", &dropped, b.ctx_max, "none resolve to a skill", &mut lines);
     }
 
     // #846: the documents the window now carries, beside the skills it keeps.
     // Same columns as every other group — the card's whole claim is that a
     // name never appears without what it costs.
-    breakdown_documents(b.documents, b.document_refusals, b.ctx_max, b.rich, &mut lines);
+    breakdown_documents(b.documents, b.document_refusals, b.ctx_max, &mut lines);
 
     // The tools row stands even without a manifest: the schema cost is
     // measured at emit, and it is the row that says how much of the window the
