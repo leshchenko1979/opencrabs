@@ -10,6 +10,7 @@
 pub mod agent_type;
 pub mod brain;
 mod close;
+pub mod ledger;
 pub mod manager;
 pub(crate) mod notify;
 pub(crate) mod provider_pair;

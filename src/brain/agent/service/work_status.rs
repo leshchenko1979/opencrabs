@@ -85,6 +85,17 @@ pub fn status_path(id: &str) -> PathBuf {
     status_dir().join(format!("{}.json", id))
 }
 
+/// Path to a sub-agent's progress ledger: an append-only sibling of the status
+/// file (#852).
+///
+/// The extension is load-bearing. [`cleanup_stale`] sweeps on
+/// `extension() == "json"`, so a `.progress.jsonl` is invisible to it and
+/// `scanned`/`removed` keep meaning *status files* — a ledger is deleted with
+/// its record, never on its own schedule, because its lifetime IS the agent's.
+pub fn progress_path(id: &str) -> PathBuf {
+    status_dir().join(format!("{}.progress.jsonl", id))
+}
+
 /// Path to a run's captured stream (#692).
 ///
 /// A sibling stem of the status file — same `id` — so every surface prints one
@@ -994,6 +1005,10 @@ pub fn migrate_legacy_dir(legacy: &Path) -> usize {
                 finish.error = old.error.clone();
                 finish
             }),
+            // A legacy record predates the persisted grant (#852). `None`
+            // reads back as the pre-#852 behaviour via `effective_grant`, which
+            // is exactly what this record was produced under.
+            grant: None,
             // A legacy record is an AGENT's, and agents have neither capture
             // streams nor a process group (#692). `None`, not an empty string:
             // an empty path reads as a path and fails at open time with an
@@ -1072,6 +1087,13 @@ pub fn cleanup_stale(max_age: Duration) -> std::io::Result<(usize, usize)> {
 
         if should_delete {
             fs::remove_file(&path)?;
+            // The ledger has no lifetime of its own (#852): it exists to
+            // narrate one agent, so it goes with that agent's record. Left
+            // behind, it would accumulate forever — the sweep above never sees
+            // a `.jsonl`.
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                let _ = fs::remove_file(progress_path(stem));
+            }
             removed += 1;
         }
     }
