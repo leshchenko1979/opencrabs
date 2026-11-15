@@ -385,6 +385,43 @@ fn finish_now() -> WorkFinish {
     }
 }
 
+/// What a sub-agent was permitted to do, recorded so the grant survives the
+/// process (#852).
+///
+/// Before this, the grant lived only in the in-memory `SubAgent` and a
+/// rehydrated agent therefore came back with whatever the rebuilding path
+/// assumed. That is a privilege-widening bug in the making: a `read_only`
+/// child restored as writable looks exactly like a normal resume. Recording
+/// the three flags at spawn is what makes rehydration safe.
+///
+/// Deliberately has NO `Default`: a zeroed value reads `allow_nested: false`,
+/// so any legacy record deserialised through a default would silently strip
+/// nesting from an agent that had it. Absence is expressed as
+/// `Option<AgentGrant>` — see [`WorkStatus::grant`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentGrant {
+    pub read_only: bool,
+    pub include_brain: bool,
+    pub allow_nested: bool,
+}
+
+impl AgentGrant {
+    pub fn new(read_only: bool, include_brain: bool, allow_nested: bool) -> Self {
+        Self {
+            read_only,
+            include_brain,
+            allow_nested,
+        }
+    }
+
+    /// The pre-#852 grant, assumed for records written before the field
+    /// existed. Widest of the three flags off, nesting on — i.e. exactly what
+    /// `SubAgent::new` used to fall back to.
+    pub fn legacy() -> Self {
+        Self::new(false, false, true)
+    }
+}
+
 /// Persisted status of one unit of detached work.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkStatus {
@@ -412,6 +449,11 @@ pub struct WorkStatus {
     pub progress: Option<ProgressSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish: Option<WorkFinish>,
+    /// The permissions the agent was spawned with (#852). `None` for
+    /// commands and for records written before the field existed — read it
+    /// through [`Self::effective_grant`], never directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<AgentGrant>,
     /// Absolute path of the run's captured stdout (#692). `None` for agents
     /// and for records written before the field existed.
     ///
@@ -440,6 +482,7 @@ impl WorkStatus {
         session_id: &str,
         prompt: &str,
         parent_session_id: Option<&str>,
+        grant: Option<&AgentGrant>,
     ) -> std::io::Result<Self> {
         ensure_dir()?;
         let status = Self {
@@ -453,6 +496,7 @@ impl WorkStatus {
             state: WorkState::Pending,
             progress: None,
             finish: None,
+            grant: grant.copied(),
             output_out: None,
             output_err: None,
             pid: None,
@@ -487,6 +531,7 @@ impl WorkStatus {
             state: WorkState::Running,
             progress: None,
             finish: None,
+            grant: None,
             output_out: recorded_path(paths.output_out),
             output_err: recorded_path(paths.output_err),
             pid: paths.pid,
@@ -515,6 +560,7 @@ impl WorkStatus {
             state: WorkState::Running,
             progress: None,
             finish: None,
+            grant: None,
             // The spawn write may have failed (best-effort by design), and the
             // stream paths are not recoverable from the exit information. Left
             // `None` rather than guessed: a fabricated path that 404s is worse
@@ -644,6 +690,16 @@ impl WorkStatus {
         }
         let data = fs::read_to_string(&path).ok()?;
         serde_json::from_str(&data).ok()
+    }
+
+    /// The grant this record carries, falling back to [`AgentGrant::legacy`]
+    /// for records written before #852 (#852).
+    ///
+    /// One reader, so "no grant recorded" can never be mistaken for "no
+    /// permissions": the fallback is the pre-#852 behaviour, which is what such
+    /// a record was actually produced under.
+    pub fn effective_grant(&self) -> AgentGrant {
+        self.grant.unwrap_or_else(AgentGrant::legacy)
     }
 
     /// Re-read this handle from disk, returning whether the file was there

@@ -4,7 +4,7 @@
 //! so the main orchestrator can track status without session_search.
 
 use super::manager::{SubAgent, SubAgentManager};
-use crate::brain::agent::service::work_status::{WorkState, WorkStatus};
+use crate::brain::agent::service::work_status::{AgentGrant, WorkState, WorkStatus};
 use crate::brain::tools::error::{Result, ToolError};
 use crate::brain::tools::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
@@ -544,12 +544,19 @@ impl Tool for SpawnAgentTool {
         // loop and the completion path below capture it by value (#110).
         let parent_session_id = context.session_id;
         let parent_session_for_status = context.session_id.to_string();
+        // The grant is recorded HERE, not only in the in-memory agent (#852):
+        // a resumed agent is rebuilt from this file, so a grant that lived
+        // only in the map would come back as whatever the rebuild assumed —
+        // and a read-only child restored writable is indistinguishable from a
+        // normal resume.
+        let grant = AgentGrant::new(read_only, include_brain, allow_nested);
         let _ = WorkStatus::new_agent(
             &agent_id,
             &label,
             &child_session_id.to_string(),
             &full_prompt,
             Some(&parent_session_for_status),
+            Some(&grant),
         )
         .map_err(|e| ToolError::Execution(format!("Failed to create status file: {e}")))?;
 
@@ -574,6 +581,7 @@ impl Tool for SpawnAgentTool {
                     &child_session_id.to_string(),
                     &prompt_clone,
                     Some(&parent_session_for_status),
+                    Some(&grant),
                 )
                 .expect("status file")
             });

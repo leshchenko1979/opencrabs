@@ -112,6 +112,7 @@ fn advertised_status_file_is_the_file_the_writer_creates() {
         &session_id.to_string(),
         "probe the advertised path",
         None,
+        None,
     )
     .unwrap();
 

@@ -342,6 +342,7 @@ fn review_clock_anchors_on_the_spawn_stamp() {
         state: WorkState::Running,
         progress: None,
         finish: None,
+        grant: None,
         output_out: None,
         output_err: None,
         pid: None,

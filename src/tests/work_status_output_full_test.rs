@@ -38,7 +38,7 @@ fn roundtrip_five_kb_report_byte_exact_no_summary_field() {
         + &"finding line with plenty of words to bulk it up.\n".repeat(120);
     assert!(report.chars().count() > 5000, "fixture must be ~5 KB");
 
-    let mut s = WorkStatus::new_agent("ofx-1", "review", "sess-x", "review", None).unwrap();
+    let mut s = WorkStatus::new_agent("ofx-1", "review", "sess-x", "review", None, None).unwrap();
     s.mark_completed(report.clone()).unwrap();
     let finish = s.finish.as_ref().expect("finish stamped");
     assert_eq!(finish.output_full.as_deref(), Some(report.as_str()));
@@ -58,7 +58,7 @@ fn roundtrip_five_kb_report_byte_exact_no_summary_field() {
 #[test]
 fn absent_field_stays_absent_no_nulls() {
     let dir = temp_dir("skip");
-    let _s = WorkStatus::new_agent("ofx-2", "idle", "sess-x2", "nothing", None).unwrap();
+    let _s = WorkStatus::new_agent("ofx-2", "idle", "sess-x2", "nothing", None, None).unwrap();
     let raw = fs::read_to_string(dir.join("ofx-2.json")).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert!(parsed.get("finish").is_none());

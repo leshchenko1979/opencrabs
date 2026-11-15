@@ -918,6 +918,7 @@ pub mod slash_models_target_test;
 pub mod split_pane_test;
 pub mod subagent_brain_test;
 pub mod subagent_compaction_preamble_test;
+pub mod subagent_ledger_test;
 pub mod subagent_natural_completion_test;
 pub mod subagent_provider_pair_test;
 pub mod subagent_push_result_test;

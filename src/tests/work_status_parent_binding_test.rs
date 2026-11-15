@@ -38,6 +38,7 @@ fn status_file_carries_parent_and_lookup_finds_child() {
         &child.to_string(),
         "do the review",
         Some(&parent.to_string()),
+        None,
     )
     .expect("write status");
 
@@ -104,6 +105,7 @@ fn lookup_skips_commands_and_terminal_agents() {
         &child.to_string(),
         "task",
         None,
+        None,
     )
     .expect("write agent status");
     agent.mark_completed("done".to_string()).expect("finalize");
@@ -133,6 +135,7 @@ fn natural_completion_persists_full_output_byte_exact() {
         "lens",
         "sess-of-natural",
         "review task",
+        None,
         None,
     )
     .expect("write agent status");
@@ -166,7 +169,7 @@ fn a_resumed_session_resolves_its_run_without_a_second_directory_walk() {
     let child = Uuid::new_v4().to_string();
 
     for (id, label) in [("aaa-decoy", "decoy"), ("zzz-indexed", "real")] {
-        WorkStatus::new_agent(id, label, &child, "task", None).expect("write agent status");
+        WorkStatus::new_agent(id, label, &child, "task", None, None).expect("write agent status");
     }
 
     // Control: with no index for THIS dir, the walk answers — with the decoy.
@@ -187,7 +190,7 @@ fn a_resumed_session_resolves_its_run_without_a_second_directory_walk() {
     // A miss is final once the index describes this dir: falling back to the
     // walk on every miss is exactly the cost this index exists to remove.
     let stranger = Uuid::new_v4().to_string();
-    WorkStatus::new_agent("zzz-stranger", "unindexed", &stranger, "task", None)
+    WorkStatus::new_agent("zzz-stranger", "unindexed", &stranger, "task", None, None)
         .expect("write agent status");
     assert!(
         WorkStatus::find_agent_by_session(&stranger).is_none(),

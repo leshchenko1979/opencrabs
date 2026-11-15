@@ -89,6 +89,7 @@ fn legacy_record(id: &str, session: &str, label: &str, code: i32) {
             error: None,
             output_full: None,
         }),
+        grant: None,
         output_out: None,
         output_err: None,
         pid: None,
