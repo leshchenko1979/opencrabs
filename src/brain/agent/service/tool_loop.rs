@@ -1471,6 +1471,17 @@ impl AgentService {
                 crate::brain::tools::retained_docs::render(session_id, total.saturating_sub(used))
                 && let Some(ref mut brain) = context.system_brain
             {
+                // The retained set is invisible to the user and to every surface
+                // except the model's own context, so this line IS the evidence
+                // that a compaction kept (or refused) a document (#831).
+                tracing::info!(
+                    target: "brain::retained_docs",
+                    session_id = %session_id,
+                    budget_tokens = total.saturating_sub(used),
+                    section_chars = section.len(),
+                    injected = section.contains("## Retained documents"),
+                    "retained documents re-injected on wake"
+                );
                 brain.push_str(&section);
                 context.token_count += AgentContext::estimate_tokens(&section);
             }
