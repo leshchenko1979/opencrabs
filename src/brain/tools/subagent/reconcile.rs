@@ -36,6 +36,16 @@ pub const STALE_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
     let interrupted = mark_orphans_interrupted();
 
+    // Hand the session→run map to the boot-resume path (#848). This pass has
+    // just read every agent file, so the map is free here — and it saves the
+    // resume path a second walk of the same directory to answer one lookup.
+    work_status::install_agent_index(
+        interrupted
+            .iter()
+            .map(|s| (s.session_id.clone(), s.id.clone()))
+            .collect(),
+    );
+
     match work_status::cleanup_stale(STALE_AFTER) {
         Ok((scanned, removed)) if removed > 0 => {
             tracing::info!(

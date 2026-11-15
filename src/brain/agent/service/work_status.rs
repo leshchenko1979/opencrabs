@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use std::time::{Duration, SystemTime};
 
 /// Base directory for all detached-work status files.
@@ -711,7 +712,53 @@ impl WorkStatus {
         ids.sort();
         Ok(ids)
     }
+}
 
+/// What an installed index holds: the status dir it describes, plus
+/// `child session id` → `status-file id`.
+type AgentIndex = (PathBuf, HashMap<String, String>);
+
+/// Boot-built index of mid-flight sub-agent files (#848).
+///
+/// The directory is part of the value on purpose. An index may only answer for
+/// the directory it was built from, so a test that points [`status_dir`] at a
+/// throwaway dir can never be answered out of another test's snapshot: a
+/// mismatch reads as "no index", which falls back to the walk. That is what
+/// keeps a process-global map safe beside the thread-local test override.
+static AGENT_INDEX: RwLock<Option<AgentIndex>> = RwLock::new(None);
+
+/// Record the session→run map the boot orphan pass built (#848).
+///
+/// Called once, by [`crate::brain::tools::subagent::reconcile`], which has just
+/// read every agent file anyway — so the map costs nothing there and saves the
+/// boot-resume path a second walk of the status dir. A duplicated child session
+/// keeps the file the pass saw last; one session has one sub-agent in practice.
+///
+/// **The map must be COMPLETE for the status dir, not merely the files the
+/// caller touched.** A miss is final once an index describes the current dir,
+/// so an index built from a subset silently reports "no such run" for every
+/// session outside it. [`crate::brain::tools::subagent::reconcile`] satisfies
+/// this because its orphan pass collects every non-terminal agent file, which
+/// is exactly the set [`WorkStatus::find_agent_by_session`] can match.
+pub fn install_agent_index(index: HashMap<String, String>) {
+    let mut slot = AGENT_INDEX.write().unwrap_or_else(|e| e.into_inner());
+    *slot = Some((status_dir(), index));
+}
+
+/// The indexed run id for `session_id`, when an index describes the CURRENT
+/// status dir.
+///
+/// `None` means "no index answers here, walk instead"; `Some(None)` means the
+/// index answered and does not know this session.
+fn indexed_agent_id(session_id: &str) -> Option<Option<String>> {
+    let slot = AGENT_INDEX.read().unwrap_or_else(|e| e.into_inner());
+    match slot.as_ref() {
+        Some((dir, index)) if *dir == status_dir() => Some(index.get(session_id).cloned()),
+        _ => None,
+    }
+}
+
+impl WorkStatus {
     /// Find a sub-agent status whose **child** session is `session_id` and
     /// whose outcome is not yet decided (#110).
     ///
@@ -722,7 +769,29 @@ impl WorkStatus {
     /// finishes — as do `Running`/`Pending`/`AwaitingInput`. `None` for
     /// unknown, outcome-terminal (`Completed`/`Failed`), or non-agent work —
     /// those keep the existing resume behavior.
+    ///
+    /// Consults [`install_agent_index`]'s boot-built map first, so a resumed
+    /// session costs one file read instead of a walk of the whole status dir
+    /// (~25k files on a long-lived host, #848). The walk survives as the
+    /// no-index path: it is what answers before boot recovery has run, and in
+    /// tests that point the status dir at a throwaway directory.
+    ///
+    /// A miss is FINAL while an index describes this dir — no walk — which is
+    /// sound for the only callers (`cli::ui`'s boot resume path, after
+    /// [`crate::brain::tools::subagent::reconcile`]): every file such a row can
+    /// name was written before the restart, so the boot pass saw it. A caller
+    /// that runs after agents were created in this same process must re-install
+    /// the index rather than read a miss as absence.
     pub fn find_agent_by_session(session_id: &str) -> Option<WorkStatus> {
+        if let Some(indexed) = indexed_agent_id(session_id) {
+            let status = Self::read(&indexed?)?;
+            // Re-checked, never trusted: the file may have reached a terminal
+            // state after the index was built.
+            return (matches!(status.kind, WorkKind::Agent)
+                && status.session_id == session_id
+                && !matches!(status.state, WorkState::Completed | WorkState::Failed))
+                .then_some(status);
+        }
         let ids = Self::list_all().ok()?;
         ids.into_iter().filter_map(|id| Self::read(&id)).find(|s| {
             matches!(s.kind, WorkKind::Agent)

@@ -4,7 +4,10 @@
 //! the file must carry the spawning session: without that binding the
 //! resumed result routes to the surface-less default and vanishes.
 
-use crate::brain::agent::service::work_status::{CommandPaths, WorkKind, WorkState, WorkStatus};
+use crate::brain::agent::service::work_status::{
+    CommandPaths, WorkKind, WorkState, WorkStatus, install_agent_index,
+};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 fn temp_status_dir(tag: &str) -> std::path::PathBuf {
@@ -148,3 +151,49 @@ fn natural_completion_persists_full_output_byte_exact() {
     assert!(parsed.get("output_summary").is_none());
     drop_status_dir(dir);
 }
+
+// ── #848: the resume path resolves from the boot-built index ─────────
+
+/// A resumed session must resolve its run from the index the boot orphan pass
+/// built, not by walking the status dir a second time (#848).
+///
+/// The decoy id sorts FIRST, so the walk returns it and stops. That makes the
+/// control below the assertion that actually discriminates: the walk really
+/// does pick the decoy, and the index really does override it.
+#[test]
+fn a_resumed_session_resolves_its_run_without_a_second_directory_walk() {
+    let dir = temp_status_dir("indexed");
+    let child = Uuid::new_v4().to_string();
+
+    for (id, label) in [("aaa-decoy", "decoy"), ("zzz-indexed", "real")] {
+        WorkStatus::new_agent(id, label, &child, "task", None).expect("write agent status");
+    }
+
+    // Control: with no index for THIS dir, the walk answers — with the decoy.
+    assert_eq!(
+        WorkStatus::find_agent_by_session(&child).map(|s| s.id),
+        Some("aaa-decoy".to_string()),
+        "the no-index path is the walk, and it takes the first match"
+    );
+
+    install_agent_index(HashMap::from([(child.clone(), "zzz-indexed".to_string())]));
+
+    assert_eq!(
+        WorkStatus::find_agent_by_session(&child).map(|s| s.id),
+        Some("zzz-indexed".to_string()),
+        "the index answers; a second walk would have returned the decoy"
+    );
+
+    // A miss is final once the index describes this dir: falling back to the
+    // walk on every miss is exactly the cost this index exists to remove.
+    let stranger = Uuid::new_v4().to_string();
+    WorkStatus::new_agent("zzz-stranger", "unindexed", &stranger, "task", None)
+        .expect("write agent status");
+    assert!(
+        WorkStatus::find_agent_by_session(&stranger).is_none(),
+        "the index answered and does not know this session"
+    );
+
+    drop_status_dir(dir);
+}
+
