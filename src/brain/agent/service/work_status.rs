@@ -26,6 +26,7 @@
 //! the mtime sweep.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -974,6 +975,22 @@ pub fn cleanup_stale(max_age: Duration) -> std::io::Result<(usize, usize)> {
 /// Cap markers are swept by the same rule and in the same pass: they share the
 /// captures' directory and their run's liveness, and a marker that outlived its
 /// capture would report a truncation for a stream that no longer exists.
+///
+/// # Order of the two tests (#847)
+///
+/// The **mtime test runs first**, and the status record is consulted only for a
+/// file that is already stale. The order is not an optimisation of convenience:
+/// a file that is not stale is not removed whether its run is live or not, so
+/// reading its record first was work whose result could never change the
+/// outcome. Measured on the `ops` profile, where all 50,115 captures were
+/// younger than the 7-day window: 50,115 status reads plus serde parses on
+/// every boot, every one of them discarded, costing **161 s** of startup before
+/// the database opened.
+///
+/// The record is also read **once per run**, not once per file: `<id>.out`,
+/// `<id>.err` and their `.cap` markers all resolve to the same id, so the cache
+/// collapses a run's reads into one — up to four files per run (two streams plus
+/// two truncation markers), two on the measured tree.
 pub fn sweep_stale_runs(cutoff: SystemTime) -> std::io::Result<(usize, usize)> {
     let runs = runs_dir();
     if !runs.exists() {
@@ -983,6 +1000,11 @@ pub fn sweep_stale_runs(cutoff: SystemTime) -> std::io::Result<(usize, usize)> {
     let mut scanned = 0usize;
     let mut removed = 0usize;
 
+    // Liveness per run id, filled on demand (#847). Only runs with at least one
+    // STALE file ever appear here, so a healthy tree leaves this empty and the
+    // sweep costs one readdir plus one stat per file.
+    let mut live_by_run: HashMap<String, bool> = HashMap::new();
+
     for entry in fs::read_dir(&runs)? {
         let entry = entry?;
         let path = entry.path();
@@ -990,6 +1012,11 @@ pub fn sweep_stale_runs(cutoff: SystemTime) -> std::io::Result<(usize, usize)> {
             continue;
         }
         scanned += 1;
+
+        // #847: the mtime test comes FIRST — see the doc block above.
+        if !file_stale(&path, &cutoff) {
+            continue;
+        }
 
         // `<id>.out`, `<id>.err` and the markers `<id>.out.cap` / `<id>.err.cap`
         // all resolve to `<id>`: the stem is everything before the FIRST dot, so
@@ -1004,17 +1031,27 @@ pub fn sweep_stale_runs(cutoff: SystemTime) -> std::io::Result<(usize, usize)> {
             .unwrap_or_default()
             .to_string();
 
-        let live = fs::read_to_string(status_path(&run_id))
-            .ok()
-            .and_then(|data| serde_json::from_str::<WorkStatus>(&data).ok())
-            .is_some_and(|status| status.finish.is_none());
+        let live = *live_by_run.entry(run_id.clone()).or_insert_with(|| {
+            fs::read_to_string(status_path(&run_id))
+                .ok()
+                .and_then(|data| serde_json::from_str::<WorkStatus>(&data).ok())
+                .is_some_and(|status| status.finish.is_none())
+        });
         if live {
             continue;
         }
 
-        if file_stale(&path, &cutoff) {
-            fs::remove_file(&path)?;
-            removed += 1;
+        // #847: one unremovable capture must not abandon the rest of the leg.
+        // Propagating here left every remaining capture unswept, and the caller
+        // (`cleanup_old_temp_files`) logs a single warning and moves on — so the
+        // next boot repeated the same work and failed on the same file. The
+        // other three legs of that sweep already warn per file.
+        match fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => tracing::warn!(
+                "Failed to remove stale run capture {}: {e}",
+                path.display()
+            ),
         }
     }
 

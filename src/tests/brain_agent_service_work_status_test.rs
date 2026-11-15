@@ -418,3 +418,84 @@ fn reload_reports_a_missing_file_and_leaves_the_handle_alone() {
     assert_eq!(orphan.id, "d2-gone", "and the handle is left untouched");
     assert_eq!(orphan.task, "x");
 }
+
+// ── #847: the run-capture sweep tests mtime BEFORE liveness ──────────────────
+//
+// The reordering is behaviour-preserving by construction — a file that is not
+// stale is not removed whether its run is live or not — so these tests pin the
+// OUTCOMES that must survive it. The speed-up itself is not observable from a
+// unit test (it is the absence of work); it is measured on the live box.
+
+/// A cutoff that puts `OLD` behind it and `YOUNG` in front of it.
+fn sweep_cutoff() -> std::time::SystemTime {
+    std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 24 * 60 * 60)
+}
+
+const OLD: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+const YOUNG: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn capture_path(name: &str) -> std::path::PathBuf {
+    runs_dir().join(name)
+}
+
+/// Write a capture file and back-date its mtime by `age`.
+///
+/// `set_modified` rather than a wall-clock sleep: the sweep compares against a
+/// cutoff the caller passes, so the file's own timestamp is the input under
+/// test and must be exact.
+fn write_capture(name: &str, age: std::time::Duration) {
+    // `isolate` points the override at a path it does not create, and
+    // `sweep_stale_runs` early-returns on a missing dir.
+    fs::create_dir_all(runs_dir()).unwrap();
+    let p = capture_path(name);
+    fs::write(&p, b"stream").unwrap();
+    let f = fs::OpenOptions::new().write(true).open(&p).unwrap();
+    f.set_modified(std::time::SystemTime::now() - age).unwrap();
+}
+
+/// A stale capture whose run has NO status record is swept: a missing record
+/// counts as not-live, or a stream whose record aged out would be stranded
+/// forever. Both streams of the run go in one pass.
+#[test]
+fn sweep_removes_a_stale_capture_of_a_dead_run() {
+    isolate("sweep_dead");
+    write_capture("dead1.out", OLD);
+    write_capture("dead1.err", OLD);
+
+    let (_, removed) = sweep_stale_runs(sweep_cutoff()).unwrap();
+
+    assert_eq!(removed, 2, "both streams of the dead run are swept");
+    assert!(!capture_path("dead1.out").exists());
+    assert!(!capture_path("dead1.err").exists());
+}
+
+/// The whole reason this cannot be a plain mtime sweep: a STALE capture whose
+/// run is still live must survive. Reordering the tests must not lose this.
+#[test]
+fn sweep_keeps_a_stale_capture_of_a_live_run() {
+    isolate("sweep_live");
+    // `finish: None` — the record is the authority on liveness.
+    WorkStatus::new_agent("live1", "review", "sess-1", "x", None).unwrap();
+    write_capture("live1.out", OLD);
+    write_capture("live1.err", OLD);
+
+    let (_, removed) = sweep_stale_runs(sweep_cutoff()).unwrap();
+
+    assert_eq!(removed, 0, "a live run's stream is never unlinked");
+    assert!(capture_path("live1.out").exists());
+    assert!(capture_path("live1.err").exists());
+}
+
+/// A young capture with no status record survives. Under the old order this
+/// still held, but only after reading a record that did not exist; the
+/// regression this pins is that the mtime test now decides it on its own.
+#[test]
+fn sweep_leaves_a_young_capture_alone() {
+    isolate("sweep_young");
+    write_capture("young1.out", YOUNG);
+
+    let (_, removed) = sweep_stale_runs(sweep_cutoff()).unwrap();
+
+    assert_eq!(removed, 0);
+    assert!(capture_path("young1.out").exists());
+}
