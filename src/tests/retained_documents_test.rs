@@ -289,7 +289,7 @@ fn render_names_registered_documents_when_the_budget_is_exhausted() {
     let sid = Uuid::new_v4();
     let dir = tmp_dir("render_exhausted");
     let path = write_document(sid, &dir, "law.md", "# law\nobey\n");
-    register(sid, &[path.clone()]);
+    register(sid, std::slice::from_ref(&path));
 
     // A registered document that does not fit must be NAMED, never silently
     // dropped: the model asked for it, so silence reads as "it is in context".
