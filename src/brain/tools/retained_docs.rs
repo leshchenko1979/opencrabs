@@ -235,8 +235,9 @@ pub fn has_retained_set(session_id: Uuid) -> bool {
 ///
 /// `None` only when the session registered nothing at all, so a session that
 /// read no documents gets a system brain byte-identical to before #831. A
-/// session that DID register documents always gets a block — if none fitted the
-/// budget, the block names them instead of returning silence.
+/// session that DID register documents always gets a block, and every document
+/// that did not reach it — oversize, unreadable, or out of budget, whether none
+/// fitted or only some — is named with its reason.
 pub fn render(session_id: Uuid, budget_tokens: usize) -> Option<String> {
     let (entries, refusals) = registered_registry()
         .lock()
@@ -253,27 +254,53 @@ pub fn render(session_id: Uuid, budget_tokens: usize) -> Option<String> {
     let mut used = crate::brain::tokenizer::count_tokens(header);
     let mut included = 0usize;
 
+    // Every registered document that did NOT reach the block, with its reason.
+    // Collected during the walk rather than derived from `included == 0`: a
+    // PARTIAL fit is the ordinary case, and naming only when nothing fitted
+    // leaves the documents that lost the budget race in exactly the silence
+    // this block exists to remove.
+    let mut excluded: Vec<(String, &'static str)> = Vec::new();
+    let mut out_of_room = false;
+
     for entry in &entries {
-        if entry.status != DocStatus::Ok {
+        let path = entry.path.display().to_string();
+        if out_of_room {
+            excluded.push((path, "no room left in the retained-set budget"));
             continue;
         }
+        match entry.status {
+            DocStatus::Ok => {}
+            DocStatus::TooLarge => {
+                excluded.push((path, "file too large to retain"));
+                continue;
+            }
+            DocStatus::Unreadable => {
+                excluded.push((path, "unreadable"));
+                continue;
+            }
+        }
         match std::fs::metadata(&entry.path) {
-            Ok(meta) if meta.len() > MAX_DOC_BODY_BYTES as u64 => continue,
+            Ok(meta) if meta.len() > MAX_DOC_BODY_BYTES as u64 => {
+                excluded.push((path, "file too large to retain"));
+                continue;
+            }
             Ok(_) => {}
-            Err(_) => continue,
+            Err(_) => {
+                excluded.push((path, "unreadable"));
+                continue;
+            }
         }
         let Ok(raw) = std::fs::read(&entry.path) else {
+            excluded.push((path, "unreadable"));
             continue;
         };
         let body = String::from_utf8_lossy(&raw);
-        let chunk = format!(
-            "\n\n### {}\n```\n{}\n```",
-            entry.path.display(),
-            body.trim_end()
-        );
+        let chunk = format!("\n\n### {path}\n```\n{}\n```", body.trim_end());
         let cost = crate::brain::tokenizer::count_tokens(&chunk);
         if used + cost > budget_tokens {
-            break;
+            out_of_room = true;
+            excluded.push((path, "no room left in the retained-set budget"));
+            continue;
         }
         used += cost;
         section.push_str(&chunk);
@@ -297,15 +324,8 @@ pub fn render(session_id: Uuid, budget_tokens: usize) -> Option<String> {
     // one. Silence is the only outcome the model cannot recover from, because
     // it has no way to notice.
     let mut missing = String::new();
-    if included == 0 {
-        for entry in &entries {
-            let why = match entry.status {
-                DocStatus::Ok => "no room left in the retained-set budget",
-                DocStatus::TooLarge => "file too large to retain",
-                DocStatus::Unreadable => "unreadable",
-            };
-            missing.push_str(&format!("- {} ({why})\n", entry.path.display()));
-        }
+    for (path, why) in &excluded {
+        missing.push_str(&format!("- {path} ({why})\n"));
     }
     for reason in &refusals {
         missing.push_str(&format!("- {reason}\n"));

@@ -246,11 +246,17 @@ fn render_respects_the_leftover_budget() {
         (1..3).contains(&tight_count),
         "a mid budget carries some but not all bodies, got {tight_count}"
     );
-    // Whatever did fit is the NEWEST read (c.md), never the oldest.
-    assert!(tight.contains("c.md"), "got: {tight}");
+    // Whatever did fit is the NEWEST read (c.md), never the oldest. Assert on
+    // the injected BODY heading, not the bare name: a dropped document is now
+    // NAMED in the not-retained list, so `contains("a.md")` is true either way.
+    assert!(tight.contains(&format!("### {c}")), "got: {tight}");
     assert!(
-        !tight.contains("a.md"),
-        "the oldest must be the one dropped"
+        !tight.contains(&format!("### {a}")),
+        "the oldest must be the one dropped, and its body must not appear: {tight}"
+    );
+    assert!(
+        tight.contains(&a),
+        "…but the dropped document is still NAMED, so the model can recover: {tight}"
     );
 
     std::fs::remove_dir_all(&dir).ok();
@@ -277,7 +283,21 @@ fn render_skips_a_body_over_the_cap() {
         !block.contains("BEGIN-OVERSIZE-MARKER"),
         "an oversize body must not be injected, not even partially"
     );
-    assert!(!block.contains(&big_path));
+    // The oversize document's PATH is named in the not-retained section — the
+    // model asked for it, so it must learn it was refused and why — while its
+    // BODY stays out, which is the assertion above.
+    assert!(
+        block.contains("## Documents NOT retained"),
+        "the oversize document must be reported, not dropped silently: {block}"
+    );
+    assert!(
+        block.contains(&big_path),
+        "the refused path must be named: {block}"
+    );
+    assert!(
+        block.contains("file too large to retain"),
+        "the refusal must carry its reason: {block}"
+    );
     assert!(block.contains(&small_path));
     assert!(block.contains("short body"));
 
@@ -371,6 +391,10 @@ fn render_emits_one_not_retained_header_when_both_causes_fire() {
     std::fs::write(&law, "# law\nOBEY-MARKER\n").unwrap();
     mark_document_read(sid, &law);
     let law = law.canonicalize().unwrap();
+    // The rendered block carries the path as a STRING, so the assertion must
+    // compare against one: `str::contains` takes a `Pattern`, and `&PathBuf`
+    // is not one.
+    let law_display = law.display().to_string();
 
     // Named by the manifest, present on disk, never read by this session.
     let unread = dir.join("never-read.md");
@@ -378,7 +402,7 @@ fn render_emits_one_not_retained_header_when_both_causes_fire() {
 
     let (registered, rejected) = register(
         sid,
-        &[law.display().to_string(), unread.display().to_string()],
+        &[law_display.clone(), unread.display().to_string()],
     );
     assert_eq!(registered.len(), 1, "the read document is carried");
     assert_eq!(rejected.len(), 1, "the unread one is refused");
@@ -392,7 +416,7 @@ fn render_emits_one_not_retained_header_when_both_causes_fire() {
         "one heading must cover both causes, got: {block}"
     );
     assert!(
-        block.contains(&law),
+        block.contains(&law_display),
         "the unfitting body must be named: {block}"
     );
     assert!(
