@@ -731,7 +731,7 @@ impl WorkStatus {
         })
     }
 
-    /// Finalize detached-COMMAND status files left `Running` by a restart
+    /// Finalize the detached-COMMAND status files a restart left `Running`
     /// (#111 follow-up, Part D).
     ///
     /// [`crate::brain::agent::service::restart_recovery::report_interrupted`]
@@ -739,26 +739,29 @@ impl WorkStatus {
     /// owning session, but it never rewrites the status FILE — so every
     /// restart-killed command left a file reading `Running` forever, and
     /// every file reader (`tasks_list`, the waiter sweeps) saw work that no
-    /// longer existed. At boot no command can be live, so a `Running`
-    /// command file is stale by construction.
+    /// longer existed.
+    ///
+    /// `ids` is the index, and it is the reason this leg no longer reads the
+    /// whole status dir (~25k files on a long-lived host, #848). A
+    /// `background_tasks` row exists only while its command is believed to be
+    /// running, so the rows that survive a boot ARE the commands the restart
+    /// killed ([`crate::db::repository::background_task`]) — and the row id is
+    /// the status-file id, because `background_tasks.rs` derives the file id
+    /// from the same uuid it records.
+    ///
+    /// Two kinds of file are left alone by design: terminal files (nothing to
+    /// fix), and a `Running` file whose row never landed. The spawn path logs
+    /// that write failure as an error, and the 7-day status sweep bounds how
+    /// long such a file can linger — the alternative is re-reading every file
+    /// on every boot to catch a case the DB itself could not write.
     ///
     /// Deliberately emits NO notice: the DB-row path already reported the
     /// interruption, and a second notice would be a duplicate wake.
     /// Returns how many files were finalized.
-    pub fn reconcile_stale_commands() -> usize {
-        let ids = match Self::list_all() {
-            Ok(ids) => ids,
-            Err(e) => {
-                tracing::warn!(
-                    target: "background_task",
-                    "Could not list detached status files for boot reconcile: {e}"
-                );
-                return 0;
-            }
-        };
+    pub fn reconcile_stale_commands(ids: &[String]) -> usize {
         let mut finalized = 0usize;
         for id in ids {
-            let Some(mut status) = Self::read(&id) else {
+            let Some(mut status) = Self::read(id) else {
                 continue;
             };
             if status.kind == WorkKind::Command && status.state == WorkState::Running {

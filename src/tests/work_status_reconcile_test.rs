@@ -5,8 +5,8 @@
 //! Every restart-killed command therefore left a file reading `Running`
 //! forever, and every file reader (`tasks_list`, the waiter sweeps) saw work
 //! that no longer existed. `reconcile_stale_commands` finalizes those files at
-//! boot. At boot no command can be live, so a `Running` command file is stale
-//! by construction.
+//! boot, working from the run ids whose `background_tasks` row survived the
+//! boot (#848) rather than from a scan of the whole status dir.
 
 use crate::brain::agent::service::work_status::{
     CommandExit, CommandPaths, RunCause, WorkState, WorkStatus, test_override,
@@ -64,7 +64,8 @@ fn running_command_file_is_finalized_and_completed_one_is_spared() {
     )
     .expect("finish command");
 
-    let finalized = WorkStatus::reconcile_stale_commands();
+    let indexed = ["stale-cmd".to_string(), "done-cmd".to_string()];
+    let finalized = WorkStatus::reconcile_stale_commands(&indexed);
     assert_eq!(finalized, 1, "only the Running command file is finalized");
 
     let stale = WorkStatus::read("stale-cmd").expect("stale file present");
@@ -79,5 +80,35 @@ fn running_command_file_is_finalized_and_completed_one_is_spared() {
         done.state,
         WorkState::Completed,
         "terminal files are not rewritten"
+    );
+}
+
+/// The leg works from the DB index, not from a directory scan (#848).
+///
+/// This is the behaviour change that makes the leg cheap, so it needs its own
+/// test: a `Running` file the index does not name must survive untouched. If
+/// someone reintroduces a `list_all()` scan here, this test fails — which is
+/// the point, because the cost it removes is ~25k file reads per boot.
+#[test]
+fn a_running_file_the_index_does_not_name_is_left_alone() {
+    let _guard = TempStatusDir::new();
+
+    WorkStatus::new_command("killed-cmd", "sess-1", "sleep 900", "sleep 900", CommandPaths::none())
+        .expect("write running command");
+    WorkStatus::new_command("unnamed-cmd", "sess-2", "sleep 900", "sleep 900", CommandPaths::none())
+        .expect("write second running command");
+
+    let finalized = WorkStatus::reconcile_stale_commands(&["killed-cmd".to_string()]);
+    assert_eq!(finalized, 1, "only the named run is finalized");
+
+    assert_eq!(
+        WorkStatus::read("killed-cmd").map(|s| s.state),
+        Some(WorkState::Interrupted),
+        "a named run is finalized"
+    );
+    assert_eq!(
+        WorkStatus::read("unnamed-cmd").map(|s| s.state),
+        Some(WorkState::Running),
+        "an unnamed run is not found by scanning the dir — the index decides"
     );
 }

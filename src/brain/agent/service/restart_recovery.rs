@@ -299,23 +299,29 @@ pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
 /// child is gone too: there is nothing to reattach to and no result coming.
 /// Each one is reported into its session as an interruption so the agent can
 /// decide whether to re-run it, rather than waiting forever on a resume that
-/// can never arrive (#763). Returns how many were reported.
-pub async fn report_interrupted() -> usize {
+/// can never arrive (#763).
+///
+/// Returns the run ids it accounted for — which is also the index the status
+/// FILE leg needs, since the row id and the file id are the same uuid
+/// (#848). It is returned rather than re-read by the caller because this
+/// function clears each row as it goes, so a later read would find nothing.
+pub async fn report_interrupted() -> Vec<Uuid> {
     let Some(repo) = super::background_tasks::task_repo() else {
-        return 0;
+        return Vec::new();
     };
     let rows = match repo.all().await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::error!(target: "background_task", "Failed to read background tasks: {e:#}");
-            return 0;
+            return Vec::new();
         }
     };
     if rows.is_empty() {
-        return 0;
+        return Vec::new();
     }
-    let mut count = 0usize;
+    let mut reported = Vec::with_capacity(rows.len());
     for row in rows {
+        let row_id = row.id;
         tracing::warn!(
             target: "background_task",
             "Background task '{}' for session {} was interrupted by a restart",
@@ -328,12 +334,12 @@ pub async fn report_interrupted() -> usize {
         // and left standing here. Startup runs before channels register, so
         // an unclaimed session parks rather than mis-delivers (#1037).
         deliver_or_park(row.session_id, interrupted_message(&row));
-        count += 1;
+        reported.push(row_id);
 
         // Clear per row, only after it is accounted for. clear_all() used to
         // run regardless, so a row whose report never got produced was
         // dropped from the table anyway and its session never heard anything.
-        if let Err(e) = repo.clear(row.id).await {
+        if let Err(e) = repo.clear(row_id).await {
             // A surviving row re-reports the same interruption next start,
             // which is noisy but recoverable; the report itself already
             // landed, so this is not fatal.
@@ -344,7 +350,7 @@ pub async fn report_interrupted() -> usize {
             );
         }
     }
-    count
+    reported
 }
 
 /// What happened to one interrupted boot row, so that clearing it is a
@@ -576,14 +582,24 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
         }
     }
 
-    // Then detached commands, which keep their own table.
-    reported += report_interrupted().await;
+    // Then detached commands, which keep their own table. The ids it returns
+    // are the index the file leg below works from — handed over here because
+    // `report_interrupted` clears each row as it accounts for it, so nothing
+    // could re-read them afterwards.
+    let interrupted_commands = report_interrupted().await;
+    reported += interrupted_commands.len();
     // Their STATUS FILES are a separate surface: `report_interrupted` accounts
     // for the DB row but never rewrites the file, so a restart-killed command
     // left a forever-`Running` file that every reader saw as live work (#111
-    // follow-up, Part D). No notice here — the row path already notified; this
-    // only makes the file agree with reality.
-    let finalized = super::work_status::WorkStatus::reconcile_stale_commands();
+    // follow-up, Part D). Naming the files from the row ids keeps this leg off
+    // the whole status dir, which is ~25k files on a long-lived host (#848).
+    // No notice here — the row path already notified; this only makes the file
+    // agree with reality.
+    let interrupted_ids: Vec<String> = interrupted_commands
+        .iter()
+        .map(|id| id.to_string())
+        .collect();
+    let finalized = super::work_status::WorkStatus::reconcile_stale_commands(&interrupted_ids);
     if finalized > 0 {
         tracing::info!(
             target: "background_task",
