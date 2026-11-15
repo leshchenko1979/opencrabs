@@ -1310,7 +1310,7 @@ async fn cmd_chat_inner(
     // stays; but it records that it ran, and the sweep's first cycle after a
     // boot hands the prune back to it instead of enumerating the same rows.
     match crate::services::SessionService::new(service_context.clone())
-        .prune_expired_subagent_sessions(config.agent.subagent_session_ttl_days)
+        .prune_expired_subagent_sessions(config.agent.subagent_session_ttl_days())
         .await
     {
         Ok(0) => crate::services::maintenance::note_subagent_catchup_done(),
@@ -1323,18 +1323,20 @@ async fn cmd_chat_inner(
         Err(e) => tracing::warn!("Sub-agent session sweep failed: {e:#}"),
     }
 
-    // Spawn periodic maintenance sweep (#241) — every 24 hours
+    // Spawn periodic maintenance sweep (#241). The period and every other
+    // timing value live in `MaintenanceTiming`, which asserts the ordering
+    // between them at construction (#844) — the invariant #838 and #840 were
+    // each a violation of.
+    let maintenance_timing = crate::services::maintenance::MaintenanceTiming::default();
     crate::services::maintenance::MaintenanceService::spawn_periodic(
         service_context.clone(),
-        std::time::Duration::from_secs(86400),
+        maintenance_timing,
     );
 
     // Memory-only reclaim (#522): ONE bounded #321 batch per tick, skipped
     // while any turn is in flight or any inbound message has just landed.
     // Message prune and the main-DB reclaim stay on the 24 h sweep above.
-    crate::services::maintenance::MaintenanceService::spawn_memory_reclaim(
-        crate::services::maintenance::MEMORY_RECLAIM_TICK,
-    );
+    crate::services::maintenance::MaintenanceService::spawn_memory_reclaim(maintenance_timing);
 
     // Decision-cache sweep (#1648 PR3): rows past a tier's `ttl_hours` are
     // stale by the tier's own definition, and rows for tiers no longer in

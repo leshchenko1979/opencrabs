@@ -131,7 +131,7 @@ fn the_shipped_default_window_is_seven_days() {
     // The window is the only load-bearing number in the change: 7 days bounds
     // the spill dir, and it is what an unconfigured install gets. Pin it to the
     // config field so a later default edit cannot drift from this test.
-    let window = u64::from(crate::config::AgentConfig::default().tool_output_retention_days);
+    let window = u64::from(crate::config::AgentConfig::default().tool_output_retention_days());
     assert_eq!(window, 7, "the shipped retention window");
 
     let home = tempfile::tempdir().expect("tempdir");

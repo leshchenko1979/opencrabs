@@ -1516,6 +1516,88 @@ pub fn default_image_model() -> String {
     "gemini-3.1-flash-image-preview".to_string()
 }
 
+/// One home for the maintenance sweep's retention windows (#844).
+///
+/// Resolved by the [`AgentConfig`] accessors, which fold in the deprecated
+/// flat keys so an existing config keeps its exact behaviour.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct RetentionConfig {
+    /// Fallback applied to the ROW prunes that name no key of their own.
+    ///
+    /// `0` (the default) means "no fallback": every row prune keeps its own
+    /// historical default (subagent 7, messages 0, ledger 0), which is exactly
+    /// what an untouched config already did. A positive value replaces those
+    /// defaults for each row prune the operator did not name explicitly.
+    ///
+    /// Never applied to [`Self::tool_output_files`] — that purge runs at
+    /// startup and deletes files rather than rows.
+    #[serde(default)]
+    pub default_days: u32,
+
+    /// Days a spawned sub-agent's session is kept (historical default: 7).
+    ///
+    /// Every `spawn_agent` creates a session of its own and nothing revisits
+    /// them, so they accumulate with their messages, tool rows and plan files
+    /// (#931). `0` keeps them forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_sessions: Option<u32>,
+
+    /// Days of historical session messages retained (#278).
+    /// Historical default: `0` — retain forever, so upgrading never deletes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages: Option<u32>,
+
+    /// Days of `feedback_ledger` rows retained (#836).
+    ///
+    /// The ledger is append-only by design — every tool outcome, provider error
+    /// and compaction writes a row — and `tool_%` is 90 % of it, so no index
+    /// makes those scans selective; only retention bounds them.
+    /// Historical default: `0` — retain forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_ledger: Option<u32>,
+
+    /// Days throwaway FILES survive the startup purge (#345): the profile's
+    /// `tmp/` tree and the tool-output spill dir.
+    ///
+    /// Deliberately outside the [`Self::default_days`] cascade — a different
+    /// trigger (startup, not the sweep) and a different unit (files, not rows).
+    /// Historical default: `7`; `0` disables the purge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_output_files: Option<u32>,
+}
+
+impl RetentionConfig {
+    /// Historical default for [`Self::subagent_sessions`].
+    pub const DEFAULT_SUBAGENT_SESSIONS_DAYS: u32 = 7;
+    /// Historical default for [`Self::messages`].
+    pub const DEFAULT_MESSAGES_DAYS: u32 = 0;
+    /// Historical default for [`Self::feedback_ledger`].
+    pub const DEFAULT_FEEDBACK_LEDGER_DAYS: u32 = 0;
+    /// Historical default for [`Self::tool_output_files`].
+    pub const DEFAULT_TOOL_OUTPUT_FILES_DAYS: u32 = 7;
+
+    /// Resolve one ROW prune: the specific key, then the deprecated flat key,
+    /// then `default_days` (only when non-zero), then the historical default.
+    ///
+    /// Specific beats generic on both sides of the split, so a legacy key
+    /// already on disk is never silently overridden by a later
+    /// `default_days = N`.
+    fn resolve_row(&self, specific: Option<u32>, legacy: Option<u32>, historical: u32) -> u32 {
+        specific
+            .or(legacy)
+            .or((self.default_days > 0).then_some(self.default_days))
+            .unwrap_or(historical)
+    }
+
+    /// Resolve the FILE purge: the specific key, then the deprecated flat key,
+    /// then the historical default. `default_days` is never consulted.
+    fn resolve_files(&self, specific: Option<u32>, legacy: Option<u32>) -> u32 {
+        specific
+            .or(legacy)
+            .unwrap_or(Self::DEFAULT_TOOL_OUTPUT_FILES_DAYS)
+    }
+}
+
 /// Agent behaviour configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -1650,49 +1732,51 @@ pub struct AgentConfig {
     #[serde(default = "default_evolve_allow_root")]
     pub evolve_allow_root: bool,
 
-    /// Days to keep a spawned sub-agent's session before it is pruned
-    /// (default: 7). `0` disables pruning and keeps them forever.
+    /// Deprecated flat key — use `[agent.retention].subagent_sessions` (#844).
     ///
-    /// Every `spawn_agent` creates a session of its own, and nothing ever
-    /// revisits them, so they accumulate along with their messages, tool
-    /// executions and on-disk plan files (#931). They are hidden from the
-    /// session list from the moment they are created; this only decides when
-    /// they stop taking up space.
-    #[serde(default = "default_subagent_session_ttl_days")]
-    pub subagent_session_ttl_days: u32,
+    /// Kept on the wire under its original name so an existing config keeps
+    /// its exact behaviour; [`AgentConfig::subagent_session_ttl_days`] resolves
+    /// the cascade. New configs should use the section.
+    #[serde(default, rename = "subagent_session_ttl_days", skip_serializing_if = "Option::is_none")]
+    pub legacy_subagent_session_ttl_days: Option<u32>,
 
-    /// Days to retain historical messages in the session database before
-    /// pruning them during maintenance sweeps (#278).
-    /// Default: `0` (disabled / retain forever). Setting e.g. `90` prunes
-    /// messages older than 90 days.
-    #[serde(default = "default_message_retention_days")]
-    pub message_retention_days: u32,
+    /// Deprecated flat key — use `[agent.retention].messages` (#844).
+    #[serde(default, rename = "message_retention_days", skip_serializing_if = "Option::is_none")]
+    pub legacy_message_retention_days: Option<u32>,
 
-    /// Days to retain rows in the `feedback_ledger` table before pruning them
-    /// during maintenance sweeps (#836).
-    ///
-    /// The ledger is append-only by design — every tool outcome, provider error
-    /// and compaction writes a row — and nothing pruned it, so it reached
-    /// 1.04M rows / 3.75 GiB on a busy profile and every `feedback_analyze`,
-    /// RSI digest and `self_improve` call aggregated over the whole table.
-    /// `tool_%` is 90 % of the rows, so no index can make those scans
-    /// selective; only retention bounds them.
-    ///
-    /// Default: `0` (disabled / retain forever), matching
-    /// `message_retention_days` — upgrading never deletes data silently.
-    #[serde(default = "default_feedback_ledger_retention_days")]
-    pub feedback_ledger_retention_days: u32,
+    /// Deprecated flat key — use `[agent.retention].feedback_ledger` (#844).
+    #[serde(default, rename = "feedback_ledger_retention_days", skip_serializing_if = "Option::is_none")]
+    pub legacy_feedback_ledger_retention_days: Option<u32>,
 
-    /// Days to retain throwaway files before the startup purge removes them
-    /// (#345). Covers the profile's `tmp/` tree (channel image uploads, loose
-    /// scratch files) and the tool-output spill dir
-    /// (`/tmp/opencrabs/tool_output`, where oversized tool results are written).
+    /// Deprecated flat key — use `[agent.retention].tool_output_files` (#844).
+    #[serde(default, rename = "tool_output_retention_days", skip_serializing_if = "Option::is_none")]
+    pub legacy_tool_output_retention_days: Option<u32>,
+
+    /// Retention windows for the maintenance sweep (#844).
     ///
-    /// Default: `7`. `0` disables the purge and keeps them forever — note that
-    /// a literal `0` passed to the purge would instead age out *every* file,
-    /// so the disable is honoured at the call site.
-    #[serde(default = "default_tool_output_retention_days")]
-    pub tool_output_retention_days: u32,
+    /// These four operator-tunable switches used to sit flat in `[agent]` among
+    /// 44 unrelated fields, where the value that caused a one-day retention
+    /// outage (#838) was one of them. They now have one home:
+    ///
+    /// ```toml
+    /// [agent.retention]
+    /// default_days      = 0   # fallback for the ROW prunes
+    /// subagent_sessions = 7
+    /// # messages and feedback_ledger inherit default_days
+    /// ```
+    ///
+    /// The four deprecated flat keys above are still honoured, so upgrading
+    /// changes nothing. Resolution is per key, in this order: the specific
+    /// `[agent.retention]` key, then the legacy flat key, then `default_days`
+    /// (only when non-zero), then the historical default.
+    ///
+    /// `default_days` is deliberately a fallback and not a replacement: the
+    /// defaults differ (7 / 0 / 0), so one merged value would start pruning
+    /// messages for a profile sitting at `subagent = 7, messages = 0`.
+    /// `tool_output_files` never inherits it either — that purge runs at
+    /// startup and deletes FILES, not rows.
+    #[serde(default)]
+    pub retention: RetentionConfig,
 
     /// Override provider for autonomous RSI self-improvement cycles (e.g. "zhipu", "minimax").
     /// RSI runs on its own provider chain so it never competes with chat or sub-agents for quota.
@@ -1934,6 +2018,58 @@ impl AgentConfig {
             self.redact_group.unwrap_or(self.redact_sensitive_data)
         }
     }
+
+    /// Days to keep a spawned sub-agent's session before it is pruned (#931).
+    ///
+    /// Resolves `[agent.retention].subagent_sessions` -> the deprecated
+    /// `subagent_session_ttl_days` -> `[agent.retention].default_days` -> 7.
+    /// `0` disables the prune and keeps them forever.
+    pub fn subagent_session_ttl_days(&self) -> u32 {
+        self.retention.resolve_row(
+            self.retention.subagent_sessions,
+            self.legacy_subagent_session_ttl_days,
+            RetentionConfig::DEFAULT_SUBAGENT_SESSIONS_DAYS,
+        )
+    }
+
+    /// Days of historical session messages to retain (#278).
+    ///
+    /// Resolves `[agent.retention].messages` -> the deprecated
+    /// `message_retention_days` -> `[agent.retention].default_days` -> 0.
+    /// `0` disables the prune.
+    pub fn message_retention_days(&self) -> u32 {
+        self.retention.resolve_row(
+            self.retention.messages,
+            self.legacy_message_retention_days,
+            RetentionConfig::DEFAULT_MESSAGES_DAYS,
+        )
+    }
+
+    /// Days of `feedback_ledger` rows to retain (#836).
+    ///
+    /// Resolves `[agent.retention].feedback_ledger` -> the deprecated
+    /// `feedback_ledger_retention_days` -> `[agent.retention].default_days`
+    /// -> 0. `0` disables the prune.
+    pub fn feedback_ledger_retention_days(&self) -> u32 {
+        self.retention.resolve_row(
+            self.retention.feedback_ledger,
+            self.legacy_feedback_ledger_retention_days,
+            RetentionConfig::DEFAULT_FEEDBACK_LEDGER_DAYS,
+        )
+    }
+
+    /// Days throwaway files survive the startup purge (#345).
+    ///
+    /// Resolves `[agent.retention].tool_output_files` -> the deprecated
+    /// `tool_output_retention_days` -> 7. `[agent.retention].default_days` is
+    /// NOT consulted: this purge runs at startup and deletes files, not rows.
+    /// `0` disables the purge.
+    pub fn tool_output_retention_days(&self) -> u32 {
+        self.retention.resolve_files(
+            self.retention.tool_output_files,
+            self.legacy_tool_output_retention_days,
+        )
+    }
 }
 
 fn default_background_compaction() -> bool {
@@ -2037,22 +2173,6 @@ fn default_plan_require_approval() -> bool {
     true
 }
 
-fn default_subagent_session_ttl_days() -> u32 {
-    7
-}
-
-fn default_message_retention_days() -> u32 {
-    0
-}
-
-fn default_feedback_ledger_retention_days() -> u32 {
-    0
-}
-
-fn default_tool_output_retention_days() -> u32 {
-    7
-}
-
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -2075,10 +2195,11 @@ impl Default for AgentConfig {
             plan_worker_allow_write: false,
             auto_update: default_auto_update(),
             evolve_allow_root: default_evolve_allow_root(),
-            subagent_session_ttl_days: default_subagent_session_ttl_days(),
-            message_retention_days: default_message_retention_days(),
-            feedback_ledger_retention_days: default_feedback_ledger_retention_days(),
-            tool_output_retention_days: default_tool_output_retention_days(),
+            legacy_subagent_session_ttl_days: None,
+            legacy_message_retention_days: None,
+            legacy_feedback_ledger_retention_days: None,
+            legacy_tool_output_retention_days: None,
+            retention: RetentionConfig::default(),
             self_improvement_provider: None,
             rsi_enabled: None,
             self_improvement_model: None,

@@ -2734,11 +2734,9 @@ plan_auto_start = false          # default false: completing a plan task NEVER s
 plan_worker_allow_nested = false # default false: isolated plan workers are pure - they cannot spawn further sub-agents
 plan_worker_allow_write = false  # default false: isolated plan workers run READ-ONLY (#1173 grant) - they verify/report; mutations stay with the parent
                                  # or background tasks (their long bash runs attached). true lets them nest.
-subagent_session_ttl_days = 7    # days a spawned sub-agent's session is kept before pruning. Nothing revisits
-                                 # them, so they accumulate with their messages, tool rows and plan files. 0 keeps forever
-tool_output_retention_days = 7   # days throwaway files survive before the startup purge removes them: the profile's
-                                 # tmp/ tree (channel image uploads, loose scratch files) and the tool-output spill dir
-                                 # where oversized tool results are written. 0 disables the purge
+# Retention windows live in their own section at the end of [agent] (#844):
+# [agent.retention]. The old flat keys above are still read, so an existing
+# config keeps working unchanged.
 
 # ── Runaway-reasoning guard ───────────────────────────────────────────────────
 thinking_loop_timeout_secs = 600 # how long a model may stream with zero tool calls. Enforced at this
@@ -2747,6 +2745,28 @@ thinking_loop_timeout_secs = 600 # how long a model may stream with zero tool ca
                                  # only a stream that delivered nothing is killed and retried with
                                  # phantom enforcement. Overridable per provider via
                                  # `[providers.<name>] thinking_loop_timeout_secs` (#1690). 0 disables.
+
+# ── Retention (#844) ──────────────────────────────────────────────────────────
+# One home for the maintenance sweep's retention windows. Resolution is per key:
+# the [agent.retention] key, then the deprecated flat key in [agent], then
+# default_days (only when non-zero), then the historical default.
+#
+# The deprecated flat keys - subagent_session_ttl_days, message_retention_days,
+# feedback_ledger_retention_days, tool_output_retention_days - are still read
+# under their original names, so upgrading never changes behaviour. New configs
+# should use this section.
+[agent.retention]
+default_days      = 0   # fallback for the ROW prunes that name no key of their own. 0 = no fallback, so each
+                        # keeps its historical default (subagent 7, messages 0, ledger 0). A positive value
+                        # replaces those defaults. Never applied to tool_output_files.
+subagent_sessions = 7   # days a spawned sub-agent's session is kept. Nothing revisits them, so they accumulate
+                        # with their messages, tool rows and plan files. 0 keeps forever. (historical default: 7)
+# messages         = 0   # days of historical session messages retained. 0 = retain forever. (historical default: 0)
+# feedback_ledger  = 0   # days of feedback_ledger rows retained. 0 = retain forever. (historical default: 0)
+# tool_output_files= 7   # days throwaway FILES survive the startup purge: the profile's tmp/ tree (channel image
+                        # uploads, loose scratch files) and the tool-output spill dir where oversized tool results
+                        # are written. 0 disables the purge. Different trigger (startup, not the sweep) and a
+                        # different unit (files, not rows), so it does NOT inherit default_days.
 
 # ── Provider registry ─────────────────────────────────────────────────────────
 # Optional discovery service that can add providers automatically. Opt-in: the

@@ -3,8 +3,9 @@
 //! Append-only observations for recursive self-improvement.
 //! Records tool outcomes, user corrections, provider errors, and performance
 //! signals. Rows are written by the RSI machinery and consumed by analysis
-//! tools; retention is opt-in via `[agent].feedback_ledger_retention_days`
-//! (#836) — `0` (the default) keeps every row forever.
+//! tools; retention is opt-in via `[agent.retention].feedback_ledger`
+//! (#836, moved there by #844; the deprecated flat key still resolves) — `0`
+//! (the default) keeps every row forever.
 
 use crate::db::Pool;
 use crate::db::database::interact_err;

@@ -63,11 +63,12 @@ async fn main() -> Result<()> {
     }
 
     // Clean up orphaned temp files — channel uploads (tg_photo_*, wa_img_*) and
-    // the tool-output spill dir — older than `agent.tool_output_retention_days`.
+    // the tool-output spill dir — older than `[agent.retention].tool_output_files`
+    // (or the deprecated flat key it replaced, #844).
     // Never wipe on restart: files may be recoverable or still needed. A window
     // of `0` disables the purge; the sweep itself honours that.
     let retention_days = match opencrabs::config::Config::load_for_cli(cli_args.config.as_deref()) {
-        Ok(config) => config.agent.tool_output_retention_days,
+        Ok(config) => config.agent.tool_output_retention_days(),
         Err(e) => {
             // A broken config is reported by the CLI path with full context,
             // and that same failure stops this boot anyway. Skipping the purge

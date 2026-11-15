@@ -59,6 +59,15 @@ pub const MEMORY_RECLAIM_TICK: Duration = Duration::from_secs(300);
 /// sweep waits 30 min before its first attempt.
 pub const SWEEP_WARMUP: Duration = Duration::from_secs(1800);
 
+/// How often the 24 h sweep wakes once it has run (#844).
+///
+/// This was a bare `86400` at the spawn call site in `cli::ui`, i.e. the
+/// sweep's own period lived outside the module that owns the sweep. It belongs
+/// beside the other timings so [`MaintenanceTiming`] can enforce the ordering
+/// between them.
+pub const SWEEP_INTERVAL: Duration = Duration::from_secs(86_400);
+
+
 /// Extra delay the reclaim ticker adds to [`SWEEP_WARMUP`] before its first
 /// tick (#840).
 ///
@@ -131,6 +140,121 @@ pub enum SweepOutcome {
 /// and tries again there, which still surfaces the failure on every attempt.
 pub const MAX_CONSECUTIVE_FAILURE_RETRIES: u32 = 3;
 
+/// Every timing value the maintenance scheduler depends on, in ONE place, with
+/// the ordering between them enforced by construction (#844).
+///
+/// The values were previously five independent constants, and nothing checked
+/// how they related. That gap is not hypothetical: #838 was exactly an ordering
+/// violation — a contended retry equal to the reclaim tick made the sweep
+/// phase-locked to the ticker, so every retry re-collided with the wake that
+/// had just starved it and housekeeping was lost for a whole incarnation.
+/// #840 was the same class one step earlier: equal warmups made both loops
+/// reach the shared permit in the same microsecond.
+///
+/// So the constructor does not merely store the numbers, it refuses an
+/// arrangement that cannot work:
+///
+/// - `contended_retry < reclaim_tick` — a retry at or above the tick is
+///   phase-locked to it and re-collides forever (#838);
+/// - `reclaim_tick < sweep_interval` — the ticker must tick several times per
+///   sweep period, or "retry sooner" has nothing sooner to retry into;
+/// - `reclaim_warmup_offset > 0` — the ticker must NOT share the sweep's first
+///   wake instant (#840).
+///
+/// Panics rather than returns an error: these are compile-time-shaped facts
+/// about constants, and a violation is a coding error that must never reach a
+/// running daemon.
+#[derive(Debug, Clone, Copy)]
+pub struct MaintenanceTiming {
+    contended_retry: Duration,
+    reclaim_tick: Duration,
+    sweep_interval: Duration,
+    sweep_warmup: Duration,
+    reclaim_warmup_offset: Duration,
+}
+
+impl MaintenanceTiming {
+    /// Build a timing set, asserting the ordering that makes it workable.
+    ///
+    /// # Panics
+    ///
+    /// If `contended_retry >= reclaim_tick` (#838), if
+    /// `reclaim_tick >= sweep_interval`, or if `reclaim_warmup_offset` is zero
+    /// (#840).
+    pub fn new(
+        contended_retry: Duration,
+        reclaim_tick: Duration,
+        sweep_interval: Duration,
+        sweep_warmup: Duration,
+        reclaim_warmup_offset: Duration,
+    ) -> Self {
+        assert!(
+            contended_retry < reclaim_tick,
+            "#838: contended retry ({contended_retry:?}) must be strictly shorter than \
+             the reclaim tick ({reclaim_tick:?}), or the sweep is phase-locked to the \
+             ticker and re-collides with the wake that starved it"
+        );
+        assert!(
+            reclaim_tick < sweep_interval,
+            "the reclaim tick ({reclaim_tick:?}) must be shorter than the sweep \
+             interval ({sweep_interval:?}), or a contended retry has no free window \
+             to land in"
+        );
+        assert!(
+            !reclaim_warmup_offset.is_zero(),
+            "#840: a zero warmup offset restores the simultaneous first wake that let \
+             the ticker take the shared permit every boot"
+        );
+        Self {
+            contended_retry,
+            reclaim_tick,
+            sweep_interval,
+            sweep_warmup,
+            reclaim_warmup_offset,
+        }
+    }
+
+    /// How soon a sweep retries after losing the permit or failing (#838, #843).
+    pub fn contended_retry(&self) -> Duration {
+        self.contended_retry
+    }
+
+    /// The memory reclaim ticker's period (#522).
+    pub fn reclaim_tick(&self) -> Duration {
+        self.reclaim_tick
+    }
+
+    /// The sweep's period once it has run (#844).
+    pub fn sweep_interval(&self) -> Duration {
+        self.sweep_interval
+    }
+
+    /// Post-boot wait before the sweep's first attempt (#273).
+    pub fn sweep_warmup(&self) -> Duration {
+        self.sweep_warmup
+    }
+
+    /// Post-boot wait before the reclaim ticker's first tick (#840).
+    ///
+    /// Always strictly longer than [`Self::sweep_warmup`], so the sweep reaches
+    /// the permit first by construction rather than by luck.
+    pub fn reclaim_warmup(&self) -> Duration {
+        self.sweep_warmup + self.reclaim_warmup_offset
+    }
+}
+
+impl Default for MaintenanceTiming {
+    fn default() -> Self {
+        Self::new(
+            MAINTENANCE_CONTENDED_RETRY,
+            MEMORY_RECLAIM_TICK,
+            SWEEP_INTERVAL,
+            SWEEP_WARMUP,
+            RECLAIM_WARMUP_OFFSET,
+        )
+    }
+}
+
 /// Delay before the next 24 h sweep attempt (#838, #843).
 ///
 /// A run that never happened (permit held by the reclaim ticker) must not cost
@@ -142,15 +266,15 @@ pub const MAX_CONSECUTIVE_FAILURE_RETRIES: u32 = 3;
 pub fn next_sweep_delay(
     outcome: SweepOutcome,
     consecutive_failures: u32,
-    interval: Duration,
+    timing: &MaintenanceTiming,
 ) -> Duration {
     match outcome {
-        SweepOutcome::Ran => interval,
-        SweepOutcome::Skipped => MAINTENANCE_CONTENDED_RETRY,
+        SweepOutcome::Ran => timing.sweep_interval(),
+        SweepOutcome::Skipped => timing.contended_retry(),
         SweepOutcome::Failed if consecutive_failures < MAX_CONSECUTIVE_FAILURE_RETRIES => {
-            MAINTENANCE_CONTENDED_RETRY
+            timing.contended_retry()
         }
-        SweepOutcome::Failed => interval,
+        SweepOutcome::Failed => timing.sweep_interval(),
     }
 }
 
@@ -315,9 +439,10 @@ impl MaintenanceService {
                 "Maintenance: subagent catch-up already ran this boot; sweep owns the prune next cycle"
             );
         } else {
+            let ttl_days = config.agent.subagent_session_ttl_days();
             let (pruned, ok) = prune_leg(
                 "subagent sessions",
-                session_svc.prune_expired_subagent_sessions(config.agent.subagent_session_ttl_days),
+                session_svc.prune_expired_subagent_sessions(ttl_days),
             )
             .await;
             report.subagents_pruned = pruned;
@@ -327,7 +452,7 @@ impl MaintenanceService {
         // 1b. Prune expired messages (#278)
         let (pruned, ok) = prune_leg(
             "expired messages",
-            session_svc.prune_expired_messages(config.agent.message_retention_days),
+            session_svc.prune_expired_messages(config.agent.message_retention_days()),
         )
         .await;
         report.messages_pruned = pruned;
@@ -341,7 +466,7 @@ impl MaintenanceService {
         // `tool_%` is 90 % of the rows, so no index makes those scans selective.
         let (pruned, ok) = prune_leg(
             "feedback ledger",
-            self.prune_expired_feedback_ledger(config.agent.feedback_ledger_retention_days),
+            self.prune_expired_feedback_ledger(config.agent.feedback_ledger_retention_days()),
         )
         .await;
         report.feedback_ledger_pruned = pruned;
@@ -426,11 +551,11 @@ impl MaintenanceService {
     }
 
     /// Spawn periodic background maintenance task.
-    pub fn spawn_periodic(context: ServiceContext, interval: Duration) {
+    pub fn spawn_periodic(context: ServiceContext, timing: MaintenanceTiming) {
         tokio::spawn(async move {
             let svc = MaintenanceService::new(context);
             // Initial post-boot warmup delay (30 mins) so startup and tool execution are not bottlenecked (#273)
-            tokio::time::sleep(SWEEP_WARMUP).await;
+            tokio::time::sleep(timing.sweep_warmup()).await;
 
             // Consecutive failed runs ALREADY retried on the short interval
             // (#843). Only a run that gets through resets it: a skip means no
@@ -458,7 +583,7 @@ impl MaintenanceService {
                         // rare, but a tick that lands inside a long sweep still
                         // contends. Retry soon instead of losing a day.
                         tracing::info!(
-                            retry_secs = MAINTENANCE_CONTENDED_RETRY.as_secs(),
+                            retry_secs = timing.contended_retry().as_secs(),
                             "Maintenance sweep skipped (permit held) — retrying on the short interval"
                         );
                     }
@@ -473,7 +598,7 @@ impl MaintenanceService {
                             retry_secs = next_sweep_delay(
                                 outcome,
                                 consecutive_failures,
-                                interval
+                                &timing
                             )
                             .as_secs(),
                             "Maintenance sweep failed — retrying"
@@ -481,7 +606,7 @@ impl MaintenanceService {
                     }
                 }
 
-                tokio::time::sleep(next_sweep_delay(outcome, consecutive_failures, interval)).await;
+                tokio::time::sleep(next_sweep_delay(outcome, consecutive_failures, &timing)).await;
             }
         });
     }
@@ -496,7 +621,7 @@ impl MaintenanceService {
     ///
     /// No `ServiceContext`: the tick needs only the store. Spawned-once, like
     /// [`crate::memory::freshness::spawn_external_sweep`].
-    pub fn spawn_memory_reclaim(interval: Duration) {
+    pub fn spawn_memory_reclaim(timing: MaintenanceTiming) {
         if MEMORY_RECLAIM_SPAWNED.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -508,11 +633,11 @@ impl MaintenanceService {
             // startup and the first tool calls must not compete with
             // housekeeping (#273), and the ticker must not collide with the
             // sweep's first wake — see `RECLAIM_WARMUP_OFFSET`.
-            tokio::time::sleep(SWEEP_WARMUP + RECLAIM_WARMUP_OFFSET).await;
+            tokio::time::sleep(timing.reclaim_warmup()).await;
 
             loop {
                 reclaim_once().await;
-                tokio::time::sleep(interval).await;
+                tokio::time::sleep(timing.reclaim_tick()).await;
             }
         });
     }

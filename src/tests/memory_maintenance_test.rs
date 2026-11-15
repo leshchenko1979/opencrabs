@@ -10,7 +10,8 @@ use crate::memory::db::{MemoryGcReport, Store};
 use crate::services::context::ServiceContext;
 use crate::services::maintenance::{
     MAINTENANCE_CONTENDED_RETRY, MAX_CONSECUTIVE_FAILURE_RETRIES, MEMORY_RECLAIM_TICK,
-    RECLAIM_WARMUP_OFFSET, SWEEP_WARMUP, MaintenanceService, SweepOutcome, enter_maintenance, leave,
+    MaintenanceTiming, RECLAIM_WARMUP_OFFSET, SWEEP_WARMUP, MaintenanceService, SweepOutcome,
+    enter_maintenance, leave,
     next_sweep_delay, note_subagent_catchup_done, reclaim_is_due, take_subagent_catchup, try_enter,
 };
 use crate::services::session::SessionService;
@@ -408,14 +409,15 @@ async fn test_contended_sweep_is_flagged_and_retries_soon() {
 
     // The choice itself. A run that never happened waits the short retry; a run
     // that happened waits the configured interval.
-    let day = std::time::Duration::from_secs(86_400);
+    let timing = MaintenanceTiming::default();
+    let day = timing.sweep_interval();
     assert_eq!(
-        next_sweep_delay(SweepOutcome::Skipped, 0, day),
+        next_sweep_delay(SweepOutcome::Skipped, 0, &timing),
         MAINTENANCE_CONTENDED_RETRY,
         "a contended sweep must retry on the short interval, not the 24 h one"
     );
     assert_eq!(
-        next_sweep_delay(SweepOutcome::Ran, 0, day),
+        next_sweep_delay(SweepOutcome::Ran, 0, &timing),
         day,
         "a sweep that actually ran must keep the configured interval"
     );
@@ -471,15 +473,13 @@ fn test_contended_retry_is_shorter_than_the_reclaim_tick() {
 /// #838: a skip retries on the short interval; a real run waits the full one.
 #[test]
 fn test_next_sweep_delay_retries_short_only_after_a_skip() {
-    let interval = std::time::Duration::from_secs(86_400);
+    let timing = MaintenanceTiming::default();
+    let interval = timing.sweep_interval();
     assert_eq!(
-        next_sweep_delay(SweepOutcome::Skipped, 0, interval),
+        next_sweep_delay(SweepOutcome::Skipped, 0, &timing),
         MAINTENANCE_CONTENDED_RETRY
     );
-    assert_eq!(
-        next_sweep_delay(SweepOutcome::Ran, 0, interval),
-        interval
-    );
+    assert_eq!(next_sweep_delay(SweepOutcome::Ran, 0, &timing), interval);
 }
 
 /// #843: a FAILED sweep must not sleep the full interval either — but a
@@ -490,12 +490,13 @@ fn test_next_sweep_delay_retries_short_only_after_a_skip() {
 /// stopped working for a day with one WARN line as the only trace.
 #[test]
 fn test_failed_sweep_retries_short_then_escalates() {
-    let interval = std::time::Duration::from_secs(86_400);
+    let timing = MaintenanceTiming::default();
+    let interval = timing.sweep_interval();
 
     // Fresh failures retry soon — the whole point of the fix.
     for already_retried in 0..MAX_CONSECUTIVE_FAILURE_RETRIES {
         assert_eq!(
-            next_sweep_delay(SweepOutcome::Failed, already_retried, interval),
+            next_sweep_delay(SweepOutcome::Failed, already_retried, &timing),
             MAINTENANCE_CONTENDED_RETRY,
             "failure {already_retried} must retry on the short interval"
         );
@@ -504,7 +505,7 @@ fn test_failed_sweep_retries_short_then_escalates() {
     // Past the bound it goes back to the configured interval, so a broken sweep
     // cannot spin against the database it is failing on.
     assert_eq!(
-        next_sweep_delay(SweepOutcome::Failed, MAX_CONSECUTIVE_FAILURE_RETRIES, interval),
+        next_sweep_delay(SweepOutcome::Failed, MAX_CONSECUTIVE_FAILURE_RETRIES, &timing),
         interval,
         "a persistently failing sweep must escalate back to the full interval"
     );

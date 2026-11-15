@@ -878,6 +878,7 @@ pub mod parallel_tools_test;
 pub mod path_lock_test;
 pub mod profile_test;
 pub mod retained_documents_test;
+pub mod retention_config_test;
 pub mod retry_notice_drain_test;
 pub mod retry_policy_config_test;
 pub mod retry_policy_wiring_test;
