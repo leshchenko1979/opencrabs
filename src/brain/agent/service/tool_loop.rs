@@ -1086,12 +1086,14 @@ impl AgentService {
             .map_err(AgentError::db)?
             .ok_or(AgentError::SessionNotFound(session_id))?;
 
-        // Load conversation context with budget-aware message trimming
-        let message_service = MessageService::new(self.context.clone());
-        let all_db_messages = message_service
-            .list_messages_for_session(session_id)
-            .await
-            .map_err(AgentError::db)?;
+        // Load conversation context with budget-aware message trimming.
+        // #854: the compaction boundary is pushed into SQL — a session that has
+        // already been compacted loads its tail, not its whole history.
+        let mut db_messages = Self::load_messages_since_last_compaction(
+            self.context.pool(),
+            session_id,
+        )
+        .await?;
 
         // Resolve model name: explicit caller arg > session's saved model >
         // current provider's default. The session.model fallback is critical
@@ -1152,10 +1154,6 @@ impl AgentService {
             );
         }
         let context_window = self.context_limit_for_session(session_id);
-
-        // Load from last compaction point — find the last CONTEXT COMPACTION marker
-        // and only load messages from there forward. No arbitrary trimming.
-        let mut db_messages = Self::messages_from_last_compaction(all_db_messages);
 
         // Auto-title: fire a one-shot background LLM call using the current
         // user_message as the seed. Works on ALL channels (TUI, Telegram,

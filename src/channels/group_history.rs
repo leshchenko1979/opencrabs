@@ -17,7 +17,6 @@
 
 use crate::brain::agent::AgentService;
 use crate::brain::timezone::TzInfo;
-use crate::db::MessageRepository;
 use crate::db::models::ChannelMessage as DbChannelMessage;
 
 /// Normalize text for deduplication comparison.
@@ -109,12 +108,11 @@ pub(crate) async fn live_context_haystacks(
     pool: crate::db::Pool,
     session_id: uuid::Uuid,
 ) -> Vec<String> {
-    let msg_repo = MessageRepository::new(pool);
-    let all_msgs = msg_repo
-        .find_by_session(session_id)
+    // #854: read only the tail after the last compaction boundary, so dedup
+    // against a huge session does not load its whole history.
+    AgentService::load_messages_since_last_compaction(pool, session_id)
         .await
-        .unwrap_or_default();
-    AgentService::messages_from_last_compaction(all_msgs)
+        .unwrap_or_default()
         .iter()
         .map(|m| normalize_for_dedup(&m.content))
         .collect()

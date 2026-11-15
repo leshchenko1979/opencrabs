@@ -497,10 +497,13 @@ impl AgentService {
 
         // Load conversation context with budget-aware message trimming
         let message_service = MessageService::new(self.context.clone());
-        let all_db_messages = message_service
-            .list_messages_for_session(session_id)
-            .await
-            .map_err(AgentError::db)?;
+        // #854: the compaction boundary is pushed into SQL, so a session that has
+        // already been compacted loads its tail instead of its whole history.
+        let db_messages = Self::load_messages_since_last_compaction(
+            self.context.pool(),
+            session_id,
+        )
+        .await?;
 
         let model_name = model.unwrap_or_else(|| {
             self.provider_for_session(session_id)
@@ -508,9 +511,6 @@ impl AgentService {
                 .to_string()
         });
         let context_window = self.context_limit_for_session(session_id);
-
-        // Load from last compaction point — no arbitrary trimming
-        let db_messages = Self::messages_from_last_compaction(all_db_messages);
 
         let mut context =
             AgentContext::from_db_messages(session_id, db_messages, context_window as usize);
@@ -663,7 +663,7 @@ impl AgentService {
     /// rows, all 1813 starting with the prefix; 243 `assistant` rows
     /// containing it, none of them a marker.
     pub fn messages_from_last_compaction(
-        all_messages: Vec<crate::db::models::Message>,
+        mut all_messages: Vec<crate::db::models::Message>,
     ) -> Vec<crate::db::models::Message> {
         use crate::brain::agent::context::{COMPACTION_MARKER_PREFIX, SEGMENT_SENTINEL};
 
@@ -692,10 +692,54 @@ impl AgentService {
                 all_messages.len(),
                 kept,
             );
-            all_messages[idx..].to_vec()
+            // `split_off` returns the tail without copying it: the dropped
+            // prefix is freed rather than cloned into a second Vec (#854).
+            all_messages.split_off(idx)
         } else {
             all_messages
         }
+    }
+
+    /// Load ONLY the messages at or after the last compaction boundary, straight
+    /// from SQL.
+    ///
+    /// The async counterpart of [`Self::messages_from_last_compaction`]: same
+    /// boundary, same window, but the rows before the boundary are never
+    /// materialised. On a session that has already been compacted that is the
+    /// difference between reading 15,567 rows and reading 88 (#854).
+    ///
+    /// This is the single home of the compaction vocabulary on the async path —
+    /// the repository only knows "anchored prefix" — so the two forms cannot
+    /// drift apart without the pinning test in `compaction_boundary_test`
+    /// failing, which asserts they agree over the same fixture.
+    pub(crate) async fn load_messages_since_last_compaction(
+        pool: crate::db::Pool,
+        session_id: Uuid,
+    ) -> Result<Vec<crate::db::models::Message>> {
+        use crate::brain::agent::context::{COMPACTION_MARKER_PREFIX, SEGMENT_SENTINEL};
+
+        // The DELTA banner is the sentinel ANCHORED at the row start, exactly as
+        // `messages_from_last_compaction` matches it (#1928).
+        let delta_banner = format!("{COMPACTION_MARKER_PREFIX} — {SEGMENT_SENTINEL}");
+
+        let repo = crate::db::MessageRepository::new(pool);
+        let (tail, total) = repo
+            .find_since_last_marker(session_id, "user", COMPACTION_MARKER_PREFIX, &delta_banner)
+            .await
+            .map_err(AgentError::db)?;
+
+        // A boundary exists exactly when the window is a strict suffix.
+        if tail.len() < total {
+            tracing::info!(
+                "Found compaction boundary at message {}/{} — loading {} messages \
+                 (boundary + segments + tail), skipping {}",
+                total - tail.len(),
+                total,
+                tail.len(),
+                total - tail.len(),
+            );
+        }
+        Ok(tail)
     }
 
     /// Synchronous compaction: compute a summary and apply it to `context` in place.

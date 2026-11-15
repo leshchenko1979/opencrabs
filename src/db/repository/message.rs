@@ -7,7 +7,7 @@ use crate::db::database::interact_err;
 use crate::db::retry::{write_retry_config, write_with_retry};
 use crate::db::models::Message;
 use anyhow::{Context, Result};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 /// Repository for message operations
@@ -89,6 +89,95 @@ impl MessageRepository {
             .context("Failed to find recent messages by session")?;
         messages.reverse();
         Ok(messages)
+    }
+
+    /// Find every message at or after the LAST row whose content starts with
+    /// `marker_prefix` (and does not start with `excluded_prefix`), oldest-first.
+    ///
+    /// This is the SQL form of the boundary trim the agent service used to
+    /// perform in memory over a fully loaded history: reading the tail of a
+    /// 15,000-message session now costs the tail, not the history (#854).
+    ///
+    /// This layer deliberately knows nothing about compaction — it takes the
+    /// marker vocabulary from the caller, so the predicate has exactly one home
+    /// (the agent service) and this stays a generic "rows since the last
+    /// anchored-prefix row" primitive.
+    ///
+    /// The boundary is the last matching row in `(sequence, rowid)` order —
+    /// precisely the row `rposition` would pick over [`Self::find_by_session`]'s
+    /// output — and the tail is a keyset on that pair rather than a bare
+    /// `sequence >= boundary`. The keyset matters: sequence numbers come from
+    /// `count(*) + 1` (`MessageService::get_next_sequence`), so a delete in the
+    /// middle of a session lets a later insert reuse an earlier sequence, and
+    /// `>=` would then pull in rows that sort BEFORE the boundary.
+    ///
+    /// `instr(content, prefix) = 1` is the anchored test, matching Rust's
+    /// `starts_with`. It is used instead of `substr(content, 1, len)` because
+    /// `substr` counts CHARACTERS while `str::len` counts BYTES — the delta
+    /// banner contains an em dash, so a byte length would truncate the test
+    /// mid-prefix and silently match the wrong rows.
+    ///
+    /// Returns `(tail, total_rows_in_session)`; the total is the whole session's
+    /// count, reported so the caller can log how much was skipped.
+    pub async fn find_since_last_marker(
+        &self,
+        session_id: Uuid,
+        role: &str,
+        marker_prefix: &str,
+        excluded_prefix: &str,
+    ) -> Result<(Vec<Message>, usize)> {
+        let sid = session_id.to_string();
+        let role = role.to_string();
+        let marker_prefix = marker_prefix.to_string();
+        let excluded_prefix = excluded_prefix.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let boundary: Option<(i64, i64)> = conn
+                    .prepare_cached(
+                        "SELECT sequence, rowid FROM messages \
+                         WHERE session_id = ?1 AND role = ?2 \
+                           AND instr(content, ?3) = 1 \
+                           AND instr(content, ?4) <> 1 \
+                         ORDER BY sequence DESC, rowid DESC LIMIT 1",
+                    )?
+                    .query_row(
+                        params![sid, role, marker_prefix, excluded_prefix],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+
+                let total: i64 = conn
+                    .prepare_cached("SELECT COUNT(*) FROM messages WHERE session_id = ?1")?
+                    .query_row(params![sid], |r| r.get(0))?;
+
+                let rows = match boundary {
+                    // No boundary: the whole session is the window.
+                    None => {
+                        let mut stmt = conn.prepare_cached(
+                            "SELECT * FROM messages WHERE session_id = ?1 ORDER BY sequence ASC",
+                        )?;
+                        let rows = stmt.query_map(params![sid], Message::from_row)?;
+                        rows.collect::<std::result::Result<Vec<_>, _>>()?
+                    }
+                    Some((seq, rowid)) => {
+                        let mut stmt = conn.prepare_cached(
+                            "SELECT * FROM messages WHERE session_id = ?1 \
+                               AND (sequence > ?2 OR (sequence = ?2 AND rowid >= ?3)) \
+                             ORDER BY sequence ASC",
+                        )?;
+                        let rows = stmt.query_map(params![sid, seq, rowid], Message::from_row)?;
+                        rows.collect::<std::result::Result<Vec<_>, _>>()?
+                    }
+                };
+
+                Ok((rows, total as usize))
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to find messages since the last marker")
     }
 
     /// Create a new message
