@@ -45,6 +45,15 @@ pub(crate) enum CompactionOutcome {
     /// looped in SILENCE, and a break the model never sees is that same
     /// silence at a lower bill.
     LoopGuard,
+    /// #833: compaction was SUPPRESSED because the last
+    /// [`COMPACTION_NON_REDUCING_BRAKE_STREAK`] compactions each left the
+    /// context at least as full as they found it.
+    ///
+    /// A distinct arm from `LoopGuard` because the evidence is different and so
+    /// is the advice: the loop guard says "you have made no progress, stop
+    /// re-summarising", this one says "compaction itself is adding to the
+    /// window", which is the only case where doing LESS is the fix.
+    NonReducingBrake,
 }
 
 impl CompactionOutcome {
@@ -85,6 +94,16 @@ impl CompactionOutcome {
                  conversation this turn.]",
                 streak = COMPACTION_LOOP_GUARD_STREAK,
             ),
+            Self::NonReducingBrake => format!(
+                "[CONTEXT COMPACTION SUSPENDED — The conversation crossed the compaction \
+                 threshold{trigger}, but the last {streak} compactions each left the context at \
+                 least as full as they found them: summarising was adding more than it removed. \
+                 Nothing was summarised this time, on purpose — the harness is not repeating a \
+                 move that measurably does not work. Finish or abandon the step you are on, and \
+                 tell the user plainly what is blocking you, rather than re-summarising the \
+                 conversation.]",
+                streak = COMPACTION_NON_REDUCING_BRAKE_STREAK,
+            ),
         }
     }
 }
@@ -105,6 +124,20 @@ pub(crate) struct CompactionState {
     /// Cleared by any committed tool result. A value that keeps climbing is
     /// the signature of the #226 loop: the floor is not coming down.
     pub(crate) compaction_streak: u32,
+    /// Consecutive successful compactions that left the fill at least as high
+    /// as they found it (#833).
+    ///
+    /// Deliberately separate from `compaction_streak`: that one counts
+    /// compactions with no completed tool call between them, which a busy lane
+    /// never accumulates — it fired once in 396 compactions. This one counts
+    /// compactions that measurably bought nothing, which is the busy-lane loop
+    /// and the reason the existing brake could not see it.
+    pub(crate) non_reducing_streak: u32,
+    /// Tokens the last continuation document cost this session. 0 until the
+    /// first compaction lands; the scope decision uses it as its prior, so a
+    /// session that writes 6k-token documents is judged against 6k, not
+    /// against the measured median.
+    pub(crate) last_summary_tokens: usize,
 }
 
 /// A summariser running against a snapshot of a session's context while that
@@ -249,6 +282,34 @@ pub(crate) const COMPACTION_LOOP_GUARD_STREAK: u32 = 2;
 /// lands, the guard brakes on the predicate it has.
 pub(crate) fn compaction_loop_guard(compaction_streak: u32) -> bool {
     compaction_streak >= COMPACTION_LOOP_GUARD_STREAK
+}
+
+/// #833: the run of non-reducing compactions at which the harness stops
+/// spending summarisers.
+///
+/// Two, for the same reason as the loop guard: the first non-reducing
+/// compaction is a judgement call on a window that may be pinned by one
+/// outsized message, and the second one with no improvement in between is a
+/// measurement — the scope is wrong for this session, and a third attempt with
+/// the same inputs is a prediction, not an experiment. With the scope decision
+/// escalating on the first non-reducer, reaching two means consolidation was
+/// tried and also bought nothing.
+pub(crate) const COMPACTION_NON_REDUCING_BRAKE_STREAK: u32 = 2;
+
+/// How far the fill must come down for a compaction to count as having
+/// reduced anything.
+///
+/// A compaction that lands a fraction of a point lower has bought no room, and
+/// counting it as success is exactly how a treadmill reads as progress: the
+/// measured loop landed 65% → 64% repeatedly while the floor climbed.
+const MIN_REDUCTION_PCT: f64 = 1.0;
+
+/// #833 — did this compaction buy anything?
+///
+/// Pure, so the boundary is testable without a service: the caller supplies
+/// the two levels it already reports on the receipt.
+pub(crate) fn compaction_reduced(before_pct: f64, after_pct: f64) -> bool {
+    after_pct + MIN_REDUCTION_PCT <= before_pct
 }
 
 /// Last-resort truncation to 80% of the window: the recovery that costs no
@@ -438,6 +499,13 @@ impl AgentService {
             // pressure warning if usage is in the 55-64% band (#909), and
             // re-arm the throttle when usage has dropped below the floor.
             self.maybe_emit_pressure_warning(session_id, context, usage_pct);
+            // #833: the gate is not firing, so whatever non-reducing run this
+            // session had is over — the window came down by some other means
+            // (truncation, a smaller turn, a fresh context). Reset HERE rather
+            // than on the next successful compaction, which by definition only
+            // happens once the problem is back and would leave a stale streak
+            // to brake on.
+            self.reset_compaction_non_reducing(session_id);
             // Tier 2 may have already dropped messages to get us here. The
             // marker still has to land even though no summariser ran.
             return truncated.then_some(CompactionOutcome::Truncated);
@@ -470,6 +538,41 @@ impl AgentService {
                 );
             }
             return Some(CompactionOutcome::LoopGuard);
+        }
+
+        // #833 — the non-reducing brake, immediately after the loop guard and
+        // before any summariser is spawned.
+        //
+        // This is the same disease as the #438 loop with a different pulse: the
+        // lane IS working, so `compaction_streak` above never accumulates and
+        // the guard never fires (once in 396 compactions). What accumulates
+        // instead is a run of compactions that each left the fill at least as
+        // high as they found it. Measured Nov 13–15: 252 of 257 consecutive
+        // delta compactions raised the fill, median +1,850 tokens, and one
+        // session needed 20 of them to reach the consolidation that finally
+        // reset it to 17%.
+        //
+        // One non-reducer escalates the scope instead of braking (see
+        // `compaction_scope_with`); two means consolidation was tried and also
+        // bought nothing, so a third attempt would be a prediction.
+        let non_reducing_streak = self.compaction_state(session_id).non_reducing_streak;
+        if non_reducing_streak >= COMPACTION_NON_REDUCING_BRAKE_STREAK {
+            tracing::warn!(
+                "Compaction non-reducing brake (#833): {} consecutive compactions left the \
+                 context at least as full as they found it — suppressing compaction at {:.0}% \
+                 rather than adding another document to a window that is growing by them",
+                non_reducing_streak,
+                usage_pct,
+            );
+            // The floor may still be movable without a summary, exactly as in
+            // the loop guard above.
+            if safety_truncate_to_80(context, effective_max) {
+                tracing::warn!(
+                    "Compaction non-reducing brake (#833): context still over 80% — \
+                     safety-truncated without a summary"
+                );
+            }
+            return Some(CompactionOutcome::NonReducingBrake);
         }
 
         tracing::warn!(
@@ -706,13 +809,26 @@ impl AgentService {
         // that keeps climbing means the compaction produced no work (the #226
         // loop).
         self.note_compaction_streak(session_id);
+        // #833: what this compaction cost and whether it bought anything. The
+        // document size becomes the prior for the next scope decision, and a
+        // compaction that did not lower the fill escalates that decision
+        // instead of being retried with the same inputs.
+        //
+        // Measured on the DECORATED summary — the string that was actually
+        // welded into the window — so the prior describes the bytes the window
+        // pays for, not the model's raw output.
+        let after_pct = context.usage_percentage();
+        self.note_compaction_reduction(
+            session_id,
+            AgentContext::estimate_tokens(summary),
+            compaction_reduced(before_pct, after_pct),
+        );
         if let Some(cb) = progress_callback {
             // The same basis the gate measures on and the meter logs at
             // service/context.rs:1011. Dividing the raw `token_count` by
             // `max_tokens` here dropped the provider anchor, so a context the
             // log recorded at 17% was receipted at 19% (session bee04b00,
             // #1686): one compaction, two different after-numbers.
-            let after_pct = context.usage_percentage();
             // #824: the breakdown's tools rows. Measured on the set the next
             // request actually carries (`tool_schemas_for_session`), never the
             // registry upper bound — the card describes what the window pays
@@ -900,11 +1016,23 @@ impl AgentService {
         usage_pct: f64,
     ) {
         let snapshot_len = context.messages.len();
-        // #1649: scope-aware input. A session's first compaction summarises
+        // #1649/#833: scope-aware input. A session's first compaction summarises
         // the whole window; every later one summarises only the delta since
         // the last marker (frozen segments never re-enter the input), or the
-        // segments themselves when they crowd the window past half.
-        let (scope, messages, token_count) = context.compaction_input();
+        // segments themselves when the delta scope cannot move the floor.
+        //
+        // The decision reads THIS session's history: the size of the last
+        // document it wrote (what a new one will cost) and whether its last
+        // compaction actually lowered the fill (if not, escalate rather than
+        // repeat).
+        let trend = self.compaction_state(session_id);
+        let expected_document = if trend.last_summary_tokens > 0 {
+            trend.last_summary_tokens
+        } else {
+            AgentContext::DEFAULT_SUMMARY_TOKENS
+        };
+        let (scope, messages, token_count) =
+            context.compaction_input_with(expected_document, trend.non_reducing_streak >= 1);
         tracing::info!(
             "Spawning background compaction at {:.0}% ({snapshot_len} messages, {scope:?} scope)",
             usage_pct,

@@ -314,23 +314,115 @@ impl AgentContext {
         }
     }
 
-    /// #1649: decide what a new compaction summarises.
+    /// #833: the prior for what a continuation document costs, used until a
+    /// session has written one and reported its own size.
+    ///
+    /// Measured median across 257 consecutive delta compactions (Nov 13–15):
+    /// ~1,800 tokens each. A prior, never a floor — the observed size replaces
+    /// it after the first compaction.
+    pub(crate) const DEFAULT_SUMMARY_TOKENS: usize = 2_000;
+
+    /// Where the floor a delta compaction lands on stops being headroom.
+    ///
+    /// A delta compaction leaves the frozen segments in place, so the level it
+    /// lands on is `segments + document`. Once that sits above this share of
+    /// the window, the scope cannot buy real room: the tool loop refills the
+    /// gap in minutes, the gate fires again, and every pass adds one more
+    /// document to the frozen block. Consolidation is then the only scope that
+    /// moves the floor, because it replaces the segments themselves.
+    ///
+    /// This is the old `segments > max/2` rule restated in terms of what the
+    /// compaction LANDS ON rather than what it summarises — the difference is
+    /// the document, and it is what the old rule was reaching for.
+    const CONSOLIDATION_FLOOR_RATIO: f64 = 0.5;
+
+    /// A delta compaction replaces `delta` tokens with a document of roughly
+    /// `expected` tokens, so it pays only while the delta is clearly bigger
+    /// than the document replacing it. Below this ratio it is net ADDITIVE —
+    /// the measured +1,850-token median growth that turned one compaction into
+    /// twenty, none of which lowered the floor.
+    const DELTA_MIN_PAYOFF_RATIO: f64 = 2.0;
+
+    /// Tokens held by the delta: everything after the last marker.
+    ///
+    /// The exact quantity a delta compaction can remove, as opposed to the
+    /// tokens it costs to describe them.
+    pub(crate) fn delta_token_count(&self) -> usize {
+        self.delta_since_last_marker()
+            .iter()
+            .map(Self::estimate_tokens_static)
+            .sum()
+    }
+
+    /// #1649/#833: decide what a new compaction summarises.
     ///
     /// - No marker yet → full window (byte-identical to the classic path).
-    /// - Segments alone over half the window → consolidate the SEGMENTS only
-    ///   into one fresh summary; otherwise they crowd the window and no delta
-    ///   compaction can drop usage below the trigger (the 66dc5151 loop:
-    ///   20+ triggers in 3 minutes, none escaped).
+    /// - Escalated → consolidate: the previous compaction did not lower the
+    ///   fill, so repeating its scope would repeat its result.
+    /// - The floor a delta compaction would land on is above the headroom
+    ///   target → consolidate; a delta pass would leave that floor where it is.
+    /// - The delta is too small to pay for the document replacing it →
+    ///   consolidate.
     /// - Otherwise → delta since the last marker.
-    pub(crate) fn compaction_scope(&self) -> CompactionScope {
+    ///
+    /// The scope is chosen by WHAT IT CAN REMOVE, never by how much text it
+    /// summarises: a delta compaction that removes 800 tokens and writes an
+    /// 1,800-token document is a net loss however cheap the call was.
+    pub(crate) fn compaction_scope_with(
+        &self,
+        expected_summary_tokens: usize,
+        escalate: bool,
+    ) -> CompactionScope {
         if self.last_marker_index().is_none() {
             return CompactionScope::FullWindow;
         }
-        if self.segments_token_count() > self.max_tokens / 2 {
-            CompactionScope::SegmentConsolidation
+        let expected = expected_summary_tokens.max(1);
+        let segments = self.segments_token_count();
+        let delta = self.delta_token_count();
+        let floor_after_delta = segments.saturating_add(expected);
+        let headroom_target =
+            (self.max_tokens as f64 * Self::CONSOLIDATION_FLOOR_RATIO) as usize;
+
+        let (scope, reason) = if escalate {
+            (
+                CompactionScope::SegmentConsolidation,
+                "escalated: the previous compaction did not lower the fill",
+            )
+        } else if floor_after_delta > headroom_target {
+            (
+                CompactionScope::SegmentConsolidation,
+                "the frozen segments alone land above the headroom target",
+            )
+        } else if (delta as f64) < expected as f64 * Self::DELTA_MIN_PAYOFF_RATIO {
+            (
+                CompactionScope::SegmentConsolidation,
+                "the delta is too small to pay for the document replacing it",
+            )
         } else {
-            CompactionScope::DeltaSinceMarker
-        }
+            (
+                CompactionScope::DeltaSinceMarker,
+                "the delta pays for its own document and leaves headroom",
+            )
+        };
+
+        // #833: the decision was invisible for three days and 396 compactions,
+        // because the only trace of a compaction was the level it left behind.
+        // Log the inputs, not just the verdict: the next diagnosis reads why.
+        tracing::info!(
+            "Compaction scope: {scope:?} ({reason}) — window {} of {} tokens, \
+             segments {segments}, delta {delta}, expected document {expected}, \
+             floor after delta {floor_after_delta} (target {headroom_target})",
+            self.token_count,
+            self.max_tokens,
+        );
+        scope
+    }
+
+    /// The default-policy scope decision: the measured prior for a document
+    /// size, no escalation. Callers that track a session's history use
+    /// [`Self::compaction_scope_with`] with its own numbers.
+    pub(crate) fn compaction_scope(&self) -> CompactionScope {
+        self.compaction_scope_with(Self::DEFAULT_SUMMARY_TOKENS, false)
     }
 
     /// Tokens held by the frozen segment block: everything through the last
@@ -449,7 +541,30 @@ impl AgentContext {
     /// One helper for BOTH the synchronous and background paths — parity by
     /// construction, not by duplication.
     pub(crate) fn compaction_input(&self) -> (CompactionScope, Vec<Message>, usize) {
-        let scope = self.compaction_scope();
+        self.compaction_input_with(Self::DEFAULT_SUMMARY_TOKENS, false)
+    }
+
+    /// The same helper with the caller's own history: the size of the last
+    /// document this session wrote, and whether its last compaction actually
+    /// lowered the fill (#833).
+    pub(crate) fn compaction_input_with(
+        &self,
+        expected_summary_tokens: usize,
+        escalate: bool,
+    ) -> (CompactionScope, Vec<Message>, usize) {
+        let scope = self.compaction_scope_with(expected_summary_tokens, escalate);
+        self.compaction_input_for_scope(scope)
+    }
+
+    /// The input for a scope already decided.
+    ///
+    /// Split from the decision so the SHAPE of each scope is testable without
+    /// the policy that picks it — a policy change must not silently rewrite
+    /// what a delta summary is allowed to see.
+    pub(crate) fn compaction_input_for_scope(
+        &self,
+        scope: CompactionScope,
+    ) -> (CompactionScope, Vec<Message>, usize) {
         match scope {
             CompactionScope::FullWindow => (scope, self.messages.clone(), self.token_count),
             CompactionScope::DeltaSinceMarker => {

@@ -1794,6 +1794,45 @@ impl AgentService {
         }
     }
 
+    /// #833: record what a completed compaction cost and whether it bought
+    /// anything.
+    ///
+    /// Two values, both read by the scope decision: the document size is the
+    /// prior for what the next one will cost, and the streak is what escalates
+    /// the scope when summarising stops paying.
+    pub(crate) fn note_compaction_reduction(
+        &self,
+        session_id: Uuid,
+        summary_tokens: usize,
+        reduced: bool,
+    ) {
+        let mut map = self
+            .session_compaction_state
+            .write()
+            .expect("session_compaction_state lock poisoned");
+        let entry = map.entry(session_id).or_default();
+        entry.last_summary_tokens = summary_tokens;
+        if reduced {
+            entry.non_reducing_streak = 0;
+        } else {
+            entry.non_reducing_streak = entry.non_reducing_streak.saturating_add(1);
+        }
+    }
+
+    /// #833: clear the non-reducing run once the gate stops firing.
+    ///
+    /// The window came down by some means other than compaction, so the
+    /// evidence that compaction was not working no longer describes this
+    /// session. Resetting on the next success instead would leave a stale
+    /// streak armed exactly until the problem returned.
+    pub(crate) fn reset_compaction_non_reducing(&self, session_id: Uuid) {
+        if let Ok(mut map) = self.session_compaction_state.write()
+            && let Some(entry) = map.get_mut(&session_id)
+        {
+            entry.non_reducing_streak = 0;
+        }
+    }
+
     /// #438 S1: read the session's compaction trend. Absent entry reads as the
     /// default (no compactions yet), so callers need no `Option` handling.
     pub(crate) fn compaction_state(&self, session_id: Uuid) -> CompactionState {
