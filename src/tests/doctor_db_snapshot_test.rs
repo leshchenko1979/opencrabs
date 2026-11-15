@@ -10,16 +10,31 @@
 use crate::db::migration_snapshot::{LATEST, PREFIX, newest_snapshot, newest_snapshot_note};
 use std::path::Path;
 
-/// A snapshot dir holding `names` as empty files, plus the `-latest` alias.
+/// A snapshot dir holding `names` as files with a valid SQLite header, plus the
+/// `-latest` alias.
 ///
-/// The files are empty on purpose: reporting never reads a snapshot's contents,
-/// only its name, and an empty file keeps the test from depending on SQLite.
+/// These were empty files until #845, on the theory that reporting only ever
+/// read a snapshot's NAME. #845 disproved exactly that: a failed `VACUUM INTO`
+/// leaves a **0-byte** file carrying a perfectly valid name, so a name-ordered
+/// report offered an empty file as the thing to restore from. Reporting now
+/// validates the header before promising a file is usable, which means a test
+/// asserting "the newest copy is reported" has to hand it something that could
+/// be a database. 101 bytes of header is that: no SQLite dependency, no pages.
+fn header_only_snapshot() -> Vec<u8> {
+    let mut bytes = vec![0u8; 101];
+    bytes[..16].copy_from_slice(b"SQLite format 3\0");
+    bytes[16..18].copy_from_slice(&4096u16.to_be_bytes());
+    // Page 1 of a real image is a schema b-tree leaf; the probe reads this byte.
+    bytes[100] = 0x0d;
+    bytes
+}
+
 fn snapshot_dir_with(names: &[&str]) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     for name in names {
-        std::fs::write(tmp.path().join(name), b"").unwrap();
+        std::fs::write(tmp.path().join(name), header_only_snapshot()).unwrap();
     }
-    std::fs::write(tmp.path().join(LATEST), b"").unwrap();
+    std::fs::write(tmp.path().join(LATEST), header_only_snapshot()).unwrap();
     tmp
 }
 

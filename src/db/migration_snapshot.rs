@@ -230,8 +230,18 @@ pub fn snapshot_before_migrations(conn: &Connection, dir: &Path) -> Result<Optio
         "Pre-migration snapshot: VACUUM INTO {} (user_version {user_version})",
         dated.display()
     );
-    conn.execute("VACUUM INTO ?1", [&dated.to_string_lossy()])
-        .with_context(|| format!("VACUUM INTO {}", dated.display()))?;
+    // #845: `VACUUM INTO` writes its destination as it goes, so a failure
+    // leaves the file behind at whatever size it reached — measured on a
+    // damaged image, a 0-byte file carrying a name that sorts NEWEST. Removing
+    // it here is safe by construction: the loop above picked a name that did
+    // not exist, so this path is ours and nothing else can be holding it.
+    // `newest_snapshot` filters such a leftover out as well, because a process
+    // killed mid-vacuum never reaches this line.
+    if let Err(e) = conn.execute("VACUUM INTO ?1", [&dated.to_string_lossy()]) {
+        let _ = std::fs::remove_file(&dated);
+        return Err::<Option<PathBuf>, _>(e)
+            .with_context(|| format!("VACUUM INTO {}", dated.display()));
+    }
     tracing::info!(
         "Pre-migration snapshot written: {} ({} bytes in {:.1}s)",
         dated.display(),
@@ -276,8 +286,33 @@ pub fn rotate(dir: &Path) -> Result<usize> {
 pub fn newest_snapshot(dir: &Path) -> Option<PathBuf> {
     // Same enumeration as [`rotate`], ordered by the embedded stamp rather
     // than the filename: a higher `user_version` is not a later snapshot
-    // (#717).
-    collect_dated(dir).pop()
+    // (#717). Unusable files are skipped rather than reported (#845).
+    collect_dated(dir)
+        .into_iter()
+        .filter(|p| snapshot_is_usable(p.as_path()))
+        .last()
+}
+
+/// Whether a dated snapshot is a file an operator could actually restore from.
+///
+/// #845: a failed `VACUUM INTO` leaves its destination behind at whatever size
+/// it reached — measured on a damaged image, a **0-byte** file under a
+/// perfectly valid snapshot name. The name is not evidence of the content, and
+/// the name is exactly what [`collect_dated`] sorts on, so the newest *name*
+/// can be the one file that restores nothing. Without this filter `doctor`
+/// answers the one question an operator asks mid-incident by pointing at an
+/// empty file.
+///
+/// Reuses [`check_header`] rather than inventing a second notion of "looks like
+/// a database": it is the same 101-byte read the pre-migration path already
+/// trusts, so the two cannot drift. A 0-byte file is excluded explicitly
+/// because `check_header` deliberately ACCEPTS one — a fresh install is not a
+/// torn image, but a fresh install is also not a snapshot.
+fn snapshot_is_usable(path: &Path) -> bool {
+    let Some(path_str) = path.to_str() else {
+        return false;
+    };
+    file_len(path) >= HEADER_PROBE_LEN as u64 && check_header(path_str).is_ok()
 }
 
 /// What an operator can restore from, in one clause, for `doctor` and the
@@ -309,7 +344,11 @@ pub fn newest_snapshot_note(newest: Option<&Path>) -> String {
 /// made the original rpi5 receipt useless two days into the incident.
 fn refuse(stage: &str, dir: &Path, cause: &str) -> String {
     let latest = dir.join(LATEST);
-    let hint = if latest.exists() {
+    // #845: the hint makes a promise ("restore from this"), so it must not be
+    // satisfied by a file that only exists. A 0-byte leftover from a failed
+    // `VACUUM INTO` is exactly the shape that exists and restores nothing, and
+    // this message is read mid-incident over SSH by someone who will believe it.
+    let hint = if snapshot_is_usable(&latest) {
         format!(
             "An earlier snapshot is still available at {}.",
             latest.display()
