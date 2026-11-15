@@ -56,6 +56,8 @@ fn card(summary: &str) -> String {
         elapsed: Duration::from_millis(21_500),
         tool_sizes: &sizes,
         summary,
+        scope: "delta",
+        input_tokens: 41_300,
         rich: false,
         documents: &[],
         document_refusals: &[],
@@ -143,19 +145,27 @@ fn tools_row_survives_a_document_with_no_manifest() {
 }
 
 #[test]
-fn every_tool_carries_its_own_kb_and_share() {
-    // "size indication similar to skills": a bare name says nothing about what
-    // the schema costs, so each row carries both units.
+fn the_tools_row_is_a_total_only() {
+    // Owner order 2026-11-15: the ranked list of six schema names plus a `+18`
+    // tail answered nothing. What the reader needs is what the tool set COSTS —
+    // the per-tool measurements stay on the event, the card keeps the total.
     let out = card(no_manifest());
-    let detail = out
+    assert!(
+        !out.contains("`bash`"),
+        "no per-tool rows on the card: {out}"
+    );
+    let tools = out
         .lines()
-        .find(|l| l.contains("`bash`"))
-        .expect("a tool detail row");
-    assert!(detail.contains("`bash` 16.0KB · 2.0%"), "{detail}");
-    // Ordered by cost: the row worth acting on leads.
-    let bash = detail.find("`bash`").expect("bash");
-    let read = detail.find("`read_file`").expect("read_file");
-    assert!(bash < read, "largest schema first: {detail}");
+        .find(|l| l.contains("tools"))
+        .expect("a tools row");
+    // Count · total KB · total share, summed from the three measurements.
+    assert!(tools.contains("3 · 28.0KB · 3.7%"), "{tools}");
+    // And it is ONE line: nothing indented beneath it.
+    let idx = out.lines().position(|l| l.contains("tools")).expect("idx");
+    assert!(
+        !out.lines().nth(idx + 1).is_some_and(|l| l.starts_with("     ")),
+        "no detail line under the tools total: {out}"
+    );
 }
 
 #[test]
@@ -227,6 +237,8 @@ fn an_unknown_ceiling_states_no_share() {
         elapsed: Duration::from_secs(1),
         tool_sizes: &sizes,
         summary: no_manifest(),
+        scope: "delta",
+        input_tokens: 41_300,
         rich: false,
         documents: &[],
         document_refusals: &[],
@@ -268,6 +280,8 @@ fn a_compaction_that_grew_the_context_reads_as_growth() {
         elapsed: Duration::from_secs(5),
         tool_sizes: &sizes,
         summary: no_manifest(),
+        scope: "delta",
+        input_tokens: 41_300,
         rich: false,
         documents: &[],
         document_refusals: &[],
@@ -287,6 +301,8 @@ fn a_long_silent_window_reads_in_minutes() {
         elapsed: Duration::from_secs(102),
         tool_sizes: &sizes,
         summary: no_manifest(),
+        scope: "delta",
+        input_tokens: 41_300,
         rich: false,
         documents: &[],
         document_refusals: &[],
@@ -317,6 +333,10 @@ fn rich_card(summary: &str) -> String {
         elapsed: Duration::from_millis(21_500),
         tool_sizes: &sizes,
         summary,
+        // The rich fixture is a consolidation, so the two legs' scope labels
+        // are proven distinct rather than both reading `delta`.
+        scope: "consolidate",
+        input_tokens: 130_600,
         rich: true,
         documents: &[],
         document_refusals: &[],
@@ -324,9 +344,11 @@ fn rich_card(summary: &str) -> String {
 }
 
 #[test]
-fn the_classic_leg_states_the_summary_and_each_of_its_parts() {
+fn the_classic_leg_states_the_summary_total_only() {
     // The summary is the largest thing a compaction leaves in the window, and
-    // the card used to describe the whole window without naming it.
+    // the card used to describe the whole window without naming it. The total
+    // and the part COUNT stay; the per-part rows are gone (owner order
+    // 2026-11-15) — `2 parts` was the only fact the list carried.
     let out = card(numbered_document());
     let head = out
         .lines()
@@ -335,26 +357,18 @@ fn the_classic_leg_states_the_summary_and_each_of_its_parts() {
     assert!(head.contains("2 parts"), "part count: {head}");
     assert!(head.contains("KB"), "summary size: {head}");
     assert!(head.contains('%'), "summary share: {head}");
-    let detail = out
-        .lines()
-        .skip_while(|l| !l.contains("summary"))
-        .nth(1)
-        .expect("a summary detail row");
-    // Document order, each part carrying its own size — §0 is the part the
-    // next turn reads first, so it must not be sorted away.
-    assert!(detail.contains("§0 IMMEDIATE TASK"), "{detail}");
-    assert!(detail.contains("§1 Chronological Analysis"), "{detail}");
-    let first = detail.find("§0").expect("§0");
-    let second = detail.find("§1").expect("§1");
-    assert!(first < second, "document order: {detail}");
-    assert_eq!(detail.matches("KB").count(), 2, "one size per part: {detail}");
+    assert!(
+        !out.contains("§0 IMMEDIATE TASK"),
+        "no per-part rows: {out}"
+    );
 }
 
 #[test]
-fn the_rich_leg_renders_skills_and_tools_as_tables() {
+fn the_rich_leg_renders_skills_as_a_table() {
     // The owner's ask: "for the rich format leg, use tables for skills and
-    // tools lists". A table is only legal on the markdown plane, so this leg
-    // must emit real pipe tables — header, separator, one row per entry.
+    // tools lists". The tools LIST is now a single total row (owner order
+    // 2026-11-15), so only the skills groups remain tabular — and a table is
+    // legal only on the markdown plane, so this leg must emit real pipe rows.
     let out = rich_card(mixed_manifest());
 
     let kept_head = out
@@ -369,49 +383,36 @@ fn the_rich_leg_renders_skills_and_tools_as_tables() {
         .expect("a kept table row");
     assert_eq!(kept_row.matches('|').count(), 5, "4 columns: {kept_row}");
 
-    let tools_head = out
-        .lines()
-        .find(|l| l.starts_with("| tools"))
-        .expect("a tools table header");
-    assert!(tools_head.contains("(3)"), "{tools_head}");
-    // Ordered by cost, largest first — the row worth acting on leads.
-    let rows: Vec<&str> = out
-        .lines()
-        .skip_while(|l| !l.starts_with("| tools"))
-        .skip(2)
-        .take(3)
-        .collect();
-    assert!(rows[0].starts_with("| `bash`"), "largest first: {rows:?}");
-    // The total reconciles with the rows: 28_672 B = 28.0 KB, 7_400 tok of
-    // 200 K = 3.7 %.
+    // The tool set is a TOTAL, never a table: no pipe row may name a tool.
     assert!(
-        out.contains("| **total** | 28.0KB | 3.7% |"),
-        "a reconciling total: {out}"
+        !out.lines().any(|l| l.starts_with("| tools")),
+        "no tools table: {out}"
     );
+    let tools = out
+        .lines()
+        .find(|l| l.contains("tools"))
+        .expect("a tools total row");
+    // 28_672 B = 28.0 KB, 7_400 tok of 200 K = 3.7 % — the same figures the
+    // rows used to reconcile to, now stated once.
+    assert!(tools.contains("3 · 28.0KB · 3.7%"), "{tools}");
 }
 
 #[test]
-fn the_rich_leg_lists_each_summary_part_as_a_row() {
+fn the_rich_leg_states_the_summary_as_a_row_not_a_table() {
+    // Both tables the owner called worthless are gone. The summary's total
+    // rides the same labelled row the classic leg uses, so the two planes
+    // agree on the number even though they disagree on the chrome.
     let out = rich_card(numbered_document());
     assert!(
-        out.lines().any(|l| l == "| summary part | size | share |"),
-        "a summary table header: {out}"
+        !out.lines().any(|l| l.starts_with("| summary part")),
+        "no summary table: {out}"
     );
-    // The document's own total leads, so the parts are read against it.
-    let total = out
+    let head = out
         .lines()
-        .position(|l| l.starts_with("| **total** |"))
-        .expect("a summary total row");
-    let first_part = out
-        .lines()
-        .position(|l| l.starts_with("| §0 IMMEDIATE TASK |"))
-        .expect("the §0 row");
-    assert!(total < first_part, "total above the parts: {out}");
-    assert!(
-        out.lines()
-            .any(|l| l.starts_with("| §1 Chronological Analysis |")),
-        "every part gets a row: {out}"
-    );
+        .find(|l| l.contains("summary"))
+        .expect("a summary row");
+    assert!(head.contains("2 parts"), "{head}");
+    assert!(head.contains("KB"), "summary size: {head}");
 }
 
 #[test]
@@ -433,8 +434,70 @@ fn every_table_in_the_rich_leg_is_parseable() {
             assert_eq!(cols, sep_cols, "header/separator width: {line}");
         }
     }
-    // summary + kept + dropped + tools.
-    assert_eq!(tables, 4, "one table per section: {out}");
+    // kept + dropped. The summary and tools sections are totals rows now
+    // (owner order 2026-11-15), not tables.
+    assert_eq!(tables, 2, "one table per skills group: {out}");
+}
+
+#[test]
+fn the_scope_row_names_which_compaction_ran() {
+    // Owner order 2026-11-15: "the notice does not tell anything about those
+    // delta and document summaries, and so the percentage numbers don't adapt".
+    // A `DeltaSinceMarker` pass keeps the frozen segments standing and replaces
+    // only the tail, so a fill that RISES after one is the scope doing its job.
+    // Without the label the percentages read as a bug.
+    let out = card(numbered_document());
+    let scope = out
+        .lines()
+        .find(|l| l.contains("scope"))
+        .expect("a scope row");
+    assert!(scope.contains("delta"), "the scope label: {scope}");
+    // `format_token_count` renders whole K below 1M (41_300 -> `41K`), so the
+    // assertion states the renderer's contract rather than a guess at it: an
+    // earlier draft demanded `41.3K` and failed on the gate (run 43741914995).
+    assert!(scope.contains("41K in"), "what it read: {scope}");
+    assert!(scope.contains("doc "), "what it wrote back: {scope}");
+    assert!(scope.contains("payoff"), "the trade: {scope}");
+
+    // The other scope must read differently, or the label is decoration.
+    let rich = rich_card(numbered_document());
+    let rich_scope = rich
+        .lines()
+        .find(|l| l.contains("scope"))
+        .expect("a scope row");
+    assert!(
+        rich_scope.contains("consolidate"),
+        "consolidation is labelled: {rich_scope}"
+    );
+    assert!(!rich_scope.contains("delta"), "{rich_scope}");
+}
+
+#[test]
+fn an_unmeasured_document_states_no_payoff_ratio() {
+    // A ratio needs a denominator. With no document there is nothing to divide
+    // by, and a `0.0:1` would read as a measured loss rather than as absent.
+    let sizes = tool_sizes();
+    let out = compaction_breakdown(&CompactionBreakdown {
+        before_tokens: 1_000,
+        after_tokens: 500,
+        before_pct: 1.0,
+        after_pct: 0.5,
+        ctx_max: 200_000,
+        elapsed: Duration::from_secs(1),
+        tool_sizes: &sizes,
+        summary: "",
+        scope: "delta",
+        input_tokens: 41_300,
+        rich: false,
+        documents: &[],
+        document_refusals: &[],
+    });
+    let scope = out
+        .lines()
+        .find(|l| l.contains("scope"))
+        .expect("a scope row");
+    assert!(scope.contains('—'), "unmeasurable payoff: {scope}");
+    assert!(!scope.contains("0.0:1"), "{scope}");
 }
 
 // ─── #846: the documents row ────────────────────────────────────────────────
@@ -475,6 +538,8 @@ fn card_with_docs(
         elapsed: Duration::from_millis(21_500),
         tool_sizes: &sizes,
         summary,
+        scope: "delta",
+        input_tokens: 41_300,
         rich,
         documents,
         document_refusals: refusals,

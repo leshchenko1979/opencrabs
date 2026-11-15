@@ -165,6 +165,15 @@ pub(crate) struct PendingCompaction {
     /// Token count at spawn time (#135) — absolute "before" for the
     /// receipt, same boundary as `snapshot_usage_pct`.
     snapshot_tokens: usize,
+    /// Token size of the input `scope` selected: the delta since the last
+    /// marker, the joined segments, or the whole window (#833 follow-up).
+    ///
+    /// NOT the same quantity as `snapshot_tokens`, and the difference is the
+    /// whole point of carrying both: `snapshot_tokens` is the window the
+    /// receipt reports as "before", this is what the summariser actually read.
+    /// On a `DeltaSinceMarker` pass the two differ by the frozen segments —
+    /// which is exactly why the fill can climb while a delta runs.
+    input_tokens: usize,
     started: std::time::Instant,
 }
 
@@ -730,7 +739,12 @@ impl AgentService {
                 session_id,
                 context,
                 summary,
+                // The synchronous path is full-window by definition
+                // (`compact_context`), so its input IS the window it reports
+                // as "before" — the two numbers coincide here and only here.
+                CompactionScope::FullWindow,
                 before_pct,
+                before_tokens,
                 before_tokens,
                 compact_started.elapsed(),
                 progress_callback,
@@ -793,8 +807,10 @@ impl AgentService {
         session_id: Uuid,
         context: &AgentContext,
         summary: &str,
+        scope: CompactionScope,
         before_pct: f64,
         before_tokens: usize,
+        input_tokens: usize,
         elapsed: std::time::Duration,
         progress_callback: &Option<ProgressCallback>,
     ) {
@@ -866,6 +882,8 @@ impl AgentService {
                 session_id,
                 ProgressEvent::CompactionSummary {
                     summary: summary.to_string(),
+                    scope: scope.label(),
+                    input_tokens,
                     before_pct,
                     after_pct,
                     before_tokens,
@@ -973,6 +991,7 @@ impl AgentService {
             scope,
             snapshot_usage_pct,
             snapshot_tokens,
+            input_tokens,
             started,
         } = pending;
 
@@ -984,8 +1003,10 @@ impl AgentService {
                     session_id,
                     context,
                     &summary,
+                    scope,
                     snapshot_usage_pct,
                     snapshot_tokens,
+                    input_tokens,
                     started.elapsed(),
                     progress_callback,
                 );
@@ -1049,6 +1070,10 @@ impl AgentService {
         };
         let (scope, messages, token_count) =
             context.compaction_input_with(expected_document, trend.non_reducing_streak >= 1);
+        // Captured before the spawn moves it: the receipt reports what the
+        // summariser actually read, which is not `snapshot_tokens` on a delta
+        // pass (#833 follow-up).
+        let input_tokens = token_count;
         tracing::info!(
             "Spawning background compaction at {:.0}% ({snapshot_len} messages, {scope:?} scope)",
             usage_pct,
@@ -1119,6 +1144,7 @@ impl AgentService {
                     // tokens on a 134K window), and the card rendered it as the
                     // before-state — `821 → 134K (+16179.7%)` (#824 follow-up).
                     snapshot_tokens: context.token_count,
+                    input_tokens,
                     started: std::time::Instant::now(),
                 },
             );

@@ -582,3 +582,15 @@ fn compaction_reduced_needs_a_real_drop_in_fill() {
         "an unchanged fill is a non-reducer"
     );
 }
+
+#[test]
+fn every_scope_has_exactly_one_label() {
+    // #833: the rendered word lives ON the enum, because the event that carries
+    // it is `pub` and this type is `pub(crate)` — a `pub` field cannot name a
+    // `pub(crate)` type under `-D warnings` (gate run 43740608570). Pinning all
+    // three here means a channel that invents its own word fails this test
+    // instead of drifting.
+    assert_eq!(CompactionScope::FullWindow.label(), "full");
+    assert_eq!(CompactionScope::DeltaSinceMarker.label(), "delta");
+    assert_eq!(CompactionScope::SegmentConsolidation.label(), "consolidate");
+}

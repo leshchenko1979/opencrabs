@@ -1101,18 +1101,38 @@ pub(crate) struct CompactionBreakdown<'a> {
     pub(crate) after_tokens: usize,
     pub(crate) before_pct: f64,
     pub(crate) after_pct: f64,
+    /// Which scope the summariser was pointed at, and the token size of that
+    /// input (#833 follow-up).
+    ///
+    /// The card's percentages are only readable beside these: a
+    /// `DeltaSinceMarker` pass leaves the frozen segments untouched, so its
+    /// before/after describe the same window minus one delta and the fill can
+    /// legitimately climb — while a `SegmentConsolidation` rewrites the
+    /// segments and the fill drops. Without the scope the two look identical
+    /// and a losing pass reads like a winning one (#438).
+    ///
+    /// A LABEL (`"full"` / `"delta"` / `"consolidate"`), because the event that
+    /// carries it is public while `CompactionScope` is `pub(crate)` — see
+    /// `ProgressEvent::CompactionSummary::scope` (gate run 43740608570).
+    pub(crate) scope: &'static str,
+    pub(crate) input_tokens: usize,
     pub(crate) ctx_max: u32,
     pub(crate) elapsed: std::time::Duration,
     /// Per-tool schema cost the next request carries (#824 event field).
     ///
-    /// Per tool, never a single total: the card prints a KB and a
-    /// share-of-window figure beside each name, and its own total is the SUM
-    /// of those rows.
+    /// Summed into a single TOTAL row (owner order 2026-11-15): the ranked list
+    /// of six names plus a `+18` tail answered nothing a reader acted on, so
+    /// only the count, the KB and the share survive.
     pub(crate) tool_sizes: &'a [ToolSize],
     /// The continuation document, whose `context-manifest` fence declares the
     /// kept and dropped sets.
     pub(crate) summary: &'a str,
-    /// Render the skills and tools rows as markdown TABLES (#824 follow-up).
+    /// Render the kept/dropped skills rows as markdown TABLES (#824 follow-up).
+    ///
+    /// The summary and tools sections are totals ROWS on both planes (owner
+    /// order 2026-11-15); only the skills groups stay tabular, because there a
+    /// row is a document with its own size and line count, not a name in a
+    /// ranked list.
     ///
     /// The classic leg rides the flow block's `<blockquote expandable>`, which
     /// is Telegram HTML — and the rich HTML input mode returns 200 and then
@@ -1431,179 +1451,82 @@ fn breakdown_tools(tool_sizes: &[ToolSize], ctx_max: u32, lines: &mut Vec<String
         format_breakdown_kb(total_bytes),
         format_breakdown_share(total_tokens, ctx_max),
     ));
-    if tool_sizes.is_empty() {
-        return;
-    }
-
-    let mut ordered: Vec<&ToolSize> = tool_sizes.iter().collect();
-    ordered.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.name.cmp(&b.name)));
-
-    const MAX_TOOLS: usize = 6;
-    let mut detail = String::new();
-    for (i, t) in ordered.iter().take(MAX_TOOLS).enumerate() {
-        if i > 0 {
-            detail.push_str(" · ");
-        }
-        // Backticks, not `<code>` — see `breakdown_group` for why the HTML
-        // form cannot survive the flow body's escape-then-format pipeline.
-        detail.push_str(&format!(
-            "`{}` {} · {}",
-            t.name,
-            format_breakdown_kb(t.bytes),
-            format_breakdown_share(t.tokens, ctx_max),
-        ));
-    }
-    if ordered.len() > MAX_TOOLS {
-        detail.push_str(&format!(" · +{}", ordered.len() - MAX_TOOLS));
-    }
-    lines.push(format!("     {detail}"));
+    // TOTAL ONLY (owner order 2026-11-15): a ranked list of up to six tool
+    // names, then `+18`, answered nothing — the reader wants what the tool set
+    // COSTS, not which schema outranks which. The per-tool measurements are
+    // still carried on the event; only the rendering is gone.
 }
 
-/// One numbered section of the continuation document (#824 follow-up).
-struct SummaryPart {
-    /// `§0 IMMEDIATE TASK` — the document's own numbering, so a row maps back
-    /// to the part it measures without a second lookup.
-    label: String,
-    tokens: usize,
-    bytes: usize,
-}
-
-impl SummaryPart {
-    fn measured(label: String, body: &str) -> Self {
-        Self {
-            label,
-            tokens: crate::brain::tokenizer::count_tokens(body),
-            bytes: body.len(),
-        }
-    }
-}
-
-/// Split the continuation document into the parts it actually ARRIVED with.
+/// How many parts the continuation document ARRIVED with (owner order
+/// 2026-11-15).
 ///
-/// The summariser writes against the numbered prompt in
-/// `service/context.rs`, but this measures the delivered string: a section the
-/// model omitted is simply absent here, and anything before the first `## `
-/// heading becomes its own `preamble` part, so nothing between the headings is
-/// dropped from the accounting. Each part's bytes include its own heading line.
-fn summary_parts(summary: &str) -> Vec<SummaryPart> {
-    let mut parts: Vec<SummaryPart> = Vec::new();
-    let mut current: Option<(String, String)> = None;
+/// The summariser writes against the numbered prompt in `service/context.rs`,
+/// but this counts the DELIVERED string: a section the model omitted is simply
+/// absent here, and any non-blank text before the first `## ` heading counts as
+/// its own `preamble` part, so no bytes escape the accounting. Only the count
+/// survives — the per-part rows were collapsed into the total.
+fn summary_part_count(summary: &str) -> usize {
+    let mut sections = 0usize;
+    let mut preamble = false;
     for line in summary.lines() {
-        if let Some(title) = line.strip_prefix("## ") {
-            if let Some((label, body)) = current.take() {
-                parts.push(SummaryPart::measured(label, &body));
-            }
-            current = Some((summary_part_label(title), format!("## {title}\n")));
-            continue;
-        }
-        match current.as_mut() {
-            Some((_, body)) => {
-                body.push_str(line);
-                body.push('\n');
-            }
-            None if !line.trim().is_empty() => {
-                current = Some(("preamble".to_string(), format!("{line}\n")));
-            }
-            None => {}
+        if line.starts_with("## ") {
+            sections += 1;
+        } else if sections == 0 && !line.trim().is_empty() {
+            preamble = true;
         }
     }
-    if let Some((label, body)) = current {
-        parts.push(SummaryPart::measured(label, &body));
-    }
-    parts
+    sections + usize::from(preamble)
 }
 
-/// `0. IMMEDIATE TASK` -> `§0 IMMEDIATE TASK`, capped so one part stays one
-/// table cell.
-fn summary_part_label(title: &str) -> String {
-    let t = title.trim();
-    let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
-    let label = if digits > 0 && t[digits..].starts_with('.') {
-        format!("§{} {}", &t[..digits], t[digits + 1..].trim())
+/// WHICH compaction ran, and the trade it made (owner order 2026-11-15).
+///
+/// The percentages above cannot be read without it. A `DeltaSinceMarker` pass
+/// leaves the frozen segments standing and replaces only the tail, so
+/// `65% → 67%` is a delta that failed to pay for the document it wrote — not a
+/// consolidation that did nothing. Naming the scope is what makes `fill` mean
+/// something, and `payoff` (`input ÷ document`) is the one number that says
+/// whether the pass was worth running at all: below 1.0 it was net additive,
+/// which is the #438 loop in a single figure.
+fn breakdown_scope_row(scope: &str, input_tokens: usize, summary: &str) -> String {
+    let tok = |n: usize| crate::utils::format_token_count(n.min(u32::MAX as usize) as u32);
+    let doc_tokens = crate::brain::tokenizer::count_tokens(summary);
+    // An unmeasured document prints `—` rather than a division by zero dressed
+    // up as a ratio.
+    let payoff = if doc_tokens == 0 {
+        "—".to_string()
     } else {
-        format!("§ {t}")
+        format!("{:.1}:1", input_tokens as f64 / doc_tokens as f64)
     };
-    const MAX_LABEL: usize = 30;
-    if label.chars().count() <= MAX_LABEL {
-        label
-    } else {
-        let cut: String = label.chars().take(MAX_LABEL - 1).collect();
-        format!("{cut}…")
-    }
+    format!(
+        "   {:<8} {} {} in · doc {} · {} payoff",
+        "scope",
+        scope,
+        tok(input_tokens),
+        tok(doc_tokens),
+        payoff,
+    )
 }
 
-/// The continuation document's own size, and the size of each of its parts
-/// (#824 follow-up) — the classic (HTML flow) form.
+/// The continuation document's own TOTAL (#824 follow-up; narrowed 2026-11-15).
 ///
 /// The summary is the largest single thing a compaction leaves in the window,
-/// and the card described the whole window without ever naming it. Every part
-/// carries its own KB and share, in document order, because `§0` (the
-/// immediate task) and `§9` (the continuation message) are the two the next
-/// turn reads first and they are not the two biggest.
+/// and the card described the whole window without ever naming it. The part
+/// COUNT stays — it is the one fact the old per-part list carried, and `4 parts`
+/// is cheaper than four rows that itemise sections the reader never acts on.
 fn breakdown_summary(summary: &str, ctx_max: u32, lines: &mut Vec<String>) {
     if summary.is_empty() {
         return;
     }
-    let parts = summary_parts(summary);
+    let part_count = summary_part_count(summary);
     let total_tokens = crate::brain::tokenizer::count_tokens(summary);
-    let noun = if parts.len() == 1 { "part" } else { "parts" };
+    let noun = if part_count == 1 { "part" } else { "parts" };
     lines.push(format!(
         "   {:<8} {} · {} · {} {noun}",
         "summary",
         format_breakdown_kb(summary.len()),
         format_breakdown_share(total_tokens, ctx_max),
-        parts.len(),
+        part_count,
     ));
-    if parts.is_empty() {
-        return;
-    }
-    const MAX_PARTS: usize = 8;
-    let mut detail = String::new();
-    for (i, p) in parts.iter().take(MAX_PARTS).enumerate() {
-        if i > 0 {
-            detail.push_str(" · ");
-        }
-        detail.push_str(&format!(
-            "{} {} · {}",
-            p.label,
-            format_breakdown_kb(p.bytes),
-            format_breakdown_share(p.tokens, ctx_max),
-        ));
-    }
-    if parts.len() > MAX_PARTS {
-        detail.push_str(&format!(" · +{}", parts.len() - MAX_PARTS));
-    }
-    lines.push(format!("     {detail}"));
-}
-
-/// The summary table (rich leg): the document's own total first, then one row
-/// per part, so the parts are read against the total they belong to.
-fn breakdown_summary_table(summary: &str, ctx_max: u32, lines: &mut Vec<String>) {
-    if summary.is_empty() {
-        return;
-    }
-    let parts = summary_parts(summary);
-    let total_tokens = crate::brain::tokenizer::count_tokens(summary);
-    lines.push(String::new());
-    lines.push("| summary part | size | share |".to_string());
-    lines.push("|---|---:|---:|".to_string());
-    lines.push(format!(
-        "| **total** | {} | {} |",
-        format_breakdown_kb(summary.len()),
-        format_breakdown_share(total_tokens, ctx_max),
-    ));
-    const MAX_PARTS: usize = 14;
-    for p in parts.iter().take(MAX_PARTS) {
-        lines.push(format!(
-            "| {} | {} | {} |",
-            p.label,
-            format_breakdown_kb(p.bytes),
-            format_breakdown_share(p.tokens, ctx_max),
-        ));
-    }
-    if parts.len() > MAX_PARTS {
-        lines.push(format!("| +{} more | | |", parts.len() - MAX_PARTS));
-    }
 }
 
 /// The kept/dropped table (rich leg): one row per entry, the group's totals in
@@ -1663,50 +1586,6 @@ fn breakdown_group_table(
     }
 }
 
-/// The tools table (rich leg): the measured schema set, largest first.
-///
-/// Same source and same ordering as the classic leg — the event's per-tool
-/// measurements, not the manifest's `required_tools` — because the card
-/// describes what the request CARRIES. A JSON schema has no meaningful line
-/// count, so this table has no LOC column.
-fn breakdown_tools_table(tool_sizes: &[ToolSize], ctx_max: u32, lines: &mut Vec<String>) {
-    if tool_sizes.is_empty() {
-        // A header with no rows is a table the parser may reject, and a
-        // rejected table renders as raw pipes — so the section is absent
-        // instead of empty. (The classic leg keeps its `tools 0 · …` row: a
-        // text row carries a zero fine, a table does not.)
-        return;
-    }
-    let total_tokens: usize = tool_sizes.iter().map(|t| t.tokens).sum();
-    let total_bytes: usize = tool_sizes.iter().map(|t| t.bytes).sum();
-    lines.push(String::new());
-    lines.push(format!("| tools ({}) | size | share |", tool_sizes.len()));
-    lines.push("|---|---:|---:|".to_string());
-
-    let mut ordered: Vec<&ToolSize> = tool_sizes.iter().collect();
-    ordered.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.name.cmp(&b.name)));
-
-    const MAX_ROWS: usize = 10;
-    for t in ordered.iter().take(MAX_ROWS) {
-        lines.push(format!(
-            "| `{}` | {} | {} |",
-            t.name,
-            format_breakdown_kb(t.bytes),
-            format_breakdown_share(t.tokens, ctx_max),
-        ));
-    }
-    if ordered.len() > MAX_ROWS {
-        lines.push(format!("| +{} more | | |", ordered.len() - MAX_ROWS));
-    }
-    if ordered.len() > 1 {
-        lines.push(format!(
-            "| **total** | {} | {} |",
-            format_breakdown_kb(total_bytes),
-            format_breakdown_share(total_tokens, ctx_max),
-        ));
-    }
-}
-
 /// The post-compaction breakdown card (#824): the headline, a labelled
 /// section header, and what the compaction actually did.
 ///
@@ -1745,15 +1624,16 @@ pub(crate) fn compaction_breakdown(b: &CompactionBreakdown<'_>) -> String {
         "took",
         format_breakdown_elapsed(b.elapsed)
     ));
+    // #833 follow-up: WHICH compaction ran, what it read, what it wrote back.
+    // The fill percentages above are ambiguous without it — a delta pass leaves
+    // the frozen segments standing, so `65% → 67%` is a delta that failed to
+    // pay for its own document, not a consolidation that did nothing.
+    lines.push(breakdown_scope_row(b.scope, b.input_tokens, b.summary));
 
-    // The continuation document's own size, and the size of each of its parts
-    // (#824 follow-up): the largest single thing a compaction leaves in the
-    // window, and until now the one cost the card never named.
-    if b.rich {
-        breakdown_summary_table(b.summary, b.ctx_max, &mut lines);
-    } else {
-        breakdown_summary(b.summary, b.ctx_max, &mut lines);
-    }
+    // The continuation document's TOTAL only (#833 follow-up). The per-part
+    // rows itemised sections the reader never acts on; the owner asked for the
+    // total alone.
+    breakdown_summary(b.summary, b.ctx_max, &mut lines);
 
     let manifest = crate::brain::agent::service::context::parse_context_manifest(b.summary);
     if let Some(m) = manifest.as_ref() {
@@ -1777,14 +1657,10 @@ pub(crate) fn compaction_breakdown(b: &CompactionBreakdown<'_>) -> String {
     // name never appears without what it costs.
     breakdown_documents(b.documents, b.document_refusals, b.ctx_max, b.rich, &mut lines);
 
-    // The tools rows stand even without a manifest: the schema cost is
+    // The tools row stands even without a manifest: the schema cost is
     // measured at emit, and it is the row that says how much of the window the
-    // tool set alone occupies.
-    if b.rich {
-        breakdown_tools_table(b.tool_sizes, b.ctx_max, &mut lines);
-    } else {
-        breakdown_tools(b.tool_sizes, b.ctx_max, &mut lines);
-    }
+    // tool set alone occupies. TOTAL ONLY — see `breakdown_tools`.
+    breakdown_tools(b.tool_sizes, b.ctx_max, &mut lines);
     lines.join("\n")
 }
 

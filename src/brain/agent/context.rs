@@ -713,3 +713,21 @@ pub(crate) enum CompactionScope {
     /// segments into one fresh summary that supersedes them.
     SegmentConsolidation,
 }
+
+impl CompactionScope {
+    /// The scope's name as a channel renders it (#833 follow-up).
+    ///
+    /// The label lives HERE, beside the enum, because the event that carries it
+    /// crosses into the public `ProgressEvent` surface and this enum is
+    /// `pub(crate)` — a `pub` field cannot name a `pub(crate)` type without
+    /// tripping `private_interfaces` under `-D warnings` (measured: gate run
+    /// 43740608570). The event therefore carries the LABEL, not the policy
+    /// type, and every channel renders the same word for the same scope.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::FullWindow => "full",
+            Self::DeltaSinceMarker => "delta",
+            Self::SegmentConsolidation => "consolidate",
+        }
+    }
+}

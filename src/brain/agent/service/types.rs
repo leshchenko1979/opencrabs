@@ -108,6 +108,30 @@ pub enum ProgressEvent {
         elapsed: std::time::Duration,
         before_tokens: usize,
         after_tokens: usize,
+        /// Which scope the summariser was pointed at (#833 follow-up).
+        ///
+        /// The notice has to say WHICH compaction happened, because the two
+        /// scopes move the fill in opposite directions. A `DeltaSinceMarker`
+        /// pass replaces only the tail and leaves the frozen segments standing,
+        /// so its "before" and "after" are measurements of the same window
+        /// minus one delta — while `SegmentConsolidation` rewrites the segments
+        /// themselves. Reporting the percentages without the scope let a losing
+        /// delta read exactly like a winning consolidation (#438).
+        ///
+        /// Carried as the LABEL (`"full"` / `"delta"` / `"consolidate"`), not
+        /// as `CompactionScope`: this enum is `pub` and the scope type is
+        /// `pub(crate)`, so naming it here is a `private_interfaces` error under
+        /// `-D warnings` (gate run 43740608570). The words live on the type
+        /// itself (`CompactionScope::label`), so no channel invents its own.
+        scope: &'static str,
+        /// Token size of the input that scope selected — the delta since the
+        /// last marker, the joined segments, or the whole window.
+        ///
+        /// Paired with the document's own size (measured by the card from
+        /// `summary`), this is the payoff ratio the scope policy decides on: a
+        /// pass that spends a 1.8K-token document to remove an 800-token delta
+        /// is a net loss however cheap the call was (#438).
+        input_tokens: usize,
         /// Per-tool schema cost of the session's NEXT request (#824), one row
         /// per tool actually sent (`tool_schemas_for_session` — lazy sessions
         /// send a filtered subset, health annotations included), never the
