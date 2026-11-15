@@ -289,8 +289,7 @@ pub fn newest_snapshot(dir: &Path) -> Option<PathBuf> {
     // (#717). Unusable files are skipped rather than reported (#845).
     collect_dated(dir)
         .into_iter()
-        .filter(|p| snapshot_is_usable(p.as_path()))
-        .next_back()
+        .rfind(|p| snapshot_is_usable(p.as_path()))
 }
 
 /// Whether a dated snapshot is a file an operator could actually restore from.
