@@ -9,7 +9,8 @@ use crate::db::repository::{MessageRepository, SessionRepository};
 use crate::memory::db::{MemoryGcReport, Store};
 use crate::services::context::ServiceContext;
 use crate::services::maintenance::{
-    MaintenanceService, enter_maintenance, leave, reclaim_is_due, try_enter,
+    MAINTENANCE_CONTENDED_RETRY, MaintenanceService, enter_maintenance, leave, next_sweep_delay,
+    reclaim_is_due, try_enter,
 };
 use crate::services::session::SessionService;
 use tempfile::tempdir;
@@ -389,4 +390,61 @@ async fn test_prune_expired_feedback_ledger() {
     let remaining = ledger_repo.recent(10).await.unwrap();
     assert_eq!(remaining.len(), 1, "the fresh row must survive");
     assert_eq!(remaining[0].event_type, "tool_success");
+}
+
+/// #838: the 24 h sweep and the 5-min reclaim ticker are spawned in the same
+/// bootstrap with the same 1800 s warmup, so their first wake is simultaneous
+/// by construction and the ticker can take the shared permit first. Measured on
+/// `ops`: the two calls were 32 µs apart, the sweep skipped, and the loop then
+/// slept a full day — so every step inside it (message prune, ledger retention,
+/// vacuums) was silently lost.
+///
+/// Two things must therefore hold: the skip must be VISIBLE to the caller, and
+/// it must not cost the full interval.
+#[tokio::test]
+async fn test_contended_sweep_is_flagged_and_retries_soon() {
+    let _g = guard().await;
+
+    // The choice itself. A run that never happened waits the short retry; a run
+    // that happened waits the configured interval.
+    let day = std::time::Duration::from_secs(86_400);
+    assert_eq!(
+        next_sweep_delay(true, day),
+        MAINTENANCE_CONTENDED_RETRY,
+        "a contended sweep must retry on the short interval, not the 24 h one"
+    );
+    assert_eq!(
+        next_sweep_delay(false, day),
+        day,
+        "a sweep that actually ran must keep the configured interval"
+    );
+    assert!(
+        MAINTENANCE_CONTENDED_RETRY < day,
+        "the retry must be shorter than the interval, or the fix is a no-op"
+    );
+
+    // The report must tell "starved" apart from "ran and found nothing".
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let svc = MaintenanceService::new(ServiceContext::new(db.pool().clone()));
+
+    assert!(try_enter(), "the test must hold the single-flight permit");
+    let starved = svc
+        .run_maintenance_with(MaintenanceKnobs::default())
+        .await
+        .unwrap();
+    assert!(
+        starved.skipped,
+        "a sweep that never ran must report skipped, not a silent default"
+    );
+    assert_eq!(starved.feedback_ledger_pruned, 0);
+    assert_eq!(starved.messages_pruned, 0);
+
+    // The skip path must not leak the permit: the next caller has to get it.
+    leave();
+    assert!(
+        try_enter(),
+        "a skipped sweep must release the single-flight permit"
+    );
+    leave();
 }

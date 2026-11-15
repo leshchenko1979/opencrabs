@@ -36,9 +36,38 @@ pub const MEMORY_RECLAIM_QUIET_FOR: Duration = Duration::from_secs(60);
 /// cannot starve the reclaim — the arm that makes the gate safe to ship.
 pub const MEMORY_RECLAIM_MAX_DELAY: Duration = Duration::from_secs(1800);
 
+/// How soon the 24 h sweep retries after it lost the single-flight permit
+/// (#838).
+///
+/// The reclaim ticker and the sweep are both spawned in the same bootstrap
+/// with the same 1800 s warmup, so their first wake is simultaneous by
+/// construction: the tick takes the shared permit first and the sweep skips.
+/// Waiting the full interval after a skip then costs a whole day of
+/// housekeeping — measured on `ops`, 32 µs apart, no sweep for that
+/// incarnation. A contended start retries on this short interval instead.
+pub const MAINTENANCE_CONTENDED_RETRY: Duration = Duration::from_secs(300);
+
+/// Delay before the next 24 h sweep attempt.
+///
+/// A run that never happened (permit held by the reclaim ticker) must not cost
+/// the full interval; a run that did happen waits it. Pure, so the choice is
+/// pinable without a clock or a process-global flag (#838).
+pub fn next_sweep_delay(skipped: bool, interval: Duration) -> Duration {
+    if skipped {
+        MAINTENANCE_CONTENDED_RETRY
+    } else {
+        interval
+    }
+}
+
 /// Summary report of a maintenance run.
 #[derive(Debug, Clone, Default)]
 pub struct MaintenanceReport {
+    /// `true` when the sweep never ran because another maintenance run held
+    /// the single-flight permit (#838). The caller must retry on a short
+    /// interval rather than the full one, and it must be able to tell this
+    /// apart from a real sweep that simply found nothing to prune.
+    pub skipped: bool,
     /// Number of expired sub-agent sessions pruned.
     pub subagents_pruned: usize,
     /// Number of expired messages pruned (#278).
@@ -109,7 +138,13 @@ impl MaintenanceService {
         // silently disable every later sweep (#522).
         let Some(_permit) = enter_maintenance() else {
             tracing::debug!("Maintenance sweep: already in flight, skipping");
-            return Ok(MaintenanceReport::default());
+            // #838: flag the skip. Returning a bare default made "the sweep was
+            // starved" indistinguishable from "the sweep ran and found nothing",
+            // so the 24 h loop could not tell that a whole day was lost.
+            return Ok(MaintenanceReport {
+                skipped: true,
+                ..Default::default()
+            });
         };
 
         self.run_maintenance_inner(knobs).await
@@ -233,10 +268,23 @@ impl MaintenanceService {
             tokio::time::sleep(Duration::from_secs(1800)).await;
 
             loop {
-                if let Err(e) = svc.run_maintenance().await {
-                    tracing::warn!("Periodic maintenance run encountered error: {e:#}");
+                let skipped = match svc.run_maintenance().await {
+                    Ok(report) => report.skipped,
+                    Err(e) => {
+                        tracing::warn!("Periodic maintenance run encountered error: {e:#}");
+                        false
+                    }
+                };
+                if skipped {
+                    // #838: the reclaim ticker took the shared permit at the same
+                    // instant (both warmups are 1800 s from the same bootstrap),
+                    // so nothing ran. Retry soon instead of losing a day.
+                    tracing::info!(
+                        retry_secs = MAINTENANCE_CONTENDED_RETRY.as_secs(),
+                        "Maintenance sweep skipped (permit held) — retrying on the short interval"
+                    );
                 }
-                tokio::time::sleep(interval).await;
+                tokio::time::sleep(next_sweep_delay(skipped, interval)).await;
             }
         });
     }
