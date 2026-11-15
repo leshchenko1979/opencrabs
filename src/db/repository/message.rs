@@ -134,7 +134,11 @@ impl MessageRepository {
             .get()
             .await
             .context("Failed to get connection")?
-            .interact(move |conn| {
+            // The closure's error type is pinned: two crates provide
+            // `From<rusqlite::Error>` (the crate's own error and
+            // `rusqlite_migration`), so an unannotated `Ok(..)` leaves `E`
+            // ambiguous at the tail.
+            .interact(move |conn| -> rusqlite::Result<(Vec<Message>, usize)> {
                 let boundary: Option<(i64, i64)> = conn
                     .prepare_cached(
                         "SELECT sequence, rowid FROM messages \
