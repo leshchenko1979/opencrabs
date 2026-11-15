@@ -9,7 +9,8 @@
 use crate::config::profile::with_home_override_async;
 use crate::config::PreflightMode;
 use crate::db::migration_snapshot::{
-    integrity_preflight, rotate, snapshot_before_migrations, LATEST, PREFIX, RETENTION,
+    integrity_preflight, newest_snapshot, newest_snapshot_note, refusal_message, rotate,
+    snapshot_before_migrations, LATEST, PREFIX, RETENTION,
 };
 use crate::db::Database;
 use rusqlite::{Connection, OpenFlags};
@@ -631,5 +632,97 @@ fn run_migrations_does_not_scan_on_every_open() {
         !SRC.contains("Run integrity check on startup"),
         "run_migrations() must not run an unconditional integrity_check after \
          the migrations -- it scans every page on EVERY open (#459, #677)"
+    );
+}
+
+// ------------------------------------------------- #845: empty leftovers
+
+/// A snapshot file that a real `VACUUM INTO` could have produced: page 1 is a
+/// genuine schema b-tree, so the header probe accepts it.
+fn write_valid_snapshot(dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(name);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute("CREATE TABLE canary(x TEXT)", []).unwrap();
+    drop(conn);
+    path
+}
+
+/// The 0-byte file a failed `VACUUM INTO` leaves behind, under a name that
+/// sorts NEWEST because it carries the newest stamp (#845).
+fn write_empty_leftover(dir: &Path) -> PathBuf {
+    let path = dir.join(format!("{PREFIX}62-20261115-235959"));
+    std::fs::write(&path, b"").unwrap();
+    path
+}
+
+/// Measured on a damaged image: `VACUUM INTO` fails and leaves a 0-byte file
+/// named like a snapshot. It carries the newest stamp, so a name-ordered
+/// `newest_snapshot` reported it as the one thing to restore from — an empty
+/// file, offered mid-incident, by the command an operator reaches for.
+#[test]
+fn newest_snapshot_ignores_a_zero_byte_leftover() {
+    let tmp = tempfile::tempdir().unwrap();
+    let good = write_valid_snapshot(tmp.path(), &format!("{PREFIX}62-20261115-010101"));
+    let empty = write_empty_leftover(tmp.path());
+
+    assert_eq!(
+        newest_snapshot(tmp.path()),
+        Some(good.clone()),
+        "the newest NAME is the empty file; the newest USABLE file is {good:?}"
+    );
+
+    // The leftover is still part of the retention population, so rotation
+    // reaps it instead of letting empty files accumulate forever.
+    let dated = dated_snapshots(tmp.path());
+    assert!(
+        dated.contains(&empty),
+        "an empty leftover must still be pruned by name: {dated:?}"
+    );
+}
+
+/// `doctor` must never answer "restore from this" with a file that restores
+/// nothing (#845). Same defect as the hint below, on the surface an operator
+/// reads first.
+#[test]
+fn newest_snapshot_note_never_points_at_an_empty_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_empty_leftover(tmp.path());
+
+    let note = newest_snapshot_note(newest_snapshot(tmp.path()).as_deref());
+    assert!(
+        note.contains("none yet"),
+        "a lone empty leftover is not a restore source: {note}"
+    );
+
+    write_valid_snapshot(tmp.path(), &format!("{PREFIX}62-20261115-010101"));
+    let note = newest_snapshot_note(newest_snapshot(tmp.path()).as_deref());
+    assert!(
+        note.contains("copy it over the database file to restore"),
+        "a real snapshot is named as the restore source: {note}"
+    );
+}
+
+/// The refusal message promises a snapshot exists. It was gated on
+/// `Path::exists()`, which a 0-byte leftover satisfies — so the message told a
+/// panicked operator to restore from an empty file (#845).
+#[test]
+fn refusal_does_not_promise_an_empty_latest_alias() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // A 0-byte file standing in for the alias: exists, restores nothing.
+    std::fs::write(tmp.path().join(LATEST), b"").unwrap();
+    let message = refusal_message(tmp.path(), "simulated");
+    assert!(
+        message.contains("No snapshot exists"),
+        "an empty alias must not be offered as a restore source: {message}"
+    );
+
+    // A real database behind the alias is offered, as before.
+    std::fs::remove_file(tmp.path().join(LATEST)).unwrap();
+    write_valid_snapshot(tmp.path(), LATEST);
+    let message = refusal_message(tmp.path(), "simulated");
+    assert!(
+        message.contains("An earlier snapshot is still available"),
+        "a usable alias must still be named: {message}"
     );
 }
