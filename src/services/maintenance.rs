@@ -45,7 +45,15 @@ pub const MEMORY_RECLAIM_MAX_DELAY: Duration = Duration::from_secs(1800);
 /// Waiting the full interval after a skip then costs a whole day of
 /// housekeeping — measured on `ops`, 32 µs apart, no sweep for that
 /// incarnation. A contended start retries on this short interval instead.
-pub const MAINTENANCE_CONTENDED_RETRY: Duration = Duration::from_secs(300);
+///
+/// MUST stay strictly BELOW [`MEMORY_RECLAIM_TICK`]. A retry equal to the tick
+/// is phase-locked to it: the sweep wakes exactly when the ticker does, loses
+/// the same race, and retries into the same collision forever — measured on
+/// `ops` at 300 s, losing at 05:11:42 and 05:16:42 (425 µs and 960 µs behind).
+/// Retrying faster than the ticker guarantees attempts that land BETWEEN
+/// ticks, where the permit is free. A test in
+/// `src/tests/memory_maintenance_test.rs` pins the inequality.
+pub const MAINTENANCE_CONTENDED_RETRY: Duration = Duration::from_secs(60);
 
 /// Delay before the next 24 h sweep attempt.
 ///

@@ -9,8 +9,8 @@ use crate::db::repository::{MessageRepository, SessionRepository};
 use crate::memory::db::{MemoryGcReport, Store};
 use crate::services::context::ServiceContext;
 use crate::services::maintenance::{
-    MAINTENANCE_CONTENDED_RETRY, MaintenanceService, enter_maintenance, leave, next_sweep_delay,
-    reclaim_is_due, try_enter,
+    MAINTENANCE_CONTENDED_RETRY, MEMORY_RECLAIM_TICK, MaintenanceService, enter_maintenance, leave,
+    next_sweep_delay, reclaim_is_due, try_enter,
 };
 use crate::services::session::SessionService;
 use tempfile::tempdir;
@@ -447,4 +447,30 @@ async fn test_contended_sweep_is_flagged_and_retries_soon() {
         "a skipped sweep must release the single-flight permit"
     );
     leave();
+}
+
+/// #838: the contended retry MUST be shorter than the reclaim tick.
+///
+/// Both loops wake together after the same 1800 s warmup, so a retry equal to
+/// the tick is phase-locked: the sweep re-collides with the ticker on every
+/// attempt and the housekeeping it owns is lost for the whole incarnation.
+/// Measured on `ops` with a 300 s retry against a 300 s tick — skipped at
+/// 05:11:42.545545 and again at 05:16:42.547150, never once getting through.
+/// Retrying below the tick guarantees attempts that land between ticks.
+#[test]
+fn test_contended_retry_is_shorter_than_the_reclaim_tick() {
+    assert!(
+        MAINTENANCE_CONTENDED_RETRY < MEMORY_RECLAIM_TICK,
+        "#838: contended retry ({MAINTENANCE_CONTENDED_RETRY:?}) must be strictly \
+         shorter than the reclaim tick ({MEMORY_RECLAIM_TICK:?}), or the sweep is \
+         phase-locked to the ticker and re-collides forever"
+    );
+}
+
+/// #838: a skip retries on the short interval; a real run waits the full one.
+#[test]
+fn test_next_sweep_delay_retries_short_only_after_a_skip() {
+    let interval = std::time::Duration::from_secs(86_400);
+    assert_eq!(next_sweep_delay(true, interval), MAINTENANCE_CONTENDED_RETRY);
+    assert_eq!(next_sweep_delay(false, interval), interval);
 }
