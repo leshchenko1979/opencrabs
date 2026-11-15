@@ -17,7 +17,7 @@
         "10:19:50.235 delivery.rs:491 Telegram dedup: match found among 1 intermediates (normalized) — suppressing final response",
         "raw-TL read 2026-11-14: documents: [] , photos: [] , media: null  (tg_get_messages had reported the same message as carrying a document reference)"
       ],
-      "note": "RE-SCORED 2026-11-14. The probe's claim is: a local document is stored as a LINK-form `tg://document` reference and lands as one bubble. Both halves hold on 96084 (raw TL: one PageBlockParagraph carrying TextUrl `tg://document?id=doc0`, one bubble, no twin). The earlier FAIL scored the probe on `documents: []` and was WRONG: ADR §4.2 records the client measurement (2026-11-12) that the LINK form is the form that is visible and opens, while the EMBED form drew nothing. An empty `documents` array beside a link-form reference is therefore the WORKING shape, not a failure - scoring it as one was the #801 error (measuring the payload and calling it the render) one layer down. The rendering half remains the owner's tap, not this instrument's claim.",
+      "note": "RE-SCORED 2026-11-14. The probe's claim is: a local document is stored as a LINK-form `tg://document` reference and lands as one bubble. Both halves hold on 96084 (raw TL: one PageBlockParagraph carrying TextUrl `tg://document?id=doc0`, one bubble, no twin). The earlier FAIL scored the probe on `documents: []` and was WRONG: ADR §4.2 records the client measurement (2026-11-12) that the LINK form is the form that is visible and opens, while the EMBED form drew nothing. An empty `documents` array beside a link-form reference is therefore the WORKING shape, not a failure - scoring it as one was the #801 error (measuring the payload and calling it the render) one layer down. The rendering half remains the owner's tap, not this instrument's claim. | SUPERSEDED 2026-11-15: the 2026-11-12 client reading cited here (link form visible and opens, embed draws nothing) was derived from hand-written `tg://document?id=docN` references that carried NO media entry - a dead reference measured as a form. ADR 4.3's A/B (L17: 96654 embed -> documents:[1] PageBlockDocument; 96655 link -> documents:[] bare TextUrl) and the owner's 2026-11-15 tap on msg 96949 ('the video plays and the files open') both invert it: the EMBED binds and opens, the LINK is the dead reference.",
       "attachment": "NONE",
       "documents_array": [],
       "photos_array": [],
@@ -159,7 +159,9 @@
       ],
       "note": "RE-PROBED AND PASSED 2026-11-15. The pre-fix measurement (msg 96248, 2026-11-14) delivered the photo only: video and document survived as TextUrl paragraphs with documents: []. Root cause was pipeline pass 2 (shield_unresolvable_markdown_images) judging image syntax photo-only and stripping the '!' from the rewriter's own embed, fixed in 2b9789721 (kind-aware scheme). The earlier note's alternative reading (b) - that the 64-byte fixture was refused - is DEAD: this bubble carries the same small fixtures and every entry bound. Reading (a) is also dead: a video and a document DO bind beside a photo in one bubble. Note also that the old claim demanded three media ENTRIES on the strength of ADR 4.2; 4.3's A/B (L17) falsified 4.2, and the three-entry claim is now met on the wire.",
       "binary": "3356c99d2fba13210e77a9dd34f045c1294e10ac",
-      "binary_delta": "git diff --stat 90161a32..3356c99d -- src/utils/image.rs src/channels/telegram/rich/ is EMPTY for the emit/shield surface, so this verdict is not stale across the swap to 3356c99d"
+      "binary_delta": "git diff --stat 90161a32..3356c99d -- src/utils/image.rs src/channels/telegram/rich/ is EMPTY for the emit/shield surface, so this verdict is not stale across the swap to 3356c99d",
+      "owner_tap": "OWNER TAP, MEASURED 2026-11-15 (topic 31847, msg 96949): owner reports 'the video plays and the files open'. This is the CLIENT-SIDE leg that no instrument on the box can observe: the wire shows blocks and entries, never rendering. It confirms the EMBED form binds AND opens, which is the exact inverse of the superseded ADR 4.2 reading (hand-written tg://document refs carrying no media entry, read as 'the link opens, the embed draws nothing').",
+      "owner_tap_verdict": "PASS"
     },
     "L11": {
       "verdict": "PASS",
@@ -185,7 +187,9 @@
       ],
       "note": "RE-PROBED AND PASSED 2026-11-15, and BOTH open readings of the pre-fix failure are now excluded. (a) 'a video entry is dropped when it shares a message with a photo' - FALSE: this bubble carries a photo AND a video AND two documents, all bound. (b) 'the 64-byte fixture was refused' - FALSE: the same 1853 B fixture binds here. The actual cause was the pass-2 shield stripping the '!' from the rewriter's own embed (2b9789721). ADR 2 rule 2 is met on this message.",
       "binary": "3356c99d2fba13210e77a9dd34f045c1294e10ac",
-      "binary_delta": "git diff --stat 90161a32..3356c99d -- src/utils/image.rs src/channels/telegram/rich/ is EMPTY for the emit/shield surface, so this verdict is not stale across the swap to 3356c99d"
+      "binary_delta": "git diff --stat 90161a32..3356c99d -- src/utils/image.rs src/channels/telegram/rich/ is EMPTY for the emit/shield surface, so this verdict is not stale across the swap to 3356c99d",
+      "owner_tap": "OWNER TAP, MEASURED 2026-11-15 (topic 31847, msg 96949): owner reports 'the video plays and the files open'. This is the CLIENT-SIDE leg that no instrument on the box can observe: the wire shows blocks and entries, never rendering. It confirms the EMBED form binds AND opens, which is the exact inverse of the superseded ADR 4.2 reading (hand-written tg://document refs carrying no media entry, read as 'the link opens, the embed draws nothing').",
+      "owner_tap_verdict": "PASS"
     },
     "L10": {
       "verdict": "PASS",
