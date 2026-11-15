@@ -1047,11 +1047,16 @@ fn split_media_refs_onto_own_lines(line: &str, out: &mut String, media: &[MediaE
 ///   `utils/image.rs`'s video family), and this guard demoted it back to link syntax —
 ///   which attaches nothing for ANY kind — so a video could never render. Measured on
 ///   message 96248 (2026-11-14): the photo bound, the video did not.
-/// - `tg://document?id=<X>` naming a **document** entry — NOT valid here. The client
-///   measurement in §4.2 is the authority: an embed aimed at a document id drew
-///   nothing at all while the same reference in link syntax was visible and opened
-///   (#827). Image syntax carries no document render, so the caller demotes it to a
-///   link — see [`media_ref_names_live_entry`].
+/// - `tg://document?id=<X>` naming a **document** entry — valid, and MEASURED by
+///   direct A/B against the Bot API (ADR-0001 §4.3, 2026-11-15): one `sendRichMessage`
+///   per form, both carrying a real `attach://docN` part. The EMBED returned
+///   `PageBlockDocument` + `documents:[1]` (73 B, `text/markdown`); the LINK returned a
+///   bare `TextUrl` paragraph with `documents:[]` — the entry silently discarded, no
+///   error, nothing behind the reference. That is why a tapped document link does
+///   nothing: the link form is a DEAD reference, not a working one. §4.2 previously
+///   concluded the opposite from hand-written `tg://document?id=doc0` references that
+///   carried no media entry at all (msg 96084's shape) — a dead reference measured as
+///   if it were a form.
 /// - a scheme the entry's kind contradicts (`![…](tg://photo?id=vid0)`) — NOT valid:
 ///   Telegram answers `RICH_MESSAGE_PHOTO_INVALID` and rejects the entire rich send,
 ///   dropping the reply's text and every other attachment with it (#800). Demoted by
@@ -1075,8 +1080,8 @@ fn is_valid_image_syntax_ref(target: &str, media: &[MediaEntry]) -> bool {
         Some(entry) => match entry.kind {
             MediaKind::Photo => media_ref_is_photo_scheme(url),
             MediaKind::Video => media_ref_is_video_scheme(url),
-            // No document render exists in image syntax (§4.2), whatever the scheme.
-            MediaKind::Document => false,
+            // Documents DO render in image syntax when the entry is bound (§4.3 A/B).
+            MediaKind::Document => media_ref_is_document_scheme(url),
         },
         None => false,
     }
@@ -1094,6 +1099,11 @@ fn media_ref_names_live_entry(target: &str, media: &[MediaEntry]) -> bool {
     media_ref_id(target)
         .and_then(|id| media_entry(id, media))
         .is_some()
+}
+
+/// Whether the reference's own scheme is a document scheme — `tg://document?id=`.
+fn media_ref_is_document_scheme(url: &str) -> bool {
+    url.starts_with("tg://document?")
 }
 
 /// Whether the reference's own scheme is a photo scheme — `tg://photo?id=` or

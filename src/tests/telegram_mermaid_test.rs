@@ -806,8 +806,10 @@ fn the_form_follows_the_entrys_kind() {
         "a live video entry keeps image syntax — §4.1 measured the block it renders"
     );
 
-    // A DOCUMENT entry is the opposite case: no image render exists (§4.2), so the
-    // `!` is dropped and the reference survives as the link the client shows.
+    // A DOCUMENT entry: §4.3's A/B (2026-11-15) measured the embed BINDING the
+    // entry (`PageBlockDocument`, `documents:[1]`) while the link form returned
+    // `documents:[]` — the entry silently discarded. So the embed is the form
+    // that renders, and the shield keeps it.
     let doc_media = vec![MediaEntry {
         kind: MediaKind::Document,
         id: "doc0".into(),
@@ -827,8 +829,8 @@ fn the_form_follows_the_entrys_kind() {
         .as_str()
         .expect("rich markdown");
     assert_eq!(
-        md, "[d.pdf](tg://document?id=doc0)",
-        "a document embed draws nothing in the client — demote it to the link form"
+        md, "![d.pdf](tg://document?id=doc0)",
+        "a document embed is the form that binds (§4.3 A/B) — kept as written"
     );
 
     // CONTROL: the same syntax with a PHOTO entry keeps its inline render, so the

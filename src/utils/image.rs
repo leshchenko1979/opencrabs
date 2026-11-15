@@ -2580,21 +2580,23 @@ impl FileRewriter<'_> {
     ///
     /// Two shapes come out of here, and the choice between them is the ADR's:
     ///
-    /// - **inline** — `[label](tg://document?id=docN)`, in LINK syntax, with the
-    ///   entry pushed in the SAME call so the reference and its bytes can never
-    ///   disagree (ADR §3.3, §10 gap 5). This is the shape for every file,
+    /// - **inline** — `![label](tg://document?id=docN)`, in IMAGE syntax, with
+    ///   the entry pushed in the SAME call so the reference and its bytes can
+    ///   never disagree (ADR §3.3, §10 gap 5). This is the shape for every file,
     ///   whatever its extension — `.md` included (#823: a markdown file is a
     ///   document like any other, and the carve-out that held it out is gone).
     ///
-    ///   LINK, not image syntax: `![…](tg://document?id=…)` is read by the
-    ///   client as a PHOTO embed whose source is a document, and it draws
-    ///   nothing (#827). Measured in the client, same daemon, one day apart: the
-    ///   link-form bubble (12:01) opened when the owner tapped it, and the
-    ///   embed-form bubble (18:33) was neither visible nor tappable. The same
-    ///   reference in link syntax is also what
-    ///   `shield_unresolvable_markdown_images` demotes it to at send time, so
-    ///   emitting it here is the shape that reaches the wire either way — this
-    ///   just stops depending on that repair running.
+    ///   IMAGE syntax, and that is MEASURED rather than argued (ADR §4.3,
+    ///   2026-11-15): one `sendRichMessage` per form, both carrying a real
+    ///   `attach://docN` part, so the markdown reference was the only variable.
+    ///   The EMBED came back `PageBlockDocument` with `documents:[1]` — 73 B,
+    ///   `text/markdown`; the LINK came back a bare `TextUrl` paragraph with
+    ///   `documents:[]`, the entry discarded silently. Both answered HTTP 200,
+    ///   which is why #827 read the LINK as the working form: it measured
+    ///   hand-written `tg://document?id=doc0` references carrying NO entry
+    ///   (msg 96084's shape) and attributed a dead reference to the syntax. The
+    ///   owner's "the link is not clickable" is that dead reference, not a
+    ///   client quirk.
     /// - **the plain `📎 <label>` marker** — for a file this turn already
     ///   delivered. The marker records no entry, so the rich plane does not
     ///   claim it and the detached file floor ships it.
@@ -2632,15 +2634,17 @@ impl FileRewriter<'_> {
                 // `application/pdf` 200 B, in a DM and in a forum topic. The
                 // API was never refusing documents; the markdown form was.
                 //
-                // #827: the FORM is LINK, not image syntax. An embed
-                // `![alt](tg://document?id=docN)` asks the client for a picture
-                // and is answered with a document id, so it draws nothing —
-                // measured in the client on one daemon: the link-form bubble
-                // (12:01) opened on a tap, the embed-form bubble (18:33) was
-                // absent. `shield_unresolvable_markdown_images` already demotes
-                // a live document entry to link syntax at send time; emitting it
-                // here is the same wire form without depending on that repair
-                // having run.
+                // #827 REVERSED (ADR §4.3, measured 2026-11-15): the FORM is
+                // IMAGE syntax. A direct A/B, one form per message, both with a
+                // real `attach://docN` part: the embed bound the entry
+                // (`PageBlockDocument`, `documents:[1]`, 73 B) and the link
+                // dropped it (`TextUrl`, `documents:[]`) — no error either way,
+                // both HTTP 200. #827 had concluded LINK from hand-written
+                // `tg://document?id=doc0` references that carried no media entry
+                // at all, i.e. it measured a dead reference and blamed the
+                // syntax. The owner's "the link is not clickable" is exactly
+                // that. `is_valid_image_syntax_ref` now accepts a document
+                // embed, so this survives the send-time shield.
                 let id = format!("{}{}", DOC_ID_PREFIX, self.entries.len());
                 let alt = document_alt(label, &path);
                 // The caption rides the markdown TITLE, because the rich media
@@ -2653,7 +2657,7 @@ impl FileRewriter<'_> {
                 // whichever form this file took.
                 consume_marker_prefix(&mut self.rich);
                 self.rich
-                    .push_str(&format!("[{alt}](tg://document?id={id}{title})"));
+                    .push_str(&format!("![{alt}](tg://document?id={id}{title})"));
                 self.entries.push(ResolvedFileRef {
                     id,
                     file: LocalFile {

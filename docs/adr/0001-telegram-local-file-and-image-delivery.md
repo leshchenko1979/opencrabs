@@ -3,9 +3,12 @@
 - **Status:** Accepted — the owner's intended behaviour (ruling 2026-10-29), **corrected by measurement**
   (revision 3). §2 and §4 now state what the wire actually does; §10 lists every gap between this document
   and the tree, so a reader never has to guess which half is real.
-- **Date:** 2026-11-12 (revision 6 — the reference's **form now follows its kind**: `[…]` for a document,
-  `![…]` for a photo or a video, after the owner read the two bubbles in his client and only the link form
-  opened (#827, §4.2). Revision 5 separated a remote target's two forms after #825 showed §3.2's "never
+- **Date:** 2026-11-15 (revision 7 — the reference's **form is embed syntax for EVERY kind**, after the
+  direct A/B in §4.3: one `sendRichMessage` per form, both carrying a real `attach://docN` part, the
+  EMBED bound the entry (`PageBlockDocument`, `documents:[1]`) and the LINK returned a bare `TextUrl` with
+  `documents:[]` — the entry silently discarded, no error. Revision 6's client leg (§4.2) read the link
+  form as the one that opens; §4.3 falsifies that reading, because the link form has nothing behind it.
+  Revision 5 separated a remote target's two forms after #825 showed §3.2's "never
   fetched" contradicting the fetch step beside it; revision 4 deleted the `.md` exception and §2 lost rule 4,
   after the owner opened an inlined markdown file in the client; revision 3 was the twelve-live-probe rewrite
   of §2, §3.2, §4, §5 and §7; revision 2 was the ruling before anyone had measured the shapes it assumed)
@@ -36,7 +39,7 @@ Telegram gives a bot three ways to put bytes in front of a reader, and they beha
 |---|---|---|
 | `sendPhoto` / `sendDocument` / `sendVideo` | its own message ("bubble"), openable | yes — a message id exists |
 | A `media` entry inside `sendRichMessage` | rendered **inside** the message body | no — it is not a message |
-| An `![…](tg://<kind>?id=…)` **embed** — or, for a document, `[…]` **link** — inside a rich body | the media itself, rendered inside the message body — **only** if a `media` entry with an `attach://` source answers that id (§4.1). A photo or a video is a media block and takes the embed; a document takes the link, because an embed aimed at a document id renders nothing in the client (#827) | no |
+| An `![…](tg://<kind>?id=…)` **embed** inside a rich body | the media itself, rendered inside the message body — **only** if a `media` entry with an `attach://` source answers that id (§4.1). The embed is the form for **every** kind — photo, video, document — measured by the §4.3 A/B: the embed bound the entry, the link form silently discarded it | no |
 
 The whole history of this area is the discovery of which of those three works for which kind of file.
 It was not obvious, and three separate assumptions were measured false (§7).
@@ -53,12 +56,14 @@ That second clause is the measurement's contribution, and it inverts revision 2 
 again, on a different instrument. On the wire a reference attaches when it names an entry whose bytes arrive as a
 multipart part (`"media": "attach://<name>"`); that much holds. What does NOT hold is the claim that the FORM is
 free: revision 4 concluded that only **image syntax** `![label](tg://<kind>?id=<id>)` attaches, from probes read
-back through the API. **The API accepting a reference is not the client rendering it** (#827). Measured in the
-client, one daemon, one day apart: the bubble whose document references were written `[label](tg://document?id=…)`
-opened when the owner tapped it, and the bubble whose references were written `![label](tg://document?id=…)` was
-neither visible nor tappable. A document entry is therefore written back as **LINK** syntax — which is also what
-`shield_unresolvable_markdown_images` demotes a live document entry to link syntax at send time, so the emit and the repair
-now agree instead of the emit depending on the repair.
+back through the API, and revision 6 concluded the split was BY KIND — link for a document, embed for a photo or
+a video — from the client leg (§4.2). Both inverted the same variable: the FORM. The 2026-11-15 A/B (§4.3) made
+the markdown form the only variable, both forms carrying a real `attach://docN` part: the **EMBED bound the
+entry** (`PageBlockDocument`, `documents:[1]`) and the **LINK returned a bare `TextUrl` with `documents:[]`** —
+the entry silently discarded, no error either way, both HTTP 200. That is why the owner tapped a link-form
+reference and it did nothing: the link form has nothing behind it. A document entry is therefore written back
+as **EMBED** (image) syntax — `is_valid_image_syntax_ref` accepts a document scheme, so the send-time shield
+no longer demotes it, and the emit and the repair now agree instead of the emit depending on the repair.
 
 | # | Rule | Entry emitted | Plane |
 |---|---|---|---|
@@ -67,7 +72,7 @@ now agree instead of the emit depending on the repair.
 | 3 | A resolvable local reference to **any other file** — one document kind, every extension — renders inline the same way | `document` — **verified live**: `text/markdown` 37 B and `application/pdf` 200 B | rich |
 | 4 | *(deleted in revision 4 — `.md` was the one exception; #823 removed it. Markdown is rule 3.)* | — | — |
 | 5 | With **no rich path** — `rich_messages = false`, or a rich send that failed and fell back — every kind ships as its own detached bubble | none | non-rich |
-| 6 | The reference is **always rewritten** whatever the author wrote, into the form its **kind** demands: `![…]` for an image or a video, `[…]` (link) for a document — an embed aimed at a document id draws nothing in the client (#827). A caption rides the markdown title (`"…"`) | — | rich |
+| 6 | The reference is **always rewritten** whatever the author wrote, into the form its **kind** demands: `![…]` (embed) for **every** kind — image, video, document — measured by the §4.3 A/B: the embed bound the entry (`PageBlockDocument`, `documents:[1]`), the link form silently discarded it (`documents:[]`). A caption rides the markdown title (`"…"`) | — | rich |
 
 Three consequences worth stating plainly, because each one used to be the opposite rule:
 
@@ -76,8 +81,11 @@ Three consequences worth stating plainly, because each one used to be the opposi
   only because the harness rewrites it. Revision 2 read "the `!` decides nothing" as "syntax is not a
   routing signal"; revision 4 then over-read the API probes as "only `!` attaches"; revision 5 measured the
   client and found the split is BY KIND, not by taste: a photo or a video is a media block and takes `![…]`,
-  a document is a link target and takes `[…]`. One rule satisfies all three: the harness claims by content,
-  picks the entry by kind, and writes the form that kind actually renders in.
+  a document is a link target and takes `[…]`. Revision 7's A/B (§4.3) falsified that split: the embed
+  binds the entry for EVERY kind, and the link form attaches nothing for ANY kind — the two instruments
+  that disagreed were both right about the *shape* and both wrong about the *form*. One rule satisfies all
+  three revisions: the harness claims by content, picks the entry by kind, and writes the form that
+  actually binds — embed syntax, always.
 - **The floor never disappears — but it is *attempted*, not *delivered*.** Every kind still has a detached
   leg, and it stays *ungated*: it is what carries the bytes when the rich plane declines, fails, or is
   switched off. An inline entry is an *additional* delivery, never a replacement for a bubble a client can

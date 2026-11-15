@@ -12,7 +12,7 @@
 //! | plane | the reference reads |
 //! |---|---|
 //! | the model's answer (the final leg) | `[report.pdf](/tmp/x.pdf)` |
-//! | the rich body that goes out | `[report.pdf](tg://document?id=doc0)` |
+//! | the rich body that goes out | `![report.pdf](tg://document?id=doc0)` |
 //! | the `📎` marker recorded in `sent_bubbles` | `📎 report.pdf` |
 //!
 //! `normalize_for_dedup` collapses whitespace and nothing else, so it can never
@@ -29,8 +29,8 @@ use crate::channels::telegram::intermediates::{
 fn the_three_spellings_of_one_reply_compare_equal() {
     let model_form = "Attached.\n\n[report.pdf](/tmp/oc-probes/report.pdf) and \
                       [notes.md](/tmp/oc-probes/notes.md)";
-    let rich_form = "Attached.\n\n[report.pdf](tg://document?id=doc0) and \
-                     [notes.md](tg://document?id=doc1)";
+    let rich_form = "Attached.\n\n![report.pdf](tg://document?id=doc0) and \
+                     ![notes.md](tg://document?id=doc1)";
     let marker_form = "Attached.\n\n📎 report.pdf and 📎 notes.md";
 
     let a = normalize_reference_spelling(model_form);

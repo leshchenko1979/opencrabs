@@ -249,6 +249,52 @@
     "note": "sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. Two halves, and only the first is a pass: the floor CHOSE the right kind (`as document`, so §2 rule 1's size split is honoured), then Telegram answered `Retry after 19s` and the tool dropped the file without retrying. #815 closed this hole for the turn path; it is still open on the tool path. A rate-limited attachment is silently lost, and the body has already gone out so nothing can announce it.",
     "withdrawn_reason": "instrument cannot see the claim: this probe ran on the TOOL plane (telegram_send, no kind=rich_api line), while live-l16-oversize-image-ships-as-document is a §3 rich-plane claim. The tool-plane observation is kept in `stored_form`/`raw_tl` as a §2 rule-5 datum and is NOT a verdict on §3."
    }
+  },
+  "L17": {
+   "verdict": "PASS",
+   "plane": "rich",
+   "method": "direct Bot API sendRichMessage, multipart, one form per message",
+   "sent_at": "2026-11-15T10:05:45Z",
+   "chat_id": -1003936827469,
+   "topic": 31847,
+   "probe": "A/B: identical media entry {type:document, media:attach://docN} with real bytes; the ONLY variable is the markdown reference form.",
+   "form_embed": {
+    "message_id": 96654,
+    "http": 200,
+    "markdown": "![doc-sample.md](tg://document?id=doc0)",
+    "raw_tl": {
+     "blocks": [
+      "PageBlockParagraph",
+      "PageBlockDocument document_id=5462918480313492839"
+     ],
+     "photos": [],
+     "documents": [
+      {
+       "id": "5462918480313492839",
+       "mime_type": "text/markdown",
+       "size": 73,
+       "file_name": "doc-sample.md"
+      }
+     ]
+    },
+    "result": "BOUND - the document entry is attached and rendered as a document block"
+   },
+   "form_link": {
+    "message_id": 96655,
+    "http": 200,
+    "markdown": "[doc-sample.pdf](tg://document?id=doc1)",
+    "raw_tl": {
+     "blocks": [
+      "PageBlockParagraph",
+      "PageBlockParagraph TextUrl{text:'doc-sample.pdf',url:'tg://document?id=doc1'}"
+     ],
+     "photos": [],
+     "documents": []
+    },
+    "result": "DROPPED - the entry is discarded and the reference degrades to a bare link"
+   },
+   "note": "Both legs returned HTTP 200 and both carried a real multipart part (attach://docN). The link leg's entry is silently discarded by the server: no error, no warning. This is the measured reason the owner reports 'the link is not clickable' - the link form has nothing behind it. ADR 4.2's claim that the link form is the one that renders is FALSIFIED by this measurement; 4.1's table (embed delivered, link delivered nothing) is confirmed.",
+   "conclusion": "Document references MUST be emitted in EMBED form with a bound media entry. The link form is a dead reference. #827's flip to link form was the wrong direction; the shield that demotes a matching document embed to link form is a defect."
   }
  },
  "binary": "opencrabs 0.5.4 @ bf74d9e93317124c5a33978951488d17dac45e51",

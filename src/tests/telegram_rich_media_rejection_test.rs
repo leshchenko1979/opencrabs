@@ -192,7 +192,7 @@ async fn a_refused_body_is_retried_identically_before_anything_is_dropped() {
         4242,
         None,
         None,
-        "[a.pdf](tg://document?id=doc0) and ![p](tg://photo?id=img0)",
+        "![a.pdf](tg://document?id=doc0) and ![p](tg://photo?id=img0)",
         &media,
         "test",
         "-",
@@ -245,7 +245,7 @@ async fn a_document_rejection_costs_one_document_and_not_the_whole_message() {
         4242,
         None,
         None,
-        "[a.pdf](tg://document?id=doc0) [b.pdf](tg://document?id=doc1) ![p](tg://photo?id=img0)",
+        "![a.pdf](tg://document?id=doc0) ![b.pdf](tg://document?id=doc1) ![p](tg://photo?id=img0)",
         &media,
         "test",
         "-",
@@ -274,7 +274,7 @@ async fn a_document_rejection_costs_one_document_and_not_the_whole_message() {
         "the dead reference must be neutralised, or the retry 400s on it (§3.3, #334)"
     );
     assert!(
-        second.contains("[b.pdf](tg://document?id=doc1)"),
+        second.contains("![b.pdf](tg://document?id=doc1)"),
         "the surviving document's own reference must be left byte-identical"
     );
 }

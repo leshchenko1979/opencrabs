@@ -236,8 +236,9 @@ fn test_shield_keeps_video_embed_and_demotes_documents() {
         "the scheme says photo, the entry says video — never ship that"
     );
 
-    // A DOCUMENT entry has no image render in the client (§4.2): the `!` is dropped
-    // so the reference survives as the link the reader can tap (#827).
+    // A DOCUMENT entry: §4.3's A/B (2026-11-15) measured the embed BINDING the
+    // entry (`PageBlockDocument`, `documents:[1]`) while the link form returned
+    // `documents:[]` — the entry silently discarded. So the shield keeps the embed.
     let document = MediaEntry {
         kind: MediaKind::Document,
         id: "doc0".into(),
@@ -247,8 +248,8 @@ fn test_shield_keeps_video_embed_and_demotes_documents() {
     };
     assert_eq!(
         shield_unresolvable_markdown_images("![s.md](tg://document?id=doc0)", std::slice::from_ref(&document)),
-        "[s.md](tg://document?id=doc0)",
-        "a document embed draws nothing in the client — demote to the link form"
+        "![s.md](tg://document?id=doc0)",
+        "a document embed is the form that binds (§4.3 A/B) — kept as written"
     );
 
     // CONTROL: the identical syntax with a PHOTO entry keeps its inline render, so
