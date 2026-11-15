@@ -10,6 +10,7 @@ pub mod maintenance;
 pub mod message;
 pub mod project;
 pub mod project_match;
+pub(crate) mod prune;
 pub mod session;
 
 pub use context::{ServiceContext, ServiceManager};

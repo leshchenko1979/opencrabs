@@ -404,7 +404,7 @@ impl SessionService {
         if ttl_days == 0 {
             return Ok(0);
         }
-        let cutoff = Utc::now().timestamp() - (ttl_days as i64) * 86_400;
+        let cutoff = crate::services::prune::day_cutoff(ttl_days);
         let repo = SessionRepository::new(self.context.pool());
         let expired = repo
             .subagent_sessions_older_than(cutoff)
@@ -447,7 +447,7 @@ impl SessionService {
         if retention_days == 0 {
             return Ok(0);
         }
-        let cutoff = Utc::now().timestamp() - (retention_days as i64) * 86_400;
+        let cutoff = crate::services::prune::day_cutoff(retention_days);
         let repo = crate::db::repository::message::MessageRepository::new(self.context.pool());
         repo.prune_older_than(cutoff)
             .await

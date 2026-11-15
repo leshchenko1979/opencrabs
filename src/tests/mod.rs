@@ -743,6 +743,7 @@ pub mod provider_retry_consolidation_test;
 pub mod provider_stream_total_timeout_test;
 pub mod provider_sync_test;
 pub mod provider_timeout_test;
+pub mod prune_cutoff_test;
 pub mod qr_render_test;
 pub mod queued_message_test;
 pub mod quota_classification_test;

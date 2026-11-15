@@ -6,7 +6,6 @@
 //! - Periodic SQLite `VACUUM` on `memory.db` and `opencrabs.db`
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -98,6 +97,29 @@ pub struct MaintenanceService {
     context: ServiceContext,
 }
 
+/// Run one retention leg and report how many rows it removed.
+///
+/// The three prunes share one shape — a count on success, a warning on failure,
+/// and a sweep that carries on either way — so they share this helper instead of
+/// three copies of the same `match` (#841). A prune is best-effort by design: a
+/// failing leg must not cost the others, and the failure is logged rather than
+/// propagated because the sweep's caller has no repair to attempt.
+///
+/// `what` names the leg in the warning, so the log still says WHICH prune failed
+/// even though the code no longer repeats the message three times.
+async fn prune_leg<F>(what: &str, leg: F) -> usize
+where
+    F: std::future::Future<Output = Result<usize>>,
+{
+    match leg.await {
+        Ok(pruned) => pruned,
+        Err(e) => {
+            tracing::warn!("Maintenance: failed to prune {what}: {e:#}");
+            0
+        }
+    }
+}
+
 impl MaintenanceService {
     pub fn new(context: ServiceContext) -> Self {
         Self { context }
@@ -110,8 +132,10 @@ impl MaintenanceService {
     /// ledger history by itself.
     ///
     /// `feedback_ledger.created_at` is TEXT ISO8601 (`%Y-%m-%dT%H:%M:%SZ`), so
-    /// the cutoff is formatted identically and the DELETE's range walks
-    /// `idx_feedback_ledger_created` instead of scanning the table.
+    /// the cutoff comes from [`crate::services::prune::iso_day_cutoff`] — the
+    /// one place that states which representation a column needs — and the
+    /// DELETE's range walks `idx_feedback_ledger_created` instead of scanning
+    /// the table.
     pub(crate) async fn prune_expired_feedback_ledger(
         &self,
         retention_days: u32,
@@ -119,9 +143,7 @@ impl MaintenanceService {
         if retention_days == 0 {
             return Ok(0);
         }
-        let cutoff = (Utc::now() - chrono::Duration::days(i64::from(retention_days)))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let cutoff = crate::services::prune::iso_day_cutoff(retention_days);
         let repo = crate::db::repository::feedback_ledger::FeedbackLedgerRepository::new(
             self.context.pool(),
         );
@@ -169,18 +191,18 @@ impl MaintenanceService {
 
         // 1. Prune expired sub-agent sessions
         let session_svc = SessionService::new(self.context.clone());
-        let ttl_days = config.agent.subagent_session_ttl_days;
-        match session_svc.prune_expired_subagent_sessions(ttl_days).await {
-            Ok(pruned) => report.subagents_pruned = pruned,
-            Err(e) => tracing::warn!("Maintenance: failed to prune subagent sessions: {e:#}"),
-        }
+        report.subagents_pruned = prune_leg(
+            "subagent sessions",
+            session_svc.prune_expired_subagent_sessions(config.agent.subagent_session_ttl_days),
+        )
+        .await;
 
         // 1b. Prune expired messages (#278)
-        let msg_retention_days = config.agent.message_retention_days;
-        match session_svc.prune_expired_messages(msg_retention_days).await {
-            Ok(pruned) => report.messages_pruned = pruned,
-            Err(e) => tracing::warn!("Maintenance: failed to prune expired messages: {e:#}"),
-        }
+        report.messages_pruned = prune_leg(
+            "expired messages",
+            session_svc.prune_expired_messages(config.agent.message_retention_days),
+        )
+        .await;
 
         // 1c. Prune the feedback ledger (#836)
         //
@@ -188,14 +210,11 @@ impl MaintenanceService {
         // profile grew it past 1M rows / 3.75 GiB and every `feedback_analyze`,
         // RSI digest and `self_improve` call aggregated over the whole table —
         // `tool_%` is 90 % of the rows, so no index makes those scans selective.
-        let ledger_retention_days = config.agent.feedback_ledger_retention_days;
-        match self
-            .prune_expired_feedback_ledger(ledger_retention_days)
-            .await
-        {
-            Ok(pruned) => report.feedback_ledger_pruned = pruned,
-            Err(e) => tracing::warn!("Maintenance: failed to prune feedback ledger: {e:#}"),
-        }
+        report.feedback_ledger_pruned = prune_leg(
+            "feedback ledger",
+            self.prune_expired_feedback_ledger(config.agent.feedback_ledger_retention_days),
+        )
+        .await;
 
         // 2. Memory Store GC & Vacuum
         //

@@ -563,14 +563,20 @@ impl MessageRepository {
     /// Also cleans up any associated child records (such as `attachments` or `tool_executions`
     /// referencing the deleted messages) to maintain database hygiene.
     /// Returns the number of pruned message rows.
+    ///
+    /// Goes through [`write_with_retry`] like every other write in this
+    /// repository: a `DELETE` that meets a busy database is retried instead of
+    /// failing the sweep outright, and the three statements share one
+    /// transaction so a child cleanup can never outlive the rows it orphaned.
+    /// `unchecked_transaction` takes `&Connection` — `write_with_retry`'s
+    /// closure cannot take `&mut` without rebuilding the pool future on every
+    /// attempt, which is the whole reason that helper exists.
     pub async fn prune_older_than(&self, cutoff_unix: i64) -> Result<usize> {
-        let pruned = self
-            .pool
-            .get()
-            .await
-            .context("Failed to get connection")?
-            .interact(move |conn| {
-                let tx = conn.transaction()?;
+        let pruned = write_with_retry(
+            &self.pool,
+            &write_retry_config(),
+            move |conn| -> rusqlite::Result<usize> {
+                let tx = conn.unchecked_transaction()?;
                 // Clean up any child rows referencing messages to be deleted (in case FK cascades aren't active)
                 let _ = tx.execute(
                     "DELETE FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE created_at < ?1)",
@@ -585,11 +591,11 @@ impl MessageRepository {
                     params![cutoff_unix],
                 )?;
                 tx.commit()?;
-                Ok::<_, rusqlite::Error>(count)
-            })
-            .await
-            .map_err(interact_err)?
-            .context("Failed to prune expired messages")?;
+                Ok(count)
+            },
+        )
+        .await
+        .context("Failed to prune expired messages")?;
 
         if pruned > 0 {
             tracing::info!("Pruned {pruned} message(s) older than timestamp {cutoff_unix}");
