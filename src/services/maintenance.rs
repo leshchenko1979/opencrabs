@@ -20,12 +20,61 @@ static RUNNING_MAINTENANCE: AtomicBool = AtomicBool::new(false);
 /// Spawned-once guard for the memory reclaim ticker (#522).
 static MEMORY_RECLAIM_SPAWNED: AtomicBool = AtomicBool::new(false);
 
+/// Set when the startup sub-agent catch-up has pruned for this boot, so the
+/// first 24 h sweep does not repeat the same prune (#842).
+///
+/// `subagent_session_ttl_days` had TWO schedulers pruning the same table — a
+/// startup catch-up in `cli::ui` and the sweep. Under restart churn only the
+/// startup leg ever ran, so the sweep's copy was dead weight; under a
+/// long-lived daemon both ran and the same row set was enumerated twice a day.
+/// The startup leg still exists (a daemon that never survives 24 h would
+/// otherwise never prune at all), but it now records that it ran, and the
+/// sweep's first cycle after a boot hands the work back to it.
+static SUBAGENT_CATCHUP_DONE: AtomicBool = AtomicBool::new(false);
+
+/// Record that the startup sub-agent catch-up pruned for this boot (#842).
+pub(crate) fn note_subagent_catchup_done() {
+    SUBAGENT_CATCHUP_DONE.store(true, Ordering::Release);
+}
+
+/// Consume the catch-up flag: `true` exactly once after a startup catch-up.
+///
+/// Swapping rather than reading is what makes the handover one-shot — the
+/// first sweep after a boot skips its copy, every later sweep owns the prune
+/// again.
+pub(crate) fn take_subagent_catchup() -> bool {
+    SUBAGENT_CATCHUP_DONE.swap(false, Ordering::AcqRel)
+}
+
 /// When the reclaim first became due and was deferred, so the starvation cap
 /// has a start point. `None` while nothing is owed (#522).
 static RECLAIM_DEBT_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// How often the memory reclaim ticker wakes (#522).
 pub const MEMORY_RECLAIM_TICK: Duration = Duration::from_secs(300);
+
+/// Post-boot warmup before the first 24 h sweep (#273).
+///
+/// Startup and the first tool calls must not compete with housekeeping, so the
+/// sweep waits 30 min before its first attempt.
+pub const SWEEP_WARMUP: Duration = Duration::from_secs(1800);
+
+/// Extra delay the reclaim ticker adds to [`SWEEP_WARMUP`] before its first
+/// tick (#840).
+///
+/// Both loops are spawned from the same bootstrap, so equal warmups make their
+/// first wake simultaneous BY CONSTRUCTION — measured on `ops`: 32 µs apart,
+/// the ticker took the shared single-flight permit first, and the sweep
+/// skipped. Offsetting the ticker past the sweep is the structural fix; it
+/// also decides the winner deterministically rather than by a race:
+///
+/// - the SWEEP goes first, because losing costs it a whole sweep (every prune,
+///   both vacuums and the memory GC live inside it), while the ticker's loss
+///   costs one 300 s tick that it retries on its own interval;
+/// - the ticker still lands inside the sweep's first window often enough to be
+///   deferred once, which is harmless — `reclaim_once` re-arms its own debt and
+///   the next tick picks it up.
+pub const RECLAIM_WARMUP_OFFSET: Duration = Duration::from_secs(150);
 
 /// How long the fleet must be quiet before a reclaim tick may run (#522).
 pub const MEMORY_RECLAIM_QUIET_FOR: Duration = Duration::from_secs(60);
@@ -38,12 +87,15 @@ pub const MEMORY_RECLAIM_MAX_DELAY: Duration = Duration::from_secs(1800);
 /// How soon the 24 h sweep retries after it lost the single-flight permit
 /// (#838).
 ///
-/// The reclaim ticker and the sweep are both spawned in the same bootstrap
-/// with the same 1800 s warmup, so their first wake is simultaneous by
-/// construction: the tick takes the shared permit first and the sweep skips.
-/// Waiting the full interval after a skip then costs a whole day of
+/// #840 removed the STRUCTURAL collision — the two loops no longer wake
+/// together, because the ticker's warmup is [`SWEEP_WARMUP`] +
+/// [`RECLAIM_WARMUP_OFFSET`] while the sweep's is [`SWEEP_WARMUP`]. This retry
+/// is the safety net for the residual case: a tick that fires while a long
+/// sweep (vacuums, memory GC) is still holding the permit.
+///
+/// Waiting the full interval after a skip would cost a whole day of
 /// housekeeping — measured on `ops`, 32 µs apart, no sweep for that
-/// incarnation. A contended start retries on this short interval instead.
+/// incarnation — so a contended start retries on this short interval instead.
 ///
 /// MUST stay strictly BELOW [`MEMORY_RECLAIM_TICK`]. A retry equal to the tick
 /// is phase-locked to it: the sweep wakes exactly when the ticker does, loses
@@ -54,16 +106,51 @@ pub const MEMORY_RECLAIM_MAX_DELAY: Duration = Duration::from_secs(1800);
 /// `src/tests/memory_maintenance_test.rs` pins the inequality.
 pub const MAINTENANCE_CONTENDED_RETRY: Duration = Duration::from_secs(60);
 
-/// Delay before the next 24 h sweep attempt.
+/// How a sweep attempt ended, as far as the 24 h loop cares (#843).
+///
+/// The loop's only decision is how long to wait next, and these are the three
+/// outcomes that change the answer. Without this split a failed run and a
+/// completed run were indistinguishable — the error arm fell through to the
+/// full interval and the retention knobs silently stopped working for a day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SweepOutcome {
+    /// The sweep ran to completion.
+    Ran,
+    /// The permit was held, so nothing ran (#838).
+    Skipped,
+    /// The sweep ran (or tried to) and at least one leg failed (#843).
+    Failed,
+}
+
+/// How many consecutive failures retry on the short interval before the loop
+/// gives up and waits the full one (#843).
+///
+/// A persistently broken sweep — a locked DB, a full disk, a failing vacuum —
+/// must not hot-loop against the very database it is failing on. After this
+/// many consecutive short retries the loop returns to the configured interval
+/// and tries again there, which still surfaces the failure on every attempt.
+pub const MAX_CONSECUTIVE_FAILURE_RETRIES: u32 = 3;
+
+/// Delay before the next 24 h sweep attempt (#838, #843).
 ///
 /// A run that never happened (permit held by the reclaim ticker) must not cost
-/// the full interval; a run that did happen waits it. Pure, so the choice is
-/// pinable without a clock or a process-global flag (#838).
-pub fn next_sweep_delay(skipped: bool, interval: Duration) -> Duration {
-    if skipped {
-        MAINTENANCE_CONTENDED_RETRY
-    } else {
-        interval
+/// the full interval; neither must a run that failed. `consecutive_failures`
+/// is the count ALREADY retried, so a broken sweep escalates back to the
+/// configured interval instead of spinning.
+///
+/// Pure, so every branch is pinable without a clock or a process-global flag.
+pub fn next_sweep_delay(
+    outcome: SweepOutcome,
+    consecutive_failures: u32,
+    interval: Duration,
+) -> Duration {
+    match outcome {
+        SweepOutcome::Ran => interval,
+        SweepOutcome::Skipped => MAINTENANCE_CONTENDED_RETRY,
+        SweepOutcome::Failed if consecutive_failures < MAX_CONSECUTIVE_FAILURE_RETRIES => {
+            MAINTENANCE_CONTENDED_RETRY
+        }
+        SweepOutcome::Failed => interval,
     }
 }
 
@@ -75,6 +162,13 @@ pub struct MaintenanceReport {
     /// interval rather than the full one, and it must be able to tell this
     /// apart from a real sweep that simply found nothing to prune.
     pub skipped: bool,
+    /// How many legs of the sweep failed (#843).
+    ///
+    /// The legs are best-effort — one failing prune must not cost the others —
+    /// but a sweep whose legs ALL failed is not the same event as a sweep that
+    /// found nothing, and before this counter existed the loop could not tell
+    /// them apart and slept a full day on a broken sweep.
+    pub failed_legs: usize,
     /// Number of expired sub-agent sessions pruned.
     pub subagents_pruned: usize,
     /// Number of expired messages pruned (#278).
@@ -92,12 +186,29 @@ pub struct MaintenanceReport {
     pub memory_vacuumed: bool,
 }
 
+impl MaintenanceReport {
+    /// How this attempt ended, for the loop's retry decision (#843).
+    ///
+    /// A skip outranks a failure: a skipped run did no work at all, so nothing
+    /// failed — `failed_legs` is necessarily zero on that path, and reading it
+    /// first would be dead code.
+    pub fn outcome(&self) -> SweepOutcome {
+        if self.skipped {
+            SweepOutcome::Skipped
+        } else if self.failed_legs > 0 {
+            SweepOutcome::Failed
+        } else {
+            SweepOutcome::Ran
+        }
+    }
+}
+
 /// Service managing periodic database & memory maintenance sweeps.
 pub struct MaintenanceService {
     context: ServiceContext,
 }
 
-/// Run one retention leg and report how many rows it removed.
+/// Run one retention leg and report what it removed, plus whether it failed.
 ///
 /// The three prunes share one shape — a count on success, a warning on failure,
 /// and a sweep that carries on either way — so they share this helper instead of
@@ -105,17 +216,21 @@ pub struct MaintenanceService {
 /// failing leg must not cost the others, and the failure is logged rather than
 /// propagated because the sweep's caller has no repair to attempt.
 ///
+/// The `bool` is what makes a failure VISIBLE to the loop (#843): a sweep whose
+/// legs all failed must not look like a sweep that found nothing, or it sleeps
+/// the full interval and the retention knobs stay broken for a day.
+///
 /// `what` names the leg in the warning, so the log still says WHICH prune failed
 /// even though the code no longer repeats the message three times.
-async fn prune_leg<F>(what: &str, leg: F) -> usize
+async fn prune_leg<F>(what: &str, leg: F) -> (usize, bool)
 where
     F: std::future::Future<Output = Result<usize>>,
 {
     match leg.await {
-        Ok(pruned) => pruned,
+        Ok(pruned) => (pruned, true),
         Err(e) => {
             tracing::warn!("Maintenance: failed to prune {what}: {e:#}");
-            0
+            (0, false)
         }
     }
 }
@@ -189,20 +304,34 @@ impl MaintenanceService {
         let mut report = MaintenanceReport::default();
         let config = crate::config::Config::load().unwrap_or_default();
 
-        // 1. Prune expired sub-agent sessions
+        // 1. Prune expired sub-agent sessions (#842)
+        //
+        // The startup catch-up in `cli::ui` already pruned this table for this
+        // boot. Taking the flag hands the prune back to the sweep from the NEXT
+        // cycle on, instead of enumerating the same rows twice in one day.
         let session_svc = SessionService::new(self.context.clone());
-        report.subagents_pruned = prune_leg(
-            "subagent sessions",
-            session_svc.prune_expired_subagent_sessions(config.agent.subagent_session_ttl_days),
-        )
-        .await;
+        if take_subagent_catchup() {
+            tracing::debug!(
+                "Maintenance: subagent catch-up already ran this boot; sweep owns the prune next cycle"
+            );
+        } else {
+            let (pruned, ok) = prune_leg(
+                "subagent sessions",
+                session_svc.prune_expired_subagent_sessions(config.agent.subagent_session_ttl_days),
+            )
+            .await;
+            report.subagents_pruned = pruned;
+            report.failed_legs += usize::from(!ok);
+        }
 
         // 1b. Prune expired messages (#278)
-        report.messages_pruned = prune_leg(
+        let (pruned, ok) = prune_leg(
             "expired messages",
             session_svc.prune_expired_messages(config.agent.message_retention_days),
         )
         .await;
+        report.messages_pruned = pruned;
+        report.failed_legs += usize::from(!ok);
 
         // 1c. Prune the feedback ledger (#836)
         //
@@ -210,11 +339,13 @@ impl MaintenanceService {
         // profile grew it past 1M rows / 3.75 GiB and every `feedback_analyze`,
         // RSI digest and `self_improve` call aggregated over the whole table —
         // `tool_%` is 90 % of the rows, so no index makes those scans selective.
-        report.feedback_ledger_pruned = prune_leg(
+        let (pruned, ok) = prune_leg(
             "feedback ledger",
             self.prune_expired_feedback_ledger(config.agent.feedback_ledger_retention_days),
         )
         .await;
+        report.feedback_ledger_pruned = pruned;
+        report.failed_legs += usize::from(!ok);
 
         // 2. Memory Store GC & Vacuum
         //
@@ -263,7 +394,10 @@ impl MaintenanceService {
 
             match vac_res {
                 Ok(vacuumed) => report.memory_vacuumed = vacuumed,
-                Err(e) => tracing::warn!("Maintenance: memory vacuum failed: {e:#}"),
+                Err(e) => {
+                    tracing::warn!("Maintenance: memory vacuum failed: {e:#}");
+                    report.failed_legs += 1;
+                }
             }
         }
 
@@ -271,7 +405,10 @@ impl MaintenanceService {
         let db = crate::db::Database::new_with_pool(self.context.pool());
         match db.vacuum_database().await {
             Ok(vacuumed) => report.database_vacuumed = vacuumed,
-            Err(e) => tracing::warn!("Maintenance: database vacuum failed: {e:#}"),
+            Err(e) => {
+                tracing::warn!("Maintenance: database vacuum failed: {e:#}");
+                report.failed_legs += 1;
+            }
         }
 
         tracing::info!(
@@ -281,6 +418,7 @@ impl MaintenanceService {
             database_vacuumed = report.database_vacuumed,
             memory_vacuumed = report.memory_vacuumed,
             memory_gc_skipped = report.memory_gc_skipped,
+            failed_legs = report.failed_legs,
             "Maintenance sweep completed"
         );
 
@@ -292,26 +430,58 @@ impl MaintenanceService {
         tokio::spawn(async move {
             let svc = MaintenanceService::new(context);
             // Initial post-boot warmup delay (30 mins) so startup and tool execution are not bottlenecked (#273)
-            tokio::time::sleep(Duration::from_secs(1800)).await;
+            tokio::time::sleep(SWEEP_WARMUP).await;
+
+            // Consecutive failed runs ALREADY retried on the short interval
+            // (#843). Only a run that gets through resets it: a skip means no
+            // work happened, so it must not buy a broken sweep more retries.
+            let mut consecutive_failures: u32 = 0;
 
             loop {
-                let skipped = match svc.run_maintenance().await {
-                    Ok(report) => report.skipped,
+                let outcome = match svc.run_maintenance().await {
+                    Ok(report) => report.outcome(),
                     Err(e) => {
+                        // #843: a run that errored out did NOT succeed, so it
+                        // must not fall through to the full interval — that
+                        // silently disabled every retention knob for a day.
                         tracing::warn!("Periodic maintenance run encountered error: {e:#}");
-                        false
+                        SweepOutcome::Failed
                     }
                 };
-                if skipped {
-                    // #838: the reclaim ticker took the shared permit at the same
-                    // instant (both warmups are 1800 s from the same bootstrap),
-                    // so nothing ran. Retry soon instead of losing a day.
-                    tracing::info!(
-                        retry_secs = MAINTENANCE_CONTENDED_RETRY.as_secs(),
-                        "Maintenance sweep skipped (permit held) — retrying on the short interval"
-                    );
+
+                match outcome {
+                    SweepOutcome::Ran => consecutive_failures = 0,
+                    SweepOutcome::Skipped => {
+                        // #838/#840: a permit held by the reclaim ticker means
+                        // the sweep never ran, so nothing inside it happened.
+                        // The warmups are offset now (#840) so this should be
+                        // rare, but a tick that lands inside a long sweep still
+                        // contends. Retry soon instead of losing a day.
+                        tracing::info!(
+                            retry_secs = MAINTENANCE_CONTENDED_RETRY.as_secs(),
+                            "Maintenance sweep skipped (permit held) — retrying on the short interval"
+                        );
+                    }
+                    SweepOutcome::Failed => {
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+                        // Bounded (#843): after MAX_CONSECUTIVE_FAILURE_RETRIES
+                        // the loop goes back to the configured interval, so a
+                        // persistently broken sweep cannot hammer the database
+                        // it is failing on.
+                        tracing::warn!(
+                            consecutive_failures = consecutive_failures,
+                            retry_secs = next_sweep_delay(
+                                outcome,
+                                consecutive_failures,
+                                interval
+                            )
+                            .as_secs(),
+                            "Maintenance sweep failed — retrying"
+                        );
+                    }
                 }
-                tokio::time::sleep(next_sweep_delay(skipped, interval)).await;
+
+                tokio::time::sleep(next_sweep_delay(outcome, consecutive_failures, interval)).await;
             }
         });
     }
@@ -334,9 +504,11 @@ impl MaintenanceService {
             // Seed the clock, so a silent daemon does not have to wait for its
             // first message before the quiet window can ever elapse.
             crate::brain::agent::service::session_routes::note_activity();
-            // Same post-boot warmup as the 24 h sweep: startup and the first
-            // tool calls must not compete with housekeeping (#273).
-            tokio::time::sleep(Duration::from_secs(1800)).await;
+            // Same post-boot warmup as the 24 h sweep, OFFSET past it (#840):
+            // startup and the first tool calls must not compete with
+            // housekeeping (#273), and the ticker must not collide with the
+            // sweep's first wake — see `RECLAIM_WARMUP_OFFSET`.
+            tokio::time::sleep(SWEEP_WARMUP + RECLAIM_WARMUP_OFFSET).await;
 
             loop {
                 reclaim_once().await;

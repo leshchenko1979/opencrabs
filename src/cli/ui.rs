@@ -1304,12 +1304,22 @@ async fn cmd_chat_inner(
     // are created per `spawn_agent` and read by nothing afterwards, so there is
     // no window where sweeping sooner would help. Never fatal — a failed sweep
     // costs disk, not correctness.
+    //
+    // #842: this is the CATCH-UP leg, not a second owner. A daemon that never
+    // survives 24 h would otherwise never prune at all, so the startup prune
+    // stays; but it records that it ran, and the sweep's first cycle after a
+    // boot hands the prune back to it instead of enumerating the same rows.
     match crate::services::SessionService::new(service_context.clone())
         .prune_expired_subagent_sessions(config.agent.subagent_session_ttl_days)
         .await
     {
-        Ok(0) => {}
-        Ok(n) => tracing::info!("Pruned {n} expired sub-agent session(s)"),
+        Ok(0) => crate::services::maintenance::note_subagent_catchup_done(),
+        Ok(n) => {
+            tracing::info!("Pruned {n} expired sub-agent session(s)");
+            crate::services::maintenance::note_subagent_catchup_done();
+        }
+        // Leave the flag clear on failure, so the sweep still owns the prune
+        // and a failed catch-up is not mistaken for a completed one.
         Err(e) => tracing::warn!("Sub-agent session sweep failed: {e:#}"),
     }
 

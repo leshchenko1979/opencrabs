@@ -9,8 +9,9 @@ use crate::db::repository::{MessageRepository, SessionRepository};
 use crate::memory::db::{MemoryGcReport, Store};
 use crate::services::context::ServiceContext;
 use crate::services::maintenance::{
-    MAINTENANCE_CONTENDED_RETRY, MEMORY_RECLAIM_TICK, MaintenanceService, enter_maintenance, leave,
-    next_sweep_delay, reclaim_is_due, try_enter,
+    MAINTENANCE_CONTENDED_RETRY, MAX_CONSECUTIVE_FAILURE_RETRIES, MEMORY_RECLAIM_TICK,
+    RECLAIM_WARMUP_OFFSET, SWEEP_WARMUP, MaintenanceService, SweepOutcome, enter_maintenance, leave,
+    next_sweep_delay, note_subagent_catchup_done, reclaim_is_due, take_subagent_catchup, try_enter,
 };
 use crate::services::session::SessionService;
 use tempfile::tempdir;
@@ -409,12 +410,12 @@ async fn test_contended_sweep_is_flagged_and_retries_soon() {
     // that happened waits the configured interval.
     let day = std::time::Duration::from_secs(86_400);
     assert_eq!(
-        next_sweep_delay(true, day),
+        next_sweep_delay(SweepOutcome::Skipped, 0, day),
         MAINTENANCE_CONTENDED_RETRY,
         "a contended sweep must retry on the short interval, not the 24 h one"
     );
     assert_eq!(
-        next_sweep_delay(false, day),
+        next_sweep_delay(SweepOutcome::Ran, 0, day),
         day,
         "a sweep that actually ran must keep the configured interval"
     );
@@ -471,6 +472,140 @@ fn test_contended_retry_is_shorter_than_the_reclaim_tick() {
 #[test]
 fn test_next_sweep_delay_retries_short_only_after_a_skip() {
     let interval = std::time::Duration::from_secs(86_400);
-    assert_eq!(next_sweep_delay(true, interval), MAINTENANCE_CONTENDED_RETRY);
-    assert_eq!(next_sweep_delay(false, interval), interval);
+    assert_eq!(
+        next_sweep_delay(SweepOutcome::Skipped, 0, interval),
+        MAINTENANCE_CONTENDED_RETRY
+    );
+    assert_eq!(
+        next_sweep_delay(SweepOutcome::Ran, 0, interval),
+        interval
+    );
+}
+
+/// #843: a FAILED sweep must not sleep the full interval either — but a
+/// persistently broken one must not hot-loop against the DB it is failing on.
+///
+/// `spawn_periodic` used to fold the error arm into "not skipped", so a run that
+/// errored out waited the full 86,400 s. Every retention knob then silently
+/// stopped working for a day with one WARN line as the only trace.
+#[test]
+fn test_failed_sweep_retries_short_then_escalates() {
+    let interval = std::time::Duration::from_secs(86_400);
+
+    // Fresh failures retry soon — the whole point of the fix.
+    for already_retried in 0..MAX_CONSECUTIVE_FAILURE_RETRIES {
+        assert_eq!(
+            next_sweep_delay(SweepOutcome::Failed, already_retried, interval),
+            MAINTENANCE_CONTENDED_RETRY,
+            "failure {already_retried} must retry on the short interval"
+        );
+    }
+
+    // Past the bound it goes back to the configured interval, so a broken sweep
+    // cannot spin against the database it is failing on.
+    assert_eq!(
+        next_sweep_delay(SweepOutcome::Failed, MAX_CONSECUTIVE_FAILURE_RETRIES, interval),
+        interval,
+        "a persistently failing sweep must escalate back to the full interval"
+    );
+    assert!(
+        MAINTENANCE_CONTENDED_RETRY < interval,
+        "the retry must be shorter than the interval, or the fix is a no-op"
+    );
+}
+
+/// #843: the report must distinguish "ran and found nothing" from "failed".
+///
+/// Without this the loop reads both as a completed run and sleeps a day.
+#[test]
+fn test_report_outcome_distinguishes_skip_failure_and_success() {
+    use crate::services::maintenance::MaintenanceReport;
+
+    let ran = MaintenanceReport::default();
+    assert_eq!(ran.outcome(), SweepOutcome::Ran);
+    assert_eq!(ran.failed_legs, 0);
+
+    let failed = MaintenanceReport {
+        failed_legs: 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        failed.outcome(),
+        SweepOutcome::Failed,
+        "a sweep with a failed leg must not read as a completed one"
+    );
+
+    // A skip outranks everything: nothing ran, so nothing could fail.
+    let skipped = MaintenanceReport {
+        skipped: true,
+        ..Default::default()
+    };
+    assert_eq!(skipped.outcome(), SweepOutcome::Skipped);
+}
+
+/// #840: the two loops must NOT wake together.
+///
+/// `spawn_periodic` and `spawn_memory_reclaim` are both called from the same
+/// bootstrap, so equal warmups make their first wake simultaneous by
+/// construction — measured on `ops`, 32 µs apart, the ticker taking the shared
+/// permit first and the sweep skipping. #838 taught the sweep to retry after
+/// losing that race; this pins the race itself away, which is the actual fix.
+///
+/// The invariant is directional: the SWEEP wakes first, because losing costs it
+/// every prune and both vacuums, while the ticker loses only one 300 s tick.
+#[test]
+fn test_sweep_and_reclaim_warmups_are_offset() {
+    assert!(
+        RECLAIM_WARMUP_OFFSET > std::time::Duration::ZERO,
+        "#840: a zero offset restores the simultaneous first wake that made the \
+         ticker win the permit every boot"
+    );
+
+    let sweep_wakes = SWEEP_WARMUP;
+    let reclaim_wakes = SWEEP_WARMUP + RECLAIM_WARMUP_OFFSET;
+    assert!(
+        sweep_wakes < reclaim_wakes,
+        "#840: the sweep must reach the permit before the ticker, or the loser is \
+         the loop that owns every prune and both vacuums"
+    );
+
+    // The offset must be big enough to clear the sweep's arrival, not merely
+    // non-zero: two wake-ups a microsecond apart still race.
+    assert!(
+        RECLAIM_WARMUP_OFFSET >= std::time::Duration::from_secs(30),
+        "#840: offset ({RECLAIM_WARMUP_OFFSET:?}) must be a real gap, not a \
+         rounding difference between two simultaneous spawns"
+    );
+}
+
+/// #842: the startup catch-up and the sweep must not both prune the same table.
+///
+/// `subagent_session_ttl_days` had two schedulers. Under a long-lived daemon
+/// both ran, enumerating the same row set twice a day; the fix keeps the startup
+/// leg (a daemon that never survives 24 h would otherwise never prune) but makes
+/// it a one-shot handover: the first sweep after a boot skips its copy and every
+/// later sweep owns the prune again.
+#[tokio::test]
+async fn test_subagent_catchup_hands_over_exactly_once() {
+    let _g = guard().await;
+
+    // Start from a clean slate: a sibling test or an earlier boot may have left
+    // the flag set.
+    let _ = take_subagent_catchup();
+
+    assert!(
+        !take_subagent_catchup(),
+        "#842: with no catch-up recorded, the sweep must own the prune"
+    );
+
+    note_subagent_catchup_done();
+    assert!(
+        take_subagent_catchup(),
+        "#842: the first sweep after a startup catch-up must skip its duplicate prune"
+    );
+    assert!(
+        !take_subagent_catchup(),
+        "#842: the handover must be one-shot — a flag that never clears would \
+         leave the sweep unable to prune sub-agent sessions at all"
+    );
 }
