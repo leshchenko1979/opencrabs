@@ -290,7 +290,7 @@ pub fn newest_snapshot(dir: &Path) -> Option<PathBuf> {
     collect_dated(dir)
         .into_iter()
         .filter(|p| snapshot_is_usable(p.as_path()))
-        .last()
+        .next_back()
 }
 
 /// Whether a dated snapshot is a file an operator could actually restore from.
