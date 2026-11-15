@@ -1,0 +1,361 @@
+//! Leg 2 of #852 — the two progress tools, and the scope that separates them.
+//!
+//! The pair is asymmetric on purpose, and these tests pin the asymmetry:
+//!
+//! * `report_progress` is a CHILD's tool. A root session has no agent id, so
+//!   the call is REFUSED rather than silently writing a ledger nothing reads.
+//! * `agent_progress` is a PARENT's tool. It is scoped to the caller's own
+//!   children, so one chat can never read another chat's agent (#191).
+//!
+//! Both are asserted against the real ledger on disk, because the whole point
+//! of the feature is that the line survives the turn that wrote it.
+
+use crate::brain::agent::service::work_status::test_override;
+use crate::brain::tools::r#trait::{Tool, ToolExecutionContext};
+use crate::brain::tools::subagent::ledger::{self, LedgerKind};
+use crate::brain::tools::subagent::{
+    AgentProgressTool, ReportProgressTool, SubAgent, SubAgentManager,
+};
+use serde_json::json;
+use std::fs;
+use std::sync::Arc;
+use uuid::Uuid;
+
+/// Per-test status dir. `test_override` is thread-local and the runner reuses
+/// threads, so the tag must be unique per test, not per file.
+fn isolate(tag: &str) {
+    let dir = std::env::temp_dir().join(format!(
+        "opencrabs-852-progress-{}-{}",
+        tag,
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    test_override::set(dir.join("detached"));
+}
+
+/// A manager holding one live child, and the ids needed to talk to it.
+fn one_child(id: &str) -> (Arc<SubAgentManager>, Uuid, Uuid) {
+    let manager = Arc::new(SubAgentManager::new());
+    let child_session = Uuid::new_v4();
+    let parent_session = Uuid::new_v4();
+    manager.insert(SubAgent::new(
+        id,
+        "worker",
+        child_session,
+        parent_session,
+    ));
+    (manager, child_session, parent_session)
+}
+
+// ---------------------------------------------------------------------------
+// report_progress — the child's half
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_root_session_is_refused_rather_than_writing_an_orphan_ledger() {
+    isolate("root_refused");
+    let manager = Arc::new(SubAgentManager::new());
+    let tool = ReportProgressTool::new(manager);
+    // A session the manager has never seen: this is what a root chat looks
+    // like from inside the tool. There is no agent id to write against, and
+    // inventing one would produce a file no reader ever opens.
+    let ctx = ToolExecutionContext::new(Uuid::new_v4());
+
+    let err = tool
+        .execute(json!({"kind": "note", "text": "hello"}), &ctx)
+        .await
+        .expect_err("a root session must be refused, not silently accepted");
+    assert!(
+        err.to_string().contains("only available to a sub-agent session"),
+        "the refusal must name the actual reason, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_child_append_lands_in_its_own_ledger() {
+    isolate("child_append");
+    let (manager, child_session, _parent) = one_child("child-append");
+    let tool = ReportProgressTool::new(manager);
+
+    let ctx = ToolExecutionContext::new(child_session);
+    let result = tool
+        .execute(
+            json!({"kind": "blocker", "text": "waiting on the migration"}),
+            &ctx,
+        )
+        .await
+        .expect("a child session must be able to report");
+    assert!(result.success, "the append reported failure: {result:?}");
+    assert!(
+        result.output.contains("child-append"),
+        "the confirmation must name the agent it wrote against, got: {}",
+        result.output
+    );
+
+    let entries = ledger::read("child-append", 10);
+    assert_eq!(entries.len(), 1, "exactly one line was recorded");
+    assert_eq!(
+        entries[0].kind,
+        LedgerKind::Blocker,
+        "the kind must survive the round trip — it is what lets a parent \
+         filter blockers without parsing prose"
+    );
+    assert_eq!(entries[0].text, "waiting on the migration");
+}
+
+#[tokio::test]
+async fn an_unknown_kind_is_rejected_with_the_vocabulary() {
+    isolate("bad_kind");
+    let (manager, child_session, _parent) = one_child("child-kind");
+    let tool = ReportProgressTool::new(manager);
+    let ctx = ToolExecutionContext::new(child_session);
+
+    let err = tool
+        .execute(json!({"kind": "shrug", "text": "hi"}), &ctx)
+        .await
+        .expect_err("an unrecognised kind must not be coerced to a default");
+    let message = err.to_string();
+    assert!(
+        message.contains("note") && message.contains("blocker"),
+        "the error must list the accepted kinds so the model can retry \
+         correctly, got: {message}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// agent_progress — the parent's half
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_parent_reads_its_childs_history_while_the_child_is_live() {
+    isolate("parent_reads");
+    let (manager, child_session, parent_session) = one_child("child-read");
+    let reporter = ReportProgressTool::new(manager.clone());
+    let child_ctx = ToolExecutionContext::new(child_session);
+
+    for (kind, text) in [
+        ("note", "started on the parser"),
+        ("decision", "chose the streaming API over buffering"),
+        ("blocker", "the fixture has no auth header"),
+    ] {
+        reporter
+            .execute(json!({"kind": kind, "text": text}), &child_ctx)
+            .await
+            .expect("append");
+    }
+
+    let reader = AgentProgressTool::new(manager);
+    let parent_ctx = ToolExecutionContext::new(parent_session);
+    let result = reader
+        .execute(json!({"agent_id": "child-read"}), &parent_ctx)
+        .await
+        .expect("the parent must be able to read its own child");
+    assert!(result.success);
+
+    // Header first, then the entries oldest-first: the parent needs the state
+    // and the story, and the order is the story.
+    let lines: Vec<&str> = result.output.lines().collect();
+    assert!(
+        lines[0].contains("child-read") && lines[0].contains("running"),
+        "the header must name the agent and its live state, got: {}",
+        lines[0]
+    );
+    let note = result.output.find("started on the parser");
+    let decision = result.output.find("chose the streaming API");
+    let blocker = result.output.find("the fixture has no auth header");
+    assert!(
+        note < decision && decision < blocker,
+        "entries must read oldest first, got:\n{}",
+        result.output
+    );
+}
+
+#[tokio::test]
+async fn a_parent_cannot_read_another_sessions_agent() {
+    isolate("foreign_read");
+    let manager = Arc::new(SubAgentManager::new());
+    let other_parent = Uuid::new_v4();
+    manager.insert(SubAgent::new(
+        "someone-elses",
+        "stranger",
+        Uuid::new_v4(),
+        other_parent,
+    ));
+
+    let reader = AgentProgressTool::new(manager);
+    // A DIFFERENT parent, asking for an id it does not own. The manager is
+    // process-global, so an unscoped read would hand one chat's agent ids to
+    // another chat's model (#191).
+    let ctx = ToolExecutionContext::new(Uuid::new_v4());
+    let result = reader
+        .execute(json!({"agent_id": "someone-elses"}), &ctx)
+        .await
+        .expect("the call itself succeeds; the ANSWER is the refusal");
+    assert!(
+        !result.success,
+        "a foreign agent id must not resolve, got: {}",
+        result.output
+    );
+    assert!(
+        result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("belongs to this session"),
+        "the refusal must say whose scope was violated, got: {:?}",
+        result.error
+    );
+}
+
+#[tokio::test]
+async fn an_agent_with_no_entries_says_so_instead_of_returning_nothing() {
+    isolate("empty_ledger");
+    let (manager, _child_session, parent_session) = one_child("quiet-child");
+    let reader = AgentProgressTool::new(manager);
+    let ctx = ToolExecutionContext::new(parent_session);
+
+    let result = reader
+        .execute(json!({"agent_id": "quiet-child"}), &ctx)
+        .await
+        .expect("an empty ledger is not an error");
+    assert!(result.success);
+    assert!(
+        result.output.contains("no progress recorded yet"),
+        "an empty history must be stated, not rendered as a bare header — \
+         otherwise the parent cannot tell 'quiet' from 'broken', got:\n{}",
+        result.output
+    );
+}
+
+#[tokio::test]
+async fn the_limit_returns_the_most_recent_entries_not_the_first_ones() {
+    isolate("limit_tail");
+    let (manager, child_session, parent_session) = one_child("chatty-child");
+    let reporter = ReportProgressTool::new(manager.clone());
+    let child_ctx = ToolExecutionContext::new(child_session);
+    for i in 0..5 {
+        reporter
+            .execute(
+                json!({"kind": "note", "text": format!("step {i}")}),
+                &child_ctx,
+            )
+            .await
+            .expect("append");
+    }
+
+    let reader = AgentProgressTool::new(manager);
+    let ctx = ToolExecutionContext::new(parent_session);
+    let result = reader
+        .execute(json!({"agent_id": "chatty-child", "limit": 2}), &ctx)
+        .await
+        .expect("read");
+    assert!(result.success);
+    assert!(
+        !result.output.contains("step 2"),
+        "a limited read is a TAIL — a parent asking for the last 2 entries \
+         wants the newest, got:\n{}",
+        result.output
+    );
+    assert!(
+        result.output.contains("step 3") && result.output.contains("step 4"),
+        "the last two entries must both be present, got:\n{}",
+        result.output
+    );
+}
+
+/// `limit` arrives from a model, so it can be 0 or a million. Both ends are
+/// clamped rather than rejected: a caller asking for 0 entries wanted "just the
+/// latest" and a caller asking for a million wanted "all of them", and neither
+/// deserves an error for saying so.
+#[tokio::test]
+async fn the_limit_is_clamped_at_both_ends() {
+    isolate("limit_clamp");
+    let (manager, child_session, parent_session) = one_child("clamp-child");
+    let reporter = ReportProgressTool::new(manager.clone());
+    let child_ctx = ToolExecutionContext::new(child_session);
+    for i in 0..5 {
+        reporter
+            .execute(
+                json!({"kind": "note", "text": format!("step {i}")}),
+                &child_ctx,
+            )
+            .await
+            .expect("append");
+    }
+
+    let reader = AgentProgressTool::new(manager);
+    let ctx = ToolExecutionContext::new(parent_session);
+
+    // 0 clamps UP to 1. Without the clamp a `take(0)` would render an empty
+    // body, which the header alone cannot be told apart from a broken ledger.
+    let zero = reader
+        .execute(json!({"agent_id": "clamp-child", "limit": 0}), &ctx)
+        .await
+        .expect("read");
+    assert!(zero.success);
+    assert!(
+        zero.output.contains("step 4") && !zero.output.contains("step 3"),
+        "limit 0 must clamp to the single newest entry, got:\n{}",
+        zero.output
+    );
+
+    // A huge limit clamps DOWN to 200 and simply returns everything there is.
+    let huge = reader
+        .execute(json!({"agent_id": "clamp-child", "limit": 99999}), &ctx)
+        .await
+        .expect("read");
+    assert!(huge.success);
+    assert!(
+        huge.output.contains("step 0") && huge.output.contains("step 4"),
+        "a limit past the cap must still return the whole ledger, got:\n{}",
+        huge.output
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Registry placement — the asymmetry, enforced
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_child_registry_carries_report_progress_but_not_the_parent_reader() {
+    use crate::brain::tools::subagent::build_child_registry;
+    use crate::brain::tools::ToolRegistry;
+
+    // An empty parent: everything the child has, it has by design, not by
+    // inheritance. This is the assertion that keeps the two halves from
+    // collapsing into one tool registered everywhere.
+    let parent = ToolRegistry::new();
+    let manager = Arc::new(SubAgentManager::new());
+    let child = build_child_registry(&parent, &manager);
+
+    assert!(
+        child.has_tool("report_progress"),
+        "the child must carry its channel home even when the parent has no \
+         tools at all — it is registered explicitly, not copied"
+    );
+    assert!(
+        !child.has_tool("agent_progress"),
+        "a child must not read progress: it would only ever see its own \
+         ledger, and a tool that can only fail is schema noise on every request"
+    );
+}
+
+#[test]
+fn a_read_only_child_keeps_report_progress() {
+    use crate::brain::tools::subagent::build_child_registry;
+    use crate::brain::tools::ToolRegistry;
+
+    let parent = ToolRegistry::new();
+    let manager = Arc::new(SubAgentManager::new());
+    let child = build_child_registry(&parent, &manager);
+    // The read-only grant strips every tool whose hints say it mutates. The
+    // reporting tool must declare itself read-only or an explore-style child
+    // loses the one way it can tell its parent what it found (#1173).
+    crate::brain::tools::plan_gate::restrict_registry_to_read_only(&child);
+
+    assert!(
+        child.has_tool("report_progress"),
+        "a read-only child is exactly the one that cannot otherwise show its \
+         work — stripping this tool would leave it silent"
+    );
+}

@@ -30,8 +30,9 @@ fn test_a_child_registry_is_freed_when_its_last_owner_drops() {
     // one leaked registry per spawn otherwise. `Weak` is what makes this
     // assertion hold, and it is the only thing that does.
     let parent = parent_with_tool_search();
+    let mgr = Arc::new(crate::brain::tools::subagent::SubAgentManager::new());
     let watch = {
-        let child = build_child_registry(&parent);
+        let child = build_child_registry(&parent, &mgr);
         assert!(
             child.get("tool_search").is_some(),
             "precondition: the child carries a re-bound tool_search"

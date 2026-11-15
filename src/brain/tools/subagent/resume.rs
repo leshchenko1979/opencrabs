@@ -96,6 +96,19 @@ impl Tool for ResumeAgentTool {
             crate::cli::tool_setup::HEADLESS_PREAMBLE.trim_start_matches('\n')
         );
 
+        // #852: an agent that outlived the process is absent from the map but
+        // present on disk, so resolve BEFORE the state gate. Rehydration
+        // restores the agent's frozen grant from its status file, which is
+        // what keeps this from widening a read-only child on resume (#1173);
+        // the state it lands in is `Failed`, i.e. resumable by the gate below.
+        // Scoped to the caller's own children — a stranger's id still misses.
+        if self.manager.resolve(agent_id, context.session_id).is_none() {
+            return Ok(ToolResult::error(format!(
+                "no agent {agent_id} belongs to this session (after a restart an \
+                 agent is reachable only by its full id)"
+            )));
+        }
+
         // Check agent exists and is in a resumable state
         match self.manager.get_state(agent_id) {
             None => {
@@ -212,7 +225,7 @@ impl Tool for ResumeAgentTool {
             // widening an explore-style child into full write access. The
             // stored read_only flag is the single source of truth for the
             // agent's whole life.
-            let child_registry = super::build_child_registry(&self.parent_registry);
+            let child_registry = super::build_child_registry(&self.parent_registry, &self.manager);
             if self.manager.get_read_only(agent_id).unwrap_or(false) {
                 crate::brain::tools::plan_gate::restrict_registry_to_read_only(&child_registry);
                 tracing::info!(

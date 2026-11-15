@@ -188,6 +188,12 @@ pub(crate) fn register_core_agent_tools(
             tool_registry.clone(),
         ),
     ));
+    // Parent-side ledger reader (#852). Registered only here: `report_progress`
+    // is the child's half and is added by `build_child_registry`, so a root
+    // session can read its children's progress but has nothing to report into.
+    tool_registry.register(Arc::new(
+        crate::brain::tools::subagent::AgentProgressTool::new(subagent_manager.clone()),
+    ));
     // Cross-session push (issue #1203): needs no manager — deliver_to_session
     // is a free function on the in-process session-route registry.
     // #129: interactive-only — parked notifications die with the process on

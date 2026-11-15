@@ -68,6 +68,12 @@ pub const CORE_TOOLS: &[&str] = &[
     // Vision — always available when configured (only registered if vision backend exists)
     "analyze_image",
     "analyze_video",
+    // #852: a sub-agent's only channel back to its parent. Core because the
+    // child registry gets it from `build_child_registry` with no `tool_search`
+    // round-trip available in a headless one-shot turn; a name that is not in
+    // this list ships no schema, so a child would hold a tool it can never
+    // call. Root sessions are unaffected — nothing registers it there.
+    "report_progress",
     // The discovery tool itself
     TOOL_SEARCH_NAME,
 ];
@@ -135,6 +141,7 @@ pub const EXTENDED_TOOL_INVENTORY: &[(&str, &[&str])] = &[
             "send_input",
             "close_agent",
             "resume_agent",
+            "agent_progress",
             "session_notify",
             "team_create",
             "team_delete",

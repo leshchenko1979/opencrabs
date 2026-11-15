@@ -438,7 +438,7 @@ impl Tool for SpawnAgentTool {
             // recursive/dangerous ones, then restricted to read-only when the
             // parent granted only read access. The #649 Editing-parent
             // restriction below applies on top of either grant.
-            let child_registry = super::build_child_registry(&self.parent_registry);
+            let child_registry = super::build_child_registry(&self.parent_registry, &self.manager);
             // Explicit read_only grant from the spawn call (#1173): strip
             // mutating tools before any other consideration.
             if read_only {

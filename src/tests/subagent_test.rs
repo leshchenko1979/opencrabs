@@ -1086,7 +1086,8 @@ mod agent_type {
     #[test]
     fn child_registry_inherits_full_parent() {
         let parent = mock_parent_registry();
-        let registry = crate::brain::tools::subagent::build_child_registry(&parent);
+        let mgr = std::sync::Arc::new(crate::brain::tools::subagent::SubAgentManager::new());
+        let registry = crate::brain::tools::subagent::build_child_registry(&parent, &mgr);
         let tools = registry.list_tools();
         assert!(tools.contains(&"read_file".to_string()));
         assert!(tools.contains(&"write_file".to_string()));
@@ -1107,7 +1108,7 @@ mod agent_type {
                 Arc::new(crate::brain::tools::ToolRegistry::new()),
             ),
         ));
-        let registry = crate::brain::tools::subagent::build_child_registry(&parent);
+        let registry = crate::brain::tools::subagent::build_child_registry(&parent, &mgr);
         let tools = registry.list_tools();
         assert!(
             !tools.contains(&"spawn_agent".to_string()),
@@ -1141,7 +1142,8 @@ mod agent_type {
             ),
         ));
 
-        let registry = crate::brain::tools::subagent::build_child_registry(&parent);
+        let registry =
+            crate::brain::tools::subagent::build_child_registry(&parent, &subagent_mgr);
         let tools = registry.list_tools();
         assert!(!tools.contains(&"team_create".to_string()));
         assert!(!tools.contains(&"team_delete".to_string()));
@@ -1191,7 +1193,8 @@ mod agent_type {
     #[test]
     fn restricted_registry_strips_mutating_tools() {
         let parent = mock_parent_registry();
-        let reg = crate::brain::tools::subagent::build_child_registry(&parent);
+        let mgr = std::sync::Arc::new(crate::brain::tools::subagent::SubAgentManager::new());
+        let reg = crate::brain::tools::subagent::build_child_registry(&parent, &mgr);
         crate::brain::tools::plan_gate::restrict_registry_to_read_only(&reg);
         let tools = reg.list_tools();
         assert!(tools.contains(&"read_file".to_string()));

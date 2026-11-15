@@ -4,6 +4,7 @@
 //! Each child agent has its own session, cancel token, output channel,
 //! and input channel for mid-execution messaging.
 
+use crate::brain::agent::service::work_status::{WorkKind, WorkState, WorkStatus};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use tokio::sync::mpsc;
@@ -127,6 +128,45 @@ impl SubAgent {
     }
 }
 
+/// A read-only view of an agent, live or rehydrated from disk (#852).
+///
+/// [`SubAgent`] owns a `JoinHandle`, an input channel and a cancel token, so it
+/// is neither `Clone` nor a sensible thing to hand out from under the lock.
+/// This is the copyable half: what a reader needs to answer "which agent is
+/// this, and what is it doing".
+#[derive(Debug, Clone)]
+pub struct ResolvedAgent {
+    pub id: String,
+    pub label: String,
+    pub session_id: Uuid,
+    pub parent_session_id: Uuid,
+    pub read_only: bool,
+    pub include_brain: bool,
+    pub allow_nested: bool,
+    pub state: SubAgentState,
+    /// RFC3339, as recorded at spawn — a rehydrated agent keeps its original
+    /// time rather than claiming to have just started.
+    pub spawned_at: String,
+}
+
+impl ResolvedAgent {
+    fn from_subagent(agent: &SubAgent) -> Self {
+        Self {
+            id: agent.id.clone(),
+            label: agent.label.clone(),
+            session_id: agent.session_id,
+            parent_session_id: agent.parent_session_id,
+            read_only: agent.read_only,
+            include_brain: agent.include_brain,
+            allow_nested: agent.allow_nested,
+            state: agent.state.clone(),
+            spawned_at: agent
+                .spawned_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        }
+    }
+}
+
 /// Manages all sub-agents for a parent agent instance.
 pub struct SubAgentManager {
     agents: RwLock<HashMap<String, SubAgent>>,
@@ -196,6 +236,97 @@ impl SubAgentManager {
             .find(|a| a.session_id == session_id)
             .map(|a| a.allow_nested)
             .unwrap_or(true)
+    }
+
+    /// Which agent, if any, is running on `session_id`? (#852)
+    ///
+    /// The reverse of [`Self::get_session_id`], and the lookup a child needs to
+    /// name itself: a sub-agent knows its own session id and nothing else, so
+    /// this is what turns "I am this session" into "I am this agent's ledger".
+    /// Unregistered sessions (roots, main chats) return `None`.
+    pub fn find_by_session(&self, session_id: Uuid) -> Option<String> {
+        self.agents
+            .read()
+            .expect("subagent manager lock poisoned")
+            .values()
+            .find(|a| a.session_id == session_id)
+            .map(|a| a.id.clone())
+    }
+
+    /// Resolve an agent id for `caller_parent_session_id`, rehydrating from
+    /// disk if the map no longer holds it (#852).
+    ///
+    /// Before this, an agent that outlived the process was unreachable: the
+    /// map is in memory, so `resume_agent` answered "no sub-agent found" for an
+    /// agent whose status file was sitting on disk the whole time.
+    ///
+    /// Scoped, like every other per-session surface here: a caller only ever
+    /// sees its own children, so a rehydrated agent cannot become another
+    /// chat's agent (#191). Lazy — nothing calls this at boot, so a restart
+    /// revives nothing that nobody asks for.
+    ///
+    /// Idempotent: the presence check is repeated under the write lock, because
+    /// a peer may have rehydrated the same id between this call's read and its
+    /// write.
+    pub fn resolve(&self, id: &str, caller_parent_session_id: Uuid) -> Option<ResolvedAgent> {
+        {
+            let agents = self.agents.read().expect("subagent manager lock poisoned");
+            if let Some(agent) = agents.get(id) {
+                if agent.parent_session_id != caller_parent_session_id {
+                    return None;
+                }
+                return Some(ResolvedAgent::from_subagent(agent));
+            }
+        }
+
+        let status = WorkStatus::read(id)?;
+        // A detached command carries no grant and no parent session; it is not
+        // an agent and must never be rehydrated as one.
+        if status.kind != WorkKind::Agent {
+            return None;
+        }
+        // A legacy record with no recorded parent is REFUSED, not adopted: the
+        // caller would otherwise gain authority over an agent it never spawned.
+        let parent_session_id: Uuid = status.parent_session_id.as_deref()?.parse().ok()?;
+        if parent_session_id != caller_parent_session_id {
+            return None;
+        }
+        let session_id: Uuid = status.session_id.parse().ok()?;
+
+        // Never `Running`: nothing is executing this agent any more, and
+        // `alive_counts_for` would report a dead agent as working.
+        //
+        // Matched by reference: `WorkState` is not `Copy`, and moving it out
+        // would leave `status` partially moved for the `effective_grant()` and
+        // `label` reads below.
+        let state = match &status.state {
+            WorkState::Completed => SubAgentState::Completed,
+            WorkState::Interrupted => SubAgentState::Failed("interrupted by restart".into()),
+            _ => SubAgentState::Failed("stale after restart".into()),
+        };
+
+        let grant = status.effective_grant();
+        let mut agent = SubAgent::new(
+            id.to_string(),
+            status.label.clone(),
+            session_id,
+            parent_session_id,
+        );
+        agent.read_only = grant.read_only;
+        agent.include_brain = grant.include_brain;
+        agent.allow_nested = grant.allow_nested;
+        agent.state = state;
+        agent.spawned_at = chrono::DateTime::parse_from_rfc3339(&status.spawned_at)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+
+        let mut agents = self.agents.write().expect("subagent manager lock poisoned");
+        // The view is taken from the entry the MAP ends up holding: if a peer
+        // rehydrated this id between the read above and this write, the map's
+        // copy is the live one and returning ours would describe an agent
+        // nobody is tracking.
+        let stored = agents.entry(id.to_string()).or_insert(agent);
+        Some(ResolvedAgent::from_subagent(stored))
     }
 
     /// Get the agent's output if completed.

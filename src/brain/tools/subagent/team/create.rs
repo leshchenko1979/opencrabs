@@ -292,7 +292,8 @@ impl Tool for TeamCreateTool {
                     .map_err(|e| ToolError::Execution(format!("Provider creation failed: {}", e)))?
             };
 
-            let child_registry = super::super::build_child_registry(&self.parent_registry);
+            let child_registry =
+                super::super::build_child_registry(&self.parent_registry, &self.subagent_manager);
             if read_only {
                 crate::brain::tools::plan_gate::restrict_registry_to_read_only(&child_registry);
                 tracing::info!(

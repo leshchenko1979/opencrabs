@@ -155,7 +155,8 @@ fn child_registry_strips_interactive_only_tools() {
     let parent = ToolRegistry::new();
     parent.register(Arc::new(subagent::SessionNotifyTool));
     parent.register(Arc::new(SuggestOptionsTool));
-    let child = subagent::build_child_registry(&parent);
+    let mgr = Arc::new(subagent::SubAgentManager::new());
+    let child = subagent::build_child_registry(&parent, &mgr);
     assert!(
         !child.has_tool("session_notify") && !child.has_tool("suggest_options"),
         "child registry must strip interactive-only tools regardless of parent surface"

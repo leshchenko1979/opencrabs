@@ -39,6 +39,18 @@ pub const ALWAYS_EXCLUDED: &[&str] = &[
     "evolve",
     "session_notify",
     "suggest_options",
+    // #852: the parent-side ledger reader. Stripped here so a child cannot read
+    // a SIBLING's progress — the tool is scoped by parent session, so a child
+    // holding it would see nothing new anyway, but a tool that can only fail is
+    // schema noise on every child request.
+    "agent_progress",
+    // `report_progress` is excluded for a different reason: it is never
+    // inherited, only built. Every level of `build_child_registry` registers a
+    // fresh instance, so excluding the name here means the instance a child
+    // holds is always the one created at ITS level — one construction site to
+    // reason about, rather than an implicit reliance on the tool happening to
+    // be stateless.
+    "report_progress",
 ];
 
 /// Build a child registry from the parent's, minus recursive/dangerous tools.
@@ -59,7 +71,10 @@ pub const ALWAYS_EXCLUDED: &[&str] = &[
 /// two providers; see upstream #1210). Re-binding per level also keeps the
 /// fix correct for nested spawns: each generation's search tool points at
 /// its own registry.
-pub fn build_child_registry(parent: &ToolRegistry) -> Arc<ToolRegistry> {
+pub fn build_child_registry(
+    parent: &ToolRegistry,
+    manager: &Arc<super::manager::SubAgentManager>,
+) -> Arc<ToolRegistry> {
     let child = Arc::new(ToolRegistry::new());
 
     for name in parent.list_tools() {
@@ -82,6 +97,14 @@ pub fn build_child_registry(parent: &ToolRegistry) -> Arc<ToolRegistry> {
             child.register(tool);
         }
     }
+
+    // #852: the child's own channel back to the parent. Registered AFTER the
+    // copy loop and never inherited from the parent, because the tool resolves
+    // its agent id from the calling session — a copy taken from an ancestor's
+    // registry would bind a grandchild's reports to the child's ledger.
+    child.register(Arc::new(super::progress::ReportProgressTool::new(
+        manager.clone(),
+    )));
 
     child
 }
