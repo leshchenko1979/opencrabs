@@ -358,3 +358,51 @@ fn has_retained_set_is_false_for_a_session_that_registered_nothing() {
     assert!(!has_retained_set(Uuid::new_v4()));
     assert!(render(Uuid::new_v4(), 1_000_000).is_none());
 }
+
+/// A session can hit BOTH causes at once — bodies registered but none fitting
+/// the leftover budget, plus paths refused at registration. One heading covers
+/// both: a section header emitted per cause is pure noise in the injected
+/// brain, and nothing else in the block would reveal the duplicate.
+#[test]
+fn render_emits_one_not_retained_header_when_both_causes_fire() {
+    let sid = Uuid::new_v4();
+    let dir = tmp_dir("render_both_causes");
+    let law = dir.join("law.md");
+    std::fs::write(&law, "# law\nOBEY-MARKER\n").unwrap();
+    mark_document_read(sid, &law);
+    let law = law.canonicalize().unwrap();
+
+    // Named by the manifest, present on disk, never read by this session.
+    let unread = dir.join("never-read.md");
+    std::fs::write(&unread, "# never read\n").unwrap();
+
+    let (registered, rejected) = register(
+        sid,
+        &[law.display().to_string(), unread.display().to_string()],
+    );
+    assert_eq!(registered.len(), 1, "the read document is carried");
+    assert_eq!(rejected.len(), 1, "the unread one is refused");
+
+    // Budget 0 ⇒ nothing fits, and a refusal is present at the same time.
+    let block = render(sid, 0).expect("both causes produce a block");
+
+    assert_eq!(
+        block.matches("## Documents NOT retained").count(),
+        1,
+        "one heading must cover both causes, got: {block}"
+    );
+    assert!(
+        block.contains(&law),
+        "the unfitting body must be named: {block}"
+    );
+    assert!(
+        block.contains("never-read.md"),
+        "the refused path must be named: {block}"
+    );
+    assert!(
+        !block.contains("OBEY-MARKER"),
+        "no body may leak in when nothing fitted: {block}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

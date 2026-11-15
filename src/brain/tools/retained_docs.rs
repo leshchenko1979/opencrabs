@@ -283,39 +283,40 @@ pub fn render(session_id: Uuid, budget_tokens: usize) -> Option<String> {
     let mut out = String::new();
     if included > 0 {
         out.push_str(&section);
-    } else if !entries.is_empty() {
-        // Nothing fitted the leftover budget — the common shape for a session
-        // that carries a heavy skill, since documents share the skills' 5 %.
-        // Returning `None` here would be the same lie as dropping a refused
-        // path: the model asked for these, the harness did not deliver them,
-        // and silence is the one outcome it cannot notice.
-        out.push_str("\n\n## Documents NOT retained\n");
-        out.push_str(
-            "These paths were registered for retention and are NOT in your context — read \
-             them again if the pending work depends on them.\n",
-        );
+    }
+
+    // Everything the model asked for and did NOT get, with the reason on each
+    // bullet. One block and one header, because a single session can hit both
+    // causes at once — bodies registered but none fitting the leftover budget,
+    // plus paths refused at registration — and a heading emitted per cause
+    // would put duplicate noise in the injected brain.
+    //
+    // The refusals ride here because the manifest is model output: a refused
+    // path is a claim the model made and the harness did not honour, and
+    // saying so is what keeps a hallucinated path from reading as a retained
+    // one. Silence is the only outcome the model cannot recover from, because
+    // it has no way to notice.
+    let mut missing = String::new();
+    if included == 0 {
         for entry in &entries {
             let why = match entry.status {
                 DocStatus::Ok => "no room left in the retained-set budget",
                 DocStatus::TooLarge => "file too large to retain",
                 DocStatus::Unreadable => "unreadable",
             };
-            out.push_str(&format!("- {} ({why})\n", entry.path.display()));
+            missing.push_str(&format!("- {} ({why})\n", entry.path.display()));
         }
     }
-    // The manifest is model output, so a refused path is a claim the model made
-    // and the harness did not honour. Saying so is what keeps a hallucinated
-    // path from reading as a retained one; silence is the only outcome that
-    // cannot be recovered from, because the model has no way to notice.
-    if !refusals.is_empty() {
+    for reason in &refusals {
+        missing.push_str(&format!("- {reason}\n"));
+    }
+    if !missing.is_empty() {
         out.push_str("\n\n## Documents NOT retained\n");
         out.push_str(
-            "These paths were named in `retained_documents` and refused. They are NOT in your \
-             context — read them again if the pending work depends on them.\n",
+            "These paths are NOT in your context — read them again if the pending work \
+             depends on them.\n",
         );
-        for reason in &refusals {
-            out.push_str(&format!("- {reason}\n"));
-        }
+        out.push_str(&missing);
     }
     if out.is_empty() { None } else { Some(out) }
 }
