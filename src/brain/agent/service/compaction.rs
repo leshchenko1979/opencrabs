@@ -848,6 +848,20 @@ impl AgentService {
                     }
                 })
                 .collect();
+            // #846: the documents this compaction's manifest names, resolved
+            // against what the session actually read — the SAME `resolve` the
+            // registration in `apply_compaction_continuation` will call, so the
+            // card can never list a document the harness then refuses. Done
+            // here because registration runs AFTER this emit.
+            let (retained_documents, document_refusals) =
+                crate::brain::agent::service::context::parse_context_manifest(summary)
+                    .map(|m| {
+                        crate::brain::tools::retained_docs::resolve(
+                            session_id,
+                            &m.retained_documents,
+                        )
+                    })
+                    .unwrap_or_default();
             cb(
                 session_id,
                 ProgressEvent::CompactionSummary {
@@ -857,6 +871,8 @@ impl AgentService {
                     before_tokens,
                     after_tokens: context.token_count,
                     tool_sizes,
+                    retained_documents,
+                    document_refusals,
                     elapsed,
                 },
             );

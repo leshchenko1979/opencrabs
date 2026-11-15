@@ -991,6 +991,8 @@ pub(crate) async fn resume_session_inner(
                 elapsed,
                 summary,
                 tool_sizes,
+                retained_documents,
+                document_refusals,
                 ..
             } => {
                 // #824: same card as the live path, assembled before the lock
@@ -1013,6 +1015,8 @@ pub(crate) async fn resume_session_inner(
                         tool_sizes: &tool_sizes,
                         summary: &summary,
                         rich,
+                        documents: &retained_documents,
+                        document_refusals: &document_refusals,
                     }))
                 } else {
                     None

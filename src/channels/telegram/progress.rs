@@ -268,6 +268,8 @@ pub(crate) fn build_progress_cb(
                 elapsed,
                 summary,
                 tool_sizes,
+                retained_documents,
+                document_refusals,
                 ..
             } => {
                 // #824: assemble the breakdown BEFORE taking the lock — it
@@ -292,6 +294,8 @@ pub(crate) fn build_progress_cb(
                         tool_sizes: &tool_sizes,
                         summary: &summary,
                         rich,
+                        documents: &retained_documents,
+                        document_refusals: &document_refusals,
                     }))
                 } else {
                     None

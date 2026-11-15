@@ -137,6 +137,24 @@ fn registered_registry() -> &'static RegisteredRegistry {
 /// Order is newest-read first — independent of the manifest's own order, so the
 /// result is stable and a re-registration of the same list is idempotent.
 pub fn register(session_id: Uuid, requested: &[String]) -> (Vec<DocEntry>, Vec<String>) {
+    let resolved = resolve(session_id, requested);
+    registered_registry()
+        .lock()
+        .expect("retained_docs registry poisoned")
+        .insert(session_id, (resolved.0.clone(), resolved.1.clone()));
+    resolved
+}
+
+/// The verdict [`register`] acts on, WITHOUT storing it.
+///
+/// Split out so the post-compaction card can describe the set the window is
+/// about to carry (#846) at the moment it is emitted: the card is built in
+/// `note_compaction_success`, which runs BEFORE `apply_compaction_continuation`
+/// registers anything, so reading the registry there would print the PREVIOUS
+/// compaction's documents. Resolving the manifest twice is cheap (a manifest
+/// holds at most [`MAX_RETAINED_DOCUMENTS`] paths) and, more importantly, it is
+/// the same function: the card cannot disagree with what registration accepts.
+pub fn resolve(session_id: Uuid, requested: &[String]) -> (Vec<DocEntry>, Vec<String>) {
     use crate::brain::tools::read_state;
 
     // Oldest-first in the registry; the model cares about the most recent.
@@ -191,10 +209,6 @@ pub fn register(session_id: Uuid, requested: &[String]) -> (Vec<DocEntry>, Vec<S
     }
 
     let entries: Vec<DocEntry> = accepted.iter().map(|(_, p)| probe(p)).collect();
-    registered_registry()
-        .lock()
-        .expect("retained_docs registry poisoned")
-        .insert(session_id, (entries.clone(), rejected.clone()));
     (entries, rejected)
 }
 

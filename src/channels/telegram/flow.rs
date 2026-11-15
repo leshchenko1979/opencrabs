@@ -1126,6 +1126,14 @@ pub(crate) struct CompactionBreakdown<'a> {
     /// room not quiet, because a quiet room suppresses the promotion arm
     /// (#679) and would fold raw pipes into the collapsed log.
     pub(crate) rich: bool,
+    /// The `.md` documents this compaction's manifest resolved and measured
+    /// (#846), newest-read first. Empty when the manifest named none — and
+    /// then the card renders byte-identical to the pre-#846 shape.
+    pub(crate) documents: &'a [crate::brain::tools::retained_docs::DocEntry],
+    /// Paths the manifest named that resolution refused, each carrying its
+    /// reason. Non-empty with an empty `documents` is the case that must NOT
+    /// render as "no documents": the model asked for two and got none.
+    pub(crate) document_refusals: &'a [String],
 }
 
 /// One manifest entry resolved against the skill registry.
@@ -1269,6 +1277,7 @@ fn breakdown_group(
     label: &str,
     entries: &[BreakdownEntry],
     ctx_max: u32,
+    unmeasured: &str,
     lines: &mut Vec<String>,
 ) {
     if entries.is_empty() {
@@ -1283,7 +1292,10 @@ fn breakdown_group(
     // the row states how many entries actually resolve rather than calling
     // every one a skill.
     let head = if resolved == 0 {
-        format!("{} {noun} · none resolve to a skill", entries.len())
+        // The phrase is the CALLER's: a `discard_skills` name that matches no
+        // skill and a retained document the probe could not weigh are both
+        // "unmeasured", and only the skill case is a statement about skills.
+        format!("{} {noun} · {unmeasured}", entries.len())
     } else if resolved == entries.len() {
         format!(
             "{} {noun} · {} · {}",
@@ -1331,6 +1343,75 @@ fn breakdown_group(
         detail.push_str(&format!(" · +{}", entries.len() - MAX_NAMES));
     }
     lines.push(format!("     {detail}"));
+}
+
+/// The documents group (#846): what the retained `.md` set costs the window.
+///
+/// Sourced from the event's resolved entries rather than from the
+/// `retained_docs` registry, because the card is emitted BEFORE registration
+/// runs — see `CompactionBreakdown::documents`.
+///
+/// A refused path is printed even when nothing was accepted. The manifest is
+/// model output, so "the model named a `/tmp` log and an unread path" and "the
+/// model named nothing" are different states, and only one of them is fine.
+fn breakdown_documents(
+    documents: &[crate::brain::tools::retained_docs::DocEntry],
+    refusals: &[String],
+    ctx_max: u32,
+    rich: bool,
+    lines: &mut Vec<String>,
+) {
+    if documents.is_empty() && refusals.is_empty() {
+        return;
+    }
+    if !documents.is_empty() {
+        let entries: Vec<BreakdownEntry> = documents
+            .iter()
+            .map(|d| BreakdownEntry {
+                label: d.path.display().to_string(),
+                // A document the probe could not weigh carries NO token
+                // figure, not a zero: `TooLarge` records `tokens: 0` as
+                // "unknown", and printing it would render a 300 KB file as
+                // costing nothing of the window.
+                tokens: match d.status {
+                    crate::brain::tools::retained_docs::DocStatus::Ok => Some(d.tokens),
+                    _ => None,
+                },
+                bytes: d.bytes.map(|b| b as usize),
+                lines: d.lines,
+            })
+            .collect();
+        if rich {
+            breakdown_group_table("docs", &entries, ctx_max, "measured", lines);
+        } else {
+            breakdown_group("docs", &entries, ctx_max, "none measurable", lines);
+        }
+    }
+    if refusals.is_empty() {
+        return;
+    }
+    // The reasons are long (`not registered: <path> (not read in this
+    // process)`), so the row states the count and the DISTINCT causes: a
+    // per-path dump would triple the card's height to say one thing.
+    let mut causes: Vec<&str> = Vec::new();
+    for reason in refusals {
+        let cause = reason
+            .rsplit_once('(')
+            .map_or(reason.as_str(), |(_, rest)| rest.trim_end_matches(')'));
+        if !causes.contains(&cause) {
+            causes.push(cause);
+        }
+    }
+    let head = if documents.is_empty() {
+        format!(
+            "0 of {} retained · {}",
+            refusals.len(),
+            causes.join(" · ")
+        )
+    } else {
+        format!("{} not retained · {}", refusals.len(), causes.join(" · "))
+    };
+    lines.push(format!("   {:<8} {head}", "refused"));
 }
 
 /// The tools rows: the measured schema set, largest first.
@@ -1531,6 +1612,7 @@ fn breakdown_group_table(
     label: &str,
     entries: &[BreakdownEntry],
     ctx_max: u32,
+    unmeasured: &str,
     lines: &mut Vec<String>,
 ) {
     if entries.is_empty() {
@@ -1566,7 +1648,7 @@ fn breakdown_group_table(
     // reconcile with the total, so the gap is stated instead of hidden.
     if resolved < entries.len() {
         lines.push(format!(
-            "| *{} of {} resolve* | | | |",
+            "| *{} of {} {unmeasured}* | | | |",
             resolved,
             entries.len()
         ));
@@ -1682,13 +1764,18 @@ pub(crate) fn compaction_breakdown(b: &CompactionBreakdown<'_>) -> String {
         // markdown plane renders — see `CompactionBreakdown::rich` for why that
         // means this card leaves the flow block there.
         if b.rich {
-            breakdown_group_table("kept", &kept, b.ctx_max, &mut lines);
-            breakdown_group_table("dropped", &dropped, b.ctx_max, &mut lines);
+            breakdown_group_table("kept", &kept, b.ctx_max, "resolve", &mut lines);
+            breakdown_group_table("dropped", &dropped, b.ctx_max, "resolve", &mut lines);
         } else {
-            breakdown_group("kept", &kept, b.ctx_max, &mut lines);
-            breakdown_group("dropped", &dropped, b.ctx_max, &mut lines);
+            breakdown_group("kept", &kept, b.ctx_max, "none resolve to a skill", &mut lines);
+            breakdown_group("dropped", &dropped, b.ctx_max, "none resolve to a skill", &mut lines);
         }
     }
+
+    // #846: the documents the window now carries, beside the skills it keeps.
+    // Same columns as every other group — the card's whole claim is that a
+    // name never appears without what it costs.
+    breakdown_documents(b.documents, b.document_refusals, b.ctx_max, b.rich, &mut lines);
 
     // The tools rows stand even without a manifest: the schema cost is
     // measured at emit, and it is the row that says how much of the window the

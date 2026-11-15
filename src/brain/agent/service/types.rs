@@ -114,6 +114,23 @@ pub enum ProgressEvent {
         /// registry's upper bound. The breakdown card's total is the SUM of
         /// these rows, so its parts always reconcile with the number above them.
         tool_sizes: Vec<ToolSize>,
+        /// The `.md` documents this compaction's manifest names, resolved and
+        /// measured (#846) — what the card's `docs` row describes.
+        ///
+        /// Resolved HERE, at the emit site, rather than read from the
+        /// `retained_docs` registry by the card: registration happens in
+        /// `apply_compaction_continuation`, i.e. AFTER this event fires, so the
+        /// registry at card time still holds the previous compaction's set.
+        /// Carrying the entries on the event is the same shape `tool_sizes`
+        /// already uses, and it means the card and the registration run the
+        /// SAME `retained_docs::resolve` — a card that lists a document the
+        /// harness then refuses is the failure this prevents.
+        retained_documents: Vec<crate::brain::tools::retained_docs::DocEntry>,
+        /// Paths the manifest named that resolution refused, each with its
+        /// reason (#846). Carried so a compaction whose every path was refused
+        /// prints `0 documents · N refused` instead of claiming the model asked
+        /// for nothing.
+        document_refusals: Vec<String>,
     },
     /// A single build-output line (e.g. "Compiling foo v1.0"). The TUI keeps a
     /// rolling window of the last few lines and clears them on RestartReady.

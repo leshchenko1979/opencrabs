@@ -57,6 +57,8 @@ fn card(summary: &str) -> String {
         tool_sizes: &sizes,
         summary,
         rich: false,
+        documents: &[],
+        document_refusals: &[],
     })
 }
 
@@ -226,6 +228,8 @@ fn an_unknown_ceiling_states_no_share() {
         tool_sizes: &sizes,
         summary: no_manifest(),
         rich: false,
+        documents: &[],
+        document_refusals: &[],
     });
     let tools = out
         .lines()
@@ -265,6 +269,8 @@ fn a_compaction_that_grew_the_context_reads_as_growth() {
         tool_sizes: &sizes,
         summary: no_manifest(),
         rich: false,
+        documents: &[],
+        document_refusals: &[],
     });
     assert!(out.contains("+20K, +20.0%"), "{out}");
 }
@@ -282,6 +288,8 @@ fn a_long_silent_window_reads_in_minutes() {
         tool_sizes: &sizes,
         summary: no_manifest(),
         rich: false,
+        documents: &[],
+        document_refusals: &[],
     });
     assert!(out.contains("1m 42s"), "{out}");
 }
@@ -310,6 +318,8 @@ fn rich_card(summary: &str) -> String {
         tool_sizes: &sizes,
         summary,
         rich: true,
+        documents: &[],
+        document_refusals: &[],
     })
 }
 
@@ -425,4 +435,149 @@ fn every_table_in_the_rich_leg_is_parseable() {
     }
     // summary + kept + dropped + tools.
     assert_eq!(tables, 4, "one table per section: {out}");
+}
+
+// ─── #846: the documents row ────────────────────────────────────────────────
+//
+// The card named the summary's parts, the kept/dropped skills and every tool's
+// schema cost, while the `.md` documents the window now carries — the whole
+// point of #831 — appeared nowhere. These tests pin the row, and the two states
+// that must not read alike: "the manifest named no documents" and "the manifest
+// named documents and every one was refused".
+
+use crate::brain::tools::retained_docs::{DocEntry, DocStatus};
+use std::path::PathBuf;
+
+/// One measured document, as `retained_docs::resolve` reports it.
+fn doc(path: &str, tokens: usize, bytes: u64, lines: usize) -> DocEntry {
+    DocEntry {
+        path: PathBuf::from(path),
+        tokens,
+        lines: Some(lines),
+        bytes: Some(bytes),
+        status: DocStatus::Ok,
+    }
+}
+
+fn card_with_docs(
+    documents: &[DocEntry],
+    refusals: &[String],
+    rich: bool,
+    summary: &str,
+) -> String {
+    let sizes = tool_sizes();
+    compaction_breakdown(&CompactionBreakdown {
+        before_tokens: 130_600,
+        after_tokens: 106_186,
+        before_pct: 65.0,
+        after_pct: 53.0,
+        ctx_max: 200_000,
+        elapsed: Duration::from_millis(21_500),
+        tool_sizes: &sizes,
+        summary,
+        rich,
+        documents,
+        document_refusals: refusals,
+    })
+}
+
+#[test]
+fn a_retained_document_states_its_size_share_and_loc() {
+    // 20_480 B = 20.0 KB, 4_000 tok of 200 K = 2.0 %. Exact figures, so a
+    // rounding change is caught here rather than in the chat.
+    let docs = vec![doc("/root/proj/AGENTS.md", 4_000, 20_480, 312)];
+    let out = card_with_docs(&docs, &[], false, no_manifest());
+    let head = out
+        .lines()
+        .find(|l| l.contains("docs"))
+        .expect("a docs row");
+    assert!(head.contains("1 entry"), "entry count: {head}");
+    assert!(head.contains("20.0 KB"), "group size: {head}");
+    assert!(head.contains("2.0%"), "group share: {head}");
+    let detail = out
+        .lines()
+        .skip_while(|l| !l.contains("docs"))
+        .nth(1)
+        .expect("a docs detail row");
+    assert!(detail.contains("`/root/proj/AGENTS.md`"), "{detail}");
+    assert!(detail.contains("20.0 KB"), "{detail}");
+    assert!(detail.contains("2.0%"), "{detail}");
+    assert!(detail.contains("312 LOC"), "{detail}");
+}
+
+#[test]
+fn a_documents_path_is_never_bare() {
+    // Same ccTLD trap as `.md` / `.rs`: a bare path segment can auto-link.
+    let docs = vec![doc("/root/proj/AGENTS.md", 100, 512, 5)];
+    let out = card_with_docs(&docs, &[], false, no_manifest());
+    let bare = without_code_spans(&out);
+    assert!(!bare.contains("AGENTS.md"), "a bare path leaked: {bare}");
+}
+
+#[test]
+fn a_manifest_that_named_no_documents_adds_no_row() {
+    // The pre-#846 shape, byte for byte: a session that read no documents must
+    // not pay for a row saying so.
+    let plain = card(no_manifest());
+    let explicit = card_with_docs(&[], &[], false, no_manifest());
+    assert_eq!(plain, explicit, "an empty document set changes nothing");
+    assert!(!plain.contains("docs"), "{plain}");
+    assert!(!plain.contains("refused"), "{plain}");
+}
+
+#[test]
+fn every_refused_path_still_prints_a_row() {
+    // The failure this exists for: the summariser names two documents, both
+    // are refused (a `/tmp` log is not a project document; an unread path was
+    // never opened), and a card that prints nothing reads as "the model asked
+    // for nothing" — the opposite of what happened.
+    let refusals = vec![
+        "not registered: /tmp/w831-marker.log (not a project document)".to_string(),
+        "not registered: /root/proj/GEMINI.md (not read in this process)".to_string(),
+    ];
+    let out = card_with_docs(&[], &refusals, false, no_manifest());
+    let row = out
+        .lines()
+        .find(|l| l.contains("refused"))
+        .expect("a refused row");
+    assert!(row.contains("0 of 2 retained"), "count: {row}");
+    assert!(row.contains("not a project document"), "cause: {row}");
+    assert!(row.contains("not read in this process"), "cause: {row}");
+    // Distinct causes only: two paths refused for the same reason say it once.
+    assert_eq!(row.matches("not a project document").count(), 1, "{row}");
+}
+
+#[test]
+fn a_partial_refusal_prints_both_the_rows_and_the_reason() {
+    let docs = vec![doc("/root/proj/AGENTS.md", 4_000, 20_480, 312)];
+    let refusals = vec![
+        "not registered: /root/proj/CLAUDE.md (not read in this process)".to_string(),
+    ];
+    let out = card_with_docs(&docs, &refusals, false, no_manifest());
+    assert!(out.lines().any(|l| l.contains("docs")), "{out}");
+    let refused = out
+        .lines()
+        .find(|l| l.contains("refused"))
+        .expect("a refused row");
+    assert!(refused.contains("1 not retained"), "{refused}");
+}
+
+#[test]
+fn the_rich_leg_tabulates_documents_with_a_reconciling_total() {
+    let docs = vec![
+        doc("/root/proj/AGENTS.md", 4_000, 20_480, 312),
+        doc("/root/proj/docs/ops.md", 1_000, 5_120, 90),
+    ];
+    let out = card_with_docs(&docs, &[], true, mixed_manifest());
+    let header = out
+        .lines()
+        .find(|l| l.starts_with("| docs (2 entries) |"))
+        .expect("a docs table header");
+    assert!(header.contains("LOC"), "{header}");
+    // The group's own total is the SUM of its rows — the card's standing claim.
+    let total = out
+        .lines()
+        .find(|l| l.starts_with("| **total** | 25.0 KB | 2.5% | 402 |"))
+        .expect("a docs total row");
+    assert!(total.contains("2.5%"), "{total}");
 }
