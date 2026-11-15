@@ -5,7 +5,7 @@
 **Evidence recorded at:** 2026-11-14T20:48:00Z
 **Since then:** docs-only, measured: `git diff --name-only bf74d9e93..25e83b5c4 -- src/` is EMPTY, and the three paths that changed are docs/adr/probes/{COMPLIANCE.md,live-evidence.json,manifest.json}. The box runs opencrabs 0.5.4 @ 25e83b5c4, whose compiled code is identical to the binary these observations were taken on, so the verdicts are not stale in the sense the caveat warns about.
 **Runner:** `python3 docs/adr/probes/run.py` — **exit 1**
-**37/41 passed · 3 failed · 1 missing (missing counts as failed)**
+**38/41 passed · 3 failed · 0 missing (missing counts as failed)**
 
 > **GENERATED FILE — do not hand-edit.** Written by `python3 docs/adr/probes/run.py --report`
 > from `manifest.json` + `live-evidence.json` in the same run that printed these counts, so a
@@ -31,7 +31,7 @@
 | §3.2 | `s21-mixed-kind-namespace` | static | PASS |
 | §3.2 caption | `s22-caption-gate` | static | PASS |
 | §3.5, #826 | `s23-dedup-canonical-path` | static | PASS |
-| §2 rule 1 floor | `s24-oversize-split-floor` | static | FAIL |
+| §2 rule 1 floor | `s24-oversize-split-floor` | static | PASS |
 | §2 rule 2 floor | `s25-video-kind-floor` | static | PASS |
 | §6 | `s36-thread-id-conditional` | static | PASS |
 | §2 rules 3 and 6 | `live-l1-document-link-renders` | live | PASS |
@@ -56,7 +56,7 @@
 | §3.2 caption | `live-l13-inexpressible-caption-dropped` | live | PASS |
 | §3.5, #826 | `live-l14-dedup-two-spellings-one-file` | live | PASS |
 | §3.4, #826 | `live-l15-refused-entry-costs-one-entry` | live | PASS |
-| §2 rule 1 floor | `live-l16-oversize-image-ships-as-document` | live | MISSING |
+| §2 rule 1 floor | `live-l16-oversize-image-ships-as-document` | live | FAIL |
 
 ## Live probes — the wire as Telegram stored it
 
@@ -201,18 +201,16 @@
 - **log:** `21:19:20.723779 INFO Telegram send ok: ... kind=rich_api path=sendRichMessage msg=96344 len=893 hash8=42c0add6`
 - **Analysis:** The full #826 AC-3 sequence is visible end to end: attempt 1 refused, the HEDGE re-sent the identical request (same hash8=bae2df13, same len=894) and was refused again, then exactly ONE entry [img0] was sacrificed, its reference neutralised, and attempt 3 succeeded at len=893 (one byte shorter: the neutralised ref). The healthy photo rode the SAME bubble, and the next rich send 96345 (len=4842) is the next turn's own body, not a degraded fallback of this one - the positive control for 'no twin' is that the log DOES emit 'falling back' today (3 hits), so its absence here is a measurement, not a blind grep.
 
-### `live-l16-oversize-image-ships-as-document` — §2 rule 1 floor → **MISSING**
+### `live-l16-oversize-image-ships-as-document` — §2 rule 1 floor → **FAIL**
 
 - **Claim under test:** a structurally valid 12.01 MiB image is above the `sendPhoto` ceiling, so the floor ships it as a document: it arrives as a file rather than being refused
-- **tg_get_messages** (msg `96323`, chat `None`): NOTHING delivered: 96323 is the header text alone, media: null
-- **Bubbles observed:** None · **sent at:** 2026-11-14T20:42:39Z
-- **Probe:** a structurally valid 12.01 MiB PNG, past the 10 MiB sendPhoto ceiling
-- **log:** `20:42:47.298711 ERROR tool/send: failed to send image /tmp/oc-probes/oversize-photo.png as document: Retry after 19s`
-- **Analysis:** sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. Two halves, and only the first is a pass: the floor CHOSE the right kind (`as document`, so §2 rule 1's size split is honoured), then Telegram answered `Retry after 19s` and the tool dropped the file without retrying. #815 closed this hole for the turn path; it is still open on the tool path. A rate-limited attachment is silently lost, and the body has already gone out so nothing can announce it.
-
-## Withdrawn observations (UNMEASURED, not compliant)
-
-- **L16** (msg `96323`): sent through the `telegram_send` tool, which took the TOOL plane: telemetry shows no `kind=rich_api path=sendRichMessage` line for any of these ids (the last rich send before them is 96312), and the log carries `tool/send:` lines instead. So these answer ADR §2 rule 5 (the detached floor), NOT §3's rich plane. Two halves, and only the first is a pass: the floor CHOSE the right kind (`as document`, so §2 rule 1's size split is honoured), then Telegram answered `Retry after 19s` and the tool dropped the file without retrying. #815 closed this hole for the turn path; it is still open on the tool path. A rate-limited attachment is silently lost, and the body has already gone out so nothing can announce it.
+- **tg_get_messages** (msg `96464`, chat `-1003936827469`): NOTHING attached: media null, photos [], documents []. The reference degraded to a literal '!' followed by TextUrl 'tg://photo?id=img0' -- a dead link to a photo that does not exist.
+- **Bubbles observed:** None · **sent at:** 2026-11-14T23:40:52Z
+- **Probe:** a structurally valid 12.01 MiB PNG (2048x2048), past the 10 MiB sendPhoto ceiling, referenced alone in a reply
+- **log:** `23:40:51.222859 WARN telegram: kind=rich_api path=sendRichMessage chat=-1003936827469 thread=Some(31847) len=481 hash8=0f1e393a error=(400 Bad Request): Bad Request: file of size 12598410 bytes is too big for a photo; the maximum size is 10485760 bytes`
+- **log:** `23:40:51.503755 WARN rich::api: rich markdown+media send failed (...); falling back to html dialect`
+- **log:** `23:40:52.140989 INFO telegram: kind=rich_api path=sendRichMessage msg=96464 len=539 hash8=cedcaa46`
+- **Analysis:** §2 rule 1's size split is honoured on the tool plane and MISSING from the rich rewriter. src/utils/image.rs claimed every locally-valid image as 'tg://photo' with no size check, so a 12 MiB PNG went out as a photo, Telegram refused it with the 400 above, the entry was sacrificed and the whole message fell back to the html dialect -- the reader got a dead '!' plus a link instead of a document bubble. Fixed in 8446abd66: the image family now declines a reference above TELEGRAM_PHOTO_MAX_BYTES (10 MiB) and hands it to the file family, which emits link-form '[alt](tg://document?id=docN)'; bytes_owned_by_an_earlier_family carries the same wall so the file family is not blocked from taking the hand-off. Both planes now read ONE constant. This verdict is the PRE-FIX repro and owes a post-ship re-probe.
 
 ## Section 11 — the tree compiles and its tests pass
 
