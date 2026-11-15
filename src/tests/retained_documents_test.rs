@@ -229,7 +229,9 @@ fn render_respects_the_leftover_budget() {
     let a = write_document(sid, &dir, "a.md", &body);
     let b = write_document(sid, &dir, "b.md", &body);
     let c = write_document(sid, &dir, "c.md", &body);
-    register(sid, &[a, b, c]);
+    // Cloned into the call: the assertions below compare against the names, and
+    // `register` takes them by value.
+    register(sid, &[a.clone(), b.clone(), c.clone()]);
 
     let generous = render(sid, 1_000_000).expect("room for everything");
     assert_eq!(generous.matches("### ").count(), 3, "all three bodies fit");
