@@ -982,10 +982,14 @@ pub fn cleanup_stale(max_age: Duration) -> std::io::Result<(usize, usize)> {
 /// file that is already stale. The order is not an optimisation of convenience:
 /// a file that is not stale is not removed whether its run is live or not, so
 /// reading its record first was work whose result could never change the
-/// outcome. Measured on the `ops` profile, where all 50,115 captures were
-/// younger than the 7-day window: 50,115 status reads plus serde parses on
-/// every boot, every one of them discarded, costing **161 s** of startup before
-/// the database opened.
+/// outcome.
+///
+/// Measured on the `ops` profile: a boot on 2026-11-15 spent **161.76 s** between
+/// the config-load line and the purge line with 50,115 captures in the
+/// directory; a census of that directory at 17:11:51Z found 50,349 files, of
+/// which only **68** were older than the 7-day window. All but those 68 reads
+/// and serde parses were therefore discarded, on every boot, before the database
+/// opened.
 ///
 /// The record is also read **once per run**, not once per file: `<id>.out`,
 /// `<id>.err` and their `.cap` markers all resolve to the same id, so the cache
