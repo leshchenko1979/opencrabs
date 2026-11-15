@@ -902,6 +902,11 @@ pub fn migrate_legacy_dir(legacy: &Path) -> usize {
 /// Remove status files whose finish `completed_at` is older than `max_age`
 /// or whose on-disk mtime is older than `max_age` (for files without a
 /// finish — covers in-flight, old, and corrupted files).
+///
+/// Scope is the STATUS directory (`tmp/detached`) only. Captured streams in
+/// `tmp/runs` belong to [`sweep_stale_runs`], whose single owner is
+/// `logging::cleanup_old_temp_files` (#848) — see the note at the end of this
+/// function for why the duplicate came out.
 pub fn cleanup_stale(max_age: Duration) -> std::io::Result<(usize, usize)> {
     let dir = status_dir();
     if !dir.exists() {
@@ -943,20 +948,22 @@ pub fn cleanup_stale(max_age: Duration) -> std::io::Result<(usize, usize)> {
         }
     }
 
-    // Captured streams of finished runs (#692). Streams live in `runs_dir()`, a
-    // SIBLING of the status dir, so the loop above never sees them — and the
-    // temp purge deliberately does not recurse into subdirectories. Without this
-    // leg a stream would outlive its status file forever, which is the one file
-    // class in this feature that grows unbounded.
+    // Captured streams of finished runs (#692) live in `runs_dir()`, a SIBLING
+    // of the status dir, so the loop above never sees them — and the temp purge
+    // deliberately does not recurse into subdirectories. They are NOT swept
+    // here (#848): this leg used to run in BOTH this function and
+    // `logging::cleanup_old_temp_files`, and both run on every boot
+    // (`subagent/reconcile.rs` for this one, `main.rs` for the purge), so the
+    // duplicate bought a second `readdir` of `tmp/runs` plus a `stat` per
+    // capture on every start. That directory is the largest population on the
+    // box (~52k files, 25.81 s cold on `ops`), which made the copy the most
+    // expensive avoidable thing in a boot.
     //
-    // The sweep itself lives in `sweep_stale_runs` because it has TWO callers:
-    // this function (the TUI's startup path) and `logging::cleanup_old_temp_files`
-    // (the every-surface path `main.rs` runs). A second copy of the liveness
-    // rule below is a copy that can be forgotten.
-    let (runs_scanned, runs_removed) = sweep_stale_runs(cutoff)?;
-    scanned += runs_scanned;
-    removed += runs_removed;
-
+    // `logging::cleanup_old_temp_files` is the remaining owner, and it is the
+    // right one: it runs on every surface AND on every CLI invocation, so no
+    // surface loses the leg. The reason this function used to carry it — that
+    // it was "the TUI's startup path", with `cleanup_stale` reached from
+    // `cli/ui.rs` — was never true: nothing in `cli/ui.rs` calls this function.
     Ok((scanned, removed))
 }
 

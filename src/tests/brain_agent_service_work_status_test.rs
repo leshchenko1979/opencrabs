@@ -499,3 +499,36 @@ fn sweep_leaves_a_young_capture_alone() {
     assert_eq!(removed, 0);
     assert!(capture_path("young1.out").exists());
 }
+
+// ── #848: the runs leg has ONE owner, and it is not this module ─────────────
+//
+// `cleanup_stale` and `logging::cleanup_old_temp_files` both swept captured
+// streams, and both run on every boot, so a start paid the `tmp/runs` scan
+// twice — the largest population on the box. The leg now lives only in the temp
+// purge. This test FAILS before that change (both captures removed here) and
+// passes after it, which is what makes it a regression test rather than a
+// restatement.
+
+/// A stale capture of a dead run survives `cleanup_stale`: the status sweep
+/// owns `tmp/detached`, and the capture belongs to the temp purge.
+#[test]
+fn cleanup_stale_leaves_the_runs_leg_to_its_owner() {
+    isolate("cleanup_no_runs");
+    write_capture("dedup1.out", OLD);
+    write_capture("dedup1.err", OLD);
+
+    let (_, removed) = cleanup_stale(Duration::from_secs(7 * 86400)).unwrap();
+
+    assert_eq!(
+        removed, 0,
+        "cleanup_stale must not sweep captured streams (#848)"
+    );
+    assert!(
+        capture_path("dedup1.out").exists(),
+        "the .out capture is the temp purge's to remove, not this sweep's"
+    );
+    assert!(
+        capture_path("dedup1.err").exists(),
+        "the .err capture is the temp purge's to remove, not this sweep's"
+    );
+}

@@ -305,3 +305,36 @@ fn a_failed_unlink_is_counted_out_but_does_not_abort_the_sweep() {
         .count();
     assert_eq!(removed, gone, "the count reports only what it removed");
 }
+
+/// #848: the `tmp/runs` leg has exactly one owner, and this is it.
+///
+/// `work_status::cleanup_stale` used to sweep captured streams as well, and
+/// since both it and this purge run on every boot, every start paid the
+/// `tmp/runs` scan twice. The duplicate was removed from `cleanup_stale`; this
+/// test pins that the duty did not fall through the gap — an aged capture must
+/// still be reaped by the purge that kept the leg.
+#[test]
+fn the_runs_leg_is_swept_by_its_single_owner() {
+    let _spill = spill_guard();
+    // `work_status::runs_dir()` consults the thread-local test override BEFORE
+    // the home, and the test runner reuses threads. A stale override leaked by
+    // another test in this binary would point the sweep at an unrelated
+    // directory, and this test would then pass or fail on scheduling order.
+    crate::brain::agent::service::work_status::test_override::clear();
+
+    let home = tempfile::tempdir().expect("tempdir");
+    let runs = home.path().join("tmp").join("runs");
+    let capture = write_aged(&runs, "owner-848.out", days(1000));
+
+    let removed = with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(900));
+
+    assert!(
+        !capture.exists(),
+        "an aged capture must be swept by the purge that owns the leg: {}",
+        capture.display()
+    );
+    assert!(
+        removed >= 1,
+        "the purge reports the capture it removed, got {removed}"
+    );
+}
