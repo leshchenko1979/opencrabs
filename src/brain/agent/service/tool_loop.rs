@@ -1089,6 +1089,11 @@ impl AgentService {
         // Load conversation context with budget-aware message trimming.
         // #854: the compaction boundary is pushed into SQL — a session that has
         // already been compacted loads its tail, not its whole history.
+        //
+        // `message_service` is not only the loader: the turn writes assistant
+        // rows and feedback through it further down, so the binding stays even
+        // though the history read no longer goes through it.
+        let message_service = MessageService::new(self.context.clone());
         let mut db_messages = Self::load_messages_since_last_compaction(
             self.context.pool(),
             session_id,

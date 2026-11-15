@@ -7,7 +7,7 @@ use crate::db::database::interact_err;
 use crate::db::retry::{write_retry_config, write_with_retry};
 use crate::db::models::Message;
 use anyhow::{Context, Result};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use uuid::Uuid;
 
 /// Repository for message operations
