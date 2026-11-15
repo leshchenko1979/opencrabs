@@ -421,6 +421,12 @@ impl AgentContext {
     /// The default-policy scope decision: the measured prior for a document
     /// size, no escalation. Callers that track a session's history use
     /// [`Self::compaction_scope_with`] with its own numbers.
+    ///
+    /// `cfg(test)`: the production path ALWAYS supplies a session's own history
+    /// (`spawn_background_compaction` passes the size of the last document it
+    /// wrote and whether that compaction reduced anything), so this form exists
+    /// only for the probes that pin the default policy.
+    #[cfg(test)]
     pub(crate) fn compaction_scope(&self) -> CompactionScope {
         self.compaction_scope_with(Self::DEFAULT_SUMMARY_TOKENS, false)
     }
@@ -540,6 +546,11 @@ impl AgentContext {
     ///
     /// One helper for BOTH the synchronous and background paths — parity by
     /// construction, not by duplication.
+    ///
+    /// `cfg(test)`: production goes through [`Self::compaction_input_with`]
+    /// with the session's own document-size prior; this is the default-policy
+    /// form the probes exercise.
+    #[cfg(test)]
     pub(crate) fn compaction_input(&self) -> (CompactionScope, Vec<Message>, usize) {
         self.compaction_input_with(Self::DEFAULT_SUMMARY_TOKENS, false)
     }
