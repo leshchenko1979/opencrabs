@@ -7,8 +7,9 @@
 //! snapshot that cannot be taken STOPS the migration.
 
 use crate::config::profile::with_home_override_async;
+use crate::config::PreflightMode;
 use crate::db::migration_snapshot::{
-    rotate, snapshot_before_migrations, LATEST, PREFIX, RETENTION,
+    integrity_preflight, rotate, snapshot_before_migrations, LATEST, PREFIX, RETENTION,
 };
 use crate::db::Database;
 use rusqlite::{Connection, OpenFlags};
@@ -327,6 +328,191 @@ fn corrupt_page_one(path: &Path) -> Vec<u8> {
     bytes[100..200].fill(0);
     std::fs::write(path, &bytes).unwrap();
     bytes
+}
+
+// ── #835: the preflight is an O(1) header read, not a page walk ─────────────
+//
+// The full `PRAGMA integrity_check` cost a complete scan on every boot that
+// needed a snapshot: ~33 min on the 3.7 GiB ops image at the measured ~2 MB/s,
+// and it was a second read of a file `VACUUM INTO` reads anyway. The header
+// check must still refuse the shapes that matter, and must NOT refuse a file
+// whose damage lies deeper, because the vacuum is the probe for that.
+
+fn preflight_dir(tmp: &Path) -> PathBuf {
+    let dir = tmp.join("backups");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn preflight_accepts_a_healthy_image() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = preflight_dir(tmp.path());
+    let path = seeded_db(tmp.path());
+
+    integrity_preflight(&path.to_string_lossy(), &dir, PreflightMode::Header)
+        .expect("a healthy image must pass the header check");
+}
+
+#[test]
+fn preflight_refuses_a_zeroed_page_one_header() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = preflight_dir(tmp.path());
+    let path = seeded_db(tmp.path());
+    corrupt_page_one(&path);
+
+    let err = integrity_preflight(&path.to_string_lossy(), &dir, PreflightMode::Header)
+        .expect_err("the rpi5 shape must be refused by the header read");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("the pre-migration integrity check failed"),
+        "the refusal must name the stage that found the damage: {msg}"
+    );
+    assert!(
+        msg.contains("b-tree page type"),
+        "the cause must say what the header read saw, not just that it failed: {msg}"
+    );
+    assert!(
+        msg.contains(&dir.display().to_string()),
+        "the message must name the directory the operator restores from: {msg}"
+    );
+}
+
+#[test]
+fn preflight_refuses_a_file_without_the_sqlite_magic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = preflight_dir(tmp.path());
+    let path = tmp.path().join("not-a-database.db");
+    std::fs::write(&path, vec![0x41u8; 4096]).unwrap();
+
+    let err = integrity_preflight(&path.to_string_lossy(), &dir, PreflightMode::Header)
+        .expect_err("a file with no SQLite magic is not a database");
+    assert!(
+        format!("{err:#}").contains("SQLite magic"),
+        "the cause must name the missing magic: {err:#}"
+    );
+}
+
+#[test]
+fn preflight_refuses_a_file_too_short_to_hold_a_header() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = preflight_dir(tmp.path());
+    let path = tmp.path().join("stub.db");
+    std::fs::write(&path, b"SQLite format 3\0").unwrap();
+
+    let err = integrity_preflight(&path.to_string_lossy(), &dir, PreflightMode::Header)
+        .expect_err("a header truncated mid-way cannot be validated");
+    assert!(
+        format!("{err:#}").contains("too short to hold a SQLite header"),
+        "the cause must say the file is truncated: {err:#}"
+    );
+}
+
+/// A brand-new database has a file but no bytes yet: refusing it would refuse
+/// every first boot.
+#[test]
+fn preflight_accepts_a_zero_length_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = preflight_dir(tmp.path());
+    let path = tmp.path().join("empty.db");
+    std::fs::File::create(&path).unwrap();
+
+    integrity_preflight(&path.to_string_lossy(), &dir, PreflightMode::Header)
+        .expect("a fresh install must not be refused");
+}
+
+/// Same for a path with no file behind it at all.
+#[test]
+fn preflight_accepts_an_absent_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = preflight_dir(tmp.path());
+    let path = tmp.path().join("does-not-exist.db");
+
+    integrity_preflight(&path.to_string_lossy(), &dir, PreflightMode::Header)
+        .expect("a path with no file is a fresh install, not a torn image");
+}
+
+/// Damage past page 1 is `VACUUM INTO`'s job. The header check must stay out of
+/// its way, or it becomes the full scan again.
+#[test]
+fn preflight_accepts_damage_deeper_than_page_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = preflight_dir(tmp.path());
+    let path = seeded_db(tmp.path());
+    // Grow the file past a few pages, then zero one of them.
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("CREATE TABLE filler(x BLOB)", []).unwrap();
+        conn.execute("INSERT INTO filler VALUES (randomblob(16384))", [])
+            .unwrap();
+        drop(conn);
+    }
+    let mut bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.len() > 3 * 4096, "need a few pages to damage");
+    bytes[2 * 4096..3 * 4096].fill(0);
+    std::fs::write(&path, &bytes).unwrap();
+
+    integrity_preflight(&path.to_string_lossy(), &dir, PreflightMode::Header).expect(
+        "a later-page corruption must reach VACUUM INTO, which is the real page walk",
+    );
+}
+
+#[test]
+fn preflight_off_skips_even_a_torn_header() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = preflight_dir(tmp.path());
+    let path = seeded_db(tmp.path());
+    corrupt_page_one(&path);
+
+    integrity_preflight(&path.to_string_lossy(), &dir, PreflightMode::Off)
+        .expect("`off` means the vacuum is the only probe");
+}
+
+/// The two refusal messages exist because they tell the operator different
+/// things. When the vacuum finds corruption, the image was already broken — the
+/// receipt must say so rather than blaming the copy.
+///
+/// Mode-independent by construction: `header` and `off` reach the vacuum, and
+/// `full` fails its pragma at prepare, so all three must produce this wording.
+#[tokio::test]
+async fn vacuum_corruption_is_reported_as_the_integrity_refusal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join(".opencrabs");
+    std::fs::create_dir_all(&home).unwrap();
+    let db_path = seeded_db(&home);
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute("CREATE TABLE filler(x BLOB)", []).unwrap();
+        conn.execute("INSERT INTO filler VALUES (randomblob(16384))", [])
+            .unwrap();
+        drop(conn);
+    }
+    let mut bytes = std::fs::read(&db_path).unwrap();
+    assert!(bytes.len() > 3 * 4096, "need a few pages to damage");
+    bytes[2 * 4096..3 * 4096].fill(0);
+    std::fs::write(&db_path, &bytes).unwrap();
+
+    let err = with_home_override_async(home.clone(), async {
+        let db = Database::connect(&db_path).await.unwrap();
+        db.run_migrations().await.unwrap_err()
+    })
+    .await;
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("the pre-migration integrity check failed"),
+        "corruption found by the vacuum must be reported as an integrity \
+         failure, not as a snapshot that could not be taken: {msg}"
+    );
+    assert!(
+        !msg.contains("the pre-migration snapshot failed"),
+        "the snapshot wording points the operator at the disk when the image is \
+         what is broken: {msg}"
+    );
+    assert!(
+        !msg.contains("Failed to run database migrations"),
+        "the misleading rpi5 wording must not resurface: {msg}"
+    );
 }
 
 #[tokio::test]

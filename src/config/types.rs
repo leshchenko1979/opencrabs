@@ -3473,17 +3473,48 @@ fn default_enabled() -> bool {
     true
 }
 
+/// How much of the image the pre-migration integrity check reads (#835).
+///
+/// The check runs on the startup path, ahead of `VACUUM INTO`, and its only job
+/// is to make a torn image refuse *legibly* before anything writes. A full
+/// `PRAGMA integrity_check` walks every page: on the ops image (3.7 GiB,
+/// 975,813 pages) that is roughly 33 minutes per boot, and it is a second read
+/// of a file `VACUUM INTO` reads anyway.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PreflightMode {
+    /// Validate the SQLite header only: O(1), a 101-byte read. `VACUUM INTO`
+    /// stays the full-page probe, and corruption it finds is reported as the
+    /// integrity refusal rather than as a snapshot failure.
+    #[default]
+    Header,
+    /// Header validation plus a full `PRAGMA integrity_check` page walk.
+    /// Forensic use: costs one complete read of the database on every boot
+    /// that needs a snapshot.
+    Full,
+    /// Skip the preflight entirely. `VACUUM INTO` still probes every page
+    /// before any migration writes.
+    Off,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     /// Path to SQLite database file
     #[serde(default = "default_db_path")]
     pub path: PathBuf,
+
+    /// How thoroughly to check the image before a pre-migration snapshot
+    /// (#835). `header` is the default and the fast path, `full` restores the
+    /// old `PRAGMA integrity_check` behaviour, `off` skips the check.
+    #[serde(default)]
+    pub preflight: PreflightMode,
 }
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
             path: default_db_path(),
+            preflight: PreflightMode::default(),
         }
     }
 }
@@ -3531,9 +3562,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             provider_registry: ProviderRegistryConfig::default(),
-            database: DatabaseConfig {
-                path: default_db_path(),
-            },
+            database: DatabaseConfig::default(),
             logging: LoggingConfig {
                 level: default_log_level(),
                 file: None,

@@ -927,11 +927,16 @@ impl Database {
         //
         // Skipped when there is no file to check (in-memory database), which is
         // every test that uses `connect_in_memory`. Also skipped when nothing
-        // will write (#714): the preflight opens the file read-write and walks
-        // every page.
+        // will write (#714): the preflight exists to protect a write.
         if needs_snapshot {
             if let Some(path) = self.db_path.as_deref() {
-                crate::db::migration_snapshot::integrity_preflight(path, &snapshot_dir)?;
+                // #835: the depth is an operator choice. `header` (the default)
+                // reads 101 bytes, `full` restores the page walk, `off` leaves
+                // `VACUUM INTO` as the only probe. A full scan of the 3.7 GiB
+                // ops image costs ~33 min, and it ran on every boot that needed
+                // a snapshot.
+                let mode = crate::config::Config::current().database.preflight;
+                crate::db::migration_snapshot::integrity_preflight(path, &snapshot_dir, mode)?;
             }
 
             self.pool

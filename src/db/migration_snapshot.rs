@@ -20,7 +20,10 @@
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, OpenFlags};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+use crate::config::PreflightMode;
 
 /// Dated snapshots kept before the oldest is pruned.
 pub const RETENTION: usize = 7;
@@ -216,8 +219,25 @@ pub fn snapshot_before_migrations(conn: &Connection, dir: &Path) -> Result<Optio
     // VACUUM INTO is the only copy that is safe against a live writer: it
     // produces a compact, integrity-checked image in one transaction, where a
     // plain file copy of a WAL database can catch a half-written page.
+    //
+    // #835: this is also the full-page probe now, so a multi-gigabyte image
+    // spends minutes here with nothing else on the log. Bracketing it with a
+    // start and a finish line is what makes a slow copy distinguishable from a
+    // hang — the incident that produced this module had neither, and the
+    // operator had no way to tell which stage was stalled.
+    let started = std::time::Instant::now();
+    tracing::info!(
+        "Pre-migration snapshot: VACUUM INTO {} (user_version {user_version})",
+        dated.display()
+    );
     conn.execute("VACUUM INTO ?1", [&dated.to_string_lossy()])
         .with_context(|| format!("VACUUM INTO {}", dated.display()))?;
+    tracing::info!(
+        "Pre-migration snapshot written: {} ({} bytes in {:.1}s)",
+        dated.display(),
+        file_len(&dated),
+        started.elapsed().as_secs_f64()
+    );
 
     // Stable alias for the newest snapshot. A hard link, not a second copy:
     // the dated file is the retention unit and must stay put (#716).
@@ -345,11 +365,102 @@ pub fn guard(conn: &Connection, dir: &Path) -> Result<()> {
             Ok(())
         }
         Ok(None) => Ok(()),
+        // `VACUUM INTO` is the full-page probe (#835), so a damaged image now
+        // surfaces HERE rather than in the header check. Keep the refusal the
+        // operator needs: whether the image was already broken is what decides
+        // their next action, not which stage noticed it.
+        Err(e) if is_corrupt(&e) => bail!(
+            "{}",
+            refuse(
+                "the pre-migration integrity check failed",
+                dir,
+                &e.to_string()
+            )
+        ),
         Err(e) => bail!("{}", refusal_message(dir, &e.to_string())),
     }
 }
 
-/// Check the image before any migration can write to it (#1779 defect 2).
+/// Whether an error chain carries SQLite's own corruption verdict.
+///
+/// `VACUUM INTO` fails on a damaged image and `rusqlite` reports that as
+/// `SqliteFailure(DatabaseCorrupt)`. Distinguishing it from a disk-full or lock
+/// failure is what preserves the two refusal messages this module exists for:
+/// "the pre-migration integrity check failed" (the image was already broken)
+/// versus "the pre-migration snapshot failed" (the copy could not be made).
+/// Collapsing them is what made the rpi5 receipt useless for two days.
+fn is_corrupt(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code: rusqlite::ffi::ErrorCode::DatabaseCorrupt,
+                    ..
+                },
+                _,
+            ))
+        )
+    })
+}
+
+/// Bytes read to validate the header: the 100-byte SQLite header plus the
+/// first byte of page 1, which carries the b-tree page type.
+const HEADER_PROBE_LEN: usize = 101;
+
+/// Validate the SQLite file header without walking a single page (#835).
+///
+/// Three facts settle whether this file can be a database at all: the 16-byte
+/// magic, a legal page size, and a legal b-tree page type on page 1. A torn or
+/// zeroed header fails one of them immediately. A file damaged anywhere later
+/// passes, which is deliberate: `VACUUM INTO` is the probe for that, and it is
+/// work the startup path has to do anyway.
+fn check_header(path: &str) -> Result<()> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("the database file {path} could not be read"))?;
+    let len = file
+        .metadata()
+        .map(|m| m.len())
+        .with_context(|| format!("stat {path}"))?;
+    // Zero bytes is a FRESH install, not a torn image: `deadpool_sqlite` creates
+    // the file before SQLite writes page 1, and `run_migrations` must be allowed
+    // to migrate it. The check exists to catch damage; there is none here.
+    if len == 0 {
+        return Ok(());
+    }
+    if len < HEADER_PROBE_LEN as u64 {
+        bail!("the file is {len} bytes, too short to hold a SQLite header");
+    }
+    let mut buf = [0u8; HEADER_PROBE_LEN];
+    file.read_exact(&mut buf)
+        .with_context(|| format!("read the first {} bytes of {path}", HEADER_PROBE_LEN))?;
+
+    if &buf[..16] != b"SQLite format 3\0" {
+        bail!("the file does not begin with the SQLite magic");
+    }
+
+    // 1 means 65536, which the 16-bit field cannot hold; every other legal
+    // value is a power of two from 512 to 32768.
+    let page_size = u16::from_be_bytes([buf[16], buf[17]]);
+    let page_size_ok =
+        page_size == 1 || (page_size.is_power_of_two() && (512..=32768).contains(&page_size));
+    if !page_size_ok {
+        bail!("the header declares an illegal page size of {page_size} bytes");
+    }
+
+    // Page 1 holds the schema table: 0x0D as a leaf, 0x05 once it grows an
+    // interior page. 0x02/0x0A are index pages and cannot legally be page 1,
+    // but accepting them costs nothing, and refusing a shape SQLite tolerates
+    // would be worse than the opposite.
+    let page_type = buf[HEADER_PROBE_LEN - 1];
+    if !matches!(page_type, 0x02 | 0x05 | 0x0a | 0x0d) {
+        bail!("page 1 declares b-tree page type 0x{page_type:02x}, which is not a legal page type");
+    }
+
+    Ok(())
+}
+
+/// Check the image before any migration can write to it (#1779 defect 2, #835).
 ///
 /// Deliberately NOT routed through the pool. `post_create` applies
 /// `PRAGMA journal_mode = WAL`, which is a *write*, so on a torn image the pool
@@ -357,41 +468,62 @@ pub fn guard(conn: &Connection, dir: &Path) -> Result<()> {
 /// in the exact incident it exists to catch. The rpi5 receipt is literally
 /// "post_create hook failed: database disk image is malformed", emitted from
 /// `pool.get()` before a single line of migration code ran. So this opens its
-/// own read-write connection to the file instead.
+/// own read-write connection to the file instead — and the default mode does
+/// not even need that: it reads the raw bytes with `std::fs`.
 ///
-/// `integrity_check` rather than `quick_check`: quick_check skips the page-ref
-/// and freelist walks, and a torn page 1 breaks precisely those. The cost is the
-/// same one the post-migration check already paid on every startup.
+/// The default mode reads 101 bytes and stops. Measured 2026-11-15 on scratch
+/// copies: the rpi5 shape (bytes 100..200 zeroed) makes `integrity_check`,
+/// `quick_check` AND `VACUUM INTO` fail at *prepare* — all three detect it
+/// without reading a page. So a full `integrity_check` buys nothing for that
+/// shape and costs a complete page walk on every boot that needs a snapshot
+/// (~33 min on the 3.7 GiB ops image at the measured ~2 MB/s). `VACUUM INTO`,
+/// which this function precedes, is the real full-page probe; [`guard`] reports
+/// the corruption it finds with this same refusal wording.
 ///
-/// A damaged image reports as an `Err` from the pragma, not as a row that says
-/// so. Verified 2026-09-28 against a real file: blanking bytes 100..200 (the
-/// page-1 b-tree header) leaves the magic intact and makes `integrity_check`
-/// fail with SQLITE_CORRUPT instead of returning text, so `Err` is a verdict
-/// here and must refuse, never escape as if the plumbing broke.
-pub fn integrity_preflight(path: &str, dir: &Path) -> Result<()> {
-    // A path with no file behind it is a FRESH install, not a torn image.
-    // `deadpool_sqlite` opens lazily, so at this point in startup a brand-new
-    // database legitimately has no bytes yet — and `SQLITE_OPEN_READ_WRITE`
-    // refuses to create one, so the check would report "unable to open
-    // database file" and refuse every first boot. The check exists to catch a
-    // damaged image; there is nothing here to damage.
+/// `PreflightMode::Full` restores the old scan for forensic use, and `Off`
+/// skips the check while leaving the vacuum as the probe.
+pub fn integrity_preflight(path: &str, dir: &Path, mode: PreflightMode) -> Result<()> {
+    if mode == PreflightMode::Off {
+        return Ok(());
+    }
+    // A path with no file behind it is a FRESH install, not a torn image: at
+    // this point in startup a brand-new database legitimately has no bytes yet,
+    // and `SQLITE_OPEN_READ_WRITE` refuses to create one, so the check would
+    // report "unable to open database file" and refuse every first boot.
     if !std::path::Path::new(path).exists() {
         return Ok(());
     }
-    let cause = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE) {
-        Err(e) => format!("the database could not be opened ({e})"),
-        Ok(conn) => {
-            match conn.pragma_query_value(None, "integrity_check", |row| row.get::<_, String>(0)) {
-                Ok(report) if report == "ok" => return Ok(()),
-                Ok(report) => format!("integrity_check reported {report:?}"),
-                Err(e) => format!("integrity_check could not run ({e})"),
+
+    let cause = match check_header(path) {
+        Err(e) => Some(format!("{e:#}")),
+        Ok(()) if mode == PreflightMode::Full => {
+            match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE) {
+                Err(e) => Some(format!("the database could not be opened ({e})")),
+                Ok(conn) => {
+                    // A damaged image reports as an `Err` from the pragma, not
+                    // as a row that says so (verified 2026-09-28), so `Err` is a
+                    // verdict here and must refuse rather than escape as if the
+                    // plumbing broke.
+                    match conn.pragma_query_value(None, "integrity_check", |row| {
+                        row.get::<_, String>(0)
+                    }) {
+                        Ok(report) if report == "ok" => None,
+                        Ok(report) => Some(format!("integrity_check reported {report:?}")),
+                        Err(e) => Some(format!("integrity_check could not run ({e})")),
+                    }
+                }
             }
         }
+        Ok(()) => None,
     };
-    bail!(
-        "{}",
-        refuse("the pre-migration integrity check failed", dir, &cause)
-    );
+
+    match cause {
+        None => Ok(()),
+        Some(cause) => bail!(
+            "{}",
+            refuse("the pre-migration integrity check failed", dir, &cause)
+        ),
+    }
 }
 
 #[cfg(test)]

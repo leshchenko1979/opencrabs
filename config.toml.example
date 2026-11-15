@@ -11,6 +11,15 @@
 [database]
 # Database file location (stores conversation history)
 # path = "~/.opencrabs/opencrabs.db"  # Default; only override if needed
+#
+# How thoroughly to check the image before a pre-migration snapshot (#835).
+#   "header" (default) — validate the 101-byte SQLite header only, then let
+#            VACUUM INTO probe every page. Corruption found by the vacuum is
+#            still reported as an integrity failure, before anything writes.
+#   "full"  — also run PRAGMA integrity_check, a complete page walk on every
+#            boot that needs a snapshot. ~33 min on a 3.7 GiB database.
+#   "off"   — skip the header check; VACUUM INTO remains the only probe.
+# preflight = "header"
 
 [providers]
 # NOTE on the `enabled` flag: `enabled = false` only removes a provider from the
