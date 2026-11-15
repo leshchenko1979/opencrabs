@@ -18,7 +18,8 @@
 //!   cleanup that legitimately deletes the text-only ones.
 
 use crate::channels::telegram::intermediates::{
-    is_deliverable_rich_report, promoted_bubble_is_burial_evidence, should_promote_intermediate,
+    is_compaction_card, is_deliverable_rich_report, promoted_bubble_is_burial_evidence,
+    should_promote_intermediate,
 };
 use crate::utils::image::{
     LocalImageFailureReason, rewrite_local_images, strip_image_references,
@@ -387,4 +388,59 @@ fn a_text_only_bubble_stays_burial_evidence() {
         promoted_bubble_is_burial_evidence(0),
         "a bubble with no media is superseded by the final rich message and stays deletable"
     );
+}
+
+// ---------------------------------------------------------------------------
+// should_promote_intermediate — the compaction card (#833)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_compaction_card_promotes_without_its_old_table() {
+    // #833: the card carried a pipe table, and that table was the ONLY thing
+    // promoting it out of the collapsed processing log — the card has no ATX
+    // heading and no status callout, so none of Rules A/B/C reach it. Removing
+    // the table (the owner's totals-only order, and the fix for message 783's
+    // mangled rows) removed the trigger with it, which would have moved the
+    // card from its own visible message to a row inside a tap-to-expand block.
+    let header = crate::channels::telegram::flow::compacted_flow_line(
+        65.0,
+        34.0,
+        std::time::Duration::from_secs(22),
+    );
+    let card = format!(
+        "{header}\n   **post-compaction context**\n   tokens   130K → 68K   (−62K, −47.8%)\n   scope    delta 59K in · doc 2.0K · 29.5:1 payoff"
+    );
+    assert!(
+        !card.contains('|'),
+        "the card must carry no table, or this test proves nothing"
+    );
+    assert!(
+        !is_deliverable_rich_report(&card),
+        "sanity: without the card arm nothing else here promotes it — the \
+         text has no table, no ATX heading and no status callout"
+    );
+    assert!(
+        is_compaction_card(&card),
+        "the card arm keys on the header `compacted_flow_line` actually emits"
+    );
+    assert!(
+        should_promote_intermediate(&card, 0),
+        "a compaction receipt behind a tap-to-expand is not a receipt"
+    );
+}
+
+#[test]
+fn ordinary_narration_is_not_mistaken_for_the_card() {
+    // The card arm must not become a blanket promotion of anything mentioning
+    // a compaction — that would open a bubble for every log line about one.
+    for prose in [
+        "Compacting the context now.",
+        "The compaction took 22s and left 34%.",
+        "🧹 compacted: now at 34%",
+    ] {
+        assert!(
+            !is_compaction_card(prose),
+            "only the card's own header promotes: {prose}"
+        );
+    }
 }
