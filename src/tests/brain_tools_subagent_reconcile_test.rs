@@ -201,3 +201,153 @@ fn legacy_subagent_files_are_migrated_and_reconciled() {
     assert_eq!(orphans[0].id, "legacy-agent-1");
     assert_eq!(orphans[0].state, WorkState::Interrupted);
 }
+
+/// Backdate a file's mtime so the mtime arm of the staleness decision can be
+/// exercised without sleeping.
+fn backdate(path: &std::path::Path, days: u64) {
+    let f = fs::File::options()
+        .write(true)
+        .open(path)
+        .expect("fixture file must exist");
+    f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400))
+        .expect("backdate mtime");
+}
+
+/// An RFC3339 stamp `days` in the past.
+fn stamp_days_ago(days: i64) -> String {
+    chrono::Utc::now()
+        .checked_sub_signed(chrono::Duration::days(days))
+        .expect("clock within range")
+        .to_rfc3339()
+}
+
+#[test]
+fn one_pass_reconciles_and_sweeps_a_mixed_directory() {
+    // #858: this used to be two walks — one to interrupt, one to sweep. A single
+    // call must now produce both decisions, and the file it just interrupted must
+    // still be on disk when it returns. Every fixture is aged where that
+    // distinguishes the arms, so a naive fold (deciding staleness from the
+    // PRE-interrupt status, whose finish is still `None` and whose mtime is 8
+    // days old) would delete the orphan and fail this test.
+    isolate("one_pass");
+
+    // A live orphan, ALSO old on disk: interrupted, never swept in that pass.
+    let mut orphan =
+        WorkStatus::new_agent("orphan-1", "mid-flight", "sess-o", "p", None, None).unwrap();
+    orphan.mark_running().unwrap();
+    backdate(&work_status::status_path("orphan-1"), 8);
+
+    // Finished 8 days ago with a FRESH mtime: the finish arm sweeps it.
+    let mut done =
+        WorkStatus::new_agent("done-old", "finished", "sess-d", "p", None, None).unwrap();
+    done.mark_completed("ok".into()).unwrap();
+    let path = work_status::status_path("done-old");
+    let mut raw: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    raw["finish"]["completed_at"] = serde_json::json!(stamp_days_ago(8));
+    fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
+
+    // An unfinished COMMAND with an old mtime: not an orphan (only agents are
+    // interrupted), swept by the mtime arm.
+    WorkStatus::new_command(
+        "cmd-old",
+        "sess-c",
+        "old command",
+        "cargo test",
+        CommandPaths::none(),
+    )
+    .unwrap();
+    backdate(&work_status::status_path("cmd-old"), 8);
+
+    // A corrupt file with an old mtime: swept, never silently skipped.
+    let corrupt = work_status::status_dir().join("corrupt-old.json");
+    fs::write(&corrupt, "not json at all").unwrap();
+    backdate(&corrupt, 8);
+
+    // A fresh unfinished command: left alone.
+    WorkStatus::new_command("cmd-fresh", "sess-c", "fresh", "ls", CommandPaths::none()).unwrap();
+
+    let orphans = reconcile_orphaned_agents();
+
+    assert_eq!(orphans.len(), 1, "only the live orphan is interrupted");
+    assert_eq!(orphans[0].id, "orphan-1");
+    assert_eq!(orphans[0].state, WorkState::Interrupted);
+
+    assert!(
+        work_status::status_path("orphan-1").exists(),
+        "the file interrupted in this pass must survive it: deleting it here would \
+         destroy the record of an agent whose session still has to be told"
+    );
+    assert!(
+        !work_status::status_path("done-old").exists(),
+        "finished-and-old is swept"
+    );
+    assert!(
+        !work_status::status_path("cmd-old").exists(),
+        "unfinished-and-old is swept by its mtime"
+    );
+    assert!(!corrupt.exists(), "corrupt-and-old is swept, not skipped");
+    assert!(
+        work_status::status_path("cmd-fresh").exists(),
+        "a fresh file is left alone"
+    );
+}
+
+#[test]
+fn the_pass_walks_the_status_dir_once() {
+    // The one property behaviour alone cannot show. A second `read_dir` in this
+    // module is a second walk of 30k files, whatever the answers look like — so
+    // the guard is structural on purpose.
+    let src = include_str!("../brain/tools/subagent/reconcile.rs");
+    assert_eq!(
+        src.matches("read_dir").count(),
+        1,
+        "reconcile.rs must walk the status directory exactly once (#858)"
+    );
+    assert_eq!(
+        src.matches("read_to_string").count(),
+        1,
+        "one read per file: a second read_to_string is a second walk"
+    );
+    assert_eq!(
+        src.matches("from_str").count(),
+        1,
+        "one parse per file: a second from_str is a second walk"
+    );
+}
+
+#[test]
+fn is_stale_keeps_the_three_way_decision() {
+    // The predicate both sweepers share. Each arm is exercised with a fixture
+    // that ONLY that arm can answer correctly.
+    isolate("is_stale");
+    work_status::ensure_dir().unwrap();
+    let cutoff = std::time::SystemTime::now();
+
+    // (1) finished 8 days ago, fresh mtime → stale by the finish, not the mtime.
+    let mut done = WorkStatus::new_agent("s-done", "d", "sess", "p", None, None).unwrap();
+    done.mark_completed("ok".into()).unwrap();
+    done.finish.as_mut().expect("finish stamped").completed_at = stamp_days_ago(8);
+    assert!(
+        work_status::is_stale(Some(&done), &work_status::status_path("s-done"), cutoff),
+        "a finished-and-old file is stale whatever its mtime says"
+    );
+
+    // (2) unfinished, fresh mtime → not stale.
+    let pending = WorkStatus::new_agent("s-pending", "p", "sess", "p", None, None).unwrap();
+    assert!(
+        !work_status::is_stale(
+            Some(&pending),
+            &work_status::status_path("s-pending"),
+            cutoff
+        ),
+        "an unfinished file with a fresh mtime is not stale"
+    );
+
+    // (3) unparseable (`None`), judged on mtime — and an unstatable path is
+    //     treated as stale, which is the arm's documented fallback.
+    assert!(
+        work_status::is_stale(None, &work_status::status_path("never-written"), cutoff),
+        "an undatable file falls back to the mtime arm, which cannot stat it"
+    );
+}
