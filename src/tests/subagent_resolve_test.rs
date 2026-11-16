@@ -332,8 +332,17 @@ fn resolving_twice_keeps_one_entry_and_the_original_spawn_time() {
         first.spawned_at, second.spawned_at,
         "the spawn time comes from the record, not from the moment of rehydration"
     );
+    // Compared as INSTANTS, not as strings: the view renders whole seconds
+    // for display while the record keeps the spawn's nanoseconds, and pinning
+    // the rendering would break the moment either format is tidied up. What
+    // must not drift is the moment itself — a rehydration that substituted
+    // `Utc::now()` would move it, and that is the bug this guards.
+    let view_at = chrono::DateTime::parse_from_rfc3339(&second.spawned_at)
+        .expect("the view's spawn time is RFC3339");
+    let record_at = chrono::DateTime::parse_from_rfc3339(&status.spawned_at)
+        .expect("the record's spawn time is RFC3339");
     assert_eq!(
-        second.spawned_at, status.spawned_at,
+        view_at, record_at,
         "a rehydrated agent keeps the time it actually started"
     );
     assert_eq!(
