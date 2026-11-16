@@ -117,7 +117,7 @@ impl TransportCause {
         match self {
             Self::ListenerDead => "listener_dead".to_string(),
             Self::Unresponsive => "unresponsive".to_string(),
-            Self::Bodiless(status) => format!("bodiless_http_{}", status.as_u16()),
+            Self::Bodiless(status) => format!("bodiless_http_{status}"),
         }
     }
 

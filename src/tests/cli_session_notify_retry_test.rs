@@ -146,8 +146,8 @@ async fn an_unreachable_gateway_spends_the_whole_retry_budget() {
     //
     // The budget is passed explicitly so the test measures the SCHEDULE rather
     // than waiting out the production default. With a 1200 ms budget the
-    // backoffs are 250 + 500 and the third sleep (1000) would overrun, so
-    // exactly three attempts fit — which is what the detail must report.
+    // backoffs are 250 + 250 + 500 and the next sleep (1000) would overrun, so
+    // the leg stops on its own well before the ceiling below.
     let started = Instant::now();
     let err = post_jsonrpc_with(
         &dead_endpoint(),
