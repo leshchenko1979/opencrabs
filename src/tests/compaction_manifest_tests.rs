@@ -221,13 +221,19 @@ fn test_format_context_inventory() {
     assert!(table.contains("Guidance: aim to keep active skills and lazy tools <= 5% target"));
 }
 
+/// #216 listing property, made hermetic by #856: the parent is a BUILT-IN
+/// (`cost-estimate`) so the rows exist on any machine. The old fixture used
+/// `opencrabs-dev`, which resolves only where that skill happens to be
+/// installed — and it passed in CI solely because the unresolved row was billed
+/// a fabricated 100 tokens. A test that only goes green because of the bug it
+/// sits next to is not a control.
 #[test]
 fn test_format_context_inventory_with_auxiliary() {
     let mut active_skills = HashSet::new();
-    active_skills.insert("opencrabs-dev".to_string());
+    active_skills.insert("cost-estimate".to_string());
 
     let mut seen_aux = std::collections::HashMap::new();
-    seen_aux.insert("opencrabs-dev".to_string(), vec!["editor.md".to_string()]);
+    seen_aux.insert("cost-estimate".to_string(), vec!["notes.md".to_string()]);
 
     let active_tools = HashSet::new();
 
@@ -240,8 +246,100 @@ fn test_format_context_inventory_with_auxiliary() {
         &[],
         0,
     );
-    assert!(table.contains("| `opencrabs-dev` | Skill |"));
-    assert!(table.contains("| `opencrabs-dev/editor.md` | Skill aux |"));
+    assert!(
+        table.contains("| `cost-estimate` | Skill |"),
+        "got: {table}"
+    );
+    // The aux row is LISTED — that is #216 …
+    assert!(
+        table.contains("| `cost-estimate/notes.md` | Skill aux |"),
+        "aux row missing, got: {table}"
+    );
+    // … and because a built-in carries no auxiliary files, it is honestly
+    // unweighable rather than billed 100 (#856).
+    assert!(
+        table.contains("| `cost-estimate/notes.md` | Skill aux | — | — |"),
+        "aux row must be unweighable, not fabricated, got: {table}"
+    );
+}
+
+/// #856, the defect itself: an unresolved slug must not enter the table as a
+/// plausible measured row, and must not move the footer total. The footer is the
+/// model's budget signal — 100 invented tokens per ghost inflated it by 3,300
+/// tokens across 2026-11-15's manifests.
+#[test]
+fn test_phantom_skill_is_listed_but_not_billed() {
+    let mut real_only = HashSet::new();
+    real_only.insert("cost-estimate".to_string());
+
+    let mut with_phantom = real_only.clone();
+    with_phantom.insert("coding".to_string());
+
+    let empty_tools = HashSet::new();
+    let render = |skills: &HashSet<String>| {
+        AgentService::format_context_inventory(
+            200_000,
+            skills,
+            &std::collections::HashMap::new(),
+            &empty_tools,
+            None,
+            &[],
+            0,
+        )
+    };
+
+    let baseline = render(&real_only);
+    let phantom = render(&with_phantom);
+
+    // The built-in resolves, so the baseline row is a measured one.
+    assert!(
+        !baseline.contains("`cost-estimate (unknown skill)`"),
+        "cost-estimate is a built-in and must resolve, got: {baseline}"
+    );
+    // The ghost is visible, marked, and unweighed.
+    assert!(
+        phantom.contains("| `coding (unknown skill)` | Skill | — | — |"),
+        "phantom row must be marked and unweighed, got: {phantom}"
+    );
+    // …and it costs nothing: the footer total is identical to the run that
+    // never mentioned it.
+    let total_of = |t: &str| {
+        t.lines()
+            .find(|l| l.starts_with("Total active skills & tools:"))
+            .map(str::to_string)
+    };
+    assert!(total_of(&baseline).is_some(), "footer total line missing");
+    assert_eq!(
+        total_of(&baseline),
+        total_of(&phantom),
+        "a phantom slug must not change the billed total"
+    );
+}
+
+/// #856, the tool half: a registry MISS used to be billed a fabricated 150.
+#[test]
+fn test_phantom_tool_is_not_billed() {
+    let registry = std::sync::Arc::new(crate::brain::tools::ToolRegistry::new());
+    let mut tools = HashSet::new();
+    tools.insert("definitely_not_a_tool".to_string());
+
+    let table = AgentService::format_context_inventory(
+        200_000,
+        &HashSet::new(),
+        &std::collections::HashMap::new(),
+        &tools,
+        Some(&registry),
+        &[],
+        0,
+    );
+    assert!(
+        table.contains("| `definitely_not_a_tool (unknown tool)` | Lazy Tool | — | — |"),
+        "phantom tool must be marked and unweighed, got: {table}"
+    );
+    assert!(
+        table.contains("Total active skills & tools: 0 tokens"),
+        "a phantom tool must not be billed, got: {table}"
+    );
 }
 
 /// #831: documents a session read whole are LISTED for the summariser, newest

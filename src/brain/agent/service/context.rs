@@ -1233,9 +1233,32 @@ impl AgentService {
         }
     }
 
+    /// Size cell for the inventory table. `None` means "we could not weigh this
+    /// name" and renders `—` (#856): a fabricated number is worse than a dash,
+    /// because the dash is visibly unknown and the number gets copied.
+    fn inventory_size(tokens: Option<usize>) -> String {
+        match tokens {
+            Some(t) => t.to_string(),
+            None => "—".to_string(),
+        }
+    }
+
+    /// Percentage cell for the inventory table. `None` is unweighable → `—`.
+    fn inventory_pct(tokens: Option<usize>, snapshot_max_tokens: usize) -> String {
+        match tokens {
+            None => "—".to_string(),
+            Some(_) if snapshot_max_tokens == 0 => "0.0%".to_string(),
+            Some(t) => format!("{:.1}%", (t as f64 / snapshot_max_tokens as f64) * 100.0),
+        }
+    }
+
     /// Format dynamic markdown table of currently active skills, consumed auxiliary
     /// skill documents, documents the session read whole, and lazy tools, their token
     /// sizes, and percentage of total context window for the compaction prompt.
+    ///
+    /// #856: a name that resolves to nothing is still LISTED (the model needs to
+    /// see the vocabulary it used was wrong) but carries `—` for size and share
+    /// and is not charged to the footer. Nothing is active, so nothing is billed.
     pub fn format_context_inventory(
         snapshot_max_tokens: usize,
         active_skills: &std::collections::HashSet<String>,
@@ -1263,47 +1286,64 @@ impl AgentService {
             let skill = all_skills
                 .iter()
                 .find(|s| s.name == normalized || s.slash_name == *skill_name);
-            let tokens = if let Some(s) = skill {
-                AgentContext::estimate_tokens(&s.body)
+            // #856: an unresolved slug is a name the manifest invented — 33 of
+            // 254 `active_skills` entries on 2026-11-15 (`coding` for
+            // `coding-process`; `coding-standards` for a brain file that was
+            // never a skill). Rendering it as a plausible 100-token row made
+            // this table — the very vocabulary the prompt tells the model to
+            // copy from — endorse the typo, so the summariser carried it into
+            // every later manifest. The row stays, for continuity and so the
+            // model can see the name it used was never real; but it carries no
+            // size, no share and no charge to the footer, because nothing is
+            // active. Same discipline the documents block below already
+            // follows.
+            let skill_tokens = skill.map(|s| AgentContext::estimate_tokens(&s.body));
+            if let Some(t) = skill_tokens {
+                total_tokens += t;
             } else {
-                100
-            };
-            total_tokens += tokens;
-            let pct = if snapshot_max_tokens > 0 {
-                (tokens as f64 / snapshot_max_tokens as f64) * 100.0
-            } else {
-                0.0
-            };
+                tracing::warn!(
+                    slug = %normalized,
+                    raw = %skill_name,
+                    "#856: active skill slug resolves to no loaded skill — listed as \
+                     (unknown skill), not billed"
+                );
+            }
             rows.push((
-                normalized.clone(),
+                match skill_tokens {
+                    Some(_) => normalized.clone(),
+                    None => format!("{normalized} (unknown skill)"),
+                },
                 "Skill",
-                tokens.to_string(),
-                format!("{pct:.1}%"),
+                Self::inventory_size(skill_tokens),
+                Self::inventory_pct(skill_tokens, snapshot_max_tokens),
             ));
 
             // Issue #216: account consumed auxiliary skill documents.
             if let Some(files) = seen_aux.get(&normalized) {
                 for file_name in files {
-                    let aux_tokens = if let Some(s) = skill {
-                        if let Some(aux) = s.auxiliary_files.iter().find(|a| &a.name == file_name) {
-                            AgentContext::estimate_tokens(&aux.body)
-                        } else {
-                            100
-                        }
+                    // #856: the same fabrication one level down — an aux name
+                    // that resolves to no real auxiliary file of a real skill
+                    // was billed 100 tokens and rendered as a measured row.
+                    let aux_tokens = skill.and_then(|s| {
+                        s.auxiliary_files
+                            .iter()
+                            .find(|a| &a.name == file_name)
+                            .map(|aux| AgentContext::estimate_tokens(&aux.body))
+                    });
+                    if let Some(t) = aux_tokens {
+                        total_tokens += t;
                     } else {
-                        100
-                    };
-                    total_tokens += aux_tokens;
-                    let aux_pct = if snapshot_max_tokens > 0 {
-                        (aux_tokens as f64 / snapshot_max_tokens as f64) * 100.0
-                    } else {
-                        0.0
-                    };
+                        tracing::warn!(
+                            slug = %normalized,
+                            file = %file_name,
+                            "#856: aux document resolves to nothing — listed, not billed"
+                        );
+                    }
                     rows.push((
                         format!("{normalized}/{file_name}"),
                         "Skill aux",
-                        aux_tokens.to_string(),
-                        format!("{aux_pct:.1}%"),
+                        Self::inventory_size(aux_tokens),
+                        Self::inventory_pct(aux_tokens, snapshot_max_tokens),
                     ));
                 }
             }
@@ -1353,26 +1393,31 @@ impl AgentService {
         let mut sorted_tools: Vec<_> = active_tools.iter().collect();
         sorted_tools.sort();
         for tool_name in sorted_tools {
-            let tokens = if let Some(reg) = tool_registry {
-                if let Some(t) = reg.get(tool_name) {
-                    AgentContext::estimate_tokens(&t.input_schema().to_string())
-                } else {
-                    150
-                }
-            } else {
-                150
-            };
-            total_tokens += tokens;
-            let pct = if snapshot_max_tokens > 0 {
-                (tokens as f64 / snapshot_max_tokens as f64) * 100.0
-            } else {
-                0.0
-            };
+            // #856: same class — a name the registry does not know was billed a
+            // fabricated 150 tokens and rendered as a real lazy tool. A `None`
+            // registry means "not supplied", which is equally unweighable, so
+            // both land on `—` rather than a guess.
+            let tool_tokens = tool_registry
+                .and_then(|reg| reg.get(tool_name))
+                .map(|t| AgentContext::estimate_tokens(&t.input_schema().to_string()));
+            if let Some(t) = tool_tokens {
+                total_tokens += t;
+            } else if tool_registry.is_some() {
+                tracing::warn!(
+                    tool = %tool_name,
+                    "#856: active lazy tool resolves to no registered tool — listed as \
+                     (unknown tool), not billed"
+                );
+            }
             rows.push((
-                tool_name.clone(),
+                match tool_tokens {
+                    Some(_) => tool_name.clone(),
+                    None if tool_registry.is_some() => format!("{tool_name} (unknown tool)"),
+                    None => tool_name.clone(),
+                },
                 "Lazy Tool",
-                tokens.to_string(),
-                format!("{pct:.1}%"),
+                Self::inventory_size(tool_tokens),
+                Self::inventory_pct(tool_tokens, snapshot_max_tokens),
             ));
         }
 
@@ -1549,6 +1594,9 @@ impl AgentService {
              You may specify the bare `<skill-slug>` (e.g. `opencrabs-dev`) or a specific in-skill document \
              `<skill-slug>/<file.md>` (e.g. `opencrabs-dev/editor.md`, `opencrabs-dev/fleet-directives.md`) \
              if only specific auxiliary procedures are needed.\n\
+             - Names MUST be copied verbatim from a row of the inventory above. A row marked \
+             `(unknown skill)` or `(unknown tool)` resolves to nothing on this box: do NOT carry it \
+             forward — name the real skill it was meant to be, or drop it.\n\
              - `discard_skills`: Skills or specific auxiliary documents whose tasks are complete and should be pruned to save budget.\n\
              - `required_tools`: Extended lazy tools (e.g. telegram_send, browser_navigate, cron_manage, pg_query) \
              that the agent will need immediately on turn 1.\n\
