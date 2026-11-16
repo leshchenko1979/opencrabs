@@ -86,7 +86,7 @@ fn aged_files_are_reaped_in_every_swept_dir() {
     let upload = write_aged(&tmp.join("files"), "tg_photo_345.jpg", days(1000));
     let scratch = write_aged(&tmp, "loose-345.bin", days(1000));
 
-    let removed = with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(900));
+    let removed = with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(900, 900));
 
     for path in [&spill, &upload, &scratch] {
         assert!(
@@ -111,7 +111,7 @@ fn fresh_files_are_kept() {
     let upload = write_aged(&tmp.join("files"), "fresh-upload-345.jpg", days(0));
     let scratch = write_aged(&tmp, "fresh-loose-345.bin", days(0));
 
-    with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(900));
+    with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(900, 900));
 
     // No count assertion here: a sibling test in this binary may legitimately
     // have a stale spill file in flight, and the property under test is which
@@ -139,7 +139,7 @@ fn the_shipped_default_window_is_seven_days() {
     let beyond = write_aged(&tmp, "beyond-345.bin", days(window + 1));
     let within = write_aged(&tmp, "within-345.bin", days(window - 1));
 
-    with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(window));
+    with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(window, window));
 
     assert!(!beyond.exists(), "older than the window must go");
     assert!(within.exists(), "younger than the window must stay");
@@ -157,7 +157,7 @@ fn a_zero_window_disables_the_purge() {
     let upload = write_aged(&tmp.join("files"), "tg_photo_345.jpg", days(1000));
     let scratch = write_aged(&tmp, "loose-345.bin", days(1000));
 
-    let removed = with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(0));
+    let removed = with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(0, 0));
 
     assert_eq!(removed, 0, "a disabled purge removes nothing");
     assert!(upload.exists(), "0 must not age out the uploads");
@@ -181,7 +181,7 @@ fn subdirectories_are_skipped_and_do_not_abort_the_sweep() {
     let before = write_aged(&tmp, "before-345.bin", days(1000));
     let after = write_aged(&tmp, "after-345.bin", days(1000));
 
-    with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(900));
+    with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(900, 900));
 
     assert!(
         nested_upload.exists(),
@@ -220,7 +220,7 @@ fn symlinks_are_skipped_and_never_followed() {
     let link = tmp.join("link-345.bin");
     std::os::unix::fs::symlink(&target, &link).expect("symlink");
 
-    with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(900));
+    with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(900, 900));
 
     assert!(
         link.symlink_metadata().is_ok(),
@@ -244,7 +244,7 @@ fn a_sweep_target_that_cannot_be_scanned_is_not_fatal() {
 
     // No count assertion: the spill leg is a real directory here and may
     // legitimately contribute.
-    with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(900));
+    with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(900, 900));
 
     assert_eq!(
         std::fs::read_to_string(&tmp).expect("still readable"),
@@ -260,7 +260,7 @@ fn missing_directories_are_not_an_error() {
     // first-boot case, not a failure.
     let home = tempfile::tempdir().expect("tempdir");
 
-    with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(7));
+    with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(7, 7));
 
     assert!(
         !home.path().join("tmp").join("files").exists(),
@@ -290,7 +290,7 @@ fn a_failed_unlink_is_counted_out_but_does_not_abort_the_sweep() {
     let control = write_aged(&tmp, "control-345.bin", days(1000));
 
     std::fs::set_permissions(&uploads, std::fs::Permissions::from_mode(0o555)).expect("chmod");
-    let removed = with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(900));
+    let removed = with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(900, 900));
     // Restored before asserting: a read-only directory left behind would break
     // the tempdir's own recursive cleanup.
     std::fs::set_permissions(&uploads, std::fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -326,7 +326,7 @@ fn the_runs_leg_is_swept_by_its_single_owner() {
     let runs = home.path().join("tmp").join("runs");
     let capture = write_aged(&runs, "owner-848.out", days(1000));
 
-    let removed = with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(900));
+    let removed = with_home_override(home.path().to_path_buf(), || cleanup_old_temp_files(900, 900));
 
     assert!(
         !capture.exists(),

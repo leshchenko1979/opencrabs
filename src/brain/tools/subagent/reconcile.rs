@@ -14,16 +14,30 @@
 //! decides how to report it into the originating session. A file spawned WHILE
 //! the pass walks belongs to this process and is left alone (#858).
 
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
-use crate::brain::agent::service::work_status::{self, WorkKind, WorkStatus};
-
-/// How long a terminal status file is kept before the sweep removes it.
-/// Matches the 7 days the module has always documented.
-pub const STALE_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+use crate::brain::agent::service::work_status::{self, StaleWindows, WorkKind, WorkStatus};
 
 /// One pass over the status directory: interrupt every sub-agent still
 /// mid-flight, and sweep the files that have aged out.
+///
+/// # The window comes from config, per KIND (#849)
+///
+/// This pass used to sweep on one hard-coded 7-day window. It now
+/// builds [`StaleWindows`] from the live config, so a finished detached
+/// command's record ages out on `[agent.retention].command_runs` (default 2
+/// days) while a sub-agent's keeps `[agent.retention].tool_output_files`
+/// (default 7). The split matters because the two populations are read
+/// differently: an agent's record backs revived routing and must outlive the
+/// session that may come back for it, while a finished command's record is read
+/// once, by this pass, and never again — 51.3 % of 30,112 such files were
+/// already past two days on the host that filed #849.
+///
+/// A resolved value of `0` means "keep forever" and becomes a cutoff at
+/// `SystemTime::UNIX_EPOCH`, which nothing is older than.
+///
+/// The split applies to FINISHED records only. A file with no finish, or one
+/// that will not parse, takes the long window — see [`work_status::is_stale`].
 ///
 /// Returns the agents that were interrupted, oldest file first, so the caller
 /// can tell their sessions. An agent whose file cannot be re-written is still
@@ -48,11 +62,18 @@ pub const STALE_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// just-interrupted agent into a deletion. An interrupted agent ages out later
 /// on the same schedule as any other terminal state.
 pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
+    reconcile_with(stale_windows_from_config())
+}
+
+/// The pass itself, with its windows handed in (#849).
+///
+/// Split out so a test can pin an age without depending on the host's
+/// `[agent.retention]`: the predicate is the thing under test, and reading the
+/// live config to answer it would make a correct pass fail on an operator who
+/// simply set a longer window.
+pub fn reconcile_with(windows: StaleWindows) -> Vec<WorkStatus> {
     let started = std::time::Instant::now();
     let dir = work_status::status_dir();
-    let cutoff = SystemTime::now()
-        .checked_sub(STALE_AFTER)
-        .unwrap_or(SystemTime::UNIX_EPOCH);
 
     let mut interrupted: Vec<WorkStatus> = Vec::new();
     let mut scanned = 0usize;
@@ -131,7 +152,7 @@ pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
                         continue;
                     }
 
-                    if work_status::is_stale(status.as_ref(), &path, cutoff) {
+                    if work_status::is_stale(status.as_ref(), &path, windows) {
                         match work_status::sweep_status_file(&path) {
                             Ok(()) => removed += 1,
                             Err(e) => {
@@ -184,6 +205,30 @@ pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
     );
 
     interrupted
+}
+
+/// The two staleness windows, resolved from the live config (#849).
+///
+/// `Config::current()` is an `Arc` clone of the in-memory mirror — zero disk IO
+/// — so this is safe on the blocking pool the pass now runs on, and it picks up
+/// a config the watcher refreshed before boot reached here.
+///
+/// A resolved `0` means "keep forever". [`StaleWindows::from_ages`] expresses
+/// that as a cutoff at `UNIX_EPOCH`, which nothing is older than, so a zero is
+/// an operator saying "do not delete" rather than "delete everything".
+fn stale_windows_from_config() -> StaleWindows {
+    let config = crate::config::Config::current();
+    let command_age = retention_age(config.agent.command_run_retention_days());
+    let agent_age = retention_age(config.agent.tool_output_retention_days());
+    StaleWindows::from_ages(command_age, agent_age)
+}
+
+/// `days` as an age, or `None` for "keep forever" when it is zero.
+fn retention_age(days: u32) -> Option<Duration> {
+    match days {
+        0 => None,
+        days => Some(Duration::from_secs(u64::from(days) * 24 * 60 * 60)),
+    }
 }
 
 /// Was this agent spawned after the pass began?

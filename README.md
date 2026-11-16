@@ -2767,6 +2767,12 @@ subagent_sessions = 7   # days a spawned sub-agent's session is kept. Nothing re
                         # uploads, loose scratch files) and the tool-output spill dir where oversized tool results
                         # are written. 0 disables the purge. Different trigger (startup, not the sweep) and a
                         # different unit (files, not rows), so it does NOT inherit default_days.
+# command_runs     = 2   # days a FINISHED detached command's status record and captured streams are kept (#849).
+                        # Split from tool_output_files because the two populations have different readers: a
+                        # sub-agent's record backs revived routing and must outlive the session that may come back
+                        # for it, while a finished command's record is read once, by the boot pass, and never
+                        # again. A host running ~4,900 commands/day held 30,112 status files and 58,455 captures
+                        # on the 7-day window, half of them already past two days. 0 keeps them forever.
 
 # ── Provider registry ─────────────────────────────────────────────────────────
 # Optional discovery service that can add providers automatically. Opt-in: the

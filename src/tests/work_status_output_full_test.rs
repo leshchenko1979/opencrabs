@@ -7,7 +7,7 @@
 //! this module is the one-stop index that runs them together.
 
 use crate::brain::agent::service::work_status::{
-    WorkState, WorkStatus, cleanup_stale, test_override,
+    StaleWindows, WorkState, WorkStatus, cleanup_stale, test_override,
 };
 use crate::brain::tools::subagent::spawn::completion_message;
 use std::fs;
@@ -117,7 +117,7 @@ fn cleanup_ages_it(dir: &std::path::Path) -> usize {
         serde_json::to_string_pretty(&parsed).unwrap(),
     )
     .unwrap();
-    cleanup_stale(Duration::from_secs(7 * 86400))
+    cleanup_stale(StaleWindows::uniform(Duration::from_secs(7 * 86400)))
         .map(|(_, removed)| removed)
         .unwrap_or(0)
 }

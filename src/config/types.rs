@@ -1564,6 +1564,23 @@ pub struct RetentionConfig {
     /// Historical default: `7`; `0` disables the purge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_output_files: Option<u32>,
+
+    /// Days a FINISHED detached command's status file and captured streams are
+    /// kept (#849).
+    ///
+    /// Separate from [`Self::tool_output_files`] because the two populations
+    /// have different readers. A sub-agent's record backs revived routing
+    /// ([`crate::brain::agent::service::work_status::WorkStatus::find_agent_by_session`])
+    /// and is a rounding error in count; a finished command's record is read at
+    /// most once, by the boot pass that finalizes it (#848), and nothing reads
+    /// it again. The population is what makes this worth a key of its own: a
+    /// host spawning ~4,900 commands/day held **30,112** status files and
+    /// **58,455** captures on a 7-day window, of which **51.3 %** and **50.0 %**
+    /// were already older than 2 days (measured 2026-11-16).
+    ///
+    /// `0` keeps finished commands forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_runs: Option<u32>,
 }
 
 impl RetentionConfig {
@@ -1575,6 +1592,8 @@ impl RetentionConfig {
     pub const DEFAULT_FEEDBACK_LEDGER_DAYS: u32 = 0;
     /// Historical default for [`Self::tool_output_files`].
     pub const DEFAULT_TOOL_OUTPUT_FILES_DAYS: u32 = 7;
+    /// Historical default for [`Self::command_runs`].
+    pub const DEFAULT_COMMAND_RUNS_DAYS: u32 = 2;
 
     /// Resolve one ROW prune: the specific key, then the deprecated flat key,
     /// then `default_days` (only when non-zero), then the historical default.
@@ -1595,6 +1614,17 @@ impl RetentionConfig {
         specific
             .or(legacy)
             .unwrap_or(Self::DEFAULT_TOOL_OUTPUT_FILES_DAYS)
+    }
+
+    /// Resolve the finished-COMMAND file retention (#849): the specific key,
+    /// then the historical default.
+    ///
+    /// `default_days` is never consulted, for the same reason
+    /// [`Self::resolve_files`] ignores it: a different trigger and a different
+    /// unit. There is deliberately no legacy flat key — this surface is new, so
+    /// any value on disk came from this key and nothing else can shadow it.
+    fn resolve_command_files(&self, specific: Option<u32>) -> u32 {
+        specific.unwrap_or(Self::DEFAULT_COMMAND_RUNS_DAYS)
     }
 }
 
@@ -2069,6 +2099,19 @@ impl AgentConfig {
             self.retention.tool_output_files,
             self.legacy_tool_output_retention_days,
         )
+    }
+
+    /// Days a FINISHED detached command's status file and captured streams are
+    /// kept (#849).
+    ///
+    /// Resolves `[agent.retention].command_runs` -> 2. Deliberately independent
+    /// of [`Self::tool_output_retention_days`] and of
+    /// `[agent.retention].default_days`: those govern the generic `tmp/` purge,
+    /// and a finished command's record has its own reader profile (see
+    /// [`RetentionConfig::command_runs`]). `0` keeps them forever.
+    pub fn command_run_retention_days(&self) -> u32 {
+        self.retention
+            .resolve_command_files(self.retention.command_runs)
     }
 }
 

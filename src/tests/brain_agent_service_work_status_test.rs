@@ -259,7 +259,7 @@ fn cleanup_removes_old_files() {
     raw = serde_json::to_string_pretty(&parsed).unwrap();
     fs::write(status_path("old-1"), raw).unwrap();
 
-    let cleanup_result = cleanup_stale(Duration::from_secs(7 * 86400)).unwrap();
+    let cleanup_result = cleanup_stale(StaleWindows::uniform(Duration::from_secs(7 * 86400))).unwrap();
     assert!(cleanup_result.1 >= 1, "should have removed at least 1 file");
     assert!(WorkStatus::read("old-1").is_none());
 }
@@ -427,8 +427,8 @@ fn reload_reports_a_missing_file_and_leaves_the_handle_alone() {
 // unit test (it is the absence of work); it is measured on the live box.
 
 /// A cutoff that puts `OLD` behind it and `YOUNG` in front of it.
-fn sweep_cutoff() -> std::time::SystemTime {
-    std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 24 * 60 * 60)
+fn sweep_windows() -> StaleWindows {
+    StaleWindows::uniform(std::time::Duration::from_secs(7 * 24 * 60 * 60))
 }
 
 const OLD: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
@@ -462,7 +462,7 @@ fn sweep_removes_a_stale_capture_of_a_dead_run() {
     write_capture("dead1.out", OLD);
     write_capture("dead1.err", OLD);
 
-    let (_, removed) = sweep_stale_runs(sweep_cutoff()).unwrap();
+    let (_, removed) = sweep_stale_runs(sweep_windows()).unwrap();
 
     assert_eq!(removed, 2, "both streams of the dead run are swept");
     assert!(!capture_path("dead1.out").exists());
@@ -479,7 +479,7 @@ fn sweep_keeps_a_stale_capture_of_a_live_run() {
     write_capture("live1.out", OLD);
     write_capture("live1.err", OLD);
 
-    let (_, removed) = sweep_stale_runs(sweep_cutoff()).unwrap();
+    let (_, removed) = sweep_stale_runs(sweep_windows()).unwrap();
 
     assert_eq!(removed, 0, "a live run's stream is never unlinked");
     assert!(capture_path("live1.out").exists());
@@ -494,10 +494,169 @@ fn sweep_leaves_a_young_capture_alone() {
     isolate("sweep_young");
     write_capture("young1.out", YOUNG);
 
-    let (_, removed) = sweep_stale_runs(sweep_cutoff()).unwrap();
+    let (_, removed) = sweep_stale_runs(sweep_windows()).unwrap();
 
     assert_eq!(removed, 0);
     assert!(capture_path("young1.out").exists());
+}
+
+// ── #849: a capture follows the KIND of its record ──────────────────────────
+//
+// One window for both kinds kept 58,455 captures and 30,112 status files on a
+// 7-day rule, of which half were already past two days (measured on the host
+// that filed #849). A finished command's record is read once, by the boot pass,
+// and never again; a sub-agent's backs revived routing and must outlive the
+// session that may come back for it. The two windows are now separate and the
+// record's own `kind` picks between them — the caller cannot pass the wrong one
+// for a file it has already parsed.
+
+/// The shipped pair: 2 days for a finished command, 7 for a sub-agent.
+fn split_windows() -> StaleWindows {
+    StaleWindows::from_ages(
+        Some(Duration::from_secs(2 * 24 * 60 * 60)),
+        Some(Duration::from_secs(7 * 24 * 60 * 60)),
+    )
+}
+
+/// Five days: past the command window, inside the agent one. The age the split
+/// tests turn on.
+const FIVE_DAYS: Duration = Duration::from_secs(5 * 24 * 60 * 60);
+
+/// Rewrite a record's `finish.completed_at` so it reads as finished `age` ago.
+///
+/// The sweep judges a FINISHED record on that stamp, not on the file's mtime, so
+/// the stamp is the input under test and has to be exact. The rewrite also
+/// freshens the file's mtime, which keeps the json out of the capture walk when
+/// the test override puts both in one directory.
+fn backdate_finish(id: &str, age: Duration) {
+    let path = status_path(id);
+    let raw = fs::read_to_string(&path).unwrap();
+    let mut parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let ts = chrono::Utc::now()
+        .checked_sub_signed(chrono::Duration::seconds(age.as_secs() as i64))
+        .unwrap()
+        .to_rfc3339();
+    parsed["finish"]["completed_at"] = serde_json::json!(ts);
+    fs::write(&path, serde_json::to_string(&parsed).unwrap()).unwrap();
+}
+
+/// A finished detached command, stamped `age` ago, with both streams captured
+/// at the same age.
+fn finished_command(id: &str, age: Duration) {
+    WorkStatus::new_command(
+        id,
+        "sess-cmd",
+        "cmd",
+        "echo hi",
+        CommandPaths {
+            output_out: capture_path(&format!("{id}.out")).display().to_string(),
+            output_err: capture_path(&format!("{id}.err")).display().to_string(),
+            pid: None,
+        },
+    )
+    .unwrap();
+    WorkStatus::finish_command(
+        id,
+        "sess-cmd",
+        "cmd",
+        "echo hi",
+        CommandExit {
+            success: true,
+            code: 0,
+            cause: RunCause::Ordinary,
+            elapsed_secs: 0.1,
+            output_bytes: 6,
+        },
+    )
+    .unwrap();
+    backdate_finish(id, age);
+    write_capture(&format!("{id}.out"), age);
+    write_capture(&format!("{id}.err"), age);
+}
+
+/// A finished SUB-AGENT, stamped `age` ago.
+fn finished_agent(id: &str, age: Duration) {
+    let mut status = WorkStatus::new_agent(id, "review", "sess-agent", "do things", None, None)
+        .unwrap();
+    status.mark_running().unwrap();
+    status.mark_completed("done".to_string()).unwrap();
+    backdate_finish(id, age);
+}
+
+/// Five days is past a command's window and inside an agent's. The SAME age must
+/// therefore give two different answers, or the split is not being applied.
+#[test]
+fn sweep_uses_the_short_window_for_a_finished_command() {
+    isolate("split_command");
+    finished_command("cmd1", FIVE_DAYS);
+
+    let (_, removed) = sweep_stale_runs(split_windows()).unwrap();
+
+    assert_eq!(
+        removed, 2,
+        "both streams of a 5-day-old finished command are past its 2-day window"
+    );
+    assert!(!capture_path("cmd1.out").exists());
+    assert!(!capture_path("cmd1.err").exists());
+}
+
+/// The control for the test above: identical age, identical fixtures, only the
+/// record's kind differs — and the captures survive.
+#[test]
+fn sweep_keeps_a_finished_agents_capture_on_the_long_window() {
+    isolate("split_agent");
+    finished_agent("agent1", FIVE_DAYS);
+    write_capture("agent1.out", FIVE_DAYS);
+
+    let (_, removed) = sweep_stale_runs(split_windows()).unwrap();
+
+    assert_eq!(
+        removed, 0,
+        "a 5-day-old sub-agent is inside its 7-day window and its stream is kept"
+    );
+    assert!(capture_path("agent1.out").exists());
+}
+
+/// A command that has not finished is never swept, whatever its age: unlinking a
+/// stream under a running child truncates output the agent is still reading.
+#[test]
+fn sweep_never_touches_a_running_command_however_old() {
+    isolate("split_running");
+    WorkStatus::new_command(
+        "cmd2",
+        "sess-cmd",
+        "cmd",
+        "sleep 999",
+        CommandPaths {
+            output_out: capture_path("cmd2.out").display().to_string(),
+            output_err: capture_path("cmd2.err").display().to_string(),
+            pid: None,
+        },
+    )
+    .unwrap();
+    write_capture("cmd2.out", OLD);
+
+    let (_, removed) = sweep_stale_runs(split_windows()).unwrap();
+
+    assert_eq!(removed, 0, "a live run's stream is never unlinked");
+    assert!(capture_path("cmd2.out").exists());
+}
+
+/// The STATUS record follows the same split, not only its captures.
+#[test]
+fn cleanup_stale_ages_a_finished_command_record_on_its_short_window() {
+    isolate("split_status");
+    finished_command("cmd3", FIVE_DAYS);
+    finished_agent("agent3", FIVE_DAYS);
+
+    let (_, removed) = cleanup_stale(split_windows()).unwrap();
+
+    assert_eq!(removed, 1, "only the finished command's record ages out");
+    assert!(!status_path("cmd3").exists(), "the command record is gone");
+    assert!(
+        status_path("agent3").exists(),
+        "the agent record is inside its long window and stays"
+    );
 }
 
 // ── #848: the runs leg has ONE owner, and it is not this module ─────────────
@@ -517,7 +676,7 @@ fn cleanup_stale_leaves_the_runs_leg_to_its_owner() {
     write_capture("dedup1.out", OLD);
     write_capture("dedup1.err", OLD);
 
-    let (_, removed) = cleanup_stale(Duration::from_secs(7 * 86400)).unwrap();
+    let (_, removed) = cleanup_stale(StaleWindows::uniform(Duration::from_secs(7 * 86400))).unwrap();
 
     assert_eq!(
         removed, 0,

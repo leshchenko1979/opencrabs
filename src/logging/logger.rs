@@ -623,22 +623,33 @@ fn sweep_aged_files(dir: &std::path::Path, max_age: std::time::Duration) -> usiz
 ///   every boot the duplicate cost a second `readdir` of `tmp/runs` plus a
 ///   `stat` per capture for nothing.
 ///
-/// `<home>/tmp/detached` is deliberately absent: it already has its own 7-day
-/// startup sweep (`work_status::cleanup_stale`). Subdirectories are never
-/// recursed into, so sweeping `<home>/tmp` cannot double-count them; the two
-/// directories that DO have their own owner are listed above explicitly, for
-/// exactly that reason.
+/// `<home>/tmp/detached` is deliberately absent: it already has its own
+/// startup sweep (the merged boot pass in `subagent/reconcile.rs`). Subdirectories
+/// are never recursed into, so sweeping `<home>/tmp` cannot double-count them;
+/// the two directories that DO have their own owner are listed above explicitly,
+/// for exactly that reason.
+///
+/// # Two windows (#849)
+///
+/// `max_age_days` governs everything above EXCEPT a finished detached command's
+/// run captures, which age out on `command_run_days` — the command population is
+/// ~58k captures on a 7-day window and half of them are past two days, read once
+/// by the boot pass and never again. `work_status::sweep_stale_runs` picks the
+/// window per run from its status record's kind; the sub-agent arm keeps
+/// `max_age_days`. Both are resolved by the caller, so this function never reads
+/// config.
 ///
 /// A window of `0` disables the purge. It cannot fall out of the comparison on
 /// its own: the test is `age > max_age`, which a zero window satisfies for
 /// every file that was not written this instant — so `0` would wipe the whole
 /// directory rather than spare it. The guard lives here rather than at the
 /// call site so the meaning of `0` is a property of the sweep, and every
-/// caller gets it.
+/// caller gets it. `command_run_days == 0` means "keep finished commands
+/// forever", which the runs leg expresses as a cutoff at `UNIX_EPOCH`.
 ///
 /// Infallible by design: a startup purge must never be the reason startup
 /// fails, and every individual failure is warned about rather than swallowed.
-pub fn cleanup_old_temp_files(max_age_days: u64) -> usize {
+pub fn cleanup_old_temp_files(max_age_days: u64, command_run_days: u64) -> usize {
     if max_age_days == 0 {
         return 0;
     }
@@ -661,13 +672,32 @@ pub fn cleanup_old_temp_files(max_age_days: u64) -> usize {
     // A failure here is warned about like any other sweep failure rather than
     // propagated — an unreadable runs directory must not cost the other three
     // legs, and this function is documented as infallible.
-    let cutoff = std::time::SystemTime::now()
-        .checked_sub(max_age)
-        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-    match crate::brain::agent::service::work_status::sweep_stale_runs(cutoff) {
+    //
+    // Two windows, not one (#849). A capture belongs to a run, and the run's
+    // KIND decides how long it is kept: a finished detached command's streams
+    // are dead weight after `command_run_days`, while a sub-agent's are kept on
+    // the generic `max_age`. The caller resolves both, so this function never
+    // re-reads config to answer a question it was handed.
+    let windows = crate::brain::agent::service::work_status::StaleWindows::from_ages(
+        retention_age(command_run_days),
+        Some(max_age),
+    );
+    match crate::brain::agent::service::work_status::sweep_stale_runs(windows) {
         Ok((_scanned, runs_removed)) => removed += runs_removed,
         Err(e) => tracing::warn!("Failed to sweep run captures for aged temp files: {e}"),
     }
 
     removed
+}
+
+/// `days` as an age, or `None` for "keep forever" when it is zero.
+///
+/// The same convention the row prunes use, and the one `sweep_stale_runs`
+/// expresses as a cutoff at `UNIX_EPOCH`: a zero is an operator saying "do not
+/// delete", never "delete everything".
+fn retention_age(days: u64) -> Option<std::time::Duration> {
+    match days {
+        0 => None,
+        days => Some(std::time::Duration::from_secs(days * 24 * 60 * 60)),
+    }
 }

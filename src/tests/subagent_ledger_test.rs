@@ -229,7 +229,7 @@ fn the_ledger_dies_with_its_status_record() {
     parsed["finish"]["completed_at"] = serde_json::json!(old_ts);
     fs::write(status_path("gone-1"), serde_json::to_string(&parsed).unwrap()).unwrap();
 
-    cleanup_stale(Duration::from_secs(7 * 86400)).expect("sweep");
+    cleanup_stale(StaleWindows::uniform(Duration::from_secs(7 * 86400))).expect("sweep");
     assert!(
         !status_path("gone-1").exists(),
         "fixture precondition: the status record is swept"
@@ -248,7 +248,7 @@ fn a_live_agents_ledger_is_never_swept() {
     WorkStatus::new_agent("live-1", "busy", "sess", "task", None, None).unwrap();
     ledger::append("live-1", &LedgerEntry::new(LedgerKind::Note, "working"));
 
-    cleanup_stale(Duration::from_secs(7 * 86400)).expect("sweep");
+    cleanup_stale(StaleWindows::uniform(Duration::from_secs(7 * 86400))).expect("sweep");
     assert!(status_path("live-1").exists(), "a live record stays");
     assert!(
         progress_path("live-1").exists(),

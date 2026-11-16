@@ -34,6 +34,7 @@ fn untouched_config_keeps_the_historical_defaults() {
     assert_eq!(cfg.message_retention_days(), 0);
     assert_eq!(cfg.feedback_ledger_retention_days(), 0);
     assert_eq!(cfg.tool_output_retention_days(), 7);
+    assert_eq!(cfg.command_run_retention_days(), 2);
 
     // Same through the parser: an absent `[agent.retention]` is not an error
     // and not a behaviour change.
@@ -42,6 +43,7 @@ fn untouched_config_keeps_the_historical_defaults() {
     assert_eq!(parsed.message_retention_days(), 0);
     assert_eq!(parsed.feedback_ledger_retention_days(), 0);
     assert_eq!(parsed.tool_output_retention_days(), 7);
+    assert_eq!(parsed.command_run_retention_days(), 2);
 }
 
 /// The deprecated flat keys are still read under their original TOML names —
@@ -92,6 +94,31 @@ subagent_sessions = 0
         0,
         "an explicit 0 disables the prune; it must not fall through to the default"
     );
+}
+
+/// #849: a finished command's files get their own window, deliberately SHORTER
+/// than the file window it was split from.
+///
+/// It never inherits `default_days`: that fallback governs the ROW prunes, and
+/// a value an operator set for rows must not silently shorten how long a
+/// command's captured output survives.
+#[test]
+fn command_runs_resolves_on_its_own_key_and_never_inherits_default_days() {
+    assert_eq!(AgentConfig::default().command_run_retention_days(), 2);
+
+    let explicit = parse("[retention]\ncommand_runs = 5\n");
+    assert_eq!(explicit.command_run_retention_days(), 5);
+
+    let with_default = parse("[retention]\ndefault_days = 30\n");
+    assert_eq!(
+        with_default.command_run_retention_days(),
+        2,
+        "default_days governs the row prunes, not the command file window"
+    );
+
+    // A literal 0 is a real value here too: keep finished commands forever.
+    let zeroed = parse("[retention]\ncommand_runs = 0\n");
+    assert_eq!(zeroed.command_run_retention_days(), 0);
 }
 
 /// A specific key beats a generic fallback on BOTH sides of the split, so a

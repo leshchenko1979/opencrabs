@@ -64,21 +64,29 @@ async fn main() -> Result<()> {
 
     // Clean up orphaned temp files — channel uploads (tg_photo_*, wa_img_*) and
     // the tool-output spill dir — older than `[agent.retention].tool_output_files`
-    // (or the deprecated flat key it replaced, #844).
+    // (or the deprecated flat key it replaced, #844), and finished detached
+    // commands' run captures older than `[agent.retention].command_runs` (#849).
     // Never wipe on restart: files may be recoverable or still needed. A window
     // of `0` disables the purge; the sweep itself honours that.
-    let retention_days = match opencrabs::config::Config::load_for_cli(cli_args.config.as_deref()) {
-        Ok(config) => config.agent.tool_output_retention_days(),
-        Err(e) => {
-            // A broken config is reported by the CLI path with full context,
-            // and that same failure stops this boot anyway. Skipping the purge
-            // is the conservative half: deleting files on the strength of a
-            // value we could not read is the worse failure.
-            tracing::warn!("temp-file purge skipped — config unavailable: {e}");
-            0
-        }
-    };
-    let removed = logging::cleanup_old_temp_files(u64::from(retention_days));
+    let (retention_days, command_run_days) =
+        match opencrabs::config::Config::load_for_cli(cli_args.config.as_deref()) {
+            Ok(config) => (
+                config.agent.tool_output_retention_days(),
+                config.agent.command_run_retention_days(),
+            ),
+            Err(e) => {
+                // A broken config is reported by the CLI path with full context,
+                // and that same failure stops this boot anyway. Skipping the purge
+                // is the conservative half: deleting files on the strength of a
+                // value we could not read is the worse failure.
+                tracing::warn!("temp-file purge skipped — config unavailable: {e}");
+                (0, 0)
+            }
+        };
+    let removed = logging::cleanup_old_temp_files(
+        u64::from(retention_days),
+        u64::from(command_run_days),
+    );
     if removed > 0 {
         tracing::info!("🧹 Cleaned up {} orphaned temp file(s)", removed);
     }

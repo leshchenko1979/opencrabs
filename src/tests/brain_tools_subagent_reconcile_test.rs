@@ -4,8 +4,10 @@
 //! still `Pending`, `Running`, or `AwaitingInput` at startup belongs to an
 //! agent that no longer exists, and must stop reading as live.
 
-use crate::brain::agent::service::work_status::{self, CommandPaths, WorkState, WorkStatus};
-use crate::brain::tools::subagent::reconcile::reconcile_orphaned_agents;
+use crate::brain::agent::service::work_status::{
+    self, CommandPaths, StaleWindows, WorkState, WorkStatus,
+};
+use crate::brain::tools::subagent::reconcile::reconcile_with;
 use std::fs;
 
 fn isolate(tag: &str) {
@@ -19,6 +21,16 @@ fn isolate(tag: &str) {
     work_status::test_override::set(dir);
 }
 
+/// The production split, pinned (#849): a finished detached command ages out on
+/// 2 days, a sub-agent's record on 7. Pinned rather than read from config so a
+/// host whose `[agent.retention]` differs cannot turn a correct pass red.
+fn test_windows() -> StaleWindows {
+    StaleWindows::from_ages(
+        Some(std::time::Duration::from_secs(2 * 86_400)),
+        Some(std::time::Duration::from_secs(7 * 86_400)),
+    )
+}
+
 #[test]
 fn a_running_agent_becomes_interrupted() {
     isolate("running");
@@ -26,7 +38,7 @@ fn a_running_agent_becomes_interrupted() {
         WorkStatus::new_agent("agent-1", "build docs", "sess-a", "do things", None, None).unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    let orphans = reconcile_with(test_windows());
 
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].id, "agent-1");
@@ -43,7 +55,7 @@ fn a_pending_agent_becomes_interrupted() {
     isolate("pending");
     WorkStatus::new_agent("agent-2", "lint", "sess-b", "do things", None, None).unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    let orphans = reconcile_with(test_windows());
 
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].state, WorkState::Interrupted);
@@ -60,7 +72,7 @@ fn a_parked_agent_becomes_interrupted() {
     s.mark_running().unwrap();
     s.mark_awaiting_input().unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    let orphans = reconcile_with(test_windows());
 
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].state, WorkState::Interrupted);
@@ -77,7 +89,7 @@ fn interrupted_carries_a_reason_and_a_completion_stamp() {
     let mut s = WorkStatus::new_agent("agent-3", "test", "sess-c", "do things", None, None).unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    let orphans = reconcile_with(test_windows());
 
     let finish = orphans[0].finish.as_ref().expect("finish stamped");
     assert!(
@@ -98,7 +110,7 @@ fn terminal_agents_are_left_alone() {
     let mut failed = WorkStatus::new_agent("agent-failed", "b", "sess-d", "p", None, None).unwrap();
     failed.mark_failed("boom".to_string()).unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    let orphans = reconcile_with(test_windows());
 
     assert!(orphans.is_empty(), "nothing mid-flight to reconcile");
     assert_eq!(
@@ -127,7 +139,7 @@ fn the_parent_session_survives_so_the_report_can_be_routed() {
     .unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    let orphans = reconcile_with(test_windows());
 
     assert_eq!(orphans[0].parent_session_id.as_deref(), Some("sess-parent"));
 }
@@ -139,14 +151,14 @@ fn reconciling_is_idempotent() {
     let mut s = WorkStatus::new_agent("agent-5", "x", "sess-e", "p", None, None).unwrap();
     s.mark_running().unwrap();
 
-    assert_eq!(reconcile_orphaned_agents().len(), 1);
-    assert!(reconcile_orphaned_agents().is_empty());
+    assert_eq!(reconcile_with(test_windows()).len(), 1);
+    assert!(reconcile_with(test_windows()).is_empty());
 }
 
 #[test]
 fn a_missing_status_dir_is_not_an_error() {
     isolate("missing");
-    assert!(reconcile_orphaned_agents().is_empty());
+    assert!(reconcile_with(test_windows()).is_empty());
 }
 
 #[test]
@@ -161,7 +173,7 @@ fn unparseable_files_do_not_abort_the_pass() {
     let mut s = WorkStatus::new_agent("agent-6", "y", "sess-f", "p", None, None).unwrap();
     s.mark_running().unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    let orphans = reconcile_with(test_windows());
 
     assert_eq!(orphans.len(), 1, "the healthy file is still reconciled");
     assert_eq!(orphans[0].id, "agent-6");
@@ -171,7 +183,7 @@ fn unparseable_files_do_not_abort_the_pass() {
 fn commands_are_not_reconciled_by_agent_pass() {
     isolate("commands");
     WorkStatus::new_command("cmd-1", "test cmd", "sess-c", "cargo test", CommandPaths::none()).unwrap();
-    assert!(reconcile_orphaned_agents().is_empty());
+    assert!(reconcile_with(test_windows()).is_empty());
 }
 
 #[test]
@@ -196,7 +208,7 @@ fn legacy_subagent_files_are_migrated_and_reconciled() {
     let migrated = work_status::migrate_legacy_dir(&legacy_dir);
     assert_eq!(migrated, 1);
 
-    let orphans = reconcile_orphaned_agents();
+    let orphans = reconcile_with(test_windows());
     assert_eq!(orphans.len(), 1);
     assert_eq!(orphans[0].id, "legacy-agent-1");
     assert_eq!(orphans[0].state, WorkState::Interrupted);
@@ -247,6 +259,35 @@ fn one_pass_reconciles_and_sweeps_a_mixed_directory() {
     raw["finish"]["completed_at"] = serde_json::json!(stamp_days_ago(8));
     fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
 
+    // A FINISHED COMMAND 4 days old (#849): inside the 7-day window this pass
+    // used before the split, past the 2-day command window now. Same mtime
+    // treatment as `done-old`, so only the KIND decides its fate.
+    let mut cmd_done = WorkStatus::new_command(
+        "cmd-done-4d",
+        "sess-c",
+        "finished command",
+        "cargo test",
+        CommandPaths::none(),
+    )
+    .unwrap();
+    cmd_done.mark_completed("ok".into()).unwrap();
+    let cmd_path = work_status::status_path("cmd-done-4d");
+    let mut cmd_raw: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cmd_path).unwrap()).unwrap();
+    cmd_raw["finish"]["completed_at"] = serde_json::json!(stamp_days_ago(4));
+    fs::write(&cmd_path, serde_json::to_string(&cmd_raw).unwrap()).unwrap();
+
+    // The SAME age as `cmd-done-4d`, but an AGENT. The pair is what pins the
+    // split: age alone cannot decide these two, only the record's KIND can.
+    let mut agent_done =
+        WorkStatus::new_agent("agent-done-4d", "finished", "sess-a", "p", None, None).unwrap();
+    agent_done.mark_completed("ok".into()).unwrap();
+    let agent_path = work_status::status_path("agent-done-4d");
+    let mut agent_raw: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&agent_path).unwrap()).unwrap();
+    agent_raw["finish"]["completed_at"] = serde_json::json!(stamp_days_ago(4));
+    fs::write(&agent_path, serde_json::to_string(&agent_raw).unwrap()).unwrap();
+
     // An unfinished COMMAND with an old mtime: not an orphan (only agents are
     // interrupted), swept by the mtime arm.
     WorkStatus::new_command(
@@ -267,7 +308,7 @@ fn one_pass_reconciles_and_sweeps_a_mixed_directory() {
     // A fresh unfinished command: left alone.
     WorkStatus::new_command("cmd-fresh", "sess-c", "fresh", "ls", CommandPaths::none()).unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    let orphans = reconcile_with(test_windows());
 
     assert_eq!(orphans.len(), 1, "only the live orphan is interrupted");
     assert_eq!(orphans[0].id, "orphan-1");
@@ -281,6 +322,16 @@ fn one_pass_reconciles_and_sweeps_a_mixed_directory() {
     assert!(
         !work_status::status_path("done-old").exists(),
         "finished-and-old is swept"
+    );
+    assert!(
+        !work_status::status_path("cmd-done-4d").exists(),
+        "#849: a finished COMMAND past its 2-day window is swept, though 4 days \
+         is inside the 7-day window this pass used for every kind"
+    );
+    assert!(
+        work_status::status_path("agent-done-4d").exists(),
+        "#849: the same age as a COMMAND, but an agent keeps the 7-day window — \
+         if this is swept the pass is deciding on age, not on kind"
     );
     assert!(
         !work_status::status_path("cmd-old").exists(),
@@ -322,14 +373,23 @@ fn is_stale_keeps_the_three_way_decision() {
     // that ONLY that arm can answer correctly.
     isolate("is_stale");
     work_status::ensure_dir().unwrap();
-    let cutoff = std::time::SystemTime::now();
+    // Both windows end at this instant: "anything that ended before the test
+    // began is stale", which is the sharpest form of the predicate and the one
+    // that isolates each arm. Constructed BEFORE the fixtures, so a file written
+    // during the test is newer than both cutoffs and can only be stale by its
+    // finish stamp.
+    let now = std::time::SystemTime::now();
+    let windows = StaleWindows {
+        command: now,
+        agent: now,
+    };
 
     // (1) finished 8 days ago, fresh mtime → stale by the finish, not the mtime.
     let mut done = WorkStatus::new_agent("s-done", "d", "sess", "p", None, None).unwrap();
     done.mark_completed("ok".into()).unwrap();
     done.finish.as_mut().expect("finish stamped").completed_at = stamp_days_ago(8);
     assert!(
-        work_status::is_stale(Some(&done), &work_status::status_path("s-done"), cutoff),
+        work_status::is_stale(Some(&done), &work_status::status_path("s-done"), windows),
         "a finished-and-old file is stale whatever its mtime says"
     );
 
@@ -339,7 +399,7 @@ fn is_stale_keeps_the_three_way_decision() {
         !work_status::is_stale(
             Some(&pending),
             &work_status::status_path("s-pending"),
-            cutoff
+            windows
         ),
         "an unfinished file with a fresh mtime is not stale"
     );
@@ -347,7 +407,7 @@ fn is_stale_keeps_the_three_way_decision() {
     // (3) unparseable (`None`), judged on mtime — and an unstatable path is
     //     treated as stale, which is the arm's documented fallback.
     assert!(
-        work_status::is_stale(None, &work_status::status_path("never-written"), cutoff),
+        work_status::is_stale(None, &work_status::status_path("never-written"), windows),
         "an undatable file falls back to the mtime arm, which cannot stat it"
     );
 }
@@ -380,7 +440,7 @@ fn an_agent_spawned_during_the_pass_is_not_interrupted() {
     );
     fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
 
-    let orphans = reconcile_orphaned_agents();
+    let orphans = reconcile_with(test_windows());
 
     assert!(
         orphans.iter().all(|o| o.id != "live-1"),

@@ -1061,23 +1061,68 @@ pub fn migrate_legacy_dir(legacy: &Path) -> usize {
 
 // ── Auto-cleanup ─────────────────────────────────────────────────────
 
-/// Remove status files whose finish `completed_at` is older than `max_age`
-/// or whose on-disk mtime is older than `max_age` (for files without a
-/// finish — covers in-flight, old, and corrupted files).
+/// The two retention windows the status sweep judges against (#849).
+///
+/// The split exists because the two kinds of record have different readers, not
+/// because one is more valuable. A finished COMMAND's record is read at most
+/// once — by the boot pass that finalizes it (#848) — and never again, so it
+/// ages out on the short window. A sub-agent's record backs revived routing
+/// ([`WorkStatus::find_agent_by_session`]) and is a rounding error in
+/// population, so it keeps the long one.
+///
+/// A `None` age means "keep forever" and is expressed as a cutoff at
+/// [`SystemTime::UNIX_EPOCH`]: nothing is older than the beginning of time, so
+/// that kind is never swept. That is the same answer the row prunes give a `0`,
+/// and it is the safe one — a zero is an operator saying "do not delete".
+#[derive(Debug, Clone, Copy)]
+pub struct StaleWindows {
+    /// Files belonging to finished detached commands.
+    pub command: SystemTime,
+    /// Files belonging to sub-agents.
+    pub agent: SystemTime,
+}
+
+impl StaleWindows {
+    /// Build both cutoffs from two optional ages.
+    pub fn from_ages(command_age: Option<Duration>, agent_age: Option<Duration>) -> Self {
+        let now = SystemTime::now();
+        let cutoff = |age: Option<Duration>| {
+            age.and_then(|age| now.checked_sub(age))
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        };
+        Self {
+            command: cutoff(command_age),
+            agent: cutoff(agent_age),
+        }
+    }
+
+    /// One window for both kinds — the pre-#849 behaviour, and what a caller
+    /// that is not about the split wants.
+    pub fn uniform(age: Duration) -> Self {
+        Self::from_ages(Some(age), Some(age))
+    }
+
+    /// The cutoff that applies to one kind of work.
+    fn cutoff_for(&self, kind: &WorkKind) -> SystemTime {
+        match kind {
+            WorkKind::Command => self.command,
+            WorkKind::Agent => self.agent,
+        }
+    }
+}
+
+/// Remove status files that have aged out: a finished file on the window its
+/// KIND gets, and a file with no finish (or no parse) on its mtime.
 ///
 /// Scope is the STATUS directory (`tmp/detached`) only. Captured streams in
 /// `tmp/runs` belong to [`sweep_stale_runs`], whose single owner is
 /// `logging::cleanup_old_temp_files` (#848) — see the note at the end of this
 /// function for why the duplicate came out.
-pub fn cleanup_stale(max_age: Duration) -> std::io::Result<(usize, usize)> {
+pub fn cleanup_stale(windows: StaleWindows) -> std::io::Result<(usize, usize)> {
     let dir = status_dir();
     if !dir.exists() {
         return Ok((0, 0));
     }
-
-    let cutoff = SystemTime::now()
-        .checked_sub(max_age)
-        .unwrap_or(SystemTime::UNIX_EPOCH);
 
     let mut scanned = 0usize;
     let mut removed = 0usize;
@@ -1094,10 +1139,10 @@ pub fn cleanup_stale(max_age: Duration) -> std::io::Result<(usize, usize)> {
         // boot pass uses (#858), so the two callers cannot drift apart.
         let should_delete = match fs::read_to_string(&path) {
             Ok(data) => match serde_json::from_str::<WorkStatus>(&data) {
-                Ok(status) => is_stale(Some(&status), &path, cutoff),
-                Err(_) => is_stale(None, &path, cutoff),
+                Ok(status) => is_stale(Some(&status), &path, windows),
+                Err(_) => is_stale(None, &path, windows),
             },
-            Err(_) => is_stale(None, &path, cutoff),
+            Err(_) => is_stale(None, &path, windows),
         };
 
         if should_delete {
@@ -1160,7 +1205,7 @@ pub fn cleanup_stale(max_age: Duration) -> std::io::Result<(usize, usize)> {
 /// `<id>.err` and their `.cap` markers all resolve to the same id, so the cache
 /// collapses a run's reads into one — up to four files per run (two streams plus
 /// two truncation markers), two on the measured tree.
-pub fn sweep_stale_runs(cutoff: SystemTime) -> std::io::Result<(usize, usize)> {
+pub fn sweep_stale_runs(windows: StaleWindows) -> std::io::Result<(usize, usize)> {
     let runs = runs_dir();
     if !runs.exists() {
         return Ok((0, 0));
@@ -1169,10 +1214,20 @@ pub fn sweep_stale_runs(cutoff: SystemTime) -> std::io::Result<(usize, usize)> {
     let mut scanned = 0usize;
     let mut removed = 0usize;
 
-    // Liveness per run id, filled on demand (#847). Only runs with at least one
-    // STALE file ever appear here, so a healthy tree leaves this empty and the
-    // sweep costs one readdir plus one stat per file.
-    let mut live_by_run: HashMap<String, bool> = HashMap::new();
+    // The cheap pre-filter (#847) uses the LATER of the two cutoffs, which is
+    // the most permissive one: a later cutoff is a shorter age, so it admits
+    // every file either window could take. A file it rejects is stale under
+    // neither window and needs no status read. `max` also does the right thing
+    // when one kind is "keep forever" — its cutoff is `UNIX_EPOCH`, the
+    // earliest possible, so it cannot drag the gate down with it.
+    let gate = windows.command.max(windows.agent);
+
+    // The status record per run id, filled on demand (#847). Only runs with at
+    // least one STALE file ever appear here, so a healthy tree leaves this empty
+    // and the sweep costs one readdir plus one stat per file. The record is kept
+    // whole rather than as a liveness bool since #849: the capture now follows
+    // its record's KIND, so the sweep needs the kind as well as the finish.
+    let mut status_by_run: HashMap<String, Option<WorkStatus>> = HashMap::new();
 
     for entry in fs::read_dir(&runs)? {
         let entry = entry?;
@@ -1183,7 +1238,7 @@ pub fn sweep_stale_runs(cutoff: SystemTime) -> std::io::Result<(usize, usize)> {
         scanned += 1;
 
         // #847: the mtime test comes FIRST — see the doc block above.
-        if !file_stale(&path, &cutoff) {
+        if !file_stale(&path, &gate) {
             continue;
         }
 
@@ -1200,13 +1255,28 @@ pub fn sweep_stale_runs(cutoff: SystemTime) -> std::io::Result<(usize, usize)> {
             .unwrap_or_default()
             .to_string();
 
-        let live = *live_by_run.entry(run_id.clone()).or_insert_with(|| {
+        let status = status_by_run.entry(run_id.clone()).or_insert_with(|| {
             fs::read_to_string(status_path(&run_id))
                 .ok()
                 .and_then(|data| serde_json::from_str::<WorkStatus>(&data).ok())
-                .is_some_and(|status| status.finish.is_none())
         });
-        if live {
+
+        // A run that has not finished is live, whatever its kind: unlinking a
+        // stream under it would truncate output the agent is still reading.
+        if status.as_ref().is_some_and(|s| s.finish.is_none()) {
+            continue;
+        }
+
+        // The capture follows the KIND of its record (#849) — a finished
+        // command's stream goes on the short window, a sub-agent's on the long
+        // one. A record that is missing or unreadable cannot name a kind, so it
+        // takes the long window: the same conservative answer `is_stale` gives
+        // an unparsed file.
+        let cutoff = match status.as_ref() {
+            Some(status) => windows.cutoff_for(&status.kind),
+            None => windows.agent,
+        };
+        if !file_stale(&path, &cutoff) {
             continue;
         }
 
@@ -1266,13 +1336,33 @@ fn file_stale(path: &Path, cutoff: &SystemTime) -> bool {
 /// Passing the post-interrupt status is safe for a different reason — its finish
 /// now carries `completed_at = now`, so the first arm answers and the mtime is
 /// never consulted.
-pub fn is_stale(status: Option<&WorkStatus>, path: &Path, cutoff: SystemTime) -> bool {
+///
+/// # The window is chosen by KIND, not by caller (#849)
+///
+/// A finished record is judged on the cutoff its own kind gets: a detached
+/// command on the short window, a sub-agent on the long one. The kind is read
+/// from the parsed struct, so a caller cannot pass the wrong window for a file
+/// it has already read — the one thing it could get wrong is which windows it
+/// resolved, and that is [`StaleWindows`]' own contract.
+///
+/// The other two shapes ignore the split and take the LONG window: neither a
+/// record with no finish nor an unreadable one can be reasoned about, and the
+/// long window is the conservative answer for both.
+pub fn is_stale(status: Option<&WorkStatus>, path: &Path, windows: StaleWindows) -> bool {
     match status {
         Some(status) => match status.finish.as_ref() {
-            Some(finish) => parse_completed_at(&cutoff, &finish.completed_at),
-            None => file_stale(path, &cutoff),
+            Some(finish) => {
+                parse_completed_at(&windows.cutoff_for(&status.kind), &finish.completed_at)
+            }
+            // No finish: the state never stamped an end, so the KIND is not
+            // enough to shorten its life — a `Running` record of either kind is
+            // judged on mtime against the LONG window. Only a finished record
+            // has a reader profile we can reason about (#849).
+            None => file_stale(path, &windows.agent),
         },
-        None => file_stale(path, &cutoff),
+        // Unparsed: a corrupt file cannot name a kind, and being unreadable is
+        // not evidence of being disposable. Long window, as before.
+        None => file_stale(path, &windows.agent),
     }
 }
 
