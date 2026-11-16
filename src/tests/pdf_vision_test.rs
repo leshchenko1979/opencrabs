@@ -7,14 +7,16 @@
 //! and the binary on PATH, so these focus on what we can deterministically
 //! check: the function entry-point contract.
 
-use crate::utils::pdf_vision::render_pdf_pages;
+use crate::utils::pdf_vision::{
+    effective_dpi, parse_page_size_line, render_pdf_pages, DEFAULT_DPI, MAX_DPI, MIN_DPI,
+};
 use std::fs;
 
 #[test]
 fn missing_pdf_returns_error_with_path() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp.path().join("pages");
-    let result = render_pdf_pages("/no/such/file.pdf", 10, out_dir.to_str().unwrap());
+    let result = render_pdf_pages("/no/such/file.pdf", 10, out_dir.to_str().unwrap(), DEFAULT_DPI);
     let err = result.expect_err("missing pdf must error");
     assert!(err.contains("/no/such/file.pdf"));
 }
@@ -29,7 +31,7 @@ fn output_directory_is_created_if_missing() {
     fs::write(&pdf, b"%PDF-1.4\n").expect("write fake pdf");
     let out = tmp.path().join("nested").join("renders");
     assert!(!out.exists(), "precondition: output dir must not exist yet");
-    let _ = render_pdf_pages(pdf.to_str().unwrap(), 5, out.to_str().unwrap());
+    let _ = render_pdf_pages(pdf.to_str().unwrap(), 5, out.to_str().unwrap(), DEFAULT_DPI);
     assert!(out.exists(), "output dir must be created on entry");
 }
 
@@ -42,7 +44,7 @@ fn unrenderable_pdf_returns_err_not_empty_ok() {
     let pdf = tmp.path().join("not-really-a-pdf.pdf");
     fs::write(&pdf, b"this is not a pdf").expect("write fake");
     let out = tmp.path().join("out");
-    let result = render_pdf_pages(pdf.to_str().unwrap(), 100, out.to_str().unwrap());
+    let result = render_pdf_pages(pdf.to_str().unwrap(), 100, out.to_str().unwrap(), DEFAULT_DPI);
     // Either an Err (pdftoppm rejected the input) or an Ok with zero
     // pages — both are acceptable contracts; an Ok with no pages would
     // be the bug we explicitly want to avoid.
@@ -94,4 +96,112 @@ fn pdftoppm_candidates_include_unpadded_width() {
         );
     }
     assert_eq!(names.len(), 4, "exactly one candidate per width");
+}
+
+// ---------------------------------------------------------------------------
+// #814: the render resolution must be bounded by the page's AREA, not by
+// the page count. `BATCH_SIZE` counted pages and said nothing about how
+// many pixels ten pages hold, so ten A0 maps rendered exactly like ten A4
+// letters until `pdftoppm` hit 946 MB anon-rss inside the daemon's 1 GiB
+// cgroup and the service was killed four times in 117 s.
+// ---------------------------------------------------------------------------
+
+/// A4 at 200 DPI is 3.9 Mpx — comfortably inside the budget, so the
+/// caller's request must survive untouched. This is the leg that stops
+/// the fix from "protecting" ordinary documents into illegibility.
+#[test]
+fn effective_dpi_keeps_the_request_for_an_a4_page() {
+    let a4_area_pt = 595.0 * 842.0;
+    assert_eq!(effective_dpi(a4_area_pt, 200), 200);
+    assert_eq!(effective_dpi(a4_area_pt, 300), 300);
+}
+
+/// A0 at 200 DPI is ~62 Mpx, six times the budget: the render must come
+/// down to the highest resolution that still fits. 80 DPI is the
+/// arithmetic answer (72 * sqrt(10e6 / 8.03e6) = 80.3), and asserting
+/// the exact value is the point — a clamp that "rounds" to MIN_DPI would
+/// throw away four fifths of the available detail for no reason.
+#[test]
+fn effective_dpi_clamps_an_a0_page() {
+    let a0_area_pt = 2384.0 * 3370.0;
+    assert_eq!(effective_dpi(a0_area_pt, 200), 80);
+}
+
+/// Past MIN_DPI resolution stops being the lever: a page this large
+/// cannot be rendered safely at any DPI, so the floor holds and the
+/// caller gets a bounded pixel box instead (`scale_to_box`).
+#[test]
+fn effective_dpi_never_goes_below_the_floor() {
+    let enormous = 100_000_000.0;
+    assert_eq!(effective_dpi(enormous, 300), MIN_DPI);
+}
+
+/// An unmeasurable page must not silently disable the budget. NaN is the
+/// value a failed computation actually produces, and `NaN > x` is false,
+/// so a naive guard would fall through to the unbounded branch — the
+/// exact shape of the #814 regression.
+#[test]
+fn effective_dpi_treats_unmeasurable_area_as_no_opinion() {
+    assert_eq!(effective_dpi(f64::NAN, 200), 200);
+    assert_eq!(effective_dpi(0.0, 200), 200);
+    assert_eq!(effective_dpi(-5.0, 200), 200);
+}
+
+/// The caller's own bounds are enforced here too, so a `dpi: 5000` from
+/// a model cannot spend the budget on vision tokens no provider keeps.
+#[test]
+fn effective_dpi_clamps_the_request_itself() {
+    let a4_area_pt = 595.0 * 842.0;
+    assert_eq!(effective_dpi(a4_area_pt, 5), MIN_DPI);
+    assert_eq!(effective_dpi(a4_area_pt, 5000), MAX_DPI);
+}
+
+/// `pdfinfo` prints a document-level `Page size:` line that differs from
+/// the per-page one only by the missing page number. Reading it as page
+/// 0 would make the largest "page" the document default and clamp every
+/// render to a resolution the real pages never needed.
+#[test]
+fn parse_page_size_line_ignores_the_document_level_line() {
+    assert_eq!(
+        parse_page_size_line("Page size:       595 x 842 pts (A4)"),
+        None
+    );
+}
+
+/// The per-page line is the one that carries geometry per page.
+#[test]
+fn parse_page_size_line_reads_a_per_page_line() {
+    assert_eq!(
+        parse_page_size_line("Page    1 size:  595 x 842 pts (A4)"),
+        Some((595.0, 842.0))
+    );
+    assert_eq!(
+        parse_page_size_line("Page   12 size: 2383.94 x 3370.39 pts (A0)"),
+        Some((2383.94, 3370.39))
+    );
+}
+
+/// Anything pdfinfo might print that is not a page size must yield
+/// `None` rather than a half-parsed number: a wrong area is worse than
+/// an absent one, because absent falls back to the bounded pixel box.
+#[test]
+fn parse_page_size_line_rejects_non_geometry_lines() {
+    for line in [
+        "",
+        "Pages:           12",
+        "Page rot:        0",
+        "Page    1 size:  unknown",
+    ] {
+        assert_eq!(parse_page_size_line(line), None, "line: {line:?}");
+    }
+}
+
+/// The paper name is decoration; the numbers are the geometry. Dropping
+/// the trailing `(A4)` must not change the reading.
+#[test]
+fn parse_page_size_line_does_not_need_the_paper_name() {
+    assert_eq!(
+        parse_page_size_line("Page    1 size:  595 x 842 pts"),
+        Some((595.0, 842.0))
+    );
 }

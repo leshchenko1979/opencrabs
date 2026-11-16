@@ -520,6 +520,7 @@ fn process_pdf_vision(bytes: &[u8], filename: &str) -> FileContent {
         pdf_path.to_str().unwrap_or(""),
         MAX_PDF_PAGES,
         render_dir.to_str().unwrap_or(""),
+        super::pdf_vision::DEFAULT_DPI,
     );
 
     match rendered {

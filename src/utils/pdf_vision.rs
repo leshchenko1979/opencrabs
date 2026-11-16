@@ -9,12 +9,53 @@
 //!
 //! Pages are processed in configurable batches to cap memory usage.
 //! On failure, any partial renders are cleaned up automatically.
+//!
+//! A page COUNT is the wrong quantity to cap: raster memory grows with
+//! `page area x dpi^2`, so ten A4 pages and ten A0 pages differ by ~100x
+//! in what they allocate. Every render is therefore bounded by
+//! [`MAX_PIXELS_PER_PAGE`] against the document's own page geometry, and
+//! the caller can trade resolution for legibility through `dpi` (#814).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Number of pages processed per batch to limit memory.
 const BATCH_SIZE: usize = 10;
+
+/// Default render resolution. 200 DPI keeps A4 body text legible to a
+/// vision model, which is why it survived as a constant for so long —
+/// the defect in #814 was never the value, it was that it was the ONLY
+/// value a caller could get.
+pub const DEFAULT_DPI: u32 = 200;
+
+/// Lowest resolution worth rendering at. Below this, body text turns to
+/// mush and the vision model describes glyph soup — worse than an honest
+/// refusal, because the caller cannot tell the two apart.
+pub const MIN_DPI: u32 = 72;
+
+/// Highest resolution a caller may request. Past ~300 DPI the raster
+/// costs memory and vision tokens without adding detail any provider
+/// still has after its own downscale.
+pub const MAX_DPI: u32 = 300;
+
+/// Pixel budget for ONE rendered page.
+///
+/// This — not the page count — is the quantity that decides whether a
+/// render survives. Sized from the #814 incident: a single `pdftoppm`
+/// reached 946 MB anon-rss inside the daemon's 1 GiB cgroup and took the
+/// whole service down four times in 117 s. That works out at 15–30 bytes
+/// per output pixel depending on the page's true dimensions (A0 at
+/// 200 DPI is ~62 Mpx, A1 ~31 Mpx), so 10 Mpx costs ~150–300 MB — a
+/// third of the cgroup at worst, leaving room for the lanes sharing it.
+/// A4 at 200 DPI is 3.9 Mpx, so ordinary documents are untouched and
+/// only large-format pages lose resolution.
+const MAX_PIXELS_PER_PAGE: f64 = 10_000_000.0;
+
+/// Side of the pixel box that bounds one page, for `pdftoppm -scale-to`
+/// (which fits each page inside an N x N square, aspect preserved).
+fn pixel_box() -> u32 {
+    MAX_PIXELS_PER_PAGE.sqrt().floor() as u32
+}
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -24,12 +65,18 @@ const BATCH_SIZE: usize = 10;
 ///
 /// - Creates `output_dir` if it does not exist.
 /// - Pages beyond `max_pages` are skipped (a warning is logged).
+/// - `dpi` is the requested resolution, clamped to
+///   [`MIN_DPI`]..=[`MAX_DPI`] and then reduced further when the page is
+///   large-format, so that no single page's raster exceeds
+///   [`MAX_PIXELS_PER_PAGE`]. It applies to the `pdftoppm` path; the
+///   pdfium path is already bounded by a target width.
 /// - Returns the list of rendered PNG paths on success.
 /// - On failure any partially-rendered files are removed.
 pub fn render_pdf_pages(
     pdf_path: &str,
     max_pages: usize,
     output_dir: &str,
+    dpi: u32,
 ) -> Result<Vec<PathBuf>, String> {
     let pdf = PathBuf::from(pdf_path);
     let out = PathBuf::from(output_dir);
@@ -42,7 +89,7 @@ pub fn render_pdf_pages(
     fs::create_dir_all(&out)
         .map_err(|e| format!("Failed to create output directory '{}': {}", output_dir, e))?;
 
-    let result = render_pdf_pages_inner(&pdf, max_pages, &out);
+    let result = render_pdf_pages_inner(&pdf, max_pages, &out, dpi);
 
     // On total failure (no pages rendered at all), clean up any stray
     // partial renders from earlier strategies. A partial success
@@ -65,15 +112,17 @@ fn render_pdf_pages_inner(
     pdf_path: &Path,
     max_pages: usize,
     output_dir: &Path,
+    dpi: u32,
 ) -> Result<Vec<PathBuf>, String> {
-    // Strategy 1: pdfium-render crate.
+    // Strategy 1: pdfium-render crate. It bounds every page by a target
+    // pixel WIDTH, so `dpi` is not needed here; see `render_with_pdfium`.
     match render_with_pdfium(pdf_path, max_pages, output_dir) {
         Ok(paths) => return Ok(paths),
         Err(e) => tracing::debug!("pdfium-render unavailable or failed: {}", e),
     }
 
     // Strategy 2: shell pdftoppm fallback.
-    match render_with_pdftoppm(pdf_path, max_pages, output_dir) {
+    match render_with_pdftoppm(pdf_path, max_pages, output_dir, dpi) {
         Ok(paths) => return Ok(paths),
         Err(e) => tracing::debug!("pdftoppm unavailable or failed: {}", e),
     }
@@ -86,25 +135,123 @@ fn render_pdf_pages_inner(
     )
 }
 
-/// Return total page count for `pdf_path`, or `None` if it can't be
-/// determined (no `pdfinfo` available, malformed PDF, etc.). Used to
-/// bound the pdftoppm render loop so we don't ask for pages past EOF.
-fn pdf_page_count(pdf_path: &Path) -> Option<usize> {
-    let path_str = pdf_path.to_str()?;
-    let out = std::process::Command::new("pdfinfo")
-        .arg(path_str)
+/// Page geometry of a PDF, as far as `pdfinfo` can report it.
+///
+/// Both fields are optional because `pdfinfo` degrades in steps: absent
+/// entirely (not installed), present but unable to open the file, or
+/// present and reporting a page count while saying nothing usable about
+/// page size. Callers must treat "unknown" as "unbounded", never as
+/// "small" — that assumption is what let #814 through.
+#[derive(Debug, Default)]
+struct PdfGeometry {
+    /// Total pages in the document.
+    pages: Option<usize>,
+    /// Area of the largest page, in square points (1/72 inch). Raster
+    /// memory is proportional to this times `dpi^2`.
+    max_area_pt: Option<f64>,
+}
+
+/// Ask `pdfinfo` for the page count and the per-page sizes, inspecting
+/// only the first `limit` pages — those are the only ones a render will
+/// touch, and `-f`/`-l` keeps a 5000-page document from printing 10k
+/// lines of geometry.
+fn pdf_geometry(pdf_path: &Path, limit: usize) -> PdfGeometry {
+    let mut geo = PdfGeometry::default();
+    let Some(path_str) = pdf_path.to_str() else {
+        return geo;
+    };
+    let Ok(out) = std::process::Command::new("pdfinfo")
+        .args(["-f", "1", "-l", &limit.max(1).to_string(), path_str])
         .output()
-        .ok()?;
+    else {
+        return geo;
+    };
     if !out.status.success() {
-        return None;
+        return geo;
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
         if let Some(rest) = line.strip_prefix("Pages:") {
-            return rest.trim().parse::<usize>().ok();
+            geo.pages = rest.trim().parse::<usize>().ok();
+        } else if let Some((w, h)) = parse_page_size_line(line) {
+            let area = w * h;
+            geo.max_area_pt = Some(match geo.max_area_pt {
+                Some(prev) if prev > area => prev,
+                _ => area,
+            });
         }
     }
-    None
+    geo
+}
+
+/// Parse one `pdfinfo` per-page line into its width and height in points.
+///
+/// The format is `Page    1 size:  595 x 842 pts (A4)` — note the
+/// document-level `Page size:  595 x 842 pts (A4)` line, which differs
+/// only by the missing page number. Requiring the number to parse is
+/// what tells the two apart, so the document-level line never
+/// contributes a bogus "page 0".
+pub(crate) fn parse_page_size_line(line: &str) -> Option<(f64, f64)> {
+    let rest = line.strip_prefix("Page")?;
+    let (num, tail) = rest.split_once(" size:")?;
+    num.trim().parse::<usize>().ok()?;
+    let dims = tail.trim().split(" pts").next()?.trim();
+    let (w, h) = dims.split_once('x')?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+}
+
+/// Area of the largest page among the first `limit` pages of `pdf_path`,
+/// in square points.
+///
+/// Public so a caller can explain a clamped render instead of silently
+/// handing back a lower-resolution image than it asked for. `None` means
+/// the geometry could not be measured — not that the pages are small.
+///
+/// `limit` must be the same page bound the render will use. Measuring
+/// page 1 while rendering 200 would report a resolution the render never
+/// chose, on a document whose large pages are simply not first.
+pub fn max_page_area_pt(pdf_path: &Path, limit: usize) -> Option<f64> {
+    pdf_geometry(pdf_path, limit).max_area_pt
+}
+
+/// Resolution to actually render at, given the largest page's area.
+///
+/// `requested` is honoured for ordinary documents and scaled down for
+/// large-format pages until the raster fits [`MAX_PIXELS_PER_PAGE`]. It
+/// never drops below [`MIN_DPI`]: past that point resolution is no
+/// longer the lever, and the caller gets a bounded pixel box instead
+/// (see `scale_to_box`).
+pub fn effective_dpi(max_area_pt: f64, requested: u32) -> u32 {
+    let requested = requested.clamp(MIN_DPI, MAX_DPI);
+    // Also rejects NaN, which would otherwise propagate into the
+    // comparison below and silently disable the budget.
+    if !(max_area_pt > 0.0) {
+        return requested;
+    }
+    let px = max_area_pt * (requested as f64 / 72.0).powi(2);
+    if px <= MAX_PIXELS_PER_PAGE {
+        return requested;
+    }
+    // px = area * (dpi/72)^2  =>  dpi = 72 * sqrt(px / area)
+    let fitted = 72.0 * (MAX_PIXELS_PER_PAGE / max_area_pt).sqrt();
+    (fitted.floor() as u32).clamp(MIN_DPI, requested)
+}
+
+/// `pdftoppm -scale-to` box needed when even [`MIN_DPI`] overflows the
+/// budget — a page so large that no resolution is safe.
+///
+/// Returns `None` when `-r dpi` already stays inside the budget, because
+/// `-scale-to` OVERRIDES `-r` in poppler (it re-derives the resolution
+/// from the box), so passing both would silently discard the caller's
+/// requested resolution and upscale small pages.
+fn scale_to_box(max_area_pt: f64, dpi: u32) -> Option<u32> {
+    if !(max_area_pt > 0.0) {
+        return None;
+    }
+    let px = max_area_pt * (dpi as f64 / 72.0).powi(2);
+    if px <= MAX_PIXELS_PER_PAGE {
+        return None;
+    }
+    Some(pixel_box())
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +332,9 @@ fn render_with_pdfium(
                 .get(i as PdfPageIndex)
                 .map_err(|e| format!("Failed to get page {}: {}", i + 1, e))?;
 
+            // Bounded by target WIDTH, which is why this path needs no
+            // `dpi` argument: 2000 px across is 5.7 Mpx even on an A0
+            // page, so it cannot reproduce the #814 memory blowup.
             let bitmap = page
                 .render_with_config(&PdfRenderConfig::new().set_target_width(2000))
                 .map_err(|e| format!("Failed to render page {}: {}", i + 1, e))?;
@@ -225,6 +375,7 @@ fn render_with_pdftoppm(
     pdf_path: &Path,
     max_pages: usize,
     output_dir: &Path,
+    requested_dpi: u32,
 ) -> Result<Vec<PathBuf>, String> {
     // Check that pdftoppm is available.
     which::which("pdftoppm").map_err(|_| "pdftoppm not found in PATH".to_string())?;
@@ -236,6 +387,8 @@ fn render_with_pdftoppm(
         .to_str()
         .ok_or_else(|| "Output directory path is not valid UTF-8".to_string())?;
 
+    let geometry = pdf_geometry(pdf_path, max_pages);
+
     // Bound the render loop to the document's actual page count when
     // pdfinfo is available. Without this, batches past EOF make
     // pdftoppm error with "Wrong page range given: the first page (N)
@@ -243,12 +396,48 @@ fn render_with_pdftoppm(
     // returns Err and the caller wipes the already-rendered batches.
     // When pdfinfo isn't installed we fall back to max_pages and rely
     // on per-batch error tolerance below.
-    let effective_max = match pdf_page_count(pdf_path) {
+    let effective_max = match geometry.pages {
         Some(total) => total.min(max_pages),
         None => max_pages,
     };
     if effective_max == 0 {
         return Err("pdftoppm: PDF reports zero pages".into());
+    }
+
+    // Resolve the resolution against the page's own area. `-r 200` used
+    // to be the only value obtainable, which is comfortable for an A4
+    // text page (3.9 Mpx) and fatal for an A0 map (62 Mpx) — one such
+    // page took the daemon down four times in 117 s (#814).
+    //
+    // Two bounds, mutually exclusive:
+    // 1. `-r` at the highest resolution the page area allows, so normal
+    //    documents keep the caller's requested DPI.
+    // 2. `-scale-to`, when even MIN_DPI overflows the budget or pdfinfo
+    //    could not measure the page. It fits each page inside a fixed
+    //    pixel box, so the raster stays bounded whatever the page size —
+    //    the only guarantee that survives unknown geometry. Never passed
+    //    beside `-r`: poppler re-derives the resolution from the box, so
+    //    `-r` would be silently discarded and small pages upscaled.
+    let dpi = match geometry.max_area_pt {
+        Some(area) => effective_dpi(area, requested_dpi),
+        None => requested_dpi.clamp(MIN_DPI, MAX_DPI),
+    };
+    let scale_to = match geometry.max_area_pt {
+        Some(area) => scale_to_box(area, dpi),
+        None => Some(pixel_box()),
+    };
+    if dpi < requested_dpi || scale_to.is_some() {
+        tracing::warn!(
+            "pdftoppm: large-format page — rendering at {} DPI{} (requested {} DPI) to stay \
+             inside the {} Mpx per-page budget (#814)",
+            dpi,
+            match scale_to {
+                Some(box_px) => format!(" in a {box_px}x{box_px} px box"),
+                None => String::new(),
+            },
+            requested_dpi,
+            (MAX_PIXELS_PER_PAGE / 1_000_000.0) as u32,
+        );
     }
 
     // pdftoppm generates files named <prefix>-01.png, <prefix>-02.png, …
@@ -263,18 +452,25 @@ fn render_with_pdftoppm(
     while start <= effective_max {
         let batch_end = (start + BATCH_SIZE - 1).min(effective_max);
 
-        let output = std::process::Command::new("pdftoppm")
-            .args([
-                "-png",
-                "-r",
-                "200",
-                "-f",
-                &start.to_string(),
-                "-l",
-                &batch_end.to_string(),
-                pdf_path_str,
-                &format!("{}/{}", out_dir_str, prefix),
-            ])
+        let mut cmd = std::process::Command::new("pdftoppm");
+        cmd.args([
+            "-png",
+            "-f",
+            &start.to_string(),
+            "-l",
+            &batch_end.to_string(),
+        ]);
+        match scale_to {
+            // Mutually exclusive by construction: poppler re-derives the
+            // resolution from the box, so a `-r` beside `-scale-to` is
+            // silently discarded — and worse, small pages would be
+            // upscaled to the box while large ones shrank.
+            Some(box_px) => cmd.args(["-scale-to", &box_px.to_string()]),
+            None => cmd.args(["-r", &dpi.to_string()]),
+        };
+        let output = cmd
+            .arg(pdf_path_str)
+            .arg(format!("{}/{}", out_dir_str, prefix))
             .output()
             .map_err(|e| format!("Failed to execute pdftoppm: {}", e))?;
 

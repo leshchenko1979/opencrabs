@@ -36,6 +36,16 @@ struct PdfToImagesInput {
     /// Merged with `pages`. Omit to render from page 1 up to the cap.
     #[serde(default)]
     page_range: Option<String>,
+
+    /// Optional: render resolution in DPI (72–300, default 200).
+    ///
+    /// The renderer additionally caps each page's pixel area, so a
+    /// large-format page (a zoning map, an A0 drawing) is rendered at a
+    /// lower effective resolution than requested rather than taking the
+    /// whole daemon down with it (#814). The output says which
+    /// resolution was actually used.
+    #[serde(default)]
+    dpi: Option<u32>,
 }
 
 #[async_trait]
@@ -71,6 +81,12 @@ impl Tool for PdfToImagesTool {
                 "page_range": {
                     "type": "string",
                     "description": "Optional: page range like \"1-5\", \"3,7,10-12\". Merged with `pages`. Omit to render from page 1 up to the cap."
+                },
+                "dpi": {
+                    "type": "integer",
+                    "minimum": 72,
+                    "maximum": 300,
+                    "description": "Optional: render resolution in DPI (default 200). Raise it for small text on a large sheet; the renderer still caps each page's pixel area, so a large-format page may come out at a lower effective resolution than requested."
                 }
             },
             "required": ["path"]
@@ -130,21 +146,40 @@ impl Tool for PdfToImagesTool {
             None => MAX_PAGES,
         };
 
-        let out_dir = render_output_dir(&path);
+        let requested_dpi = input
+            .dpi
+            .unwrap_or(crate::utils::pdf_vision::DEFAULT_DPI)
+            .clamp(
+                crate::utils::pdf_vision::MIN_DPI,
+                crate::utils::pdf_vision::MAX_DPI,
+            );
+
         let path_owned = path.clone();
-        let out_owned = out_dir.clone();
+        let out_owned = render_output_dir(&path);
+        // The geometry probe and the render both shell out, so they share
+        // one blocking hop — `pdfinfo` on the async executor would stall
+        // every other task on the worker for the duration of a subprocess.
+        // The DPI is resolved here rather than reported afterwards so the
+        // answer can say what actually happened: a silently downscaled map
+        // is worse than a stated one, because the vision model reads mush
+        // and the agent relays it as detail.
         let rendered = tokio::task::spawn_blocking(move || {
-            crate::utils::pdf_vision::render_pdf_pages(
+            let effective_dpi = crate::utils::pdf_vision::max_page_area_pt(&path_owned, render_upto)
+                .map(|area| crate::utils::pdf_vision::effective_dpi(area, requested_dpi))
+                .unwrap_or(requested_dpi);
+            let pages = crate::utils::pdf_vision::render_pdf_pages(
                 path_owned.to_str().unwrap_or(""),
                 render_upto,
                 out_owned.to_str().unwrap_or(""),
-            )
+                requested_dpi,
+            )?;
+            Ok::<_, String>((pages, effective_dpi))
         })
         .await
         .map_err(|e| ToolError::Execution(format!("PDF render task failed: {e}")))?;
 
-        let all_pages = match rendered {
-            Ok(p) if !p.is_empty() => p,
+        let (all_pages, effective_dpi) = match rendered {
+            Ok((p, dpi)) if !p.is_empty() => (p, dpi),
             Ok(_) => {
                 return Ok(ToolResult::error(format!(
                     "PDF renderer produced no pages for {}",
@@ -157,6 +192,7 @@ impl Tool for PdfToImagesTool {
                 )));
             }
         };
+
 
         // Select the requested pages by 1-indexed position; an empty
         // request means "all rendered pages". Out-of-range numbers are
@@ -201,10 +237,22 @@ impl Tool for PdfToImagesTool {
                 "\n[Requested pages not present (document has {total_rendered} page(s)): {missing:?}]"
             ));
         }
+        // Only stated when the cap actually bit. A note on every render
+        // would be noise; silence about a downscale is a trap.
+        if effective_dpi < requested_dpi {
+            output.push_str(&format!(
+                "\n[Rendered at {effective_dpi} DPI instead of {requested_dpi}: the largest page \
+                 would exceed the per-page pixel budget, so it was downscaled rather than \
+                 OOM-killing the daemon. Small text may be unreadable; raise `dpi` only for a \
+                 document whose pages are smaller than this one's.]"
+            ));
+        }
 
         Ok(ToolResult::success(output)
             .with_metadata("path".to_string(), path.display().to_string())
-            .with_metadata("pages_rendered".to_string(), selected.len().to_string()))
+            .with_metadata("pages_rendered".to_string(), selected.len().to_string())
+            .with_metadata("requested_dpi".to_string(), requested_dpi.to_string())
+            .with_metadata("effective_dpi".to_string(), effective_dpi.to_string()))
     }
 }
 
