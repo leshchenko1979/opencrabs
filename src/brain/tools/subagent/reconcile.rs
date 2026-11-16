@@ -13,7 +13,7 @@
 //! is moved to [`WorkState::Interrupted`] and returned to the caller, which
 //! decides how to report it into the originating session.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::brain::agent::service::work_status::{self, WorkKind, WorkStatus};
 
@@ -21,20 +21,132 @@ use crate::brain::agent::service::work_status::{self, WorkKind, WorkStatus};
 /// Matches the 7 days the module has always documented.
 pub const STALE_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Move every non-terminal sub-agent status file to `Interrupted`, then sweep
-/// files that have aged out.
+/// One pass over the status directory: interrupt every sub-agent still
+/// mid-flight, and sweep the files that have aged out.
 ///
 /// Returns the agents that were interrupted, oldest file first, so the caller
 /// can tell their sessions. An agent whose file cannot be re-written is still
 /// returned: the session deserves the report even when the file is stuck, and
 /// the write failure is logged rather than swallowed.
 ///
-/// Ordering matters. Reconciliation runs before the sweep so an interrupted
-/// agent gets its `completed_at` stamped first and ages out on the same
-/// schedule as any other terminal state, instead of lingering as an
-/// unexplained file.
+/// # One pass, not two (#858)
+///
+/// This used to be two walks of the same directory: `mark_orphans_interrupted`
+/// parsed every file, then `cleanup_stale` re-opened and re-parsed all of them
+/// to reach the same struct. On a 30k-file status directory that was 30k extra
+/// opens and parses on every boot, on the startup task. Each file is now read
+/// and parsed once, and both decisions come from that one parse.
+///
+/// # Ordering is load-bearing
+///
+/// Interruption is decided before staleness, and a file interrupted in this pass
+/// is never swept in this pass. [`WorkStatus::mark_interrupted`] stamps
+/// `completed_at = now`, which makes the file fresh under the finish rule — but
+/// the skip is explicit rather than incidental, so a failed re-write (where the
+/// on-disk bytes and mtime are still the originals) cannot turn a
+/// just-interrupted agent into a deletion. An interrupted agent ages out later
+/// on the same schedule as any other terminal state.
 pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
-    let interrupted = mark_orphans_interrupted();
+    let dir = work_status::status_dir();
+    let cutoff = SystemTime::now()
+        .checked_sub(STALE_AFTER)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+
+    let mut interrupted: Vec<WorkStatus> = Vec::new();
+    let mut scanned = 0usize;
+    let mut removed = 0usize;
+
+    if dir.exists() {
+        match std::fs::read_dir(&dir) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().is_none_or(|e| e != "json") {
+                        continue;
+                    }
+                    scanned += 1;
+
+                    // A file we cannot read or parse is not silently skipped: it
+                    // may be a stranded agent, and going quiet here is how the
+                    // original bug hid. It stays eligible for the sweep by its
+                    // mtime — a half-written file is not immortal.
+                    let mut status = match std::fs::read_to_string(&path) {
+                        Ok(data) => match serde_json::from_str::<WorkStatus>(&data) {
+                            Ok(status) => Some(status),
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "subagent",
+                                    "Could not parse status file {}: {e}",
+                                    path.display()
+                                );
+                                None
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "subagent",
+                                "Could not read status file {}: {e}",
+                                path.display()
+                            );
+                            None
+                        }
+                    };
+
+                    let is_orphan = matches!(
+                        status.as_ref(),
+                        Some(s) if s.kind == WorkKind::Agent && !s.state.is_terminal()
+                    );
+                    if is_orphan {
+                        if let Some(mut orphan) = status.take() {
+                            if let Err(e) = orphan.mark_interrupted() {
+                                tracing::error!(
+                                    target: "subagent",
+                                    "Sub-agent {} was interrupted by a restart but its status could \
+                                     not be updated, so it will keep reading as running: {e}",
+                                    orphan.id
+                                );
+                            }
+                            tracing::warn!(
+                                target: "subagent",
+                                "Sub-agent '{}' ({}) for session {} was interrupted by a restart",
+                                orphan.label,
+                                orphan.id,
+                                orphan.parent_session_id.as_deref().unwrap_or(&orphan.session_id)
+                            );
+                            interrupted.push(orphan);
+                        }
+                        // Never sweep what this pass just interrupted.
+                        continue;
+                    }
+
+                    if work_status::is_stale(status.as_ref(), &path, cutoff) {
+                        match work_status::sweep_status_file(&path) {
+                            Ok(()) => removed += 1,
+                            Err(e) => {
+                                // One stuck file must not abandon the rest of
+                                // the pass: the interrupted reports still owe
+                                // delivery.
+                                tracing::warn!(
+                                    target: "subagent",
+                                    "Could not remove stale status file {}: {e}",
+                                    path.display()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "subagent",
+                    "Could not read status dir {}: {e}",
+                    dir.display()
+                );
+            }
+        }
+    }
+
+    interrupted.sort_by(|a, b| a.spawned_at.cmp(&b.spawned_at));
 
     // Hand the session→run map to the boot-resume path (#848). This pass has
     // just read every agent file, so the map is free here — and it saves the
@@ -46,93 +158,12 @@ pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
             .collect(),
     );
 
-    match work_status::cleanup_stale(STALE_AFTER) {
-        Ok((scanned, removed)) if removed > 0 => {
-            tracing::info!(
-                target: "subagent",
-                "Swept {removed} stale status file(s) of {scanned} scanned"
-            );
-        }
-        Ok(_) => {}
-        Err(e) => {
-            // Costs disk, not correctness, so startup continues.
-            tracing::warn!(target: "subagent", "Status sweep failed: {e}");
-        }
+    if removed > 0 {
+        tracing::info!(
+            target: "subagent",
+            "Swept {removed} stale status file(s) of {scanned} scanned"
+        );
     }
 
     interrupted
-}
-
-/// Walk the unified status directory and interrupt sub-agents still mid-flight.
-fn mark_orphans_interrupted() -> Vec<WorkStatus> {
-    let dir = work_status::status_dir();
-    if !dir.exists() {
-        return Vec::new();
-    }
-
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) => {
-            tracing::warn!(
-                target: "subagent",
-                "Could not read status dir {}: {e}",
-                dir.display()
-            );
-            return Vec::new();
-        }
-    };
-
-    let mut orphans: Vec<WorkStatus> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "json") {
-            continue;
-        }
-        // A file we cannot read or parse is not silently skipped: it may be a
-        // stranded agent, and going quiet here is how the original bug hid.
-        let data = match std::fs::read_to_string(&path) {
-            Ok(data) => data,
-            Err(e) => {
-                tracing::warn!(
-                    target: "subagent",
-                    "Could not read status file {}: {e}",
-                    path.display()
-                );
-                continue;
-            }
-        };
-        let mut status: WorkStatus = match serde_json::from_str(&data) {
-            Ok(status) => status,
-            Err(e) => {
-                tracing::warn!(
-                    target: "subagent",
-                    "Could not parse status file {}: {e}",
-                    path.display()
-                );
-                continue;
-            }
-        };
-        if status.kind != WorkKind::Agent || status.state.is_terminal() {
-            continue;
-        }
-        if let Err(e) = status.mark_interrupted() {
-            tracing::error!(
-                target: "subagent",
-                "Sub-agent {} was interrupted by a restart but its status could not be updated, \
-                 so it will keep reading as running: {e}",
-                status.id
-            );
-        }
-        tracing::warn!(
-            target: "subagent",
-            "Sub-agent '{}' ({}) for session {} was interrupted by a restart",
-            status.label,
-            status.id,
-            status.parent_session_id.as_deref().unwrap_or(&status.session_id)
-        );
-        orphans.push(status);
-    }
-
-    orphans.sort_by(|a, b| a.spawned_at.cmp(&b.spawned_at));
-    orphans
 }
