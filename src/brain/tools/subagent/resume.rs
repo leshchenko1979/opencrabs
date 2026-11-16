@@ -92,8 +92,11 @@ impl Tool for ResumeAgentTool {
         // final-message law on every resume (the original spawn's preamble
         // was consumed by the first run's context).
         let prompt = format!(
-            "{}\n\n{prompt}",
-            crate::cli::tool_setup::HEADLESS_PREAMBLE.trim_start_matches('\n')
+            "{}{}\n\n{prompt}",
+            crate::cli::tool_setup::HEADLESS_PREAMBLE.trim_start_matches('\n'),
+            // #859: same channel as the original spawn — a resumed child is
+            // just as able to park for an answer as a fresh one.
+            crate::cli::tool_setup::SUBAGENT_ANSWER_CHANNEL.trim_start_matches('\n')
         );
 
         // #852: an agent that outlived the process is absent from the map but

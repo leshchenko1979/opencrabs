@@ -140,6 +140,92 @@ pub(crate) fn push_result(
     }
 }
 
+/// Build the message a sub-agent injects when it cannot proceed without its
+/// parent (#859). Pure, so the framing is testable without spawning anything.
+///
+/// Deliberately shaped NOT to read like `completion_message`: a parent that
+/// mistakes a blocker for a result will report half-finished work to the user.
+/// The closing line therefore says what is due and — just as importantly —
+/// that nothing is due this second, so a parent mid-turn can finish its
+/// thought instead of dropping everything.
+pub(crate) fn attention_message(
+    label: &str,
+    agent_id: &str,
+    kind: &str,
+    text: &str,
+) -> crate::brain::agent::QueuedUserMessage {
+    let what = match kind {
+        "question" => "has a question it cannot answer on its own",
+        "blocker" => "is blocked and cannot continue",
+        _ => "wants your attention",
+    };
+    let display = match kind {
+        "question" => format!("❓ sub-agent asked: {label}"),
+        "blocker" => format!("⛔ sub-agent blocked: {label}"),
+        _ => format!("🔔 sub-agent needs you: {label}"),
+    };
+    let context_text = format!(
+        "[System: the sub-agent you spawned needs your input.\n\
+         Agent: {label} (id {agent_id})\n\
+         Status: {kind} — {what}\n\
+         It said:\n{text}\n\n\
+         Nothing is blocked on you reading this now — it is parked, not finished, and will \
+         wait. When you get to it, answer with `send_input {agent_id}` (it resumes from where \
+         it stopped) or read its full history with `agent_progress {agent_id}`. Do not report \
+         its work as done: it has not finished.]"
+    );
+    crate::brain::agent::QueuedUserMessage {
+        context_text,
+        display_text: display,
+        origin: crate::brain::agent::PushOrigin::SubAgent,
+        bg_meta: None,
+    }
+}
+
+/// Tell a parent that its sub-agent cannot proceed without it (#859).
+///
+/// `interrupt = true` matches [`push_result`] and `session_notify` (#393), and
+/// it is the load-bearing choice here. The fork #13 mid-turn gate refuses a
+/// non-interrupt push while the target is mid-turn — and a parent that spawned
+/// a child and kept working is mid-turn in the normal case, so the gate would
+/// swallow exactly the message this exists to deliver, leaving the child
+/// parked in silence. The message is framed as a `[System: …]` block that says
+/// outright nothing is due this second, which is what keeps an interrupt from
+/// derailing the turn it lands in.
+pub(crate) fn push_attention(
+    parent_session_id: uuid::Uuid,
+    label: &str,
+    agent_id: &str,
+    kind: &str,
+    text: &str,
+) {
+    use crate::brain::agent::service::session_routes::{Delivery, deliver_to_session};
+
+    let msg = attention_message(label, agent_id, kind, text);
+    match deliver_to_session(parent_session_id, msg, true) {
+        Delivery::Delivered => tracing::info!(
+            "Sub-agent {agent_id} reported a {kind}; session {parent_session_id} was told"
+        ),
+        Delivery::Parked => tracing::info!(
+            "Sub-agent {agent_id}'s {kind} is parked for session {parent_session_id} until its \
+             channel claims it"
+        ),
+        Delivery::NoRoute => tracing::warn!(
+            "Sub-agent {agent_id} reported a {kind} but session {parent_session_id} has no \
+             route; its ledger entry is the only record"
+        ),
+        Delivery::RefusedInFlight { redirected_to } => tracing::warn!(
+            "Sub-agent {agent_id}'s {kind} was refused by the interrupt gate for session \
+             {parent_session_id} (redirected to {redirected_to:?}); the parent will not hear \
+             about it"
+        ),
+        Delivery::Redirected { to } => tracing::info!(
+            "Sub-agent {agent_id}'s {kind} was redirected from session {parent_session_id} to \
+             session {to}, which now owns its channel"
+        ),
+    }
+}
+
 /// Tool that spawns a child agent to handle a sub-task.
 pub struct SpawnAgentTool {
     manager: Arc<SubAgentManager>,
@@ -529,9 +615,14 @@ impl Tool for SpawnAgentTool {
         let stacked = super::brain::child_prompt(read_only, include_brain, &prompt);
         let notes_len = stacked.len() - prompt.len();
         let full_prompt = format!(
-            "{}{}{}",
+            "{}{}{}{}",
             &stacked[..notes_len],
             crate::cli::tool_setup::HEADLESS_PREAMBLE.trim_start_matches('\n'),
+            // #859: the preamble just told this child it cannot ask anyone
+            // anything. It can — its parent is one `report_progress` away —
+            // and without this line a blocked child guesses instead of
+            // parking. Slotted beside the preamble, above the task.
+            crate::cli::tool_setup::SUBAGENT_ANSWER_CHANNEL.trim_start_matches('\n'),
             &stacked[notes_len..]
         );
 
@@ -696,6 +787,24 @@ impl Tool for SpawnAgentTool {
                             agent_id_clone,
                             iteration
                         );
+
+                        // #859: the child is now parked, and before this it
+                        // parked in total silence — nothing told the parent,
+                        // so an agent waiting on an approval or a decision
+                        // looked identical to one still working, and the
+                        // parent either waited forever or reported its work
+                        // unfinished. Throttled like every other attention
+                        // push: a child that re-parks each round has one
+                        // question, not one per round.
+                        if manager.attention_allowed(&agent_id_clone) {
+                            push_attention(
+                                parent_session_id,
+                                &label_clone,
+                                &agent_id_clone,
+                                "question",
+                                &response.content.chars().take(600).collect::<String>(),
+                            );
+                        }
 
                         // Wait for follow-up input or shutdown
                         let next = tokio::select! {

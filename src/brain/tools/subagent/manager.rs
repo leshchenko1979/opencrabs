@@ -6,11 +6,19 @@
 
 use crate::brain::agent::service::work_status::{WorkKind, WorkState, WorkStatus};
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+/// Minimum gap between two "your child needs you" notifies for one agent
+/// (#859). A child that reports three blockers in a row has one problem, not
+/// three, and every notify lands in the parent's context as a message it has
+/// to read past to find the one that mattered. The ledger entry is never
+/// throttled — only the wake.
+const ATTENTION_FLOOR: Duration = Duration::from_secs(30);
 
 /// State of a spawned sub-agent.
 ///
@@ -173,6 +181,11 @@ impl ResolvedAgent {
 /// Manages all sub-agents for a parent agent instance.
 pub struct SubAgentManager {
     agents: RwLock<HashMap<String, SubAgent>>,
+    /// Last attention notify per agent id (#859). Transport state, not
+    /// identity: deliberately absent from [`SubAgent`], so a rehydrated agent
+    /// starts with a clean slate instead of inheriting a throttle window from
+    /// a process that no longer exists.
+    attention: Mutex<HashMap<String, Instant>>,
 }
 
 impl SubAgentManager {
@@ -180,7 +193,32 @@ impl SubAgentManager {
     pub fn new() -> Self {
         Self {
             agents: RwLock::new(HashMap::new()),
+            attention: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Whether an attention notify for `id` may be sent now, recording the
+    /// instant when it may (#859).
+    ///
+    /// `false` means one already went out inside [`ATTENTION_FLOOR`]. Nothing
+    /// is lost by throttling: the entry that triggered this is in the ledger
+    /// already, which is what the parent reads — only the wake is rationed.
+    pub fn attention_allowed(&self, id: &str) -> bool {
+        let mut last = self
+            .attention
+            .lock()
+            .expect("subagent attention lock poisoned");
+        let now = Instant::now();
+        // `copied()` on purpose: the guard borrows `last`, and holding that
+        // borrow across the `insert` below is a borrowck error the compiler
+        // reports three lines away from the cause.
+        if let Some(previous) = last.get(id).copied()
+            && now.duration_since(previous) < ATTENTION_FLOOR
+        {
+            return false;
+        }
+        last.insert(id.to_string(), now);
+        true
     }
 
     /// Generate a short agent ID (first 8 chars of a UUID).

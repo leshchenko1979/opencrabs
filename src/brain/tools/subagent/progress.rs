@@ -120,7 +120,10 @@ impl Tool for ReportProgressTool {
          spawned you while you are still working. Use it for findings, \
          decisions, and especially blockers or questions — the parent reads \
          them without waiting for you to finish. Keep each entry to one or two \
-         sentences; this is a status line, not a report."
+         sentences; this is a status line, not a report. A `blocker` or \
+         `question` ALSO notifies the parent that you are stuck, so it is the \
+         right call when you genuinely cannot continue without an answer: \
+         record it, then end your turn and wait to be resumed."
     }
 
     fn input_schema(&self) -> Value {
@@ -193,6 +196,21 @@ impl Tool for ReportProgressTool {
         };
 
         ledger::append(&id, &LedgerEntry::new(kind, text));
+
+        // #859: a blocker or a question is the child saying it cannot move
+        // without the parent, and until now the ledger was write-only from its
+        // side — the parent found out when it next happened to look, which for
+        // a parked child is never. Notify on the two kinds that mean "stuck",
+        // never on note/tool_call/decision: those are progress, and waking a
+        // parent for progress is the noise that makes it stop reading.
+        if matches!(kind, LedgerKind::Blocker | LedgerKind::Question)
+            && let Some(parent) = self.manager.get_parent_session_id(&id)
+            && self.manager.attention_allowed(&id)
+        {
+            let label = self.manager.get_label(&id).unwrap_or_else(|| id.clone());
+            super::spawn::push_attention(parent, &label, &id, kind.as_str(), text);
+        }
+
         Ok(ToolResult::success(format!(
             "recorded ({}) on agent {id}",
             kind.as_str()

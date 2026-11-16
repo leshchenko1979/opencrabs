@@ -343,4 +343,15 @@ pub(crate) fn register_runtime_tools(tool_registry: &Arc<ToolRegistry>, config: 
 /// (TUI, channels), where the directive is wrong — there, intermediate
 /// messages ARE visible and narrating progress is correct behaviour. A
 /// brain-only rule cannot be headless-scoped; this preamble can.
-pub const HEADLESS_PREAMBLE: &str = "\n\n## Headless session\n\nYou are running HEADLESS: the user cannot see your intermediate messages, tool calls, or progress updates — they receive ONLY your final message. That final message must be SELF-CONTAINED: state what was done with the concrete specifics (commit shas, file paths, test results, numbers), anything that failed and why, and what is needed next. Do not ask questions mid-task (no answer channel exists); make the reasonable assumption, state it, finish. Do not use `session_notify` or `suggest_options` — neither can reach a user from here. If you cannot complete the task, your final message is the only report: say what blocked you with the evidence.\n";
+pub const HEADLESS_PREAMBLE: &str = "\n\n## Headless session\n\nYou are running HEADLESS: the user cannot see your intermediate messages, tool calls, or progress updates — they receive ONLY your final message. That final message must be SELF-CONTAINED: state what was done with the concrete specifics (commit shas, file paths, test results, numbers), anything that failed and why, and what is needed next. Do not ask the user questions mid-task; make the reasonable assumption, state it, finish. Do not use `session_notify` or `suggest_options` — neither can reach a user from here. If you cannot complete the task, your final message is the only report: say what blocked you with the evidence.\n";
+
+/// Appended to a SUB-AGENT's prompt, right after [`HEADLESS_PREAMBLE`] (#859).
+///
+/// The preamble above says a headless run cannot ask anyone anything, which is
+/// true of a plain headless CLI run and false of a sub-agent: a child has a
+/// ledger its parent reads, and a child that ends its turn parked can be
+/// answered with `send_input`. Kept out of the preamble itself because that
+/// constant also rides `cli::commands` and `cli::ui`, which have no parent at
+/// all — pointing those at `report_progress` would hand them a tool that
+/// refuses them.
+pub const SUBAGENT_ANSWER_CHANNEL: &str = "\n\n## If you get blocked\n\nYou DO have a channel to the parent that spawned you, and it is not your final message. When an answer genuinely decides the work — not a preference you could pick yourself — call `report_progress` with kind `question` (or `blocker` if something prevents progress), then END YOUR TURN. That parks you where the parent can answer, and the parent is told you are waiting. Answering costs it one `send_input`; guessing wrong costs it the whole run. Do not report a blocker you can work around, and do not ask twice.\n";
