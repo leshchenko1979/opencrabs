@@ -222,9 +222,11 @@ pub fn max_page_area_pt(pdf_path: &Path, limit: usize) -> Option<f64> {
 /// (see `scale_to_box`).
 pub fn effective_dpi(max_area_pt: f64, requested: u32) -> u32 {
     let requested = requested.clamp(MIN_DPI, MAX_DPI);
-    // Also rejects NaN, which would otherwise propagate into the
-    // comparison below and silently disable the budget.
-    if !(max_area_pt > 0.0) {
+    // Names NaN explicitly rather than relying on `!(x > 0.0)` being true
+    // for it: the comparison below is false for NaN, so an unguarded NaN
+    // would fall through and silently disable the budget — the exact
+    // shape of #814.
+    if max_area_pt.is_nan() || max_area_pt <= 0.0 {
         return requested;
     }
     let px = max_area_pt * (requested as f64 / 72.0).powi(2);
@@ -244,7 +246,7 @@ pub fn effective_dpi(max_area_pt: f64, requested: u32) -> u32 {
 /// from the box), so passing both would silently discard the caller's
 /// requested resolution and upscale small pages.
 fn scale_to_box(max_area_pt: f64, dpi: u32) -> Option<u32> {
-    if !(max_area_pt > 0.0) {
+    if max_area_pt.is_nan() || max_area_pt <= 0.0 {
         return None;
     }
     let px = max_area_pt * (dpi as f64 / 72.0).powi(2);

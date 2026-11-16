@@ -147,6 +147,15 @@ fn effective_dpi_treats_unmeasurable_area_as_no_opinion() {
     assert_eq!(effective_dpi(-5.0, 200), 200);
 }
 
+/// A non-finite area must take the BOUNDED path, not the "no opinion"
+/// one: infinity means the geometry is enormous, and treating it as
+/// unmeasurable would render at the requested DPI with no cap at all —
+/// the unbounded arm that #814 died in.
+#[test]
+fn effective_dpi_bounds_an_infinite_area() {
+    assert_eq!(effective_dpi(f64::INFINITY, 300), MIN_DPI);
+}
+
 /// The caller's own bounds are enforced here too, so a `dpi: 5000` from
 /// a model cannot spend the budget on vision tokens no provider keeps.
 #[test]

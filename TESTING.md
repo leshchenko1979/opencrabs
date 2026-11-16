@@ -440,7 +440,7 @@ Born from two real incidents (#646, #1178): hard-coded fixture constants broke o
 | Tests — Pdf Page Range Parser | 25 | `src/tests/pdf_page_range_parser_test.rs` |
 | Tests — Pdf Smart Routing | 5 | `src/tests/pdf_smart_routing_test.rs` |
 | Tests — Pdf To Images | 4 | `src/tests/pdf_to_images_test.rs` |
-| Tests — Pdf Vision | 14 | `src/tests/pdf_vision_test.rs` |
+| Tests — Pdf Vision | 15 | `src/tests/pdf_vision_test.rs` |
 | Tests — Pending Request Age | 4 | `src/tests/pending_request_age_test.rs` |
 | Tests — Pending Request Thread | 3 | `src/tests/pending_request_thread_test.rs` |
 | Tests — Pending Resume No Reinsert | 3 | `src/tests/pending_resume_no_reinsert_test.rs` |
