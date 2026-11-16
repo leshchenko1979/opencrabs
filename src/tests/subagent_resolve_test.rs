@@ -332,11 +332,13 @@ fn resolving_twice_keeps_one_entry_and_the_original_spawn_time() {
         first.spawned_at, second.spawned_at,
         "the spawn time comes from the record, not from the moment of rehydration"
     );
-    // Compared as INSTANTS, not as strings: the view renders whole seconds
-    // for display while the record keeps the spawn's nanoseconds, and pinning
-    // the rendering would break the moment either format is tidied up. What
-    // must not drift is the moment itself — a rehydration that substituted
-    // `Utc::now()` would move it, and that is the bug this guards.
+    // Compared as INSTANTS, not as strings: the field carries the moment an
+    // agent started, and two renderings of one instant are still one instant.
+    // Pinning the string would fail on a format tidy-up while the thing being
+    // guarded — that a rehydration reports when the agent ACTUALLY started
+    // rather than `Utc::now()` — stayed intact. The truncation that used to
+    // make this comparison fail is gone: the view now keeps the record's full
+    // precision, because a truncated instant is a different instant.
     let view_at = chrono::DateTime::parse_from_rfc3339(&second.spawned_at)
         .expect("the view's spawn time is RFC3339");
     let record_at = chrono::DateTime::parse_from_rfc3339(&status.spawned_at)
