@@ -351,3 +351,46 @@ fn is_stale_keeps_the_three_way_decision() {
         "an undatable file falls back to the mtime arm, which cannot stat it"
     );
 }
+
+#[test]
+fn an_agent_spawned_during_the_pass_is_not_interrupted() {
+    // #858 made the pass run detached, which opened a window the two-walk shape
+    // never had: a live agent can spawn WHILE the sweep walks the directory.
+    // Interrupting its own fresh status file would corrupt the record of a run
+    // that is still going, so the pass bounds itself by its start instant.
+    // `spawned_during_pass` is the only guard standing between a detached sweep
+    // and a live agent's file, so it gets a fixture of its own.
+    isolate("spawned_during_pass");
+
+    let mut live = WorkStatus::new_agent("live-1", "started mid-pass", "sess-l", "p", None, None)
+        .unwrap();
+    live.mark_running().unwrap();
+
+    // The file's own spawn stamp is what the guard reads, so age the field, not
+    // the mtime: a pass that started before this instant must treat the agent
+    // as live.
+    let path = work_status::status_path("live-1");
+    let mut raw: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    raw["spawned_at"] = serde_json::json!(
+        chrono::Utc::now()
+            .checked_add_signed(chrono::Duration::hours(1))
+            .expect("clock within range")
+            .to_rfc3339()
+    );
+    fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
+
+    let orphans = reconcile_orphaned_agents();
+
+    assert!(
+        orphans.iter().all(|o| o.id != "live-1"),
+        "an agent spawned after the pass began is still running: interrupting it \
+         would rewrite a live run's status file out from under it"
+    );
+    let after = WorkStatus::read("live-1").expect("the live agent's file must still exist");
+    assert_eq!(
+        after.state,
+        WorkState::Running,
+        "the live agent must still read as running after the pass"
+    );
+}
