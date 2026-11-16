@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🐛 Fixes
 
+- `9897c3f5f` **tools**: bound a PDF render by page AREA instead of page count — `pdftoppm` ran at a hardcoded 200 DPI, which is 3.9 Mpx for an A4 letter and 62 Mpx for an A0 map, so ten large-format pages took the daemon's 1 GiB cgroup down four times in 117 s; each page is now capped at 10 Mpx, a page too large for even 72 DPI falls back to `-scale-to`, and `pdf_to_images` takes a `dpi` input and states the resolution it actually used (#814)
 - `859731882` **tools**: one stream vocabulary across both detached-run readers (#785)
 - `46e52136a` **task**: record WHY a detached run ended, not just its exit code (#786)
 - `793dc2a44` **db**: write a detached run's real outcome back onto its `tool_executions` row (#787)
