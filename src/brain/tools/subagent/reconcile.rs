@@ -47,6 +47,7 @@ pub const STALE_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// just-interrupted agent into a deletion. An interrupted agent ages out later
 /// on the same schedule as any other terminal state.
 pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
+    let started = std::time::Instant::now();
     let dir = work_status::status_dir();
     let cutoff = SystemTime::now()
         .checked_sub(STALE_AFTER)
@@ -158,12 +159,18 @@ pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
             .collect(),
     );
 
-    if removed > 0 {
-        tracing::info!(
-            target: "subagent",
-            "Swept {removed} stale status file(s) of {scanned} scanned"
-        );
-    }
+    let elapsed_ms = started.elapsed().as_millis();
+    let interrupted_count = interrupted.len();
+    // Unconditional (#858). The old line spoke only when `removed > 0`, so a
+    // boot that deleted nothing was silent *by construction* — which is why a
+    // boot could show no sweep line and still have walked all 30k files. The
+    // window that line sits in then had to be inferred from an absence. One
+    // line per boot makes the pass attributable instead.
+    tracing::info!(
+        target: "subagent",
+        "Status reconcile: {scanned} scanned, {removed} removed, \
+         {interrupted_count} interrupted in {elapsed_ms} ms"
+    );
 
     interrupted
 }
