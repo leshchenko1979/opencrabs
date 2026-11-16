@@ -160,9 +160,12 @@ impl ResolvedAgent {
             include_brain: agent.include_brain,
             allow_nested: agent.allow_nested,
             state: agent.state.clone(),
-            spawned_at: agent
-                .spawned_at
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            // Full precision, not `SecondsFormat::Secs`: this field is the
+            // instant an agent started, and truncating it would hand every
+            // reader a DIFFERENT moment than the record holds. Display
+            // formatting belongs to the renderer (`elapsed_label`), which
+            // only needs the instant to be true.
+            spawned_at: agent.spawned_at.to_rfc3339(),
         }
     }
 }
