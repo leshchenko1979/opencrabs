@@ -96,6 +96,25 @@ pub fn progress_path(id: &str) -> PathBuf {
     status_dir().join(format!("{}.progress.jsonl", id))
 }
 
+/// Remove a status file together with the progress ledger that belongs to it.
+///
+/// The ledger has no lifetime of its own (#852): it exists to narrate one agent,
+/// so it goes with that agent's record. Left behind, it would accumulate
+/// forever — every sweep in this module selects on `extension() == "json"` and
+/// would never see a `.jsonl`.
+///
+/// One home for that pairing, because there are two sweepers now: the standalone
+/// [`cleanup_stale`] and the merged boot pass in
+/// `brain::tools::subagent::reconcile` (#858). A second copy of this block is
+/// how one of them would quietly stop deleting ledgers.
+pub fn sweep_status_file(path: &Path) -> std::io::Result<()> {
+    fs::remove_file(path)?;
+    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        let _ = fs::remove_file(progress_path(stem));
+    }
+    Ok(())
+}
+
 /// Path to a run's captured stream (#692).
 ///
 /// A sibling stem of the status file — same `id` — so every surface prints one
@@ -1071,29 +1090,18 @@ pub fn cleanup_stale(max_age: Duration) -> std::io::Result<(usize, usize)> {
         }
         scanned += 1;
 
-        let should_delete = if let Ok(data) = fs::read_to_string(&path) {
-            if let Ok(status) = serde_json::from_str::<WorkStatus>(&data) {
-                status
-                    .finish
-                    .as_ref()
-                    .is_some_and(|f| parse_completed_at(&cutoff, &f.completed_at))
-                    || status.finish.is_none() && file_stale(&path, &cutoff)
-            } else {
-                file_stale(&path, &cutoff)
-            }
-        } else {
-            file_stale(&path, &cutoff)
+        // One parse, one decision — `is_stale` is the same predicate the merged
+        // boot pass uses (#858), so the two callers cannot drift apart.
+        let should_delete = match fs::read_to_string(&path) {
+            Ok(data) => match serde_json::from_str::<WorkStatus>(&data) {
+                Ok(status) => is_stale(Some(&status), &path, cutoff),
+                Err(_) => is_stale(None, &path, cutoff),
+            },
+            Err(_) => is_stale(None, &path, cutoff),
         };
 
         if should_delete {
-            fs::remove_file(&path)?;
-            // The ledger has no lifetime of its own (#852): it exists to
-            // narrate one agent, so it goes with that agent's record. Left
-            // behind, it would accumulate forever — the sweep above never sees
-            // a `.jsonl`.
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                let _ = fs::remove_file(progress_path(stem));
-            }
+            sweep_status_file(&path)?;
             removed += 1;
         }
     }
@@ -1235,6 +1243,37 @@ fn file_stale(path: &Path, cutoff: &SystemTime) -> bool {
         .and_then(|m| m.modified())
         .map(|mtime| mtime < *cutoff)
         .unwrap_or(true) // can't stat → delete to be safe
+}
+
+/// Is this status file old enough to sweep?
+///
+/// Exactly three shapes, and they are not interchangeable (#858):
+///
+/// - **Parsed, with a finish** → judged on its `completed_at`. A run that ended
+///   days ago ages out even when its mtime is fresh.
+/// - **Parsed, without a finish** → judged on its mtime. Covers in-flight runs
+///   and states that never stamped an end.
+/// - **Not parsed** (`status == None`: unreadable or corrupt) → judged on its
+///   mtime. A half-written file is not immortal.
+///
+/// A finish whose `completed_at` cannot be parsed is **not** stale — the same
+/// answer the pre-#858 inline predicate gave, since an unparseable timestamp
+/// short-circuits the mtime test instead of falling through to it.
+///
+/// `path`'s mtime is read HERE, so a caller that rewrites the file first must
+/// pass the status it parsed from the ORIGINAL bytes: [`WorkStatus::mark_interrupted`]
+/// restamps the file, and an mtime read after that rewrite is the rewrite's.
+/// Passing the post-interrupt status is safe for a different reason — its finish
+/// now carries `completed_at = now`, so the first arm answers and the mtime is
+/// never consulted.
+pub fn is_stale(status: Option<&WorkStatus>, path: &Path, cutoff: SystemTime) -> bool {
+    match status {
+        Some(status) => match status.finish.as_ref() {
+            Some(finish) => parse_completed_at(&cutoff, &finish.completed_at),
+            None => file_stale(path, &cutoff),
+        },
+        None => file_stale(path, &cutoff),
+    }
 }
 
 fn now_rfc3339() -> String {
