@@ -549,38 +549,78 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
 
     // Sub-agents first: they die with the process but their status files do
     // not, so every file still mid-flight is an agent that no longer exists.
-    let orphans = crate::brain::tools::subagent::reconcile::reconcile_orphaned_agents();
-    let mut reported = redeliver_persisted_tombstones().await;
-    for mut orphan in orphans {
-        match interrupted_report_target(&orphan) {
-            Some(session_id) => {
-                let msg = subagent_interrupted_message(&orphan);
-                // Clone: the parked branch still needs the message content
-                // for the durable copy below.
-                if deliver_or_park(session_id, msg.clone()) {
-                    // Delivered to a live route; nothing durable to keep.
-                } else {
-                    // Parked in memory only — persist it so the restart that
-                    // killed the agent cannot also kill its report (#73).
-                    persist_tombstone(session_id, &msg).await;
-                }
-                reported += 1;
-            }
-            None => {
-                // Nothing to route to. Say so rather than dropping it, since
-                // the agent's parent is waiting on a result either way.
+    //
+    // DETACHED (#858). The pass walks the whole status directory — 30k files on
+    // a long-lived host — and boot used to sit on it before the A2A listener
+    // could bind, which left the listener dead for the whole window. It now runs
+    // on the blocking pool and the reports it produces are delivered from the
+    // same task: `deliver_or_park` parks and `persist_tombstone` makes the report
+    // durable, which already covers a route that is not ready yet — exactly the
+    // state boot is in. A panic inside the pass arrives as a `JoinError` and is
+    // logged; boot never aborts on it.
+    //
+    // The count of sub-agent reports is therefore no longer part of this
+    // function's return value: nothing downstream waits for it (the caller logs
+    // it), so the task logs its own.
+    let _reconcile = tokio::spawn(async move {
+        let orphans = match tokio::task::spawn_blocking(
+            crate::brain::tools::subagent::reconcile::reconcile_orphaned_agents,
+        )
+        .await
+        {
+            Ok(orphans) => orphans,
+            Err(e) => {
                 tracing::error!(
-                    target: "background_task",
-                    "Sub-agent '{}' has an unparseable parent session '{}', its \
-                     interruption cannot be reported",
-                    orphan.label,
-                    orphan.parent_session_id.as_deref().unwrap_or(&orphan.session_id),
+                    target: "subagent",
+                    "Status reconcile did not complete, so restart-killed sub-agents keep \
+                     reading as live until the next boot: {e}"
                 );
-                // Still finalize the file so it cannot zombie.
-                orphan.mark_interrupted().ok();
+                return;
+            }
+        };
+
+        let mut reported = 0usize;
+        for mut orphan in orphans {
+            match interrupted_report_target(&orphan) {
+                Some(session_id) => {
+                    let msg = subagent_interrupted_message(&orphan);
+                    // Clone: the parked branch still needs the message content
+                    // for the durable copy below.
+                    if deliver_or_park(session_id, msg.clone()) {
+                        // Delivered to a live route; nothing durable to keep.
+                    } else {
+                        // Parked in memory only — persist it so the restart that
+                        // killed the agent cannot also kill its report (#73).
+                        persist_tombstone(session_id, &msg).await;
+                    }
+                    reported += 1;
+                }
+                None => {
+                    // Nothing to route to. Say so rather than dropping it, since
+                    // the agent's parent is waiting on a result either way.
+                    tracing::error!(
+                        target: "background_task",
+                        "Sub-agent '{}' has an unparseable parent session '{}', its \
+                         interruption cannot be reported",
+                        orphan.label,
+                        orphan.parent_session_id.as_deref().unwrap_or(&orphan.session_id),
+                    );
+                    // Still finalize the file so it cannot zombie.
+                    orphan.mark_interrupted().ok();
+                }
             }
         }
-    }
+        if reported > 0 {
+            tracing::info!(
+                target: "background_task",
+                "Reported {reported} interrupted sub-agent(s) from a previous run, {} waiting \
+                 for a session route",
+                parked_count()
+            );
+        }
+    });
+
+    let mut reported = redeliver_persisted_tombstones().await;
 
     // Then detached commands, which keep their own table. The ids it returns
     // are the index the file leg below works from — handed over here because

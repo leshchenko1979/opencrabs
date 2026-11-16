@@ -8,10 +8,11 @@
 //! Prior to #192, this pass read legacy `<home>/tmp/subagents`, but sub-agents
 //! write unified status files to `<home>/tmp/detached` since #26.
 //!
-//! This pass runs once at startup, before any new agent is spawned. Every
-//! non-terminal sub-agent file belongs to a dead process by definition, so each
-//! is moved to [`WorkState::Interrupted`] and returned to the caller, which
-//! decides how to report it into the originating session.
+//! This pass runs once per process start. Every non-terminal sub-agent file
+//! written before the pass began belongs to a dead process by definition, so
+//! each is moved to [`WorkState::Interrupted`] and returned to the caller, which
+//! decides how to report it into the originating session. A file spawned WHILE
+//! the pass walks belongs to this process and is left alone (#858).
 
 use std::time::{Duration, SystemTime};
 
@@ -57,6 +58,14 @@ pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
     let mut scanned = 0usize;
     let mut removed = 0usize;
 
+    // A file that did not exist when this pass began cannot belong to a dead
+    // process — and now that the pass runs detached (#858), a new agent CAN
+    // start while it walks. Interrupting a live run's own status file would
+    // corrupt it, so the boundary is this pass's start instant. Nothing can
+    // spawn a sub-agent before `recover()` runs on any surface, so a file older
+    // than this instant belongs to a previous process by construction.
+    let pass_started_at = chrono::Utc::now();
+
     if dir.exists() {
         match std::fs::read_dir(&dir) {
             Ok(entries) => {
@@ -95,7 +104,9 @@ pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
 
                     let is_orphan = matches!(
                         status.as_ref(),
-                        Some(s) if s.kind == WorkKind::Agent && !s.state.is_terminal()
+                        Some(s) if s.kind == WorkKind::Agent
+                            && !s.state.is_terminal()
+                            && !spawned_during_pass(s, &pass_started_at)
                     );
                     if is_orphan {
                         if let Some(mut orphan) = status.take() {
@@ -173,4 +184,20 @@ pub fn reconcile_orphaned_agents() -> Vec<WorkStatus> {
     );
 
     interrupted
+}
+
+/// Was this agent spawned after the pass began?
+///
+/// A file newer than the pass cannot belong to a process that has already died,
+/// so it must not be interrupted — with the pass detached (#858), a live agent
+/// can start while it walks. An unparseable `spawned_at` counts as OLD, which is
+/// the pre-#858 answer: a file we cannot date is more likely stranded than live,
+/// and a wrong guess costs one boot, never a lost run.
+fn spawned_during_pass(
+    status: &WorkStatus,
+    pass_started_at: &chrono::DateTime<chrono::Utc>,
+) -> bool {
+    chrono::DateTime::parse_from_rfc3339(&status.spawned_at)
+        .map(|spawned| spawned.with_timezone(&chrono::Utc) >= *pass_started_at)
+        .unwrap_or(false)
 }
