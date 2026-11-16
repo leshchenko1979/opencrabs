@@ -15,15 +15,18 @@
 //! exactly as before.
 
 use super::builder::AgentService;
+use crate::config::Config;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// Sentinel dimensions recorded by diagnostics (phantom-call detection,
 /// regression probes) that ride the same `tool_`-prefixed event types but
-/// are not real tools. Mirrors `SENTINEL_DIMENSIONS` in `brain/rsi.rs`;
-/// kept as a local copy so the feedback module does not depend on the RSI
-/// subsystem (rsi.rs is feature-gated, this is not).
+/// are not real tools. Mirrors `SENTINEL_DIMENSIONS` in `brain/rsi.rs`. The
+/// local copy was originally justified by `rsi.rs` being feature-gated; it is
+/// not (`brain::rsi` is a plain module, and #860 makes this file depend on it
+/// anyway), so the two lists are a known duplicate retained only because
+/// collapsing them is a separate change.
 const NON_TOOL_DIMENSIONS: &[&str] = &[
     "phantom_intent_loop",
     "phantom_tool_call",
@@ -51,6 +54,26 @@ pub(crate) const TOOL_HEALTH_MAX_RATE: f64 = 0.5;
 /// is the accepted trade; tool health changes on the scale of turns, not
 /// milliseconds.
 pub(super) const TOOL_HEALTH_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Whether the tool-health path runs at all, gated on the RSI master switch
+/// (#860).
+///
+/// The annotations (#1706) have exactly one consumer — the description suffix
+/// built in `tool_schemas_for_session` — and no user surface anywhere: not the
+/// TUI, not `/doctor`, not Mission Control, not the daemon log. Their data
+/// source is the same feedback ledger the RSI engine reads, and nothing else
+/// consumes the built map. So leaving the path armed while RSI is off buys a
+/// full `tool_%` scan every `TOOL_HEALTH_REFRESH_INTERVAL` in exchange for a
+/// map that on a headless install is typically empty anyway. Measured
+/// 2026-11-16 on a 4.02 GB ledger: 923,089 rows scanned, 0 tools flagged.
+///
+/// The switch is deliberately SHARED with RSI rather than re-derived, so
+/// "RSI is off" cannot drift into meaning two different things. It hot-reloads
+/// in both directions: `Config::current()` is a cheap `Arc` clone the config
+/// watcher refreshes, and `headless` is a service field.
+pub(crate) fn tool_health_enabled(config: &Config, headless: bool) -> bool {
+    crate::brain::rsi::rsi_effectively_enabled(config, headless)
+}
 
 /// Cached tool-health annotations, keyed by tool name. `fetched_at: None`
 /// means no successful fetch has happened yet (fresh process, or the DB
@@ -226,6 +249,13 @@ impl AgentService {
     /// turn late is harmless. DB errors leave the cache untouched and only
     /// log at debug, same contract as `record_tool_feedback`.
     pub(super) fn tool_health_annotations(&self) -> HashMap<String, String> {
+        // #860: no RSI, no annotations. The map has one consumer and no user
+        // surface, and building it costs a full `tool_%` ledger scan every
+        // refresh interval. Gating here (rather than at the caller) keeps
+        // every request-build site honest by construction.
+        if !tool_health_enabled(&Config::current(), self.headless) {
+            return HashMap::new();
+        }
         let stale = {
             let cache = self.tool_health_cache.read().unwrap();
             cache
