@@ -2179,6 +2179,38 @@ impl AgentService {
         // slug ("foo", "/foo") as well as in-skill files ("foo/bar.md", "/foo/bar.md").
         // This pair is the choke point for BOTH entry paths into the active set.
         let (slug, aux_file) = crate::brain::skills::parse_skill_spec(skill_name);
+        // #856: the second door. A slug that resolves to nothing was accepted
+        // silently here and then rendered by `format_context_inventory` as a
+        // plausible row, which is how `coding` survived 27 manifests while
+        // `coding-process` was the real skill. Deliberately PERMISSIVE — a
+        // mid-flight compaction must never fail because the model typed a name
+        // — but observable: the miss is logged with the spec that produced it,
+        // so the next investigation does not have to reconstruct it from a
+        // table. The registry is re-read per call on purpose: skills are plain
+        // disk and a session may register one installed after boot.
+        let resolved = crate::brain::skills::resolve_skill(&slug);
+        if resolved.is_none() {
+            tracing::warn!(
+                slug = %slug,
+                spec = %skill_name,
+                aux = ?aux_file,
+                "#856: register_active_skill called with a slug that resolves to no \
+                 loaded skill — recorded anyway (permissive), but it can never inject a body"
+            );
+        }
+        if let Some(file) = aux_file.as_ref() {
+            let known = resolved
+                .as_ref()
+                .is_some_and(|s| s.auxiliary_files.iter().any(|a| &a.name == file));
+            if !known {
+                tracing::warn!(
+                    slug = %slug,
+                    file = %file,
+                    spec = %skill_name,
+                    "#856: registered auxiliary document does not exist on its skill"
+                );
+            }
+        }
         // #138: slash invocation is skill consumption too — marking seen
         // (which persists to the DB) makes the compaction stamp's union
         // survive restarts for slash-invoked skills, not just read-loaded
