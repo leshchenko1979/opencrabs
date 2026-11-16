@@ -8,7 +8,7 @@
 //! different outcome from the first: a retry that should not have happened
 //! returns that second outcome and fails the assertion.
 
-use crate::cli::session_notify::post_jsonrpc;
+use crate::cli::session_notify::{post_jsonrpc, post_jsonrpc_with};
 use std::time::{Duration, Instant};
 
 /// The path the A2A gateway answers on. The `mock()` path and the dialled URL
@@ -125,17 +125,39 @@ async fn a_jsonrpc_error_is_a_decision_and_is_not_retried() {
     decision.assert_async().await;
 }
 
+/// A listener that ACCEPTS nothing but HOLDS the socket open: the kernel
+/// completes the TCP handshake from the backlog, so a client's `connect`
+/// succeeds and then waits forever for a reply. This is the "daemon is up but
+/// not serving" case, and it must NOT be classified the same as a refused
+/// connection (#857 criterion 3).
+fn unresponsive_endpoint() -> (String, std::net::TcpListener) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local addr").port();
+    (
+        format!("http://127.0.0.1:{port}{GATEWAY_PATH}"),
+        listener,
+    )
+}
+
 #[tokio::test]
 async fn an_unreachable_gateway_spends_the_whole_retry_budget() {
     // The transport branch: every attempt fails at `send`, so the loop must run
-    // to exhaustion and hand the caller a transport-class detail. The elapsed
-    // floor is the BACKOFF SUM — `tokio::time::sleep` never wakes early, so
-    // this proves all three attempts were made without a flake-prone timing
-    // guess.
+    // until the budget is gone and hand the caller a classified detail.
+    //
+    // The budget is passed explicitly so the test measures the SCHEDULE rather
+    // than waiting out the production default. With a 1200 ms budget the
+    // backoffs are 250 + 500 and the third sleep (1000) would overrun, so
+    // exactly three attempts fit — which is what the detail must report.
     let started = Instant::now();
-    let err = post_jsonrpc(&dead_endpoint(), None, &notify_body())
-        .await
-        .expect_err("nothing is listening on that port");
+    let err = post_jsonrpc_with(
+        &dead_endpoint(),
+        None,
+        &notify_body(),
+        Duration::from_millis(1200),
+        Duration::from_millis(150),
+    )
+    .await
+    .expect_err("nothing is listening on that port");
     let elapsed = started.elapsed();
 
     assert!(
@@ -143,19 +165,90 @@ async fn an_unreachable_gateway_spends_the_whole_retry_budget() {
         "unexpected detail: {err}"
     );
     assert!(
-        elapsed >= Duration::from_millis(1500),
-        "3 attempts mean two backoffs (500 + 1000 ms); only {elapsed:?} elapsed"
+        !err.contains("1 attempt(s)"),
+        "the transport leg must retry, not give up on the first refusal: {err}"
+    );
+    // The regression guard (#857): the old count-bound budget spent 1.5 s and
+    // gave up, while the wall-clock default is 120 s. Passing an explicit
+    // budget must actually bound the leg — a leg that ignored it and ran the
+    // production default would blow this ceiling by two orders of magnitude.
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the explicit budget must bound the leg; {elapsed:?} is far past it"
+    );
+}
+
+#[tokio::test]
+async fn an_unbound_port_and_a_wedged_port_classify_differently() {
+    // #857 criterion 3, the whole point of the issue. Both legs are transport
+    // failures with the same exit code; only the CAUSE distinguishes "the
+    // daemon is booting" (retry, wait it out) from "the daemon is up but
+    // wedged" (something is wrong with the process). Before this, both were the
+    // single string `cannot reach the A2A gateway`.
+    let refused = post_jsonrpc_with(
+        &dead_endpoint(),
+        None,
+        &notify_body(),
+        Duration::from_millis(300),
+        Duration::from_millis(150),
+    )
+    .await
+    .expect_err("an unbound port must fail");
+
+    let (wedged_url, _held) = unresponsive_endpoint();
+    let wedged = post_jsonrpc_with(
+        &wedged_url,
+        None,
+        &notify_body(),
+        Duration::from_millis(400),
+        Duration::from_millis(150),
+    )
+    .await
+    .expect_err("a bound but silent port must fail");
+
+    assert!(
+        refused.contains("cause=listener_dead"),
+        "an unbound port must read as listener_dead: {refused}"
+    );
+    assert!(
+        wedged.contains("cause=unresponsive"),
+        "a bound-but-silent port must read as unresponsive: {wedged}"
+    );
+    assert_ne!(
+        refused, wedged,
+        "the two failure classes must not collapse into one string"
     );
 }
 
 #[test]
-fn the_retry_budget_is_bounded_and_the_backoff_table_matches_it() {
-    // A guard on the file's own invariants: `post_jsonrpc` indexes
-    // RETRY_BACKOFF_MS by `attempt - 1`, so a table shorter than
-    // MAX_ATTEMPTS - 1 would panic at runtime on the last attempt, and a longer
-    // one would mean a backoff that can never be used.
+fn the_backoff_grows_is_capped_and_the_budget_outlives_a_boot() {
+    use crate::cli::session_notify::{
+        BACKOFF_CAP, BACKOFF_START, DEFAULT_RETRY_BUDGET, REQUEST_TIMEOUT, next_backoff,
+    };
+
     assert_eq!(
-        crate::cli::session_notify::RETRY_BACKOFF_MS.len(),
-        crate::cli::session_notify::MAX_ATTEMPTS as usize - 1,
+        next_backoff(1),
+        BACKOFF_START,
+        "attempt 1 never retries, so its backoff is the base"
+    );
+    assert_eq!(next_backoff(2), BACKOFF_START, "the first retry waits the base");
+    assert!(next_backoff(3) > next_backoff(2), "the schedule must grow");
+    // Doubling must never escape the cap, however long the budget lets it run.
+    for attempt in 1..200u32 {
+        assert!(
+            next_backoff(attempt) <= BACKOFF_CAP,
+            "attempt {attempt} escaped the cap"
+        );
+    }
+    // The regression guard: #858 measured a 279.6 s boot with the gateway's
+    // bind at the very end, so #199's 3-attempt / 1.5 s budget is provably too
+    // small to outlive a boot. The default must be well clear of that window.
+    assert!(
+        DEFAULT_RETRY_BUDGET > Duration::from_secs(60),
+        "the budget must outlive a boot window, not a healthy daemon"
+    );
+    assert!(
+        REQUEST_TIMEOUT < DEFAULT_RETRY_BUDGET,
+        "one attempt must fit inside the budget"
     );
 }

@@ -40,6 +40,7 @@
 use crate::cli::args::OutputFormat;
 use crate::config::Config;
 use anyhow::Result;
+use std::time::Duration;
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_NO_ROUTE: i32 = 2;
@@ -60,16 +61,139 @@ pub const EXIT_TRANSPORT: i32 = 4;
 /// 502/504) — neither is an answer. A reply that unpacks into a JSON-RPC error
 /// or result IS an answer, a decision, and re-sending a decision is pointless.
 /// `pub(crate)` so the bounds are assertable in tests.
-pub(crate) const MAX_ATTEMPTS: u32 = 3;
-pub(crate) const RETRY_BACKOFF_MS: [u64; 2] = [500, 1000];
+/// How long one request attempt may take before it counts as unresponsive.
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// One POST to the A2A gateway, retried `MAX_ATTEMPTS` times on transport
-/// errors. Shared by the send and status verbs (one copy, no drift): both dial
-/// the same endpoint with the same client, timeout and auth, and differ only in
-/// the method they call and how they read the outcome back.
+/// Wall-clock budget for the whole transport leg (#857).
+///
+/// #199 bounded the retry by ATTEMPT COUNT (3 attempts, 1.5 s of backoff),
+/// which was sized against a healthy daemon. It cannot outlive a BOOT: the
+/// gateway's `TcpListener::bind` is the last thing startup does, and a measured
+/// 2026-11-15 boot spent **279.6 s** on blocked disk I/O before reaching it
+/// (#858). Every notify inside that window burned its three attempts in under
+/// two seconds and journalled `cannot reach … (exit 4)` — 69 of them on that
+/// date alone, while nothing was wrong with the network.
+///
+/// So the bound is now a BUDGET in wall-clock time rather than a count. It is
+/// deliberately larger than a boot window, because "the daemon is starting" is
+/// the single most common cause of a refused connection on this box.
+///
+/// Override with `OPENCRABS_NOTIFY_RETRY_BUDGET_SECS` (a caller that would
+/// rather fail fast sets it to `0`).
+pub(crate) const DEFAULT_RETRY_BUDGET: Duration = Duration::from_secs(120);
+
+/// First retry delay; doubles each attempt up to [`BACKOFF_CAP`].
+/// `pub(crate)` so the schedule's shape is assertable in tests.
+pub(crate) const BACKOFF_START: Duration = Duration::from_millis(250);
+pub(crate) const BACKOFF_CAP: Duration = Duration::from_secs(4);
+
+/// Why a transport leg failed — a CLOSED vocabulary (#857 criterion 1).
+///
+/// Before this, every one of these collapsed into the single string
+/// `cannot reach the A2A gateway at <url>`, which cannot distinguish a daemon
+/// that is still booting from one that is wedged or gone. The three states have
+/// three different remedies, so the journal records which one it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransportCause {
+    /// The connection was REFUSED: nothing is listening on the port. Either the
+    /// daemon is mid-boot — its bind is the last step of startup — or it is
+    /// stopped. A retry within the boot budget is the remedy.
+    ListenerDead,
+    /// The connection opened but no answer arrived inside the request timeout.
+    /// The daemon is up but not serving (wedged event loop, saturated disk), or
+    /// a middlebox swallowed the request. Retrying is still right: the socket
+    /// is live, so the daemon is not merely absent.
+    Unresponsive,
+    /// An HTTP status arrived carrying no JSON-RPC body — a gateway mid-reload
+    /// or a proxy answering 502/504. Not a decision, so it retries.
+    Bodiless(u16),
+}
+
+impl TransportCause {
+    /// The stable token written into the journal and printed to the caller.
+    /// Greppable: `session-notify.journal` can be split by cause instead of
+    /// lumping every failure under one phrase.
+    pub(crate) fn label(self) -> String {
+        match self {
+            Self::ListenerDead => "listener_dead".to_string(),
+            Self::Unresponsive => "unresponsive".to_string(),
+            Self::Bodiless(status) => format!("bodiless_http_{}", status.as_u16()),
+        }
+    }
+
+    /// What the operator should conclude, in one clause.
+    fn meaning(self) -> &'static str {
+        match self {
+            Self::ListenerDead => "nothing is listening on the port (daemon booting or stopped)",
+            Self::Unresponsive => "the port accepted a connection but never answered",
+            Self::Bodiless(_) => "the gateway answered with no JSON-RPC body (mid-reload or a proxy)",
+        }
+    }
+}
+
+/// Classify a `reqwest` failure into the closed vocabulary.
+///
+/// `is_timeout()` is checked FIRST: a connect that times out also reports
+/// `is_connect()`, and calling that "refused" would send the operator looking
+/// for a dead daemon when the socket was merely slow to open.
+pub(crate) fn classify_transport_error(e: &reqwest::Error) -> TransportCause {
+    if e.is_timeout() {
+        return TransportCause::Unresponsive;
+    }
+    if e.is_connect() {
+        // Walk the source chain for the io::Error that carries the errno. A
+        // refused connection is the ONE case we can name precisely, and it is
+        // the boot-window case, so it is worth the walk.
+        let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
+        while let Some(cause) = source {
+            if let Some(io) = cause.downcast_ref::<std::io::Error>()
+                && io.kind() == std::io::ErrorKind::ConnectionRefused
+            {
+                return TransportCause::ListenerDead;
+            }
+            source = cause.source();
+        }
+        // Belt and braces: reqwest's source chain is an implementation detail
+        // that has changed shape across versions (hyper → hyper-util), so the
+        // errno is ALSO read off the rendered message. ECONNREFUSED is 111 on
+        // Linux and 61 on macOS; both renderers are matched, plus the generic
+        // libc wording. A false negative here would silently downgrade the
+        // boot-window case to `unresponsive`, which is the misclassification
+        // this whole issue exists to prevent — so it is worth the redundancy.
+        let rendered = e.to_string();
+        if rendered.contains("Connection refused")
+            || rendered.contains("os error 111")
+            || rendered.contains("os error 61")
+            || rendered.contains("ECONNREFUSED")
+        {
+            return TransportCause::ListenerDead;
+        }
+        // A connect failure that is not a refusal (unreachable, filtered,
+        // reset): the socket never came up, but not because nobody was there.
+        return TransportCause::Unresponsive;
+    }
+    // Request/body/decode failures: the peer was reached and the exchange
+    // broke. Same remedy as a wedged daemon.
+    TransportCause::Unresponsive
+}
+
+/// Retry budget, honouring the `OPENCRABS_NOTIFY_RETRY_BUDGET_SECS` override.
+pub(crate) fn retry_budget() -> Duration {
+    std::env::var("OPENCRABS_NOTIFY_RETRY_BUDGET_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_RETRY_BUDGET)
+}
+
+/// One POST to the A2A gateway, retried on transport-class failures until the
+/// wall-clock budget is spent (#857). Shared by the send and status verbs (one
+/// copy, no drift): both dial the same endpoint with the same client, timeout
+/// and auth, and differ only in the method they call and how they read the
+/// outcome back.
 ///
 /// `Ok(result)` = the JSON-RPC result object. `Err(msg)` = the caller's journal
-/// detail for a transport failure.
+/// detail for a transport failure, carrying the classified cause.
 ///
 /// `pub(crate)` so the retry leg is testable in-process (#199) — the
 /// behavioral test drives a real HTTP server through it.
@@ -78,51 +202,108 @@ pub(crate) async fn post_jsonrpc(
     api_key: Option<&str>,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let mut last_error = format!("cannot reach the A2A gateway at {url}");
-    for attempt in 0..MAX_ATTEMPTS {
-        if attempt > 0 {
-            let backoff = RETRY_BACKOFF_MS[attempt as usize - 1];
-            tracing::debug!(attempt, backoff_ms = backoff, "retrying A2A transport");
-            tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-        }
+    post_jsonrpc_with(url, api_key, body, retry_budget(), REQUEST_TIMEOUT).await
+}
+
+/// The budget-explicit form: `budget` bounds the whole leg in wall-clock time,
+/// `request_timeout` bounds one attempt. Split out so tests can drive both ends
+/// of the classification in milliseconds instead of minutes.
+pub(crate) async fn post_jsonrpc_with(
+    url: &str,
+    api_key: Option<&str>,
+    body: &serde_json::Value,
+    budget: Duration,
+    request_timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let started = std::time::Instant::now();
+    let mut attempts: u32 = 0;
+    let mut first_cause: Option<TransportCause> = None;
+    let mut last_cause: Option<TransportCause> = None;
+
+    loop {
+        attempts += 1;
         let mut req = reqwest::Client::new()
             .post(url)
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(request_timeout)
             .json(body);
         if let Some(key) = api_key {
             req = req.bearer_auth(key);
         }
-        let resp = match req.send().await {
-            Ok(resp) => resp,
-            Err(e) => {
-                last_error = format!("cannot reach the A2A gateway at {url}: {e}");
-                continue;
+
+        // Every non-diverging arm below yields the CAUSE of the failure; the
+        // arms that got an answer return from the function instead, so a
+        // decision is never retried.
+        let cause = match req.send().await {
+            Err(e) => classify_transport_error(&e),
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<crate::a2a::types::JsonRpcResponse>().await {
+                    Ok(rpc) => {
+                        // A JSON-RPC error IS a decision: never retried.
+                        if let Some(err) = rpc.error {
+                            return Err(format!("gateway error {}: {}", err.code, err.message));
+                        }
+                        return match rpc.result {
+                            Some(result) => Ok(result),
+                            None => {
+                                Err("gateway response carried neither result nor error".into())
+                            }
+                        };
+                    }
+                    // A response with no JSON-RPC body is NOT a decision: the
+                    // usual cause is a gateway mid-reload or a proxy answering
+                    // 502/504 — transient by nature, and the very case this leg
+                    // exists for. So it retries like a transport error instead
+                    // of failing the notify on the first attempt.
+                    Err(_) => TransportCause::Bodiless(status.as_u16()),
+                }
             }
         };
-        let status = resp.status();
-        let rpc = match resp.json::<crate::a2a::types::JsonRpcResponse>().await {
-            Ok(rpc) => rpc,
-            // A response that carries no JSON-RPC body is NOT a decision: the
-            // usual cause is a gateway mid-reload or a proxy answering 502/504
-            // — transient by nature, and the very case this leg exists for. So
-            // it retries like a transport error instead of failing the notify
-            // on the first attempt. A JSON-RPC `error` below IS a decision and
-            // is never retried.
-            Err(e) => {
-                last_error =
-                    format!("gateway at {url} returned HTTP {status} without a JSON-RPC body: {e}");
-                continue;
-            }
-        };
-        if let Some(err) = rpc.error {
-            return Err(format!("gateway error {}: {}", err.code, err.message));
+
+        last_cause = Some(cause);
+        first_cause.get_or_insert(cause);
+
+        // Back off, but only if the budget can absorb both the sleep and a
+        // further attempt's timeout — a retry we cannot finish is not a retry.
+        let backoff = next_backoff(attempts);
+        let spent = started.elapsed();
+        if spent + backoff >= budget {
+            break;
         }
-        return match rpc.result {
-            Some(result) => Ok(result),
-            None => Err("gateway response carried neither result nor error".into()),
-        };
+        tracing::debug!(
+            attempt = attempts,
+            cause = %cause.label(),
+            backoff_ms = backoff.as_millis() as u64,
+            spent_secs = spent.as_secs_f64(),
+            "retrying A2A transport"
+        );
+        tokio::time::sleep(backoff).await;
     }
-    Err(last_error)
+
+    let elapsed = started.elapsed();
+    let cause = last_cause.unwrap_or(TransportCause::Unresponsive);
+    let mut detail = format!(
+        "cannot reach the A2A gateway at {url}: cause={} — {}; {attempts} attempt(s) over {:.1}s",
+        cause.label(),
+        cause.meaning(),
+        elapsed.as_secs_f64()
+    );
+    // A leg that saw MORE THAN ONE cause is the diagnostic gold: a refused
+    // connection that later turns into a timeout means the daemon came up
+    // mid-budget and then wedged.
+    if let Some(first) = first_cause
+        && first != cause
+    {
+        detail.push_str(&format!(" (first attempt: {})", first.label()));
+    }
+    Err(detail)
+}
+
+/// Exponential backoff, capped. `attempt` is 1-based, so the first RETRY (the
+/// second attempt) sleeps [`BACKOFF_START`] and each subsequent one doubles.
+pub(crate) fn next_backoff(attempt: u32) -> Duration {
+    let shift = attempt.saturating_sub(2).min(6);
+    (BACKOFF_START * 2u32.pow(shift)).min(BACKOFF_CAP)
 }
 
 /// The gateway endpoint and auth for this profile's config — one derivation,
