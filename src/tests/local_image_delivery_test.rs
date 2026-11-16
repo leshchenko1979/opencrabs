@@ -315,7 +315,7 @@ fn strip_only_reports_a_missing_local_file_as_a_failure() {
 
 #[test]
 fn strip_only_still_removes_a_remote_marker() {
-    // A `<<IMG:…>>` marker is machine syntax, never prose — even a remote
+    // A `<<IMG:…>>` marker is the directive itself, not a link — even a remote
     // target leaves the text in strip-only mode, or the raw token leaks.
     let scan = strip_image_references(&format!("x <<IMG:{REMOTE_PNG}>> y"), None);
     assert_eq!(scan.text, "x  y");

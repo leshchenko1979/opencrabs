@@ -15,12 +15,14 @@
 //! Two rules are INHERITED from the image scanner rather than re-decided here,
 //! so one question keeps one home:
 //!
-//! - the MARKER form has no code-span guard — a marker is machine syntax, never
-//!   prose (pinned for images by `img_marker_inside_a_code_span_is_still_
-//!   extracted`);
-//! - the MARKDOWN form does — a fenced or backticked reference stays
-//!   byte-identical, because it may be documentation rather than a live
-//!   reference.
+//! - BOTH forms have a code-span guard (#464) — a marker or a markdown
+//!   reference inside a fenced or backticked span stays byte-identical,
+//!   because it may be documentation rather than a live reference. The marker
+//!   form's old exemption ("a marker is machine syntax, never prose") was
+//!   falsified by measurement: a reply documenting the syntax broke itself;
+//! - a marker's payload is BOUNDED (#731) — one line, no nested opener — so a
+//!   bare token in prose cannot pair with the next `>>` anywhere later and
+//!   delete the text between them.
 //!
 //! One rule genuinely differs from the image plane: there is NO remote arm, so
 //! a remote target is left in the text as written.
@@ -208,19 +210,47 @@ fn references_inside_a_fence_or_a_code_span_are_byte_identical_in_both_forms() {
 }
 
 #[test]
-fn a_marker_inside_a_code_span_is_still_extracted() {
-    // The inherited asymmetry: a marker is machine syntax, never prose, so the
-    // code-span guard does not apply to it. Mirrors the image plane's pin
-    // (`img_marker_inside_a_code_span_is_still_extracted`).
+fn a_marker_inside_a_code_span_is_inert() {
+    // #464: the marker form used to be exempt from the code-span guard, on the
+    // theory that a marker is machine syntax and never prose. The theory was
+    // wrong: a reply that DOCUMENTED the syntax had its example extracted as a
+    // real attachment and was rejected outright. The guard now applies to both
+    // forms, so the documentation stays byte-identical and nothing is filed.
     let (_dir, clip) = video_fixture();
-    let rw = rewrite_local_videos(&format!("`<<VID:{}>>`", clip.display()), None, PREFIX, &[]);
+    let text = format!("`<<VID:{}>>`", clip.display());
+    let rw = rewrite_local_videos(&text, None, PREFIX, &[]);
 
-    assert_eq!(
-        rw.entries.len(),
-        1,
-        "the marker is consumed even between backticks"
+    assert!(rw.entries.is_empty(), "a code span is documentation");
+    assert_eq!(rw.rich, text, "and it survives byte-identical");
+    assert_eq!(rw.stripped, text);
+    assert!(rw.failures.is_empty(), "no false failure is reported");
+}
+
+/// #731: a bare `<<VID:` token in prose used to pair with the next `>>`
+/// ANYWHERE later, and the scan DELETED everything between them — a delivered
+/// report was truncated mid-sentence, with two false "not attached" notices
+/// naming the swallowed prose as a path. The payload is a path: one line, and
+/// no nested opener.
+#[test]
+fn a_bare_vid_token_does_not_swallow_the_rest_of_the_reply() {
+    let (_dir, clip) = video_fixture();
+    let text = format!(
+        "Markers FOUND: <<VID: and then the rest of the sentence <<VID:{}>>",
+        clip.display()
     );
-    assert!(!rw.stripped.contains("VID:"));
+    let scan = extract_local_videos(&text, None);
+
+    assert_eq!(scan.attachments.len(), 1, "the real marker still resolves");
+    assert!(
+        scan.text.contains("and then the rest of the sentence"),
+        "no prose is deleted: {}",
+        scan.text
+    );
+    assert!(
+        scan.failures.is_empty(),
+        "and no false notice names the prose as a path: {:?}",
+        scan.failures
+    );
 }
 
 // ---------------------------------------------------------------------------

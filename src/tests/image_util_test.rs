@@ -318,15 +318,86 @@ fn empty_img_marker_is_dropped_without_a_failure() {
     assert!(scan.failures.is_empty());
 }
 
-/// The marker form has never had a code-span guard (unlike the markdown form
-/// and the reaction directive): a `<<IMG:…>>` inside backticks is still a
-/// directive, because a marker is never prose. Pinned so the asymmetry stays
-/// deliberate rather than accidental.
+// ── #464: a marker inside a code region is documentation ──────────────────
+
+/// #464: the marker form has a code-span guard, on EVERY branch that reads it.
+///
+/// The old asymmetry was defended as "a marker is machine syntax, never prose"
+/// and pinned as deliberate. Measurement falsified it: a reply that documented
+/// the marker form inside backticks had its EXAMPLE strings extracted as real
+/// attachments, and the delivery leg bounced the whole reply with "the images
+/// your reply referenced could not be attached" — naming the example paths. A
+/// marker inside a code span is documentation, exactly as the markdown form is.
 #[test]
-fn img_marker_inside_a_code_span_is_still_extracted() {
-    let scan = extract_local_images("`<<IMG:https://h/x.png>>`", None);
-    assert_eq!(scan.text, "``");
-    assert_eq!(scan.remote, vec!["https://h/x.png"]);
+fn img_marker_inside_a_code_span_is_inert() {
+    let text = "`<<IMG:https://h/x.png>>`";
+    let scan = extract_local_images(text, None);
+    assert_eq!(scan.text, text, "the example stays byte-identical");
+    assert!(scan.remote.is_empty(), "nothing is fetched");
+    assert!(scan.attachments.is_empty(), "nothing is attached");
+    assert!(scan.failures.is_empty(), "and no false failure is reported");
+}
+
+#[test]
+fn img_marker_inside_a_code_fence_is_inert() {
+    let text = "```\n<<IMG:/root/example.png>>\n```";
+    let scan = extract_local_images(text, None);
+    assert_eq!(scan.text, text);
+    assert!(scan.attachments.is_empty());
+    assert!(scan.failures.is_empty());
+}
+
+/// The guard must not cost the real thing: a bare marker is still a directive,
+/// in the same message as a documented one.
+#[test]
+fn bare_marker_beside_a_documented_one_is_still_extracted() {
+    let scan = extract_local_images(
+        "docs: `<<IMG:https://h/doc.png>>` then <<IMG:https://h/real.png>>",
+        None,
+    );
+    assert_eq!(scan.remote, vec!["https://h/real.png"]);
+    assert_eq!(scan.text, "docs: `<<IMG:https://h/doc.png>>` then");
+}
+
+#[test]
+fn img_marker_extractor_skips_code_spans_too() {
+    let text = "`<<IMG:/root/example.png>>`";
+    let (out, paths) = extract_img_markers(text);
+    assert_eq!(out, text, "the strip twin reads the same rule");
+    assert!(paths.is_empty());
+}
+
+// ── #731: the marker terminator is bounded ────────────────────────────────
+
+/// #731: a bare `<<VID:` token in prose used to pair with the next `>>`
+/// ANYWHERE later, and everything between them was deleted from the delivered
+/// reply. The payload is a path: one line, and no nested opener.
+#[test]
+fn bare_marker_token_does_not_swallow_prose() {
+    let text = "Markers FOUND: <<IMG: and then the rest of the sentence <<IMG:/real.png>>";
+    let (out, paths) = extract_img_markers(text);
+    assert_eq!(paths, vec!["/real.png"]);
+    assert!(
+        out.contains("and then the rest of the sentence"),
+        "no prose is deleted: {out}"
+    );
+}
+
+/// The bound is LOCAL: a token that fails to close must not stop the walk, or
+/// a real marker later in the message is silently lost.
+#[test]
+fn a_non_marker_token_does_not_hide_a_later_real_marker() {
+    let text = "<<IMG: broken\n<<IMG:/real.png>>";
+    let (out, paths) = extract_img_markers(text);
+    assert_eq!(paths, vec!["/real.png"]);
+    assert!(out.contains("<<IMG: broken"), "the token stays literal");
+}
+
+#[test]
+fn a_nested_opener_ends_the_outer_payload() {
+    let text = "<<IMG: docs <<IMG:/real.png>>";
+    let (_, paths) = extract_img_markers(text);
+    assert_eq!(paths, vec!["/real.png"], "the inner marker is the real one");
 }
 
 #[test]

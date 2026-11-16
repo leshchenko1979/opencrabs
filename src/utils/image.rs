@@ -338,18 +338,38 @@ fn is_reaction_emoji(payload: &str) -> bool {
 /// `<<PREFIX:...>>` occurrence, and collects the inner paths in order. UTF-8
 /// safe (works on byte indices that lie on char boundaries — `find`/`replace_range`
 /// handle that correctly for the ASCII delimiters used here).
+///
+/// Two rules this shares with the streaming scanners, because a reply must be
+/// read the same way whichever entry point reaches it:
+///   * a marker inside a code span or fence is DOCUMENTATION, not a directive
+///     (#464) — the guard the markdown reference form has always had;
+///   * a token that does not close on its own payload is literal text (#731),
+///     and the walk CONTINUES past it rather than stopping: a later marker in
+///     the same message is still a marker.
 fn extract_markers_with_prefix(text: &str, prefix: &str) -> (String, Vec<String>) {
     let mut out = text.to_string();
     let mut paths = Vec::new();
 
-    while let Some(start) = out.find(prefix) {
-        let Some((end, path)) = parse_marker_at(&out, start, prefix) else {
-            break;
-        };
-        if !path.is_empty() {
-            paths.push(path);
+    let mut from = 0;
+    while let Some(rel) = out[from..].find(prefix) {
+        let start = from + rel;
+        // Recomputed per pass because `replace_range` below shifts every offset
+        // after the removal — a cached map would be silently stale.
+        let regions = code_regions(&out);
+        if regions.get(start).copied().unwrap_or(false) {
+            from = start + prefix.len();
+            continue;
         }
-        out.replace_range(start..end, "");
+        match parse_marker_at(&out, start, prefix) {
+            Some((end, path)) => {
+                if !path.is_empty() {
+                    paths.push(path);
+                }
+                out.replace_range(start..end, "");
+                from = start;
+            }
+            None => from = start + prefix.len(),
+        }
     }
 
     (out.trim().to_string(), paths)
@@ -665,23 +685,47 @@ pub(crate) fn image_extension(head: &[u8]) -> &'static str {
     }
 }
 
+/// The longest payload a marker may carry. A marker names a FILE PATH, so the
+/// bound is generous (`PATH_MAX` is 4096 on Linux) and exists only to stop a
+/// runaway scan, never to police a name.
+const MARKER_PAYLOAD_MAX: usize = 4096;
+
 /// Parse a `<<PREFIX:path>>` marker starting at `start`, which must lie on a
 /// char boundary and begin `prefix`. Returns `(end_byte_exclusive, raw_path)`
-/// with the payload trimmed, or `None` when no `>>` closes the marker before
-/// the end of the text. The single marker-parsing rule: both the streaming
-/// scanner below and [`extract_markers_with_prefix`] go through it.
+/// with the payload trimmed, or `None` when the marker does not CLOSE ON ITS
+/// OWN PAYLOAD — see the two bounds below. The single marker-parsing rule: both
+/// the streaming scanners and [`extract_markers_with_prefix`] go through it.
+///
+/// **The terminator is bounded (#731).** The payload is a path, so it is one
+/// line and it cannot contain another marker opener. Both facts are checked
+/// before the marker is accepted, and either one failing makes the token
+/// LITERAL TEXT rather than a directive. Without this, the terminator was the
+/// first `>>` anywhere later in the message, so a bare `<<VID:` token written
+/// in prose paired with the next real marker's terminator and everything
+/// between them was deleted from the delivered reply — measured 2026-10-01,
+/// where a report was truncated mid-sentence and two false "not attached"
+/// notices named the swallowed prose as a path.
+///
+/// A caller must therefore treat `None` as LOCAL to this occurrence and keep
+/// scanning: a later marker in the same text is still a marker.
 fn parse_marker_at(text: &str, start: usize, prefix: &str) -> Option<(usize, String)> {
     debug_assert!(text[start..].starts_with(prefix));
-    let rel_end = text[start..].find(">>")?;
     let payload_start = start + prefix.len();
-    let payload_end = start + rel_end;
-    if payload_start > payload_end {
+    // Search AFTER the prefix. The old form searched from `start` and needed a
+    // `payload_start > payload_end` guard for the case where the `>>` it found
+    // sat inside the prefix itself; starting at the payload removes both the
+    // inverted range and that guard.
+    let rel_end = text[payload_start..].find(">>")?;
+    let payload_end = payload_start + rel_end;
+    let payload = &text[payload_start..payload_end];
+    if payload.len() > MARKER_PAYLOAD_MAX
+        || payload.contains('\n')
+        || payload.contains('\r')
+        || payload.contains("<<")
+    {
         return None;
     }
-    Some((
-        payload_end + 2,
-        text[payload_start..payload_end].trim().to_string(),
-    ))
+    Some((payload_end + 2, payload.trim().to_string()))
 }
 
 /// Parse a markdown reference starting at `start` (a char boundary where the
@@ -962,12 +1006,15 @@ enum RemoteRefs {
 /// when the reference was consumed and must leave the reply text.
 ///
 /// `strip_unresolved` separates the two forms: a marker (`<<IMG:…>>`) always
-/// leaves the text, because a marker is never prose; a markdown reference whose
-/// relative target has no base directory to resolve against stays verbatim, as
-/// it may be ordinary prose that merely looks like a reference.
+/// leaves the text, because the token IS the directive — leaving it would leak
+/// machine syntax into the reply and there is no prose form to preserve; a
+/// markdown reference whose relative target has no base directory to resolve
+/// against stays verbatim, as it may be ordinary prose that merely looks like a
+/// reference.
 ///
 /// A marker's remote target always leaves the text whatever `remote` says — a
-/// marker is machine syntax, never prose, so there is no link to preserve.
+/// marker names an attachment by construction, never a hyperlink, so there is
+/// no link to preserve.
 ///
 /// `caption` is the markdown title the reference carried, bound to the image it
 /// captions. A marker has no title form, so it always passes `None`.
@@ -981,7 +1028,8 @@ enum RemoteRefs {
 /// `[#1](https://…)` is an ordinary hyperlink: fetching it returns HTML, fails
 /// magic-byte validation, and reports a "could not be delivered" trailer over a
 /// link that was never an image (#825, introduced when #820 widened this walk to
-/// both markdown forms). Markers pass `true`: machine syntax is never prose.
+/// both markdown forms). Markers pass `true`: a marker names an attachment by
+/// construction, never an ordinary hyperlink.
 fn record_candidate(
     raw: String,
     caption: Option<String>,
@@ -1305,7 +1353,8 @@ pub fn rewrite_local_images(
     let mut i = 0;
 
     while i < text.len() {
-        if text[i..].starts_with(IMG_PREFIX)
+        if !regions[i]
+            && text[i..].starts_with(IMG_PREFIX)
             && let Some((end, raw)) = parse_marker_at(text, i, IMG_PREFIX)
         {
             if !raw.is_empty() {
@@ -1356,7 +1405,8 @@ fn scan_image_references(
     let mut i = 0;
 
     while i < text.len() {
-        if text[i..].starts_with(IMG_PREFIX)
+        if !regions[i]
+            && text[i..].starts_with(IMG_PREFIX)
             && let Some((end, raw)) = parse_marker_at(text, i, IMG_PREFIX)
         {
             if !raw.is_empty() {
@@ -1479,12 +1529,14 @@ fn append_media_notice(body: &str, notice: Option<String>) -> String {
 //
 // Two rules are INHERITED from the image scanner rather than re-decided here,
 // so one question keeps one home:
-//   * the MARKER form has no code-span guard — a marker is machine syntax,
-//     never prose (pinned for images by
-//     `img_marker_inside_a_code_span_is_still_extracted`);
-//   * the MARKDOWN form does — a fenced or backticked reference stays
-//     byte-identical, because it may be documentation rather than a live
-//     reference.
+//   * BOTH forms have a code-span guard (#464) — a marker or a markdown
+//     reference inside a fenced or backticked span stays byte-identical,
+//     because it may be documentation rather than a live reference. The marker
+//     form's old exemption was falsified by measurement: a reply documenting
+//     the syntax had its own examples extracted as real attachments;
+//   * a marker's payload is BOUNDED (#731) — one line, no nested opener — so a
+//     bare token in prose cannot pair with the next `>>` anywhere later and
+//     delete the text between them.
 //
 // One rule genuinely differs, and it is the family's declared non-goal: there
 // is NO remote arm. A remote video would need a fetch step, a size policy and a
@@ -1756,7 +1808,8 @@ pub fn extract_local_videos(text: &str, base_dir: Option<&Path>) -> LocalVideoSc
     let mut i = 0;
 
     while i < text.len() {
-        if text[i..].starts_with(VID_PREFIX)
+        if !regions[i]
+            && text[i..].starts_with(VID_PREFIX)
             && let Some((end, raw)) = parse_marker_at(text, i, VID_PREFIX)
         {
             // An empty marker is dropped without a failure, matching the image
@@ -1884,7 +1937,8 @@ pub fn rewrite_local_videos(
         // Advances only on a consumption: an empty marker is dropped without a
         // failure (the scan's policy above), and a reference `file` declines
         // stays verbatim in both buffers.
-        if text[i..].starts_with(VID_PREFIX)
+        if !regions[i]
+            && text[i..].starts_with(VID_PREFIX)
             && let Some((end, raw)) = parse_marker_at(text, i, VID_PREFIX)
             && (raw.is_empty() || rw.file(&raw, "", None, true))
         {
