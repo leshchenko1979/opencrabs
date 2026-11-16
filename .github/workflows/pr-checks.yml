@@ -84,7 +84,7 @@ on:
       diagnose:
         description: "true = print the runner's real resource envelope (cpu/ram/disk/cgroup/sccache) around the test leg; diagnostic only, never fails the run"
         required: false
-        default: true
+        default: false
         type: boolean
       # #1936 Stage 1 (hang-capture, owner-approved design): a bounded libtest
       # thread count. Empty => the Run tests invocation is unchanged; N => the
@@ -128,6 +128,19 @@ on:
 # is skipped — its absence is itself the signature), which is exactly the
 # pre-test headroom H3/H4 need. REVERT to false once a kill's envelope is
 # captured, or by 2026-10-17, whichever is first.
+#
+# REVERTED 2026-11-16 (HQ): both of the arming's own exit conditions had fired.
+# The envelope WAS captured — run 38793394953 (2026-10-15T19:22:40Z, carrier
+# c350d66c) is the single teardown in 295 dispatches 2026-10-04..2026-11-16
+# (48 Clippy + 23 genuine `Run tests` + 1 teardown = 72 failures), and it fired
+# `diagnose` on the kill: `/system.slice` memory.peak 15.16 GiB = 97.1% of
+# MemTotal (0.46 GiB headroom), memory.max = `max` at both levels so H3 is
+# refuted, kill during compilation with ZERO tests run. The window expired
+# 2026-10-17. It ran 43 days past its own deadline; default is now `false`,
+# restoring the owner-GO'd "every existing caller is byte-for-byte unchanged"
+# invariant. A future capture passes `-f diagnose=true` explicitly. The
+# mechanism question stays OPEN on #311 — see
+# https://github.com/leshchenko1979/opencrabs/issues/311#issuecomment-6912072844
 #
 # Owner-approved 2026-08-30 (fix batch, a87b66dc; group KEY corrected same
 # day, owner "Fix it" 02:32Z on the cancel-storm finding): every
