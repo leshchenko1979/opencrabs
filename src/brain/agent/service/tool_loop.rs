@@ -6621,7 +6621,10 @@ impl AgentService {
                         cb(
                             session_id,
                             ProgressEvent::IntermediateText {
-                                text: iteration_text,
+                                // #866: cloned, not moved — the goal/plan
+                                // continuations below echo this text back into
+                                // context before re-entering the loop.
+                                text: iteration_text.clone(),
                                 reasoning: reasoning_text,
                             },
                         );
@@ -6675,8 +6678,24 @@ impl AgentService {
                     {
                         let open = evidence.unresolved_tasks.len();
                         plan_hold_baseline = Some(open);
+                        // #866: the model's own text must sit in context
+                        // BEFORE the hold prompt. Without it the re-entry
+                        // reads as an unanswered question (user → tool
+                        // results → [PLAN HOLD]) and the model answers a
+                        // question it already answered. Same shape as the
+                        // five sibling nudges (:5845, :6352, :6401, :6455,
+                        // :6503). The echoed length rides on the hold's own
+                        // log line because that line is the only instrument
+                        // this path has: the hold prompt is never persisted
+                        // to `messages`, so the DB cannot see the re-entry.
+                        let echoed = iteration_text.trim();
+                        if !echoed.is_empty() {
+                            context.add_message(Message::assistant(echoed.to_string()));
+                        }
                         tracing::info!(
-                            "Plan hold: {open} open task(s), re-entering the tool loop"
+                            "Plan hold: {open} open task(s), re-entering the tool loop \
+                             (echoed {} chars of assistant text)",
+                            echoed.chars().count()
                         );
                         if let Some(ref cb) = progress_callback {
                             cb(
@@ -6715,6 +6734,12 @@ impl AgentService {
                                             .to_string(),
                                     },
                                 );
+                            }
+                            // #866: same hole as the plan hold above — the
+                            // goal continuation must carry the text it is
+                            // continuing from, or the model re-answers.
+                            if !iteration_text.trim().is_empty() {
+                                context.add_message(Message::assistant(iteration_text.clone()));
                             }
                             context.add_message(Message::user(continuation_prompt));
                             final_response = None;
