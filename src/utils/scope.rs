@@ -60,6 +60,32 @@ pub enum PriorityClass {
     Idle,
 }
 
+/// `ioprio_set(2)` for the calling thread, via the raw syscall.
+///
+/// `libc` 0.2.189 ships NEITHER `ioprio_set` NOR `IOPRIO_WHO_PROCESS`: the crate
+/// exposes the per-arch syscall NUMBER (`SYS_ioprio_set`) and no wrapper, which
+/// is why calling `libc::ioprio_set(..)` fails to compile (E0425). The call is
+/// made directly instead.
+///
+/// `syscall` is async-signal-safe, so this stays legal inside a `pre_exec`
+/// closure, where only async-signal-safe calls are permitted.
+#[cfg(target_os = "linux")]
+fn ioprio_set_self(ioprio: libc::c_int) -> libc::c_int {
+    // `IOPRIO_WHO_PROCESS` from <linux/ioprio.h>: the `who` argument names a
+    // process; `which` 0 selects the calling thread.
+    const IOPRIO_WHO_PROCESS: libc::c_int = 1;
+    // SAFETY: ioprio_set(2) takes (int who, int which, int ioprio) and touches
+    // no memory this program owns.
+    unsafe {
+        libc::syscall(
+            libc::SYS_ioprio_set,
+            IOPRIO_WHO_PROCESS as libc::c_long,
+            0 as libc::c_long,
+            ioprio as libc::c_long,
+        ) as libc::c_int
+    }
+}
+
 impl PriorityClass {
     /// Nice value to set on the child.
     ///
@@ -135,7 +161,7 @@ impl PriorityClass {
                     }
                     // `ioprio_set` is Linux-only; macOS has no block-IO priority.
                     #[cfg(target_os = "linux")]
-                    if libc::ioprio_set(libc::IOPRIO_WHO_PROCESS, 0, ioprio) != 0 {
+                    if ioprio_set_self(ioprio) != 0 {
                         warn_from_child(b"priority: ioprio_set failed\n");
                     }
                     Ok(())
@@ -182,8 +208,9 @@ impl PriorityClass {
             #[cfg(target_os = "linux")]
             {
                 let ioprio = self.ioprio_value();
-                // SAFETY: as above.
-                if unsafe { libc::ioprio_set(libc::IOPRIO_WHO_PROCESS, 0, ioprio) } != 0 {
+                // The syscall's SAFETY note lives with the call, in
+                // `ioprio_set_self` — no raw syscall is written here.
+                if ioprio_set_self(ioprio) != 0 {
                     tracing::warn!(
                         ioprio,
                         error = %std::io::Error::last_os_error(),
