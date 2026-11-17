@@ -1252,7 +1252,7 @@ fn sweep_stale_runs_in(
     // its record's KIND, so the sweep needs the kind as well as the finish.
     let mut status_by_run: HashMap<String, Option<WorkStatus>> = HashMap::new();
 
-    for entry in fs::read_dir(&runs)? {
+    for entry in fs::read_dir(runs)? {
         let entry = entry?;
 
         // ONE stat per entry (#872). `entry.file_type()` is answered from the
