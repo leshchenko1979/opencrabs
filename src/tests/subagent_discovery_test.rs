@@ -172,3 +172,43 @@ fn wait_agent_description_carries_the_do_not_block_caveat() {
          \nCurrent description: {desc}"
     );
 }
+
+/// Step 4(b) of #861: pin the promotion in the catalog itself, not just in the
+/// registry it produces, and prove the headless roster still strips the
+/// interactive-only pair. The headless half needs a control: `headless=false`
+/// must still advertise both names, otherwise an empty roster would pass the
+/// assertion for the wrong reason.
+#[test]
+fn spawn_agent_is_core_and_the_headless_roster_still_strips_interactive_tools() {
+    use crate::brain::tools::catalog;
+
+    assert!(
+        catalog::is_core("spawn_agent"),
+        "spawn_agent must be CORE (#861): its schema ships in every request, which is \
+         what removes the tool_search step a session had no reason to run."
+    );
+    for (category, names) in catalog::EXTENDED_TOOL_INVENTORY {
+        assert!(
+            !names.contains(&"spawn_agent"),
+            "spawn_agent must NOT be advertised for tool_search in the {category:?} group: \
+             its schema already ships, so advertising it promises a round-trip that does \
+             nothing — the lie `tool_inventory_names_are_extended_not_core` refuses."
+        );
+    }
+
+    let headless = catalog::tool_inventory_prompt(true);
+    let interactive = catalog::tool_inventory_prompt(false);
+    for name in ["suggest_options", "session_notify"] {
+        assert!(
+            !headless.contains(name),
+            "{name} is unregistered on every headless surface (#129), so the headless \
+             roster must not advertise it. Roster:\n{headless}"
+        );
+        assert!(
+            interactive.contains(name),
+            "CONTROL: {name} must appear on an interactive roster, otherwise the assertion \
+             above passes because the roster is empty rather than because it filtered. \
+             Roster:\n{interactive}"
+        );
+    }
+}
