@@ -135,9 +135,12 @@ pub async fn check_for_update() -> Option<String> {
         return None;
     }
 
-    // If running from source, check if Cargo.toml already has the latest version
+    // If running from source, check if Cargo.toml already has the latest version.
+    // Compared on the UPSTREAM BASE: Cargo.toml carries `0.5.4` while the fork
+    // release is named `0.5.4+fork.431`, so a literal comparison never matches
+    // and a source build would be told "update available" forever.
     if let Some(source_version) = source_cargo_version()
-        && source_version == latest_version
+        && upstream_base(&source_version) == upstream_base(&latest_version)
     {
         return None;
     }

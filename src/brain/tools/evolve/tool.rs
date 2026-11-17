@@ -271,10 +271,15 @@ impl Tool for EvolveTool {
         // Dispatch based on install method
         match install_method {
             InstallMethod::Source(_) => {
+                // `latest_tag`, not `latest_version`: the fork's rolling
+                // release is tagged `fork-latest` while its version is the
+                // release name, so `git checkout v{version}` would name a ref
+                // that does not exist.
                 return Ok(ToolResult::success(format!(
                     "Update available: v{} -> v{}. You're running from source — rebuild from \
-                     the source tree with `cargo build --release`, or `git checkout v{}` to switch.",
-                    current_version, latest_version, latest_version
+                     the source tree with `cargo build --release`, or check out the release tag \
+                     `{}` to switch.",
+                    current_version, latest_version, latest_tag
                 )));
             }
             InstallMethod::CargoInstall => {
