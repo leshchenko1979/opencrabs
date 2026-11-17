@@ -5,7 +5,10 @@
 
 use super::super::error::Result;
 use super::super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
-use super::release_check::{GITHUB_API, diagnose_releases_latest_status, has_platform_asset};
+use super::release_check::{
+    GITHUB_API, diagnose_releases_latest_status, has_platform_asset, is_newer_release,
+    release_identity,
+};
 use crate::brain::agent::{ProgressCallback, ProgressEvent};
 use crate::utils::install::InstallMethod;
 use async_trait::async_trait;
@@ -214,11 +217,25 @@ impl Tool for EvolveTool {
             )));
         };
 
-        let latest_tag = release["tag_name"].as_str().unwrap_or("unknown");
-        let latest_version = latest_tag.strip_prefix('v').unwrap_or(latest_tag);
+        // The fork's rolling release keeps the real version in the release
+        // NAME (`0.5.4+fork.430`) under a constant, non-semver tag
+        // (`fork-latest`), so the version can never be read from `tag_name`
+        // alone; the tag stays for asset-name matching and logging only.
+        let (latest_tag, latest_version) = match release_identity(&release) {
+            Some(pair) => pair,
+            None => {
+                return Ok(ToolResult::error(format!(
+                    "Release payload from {GITHUB_API} carries neither a name nor a \
+                     tag_name — cannot determine which version is published."
+                )));
+            }
+        };
 
-        // Compare versions
-        if latest_version == current_version {
+        // Compare versions. `is_newer_release` compares the fork's deploy cycle
+        // numerically when both sides carry `+fork.<cycle>` and falls back to
+        // semver otherwise, so being on the same cycle reports "up to date"
+        // instead of re-downloading the same binary forever.
+        if !is_newer_release(&latest_version, current_version) {
             return Ok(ToolResult::success(format!(
                 "Already on the latest version (v{}).",
                 current_version
@@ -228,7 +245,7 @@ impl Tool for EvolveTool {
         // For pre-built binary installs, verify the platform asset exists
         // before reporting the update as available (release may still be building).
         if matches!(install_method, InstallMethod::PrebuiltBinary)
-            && !has_platform_asset(&release, latest_tag)
+            && !has_platform_asset(&release, &latest_tag)
         {
             let asset_count = release["assets"].as_array().map(|a| a.len()).unwrap_or(0);
             return Ok(ToolResult::error(format!(
@@ -262,14 +279,14 @@ impl Tool for EvolveTool {
             }
             InstallMethod::CargoInstall => {
                 return self
-                    .evolve_via_cargo_install(sid, current_version, latest_version)
+                    .evolve_via_cargo_install(sid, current_version, &latest_version)
                     .await;
             }
             InstallMethod::Homebrew => {
                 return super::homebrew::evolve(
                     sid,
                     current_version,
-                    latest_version,
+                    &latest_version,
                     self.progress.as_ref(),
                 )
                 .await;
@@ -281,8 +298,8 @@ impl Tool for EvolveTool {
                         &client,
                         &release,
                         current_version,
-                        latest_tag,
-                        latest_version,
+                        &latest_tag,
+                        &latest_version,
                         current_user_version,
                     )
                     .await;

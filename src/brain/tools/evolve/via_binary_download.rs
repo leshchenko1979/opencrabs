@@ -58,45 +58,36 @@ impl EvolveTool {
         }
 
         let is_windows = std::env::consts::OS == "windows";
-        let ext = if is_windows { "zip" } else { "tar.gz" };
-        let expected_asset = format!("opencrabs-{}-{}.{}", latest_tag, suffix, ext);
+        // Asset naming comes from ONE shared list
+        // (`release_check::platform_asset_candidates`) so the update check and
+        // this download can never disagree — a check that passes while the
+        // download 404s is the failure this pairing exists to prevent. The
+        // fork's rolling `fork-latest` release names its asset
+        // `opencrabs-fork-<suffix>.<ext>` (no tag in the filename); upstream's
+        // versioned and legacy forms stay as fallbacks.
+        let candidates = super::release_check::platform_asset_candidates(latest_tag, suffix);
 
         let assets = release["assets"].as_array();
-        let download_url = assets
-            .and_then(|arr| {
+        let selected = assets.and_then(|arr| {
+            candidates.iter().find_map(|want| {
                 arr.iter().find_map(|a| {
-                    let name = a["name"].as_str()?;
-                    if name == expected_asset {
-                        a["browser_download_url"].as_str().map(String::from)
+                    if a["name"].as_str() == Some(want.as_str()) {
+                        let url = a["browser_download_url"].as_str()?.to_string();
+                        Some((want.clone(), url))
                     } else {
                         None
                     }
                 })
             })
-            .or_else(|| {
-                // Fallback: try legacy naming without version tag
-                let legacy_asset = format!("opencrabs-{}.{}", suffix, ext);
-                assets.and_then(|arr| {
-                    arr.iter().find_map(|a| {
-                        let name = a["name"].as_str()?;
-                        if name == legacy_asset {
-                            a["browser_download_url"].as_str().map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-                })
-            });
+        });
 
-        let download_url = match download_url {
-            Some(url) => url,
+        let (expected_asset, download_url) = match selected {
+            Some(pair) => pair,
             None => {
                 return Ok(ToolResult::error(format!(
-                    "No binary found for {} in v{}. Expected: {}. \
+                    "No binary found for {suffix} in v{latest_version}. Expected one of: {}. \
                      Available assets: {}. Build from source instead.",
-                    suffix,
-                    latest_version,
-                    expected_asset,
+                    candidates.join(", "),
                     assets
                         .map(|arr| arr
                             .iter()
