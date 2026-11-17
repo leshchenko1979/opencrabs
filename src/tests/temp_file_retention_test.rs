@@ -338,3 +338,122 @@ fn the_runs_leg_is_swept_by_its_single_owner() {
         "the purge reports the capture it removed, got {removed}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #872 — the purge is a leg of the maintenance sweep, not a step of every start
+// ---------------------------------------------------------------------------
+
+/// The purge must run from the maintenance sweep, and report what it removed
+/// (#872).
+///
+/// It used to run in `main.rs` before `cli::run()`, so every CLI invocation —
+/// `opencrabs cron list`, a TUI start, a daemon boot — walked the whole temp
+/// tree before the surface that had been asked for could answer. Measured on
+/// the ops profile: 17.92 s for that leg against 0.37 s on identical code, the
+/// entire difference being a stalled disk while nothing was listening yet.
+///
+/// Driving the sweep rather than the helper is the point: moving the call is
+/// only safe if the new caller actually purges. A leg that stopped running
+/// altogether would also stop running at boot, and every test of
+/// `cleanup_old_temp_files` would still pass.
+///
+/// The `allow` is deliberate, not a workaround: `spill_guard` is a `std::Mutex`
+/// held across this sweep's await on purpose, because what it serializes is a
+/// SHARED FILESYSTEM DIRECTORY that another test could delete a fixture out of
+/// mid-run. The lint's advice — an async-aware mutex — would let a concurrent
+/// test interleave instead of blocking, which is the exact defect the lock
+/// exists to prevent. Blocking a runtime worker is harmless here: the sweep is
+/// the only thing this task runs.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn maintenance_sweep_purges_and_counts_aged_temp_files() {
+    let _spill = spill_guard();
+    let home = tempfile::tempdir().expect("tempdir");
+
+    crate::config::profile::with_home_override_async(home.path().to_path_buf(), async {
+        // 30 days: past the 7-day default the sweep resolves from an absent
+        // config, and inside a directory only the purge walks.
+        let files = crate::config::opencrabs_home().join("tmp").join("files");
+        let stale = write_aged(&files, "tg_upload_872.jpg", days(30));
+
+        let db = crate::db::Database::connect_in_memory().await.expect("db");
+        db.run_migrations().await.expect("migrations");
+        let svc = crate::services::maintenance::MaintenanceService::new(
+            crate::services::context::ServiceContext::new(db.pool().clone()),
+        );
+
+        let report = svc
+            .run_maintenance_inner(crate::db::MaintenanceKnobs::default())
+            .await
+            .expect("sweep");
+
+        assert!(
+            !stale.exists(),
+            "the sweep must purge an aged temp file: {}",
+            stale.display()
+        );
+        assert!(
+            report.temp_files_purged >= 1,
+            "the sweep must report the files it purged, got {}",
+            report.temp_files_purged
+        );
+    })
+    .await;
+}
+
+/// `main.rs` must not call the purge again (#872).
+///
+/// This is the whole fix, and it is exactly what a later refactor reverts by
+/// accident: re-adding the call compiles, passes every behavioural test in this
+/// file, and silently puts a full temp-tree walk back in front of `cli::run()`.
+/// Only a source pin can see the difference, because the defect is where the
+/// call lives rather than what it does.
+///
+/// The second assertion is the control. Without it, deleting the purge from
+/// both files would satisfy the pin.
+#[test]
+fn main_does_not_purge_temp_files_on_startup() {
+    const MAIN: &str = include_str!("../main.rs");
+    const SWEEP: &str = include_str!("../services/maintenance.rs");
+
+    assert!(
+        !MAIN.contains("cleanup_old_temp_files"),
+        "the temp purge belongs to the maintenance sweep (#872), not to every CLI start"
+    );
+    assert!(
+        SWEEP.contains("cleanup_old_temp_files"),
+        "control: the sweep is the purge's owner, so it must still call it"
+    );
+}
+
+/// A run's empty capture files must be unlinked after its finish record, never
+/// before (#872).
+///
+/// `File::create` makes both stream files when a run starts, so a command that
+/// writes nothing leaves two zero-byte files behind per run — 17,632 of the
+/// 36,461 entries the ops sweep walked. The order is the property: the finish
+/// record is how a reader finds those files, so unlinking first leaves the
+/// record pointing at nothing for the whole write window. That window is
+/// between two awaits, which no behavioural test can observe, hence the pin.
+#[test]
+fn empty_capture_cleanup_runs_after_the_finish_record() {
+    const BG: &str = include_str!("../brain/agent/service/background_tasks.rs");
+
+    assert!(
+        BG.contains("fn drop_empty_capture"),
+        "control: the cleanup helper must still exist"
+    );
+    // `rfind`, not `find`: the completion path is the LAST writer of the
+    // record, and the first match is an earlier call on a different path.
+    let finish = BG
+        .rfind("write_finish(")
+        .expect("control: the completion path still writes a finish record");
+    let cleanup = BG
+        .find("drop_empty_capture(&out_path)")
+        .expect("the empty-capture cleanup must be on the completion path");
+
+    assert!(
+        cleanup > finish,
+        "the capture cleanup must follow the finish record, not precede it"
+    );
+}

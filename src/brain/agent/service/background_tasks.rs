@@ -1100,6 +1100,38 @@ where
     })
 }
 
+/// Remove a capture file that carries no bytes (#872).
+///
+/// Called only once a run has FINISHED and its status record is written, so the
+/// record — not the file — is what says the run existed. Both captures are
+/// created AT SPAWN on purpose (#692: an absent file and an empty one must be
+/// distinguishable to a reader *during* the run), and that invariant is left
+/// exactly as it was; what changes is that a finished run's empty stream no
+/// longer sits in `tmp/runs` for its whole retention window.
+///
+/// The population is not marginal: `tmp/runs` held **36,461 entries of which
+/// 17,632 were zero-byte** (48.4%) on 2026-11-17, because a successful command
+/// writes nothing to stderr and still gets an `.err`. Both sweep legs stat every
+/// entry, and `cleanup_old_temp_files` walked the whole tree on every CLI start
+/// before #872 moved it.
+///
+/// Never fatal: a capture that is already absent, unreadable, or non-empty is
+/// not an error, and a failed unlink is warned about rather than propagated —
+/// this runs on a completion path whose job is to report the RUN's outcome.
+async fn drop_empty_capture(path: &std::path::Path) {
+    // An unreadable or already-absent capture is not this function's problem:
+    // the run's record already says it existed, and the sweep will collect it.
+    let Ok(meta) = tokio::fs::metadata(path).await else {
+        return;
+    };
+    if meta.len() != 0 {
+        return;
+    }
+    if let Err(e) = tokio::fs::remove_file(path).await {
+        tracing::warn!("Failed to remove empty capture {}: {e}", path.display());
+    }
+}
+
 /// Read a run's capture once its process is gone.
 ///
 /// Bounded on purpose. `Child::wait()` returning means the process exited, but
@@ -1720,6 +1752,13 @@ async fn continue_detached(
         elapsed_secs
     );
     write_finish(&id, &session_id, &label, &command, elapsed_secs, &result);
+    // #872: the run is finished and its record is written, so an empty stream
+    // is now just a file both sweep legs will stat for the rest of its window.
+    // Done AFTER `write_finish` deliberately — the record is what says the run
+    // existed, and a reader during the run still sees both files (the #692
+    // invariant), which is why this cannot move earlier.
+    drop_empty_capture(&out_path).await;
+    drop_empty_capture(&err_path).await;
     clear_row(run_uuid, &label).await;
     // Clear the indicator BEFORE delivering, not after: the work is over the
     // moment the process exits, so a badge that outlived it would show the

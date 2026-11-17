@@ -62,34 +62,18 @@ async fn main() -> Result<()> {
         tracing::info!("🧹 Cleaned up {} old log file(s)", removed);
     }
 
-    // Clean up orphaned temp files — channel uploads (tg_photo_*, wa_img_*) and
-    // the tool-output spill dir — older than `[agent.retention].tool_output_files`
-    // (or the deprecated flat key it replaced, #844), and finished detached
-    // commands' run captures older than `[agent.retention].command_runs` (#849).
-    // Never wipe on restart: files may be recoverable or still needed. A window
-    // of `0` disables the purge; the sweep itself honours that.
-    let (retention_days, command_run_days) =
-        match opencrabs::config::Config::load_for_cli(cli_args.config.as_deref()) {
-            Ok(config) => (
-                config.agent.tool_output_retention_days(),
-                config.agent.command_run_retention_days(),
-            ),
-            Err(e) => {
-                // A broken config is reported by the CLI path with full context,
-                // and that same failure stops this boot anyway. Skipping the purge
-                // is the conservative half: deleting files on the strength of a
-                // value we could not read is the worse failure.
-                tracing::warn!("temp-file purge skipped — config unavailable: {e}");
-                (0, 0)
-            }
-        };
-    let removed = logging::cleanup_old_temp_files(
-        u64::from(retention_days),
-        u64::from(command_run_days),
-    );
-    if removed > 0 {
-        tracing::info!("🧹 Cleaned up {} orphaned temp file(s)", removed);
-    }
+    // The aged-temp-file purge is NOT here any more (#872).
+    //
+    // It ran at this exact spot — before `cli::run()`, so on every CLI start —
+    // and walked the whole temp tree while the surface that was about to be
+    // used waited: `tmp/runs` alone is ~36k entries and both sweep legs stat
+    // every one. Measured 17.92 s against 0.37 s on identical code, the whole
+    // difference being a stalled disk.
+    //
+    // It now runs as a leg of `MaintenanceService::run_maintenance_inner`,
+    // which both the TUI and the daemon reach through `cli/ui.rs`, after
+    // readiness and on the sweep's own cadence. #848 decided this move; #872
+    // is the commit that makes it true.
 
     // Run CLI application
     let result = cli::run().await;

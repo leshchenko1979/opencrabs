@@ -299,6 +299,13 @@ pub struct MaintenanceReport {
     pub messages_pruned: usize,
     /// Number of `feedback_ledger` rows pruned (#836).
     pub feedback_ledger_pruned: usize,
+    /// Number of aged temp files purged (#872).
+    ///
+    /// Channel uploads, tool-output spills and finished run captures. This leg
+    /// used to run in `main.rs` before `cli::run()`, so every CLI start — not
+    /// just a daemon boot — paid a walk of the whole temp tree before anything
+    /// was listening (#872).
+    pub temp_files_purged: usize,
     /// Memory GC report (if memory store is available).
     pub memory_gc: Option<crate::memory::MemoryGcReport>,
     /// Whether the bulk memory GC was skipped because the freelist was already
@@ -472,6 +479,39 @@ impl MaintenanceService {
         report.feedback_ledger_pruned = pruned;
         report.failed_legs += usize::from(!ok);
 
+        // 1d. Purge aged temp files (#872)
+        //
+        // This leg lived in `main.rs` BEFORE `cli::run()`, so it ran on every
+        // CLI start and held up the surface that was about to be used: measured
+        // 17.92 s against 0.37 s on identical code, the whole difference being
+        // a stalled disk while nothing was listening yet. It belongs here — the
+        // sweep already owns retention, already waits out a post-boot warmup,
+        // and runs after readiness, in the background, once a day.
+        //
+        // `spawn_blocking` is not decoration: the purge is a synchronous walk
+        // (`read_dir` + a stat per entry), and parking a runtime worker on a
+        // slow disk is the failure this move exists to stop.
+        //
+        // Both windows come from config the same way `main.rs` resolved them,
+        // and `cleanup_old_temp_files` keeps its own `0`-disables contract — a
+        // zero must never be read as "delete everything".
+        let files_days = config.agent.tool_output_retention_days();
+        let command_days = config.agent.command_run_retention_days();
+        match tokio::task::spawn_blocking(move || {
+            crate::logging::cleanup_old_temp_files(u64::from(files_days), u64::from(command_days))
+        })
+        .await
+        {
+            Ok(purged) => report.temp_files_purged = purged,
+            // The purge is infallible by design, so the only way here is a
+            // panic inside it. Best-effort like every other leg: warn, count
+            // the failure, and let the remaining legs run (#841).
+            Err(e) => {
+                tracing::warn!("Maintenance: temp-file purge failed: {e}");
+                report.failed_legs += 1;
+            }
+        }
+
         // 2. Memory Store GC & Vacuum
         //
         // Two separate lock acquisitions on purpose: merging them would hold the
@@ -540,6 +580,7 @@ impl MaintenanceService {
             subagents_pruned = report.subagents_pruned,
             messages_pruned = report.messages_pruned,
             feedback_ledger_pruned = report.feedback_ledger_pruned,
+            temp_files_purged = report.temp_files_purged,
             database_vacuumed = report.database_vacuumed,
             memory_vacuumed = report.memory_vacuumed,
             memory_gc_skipped = report.memory_gc_skipped,

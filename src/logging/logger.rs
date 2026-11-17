@@ -616,12 +616,14 @@ fn sweep_aged_files(dir: &std::path::Path, max_age: std::time::Duration) -> usiz
 ///   Reached through `work_status::sweep_stale_runs`, NOT through a bare
 ///   `sweep_aged_files` call, because a run writes continuously and a plain
 ///   mtime sweep would unlink the stream of a still-running child. This
-///   function is that leg's **single owner** (#848): it runs on every surface
-///   and on every CLI invocation, while `work_status::cleanup_stale` — the
-///   boot status sweep called from `subagent/reconcile.rs` — now sweeps only
-///   the status directory. Both used to sweep runs, and since both run on
-///   every boot the duplicate cost a second `readdir` of `tmp/runs` plus a
-///   `stat` per capture for nothing.
+///   function is that leg's **single owner** (#848). Since #872 its caller is
+///   the maintenance sweep (`MaintenanceService::run_maintenance_inner`), not
+///   `main.rs`: the TUI and the daemon both run that sweep after readiness, on
+///   its own cadence. `work_status::cleanup_stale` — the boot status sweep
+///   called from `subagent/reconcile.rs` — now sweeps only the status
+///   directory. Both used to sweep runs, and since both run on every boot the
+///   duplicate cost a second `readdir` of `tmp/runs` plus a `stat` per capture
+///   for nothing.
 ///
 /// `<home>/tmp/detached` is deliberately absent: it already has its own
 /// startup sweep (the merged boot pass in `subagent/reconcile.rs`). Subdirectories
