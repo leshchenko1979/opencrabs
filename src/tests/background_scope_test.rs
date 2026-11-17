@@ -124,3 +124,175 @@ fn a_disabled_scope_spec_reports_itself_disabled() {
         "a disabled spec must never wrap, whatever the probe would say"
     );
 }
+
+/// A `systemctl` stand-in that records every write, so "issued no write" is a
+/// fact about a log rather than an inference from a value.
+///
+/// The real `systemctl set-property` rewrites the drop-in even when the value is
+/// unchanged (measurement 13), so idempotence cannot be read off the resulting
+/// bound — the only honest instrument is the call itself. `show` answers from a
+/// state file, exactly as systemd answers from the unit it has loaded.
+#[cfg(unix)]
+fn fake_systemctl(dir: &std::path::Path) -> std::path::PathBuf {
+    let state = dir.join("state");
+    let log = dir.join("writes");
+    std::fs::write(&state, "infinity").expect("state is writable");
+    std::fs::write(&log, "").expect("log is writable");
+
+    let script = dir.join("systemctl");
+    let body = format!(
+        "#!/bin/sh\n\
+         STATE={state}\n\
+         LOG={log}\n\
+         case \"$1\" in\n\
+           --user) shift ;;\n\
+         esac\n\
+         case \"$1\" in\n\
+           show)\n\
+             printf 'MemoryMax=%s\\n' \"$(cat \"$STATE\")\"\n\
+             exit 0 ;;\n\
+           set-property)\n\
+             printf '%s\\n' \"$3\" >> \"$LOG\"\n\
+             printf '%s\\n' \"${{3#MemoryMax=}}\" > \"$STATE\"\n\
+             exit 0 ;;\n\
+         esac\n\
+         exit 1\n",
+        state = state.display(),
+        log = log.display()
+    );
+    std::fs::write(&script, body).expect("the fake is writable");
+    let mut perms = std::fs::metadata(&script).expect("exists").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&script, perms).expect("the fake is executable");
+    script
+}
+
+#[cfg(unix)]
+fn scratch_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "oc-scope-test-{tag}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir
+}
+
+/// A second reconcile of an unchanged bound must issue NO write.
+///
+/// This is the whole reason the reconcile reads before it writes: on this host
+/// `set-property` rewrites the drop-in unconditionally, so an unguarded write
+/// would touch a unit file on every daemon start and every config reload.
+#[cfg(unix)]
+#[test]
+fn reconcile_writes_once_and_then_goes_quiet() {
+    let dir = scratch_dir("idem");
+    let bin = fake_systemctl(&dir);
+    let spec = ScopeSpec {
+        pool_memory_max: Some(2 << 30),
+        ..ScopeSpec::default()
+    };
+
+    assert!(
+        crate::utils::scope::reconcile_pool_with(&spec, bin.as_os_str()),
+        "the pool reconciles against a working systemctl"
+    );
+    let after_first = std::fs::read_to_string(dir.join("writes")).expect("log");
+    assert_eq!(
+        after_first.lines().count(),
+        1,
+        "one reconcile issues exactly one write, got {after_first:?}"
+    );
+    let mtime_first = std::fs::metadata(dir.join("state"))
+        .expect("state")
+        .modified()
+        .expect("mtime");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    assert!(
+        crate::utils::scope::reconcile_pool_with(&spec, bin.as_os_str()),
+        "the second reconcile still reports a bounded pool"
+    );
+    let after_second = std::fs::read_to_string(dir.join("writes")).expect("log");
+    assert_eq!(
+        after_second, after_first,
+        "an unchanged bound must issue no second write"
+    );
+    let mtime_second = std::fs::metadata(dir.join("state"))
+        .expect("state")
+        .modified()
+        .expect("mtime");
+    assert_eq!(
+        mtime_first, mtime_second,
+        "the state the drop-in mirrors must not be rewritten"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A bound that is not a size must never reach argv.
+///
+/// systemd rejects a malformed property and runs nothing, so a garbage value
+/// passed through would take every detached job on the host down with it. The
+/// config path is the only way a garbage value can arrive, so the assertion is
+/// made there: what `spec_from_config` emits is the shipped default, never the
+/// operator's typo.
+#[test]
+fn a_garbage_pool_bound_never_reaches_argv() {
+    let mut cfg = BackgroundConfig::default();
+    cfg.slice_memory_max = "banana".to_string();
+
+    let spec = crate::utils::scope::spec_from_config(&cfg);
+    assert_eq!(
+        spec.pool_memory_max,
+        ScopeSpec::default().pool_memory_max,
+        "a garbage size falls back to the shipped default"
+    );
+    assert!(
+        parse_memory_max("banana").is_err(),
+        "and the parser refuses it outright"
+    );
+}
+
+/// A slice name systemd would reject is refused before any command runs.
+#[cfg(unix)]
+#[test]
+fn an_invalid_slice_name_issues_no_command() {
+    let dir = scratch_dir("garbage");
+    let bin = fake_systemctl(&dir);
+    let spec = ScopeSpec {
+        slice: "not-a-slice".to_string(),
+        ..ScopeSpec::default()
+    };
+
+    assert!(
+        !crate::utils::scope::reconcile_pool_with(&spec, bin.as_os_str()),
+        "an invalid slice name must be refused before any command runs"
+    );
+    let writes = std::fs::read_to_string(dir.join("writes")).expect("log");
+    assert!(
+        writes.is_empty(),
+        "no systemctl call may happen for a refused slice, got {writes:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A disabled spec must not reconcile either — the kill switch covers the pool.
+#[cfg(unix)]
+#[test]
+fn a_disabled_spec_does_not_reconcile_the_pool() {
+    let dir = scratch_dir("disabled");
+    let bin = fake_systemctl(&dir);
+    assert!(
+        !crate::utils::scope::reconcile_pool_with(&ScopeSpec::disabled(), bin.as_os_str()),
+        "a disabled spec must not touch the pool"
+    );
+    assert!(
+        std::fs::read_to_string(dir.join("writes"))
+            .expect("log")
+            .is_empty(),
+        "a disabled spec must issue no systemctl call"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

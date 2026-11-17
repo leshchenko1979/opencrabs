@@ -53,6 +53,9 @@ pub struct ScopeSpec {
     pub swap_max: u64,
     /// Per-run `TasksMax`, so one run cannot exhaust the daemon's task budget.
     pub tasks_max: u64,
+    /// `MemoryMax` for the slice itself — the pool that bounds the SUM of every
+    /// live run. `None` = `infinity`, i.e. no pool bound at all.
+    pub pool_memory_max: Option<u64>,
 }
 
 impl Default for ScopeSpec {
@@ -63,6 +66,7 @@ impl Default for ScopeSpec {
             memory_max: Some(1 << 30),
             swap_max: 0,
             tasks_max: 16,
+            pool_memory_max: Some(2 << 30),
         }
     }
 }
@@ -120,6 +124,16 @@ pub fn spec_from_config(cfg: &crate::config::types::BackgroundConfig) -> ScopeSp
     } else {
         cfg.scope_tasks_max
     };
+    let pool_memory_max = match parse_memory_max(&cfg.slice_memory_max) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(
+                target: "background_task",
+                "ignoring agent.background.slice_memory_max: {e}; using the default"
+            );
+            fallback.pool_memory_max
+        }
+    };
 
     ScopeSpec {
         enabled: cfg.scope,
@@ -127,6 +141,7 @@ pub fn spec_from_config(cfg: &crate::config::types::BackgroundConfig) -> ScopeSp
         memory_max,
         swap_max,
         tasks_max,
+        pool_memory_max,
     }
 }
 
@@ -144,6 +159,236 @@ fn parse_size_allow_zero(raw: &str) -> Result<Option<u64>, String> {
 /// The `systemd-run` binary to invoke.
 pub fn systemd_run_bin() -> std::ffi::OsString {
     std::env::var_os(SYSTEMD_RUN_ENV).unwrap_or_else(|| "systemd-run".into())
+}
+
+/// The `systemctl` binary, overridable for tests.
+pub const SYSTEMCTL_ENV: &str = "OPENCRABS_SYSTEMCTL";
+
+/// The `systemctl` binary to invoke when reconciling the pool slice.
+pub fn systemctl_bin() -> std::ffi::OsString {
+    std::env::var_os(SYSTEMCTL_ENV).unwrap_or_else(|| "systemctl".into())
+}
+
+/// Bring the pool slice's `MemoryMax` in line with the spec, ONCE per desired
+/// value, and report whether the pool is (now) bounded as asked.
+///
+/// The ORDERING is the whole point: `systemd-run --slice=<name>` creates a
+/// missing slice on demand, and a slice created that way lands at
+/// `MemoryMax=infinity` (measurement 15). A pool reconciled after the first
+/// spawn therefore reconciles a slice that already exists *and is already
+/// unbounded* — and on a fresh host that is exactly the state the first run
+/// leaves behind. [`ensure`] reconciles before its probe for this reason.
+///
+/// The write is a read-before-write, not a courtesy: `systemctl set-property`
+/// rewrites the drop-in even when the value is unchanged (measurement 13), so
+/// writing unconditionally would touch the unit file on every daemon start and
+/// every config reload. An unchanged bound issues no command at all.
+///
+/// A failure here is logged and NOT fatal to scoping: the per-run cap still
+/// contains a single run, so a missing pool degrades the sum bound rather than
+/// the mechanism. `false` says the pool was not established.
+pub fn reconcile_pool(spec: &ScopeSpec) -> bool {
+    reconcile_pool_with(spec, &systemctl_bin())
+}
+
+/// [`reconcile_pool`] with an explicit binary, so a test can drive a fake
+/// `systemctl` without mutating process-global environment.
+pub fn reconcile_pool_with(spec: &ScopeSpec, bin: &std::ffi::OsStr) -> bool {
+    if !spec.enabled {
+        return false;
+    }
+    if let Err(e) = validate_slice_name(&spec.slice) {
+        tracing::warn!(
+            target: "background_task",
+            "not reconciling the pool: {e}"
+        );
+        return false;
+    }
+
+    let desired = pool_arg(spec.pool_memory_max);
+    match read_pool_memory_max(&spec.slice, bin) {
+        Ok(current) if same_bound(&current, spec.pool_memory_max) => {
+            tracing::debug!(
+                target: "background_task",
+                "pool {} already at MemoryMax={current}; no write",
+                spec.slice
+            );
+        }
+        Ok(current) => {
+            if !write_pool_memory_max(&spec.slice, &desired, bin) {
+                return false;
+            }
+            tracing::info!(
+                target: "background_task",
+                "pool {} MemoryMax {current} -> {desired}",
+                spec.slice
+            );
+        }
+        Err(e) => {
+            // A read we cannot trust is not a licence to skip the write: the
+            // pool bound is the only thing bounding the SUM of runs, and an
+            // unwritten bound is unbounded rather than merely unverified.
+            tracing::warn!(
+                target: "background_task",
+                "cannot read the pool bound ({e}); writing MemoryMax={desired} anyway"
+            );
+            if !write_pool_memory_max(&spec.slice, &desired, bin) {
+                return false;
+            }
+        }
+    }
+
+    advise_on_bounds(spec);
+    true
+}
+
+/// The `MemoryMax` value systemd expects: bytes, or the literal `infinity`.
+fn pool_arg(value: Option<u64>) -> String {
+    match value {
+        Some(bytes) => bytes.to_string(),
+        None => "infinity".to_string(),
+    }
+}
+
+/// Whether what systemd reports already satisfies the desired bound.
+///
+/// Compared NUMERICALLY, never as text: systemd echoes bytes for a byte-set
+/// property but `infinity` for an unset one, and a host whose drop-in was
+/// written by hand may carry `1G`. A text comparison would rewrite all three.
+/// An unrecognised spelling is "not equal" — rewriting is the safe direction.
+fn same_bound(current: &str, desired: Option<u64>) -> bool {
+    match parse_memory_max(current) {
+        Ok(Some(bytes)) => Some(bytes) == desired,
+        Ok(None) => desired.is_none(),
+        Err(_) => false,
+    }
+}
+
+/// Read the pool slice's current `MemoryMax` as systemd spells it.
+///
+/// `systemctl show` answers for a slice that does not exist yet, with
+/// `MemoryMax=infinity` and rc 0 — "absent" and "unbounded" are the same
+/// answer here, which is why a desired bound must be WRITTEN rather than
+/// assumed present.
+fn read_pool_memory_max(slice: &str, bin: &std::ffi::OsStr) -> Result<String, String> {
+    let out = std::process::Command::new(bin)
+        .arg("--user")
+        .arg("show")
+        .arg(slice)
+        .arg("-p")
+        .arg("MemoryMax")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("{} not runnable: {e}", bin.to_string_lossy()))?;
+    if !out.status.success() {
+        return Err(format!(
+            "`systemctl show {slice} -p MemoryMax` exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("MemoryMax="))
+        .map(|value| value.trim().to_string())
+        .ok_or_else(|| format!("`systemctl show {slice} -p MemoryMax` printed no MemoryMax line"))
+}
+
+/// Write the pool bound. `false` on any failure, with the reason logged.
+fn write_pool_memory_max(slice: &str, value: &str, bin: &std::ffi::OsStr) -> bool {
+    let attempt = std::process::Command::new(bin)
+        .arg("--user")
+        .arg("set-property")
+        .arg(slice)
+        .arg(format!("MemoryMax={value}"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output();
+    match attempt {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            tracing::warn!(
+                target: "background_task",
+                "could not set {} MemoryMax={value}: `systemctl set-property` exited {}: {}; \
+                 the sum of live runs stays unbounded",
+                slice,
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            false
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "background_task",
+                "could not set {} MemoryMax={value}: {} not runnable: {e}",
+                slice,
+                bin.to_string_lossy()
+            );
+            false
+        }
+    }
+}
+
+/// The two configurations that are legal but cannot be honoured. Advisory only:
+/// both are the operator's call, and refusing to start would be worse than
+/// running with a bound that is merely tighter than intended.
+fn advise_on_bounds(spec: &ScopeSpec) {
+    if let (Some(pool), Some(run)) = (spec.pool_memory_max, spec.memory_max)
+        && pool < run
+    {
+        tracing::warn!(
+            target: "background_task",
+            "slice_memory_max ({pool} B) is below scope_memory_max ({run} B): the pool is the \
+             binding limit, so a run is killed by its pool before it can reach its own cap"
+        );
+    }
+    let Some(pool) = spec.pool_memory_max else {
+        return;
+    };
+    if let (Some(daemon), Some(total)) = (daemon_memory_max(), mem_total())
+        && pool.saturating_add(daemon) > total
+    {
+        tracing::warn!(
+            target: "background_task",
+            "slice_memory_max ({pool} B) plus the daemon's own cap ({daemon} B) exceeds MemTotal \
+             ({total} B): if both reach their caps the kernel's global OOM killer chooses, and the \
+             daemon is a candidate"
+        );
+    }
+}
+
+/// The effective `MemoryMax` of the cgroup this process runs in, read from the
+/// cgroup filesystem rather than from a unit name — the daemon's unit name is
+/// not this module's business, and its own cgroup IS its cap.
+fn daemon_memory_max() -> Option<u64> {
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let path = cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))?
+        .trim();
+    let raw = std::fs::read_to_string(format!("/sys/fs/cgroup{path}/memory.max")).ok()?;
+    let raw = raw.trim();
+    if raw == "max" {
+        return None;
+    }
+    raw.parse().ok()
+}
+
+/// `MemTotal` in bytes, from `/proc/meminfo`.
+fn mem_total() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb: u64 = meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some(kb.saturating_mul(1024))
 }
 
 /// Wrap `cmd` so it runs inside its own transient scope, returning `true` when
@@ -230,7 +475,46 @@ pub fn ensure(spec: &ScopeSpec) -> bool {
     if !spec.enabled {
         return false;
     }
+    // BEFORE the probe, and before any wrapped spawn: a slice created on demand
+    // by `--slice=` is born unbounded (measurement 15), so a pool reconciled
+    // after the first run would be reconciling a bound the first run already
+    // escaped.
+    settle_pool(spec);
     *PROBE.get_or_init(probe)
+}
+
+/// The pool bound already reconciled, keyed by slice and desired value, so a
+/// spawn costs one uncontended lock and no subprocess.
+///
+/// Keyed rather than "once": `slice_memory_max` is a live knob, and a bound that
+/// only takes effect after a restart is the failure this module exists to
+/// remove. A FAILED reconcile is deliberately not recorded, so a transient
+/// systemd hiccup is retried on the next spawn instead of being remembered as
+/// settled.
+static POOL: std::sync::Mutex<Option<(String, Option<u64>)>> = std::sync::Mutex::new(None);
+
+fn settle_pool(spec: &ScopeSpec) {
+    let key = (spec.slice.clone(), spec.pool_memory_max);
+    {
+        let guard = match POOL.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.as_ref() == Some(&key) {
+            return;
+        }
+    }
+    // The lock is NOT held across the subprocess calls: a reconcile that blocks
+    // would serialise every concurrent spawn behind it. Two racing spawns can
+    // both reconcile, which is harmless — the second reads the bound the first
+    // wrote and issues no write.
+    if reconcile_pool(spec) {
+        let mut guard = match POOL.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = Some(key);
+    }
 }
 
 #[cfg(unix)]
