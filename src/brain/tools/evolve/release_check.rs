@@ -248,30 +248,36 @@ fn upstream_base(v: &str) -> &str {
 ///
 /// Upstream semver and the fork's deploy cycle are different axes: the fork
 /// republishes with an unchanged upstream version (`0.5.4+fork.430` ->
-/// `0.5.4+fork.431`), which a semver comparison can never see. When BOTH sides
-/// carry `+fork.<cycle>` the cycle is compared numerically; otherwise this
-/// falls back to `is_newer`'s semver comparison, unchanged.
+/// `0.5.4+fork.431`), which a semver comparison can never see.
+///
+/// Order of decision:
+/// 1. The upstream version decides whenever the two differ, on BOTH sides of
+///    the fork. A cycle can never make an older upstream version newer
+///    (`0.5.4+fork.999` is older than `0.5.5`) and can never hold back a real
+///    upstream bump. This is why a raw `is_newer` on the whole string is
+///    wrong: it reads `+fork.431` as a fourth semver field.
+/// 2. Same upstream version on both sides: the cycle is the axis, compared
+///    numerically.
+/// 3. Same upstream version, fork identity only on the RELEASE: newer. This is
+///    how a plain build joins the fork track — and how binaries built before
+///    the identity injection migrate onto it.
+/// 4. Same upstream version, fork identity only on the RUNNING binary: not
+///    newer (a plain release of the same upstream version is not an update).
 ///
 /// Equal on both sides => not newer (never re-download in a loop).
 pub(crate) fn is_newer_release(latest: &str, current: &str) -> bool {
+    let latest_base = upstream_base(latest);
+    let current_base = upstream_base(current);
+    if is_newer(latest_base, current_base) {
+        return true;
+    }
+    if is_newer(current_base, latest_base) {
+        return false;
+    }
     match (parse_fork_version(latest), parse_fork_version(current)) {
-        (Some((latest_base, latest_cycle)), Some((current_base, current_cycle))) => {
-            // Upstream version first: a bump there is an update whatever the
-            // cycle says. Same upstream version => the cycle IS the axis.
-            if is_newer(latest_base, current_base) {
-                true
-            } else if is_newer(current_base, latest_base) {
-                false
-            } else {
-                latest_cycle > current_cycle
-            }
-        }
-        // Mixed (one side plain semver, or an upstream `v0.5.4`): compare the
-        // upstream base only. Handing a `+fork.N` string to `is_newer` would
-        // let it read the cycle as a fourth semver field (`0.5.4+fork.431` ->
-        // `[0, 5, 431]`) and report a fork build as newer than a real upstream
-        // bump.
-        _ => is_newer(upstream_base(latest), upstream_base(current)),
+        (Some((_, latest_cycle)), Some((_, current_cycle))) => latest_cycle > current_cycle,
+        (Some(_), None) => true,
+        (None, Some(_)) | (None, None) => false,
     }
 }
 

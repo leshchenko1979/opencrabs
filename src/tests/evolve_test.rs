@@ -324,13 +324,19 @@ fn plain_semver_still_compares_as_before() {
 }
 
 #[test]
-fn mixed_fork_and_plain_compares_the_upstream_base_only() {
-    // A fork build on the same upstream version is not an "update" over plain
-    // upstream — and the cycle must never be read as a fourth semver field.
-    assert!(!is_newer_release("0.5.4+fork.431", "0.5.4"));
+fn mixed_fork_and_plain_versions_never_read_the_cycle_as_semver() {
+    // Same upstream version: a fork identity on the RELEASE is how a plain
+    // build joins the fork track, so it counts as an update...
+    assert!(is_newer_release("0.5.4+fork.431", "0.5.4"));
+    // ...while a plain release of the same upstream version never beats a
+    // running fork build.
     assert!(!is_newer_release("0.5.4", "0.5.4+fork.431"));
+    // A real upstream bump decides on its own, whatever the cycle says — the
+    // reason the whole string must never go to `is_newer`.
     assert!(is_newer_release("0.5.5", "0.5.4+fork.430"));
+    assert!(is_newer_release("0.5.5+fork.1", "0.5.4"));
     assert!(!is_newer_release("0.5.4+fork.430", "0.5.5"));
+    assert!(!is_newer_release("0.5.4+fork.999", "0.5.5"));
 }
 
 #[test]
