@@ -388,3 +388,15 @@ fn version_is_either_the_package_version_or_a_fork_cycle_on_it() {
         crate::VERSION
     );
 }
+
+#[test]
+fn clap_version_flag_reports_the_injected_version_not_the_package_version() {
+    // `opencrabs --version` / `-V` is served by clap, not by the `Version`
+    // subcommand handler, so the command's own version string is what a fork
+    // build must carry: acceptance for #865 names `--version` explicitly.
+    // With OPENCRABS_FORK_VERSION unset this still holds, because
+    // `crate::VERSION` IS `CARGO_PKG_VERSION` in that build.
+    use clap::CommandFactory;
+    let cmd = crate::cli::Cli::command();
+    assert_eq!(cmd.get_version(), Some(crate::VERSION));
+}
