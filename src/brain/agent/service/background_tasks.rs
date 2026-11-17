@@ -542,7 +542,7 @@ impl BackgroundTaskManager {
             command,
             wake,
         } = req;
-        let cmd = build_command(&cwd, &command, session_id);
+        let mut cmd = build_command(&cwd, &command, session_id);
         // `build_command` never arms `kill_on_drop`: this arm exists to let a
         // job outlive the turn, so the flag that reaps a dropped child is
         // exactly the wrong default here.
@@ -768,7 +768,9 @@ impl BackgroundTaskManager {
         // old one, and BEFORE the detachment closure, which is the ordering the
         // acceptance pins; both run in the child between fork and exec, in the
         // order they were added.
-        scope_spec.priority.apply_to_command(&mut cmd);
+        // `cmd` is a tokio Command here; the priority spec installs a
+        // `pre_exec` closure, which lives on the std Command inside it.
+        scope_spec.priority.apply_to_command(cmd.as_std_mut());
         if wrapped {
             crate::brain::tools::bash::detach_session_pre_exec(&mut cmd);
             // Re-asserted from the reservation, never defaulted: a wrapper that
