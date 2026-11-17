@@ -8,7 +8,8 @@
 //! check: the function entry-point contract.
 
 use crate::utils::pdf_vision::{
-    effective_dpi, parse_page_size_line, render_pdf_pages, DEFAULT_DPI, MAX_DPI, MIN_DPI,
+    effective_dpi, parse_page_size_line, pixel_box, render_pdf_pages, scale_to_box, DEFAULT_DPI,
+    MAX_DPI, MAX_PIXELS_PER_PAGE, MIN_DPI,
 };
 use std::fs;
 
@@ -213,4 +214,41 @@ fn parse_page_size_line_does_not_need_the_paper_name() {
         parse_page_size_line("Page    1 size:  595 x 842 pts"),
         Some((595.0, 842.0))
     );
+}
+
+/// The pixel box is the SECOND lever, used only when no fixed resolution
+/// fits. Two properties matter: it must actually stay inside the budget
+/// (it is `floor(sqrt(budget))`, so the square is just under it), and it
+/// must not fire for a page that a fitted DPI already handles — passing
+/// `-scale-to` beside `-r` makes poppler discard the resolution and
+/// upscale small pages, so "both" is never a valid answer.
+#[test]
+fn pixel_box_stays_inside_the_budget_and_only_fires_when_no_dpi_fits() {
+    let b = pixel_box();
+    assert!(
+        (b as f64).powi(2) <= MAX_PIXELS_PER_PAGE,
+        "box {b}x{b} exceeds the {MAX_PIXELS_PER_PAGE} px budget"
+    );
+    assert!(
+        ((b + 1) as f64).powi(2) > MAX_PIXELS_PER_PAGE,
+        "box {b} is smaller than it needs to be"
+    );
+
+    // A4 and A0 both fit once the DPI is fitted to the page area, so
+    // neither may take the box path.
+    for area_pt in [595.0 * 842.0, 2384.0 * 3370.0] {
+        let fitted = effective_dpi(area_pt, 200);
+        assert_eq!(
+            scale_to_box(area_pt, fitted),
+            None,
+            "area {area_pt} pt^2 fits at {fitted} DPI, so no box is needed"
+        );
+    }
+
+    // A page so large that even MIN_DPI overflows: resolution has run out,
+    // so the box is the only bound left.
+    let enormous = 1.0e8;
+    let fitted = effective_dpi(enormous, 200);
+    assert_eq!(fitted, MIN_DPI, "the floor must hold before the box is used");
+    assert_eq!(scale_to_box(enormous, fitted), Some(b));
 }

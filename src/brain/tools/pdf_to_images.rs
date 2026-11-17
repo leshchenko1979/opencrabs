@@ -11,6 +11,7 @@
 //! a vision model. This tool is the on-demand escape hatch for that case.
 
 use super::error::{Result, ToolError};
+use crate::utils::pdf_vision::RenderBound;
 use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -156,30 +157,25 @@ impl Tool for PdfToImagesTool {
 
         let path_owned = path.clone();
         let out_owned = render_output_dir(&path);
-        // The geometry probe and the render both shell out, so they share
-        // one blocking hop — `pdfinfo` on the async executor would stall
-        // every other task on the worker for the duration of a subprocess.
-        // The DPI is resolved here rather than reported afterwards so the
-        // answer can say what actually happened: a silently downscaled map
-        // is worse than a stated one, because the vision model reads mush
-        // and the agent relays it as detail.
+        // One blocking hop for the whole render: `pdfinfo` and `pdftoppm`
+        // both shell out, and either on the async executor would stall every
+        // other task on the worker for the duration of a subprocess. The
+        // bound comes BACK from the renderer instead of being predicted
+        // here — a second probe would be a second copy of the same decision,
+        // free to disagree with what actually ran.
         let rendered = tokio::task::spawn_blocking(move || {
-            let effective_dpi = crate::utils::pdf_vision::max_page_area_pt(&path_owned, render_upto)
-                .map(|area| crate::utils::pdf_vision::effective_dpi(area, requested_dpi))
-                .unwrap_or(requested_dpi);
-            let pages = crate::utils::pdf_vision::render_pdf_pages(
+            crate::utils::pdf_vision::render_pdf_pages(
                 path_owned.to_str().unwrap_or(""),
                 render_upto,
                 out_owned.to_str().unwrap_or(""),
                 requested_dpi,
-            )?;
-            Ok::<_, String>((pages, effective_dpi))
+            )
         })
         .await
         .map_err(|e| ToolError::Execution(format!("PDF render task failed: {e}")))?;
 
-        let (all_pages, effective_dpi) = match rendered {
-            Ok((p, dpi)) if !p.is_empty() => (p, dpi),
+        let (all_pages, bound) = match rendered {
+            Ok(rendered) if !rendered.pages.is_empty() => (rendered.pages, rendered.bound),
             Ok(_) => {
                 return Ok(ToolResult::error(format!(
                     "PDF renderer produced no pages for {}",
@@ -192,7 +188,6 @@ impl Tool for PdfToImagesTool {
                 )));
             }
         };
-
 
         // Select the requested pages by 1-indexed position; an empty
         // request means "all rendered pages". Out-of-range numbers are
@@ -237,22 +232,40 @@ impl Tool for PdfToImagesTool {
                 "\n[Requested pages not present (document has {total_rendered} page(s)): {missing:?}]"
             ));
         }
-        // Only stated when the cap actually bit. A note on every render
-        // would be noise; silence about a downscale is a trap.
-        if effective_dpi < requested_dpi {
-            output.push_str(&format!(
-                "\n[Rendered at {effective_dpi} DPI instead of {requested_dpi}: the largest page \
-                 would exceed the per-page pixel budget, so it was downscaled rather than \
-                 OOM-killing the daemon. Small text may be unreadable; raise `dpi` only for a \
-                 document whose pages are smaller than this one's.]"
-            ));
+        // Only stated when the bound actually bit. A note on every render
+        // would be noise; silence about a downscale is a trap — the vision
+        // model reads mush as detail and the agent relays it onward.
+        let bound_note = match bound {
+            RenderBound::Dpi(used) if used < requested_dpi => Some(format!(
+                "\n[Rendered at {used} DPI instead of {requested_dpi}: the largest page would \
+                 exceed the per-page pixel budget, so it was downscaled rather than OOM-killing \
+                 the daemon. Small text may be unreadable; raise `dpi` only for a document whose \
+                 pages are smaller than this one's.]"
+            )),
+            RenderBound::PixelBox(box_px) => Some(format!(
+                "\n[Rendered inside a {box_px}x{box_px} px box rather than at {requested_dpi} \
+                 DPI: the page is too large for any safe fixed resolution, so each page was \
+                 fitted to that box. Small text may be unreadable.]"
+            )),
+            // Fixed DPI at or above the request, or the pdfium path's own
+            // constant target width — neither is a response to page size.
+            _ => None,
+        };
+        if let Some(note) = bound_note {
+            output.push_str(&note);
         }
+
+        let bound_label = match bound {
+            RenderBound::Dpi(used) => format!("dpi:{used}"),
+            RenderBound::PixelBox(box_px) => format!("box:{box_px}"),
+            RenderBound::TargetWidth(px) => format!("width:{px}"),
+        };
 
         Ok(ToolResult::success(output)
             .with_metadata("path".to_string(), path.display().to_string())
             .with_metadata("pages_rendered".to_string(), selected.len().to_string())
             .with_metadata("requested_dpi".to_string(), requested_dpi.to_string())
-            .with_metadata("effective_dpi".to_string(), effective_dpi.to_string()))
+            .with_metadata("render_bound".to_string(), bound_label))
     }
 }
 

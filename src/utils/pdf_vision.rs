@@ -49,17 +49,53 @@ pub const MAX_DPI: u32 = 300;
 /// third of the cgroup at worst, leaving room for the lanes sharing it.
 /// A4 at 200 DPI is 3.9 Mpx, so ordinary documents are untouched and
 /// only large-format pages lose resolution.
-const MAX_PIXELS_PER_PAGE: f64 = 10_000_000.0;
+pub(crate) const MAX_PIXELS_PER_PAGE: f64 = 10_000_000.0;
+
+/// Target pixel WIDTH the pdfium path renders every page at. It bounds an
+/// A0 sheet to ~5.7 Mpx, which is why that path needs no `dpi` argument.
+const PDFIUM_TARGET_WIDTH: u32 = 2000;
 
 /// Side of the pixel box that bounds one page, for `pdftoppm -scale-to`
 /// (which fits each page inside an N x N square, aspect preserved).
-fn pixel_box() -> u32 {
+pub(crate) fn pixel_box() -> u32 {
     MAX_PIXELS_PER_PAGE.sqrt().floor() as u32
 }
 
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
+
+/// How the rasteriser bounded a render.
+///
+/// Carried out of the renderer rather than recomputed by the caller.
+/// Recomputing it meant a SECOND `pdfinfo` probe and a second copy of the
+/// same decision — which then disagreed with the renderer on the one branch
+/// that matters (unmeasurable geometry), so the tool told the model
+/// "200 DPI" while `pdftoppm` had rendered a bounded pixel box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderBound {
+    /// Rendered at this fixed resolution (`pdftoppm -r`).
+    Dpi(u32),
+    /// Fitted inside an NxN pixel box (`pdftoppm -scale-to`): no single DPI
+    /// describes the output, and the effective resolution varies per page.
+    PixelBox(u32),
+    /// Bounded by the pdfium target width in pixels. That path applies the
+    /// same width to every page, so it is not a response to page size.
+    TargetWidth(u32),
+}
+
+/// What a render actually produced, and how it was bounded.
+///
+/// `Debug` is not decoration: `Result::expect_err` in the tests requires
+/// the Ok type to be printable.
+#[derive(Debug)]
+pub struct RenderedPages {
+    /// Rendered PNG paths, in page order.
+    pub pages: Vec<PathBuf>,
+    /// How the raster was bounded — the caller reports THIS, never the
+    /// resolution it requested.
+    pub bound: RenderBound,
+}
 
 /// Render up to `max_pages` pages of `pdf_path` as PNG files in `output_dir`.
 ///
@@ -70,14 +106,18 @@ fn pixel_box() -> u32 {
 ///   large-format, so that no single page's raster exceeds
 ///   [`MAX_PIXELS_PER_PAGE`]. It applies to the `pdftoppm` path; the
 ///   pdfium path is already bounded by a target width.
-/// - Returns the list of rendered PNG paths on success.
+/// - Returns the rendered pages together with [`RenderBound`]: the fixed
+///   DPI used, or the pixel box / target width that bounded the raster
+///   instead. Reporting that distinction is the whole point — a caller
+///   that assumes it got the DPI it asked for will read a downscaled
+///   map's mush as detail and relay it onward as such.
 /// - On failure any partially-rendered files are removed.
 pub fn render_pdf_pages(
     pdf_path: &str,
     max_pages: usize,
     output_dir: &str,
     dpi: u32,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<RenderedPages, String> {
     let pdf = PathBuf::from(pdf_path);
     let out = PathBuf::from(output_dir);
 
@@ -113,17 +153,24 @@ fn render_pdf_pages_inner(
     max_pages: usize,
     output_dir: &Path,
     dpi: u32,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<RenderedPages, String> {
     // Strategy 1: pdfium-render crate. It bounds every page by a target
-    // pixel WIDTH, so `dpi` is not needed here; see `render_with_pdfium`.
+    // pixel WIDTH, so `dpi` is not needed here and no fixed DPI describes
+    // the result; see `render_with_pdfium`.
     match render_with_pdfium(pdf_path, max_pages, output_dir) {
-        Ok(paths) => return Ok(paths),
+        Ok(pages) => {
+            return Ok(RenderedPages {
+                pages,
+                bound: RenderBound::TargetWidth(PDFIUM_TARGET_WIDTH),
+            })
+        }
         Err(e) => tracing::debug!("pdfium-render unavailable or failed: {}", e),
     }
 
-    // Strategy 2: shell pdftoppm fallback.
+    // Strategy 2: shell pdftoppm fallback. It reports how it bounded the
+    // raster: `-r <dpi>` is a fixed resolution, `-scale-to` is not.
     match render_with_pdftoppm(pdf_path, max_pages, output_dir, dpi) {
-        Ok(paths) => return Ok(paths),
+        Ok((pages, bound)) => return Ok(RenderedPages { pages, bound }),
         Err(e) => tracing::debug!("pdftoppm unavailable or failed: {}", e),
     }
 
@@ -199,20 +246,6 @@ pub(crate) fn parse_page_size_line(line: &str) -> Option<(f64, f64)> {
     Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
 }
 
-/// Area of the largest page among the first `limit` pages of `pdf_path`,
-/// in square points.
-///
-/// Public so a caller can explain a clamped render instead of silently
-/// handing back a lower-resolution image than it asked for. `None` means
-/// the geometry could not be measured — not that the pages are small.
-///
-/// `limit` must be the same page bound the render will use. Measuring
-/// page 1 while rendering 200 would report a resolution the render never
-/// chose, on a document whose large pages are simply not first.
-pub fn max_page_area_pt(pdf_path: &Path, limit: usize) -> Option<f64> {
-    pdf_geometry(pdf_path, limit).max_area_pt
-}
-
 /// Resolution to actually render at, given the largest page's area.
 ///
 /// `requested` is honoured for ordinary documents and scaled down for
@@ -245,7 +278,7 @@ pub fn effective_dpi(max_area_pt: f64, requested: u32) -> u32 {
 /// `-scale-to` OVERRIDES `-r` in poppler (it re-derives the resolution
 /// from the box), so passing both would silently discard the caller's
 /// requested resolution and upscale small pages.
-fn scale_to_box(max_area_pt: f64, dpi: u32) -> Option<u32> {
+pub(crate) fn scale_to_box(max_area_pt: f64, dpi: u32) -> Option<u32> {
     if max_area_pt.is_nan() || max_area_pt <= 0.0 {
         return None;
     }
@@ -338,7 +371,7 @@ fn render_with_pdfium(
             // `dpi` argument: 2000 px across is 5.7 Mpx even on an A0
             // page, so it cannot reproduce the #814 memory blowup.
             let bitmap = page
-                .render_with_config(&PdfRenderConfig::new().set_target_width(2000))
+                .render_with_config(&PdfRenderConfig::new().set_target_width(PDFIUM_TARGET_WIDTH as i32))
                 .map_err(|e| format!("Failed to render page {}: {}", i + 1, e))?;
 
             let file_name = format!("page_{:04}.png", i + 1);
@@ -378,7 +411,7 @@ fn render_with_pdftoppm(
     max_pages: usize,
     output_dir: &Path,
     requested_dpi: u32,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<(Vec<PathBuf>, RenderBound), String> {
     // Check that pdftoppm is available.
     which::which("pdftoppm").map_err(|_| "pdftoppm not found in PATH".to_string())?;
 
@@ -427,6 +460,12 @@ fn render_with_pdftoppm(
     let scale_to = match geometry.max_area_pt {
         Some(area) => scale_to_box(area, dpi),
         None => Some(pixel_box()),
+    };
+    // The bound is decided HERE and travels back to the caller, so nothing
+    // downstream has to re-derive it (and cannot disagree with what ran).
+    let bound = match scale_to {
+        Some(box_px) => RenderBound::PixelBox(box_px),
+        None => RenderBound::Dpi(dpi),
     };
     if dpi < requested_dpi || scale_to.is_some() {
         tracing::warn!(
@@ -519,7 +558,7 @@ fn render_with_pdftoppm(
         ));
     }
 
-    Ok(rendered)
+    Ok((rendered, bound))
 }
 
 // ---------------------------------------------------------------------------

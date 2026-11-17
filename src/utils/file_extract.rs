@@ -524,7 +524,8 @@ fn process_pdf_vision(bytes: &[u8], filename: &str) -> FileContent {
     );
 
     match rendered {
-        Ok(paths) if !paths.is_empty() => {
+        Ok(rendered) if !rendered.pages.is_empty() => {
+            let paths = rendered.pages;
             let page_count = paths.len();
             let label = if page_count == 1 {
                 "scanned PDF".to_string()
