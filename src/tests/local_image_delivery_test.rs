@@ -422,7 +422,7 @@ mod local_file_links {
     use crate::utils::image::{
         ImageTarget, LocalFileScan, LocalImageFailure, LocalImageFailureReason,
         TELEGRAM_DOCUMENT_MAX_BYTES, append_file_failure_notice, classify_image_target,
-        extract_local_files, file_failure_notice, validate_local_file,
+        extract_local_files, extract_local_images, file_failure_notice, validate_local_file,
     };
     use std::path::{Path, PathBuf};
 
@@ -1146,6 +1146,40 @@ mod local_file_links {
         let target = classify_image_target("profiles/ops/projects/shots/shot.png", Some(&base));
 
         assert_eq!(target, ImageTarget::Local(png));
+    }
+
+    // -----------------------------------------------------------------------
+    // #864 — a missing document is the FILE family's to report, not the image's
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_missing_document_is_reported_as_a_file_not_an_image() {
+        // THE FILED CASE. A reply referenced a `.md` that was not on disk, and
+        // the notice read "Image not attached — the reply referenced an image
+        // that could not be delivered" over a markdown document.
+        //
+        // The hand-off used to fire ONLY on `UnsupportedFormat`, which is a
+        // BYTES verdict (`validate_local_image` sniffs magic bytes). A file that
+        // is not there has no bytes, so it never reached that arm and fell to the
+        // image family's catch-all. The extension is admissible evidence for ONE
+        // question — which family owns REPORTING the reference — and never for
+        // what the file contains or whether it exists: the bytes test still rules
+        // everything that can actually be opened.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = format!("[report]({})", dir.path().join("gone.md").display());
+
+        let images = extract_local_images(&missing, Some(dir.path()));
+        assert!(
+            images.failures.is_empty(),
+            "a document is not the image family's to report: {:?}",
+            images.failures
+        );
+
+        let files = extract_local_files(&missing, Some(dir.path()));
+        let notice = file_failure_notice(&files.failures).expect("the file family reports the miss");
+        assert!(notice.contains("File not attached"), "{notice}");
+        assert!(!notice.contains("Image not attached"), "{notice}");
+        assert!(notice.contains("gone.md"), "{notice}");
     }
 }
 

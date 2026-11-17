@@ -627,6 +627,29 @@ pub(crate) fn is_remote_url(raw: &str) -> bool {
     SCHEMES.iter().any(|scheme| lower.starts_with(scheme))
 }
 
+/// Does this path's EXTENSION name a format the image family can deliver (#864)?
+///
+/// An extension test is admissible here and nowhere else. [`validate_local_image`]
+/// judges by BYTES — a `.png` holding text is not an image — but bytes need a
+/// file to open, and the case this answers is precisely a path that cannot be
+/// opened. The question is narrower than "is this an image": it is WHICH FAMILY
+/// OWNS REPORTING a reference that could not be delivered, and the name is the
+/// only evidence a missing path offers.
+///
+/// The set mirrors [`is_supported_image`] exactly, because that is what this
+/// family can actually deliver; a name outside it belongs to the file family,
+/// which reports it under its own noun ("File not attached") rather than
+/// announcing a markdown document as an image.
+fn names_an_image_extension(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
+    )
+}
+
 /// Validate a resolved local image candidate: it must exist, be a regular
 /// file, hold at least one byte, and start with a supported image signature.
 pub fn validate_local_image(path: &Path) -> Result<(), LocalImageFailureReason> {
@@ -1055,6 +1078,21 @@ fn record_candidate(
                 // marker that is not an image is a genuine failure and must be
                 // reported rather than silently handed on.
                 Err(LocalImageFailureReason::UnsupportedFormat) if !strip_unresolved => {
+                    return false;
+                }
+                // The same hand-off, for a path that cannot be read at all
+                // (#864). The bytes test above decides by CONTENT, which needs a
+                // file to open — so a reference to a file that does not exist
+                // never reaches it, and a missing `.md` was reported by the image
+                // family as "Image not attached" over a markdown document
+                // (measured 2026-11-17T04:04:51Z). The extension is admissible
+                // evidence here and nowhere else, because the question this arm
+                // answers is narrower than "is this an image": it is WHICH FAMILY
+                // OWNS REPORTING the failure, and for a path that cannot be
+                // opened the name is all there is. When the name is not one the
+                // image family can deliver, the reference stays in the text and
+                // the file family reports it under its own noun.
+                Err(_) if !strip_unresolved && !names_an_image_extension(&path) => {
                     return false;
                 }
                 Err(reason) => scan.failures.push(LocalImageFailure {
