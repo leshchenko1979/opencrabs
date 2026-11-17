@@ -1163,10 +1163,12 @@ pub fn cleanup_stale(windows: StaleWindows) -> std::io::Result<(usize, usize)> {
     // expensive avoidable thing in a boot.
     //
     // `logging::cleanup_old_temp_files` is the remaining owner, and it is the
-    // right one: it runs on every surface AND on every CLI invocation, so no
-    // surface loses the leg. The reason this function used to carry it — that
-    // it was "the TUI's startup path", with `cleanup_stale` reached from
-    // `cli/ui.rs` — was never true: nothing in `cli/ui.rs` calls this function.
+    // right one: it runs as a leg of the maintenance sweep (#872), which both
+    // the TUI and the daemon reach after readiness — so no surface loses the
+    // leg, and no CLI start pays for it. The reason this function used to
+    // carry it — that it was "the TUI's startup path", with `cleanup_stale`
+    // reached from `cli/ui.rs` — was never true: nothing in `cli/ui.rs` calls
+    // this function.
     Ok((scanned, removed))
 }
 
@@ -1231,14 +1233,27 @@ pub fn sweep_stale_runs(windows: StaleWindows) -> std::io::Result<(usize, usize)
 
     for entry in fs::read_dir(&runs)? {
         let entry = entry?;
-        let path = entry.path();
-        if !path.is_file() {
+
+        // ONE stat per entry (#872). `entry.file_type()` is answered from the
+        // readdir buffer's `d_type` on Linux — no syscall — and the mtime below
+        // is read once and reused for BOTH window tests. The previous shape
+        // called `path.is_file()` and then `file_stale()` (a second stat), and
+        // a stale file paid a third for its kind-specific cutoff: 2-3 syscalls
+        // per entry across ~36k entries on a volume that stalls under load.
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
             continue;
         }
+        let path = entry.path();
         scanned += 1;
 
+        // A file whose mtime cannot be read is STALE — the fail-open the old
+        // `file_stale` gave ("delete to be safe"): an unreadable capture must
+        // not be kept forever by a stat it will never satisfy.
+        let mtime = entry.metadata().and_then(|m| m.modified()).ok();
+        let stale_at = |cutoff: &SystemTime| mtime.is_none_or(|t| t < *cutoff);
+
         // #847: the mtime test comes FIRST — see the doc block above.
-        if !file_stale(&path, &gate) {
+        if !stale_at(&gate) {
             continue;
         }
 
@@ -1276,7 +1291,10 @@ pub fn sweep_stale_runs(windows: StaleWindows) -> std::io::Result<(usize, usize)
             Some(status) => windows.cutoff_for(&status.kind),
             None => windows.agent,
         };
-        if !file_stale(&path, &cutoff) {
+        // The SAME mtime read above decides this second window (#872): the
+        // cutoff differs, the file's age does not, so re-statting here was a
+        // syscall bought nothing for.
+        if !stale_at(&cutoff) {
             continue;
         }
 
