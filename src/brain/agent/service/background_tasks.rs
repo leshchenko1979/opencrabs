@@ -542,7 +542,7 @@ impl BackgroundTaskManager {
             command,
             wake,
         } = req;
-        let mut cmd = build_command(&cwd, &command, session_id);
+        let cmd = build_command(&cwd, &command, session_id);
         // `build_command` never arms `kill_on_drop`: this arm exists to let a
         // job outlive the turn, so the flag that reaps a dropped child is
         // exactly the wrong default here.
