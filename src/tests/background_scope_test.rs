@@ -444,6 +444,61 @@ fn the_wrapper_argv_is_pinned() {
     );
 }
 
+/// A `Background` run carries `CPUWeight=50` as a scope property, placed with
+/// the other `-p` pairs and before `--`.
+///
+/// Nice and ioprio cannot ride here at all — `--scope` rejects `-p Nice=19`
+/// with `Unknown assignment`, and the `io` controller is not delegated to user
+/// slices — so `CPUWeight` is the only priority that reaches systemd, and its
+/// position is the only part of it this pin can check.
+#[test]
+fn a_background_run_carries_a_cpu_weight() {
+    let spec = ScopeSpec {
+        priority: crate::utils::scope::PriorityClass::Background,
+        ..ScopeSpec::default()
+    };
+    let argv = crate::utils::scope::wrapped_argv(&spec, std::ffi::OsStr::new("/bin/true"), &[]);
+    let got: Vec<String> = argv
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+
+    let weight = got
+        .iter()
+        .position(|a| a == "CPUWeight=50")
+        .expect("a background run must carry CPUWeight=50");
+    assert_eq!(
+        got.get(weight - 1).map(String::as_str),
+        Some("-p"),
+        "CPUWeight must be introduced by -p, like every other scope property"
+    );
+    let terminator = got
+        .iter()
+        .position(|a| a == "--")
+        .expect("the argv must always terminate its flags");
+    assert!(
+        weight < terminator,
+        "CPUWeight must precede `--`; after it, systemd-run hands it to the payload"
+    );
+}
+
+/// An `Interactive` run — the default — emits no `CPUWeight` at all, which is
+/// what keeps every pre-existing argv byte-identical.
+#[test]
+fn an_interactive_run_emits_no_cpu_weight() {
+    let spec = ScopeSpec::default();
+    let argv = crate::utils::scope::wrapped_argv(&spec, std::ffi::OsStr::new("/bin/true"), &[]);
+    let got: Vec<String> = argv
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+
+    assert!(
+        !got.iter().any(|a| a.starts_with("CPUWeight=")),
+        "the default class must leave systemd's own weight alone"
+    );
+}
+
 /// An unbounded run omits `MemoryMax` entirely rather than passing `infinity`:
 /// `-p MemoryMax=infinity` is accepted, but the absence is the smaller surface
 /// and cannot be misread as a cap by a reader of the argv.

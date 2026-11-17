@@ -36,6 +36,141 @@ pub const SYSTEMD_RUN_ENV: &str = "OPENCRABS_SYSTEMD_RUN";
 /// the SUM of all live runs (#776, D3).
 pub const DEFAULT_SLICE: &str = "oc-tasks.slice";
 
+/// CPU/IO priority for a spawned run.
+///
+/// Only ever *lower* priority: a negative nice needs `CAP_SYS_NICE`, so a
+/// daemon that cannot acquire it would silently keep the default. Every class
+/// here therefore sits at or below the process default.
+///
+/// The split between what rides on `systemd-run`'s argv and what is applied in
+/// a `pre_exec` hook is measured, not stylistic (2026-11-16): `--scope` rejects
+/// `-p Nice=19` with `Unknown assignment: Nice=19` (rc 1, payload never runs),
+/// and the `io` controller is not delegated to user slices, so an `IOWeight=`
+/// property is equally unreachable. `CPUWeight=` *is* accepted on the scope
+/// path, so only that one is an argv property; nice and ioprio are set on the
+/// child itself, just before it execs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PriorityClass {
+    /// The daemon's own priority: nothing is changed.
+    #[default]
+    Interactive,
+    /// Nice 10, best-effort IO class 7, `CPUWeight=50`.
+    Background,
+    /// Nice 19, idle IO class, `CPUWeight=10`.
+    Idle,
+}
+
+impl PriorityClass {
+    /// Nice value to set on the child.
+    ///
+    /// Never negative — raising priority needs `CAP_SYS_NICE`, and a daemon
+    /// without it would silently keep the default.
+    pub fn nice(self) -> i32 {
+        match self {
+            Self::Interactive => 0,
+            Self::Background => 10,
+            Self::Idle => 19,
+        }
+    }
+
+    /// `ioprio_set` value: best-effort class 2 with data 4/7, or idle class 3.
+    ///
+    /// Encoded as `(class << 13) | data`, the layout `ioprio_set(2)` expects.
+    pub fn ioprio_value(self) -> libc::c_int {
+        match self {
+            Self::Interactive => (2 << 13) | 4,
+            Self::Background => (2 << 13) | 7,
+            Self::Idle => 3 << 13,
+        }
+    }
+
+    /// `CPUWeight=` for the transient scope, or `None` to leave systemd's own
+    /// default (100) alone. `Interactive` returns `None` rather than
+    /// `Some(100)` so an unwrapped argv stays byte-identical to the pre-#871
+    /// one, and the pinned-argv test keeps meaning what it says.
+    pub fn cpu_weight(self) -> Option<u16> {
+        match self {
+            Self::Interactive => None,
+            Self::Background => Some(50),
+            Self::Idle => Some(10),
+        }
+    }
+
+    /// Parse a config value. Case-insensitive and trimmed; `None` for anything
+    /// unrecognised — including `"none"`, which the config layer treats as
+    /// "leave the process default" without going through a class at all.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "interactive" => Some(Self::Interactive),
+            "background" => Some(Self::Background),
+            "idle" => Some(Self::Idle),
+            _ => None,
+        }
+    }
+
+    /// Install the priority on a child about to be spawned.
+    ///
+    /// Failures are reported from the child and swallowed: a host that refuses
+    /// `setpriority`/`ioprio_set` must still run the job. `Interactive` installs
+    /// nothing at all, so a spec at the default leaves the command untouched.
+    pub fn apply_to_command(self, cmd: &mut std::process::Command) {
+        if self == Self::Interactive {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+
+            let nice = self.nice();
+            #[cfg(target_os = "linux")]
+            let ioprio = self.ioprio_value();
+            // SAFETY: the closure runs between fork and exec, where only
+            // async-signal-safe calls are permitted — these syscalls are, and
+            // the warning path uses a raw `write(2)` rather than allocating.
+            unsafe {
+                cmd.pre_exec(move || {
+                    if libc::setpriority(libc::PRIO_PROCESS, 0, nice) != 0 {
+                        warn_from_child(b"priority: setpriority failed\n");
+                    }
+                    // `ioprio_set` is Linux-only; macOS has no block-IO priority.
+                    #[cfg(target_os = "linux")]
+                    if libc::ioprio_set(libc::IOPRIO_WHO_PROCESS, 0, ioprio) != 0 {
+                        warn_from_child(b"priority: ioprio_set failed\n");
+                    }
+                    Ok(())
+                });
+            }
+        }
+        // Neither syscall exists off unix; the class still parses and still
+        // reports itself, it just changes nothing.
+        #[cfg(not(unix))]
+        {
+            let _ = cmd;
+        }
+    }
+}
+
+impl std::fmt::Display for PriorityClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Interactive => "interactive",
+            Self::Background => "background",
+            Self::Idle => "idle",
+        })
+    }
+}
+
+/// Warn from the child between `fork` and `exec`, where allocation, locking and
+/// `tracing` are all forbidden. A raw `write(2)` is async-signal-safe, so the
+/// message cannot deadlock the fork.
+#[cfg(unix)]
+fn warn_from_child(msg: &[u8]) {
+    // SAFETY: `msg` is a static byte slice and fd 2 is the child's stderr.
+    unsafe {
+        libc::write(2, msg.as_ptr().cast(), msg.len());
+    }
+}
+
 /// What a wrapped run's cgroup should look like.
 ///
 /// Sizes are bytes; `None` means `infinity` (no cap at all), which is also what
@@ -56,6 +191,10 @@ pub struct ScopeSpec {
     /// `MemoryMax` for the slice itself — the pool that bounds the SUM of every
     /// live run. `None` = `infinity`, i.e. no pool bound at all.
     pub pool_memory_max: Option<u64>,
+    /// CPU/IO priority for the run. Only `CPUWeight` rides on the argv; nice
+    /// and ioprio are applied by a `pre_exec` hook, because `--scope` refuses
+    /// both as properties.
+    pub priority: PriorityClass,
 }
 
 impl Default for ScopeSpec {
@@ -67,6 +206,7 @@ impl Default for ScopeSpec {
             swap_max: 0,
             tasks_max: 16,
             pool_memory_max: Some(2 << 30),
+            priority: PriorityClass::Interactive,
         }
     }
 }
@@ -142,6 +282,7 @@ pub fn spec_from_config(cfg: &crate::config::types::BackgroundConfig) -> ScopeSp
         swap_max,
         tasks_max,
         pool_memory_max,
+        priority: PriorityClass::Interactive,
     }
 }
 
@@ -417,6 +558,10 @@ pub fn wrapped_argv(
     argv.push(format!("MemorySwapMax={}", spec.swap_max).into());
     argv.push("-p".into());
     argv.push(format!("TasksMax={}", spec.tasks_max).into());
+    if let Some(weight) = spec.priority.cpu_weight() {
+        argv.push("-p".into());
+        argv.push(format!("CPUWeight={weight}").into());
+    }
     argv.push("--".into());
     argv.push(program.to_os_string());
     argv.extend(args.iter().cloned());
