@@ -269,14 +269,6 @@ impl Tool for SpawnAgentTool {
          want a different model (for example: plan with one model, code with another, review \
          with a third). Use the config keys when every sub-agent in the session should share \
          the same routing. Use no override to let the child inherit the parent."
-         \n\nProvider and model resolution (highest priority first): \
-         (1) the optional `provider` / `model` parameters on THIS call, \
-         (2) the user's config.toml `[agent]` keys `subagent_provider` / `subagent_model`, \
-         (3) the parent session's provider with that provider's default model. \
-         Use the per-call params when a single skill orchestrates multiple steps that each \
-         want a different model (for example: plan with one model, code with another, review \
-         with a third). Use the config keys when every sub-agent in the session should share \
-         the same routing. Use no override to let the child inherit the parent."
     }
 
     fn input_schema(&self) -> Value {
