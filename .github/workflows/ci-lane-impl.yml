@@ -481,8 +481,14 @@ jobs:
           # ZERO tests, the last line always cargo running rustc over the
           # dev-dependency tree. This watches FLAT CPU instead, which is
           # phase-agnostic: a progressing build always advances utime+stime.
-          # THRESHOLD 600s = 4x the longest legitimate log silence measured in a
-          # green run (2.28 min / ~10,700 lines); the stalls ran 32-48 min.
+          # THRESHOLD 300s (owner order 2026-11-17; lowered from 600s) = 2.2x the
+          # longest legitimate log silence measured in a green run (2.28 min /
+          # ~10,700 lines); the stalls ran 32-48 min. The margin is CONSERVATIVE
+          # even so, because the trigger is FLAT CPU and not log silence: a
+          # compiling rustc advances utime+stime on every sample, so healthy work
+          # cannot accumulate flat time at all. Both arms were driven before this
+          # landed — a CPU-burning process survived 20s at a 6s threshold, and a
+          # sleeping one fired at 6s with wchan=hrtimer_nanosleep.
           # On fire: stacks + wchan + vmstat, then SIGTERM the build — futex vs
           # read/fsync is the #781-deadlock vs I/O-thrash discriminator, and the
           # step fails in ~10 min instead of burning to the 45-min job cap.
@@ -506,7 +512,7 @@ jobs:
           locally -- the opencrabs daemon matched `opencrabs` and the instrument never
           fired). A progressing build always advances the sum, including a single-threaded
           link. A deadlock (#781 class) and an I/O-thrash stall both leave it flat -- and
-          the dump separates them: futex/parking vs read/fsync/wchan. Threshold 600s is 4x
+          the dump separates them: futex/parking vs read/fsync/wchan. Threshold 300s is 2.2x
           the longest legitimate log silence measured in a green run (2.28 min / ~10,700
           lines).
 
@@ -524,7 +530,7 @@ jobs:
               "rustc", "cargo", "cc", "clang", "clang-18", "ld", "ld.lld", "mold",
               "build-script-build", "build_script_build",
           }
-          THRESHOLD = int(os.environ.get("STALLWATCH_SECS", "600"))
+          THRESHOLD = int(os.environ.get("STALLWATCH_SECS", "300"))
           SAMPLE = int(os.environ.get("STALLWATCH_SAMPLE", "30"))
 
 
