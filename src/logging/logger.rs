@@ -652,16 +652,31 @@ fn sweep_aged_files(dir: &std::path::Path, max_age: std::time::Duration) -> usiz
 /// Infallible by design: a startup purge must never be the reason startup
 /// fails, and every individual failure is warned about rather than swallowed.
 pub fn cleanup_old_temp_files(max_age_days: u64, command_run_days: u64) -> usize {
+    cleanup_old_temp_files_at(&crate::config::opencrabs_home(), max_age_days, command_run_days)
+}
+
+/// Home-explicit variant of [`cleanup_old_temp_files`].
+///
+/// The profile home is a `tokio::task_local!` and does not cross into
+/// `spawn_blocking`'s pool, so a blocking caller MUST resolve it first and hand
+/// it here. Resolving it inside the closure reads the real home while the
+/// caller believes it is sweeping an overridden one — which is how the
+/// maintenance leg silently purged nothing until the #872 test caught it.
+pub fn cleanup_old_temp_files_at(
+    home: &std::path::Path,
+    max_age_days: u64,
+    command_run_days: u64,
+) -> usize {
     if max_age_days == 0 {
         return 0;
     }
 
     let max_age = std::time::Duration::from_secs(max_age_days * 24 * 60 * 60);
 
-    // Profile-aware: purge the active profile's tmp tree (where save_to_temp
+    // Profile-aware: purge the given profile's tmp tree (where save_to_temp
     // writes), not the default root — otherwise a profile's temp files never
     // get cleaned.
-    let home_tmp = crate::config::opencrabs_home().join("tmp");
+    let home_tmp = home.join("tmp");
     let mut removed = sweep_aged_files(&home_tmp.join("files"), max_age);
     removed += sweep_aged_files(&home_tmp, max_age);
     removed += sweep_aged_files(
@@ -684,7 +699,7 @@ pub fn cleanup_old_temp_files(max_age_days: u64, command_run_days: u64) -> usize
         retention_age(command_run_days),
         Some(max_age),
     );
-    match crate::brain::agent::service::work_status::sweep_stale_runs(windows) {
+    match crate::brain::agent::service::work_status::sweep_stale_runs_at(home, windows) {
         Ok((_scanned, runs_removed)) => removed += runs_removed,
         Err(e) => tracing::warn!("Failed to sweep run captures for aged temp files: {e}"),
     }

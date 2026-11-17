@@ -497,8 +497,20 @@ impl MaintenanceService {
         // zero must never be read as "delete everything".
         let files_days = config.agent.tool_output_retention_days();
         let command_days = config.agent.command_run_retention_days();
+        // Resolved HERE, on the async side, and moved into the blocking closure.
+        // The profile home is a `tokio::task_local!`, which does not cross into
+        // `spawn_blocking`'s pool: a closure that called `opencrabs_home()`
+        // itself would sweep the real home no matter what the caller had
+        // scoped — purging nothing under an override, and touching a tree the
+        // sweep does not own. The #872 test drives this leg under a temp home
+        // precisely to keep that honest.
+        let home = crate::config::opencrabs_home();
         match tokio::task::spawn_blocking(move || {
-            crate::logging::cleanup_old_temp_files(u64::from(files_days), u64::from(command_days))
+            crate::logging::cleanup_old_temp_files_at(
+                &home,
+                u64::from(files_days),
+                u64::from(command_days),
+            )
         })
         .await
         {

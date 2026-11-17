@@ -1208,7 +1208,28 @@ pub fn cleanup_stale(windows: StaleWindows) -> std::io::Result<(usize, usize)> {
 /// collapses a run's reads into one — up to four files per run (two streams plus
 /// two truncation markers), two on the measured tree.
 pub fn sweep_stale_runs(windows: StaleWindows) -> std::io::Result<(usize, usize)> {
-    let runs = runs_dir();
+    sweep_stale_runs_in(&runs_dir(), windows)
+}
+
+/// Home-explicit variant of [`sweep_stale_runs`]: the runs directory comes from
+/// the CALLER, never from [`runs_dir`].
+///
+/// The profile home is a `tokio::task_local!`, and a task-local does not cross
+/// into `spawn_blocking`'s pool. A blocking closure that resolved it itself
+/// would read whichever home the worker thread sees — the real one — so a
+/// caller holding a home override would sweep a tree it does not own. Passing
+/// the directory in keeps the sweep pointed at the caller's tree.
+pub fn sweep_stale_runs_at(
+    home: &std::path::Path,
+    windows: StaleWindows,
+) -> std::io::Result<(usize, usize)> {
+    sweep_stale_runs_in(&home.join("tmp").join("runs"), windows)
+}
+
+fn sweep_stale_runs_in(
+    runs: &std::path::Path,
+    windows: StaleWindows,
+) -> std::io::Result<(usize, usize)> {
     if !runs.exists() {
         return Ok((0, 0));
     }
