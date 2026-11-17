@@ -507,8 +507,8 @@ jobs:
           starts a test binary, which is why HANGDUMP is blind to it (12/12 sampled
           45-minute cap-hits were compile-only, zero tests run).
 
-          Signal: sum(utime+stime) over the build processes that are DESCENDANTS of the
-          step shell (STALLWATCH_ROOT). Tree scoping is load-bearing: a box-wide comm
+          Signal: sum(utime+stime) over EVERY process descending from the step shell.
+          (STALLWATCH_ROOT). Tree scoping is load-bearing: a box-wide comm
           match picks up unrelated processes and resets the flat clock forever (measured
           locally -- the opencrabs daemon matched `opencrabs` and the instrument never
           fired). A progressing build always advances the sum, including a single-threaded
@@ -530,10 +530,9 @@ jobs:
           import sys
           import time
 
-          COMMS = {
-              "rustc", "cargo", "cc", "clang", "clang-18", "ld", "ld.lld", "mold",
-              "build-script-build", "build_script_build",
-          }
+          # This watcher's own pid. It wakes every SAMPLE seconds, so counting it in the
+          # CPU sum would reset the flat clock forever.
+          SELF = os.getpid()
           THRESHOLD = int(os.environ.get("STALLWATCH_SECS", "300"))
           SAMPLE = int(os.environ.get("STALLWATCH_SAMPLE", "30"))
 
@@ -557,8 +556,22 @@ jobs:
               return comm, utime + stime, ppid
 
 
-          def build_procs(root):
-              """{pid: (comm, cpu_ticks)} for COMMS processes descending from `root`."""
+          def descendants(root):
+              """{pid: (comm, cpu_ticks)} for EVERY descendant of `root`, minus this watcher.
+
+              No comm filter, deliberately. A wedged TEST binary is `opencrabs-<hash>`: a
+              build-tools filter left it out of both the dump and the CPU sum, so the
+              2026-11-17 fire reported procs=1 -- the parked `cargo` in wait4 -- and never
+              named the process that was actually stuck. Tree scoping already excludes
+              unrelated processes, so the filter bought nothing and cost the one process
+              that mattered.
+
+              It also closes a false-positive path: with the sum over build tools only,
+              `cargo` parked in wait4 reads as FLAT for the whole test phase, so any suite
+              legitimately slower than the threshold (test_threads=1, a slow runner) would
+              have been killed as a stall. Summing every descendant means a progressing
+              test binary advances the clock, which is what the design always claimed.
+              """
               table = {}
               for entry in os.listdir("/proc"):
                   if not entry.isdigit():
@@ -569,6 +582,8 @@ jobs:
 
               procs = {}
               for pid, (comm, ticks, _ppid) in table.items():
+                  if pid == SELF:
+                      continue
                   cur, hops = pid, 0
                   while cur > 1 and hops < 64:
                       rec = table.get(cur)
@@ -576,12 +591,10 @@ jobs:
                           break
                       parent = rec[2]
                       if parent == root:
-                          if comm in COMMS:
-                              procs[pid] = (comm, ticks)
+                          procs[pid] = (comm, ticks)
                           break
                       cur, hops = parent, hops + 1
               return procs
-
 
           def dump(procs, flat_s):
               stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -638,7 +651,7 @@ jobs:
               prev = None
               flat_since = None
               while True:
-                  procs = build_procs(root)
+                  procs = descendants(root)
                   total = sum(t for _, t in procs.values())
                   now = time.time()
                   if not procs:
