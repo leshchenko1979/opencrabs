@@ -251,11 +251,24 @@ impl Tool for SpawnAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Spawn a child agent to handle a sub-task autonomously. The child gets its own session \
-         and runs in the background, completing naturally when its task is done (its result is \
-         delivered to you automatically). Returns an agent_id you can use with wait_agent, \
-         send_input (only while Running/AwaitingInput), close_agent, or resume_agent (to \
-         continue a completed agent). Use this to delegate independent work items. \
+        "Spawn a subagent (sub-agent / child agent) for work that would otherwise burn this \
+         session's context: long-running or multi-source research, bulk file processing, or \
+         code development across several files. It gets its own session, runs in the \
+         background, and is resumable by id. Do NOT spawn for a single command, one file \
+         read, or a one-line edit — delegating costs more than doing. Independent items can \
+         run in parallel. Returns an agent_id. Reading it back: the completion \
+         wake is the normal path — you are woken with its result. Mid-run, the child reports \
+         via report_progress and you read agent_progress <id>; steer it with send_input <id>. \
+         wait_agent is the EXCEPTION, for a genuine precondition such as before resume_agent \
+         — never to wait for work you will be woken for. \
+         \n\nProvider and model resolution (highest priority first): \
+         (1) the optional `provider` / `model` parameters on THIS call, \
+         (2) the user's config.toml `[agent]` keys `subagent_provider` / `subagent_model`, \
+         (3) the parent session's provider with that provider's default model. \
+         Use the per-call params when a single skill orchestrates multiple steps that each \
+         want a different model (for example: plan with one model, code with another, review \
+         with a third). Use the config keys when every sub-agent in the session should share \
+         the same routing. Use no override to let the child inherit the parent."
          \n\nProvider and model resolution (highest priority first): \
          (1) the optional `provider` / `model` parameters on THIS call, \
          (2) the user's config.toml `[agent]` keys `subagent_provider` / `subagent_model`, \
