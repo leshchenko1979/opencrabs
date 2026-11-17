@@ -59,7 +59,11 @@ impl Tool for WaitAgentTool {
     fn description(&self) -> &str {
         "Wait for a spawned sub-agent to complete and return its output. \
          If the agent is already finished, returns immediately. \
-         Use with an optional timeout_secs (default: 300s)."
+         Use with an optional timeout_secs (default: 300s). \
+         Do NOT use this to wait for work you will be woken for: a child's \
+         completion already reaches you as a fresh turn, so blocking here only \
+         keeps you out of the conversation. The legitimate use is a genuine \
+         precondition, such as needing a child finished before resume_agent."
     }
 
     fn input_schema(&self) -> Value {
