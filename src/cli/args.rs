@@ -662,7 +662,11 @@ pub async fn run() -> Result<()> {
             Ok(())
         }
         Some(Commands::Version) => {
-            println!("opencrabs {}", env!("CARGO_PKG_VERSION"));
+            // `crate::VERSION`, not `CARGO_PKG_VERSION`: a fork build injects
+            // its deploy cycle (`0.5.4+fork.431`) at compile time, and
+            // `--version` is the surface that has to show it — it is how an
+            // operator tells which cycle a running binary is.
+            println!("opencrabs {}", crate::VERSION);
             Ok(())
         }
         Some(Commands::PrintMigrationCount) => {
