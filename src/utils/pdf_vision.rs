@@ -371,7 +371,9 @@ fn render_with_pdfium(
             // `dpi` argument: 2000 px across is 5.7 Mpx even on an A0
             // page, so it cannot reproduce the #814 memory blowup.
             let bitmap = page
-                .render_with_config(&PdfRenderConfig::new().set_target_width(PDFIUM_TARGET_WIDTH as i32))
+                .render_with_config(
+                    &PdfRenderConfig::new().set_target_width(PDFIUM_TARGET_WIDTH as i32),
+                )
                 .map_err(|e| format!("Failed to render page {}: {}", i + 1, e))?;
 
             let file_name = format!("page_{:04}.png", i + 1);

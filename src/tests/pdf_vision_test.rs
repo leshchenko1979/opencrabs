@@ -49,10 +49,10 @@ fn unrenderable_pdf_returns_err_not_empty_ok() {
     // Either an Err (pdftoppm rejected the input) or an Ok with zero
     // pages — both are acceptable contracts; an Ok with no pages would
     // be the bug we explicitly want to avoid.
-    if let Ok(paths) = &result {
+    if let Ok(rendered) = &result {
         assert!(
-            !paths.is_empty(),
-            "Ok(vec![]) is forbidden — must be Err if no pages rendered"
+            !rendered.pages.is_empty(),
+            "an Ok with no pages is forbidden — must be Err if no pages rendered"
         );
     }
 }
