@@ -126,6 +126,18 @@ on:
         required: false
         default: telegram,code-graph,browser
         type: string
+      # BINARY IDENTITY (#865). The fork republishes on an UNCHANGED upstream
+      # version (`0.5.4+fork.430` -> `0.5.4+fork.431`), so the compiled-in
+      # version is the only way a running binary can say which deploy cycle it
+      # is. Empty (the default, and every PR-lane gate call) leaves
+      # `OPENCRABS_FORK_VERSION` unset-equivalent: src/lib.rs then reports
+      # CARGO_PKG_VERSION exactly as before, so upstream CI and contributor
+      # builds are unchanged.
+      fork_version:
+        description: "Version the binary reports, `<upstream-ver>+fork.<cycle>` (empty = plain CARGO_PKG_VERSION)"
+        required: false
+        default: ""
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -226,6 +238,10 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"
+          # Compile-time identity (#865). Empty is handled in src/lib.rs as
+          # "unset", so a gate call (fork_version default "") still builds the
+          # plain upstream version.
+          OPENCRABS_FORK_VERSION: ${{ inputs.fork_version }}
         run: cargo build --locked --profile ci --no-default-features --features "${{ inputs.features }}"
 
       - name: Strip

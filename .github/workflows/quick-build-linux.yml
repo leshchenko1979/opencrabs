@@ -54,6 +54,10 @@ on:
         description: 'Cargo feature set passed to --features (comma-separated)'
         required: false
         default: 'telegram,code-graph,browser'
+      fork_version:
+        description: 'Version the binary reports, <upstream-ver>+fork.<cycle> (empty = plain CARGO_PKG_VERSION)'
+        required: false
+        default: ''
 
 env:
   CARGO_TERM_COLOR: always
@@ -75,3 +79,5 @@ jobs:
       source_repository: ${{ inputs.source_repository }}
       source_ref: ${{ inputs.source_ref }}
       features: ${{ inputs.features }}
+      # #865: thread the dispatch's binary identity through to the build step.
+      fork_version: ${{ inputs.fork_version }}
