@@ -980,7 +980,7 @@ fn push_runtime_info(prompt: &mut String, runtime_info: Option<&RuntimeInfo>) {
     // you?" instead of hallucinating (#183).
     prompt.push_str(&format!(
         "OpenCrabs version: v{}\n",
-        env!("CARGO_PKG_VERSION")
+        crate::VERSION
     ));
     prompt.push_str(&format!("OS: {}\n", std::env::consts::OS));
     // Date-only timestamp (YYYY-MM-DD (UTC)). Per #693, the system prompt is

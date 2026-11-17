@@ -6,7 +6,7 @@
 //! by administrative rules. Please make sure your request has a
 //! User-Agent header." reqwest ships with no default UA, and the
 //! model had no way to know GitHub mandates one — the tool now sets
-//! `opencrabs/<CARGO_PKG_VERSION>` automatically on every request.
+//! `opencrabs/<crate::VERSION>` automatically on every request.
 //!
 //! We use mockito to stand up a local HTTP server and assert the
 //! UA header is present on the request reqwest actually sent.
@@ -24,11 +24,11 @@ fn ctx() -> ToolExecutionContext {
 async fn default_user_agent_is_opencrabs_with_version() {
     let mut server = mockito::Server::new_async().await;
     let url = server.url();
-    let expected_ua = concat!("opencrabs/", env!("CARGO_PKG_VERSION"));
+    let expected_ua = format!("opencrabs/{}", crate::VERSION);
 
     let _mock = server
         .mock("GET", "/anything")
-        .match_header("user-agent", expected_ua)
+        .match_header("user-agent", expected_ua.as_str())
         .with_status(200)
         .with_body("ok")
         .create_async()

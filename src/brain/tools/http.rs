@@ -195,7 +195,7 @@ impl Tool for HttpClientTool {
         // explicit `User-Agent` in the tool input replaces ours.
         let client = Client::builder()
             .timeout(StdDuration::from_secs(input.timeout_secs))
-            .user_agent(concat!("opencrabs/", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("opencrabs/{}", crate::VERSION))
             .redirect(if input.follow_redirects {
                 // Re-validate every hop (OC-04): a public URL that 302s to an
                 // internal address is stopped, not followed.

@@ -15,7 +15,7 @@ use super::args::{
 pub(crate) async fn cmd_status(config: &crate::config::Config) -> Result<()> {
     use crate::db::Database;
 
-    let version = env!("CARGO_PKG_VERSION");
+    let version = crate::VERSION;
     println!("🦀 OpenCrabs v{version}\n");
 
     // Provider
@@ -186,7 +186,7 @@ pub(crate) async fn cmd_status(config: &crate::config::Config) -> Result<()> {
 pub(crate) async fn cmd_doctor(config: &crate::config::Config, fix: bool) -> Result<()> {
     use crate::db::Database;
 
-    let version = env!("CARGO_PKG_VERSION");
+    let version = crate::VERSION;
     println!("🦀 OpenCrabs Doctor v{version}\n");
 
     let mut pass = 0u32;

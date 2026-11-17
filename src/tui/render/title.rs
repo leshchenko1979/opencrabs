@@ -41,7 +41,7 @@ pub(super) fn render_app_title(f: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("  v{}", env!("CARGO_PKG_VERSION")),
+            format!("  v{}", crate::VERSION),
             Style::default().fg(theme::role(Role::GrayDim)),
         ),
     ])]);

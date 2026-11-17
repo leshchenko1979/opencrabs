@@ -9,7 +9,7 @@ use crate::config::Config;
 /// OpenCrabs - High-Performance Terminal AI Orchestration Agent
 #[derive(Parser, Debug)]
 #[command(name = "opencrabs")]
-#[command(version, about, long_about = None)]
+#[command(version = crate::VERSION, about, long_about = None)]
 pub struct Cli {
     /// Enable debug mode (creates log files in .opencrabs/logs/)
     #[arg(short, long, global = true)]

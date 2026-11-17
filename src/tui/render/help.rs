@@ -45,7 +45,7 @@ pub(super) fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
     // ── LEFT COLUMN ──
     let cyan = theme::role(Role::AccentTeal);
 
-    let version_line = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let version_line = format!("v{}", crate::VERSION);
     // Session-aware: the global name lies when the loaded session runs a
     // per-session provider swap or a sticky fallback (#1464).
     let provider_name = app.provider_name_for_current_session();

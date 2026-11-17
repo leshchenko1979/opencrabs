@@ -2589,7 +2589,7 @@ fn print_terminal_banner(
   \___/| .__/\___|_||_|  \___|_| \__,_|_.__//__/
        |_|";
 
-    let version = env!("CARGO_PKG_VERSION");
+    let version = crate::VERSION;
 
     println!();
     println!("{}{}{}{}", BOLD, ORANGE, logo, RESET);

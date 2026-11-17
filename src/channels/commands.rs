@@ -1037,7 +1037,7 @@ pub(crate) fn format_help() -> String {
     // parser keeps the table separate from the heading and trailer.
     let mut out = format!(
         "# 📖 Available Commands\n\nOpenCrabs v{}\n\n{}",
-        env!("CARGO_PKG_VERSION"),
+        crate::VERSION,
         md_table(&["Command", "Description"], &rows)
     );
 
@@ -1234,7 +1234,7 @@ async fn format_usage(
     // key-value lists. Authored once; renders well under rich or legacy mode.
     let mut blocks: Vec<String> = vec![format!(
         "# 📊 Usage Dashboard\n\nOpenCrabs v{}",
-        env!("CARGO_PKG_VERSION")
+        crate::VERSION
     )];
 
     // ── Current session ──────────────────────────────────────────────

@@ -239,7 +239,7 @@ pub fn initialize_result() -> Value {
         },
         "agentInfo": {
             "name": "opencrabs",
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": crate::VERSION,
         },
     })
 }

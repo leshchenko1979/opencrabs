@@ -39,7 +39,7 @@ fn format_help_shows_the_running_version() {
     // channel can see which version they're on.
     let help = format_help();
     assert!(
-        help.contains(&format!("OpenCrabs v{}", env!("CARGO_PKG_VERSION"))),
+        help.contains(&format!("OpenCrabs v{}", crate::VERSION)),
         "help must show the running version: {help}"
     );
 }

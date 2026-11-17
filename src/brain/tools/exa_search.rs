@@ -78,7 +78,7 @@ impl ExaSearchTool {
                 "capabilities": {},
                 "clientInfo": {
                     "name": "opencrabs",
-                    "version": env!("CARGO_PKG_VERSION")
+                    "version": crate::VERSION
                 }
             }
         });

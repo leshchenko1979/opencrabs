@@ -327,3 +327,21 @@ fn test_cli_daemon_takes_no_args() {
     let result = Cli::try_parse_from(["opencrabs", "daemon", "--session", "foo"]);
     assert!(result.is_err());
 }
+
+// --- Version surface (#865) ---
+
+#[test]
+fn clap_version_flag_and_version_const_share_one_source() {
+    // #865: `--version` was rendered by clap from `CARGO_PKG_VERSION` (always
+    // the bare upstream version) while `opencrabs version` printed
+    // `crate::VERSION` (which carries the `+fork.<cycle>` suffix). Both must
+    // now come from the same const, so a fork build reports its cycle on every
+    // surface. This asserts the clap flag's version string IS `crate::VERSION`.
+    use clap::CommandFactory;
+    let cmd = Cli::command();
+    assert_eq!(
+        cmd.get_version(),
+        Some(crate::VERSION),
+        "--version must report crate::VERSION (#865)"
+    );
+}
