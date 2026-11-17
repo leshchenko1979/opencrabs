@@ -1,6 +1,7 @@
 //! Configuration types, defaults, loading, and validation.
 
 use super::provider_registry::ProviderRegistryConfig;
+use crate::utils::scope::PriorityClass;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -1599,6 +1600,7 @@ pub struct RetentionConfig {
 /// scope_swap_max    = "0"    # a run that swaps outlived its budget
 /// scope_tasks_max   = 16     # per run, not per host
 /// slice_memory_max  = "2G"   # the pool: bounds the SUM of live runs
+/// priority          = "idle"   # how hard a run fights for CPU/IO
 /// ```
 ///
 /// **Sizing is a pair, not a list.** `scope_memory_max` caps ONE run;
@@ -1612,6 +1614,16 @@ pub struct RetentionConfig {
 /// empty string for "no cap". Percentages are refused: a percentage resolves
 /// against whatever cgroup the scope lands in, so the cap would move with the
 /// pool — a budget that silently rescales is not a bound.
+///
+/// **`priority` is the third lever, and the only one that costs nothing to
+/// hold.** Memory and task caps bound a run's worst case; priority decides who
+/// wins while the host is busy. Accepted values are `interactive`,
+/// `background`, `idle`, and `none` (or an empty string) to leave the process
+/// default untouched. Only `CPUWeight` can ride on the `systemd-run` argv:
+/// `--scope` refuses `-p Nice=19` outright with "Unknown assignment", and the
+/// io controller is not delegated to user slices, so `nice` and the io class
+/// are installed by a `pre_exec` hook on the child itself. See
+/// [`crate::utils::scope::PriorityClass`].
 ///
 /// Every field carries a `#[serde(default = "…")]`, and [`Default`] is written
 /// by hand to the same values. That pairing is what stops a partial section
@@ -1644,6 +1656,17 @@ pub struct BackgroundConfig {
     /// bounds the sum of all live runs.
     #[serde(default = "default_slice_memory_max")]
     pub slice_memory_max: String,
+
+    /// How hard a detached run fights for CPU and block IO.
+    ///
+    /// `"idle"` (the default) is nice 19 with the idle io class: a detached job
+    /// yields to everything, which is what "background" is supposed to mean.
+    /// `"background"` is the gentler middle — nice 10, `CPUWeight=50`, still
+    /// fully scheduled but behind the daemon that spawned it — for work someone
+    /// is waiting on. `"none"` opts out and leaves the process default alone, so
+    /// the key can be reverted on its own without disabling the scope wrapper.
+    #[serde(default = "default_background_priority")]
+    pub priority: String,
 }
 
 impl Default for BackgroundConfig {
@@ -1654,6 +1677,7 @@ impl Default for BackgroundConfig {
             scope_swap_max: default_scope_swap_max(),
             scope_tasks_max: default_scope_tasks_max(),
             slice_memory_max: default_slice_memory_max(),
+            priority: default_background_priority(),
         }
     }
 }
@@ -1676,6 +1700,111 @@ fn default_scope_tasks_max() -> u64 {
 
 fn default_slice_memory_max() -> String {
     "2G".to_string()
+}
+
+fn default_background_priority() -> String {
+    "idle".to_string()
+}
+
+fn default_maintenance_priority() -> String {
+    "idle".to_string()
+}
+
+/// How hard the maintenance sweep fights for CPU and block IO.
+///
+/// The sweep prunes rows, vacuums and purges files on a timer, so nothing waits
+/// for it: `"idle"` (the default) is the honest setting. It is a section of its
+/// own rather than a key under `[agent.background]` because the sweep is not a
+/// detached job — it runs inside the daemon process, so it cannot use the scope
+/// wrapper and takes its priority from a thread-level path instead.
+///
+/// ```toml
+/// [agent.maintenance]
+/// priority = "idle"   # interactive | background | idle | none
+/// ```
+///
+/// The accepted values are the same four as `[agent.background].priority`, and
+/// the two keys are independent on purpose: a run that should stay snappy may
+/// still leave the sweep at `idle`, and an operator debugging a slow sweep may
+/// lift it to `interactive` without loosening the cap on background jobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceConfig {
+    /// `interactive`, `background`, `idle`, or `none` to leave it alone.
+    ///
+    /// An unrecognised value warns once and falls back to `idle`: a typo must
+    /// not silently hand the sweep full interactive priority.
+    #[serde(default = "default_maintenance_priority")]
+    pub priority: String,
+}
+
+impl Default for MaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            priority: default_maintenance_priority(),
+        }
+    }
+}
+
+impl BackgroundConfig {
+    /// Resolved class for a detached run — see [`Self::priority`].
+    ///
+    /// Lives on the SECTION, not on [`AgentConfig`], because the scope layer
+    /// receives a `&BackgroundConfig` and has no path back to the whole config.
+    pub fn priority_class(&self) -> PriorityClass {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        resolve_priority(&self.priority, PriorityClass::Idle, &WARNED)
+    }
+}
+
+impl MaintenanceConfig {
+    /// Resolved class for the sweep — see [`Self::priority`].
+    pub fn priority_class(&self) -> PriorityClass {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        resolve_priority(&self.priority, PriorityClass::Idle, &WARNED)
+    }
+}
+
+impl AgentConfig {
+    /// Resolved priority for detached background jobs.
+    pub fn background_priority(&self) -> PriorityClass {
+        self.background.priority_class()
+    }
+
+    /// Resolved priority for the maintenance sweep.
+    pub fn maintenance_priority(&self) -> PriorityClass {
+        self.maintenance.priority_class()
+    }
+}
+
+/// Resolve one `priority` value, warning ONCE per section for a bad value.
+///
+/// `""` and `"none"` are the explicit opt-out: they return
+/// [`PriorityClass::Interactive`], which every applier treats as "leave the
+/// process default alone". An unrecognised value falls back to the section's
+/// `fallback` instead of to interactive, because a typo must not silently
+/// restore full priority — the point of the key is that background work yields.
+fn resolve_priority(
+    raw: &str,
+    fallback: PriorityClass,
+    warned: &'static std::sync::Once,
+) -> PriorityClass {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        return PriorityClass::Interactive;
+    }
+    match PriorityClass::parse(trimmed) {
+        Some(class) => class,
+        None => {
+            warned.call_once(|| {
+                tracing::warn!(
+                    "unrecognised priority {:?} (want interactive, background, idle or none); \
+                     using {fallback}",
+                    trimmed
+                );
+            });
+            fallback
+        }
+    }
 }
 
 impl RetentionConfig {
@@ -1923,6 +2052,10 @@ pub struct AgentConfig {
     /// [`BackgroundConfig`] for the sizing rules and the kill switch.
     #[serde(default)]
     pub background: BackgroundConfig,
+
+    /// Priority of the maintenance sweep — see [`MaintenanceConfig`].
+    #[serde(default)]
+    pub maintenance: MaintenanceConfig,
 
     /// Override provider for autonomous RSI self-improvement cycles (e.g. "zhipu", "minimax").
     /// RSI runs on its own provider chain so it never competes with chat or sub-agents for quota.
@@ -2388,6 +2521,7 @@ impl Default for AgentConfig {
             time_marker_interval_secs: default_time_marker_interval_secs(),
             goal_max_turns: None,
             background: BackgroundConfig::default(),
+            maintenance: MaintenanceConfig::default(),
         }
     }
 }

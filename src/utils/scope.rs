@@ -86,8 +86,9 @@ impl PriorityClass {
 
     /// `CPUWeight=` for the transient scope, or `None` to leave systemd's own
     /// default (100) alone. `Interactive` returns `None` rather than
-    /// `Some(100)` so an unwrapped argv stays byte-identical to the pre-#871
-    /// one, and the pinned-argv test keeps meaning what it says.
+    /// `Some(100)` so an unwrapped argv stays byte-identical to the argv it
+    /// produced before priority classes existed, and the pinned-argv test keeps
+    /// meaning what it says.
     pub fn cpu_weight(self) -> Option<u16> {
         match self {
             Self::Interactive => None,
@@ -146,6 +147,50 @@ impl PriorityClass {
         #[cfg(not(unix))]
         {
             let _ = cmd;
+        }
+    }
+
+    /// Install the class on the CALLING thread.
+    ///
+    /// The sibling of [`Self::apply_to_command`] for a thread we own outright —
+    /// a housekeeping ticker, where there is no child to hand the class to and
+    /// no fork window to respect, so a refusal is logged through `tracing`
+    /// rather than a raw `write(2)`.
+    ///
+    /// Both syscalls are per-thread on Linux: `setpriority` with `PRIO_PROCESS`
+    /// and pid 0 re-nices the calling thread, and `ioprio_set` is thread-scoped
+    /// the same way. So this must run INSIDE the thread it is meant to cover,
+    /// never on the thread that spawns it — and it deliberately does not raise
+    /// priority (a negative nice needs `CAP_SYS_NICE`), because a class that
+    /// claims to be `idle` must never quietly become a hog.
+    pub fn apply_to_current_thread(self) {
+        if self == Self::Interactive {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            let nice = self.nice();
+            // SAFETY: a plain syscall on the calling thread, no pointers.
+            if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) } != 0 {
+                tracing::warn!(
+                    nice,
+                    error = %std::io::Error::last_os_error(),
+                    "priority: setpriority on the calling thread failed"
+                );
+            }
+            // `ioprio_set` is Linux-only; macOS has no block-IO priority.
+            #[cfg(target_os = "linux")]
+            {
+                let ioprio = self.ioprio_value();
+                // SAFETY: as above.
+                if unsafe { libc::ioprio_set(libc::IOPRIO_WHO_PROCESS, 0, ioprio) } != 0 {
+                    tracing::warn!(
+                        ioprio,
+                        error = %std::io::Error::last_os_error(),
+                        "priority: ioprio_set on the calling thread failed"
+                    );
+                }
+            }
         }
     }
 }
@@ -282,7 +327,10 @@ pub fn spec_from_config(cfg: &crate::config::types::BackgroundConfig) -> ScopeSp
         swap_max,
         tasks_max,
         pool_memory_max,
-        priority: PriorityClass::Interactive,
+        // The class comes from `[agent.background].priority`, resolved
+        // through the accessor so the `"none"` opt-out and the typo fallback
+        // live in one place instead of being re-parsed here.
+        priority: cfg.priority_class(),
     }
 }
 

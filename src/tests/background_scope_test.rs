@@ -305,6 +305,67 @@ fn a_disabled_spec_does_not_reconcile_the_pool() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The only property this code writes to the pool is `MemoryMax`, and the only
+/// properties it puts in a run's argv are the three caps — never `MemoryHigh` or
+/// `MemoryLow`.
+///
+/// Those two are the deploy-side floors: they shape how hard the kernel throttles
+/// before it reclaims, and they are tuned against the host's real capacity, which
+/// this process cannot see. A code path that wrote them would silently overwrite a
+/// hand-tuned floor on the next reload, so their ABSENCE is the assertion that
+/// matters — the presence checks above it only prove the test reads the right argv.
+#[cfg(unix)]
+#[test]
+fn the_pool_bound_is_the_only_property_we_write() {
+    let dir = scratch_dir("props");
+    let bin = fake_systemctl(&dir);
+    let spec = ScopeSpec {
+        memory_max: Some(1 << 30),
+        swap_max: 0,
+        tasks_max: 16,
+        pool_memory_max: Some(2 << 30),
+        ..ScopeSpec::default()
+    };
+
+    assert!(
+        crate::utils::scope::reconcile_pool_with(&spec, bin.as_os_str()),
+        "the pool reconciles against a working systemctl"
+    );
+    let writes = std::fs::read_to_string(dir.join("writes")).expect("log");
+    let written: Vec<&str> = writes.lines().collect();
+    assert_eq!(
+        written,
+        vec!["MemoryMax=2147483648"],
+        "the pool write must be the MemoryMax bound and nothing else"
+    );
+    for forbidden in ["MemoryHigh", "MemoryLow"] {
+        assert!(
+            !writes.contains(forbidden),
+            "`{forbidden}` belongs to the deploy-side floor; this code must not write it"
+        );
+    }
+
+    let argv = crate::utils::scope::wrapped_argv(&spec, std::ffi::OsStr::new("/bin/true"), &[]);
+    let got: Vec<String> = argv
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    for expected in ["MemoryMax=1073741824", "MemorySwapMax=0", "TasksMax=16"] {
+        assert!(
+            got.iter().any(|a| a == expected),
+            "the run argv must carry {expected}, got {got:?}"
+        );
+    }
+    for forbidden in ["MemoryHigh=", "MemoryLow="] {
+        assert!(
+            !got.iter().any(|a| a.starts_with(forbidden)),
+            "the run argv must never override `{forbidden}` — deploy owns that floor, got {got:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The caps are live knobs: an edit reaches the next run's spec with no restart.
 ///
 /// The chain is `config.toml` → watcher → `Config::set_current` →

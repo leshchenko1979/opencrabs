@@ -460,6 +460,7 @@ pub mod plan_status_glyph_test;
 pub mod plan_tool_inline_test;
 pub mod plan_vacuous_pass_test;
 pub mod pressure_warning_test;
+pub mod priority_class_test;
 pub mod pricing_fallback_test;
 pub mod profile_addressing_test;
 pub mod profile_pid_lock_test;

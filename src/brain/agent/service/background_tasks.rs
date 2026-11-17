@@ -759,7 +759,17 @@ impl BackgroundTaskManager {
         // the next run's cap with no restart.
         let live = crate::config::Config::current();
         let scope_spec = crate::utils::scope::spec_from_config(&live.agent.background);
-        if crate::utils::scope::wrap(&mut cmd, &scope_spec) {
+        let wrapped = crate::utils::scope::wrap(&mut cmd, &scope_spec);
+        // The CPU/IO class is installed on the child itself, so it needs no
+        // wrapper and survives the `scope = false` kill switch — that switch
+        // exists to revert a broken wrapper, not to hand detached jobs their
+        // full priority back. It must still come AFTER `wrap`, which rebuilds
+        // the command and would discard a `pre_exec` closure installed on the
+        // old one, and BEFORE the detachment closure, which is the ordering the
+        // acceptance pins; both run in the child between fork and exec, in the
+        // order they were added.
+        scope_spec.priority.apply_to_command(&mut cmd);
+        if wrapped {
             crate::brain::tools::bash::detach_session_pre_exec(&mut cmd);
             // Re-asserted from the reservation, never defaulted: a wrapper that
             // armed this on its own would kill the detached job it had just

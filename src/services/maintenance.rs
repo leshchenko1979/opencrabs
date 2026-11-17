@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crate::db::MaintenanceKnobs;
 use crate::services::context::ServiceContext;
 use crate::services::session::SessionService;
+use crate::utils::scope::PriorityClass;
 
 /// Set while a maintenance sweep is running, so concurrent ticks skip.
 static RUNNING_MAINTENANCE: AtomicBool = AtomicBool::new(false);
@@ -548,7 +549,13 @@ impl MaintenanceService {
 
     /// Spawn periodic background maintenance task.
     pub fn spawn_periodic(context: ServiceContext, timing: MaintenanceTiming) {
-        tokio::spawn(async move {
+        let class = crate::config::Config::current().agent.maintenance.priority_class();
+        spawn_housekeeping("maintenance-sweep", class, move || async move {
+            // One line, at the start of the loop's own thread: a class that
+            // silently resolved to `interactive` is invisible in every other
+            // way, and this is the only place that can say what the sweep is
+            // actually running at.
+            tracing::info!("maintenance priority: nice={} ioprio={}", class.nice(), class);
             let svc = MaintenanceService::new(context);
             // Initial post-boot warmup delay (30 mins) so startup and tool execution are not bottlenecked (#273)
             tokio::time::sleep(timing.sweep_warmup()).await;
@@ -617,7 +624,8 @@ impl MaintenanceService {
         if MEMORY_RECLAIM_SPAWNED.swap(true, Ordering::AcqRel) {
             return;
         }
-        tokio::spawn(async move {
+        let class = crate::config::Config::current().agent.maintenance.priority_class();
+        spawn_housekeeping("maintenance-reclaim", class, move || async move {
             // Seed the clock, so a silent daemon does not have to wait for its
             // first message before the quiet window can ever elapse.
             crate::brain::agent::service::session_routes::note_activity();
@@ -632,6 +640,59 @@ impl MaintenanceService {
                 tokio::time::sleep(timing.reclaim_tick()).await;
             }
         });
+    }
+}
+
+/// Run an infinite housekeeping loop on an OS thread of its own, at `class`.
+///
+/// Two reasons this is a thread and not a `tokio::spawn`:
+///
+/// 1. **The class has to belong to the thread that does the work.** `nice` and
+///    `ioprio` are per-thread on Linux, and a spawned task inherits whichever
+///    worker thread it happens to land on. A task that lowered its own priority
+///    would drag that shared worker down for whatever ran next on it, and a task
+///    that never lowered it would silently run the sweep at the daemon's own
+///    class — the exact failure the class exists to prevent.
+/// 2. **The blocking legs must not occupy a shared worker.** The 50k-file prune,
+///    the `VACUUM` and the WAL truncate each hold a thread for the length of a
+///    syscall. On the shared runtime that is the same starvation the class is
+///    meant to relieve, only moved to the worker pool.
+///
+/// A current-thread runtime is enough for both bodies: each is one `await`-
+/// plus-`sleep` loop with nothing to schedule in parallel. It also keeps the
+/// future off the `Send` bound, which is what lets the sweep keep taking its
+/// `ServiceContext` by value.
+///
+/// The class is read from the LIVE config by the caller, never captured at boot:
+/// the watcher swaps `Config::current()`'s `Arc`, so an operator's edit applies
+/// to the next daemon start without a code change.
+fn spawn_housekeeping<F, Fut>(name: &'static str, class: PriorityClass, body: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let spawned = std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            // Before `block_on`, so it covers every poll of the loop, and on
+            // THIS thread, because both syscalls are per-thread.
+            class.apply_to_current_thread();
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(e) => {
+                    // Housekeeping that cannot get a runtime is not a reason to
+                    // take the daemon down; say so and let the thread end.
+                    tracing::error!("{name}: could not build a housekeeping runtime: {e:#}");
+                    return;
+                }
+            };
+            runtime.block_on(body());
+        });
+    if let Err(e) = spawned {
+        tracing::error!("{name}: could not spawn the housekeeping thread: {e:#}");
     }
 }
 
