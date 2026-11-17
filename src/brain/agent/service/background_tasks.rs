@@ -195,6 +195,17 @@ struct Reservation {
     /// starts from the same value the spawn does, and a second parameter would
     /// take `run_reserved` back over clippy's argument ceiling.
     wake: Option<WakeSpec>,
+    /// Whether the caller armed `kill_on_drop` on the command it built (#776).
+    ///
+    /// Carried because a wrapper REBUILDS the command: tokio's own flag lives
+    /// beside the inner `std::process::Command` and survives the rewrite, but
+    /// nothing can read it back, so the only way to re-assert the caller's
+    /// choice is to have recorded it. The two spawn arms differ here and the
+    /// difference is load-bearing — the bash tool sets it so a dropped future
+    /// reaps the shell (#1046), while the detached arm never sets it, because a
+    /// job that is *supposed* to outlive the turn must not be killed by the
+    /// same flag.
+    kill_on_drop: bool,
 }
 
 /// Manages background commands and resumes their sessions on completion.
@@ -449,7 +460,10 @@ impl BackgroundTaskManager {
             wake,
         } = req;
         let cmd = build_command(&cwd, &command, session_id);
-        let reserved = self.reserve_run(session_id, &label, &command, &cwd, wake);
+        // `build_command` never arms `kill_on_drop`: this arm exists to let a
+        // job outlive the turn, so the flag that reaps a dropped child is
+        // exactly the wrong default here.
+        let reserved = self.reserve_run(session_id, &label, &command, &cwd, wake, false);
         // The hook is MOVED into `run_reserved` below, so this side has to
         // remember whether one existed BEFORE the move: a hooked run reports
         // itself from inside `run_reserved` (both the inline and the detached
@@ -525,6 +539,7 @@ impl BackgroundTaskManager {
         req: RunRequest,
         cmd: tokio::process::Command,
         grace: Option<std::time::Duration>,
+        kill_on_drop: bool,
     ) -> std::io::Result<Handover> {
         let RunRequest {
             session_id,
@@ -533,7 +548,7 @@ impl BackgroundTaskManager {
             command,
             wake,
         } = req;
-        let reserved = self.reserve_run(session_id, &label, &command, &cwd, wake);
+        let reserved = self.reserve_run(session_id, &label, &command, &cwd, wake, kill_on_drop);
         self.run_reserved(reserved, cmd, grace, None).await
     }
 
@@ -554,6 +569,7 @@ impl BackgroundTaskManager {
         command: &str,
         cwd: &std::path::Path,
         wake: Option<WakeSpec>,
+        kill_on_drop: bool,
     ) -> Reservation {
         let run_uuid = Uuid::new_v4();
         let id = run_uuid.to_string();
@@ -582,6 +598,7 @@ impl BackgroundTaskManager {
             label: label.to_string(),
             command: command.to_string(),
             wake,
+            kill_on_drop,
         }
     }
 
@@ -606,6 +623,7 @@ impl BackgroundTaskManager {
             label,
             command,
             wake,
+            kill_on_drop,
         } = reserved;
 
         // Each fallible step below un-registers the reservation on failure: a
@@ -633,6 +651,22 @@ impl BackgroundTaskManager {
                 return Err(e);
             }
         };
+
+        // #776: the run gets its own cgroup BEFORE anything is installed on it.
+        // Order is load-bearing in both directions — the wrapper must exist
+        // first, because the pty and the `pre_exec` closures attach to the
+        // process that will actually run, and after `--scope` that is the
+        // payload rather than a supervisor; and `wrap` rebuilds the command, so
+        // the terminal detachment `build_command`/the bash tool applied is
+        // re-applied here instead of being inherited.
+        let scope_spec = crate::utils::scope::ScopeSpec::default();
+        if crate::utils::scope::wrap(&mut cmd, &scope_spec) {
+            crate::brain::tools::bash::detach_session_pre_exec(&mut cmd);
+            // Re-asserted from the reservation, never defaulted: a wrapper that
+            // armed this on its own would kill the detached job it had just
+            // been asked to hand over.
+            cmd.kill_on_drop(kill_on_drop);
+        }
 
         // A pty per stream, installed BEFORE the spawn (see `stream_over_pty`).
         let masters = stream_over_pty(&mut cmd);

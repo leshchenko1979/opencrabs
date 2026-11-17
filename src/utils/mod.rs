@@ -31,6 +31,7 @@ pub mod providers;
 pub mod pty;
 pub mod retry;
 pub mod sanitize;
+pub mod scope;
 pub mod shell;
 pub mod shell_scan;
 pub mod slack_fmt;
