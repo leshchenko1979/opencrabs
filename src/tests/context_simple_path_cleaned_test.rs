@@ -87,6 +87,10 @@ impl Provider for CapturingProvider {
     fn context_window(&self, _model: &str) -> Option<u32> {
         Some(200_000)
     }
+
+    fn calculate_cost(&self, _model: &str, _input: u32, _output: u32) -> f64 {
+        0.0
+    }
 }
 
 /// Every text block the provider would receive, joined.
