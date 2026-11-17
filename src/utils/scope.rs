@@ -77,6 +77,70 @@ impl ScopeSpec {
     }
 }
 
+/// Build the per-run spec from `[agent.background]` (#776).
+///
+/// Called at SPAWN time against [`crate::config::Config::current()`], never
+/// captured at boot: the config watcher swaps the live `Arc`, so a spec read
+/// here follows an operator's edit on the next run instead of the next restart.
+///
+/// An invalid size never reaches argv. systemd rejects a bad `-p` with rc 1 and
+/// **does not run the payload** (measurement 10), so a malformed config value
+/// passed through would turn every detached job on the host into a dead one —
+/// the opposite of the intent. Each bad value is warned about once and replaced
+/// by its shipped default, which keeps the mechanism armed.
+pub fn spec_from_config(cfg: &crate::config::types::BackgroundConfig) -> ScopeSpec {
+    let fallback = ScopeSpec::default();
+
+    let memory_max = match parse_memory_max(&cfg.scope_memory_max) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(
+                target: "background_task",
+                "ignoring agent.background.scope_memory_max: {e}; using the default"
+            );
+            fallback.memory_max
+        }
+    };
+    let swap_max = match parse_size_allow_zero(&cfg.scope_swap_max) {
+        Ok(value) => value.unwrap_or(0),
+        Err(e) => {
+            tracing::warn!(
+                target: "background_task",
+                "ignoring agent.background.scope_swap_max: {e}; using the default"
+            );
+            fallback.swap_max
+        }
+    };
+    let tasks_max = if cfg.scope_tasks_max == 0 {
+        tracing::warn!(
+            target: "background_task",
+            "agent.background.scope_tasks_max is 0, which cannot start a process; using the default"
+        );
+        fallback.tasks_max
+    } else {
+        cfg.scope_tasks_max
+    };
+
+    ScopeSpec {
+        enabled: cfg.scope,
+        slice: DEFAULT_SLICE.to_string(),
+        memory_max,
+        swap_max,
+        tasks_max,
+    }
+}
+
+/// Like [`parse_memory_max`], but `"0"` is a real value rather than a mistake.
+///
+/// Only swap accepts it: `MemorySwapMax=0` is the meaningful "no swap for this
+/// run", while `MemoryMax=0` is a cap that cannot start a process.
+fn parse_size_allow_zero(raw: &str) -> Result<Option<u64>, String> {
+    if raw.trim() == "0" {
+        return Ok(Some(0));
+    }
+    parse_memory_max(raw)
+}
+
 /// The `systemd-run` binary to invoke.
 pub fn systemd_run_bin() -> std::ffi::OsString {
     std::env::var_os(SYSTEMD_RUN_ENV).unwrap_or_else(|| "systemd-run".into())

@@ -1583,6 +1583,101 @@ pub struct RetentionConfig {
     pub command_runs: Option<u32>,
 }
 
+/// Per-run cgroup scoping for detached jobs (#776).
+///
+/// Every detached bash job used to land in the daemon's own cgroup, sharing its
+/// `MemoryMax`, `MemoryHigh` and `TasksMax` with every other lane — so the
+/// cgroup-local OOM killer had the daemon itself in its candidate set. With
+/// this section enabled each run gets a transient scope of its own, inside a
+/// slice whose cap bounds their sum, and a run that exceeds its budget dies
+/// alone.
+///
+/// ```toml
+/// [agent.background]
+/// scope             = true   # the kill switch
+/// scope_memory_max  = "1G"   # per run
+/// scope_swap_max    = "0"    # a run that swaps outlived its budget
+/// scope_tasks_max   = 16     # per run, not per host
+/// slice_memory_max  = "2G"   # the pool: bounds the SUM of live runs
+/// ```
+///
+/// **Sizing is a pair, not a list.** `scope_memory_max` caps ONE run;
+/// `slice_memory_max` caps ALL of them together, and the per-run caps are
+/// entitlements rather than reservations — N lanes at 1G each can still exhaust
+/// the host without the pool. Keep the pool at or below what the host can spare
+/// beside the daemon's own cap, and never below `scope_memory_max`, or a single
+/// run cannot start.
+///
+/// Sizes accept `1G`, `512M`, `1.5G`, a plain byte count, `infinity`, or an
+/// empty string for "no cap". Percentages are refused: a percentage resolves
+/// against whatever cgroup the scope lands in, so the cap would move with the
+/// pool — a budget that silently rescales is not a bound.
+///
+/// Every field carries a `#[serde(default = "…")]`, and [`Default`] is written
+/// by hand to the same values. That pairing is what stops a partial section
+/// zeroing the fields it does not mention: without the per-field defaults,
+/// `[agent.background]\nscope = false` would deserialise `scope_tasks_max` as
+/// `0`, and a run with a zero task budget cannot start at all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackgroundConfig {
+    /// Master switch for per-run cgroup scoping.
+    ///
+    /// `false` returns every spawn to a bare, unwrapped command — the one-line
+    /// revert, because the blast radius of a broken wrapper is every detached
+    /// job on the host at once.
+    #[serde(default = "default_background_scope")]
+    pub scope: bool,
+
+    /// `MemoryMax` for ONE detached run.
+    #[serde(default = "default_scope_memory_max")]
+    pub scope_memory_max: String,
+
+    /// `MemorySwapMax` for ONE detached run. `"0"` forbids swap.
+    #[serde(default = "default_scope_swap_max")]
+    pub scope_swap_max: String,
+
+    /// `TasksMax` for ONE detached run, so a fork bomb stays its own problem.
+    #[serde(default = "default_scope_tasks_max")]
+    pub scope_tasks_max: u64,
+
+    /// `MemoryMax` for the SLICE every scope is placed in — the pool that
+    /// bounds the sum of all live runs.
+    #[serde(default = "default_slice_memory_max")]
+    pub slice_memory_max: String,
+}
+
+impl Default for BackgroundConfig {
+    fn default() -> Self {
+        Self {
+            scope: default_background_scope(),
+            scope_memory_max: default_scope_memory_max(),
+            scope_swap_max: default_scope_swap_max(),
+            scope_tasks_max: default_scope_tasks_max(),
+            slice_memory_max: default_slice_memory_max(),
+        }
+    }
+}
+
+fn default_background_scope() -> bool {
+    true
+}
+
+fn default_scope_memory_max() -> String {
+    "1G".to_string()
+}
+
+fn default_scope_swap_max() -> String {
+    "0".to_string()
+}
+
+fn default_scope_tasks_max() -> u64 {
+    16
+}
+
+fn default_slice_memory_max() -> String {
+    "2G".to_string()
+}
+
 impl RetentionConfig {
     /// Historical default for [`Self::subagent_sessions`].
     pub const DEFAULT_SUBAGENT_SESSIONS_DAYS: u32 = 7;
@@ -1807,6 +1902,11 @@ pub struct AgentConfig {
     /// startup and deletes FILES, not rows.
     #[serde(default)]
     pub retention: RetentionConfig,
+
+    /// Per-run cgroup scoping for detached jobs (#776) — see
+    /// [`BackgroundConfig`] for the sizing rules and the kill switch.
+    #[serde(default)]
+    pub background: BackgroundConfig,
 
     /// Override provider for autonomous RSI self-improvement cycles (e.g. "zhipu", "minimax").
     /// RSI runs on its own provider chain so it never competes with chat or sub-agents for quota.

@@ -659,7 +659,11 @@ impl BackgroundTaskManager {
         // payload rather than a supervisor; and `wrap` rebuilds the command, so
         // the terminal detachment `build_command`/the bash tool applied is
         // re-applied here instead of being inherited.
-        let scope_spec = crate::utils::scope::ScopeSpec::default();
+        // Read from the LIVE config at spawn time, never captured at boot: the
+        // watcher swaps `Config::current()`'s `Arc`, so an operator's edit moves
+        // the next run's cap with no restart.
+        let live = crate::config::Config::current();
+        let scope_spec = crate::utils::scope::spec_from_config(&live.agent.background);
         if crate::utils::scope::wrap(&mut cmd, &scope_spec) {
             crate::brain::tools::bash::detach_session_pre_exec(&mut cmd);
             // Re-asserted from the reservation, never defaulted: a wrapper that

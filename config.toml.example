@@ -525,6 +525,32 @@ thinking_loop_timeout_secs = 600
 # Set to 0 to disable intra-turn periodic markers while retaining turn-ingress time.
 time_marker_interval_secs = 900
 
+# Per-run cgroup scoping for detached jobs (#776). Every detached bash job used
+# to land in the daemon's own cgroup, sharing its MemoryMax/MemoryHigh/TasksMax
+# with the daemon and with every other lane — so one runaway job could take the
+# agent down with it, because the cgroup-local OOM killer had the daemon itself
+# in its candidate set. With this enabled each run gets a transient systemd
+# scope of its own, inside a slice whose cap bounds their sum.
+#
+# SIZING IS A PAIR, NOT A LIST. `scope_memory_max` caps ONE run;
+# `slice_memory_max` caps ALL live runs together. The per-run caps are
+# entitlements, not reservations: N lanes at 1G each can still exhaust the host
+# without the pool. Keep the pool at or below what the host can spare beside the
+# daemon's own cap, and never below `scope_memory_max` — a pool smaller than one
+# run's cap means that run cannot start.
+#
+# Sizes accept `1G`, `512M`, `1.5G`, a plain byte count, `infinity`, or "" for no
+# cap. Percentages are refused: a percentage resolves against whatever cgroup the
+# scope lands in, so the cap would move with the pool.
+#
+# `scope = false` is the kill switch and returns every spawn to a bare command.
+[agent.background]
+# scope = true              # master switch (default: true)
+# scope_memory_max = "1G"   # MemoryMax for ONE detached run
+# scope_swap_max = "0"      # MemorySwapMax for ONE run; "0" forbids swap
+# scope_tasks_max = 16      # TasksMax for ONE run
+# slice_memory_max = "2G"   # MemoryMax for the slice: the pool bounding ALL runs
+
 [image.generation]
 enabled = false
 model = "gemini-3.1-flash-image-preview"   # Gemini image-gen model ("Nano Banana")
