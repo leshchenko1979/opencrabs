@@ -296,3 +296,54 @@ fn a_disabled_spec_does_not_reconcile_the_pool() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The caps are live knobs: an edit reaches the next run's spec with no restart.
+///
+/// The chain is `config.toml` → watcher → `Config::set_current` →
+/// `Config::current()` at spawn → `spec_from_config`. Only the first link is
+/// external, so this test drives the middle three: it swaps the process-wide
+/// mirror the way the watcher does and reads the spec back through the same
+/// accessor the spawn site uses. The mirror swap is serialised against the other
+/// tests that mutate it, and restored before the guard drops.
+#[tokio::test]
+async fn an_edited_cap_moves_the_next_runs_spec() {
+    let _guard = crate::channels::telegram::governor::test_support::registry_guard().await;
+    let previous = crate::config::Config::current();
+
+    let mut edited = (*previous).clone();
+    edited.agent.background.scope_memory_max = "3G".to_string();
+    edited.agent.background.slice_memory_max = "4G".to_string();
+    crate::config::Config::set_current(edited);
+
+    let live =
+        crate::utils::scope::spec_from_config(&crate::config::Config::current().agent.background);
+    assert_eq!(live.memory_max, Some(3 << 30), "the per-run cap follows");
+    assert_eq!(live.pool_memory_max, Some(4 << 30), "so does the pool");
+
+    crate::config::Config::set_current((*previous).clone());
+}
+
+/// The spawn site must read the LIVE config, and the watcher must be its writer.
+///
+/// Both halves are structural, so they are pinned in the source rather than
+/// exercised: a spawn site that captured its spec at boot would pass every
+/// behavioural test in this file and still ignore every config edit until the
+/// next restart — the exact failure the live read exists to prevent.
+#[test]
+fn the_spawn_site_reads_the_live_config() {
+    let spawn_site = include_str!("../brain/agent/service/background_tasks.rs");
+    assert!(
+        spawn_site.contains("let live = crate::config::Config::current();"),
+        "the spawn site must read the live config mirror"
+    );
+    assert!(
+        spawn_site.contains("spec_from_config(&live.agent.background)"),
+        "the spec must be derived from that read, not from a captured copy"
+    );
+
+    let watcher = include_str!("../utils/config_watcher.rs");
+    assert!(
+        watcher.contains("Config::set_current("),
+        "the watcher must be the mirror's writer, or the live read never moves"
+    );
+}
