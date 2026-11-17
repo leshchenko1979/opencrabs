@@ -605,7 +605,7 @@ pub fn classify_image_target(raw: &str, base_dir: Option<&Path>) -> ImageTarget 
         return ImageTarget::Local(expanded);
     }
     match base_dir {
-        Some(dir) => ImageTarget::Local(dir.join(expanded)),
+        Some(dir) => ImageTarget::Local(join_relative_target(&expanded, dir)),
         None => ImageTarget::Unresolved,
     }
 }
@@ -2086,13 +2086,91 @@ fn resolve_file_target(target: &str, base_dir: Option<&Path>) -> Resolution {
         expanded
     } else {
         match base_dir {
-            Some(dir) => dir.join(expanded),
+            Some(dir) => join_relative_target(&expanded, dir),
             // A relative target with no base directory may be ordinary prose
             // that merely looks like a link: leave it as written.
             None => return Resolution::Skip,
         }
     };
     validate_local_path(path)
+}
+
+/// Join a relative reference onto `dir`, recovering the two shapes where the
+/// plain join duplicates a run of path components and so names a file that does
+/// not exist (#863).
+///
+/// A model writes the tail of a path it was shown — `profiles/ops/projects/…` —
+/// while `dir` already ENDS in that run, so `dir.join(…)` yields
+/// `…/profiles/ops/profiles/ops/projects/…`. The file exists exactly once; the
+/// doubled path exists nowhere, and the reply loses its attachment to a
+/// "file not found" notice.
+///
+/// Two recoverable shapes, and each candidate is accepted ONLY when it names a
+/// real file. That acceptance test is what keeps ordinary prose from being
+/// rescued into some unrelated file — the failure mode of a repair that matches
+/// on shape alone.
+///
+/// The plain join is returned when nothing is recovered, so a genuine miss keeps
+/// naming the path the author wrote: #793 depends on a missing path still
+/// reaching the resolver as a candidate, because the regen nudge can only fire
+/// on a rejection.
+///
+/// ONE policy for both the file family ([`resolve_file_target`]) and the image
+/// family ([`classify_image_target`]): the two used to spell the join out
+/// separately, which is exactly the invariant that drifts. Resolving them the
+/// same way also means the in-loop preflight nudge and delivery agree about
+/// where a reference points.
+fn join_relative_target(expanded: &Path, dir: &Path) -> PathBuf {
+    let plain = dir.join(expanded);
+    if plain.is_file() {
+        return plain;
+    }
+    // A single-component reference names no deeper path, so there is nothing to
+    // strip and no duplicate to collapse. This is also the prose guard: a bare
+    // word that merely looks like a link stays exactly as written.
+    let reference = components_of(expanded);
+    let base = components_of(dir);
+    if reference.len() < 2 || base.is_empty() {
+        return plain;
+    }
+    // (1) A leading run of the reference that repeats the TAIL of `dir` — the
+    // doubled-base shape this issue was filed for. Longest run first: stripping
+    // the longest match is the least lossy reading of what the author meant.
+    let longest = reference.len().saturating_sub(1).min(base.len());
+    for run in (1..=longest).rev() {
+        if base[base.len() - run..] != reference[..run] {
+            continue;
+        }
+        let candidate = dir.join(reference[run..].iter().collect::<PathBuf>());
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    // (2) One duplicated run INSIDE the reference (`files/files/x.md`), which
+    // arises when the author repeats a segment rather than echoing the base.
+    for run in (1..=reference.len() / 2).rev() {
+        for at in 0..=reference.len() - 2 * run {
+            if reference[at..at + run] != reference[at + run..at + 2 * run] {
+                continue;
+            }
+            let mut parts: Vec<std::ffi::OsString> = Vec::with_capacity(reference.len() - run);
+            parts.extend_from_slice(&reference[..at + run]);
+            parts.extend_from_slice(&reference[at + 2 * run..]);
+            let candidate = dir.join(parts.into_iter().collect::<PathBuf>());
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    plain
+}
+
+/// The path components of `path`, owned so two paths can be compared without
+/// tying their borrows together.
+fn components_of(path: &Path) -> Vec<std::ffi::OsString> {
+    path.components()
+        .map(|c| c.as_os_str().to_owned())
+        .collect()
 }
 
 /// Validate an already-resolved local path into a [`Resolution`]. Shared by the

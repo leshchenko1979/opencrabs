@@ -420,8 +420,9 @@ mod reentry_latch {
 
 mod local_file_links {
     use crate::utils::image::{
-        LocalFileScan, LocalImageFailure, LocalImageFailureReason, TELEGRAM_DOCUMENT_MAX_BYTES,
-        append_file_failure_notice, extract_local_files, file_failure_notice, validate_local_file,
+        ImageTarget, LocalFileScan, LocalImageFailure, LocalImageFailureReason,
+        TELEGRAM_DOCUMENT_MAX_BYTES, append_file_failure_notice, classify_image_target,
+        extract_local_files, file_failure_notice, validate_local_file,
     };
     use std::path::{Path, PathBuf};
 
@@ -1030,6 +1031,121 @@ mod local_file_links {
     #[test]
     fn appending_without_failures_returns_the_body_untouched() {
         assert_eq!(append_file_failure_notice("hello", &[]), "hello");
+    }
+
+    // -----------------------------------------------------------------------
+    // #863 — a reference that repeats a run of the base dir still resolves
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_doubled_base_dir_reference_still_resolves() {
+        // THE FILED CASE. A model writes the tail of a path it was shown —
+        // `profiles/ops/projects/…` — while the base dir already ENDS in that
+        // run, so the plain join produced
+        // `…/profiles/ops/profiles/ops/projects/…`: a path that exists nowhere,
+        // reported as a missing file although the real one is right there.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("profiles").join("ops");
+        std::fs::create_dir_all(base.join("projects/pageplate/files")).expect("fixture tree");
+        let md = write_file(
+            &base.join("projects/pageplate/files"),
+            "lightweight-alternatives.md",
+            b"# report\n",
+        );
+
+        let scan = extract_local_files(
+            "[report](profiles/ops/projects/pageplate/files/lightweight-alternatives.md)",
+            Some(&base),
+        );
+
+        assert_eq!(
+            paths(&scan),
+            vec![md],
+            "the doubled base resolves to the one file that exists"
+        );
+        assert!(
+            scan.failures.is_empty(),
+            "a resolved reference must not be reported as missing: {:?}",
+            scan.failures
+        );
+    }
+
+    #[test]
+    fn a_duplicated_run_inside_the_reference_still_resolves() {
+        // The other shape: the author repeats a segment rather than echoing the
+        // base (`files/files/x.md`). Same repair, one duplicated run collapsed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("files")).expect("fixture tree");
+        let pdf = write_file(&dir.path().join("files"), "q3.pdf", PDF_BYTES);
+
+        let scan = extract_local_files("[Q3](files/files/q3.pdf)", Some(dir.path()));
+
+        assert_eq!(paths(&scan), vec![pdf]);
+        assert!(scan.failures.is_empty(), "{:?}", scan.failures);
+    }
+
+    #[test]
+    fn a_reference_that_already_resolves_is_left_alone() {
+        // The recovery is a FALLBACK, not a rewrite: a reference the plain join
+        // already resolves must reach exactly the path it named. Without this,
+        // a repair that always stripped a leading run would move a working
+        // reference onto some other file.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("files")).expect("fixture tree");
+        let inside = write_file(&dir.path().join("files"), "q3.pdf", PDF_BYTES);
+        let outside = write_file(dir.path(), "q3.pdf", PDF_BYTES);
+
+        let scan = extract_local_files("[Q3](files/q3.pdf)", Some(dir.path()));
+
+        assert_eq!(
+            paths(&scan),
+            vec![inside],
+            "the path as written wins over any de-duplicated reading"
+        );
+        assert_ne!(paths(&scan), vec![outside]);
+    }
+
+    #[test]
+    fn a_reference_with_nothing_behind_it_is_still_reported_as_written() {
+        // THE PROSE / MISS GUARD. Every recovery candidate is accepted only when
+        // it names a real file, so a reference with nothing behind it keeps the
+        // exact path the author wrote — which is what the regen nudge quotes
+        // back to the model (#793), and what stops ordinary prose being rescued
+        // into an unrelated file.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("profiles/ops")).expect("fixture tree");
+        let base = dir.path().join("profiles").join("ops");
+
+        let scan = extract_local_files(
+            "[gone](profiles/ops/projects/nowhere/report.md)",
+            Some(&base),
+        );
+
+        assert!(scan.attachments.is_empty());
+        assert_eq!(scan.failures.len(), 1, "reported, so the nudge can fire");
+        assert_eq!(scan.failures[0].reason, LocalImageFailureReason::NotFound);
+        assert!(
+            scan.text.contains("profiles/ops/projects/nowhere/report.md"),
+            "the reference keeps its clue in the text: {}",
+            scan.text
+        );
+    }
+
+    #[test]
+    fn the_image_family_resolves_the_doubled_base_the_same_way() {
+        // ONE policy, two call sites. `classify_image_target` used to spell the
+        // join out itself; resolving the families differently is how the
+        // in-loop preflight and delivery end up disagreeing about where a
+        // reference points. The doubled-base recovery must therefore hold on the
+        // image side too.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("profiles").join("ops");
+        std::fs::create_dir_all(base.join("projects/shots")).expect("fixture tree");
+        let png = write_file(&base.join("projects/shots"), "shot.png", b"\x89PNG\r\n\x1a\n");
+
+        let target = classify_image_target("profiles/ops/projects/shots/shot.png", Some(&base));
+
+        assert_eq!(target, ImageTarget::Local(png));
     }
 }
 
