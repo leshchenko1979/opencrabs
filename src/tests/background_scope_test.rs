@@ -239,8 +239,10 @@ fn reconcile_writes_once_and_then_goes_quiet() {
 /// operator's typo.
 #[test]
 fn a_garbage_pool_bound_never_reaches_argv() {
-    let mut cfg = BackgroundConfig::default();
-    cfg.slice_memory_max = "banana".to_string();
+    let cfg = BackgroundConfig {
+        slice_memory_max: "banana".to_string(),
+        ..BackgroundConfig::default()
+    };
 
     let spec = crate::utils::scope::spec_from_config(&cfg);
     assert_eq!(
@@ -345,5 +347,177 @@ fn the_spawn_site_reads_the_live_config() {
     assert!(
         watcher.contains("Config::set_current("),
         "the watcher must be the mirror's writer, or the live read never moves"
+    );
+}
+
+/// (a) The wrapper argv, byte-pinned.
+///
+/// Every element here is load-bearing rather than incidental: `--quiet` before
+/// the payload (else the banner pollutes the run's stderr), every `-p` before
+/// `--`, and `--` before the program so a payload argument that looks like a
+/// flag is never parsed by systemd-run. The pin is on the ORDER, not on a
+/// formatting choice, so a refactor that keeps the meaning passes and one that
+/// moves a flag fails.
+#[test]
+fn the_wrapper_argv_is_pinned() {
+    let spec = ScopeSpec {
+        memory_max: Some(1 << 30),
+        swap_max: 0,
+        tasks_max: 16,
+        ..ScopeSpec::default()
+    };
+    let argv = crate::utils::scope::wrapped_argv(
+        &spec,
+        std::ffi::OsStr::new("/bin/echo"),
+        &[
+            std::ffi::OsString::from("hi"),
+            std::ffi::OsString::from("--not-a-systemd-flag"),
+        ],
+    );
+    let got: Vec<String> = argv
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(
+        got,
+        vec![
+            "--user",
+            "--scope",
+            "--quiet",
+            "--slice=oc-tasks.slice",
+            "-p",
+            "MemoryMax=1073741824",
+            "-p",
+            "MemorySwapMax=0",
+            "-p",
+            "TasksMax=16",
+            "--",
+            "/bin/echo",
+            "hi",
+            "--not-a-systemd-flag",
+        ],
+        "--collect must never appear, and no flag may follow the program"
+    );
+    assert!(
+        !got.iter().any(|a| a == "--collect"),
+        "scopes self-collect when empty; the flag only adds a systemd <240 risk"
+    );
+}
+
+/// An unbounded run omits `MemoryMax` entirely rather than passing `infinity`:
+/// `-p MemoryMax=infinity` is accepted, but the absence is the smaller surface
+/// and cannot be misread as a cap by a reader of the argv.
+#[test]
+fn an_unbounded_run_omits_the_memory_cap() {
+    let spec = ScopeSpec {
+        memory_max: None,
+        ..ScopeSpec::default()
+    };
+    let argv = crate::utils::scope::wrapped_argv(
+        &spec,
+        std::ffi::OsStr::new("/bin/true"),
+        &[],
+    );
+    let got: Vec<String> = argv
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !got.iter().any(|a| a.starts_with("MemoryMax=")),
+        "an unbounded run carries no MemoryMax, got {got:?}"
+    );
+}
+
+/// (b) The kill switch leaves the command byte-identical.
+///
+/// This is the one-line revert the design promises, so it is asserted on the
+/// command's own program/args rather than on a boolean: a `wrap` that returned
+/// `false` after mutating the command would be the worst of both worlds.
+#[tokio::test]
+async fn a_disabled_scope_leaves_the_command_untouched() {
+    let mut cmd = tokio::process::Command::new("/bin/echo");
+    cmd.arg("hello").arg("--world");
+    let before = {
+        let std_cmd = cmd.as_std();
+        let program = std_cmd.get_program().to_os_string();
+        let args: Vec<std::ffi::OsString> = std_cmd.get_args().map(|a| a.to_os_string()).collect();
+        (program, args)
+    };
+
+    assert!(
+        !crate::utils::scope::wrap(&mut cmd, &ScopeSpec::disabled()),
+        "a disabled spec must report that it wrapped nothing"
+    );
+    let after = {
+        let std_cmd = cmd.as_std();
+        let program = std_cmd.get_program().to_os_string();
+        let args: Vec<std::ffi::OsString> = std_cmd.get_args().map(|a| a.to_os_string()).collect();
+        (program, args)
+    };
+    assert_eq!(before, after, "the command must be byte-identical");
+}
+
+/// (e) Fail-open: a `systemd-run` that cannot scope refuses the wrapper, and the
+/// payload still runs.
+///
+/// Driven through `ensure_with` rather than an environment override, because
+/// `OPENCRABS_SYSTEMD_RUN` is process-global and a test that sets it races every
+/// other test in this binary. The refusal is what the spawn site reads, and the
+/// second half proves an unwrapped run still completes — a fail-open that
+/// returned `false` but killed the run would be worse than no wrapper at all.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unscopable_host_refuses_the_wrapper_and_the_run_still_completes() {
+    let spec = ScopeSpec::default();
+    assert!(
+        !crate::utils::scope::ensure_with(&spec, std::ffi::OsStr::new("/bin/false")),
+        "a systemd-run that exits non-zero must be refused"
+    );
+    assert!(
+        !crate::utils::scope::ensure_with(
+            &spec,
+            std::ffi::OsStr::new("/nonexistent/oc-no-such-binary")
+        ),
+        "a missing systemd-run must be refused"
+    );
+
+    let mut cmd = tokio::process::Command::new("/bin/echo");
+    cmd.arg("unwrapped");
+    assert!(
+        !crate::utils::scope::wrap(&mut cmd, &ScopeSpec::disabled()),
+        "with the wrapper refused the command is left alone"
+    );
+    let out = cmd.output().await.expect("the unwrapped run spawns");
+    assert!(out.status.success(), "and completes");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "unwrapped");
+}
+
+/// (f) The two structural pins the design calls out: the stdio trio on the
+/// wrapper, and `detach_session_pre_exec` re-applied to it.
+///
+/// Both are invisible at runtime until they are wrong — a wrapper that lost its
+/// pipes turns a pty failure into a run with no capture at all, and one that
+/// lost its detachment keeps a controlling terminal the daemon asked to shed.
+/// Pinned in the source so the failure is a red test rather than a silent
+/// behavioural drift on the box.
+#[test]
+fn the_wrapper_keeps_its_stdio_and_its_detachment() {
+    let scope = include_str!("../utils/scope.rs");
+    for needle in [
+        ".stdin(std::process::Stdio::null())",
+        ".stdout(std::process::Stdio::piped())",
+        ".stderr(std::process::Stdio::piped())",
+    ] {
+        assert!(
+            scope.contains(needle),
+            "the wrapper must re-establish {needle}"
+        );
+    }
+
+    let spawn_site = include_str!("../brain/agent/service/background_tasks.rs");
+    assert!(
+        spawn_site.contains("detach_session_pre_exec(&mut cmd)"),
+        "the wrapper must have the terminal detachment re-applied to it"
     );
 }

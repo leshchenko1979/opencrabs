@@ -391,6 +391,39 @@ fn mem_total() -> Option<u64> {
     Some(kb.saturating_mul(1024))
 }
 
+/// The exact argv `systemd-run` is invoked with, as a pure function.
+///
+/// Separated from [`wrap`] because the ORDER is load-bearing and cannot be
+/// observed from a live spawn without a running systemd: `--quiet` must precede
+/// the payload (else the banner lands in the run's stderr capture), the `-p`
+/// properties must precede `--`, and `--` must precede the program so a payload
+/// arg that looks like a flag is never parsed by systemd-run. Pinning the argv
+/// as data makes a reordering a test failure instead of a behaviour change.
+pub fn wrapped_argv(
+    spec: &ScopeSpec,
+    program: &std::ffi::OsStr,
+    args: &[std::ffi::OsString],
+) -> Vec<std::ffi::OsString> {
+    let mut argv: Vec<std::ffi::OsString> = Vec::with_capacity(12 + args.len());
+    argv.push("--user".into());
+    argv.push("--scope".into());
+    // Mandatory: without it systemd-run writes its banner to the run's stderr.
+    argv.push("--quiet".into());
+    argv.push(format!("--slice={}", spec.slice).into());
+    if let Some(max) = spec.memory_max {
+        argv.push("-p".into());
+        argv.push(format!("MemoryMax={max}").into());
+    }
+    argv.push("-p".into());
+    argv.push(format!("MemorySwapMax={}", spec.swap_max).into());
+    argv.push("-p".into());
+    argv.push(format!("TasksMax={}", spec.tasks_max).into());
+    argv.push("--".into());
+    argv.push(program.to_os_string());
+    argv.extend(args.iter().cloned());
+    argv
+}
+
 /// Wrap `cmd` so it runs inside its own transient scope, returning `true` when
 /// the command was rewritten.
 ///
@@ -421,18 +454,7 @@ pub fn wrap(cmd: &mut tokio::process::Command, spec: &ScopeSpec) -> bool {
     let cwd = std_cmd.get_current_dir().map(std::path::Path::to_path_buf);
 
     let mut wrapped = std::process::Command::new(systemd_run_bin());
-    wrapped.arg("--user").arg("--scope");
-    // Mandatory: without it systemd-run writes its banner to the run's stderr.
-    wrapped.arg("--quiet");
-    wrapped.arg(format!("--slice={}", spec.slice));
-    if let Some(max) = spec.memory_max {
-        wrapped.arg("-p").arg(format!("MemoryMax={max}"));
-    }
-    wrapped
-        .arg("-p")
-        .arg(format!("MemorySwapMax={}", spec.swap_max));
-    wrapped.arg("-p").arg(format!("TasksMax={}", spec.tasks_max));
-    wrapped.arg("--").arg(&program).args(&args);
+    wrapped.args(wrapped_argv(spec, &program, &args));
     // The stdio trio is re-established, not inherited: replacing the inner
     // `std::process::Command` drops whatever was configured on it, and the pty
     // path treats "no pty" as "this run keeps the pipes it already had". A
@@ -480,7 +502,29 @@ pub fn ensure(spec: &ScopeSpec) -> bool {
     // after the first run would be reconciling a bound the first run already
     // escaped.
     settle_pool(spec);
-    *PROBE.get_or_init(probe)
+    ensure_with(spec, &systemd_run_bin())
+}
+
+/// [`ensure`] against an explicit binary, so a test can prove the fail-open
+/// refusal without mutating process-global environment.
+///
+/// The memo is keyed by the binary rather than held in a single `OnceLock`:
+/// one process may legitimately be asked about more than one `systemd-run`
+/// (the real one, and a test's stand-in), and a single flag would let the first
+/// answer speak for the second.
+pub fn ensure_with(spec: &ScopeSpec, bin: &std::ffi::OsStr) -> bool {
+    if !spec.enabled {
+        return false;
+    }
+    let mut probes = PROBE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(known) = probes.get(bin) {
+        return *known;
+    }
+    let verdict = probe_bin(bin);
+    probes.insert(bin.to_os_string(), verdict);
+    verdict
 }
 
 /// The pool bound already reconciled, keyed by slice and desired value, so a
@@ -518,12 +562,11 @@ fn settle_pool(spec: &ScopeSpec) {
 }
 
 #[cfg(unix)]
-fn probe() -> bool {
-    let bin = systemd_run_bin();
+fn probe_bin(bin: &std::ffi::OsStr) -> bool {
     // A real scope, not `--version`: measurement 10 shows a bad property or
     // slice name never runs the payload, so the only trustworthy probe is one
     // that actually spawns and exits 0.
-    let attempt = std::process::Command::new(&bin)
+    let attempt = std::process::Command::new(bin)
         .arg("--user")
         .arg("--scope")
         .arg("--quiet")
@@ -638,14 +681,16 @@ pub fn validate_slice_name(raw: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Memoised result of [`probe`]. A refused wrapper stays refused for the life
-/// of the process.
-static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+/// Memoised probe results, keyed by the `systemd-run` binary. A refused wrapper
+/// stays refused for the life of the process.
+static PROBE: std::sync::Mutex<
+    std::collections::BTreeMap<std::ffi::OsString, bool>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// Non-Unix hosts have no `systemd-run --scope`, so the module degrades to
 /// "never wrap" — exactly the pre-#776 behaviour, and no probe to pay for.
 #[cfg(not(unix))]
-fn probe() -> bool {
+fn probe_bin(_bin: &std::ffi::OsStr) -> bool {
     tracing::debug!(
         target: "background_task",
         "cgroup scoping is unsupported on this platform; detached runs stay in the daemon's cgroup"
