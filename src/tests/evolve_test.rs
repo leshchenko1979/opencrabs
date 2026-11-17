@@ -366,3 +366,19 @@ fn has_platform_asset_finds_the_fork_asset_under_the_rolling_tag() {
     let release = fake_release(&[&fork_asset]);
     assert!(has_platform_asset(&release, "fork-latest"));
 }
+
+// ─── Binary identity (crate::VERSION) ───────────────────────────────────────
+
+#[test]
+fn version_is_either_the_package_version_or_a_fork_cycle_on_it() {
+    // Unset/empty OPENCRABS_FORK_VERSION => exactly CARGO_PKG_VERSION;
+    // a carrier build => `<CARGO_PKG_VERSION>+fork.<cycle>`. Never blank, and
+    // never a fork cycle built on some other upstream version.
+    assert!(!crate::VERSION.is_empty());
+    assert!(
+        crate::VERSION == env!("CARGO_PKG_VERSION")
+            || crate::VERSION.starts_with(concat!(env!("CARGO_PKG_VERSION"), "+fork.")),
+        "unexpected VERSION {:?}",
+        crate::VERSION
+    );
+}

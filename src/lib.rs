@@ -99,8 +99,23 @@ pub mod eval;
 // Re-export commonly used types
 pub use error::{ErrorCode, OpenCrabsError};
 
-/// Version information
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Version information.
+///
+/// A fork build injects `<upstream-version>+fork.<cycle>` through the
+/// `OPENCRABS_FORK_VERSION` build env var (set by the carrier workflow from its
+/// dispatch input), so the binary can report which deploy cycle it is running —
+/// the fork republishes on an unchanged upstream version, and without this every
+/// version surface (`--version`, `/help`, ACP, User-Agent, the prompt runtime
+/// line) would claim to be plain upstream.
+///
+/// Unset — or set to the empty string, which the carrier passes for an ordinary
+/// build — keeps `CARGO_PKG_VERSION` unchanged, so upstream CI and contributor
+/// builds are byte-identical in behaviour.
+pub const VERSION: &str = match option_env!("OPENCRABS_FORK_VERSION") {
+    Some(v) if v.is_empty() => env!("CARGO_PKG_VERSION"),
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
 /// Package authors
 pub const AUTHORS: &str = env!("CARGO_PKG_AUTHORS");
 /// Package description
