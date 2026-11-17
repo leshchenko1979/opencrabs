@@ -113,15 +113,23 @@ fn card_keeps_the_headline_and_states_the_measured_numbers() {
         "section header: {}",
         lines[1]
     );
-    assert!(lines[2].contains("131K → 106K"), "tokens row: {}", lines[2]);
-    assert!(lines[2].contains("-24K, -18.7%"), "delta row: {}", lines[2]);
-    assert!(
-        lines[3].contains("65% → 53% of 200K"),
-        "fill row: {}",
-        lines[3]
-    );
+    assert!(lines[2].is_empty(), "blank line before the table: {out}");
+    assert_eq!(lines[3], "| metric | value |", "table header: {out}");
+    assert_eq!(lines[4], "|---|---|", "table separator: {out}");
+
+    // Rows are found by their LABEL, not by index: the table grows a row at a
+    // time, and an index assertion turns a new metric into a false failure.
+    let row = |label: &str| -> String {
+        out.lines()
+            .find(|l| l.starts_with(&format!("| {label} |")))
+            .unwrap_or_else(|| panic!("a {label} row: {out}"))
+            .to_string()
+    };
+    assert!(row("tokens").contains("131K → 106K"), "tokens row: {out}");
+    assert!(row("tokens").contains("-24K, -18.7%"), "delta row: {out}");
+    assert!(row("fill").contains("65% → 53% of 200K"), "fill row: {out}");
     // Truncated, not rounded: 21.5 s is reported as 21 s.
-    assert!(lines[4].contains("21s"), "took row: {}", lines[4]);
+    assert!(row("took").contains("21s"), "took row: {out}");
 }
 
 #[test]
@@ -131,7 +139,7 @@ fn tools_row_survives_a_document_with_no_manifest() {
     let out = card(no_manifest());
     let tools = out
         .lines()
-        .find(|l| l.contains("tools"))
+        .find(|l| l.starts_with("| tools |"))
         .expect("a tools row");
     // Count · total KB · total share. Total = the sum of the three rows:
     // 28_672 B = 28.0 KB, 7_400 tok of 200 K = 3.7 %.
@@ -155,15 +163,19 @@ fn the_tools_row_is_a_total_only() {
     );
     let tools = out
         .lines()
-        .find(|l| l.contains("tools"))
+        .find(|l| l.starts_with("| tools |"))
         .expect("a tools row");
     // Count · total KB · total share, summed from the three measurements.
     assert!(tools.contains("3 · 28.0KB · 3.7%"), "{tools}");
-    // And it is ONE line: nothing indented beneath it.
-    let idx = out.lines().position(|l| l.contains("tools")).expect("idx");
-    assert!(
-        !out.lines().nth(idx + 1).is_some_and(|l| l.starts_with("     ")),
-        "no detail line under the tools total: {out}"
+    // And it is ONE row, with nothing beneath it: the tools group emits a total
+    // and no continuation row (the `|  | …` name row belongs to skills and
+    // documents). It is also the card's LAST line, which is the emission-order
+    // guarantee — a detail row added under it fails here, not on the wire.
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines.last().copied(),
+        Some(tools),
+        "the tools total closes the card: {out}"
     );
 }
 
@@ -172,7 +184,7 @@ fn a_resolvable_skill_carries_kb_share_and_loc() {
     let out = card(mixed_manifest());
     let kept_head = out
         .lines()
-        .find(|l| l.contains("kept"))
+        .find(|l| l.starts_with("| kept |"))
         .expect("a kept row");
     assert!(kept_head.contains("1 entry"), "{kept_head}");
     // The group's own totals, in the same units as its rows.
@@ -184,7 +196,7 @@ fn a_resolvable_skill_carries_kb_share_and_loc() {
 
     let kept_detail = out
         .lines()
-        .skip_while(|l| !l.contains("kept"))
+        .skip_while(|l| !l.starts_with("| kept |"))
         .nth(1)
         .expect("a kept detail row");
     assert!(kept_detail.contains("`cost-estimate`"), "{kept_detail}");
@@ -201,7 +213,7 @@ fn a_discarded_tool_name_is_not_reported_as_a_skill() {
     let out = card(mixed_manifest());
     let dropped_head = out
         .lines()
-        .find(|l| l.contains("dropped"))
+        .find(|l| l.starts_with("| dropped |"))
         .expect("a dropped row");
     assert!(
         dropped_head.contains("none resolve to a skill"),
@@ -209,7 +221,7 @@ fn a_discarded_tool_name_is_not_reported_as_a_skill() {
     );
     let dropped_detail = out
         .lines()
-        .skip_while(|l| !l.contains("dropped"))
+        .skip_while(|l| !l.starts_with("| dropped |"))
         .nth(1)
         .expect("a dropped detail row");
     assert!(dropped_detail.contains("`a2a_send`"), "{dropped_detail}");
@@ -243,7 +255,7 @@ fn an_unknown_ceiling_states_no_share() {
     });
     let tools = out
         .lines()
-        .find(|l| l.contains("tools"))
+        .find(|l| l.starts_with("| tools |"))
         .expect("a tools row");
     assert!(tools.contains('—'), "unmeasurable share: {tools}");
 }
@@ -348,7 +360,7 @@ fn the_classic_leg_states_the_summary_total_only() {
     let out = card(numbered_document());
     let head = out
         .lines()
-        .find(|l| l.contains("summary"))
+        .find(|l| l.starts_with("| summary |"))
         .expect("a summary row");
     assert!(head.contains("2 parts"), "part count: {head}");
     assert!(head.contains("KB"), "summary size: {head}");
@@ -360,34 +372,68 @@ fn the_classic_leg_states_the_summary_total_only() {
 }
 
 #[test]
-fn the_card_emits_no_tables() {
-    // Owner order 2026-11-15 (both tables worthless) plus the message-783
-    // mangling: a pipe table here forces the card out of the flow block onto
-    // the rich markdown plane, where it is re-emitted from parsed cells and
-    // arrives as `: : :` placeholders with the separator gone. The card is
-    // therefore text on EVERY plane, and this test is the guard: one pipe row
-    // would silently re-open that path.
+fn the_card_is_one_table() {
+    // The #853 ban on tables is RETIRED and this test is its replacement; the
+    // argument for the reversal lives on `compaction_breakdown` itself. Both of
+    // the ban's premises are gone: the `: : :` cells were FABRICATED
+    // placeholders, removed by #856, which made an unresolved entry say `—`
+    // instead of inventing a number; and the one real rich-plane defect left —
+    // an empty first cell rendering as a bare `<b></b>:` — is fixed in
+    // `render_key_value` and pinned by `an_empty_first_cell_renders_the_value_alone`.
+    // So the card is ONE table, and this is the guard against it becoming two
+    // or none.
     let out = card(mixed_manifest());
+    let lines: Vec<&str> = out.lines().collect();
+
+    // Exactly one header, exactly one separator, separator immediately below
+    // the header: a delimiter row anywhere else parses as nothing at all.
+    let headers = lines.iter().filter(|l| l.starts_with("| metric |")).count();
+    assert_eq!(headers, 1, "exactly one header row: {out}");
+    let seps = lines.iter().filter(|l| l.starts_with("|---")).count();
+    assert_eq!(seps, 1, "exactly one separator row: {out}");
+    let h = lines
+        .iter()
+        .position(|l| *l == "| metric | value |")
+        .expect("a header row");
+    assert_eq!(lines[h + 1], "|---|---|", "separator follows header: {out}");
+
+    // The table begins its own block: without the blank line above the header
+    // it degrades to pipe text on the markdown plane.
+    assert_eq!(lines[h - 1], "", "blank line before the header: {out}");
+
+    // Everything below the separator is a row — no prose, no second table.
+    for line in &lines[h + 2..] {
+        assert!(line.starts_with('|'), "not a table row: {line}");
+    }
+    // Two cells per row, so exactly three pipes: two outer and one between.
+    // More means a row lost its line break and collapsed into its neighbour.
+    for line in lines.iter().filter(|l| l.starts_with('|')) {
+        assert_eq!(line.matches('|').count(), 3, "one row, two cells: {line}");
+    }
+
+    // The card's own title stays OUTSIDE the table: the headline must be line 1
+    // (`is_compaction_card` matches it, and a folded card is invisible), and the
+    // section span names the block for the reader.
+    assert!(lines[0].contains("compact:"), "headline first: {out}");
     assert!(
-        !out.lines().any(|l| l.starts_with('|') || l.starts_with("|---")),
-        "no pipe rows anywhere: {out}"
+        lines[1].contains("post-compaction context"),
+        "section span second: {out}"
     );
 
-    // The kept group keeps its CONTENT — a total plus the names it counts —
-    // just not a table around it.
-    let kept = out
-        .lines()
-        .find(|l| l.trim_start().starts_with("kept"))
+    // The CONTENT survives the re-flow: the kept total, the name it counts, and
+    // the tool total that names no tool.
+    let kept = lines
+        .iter()
+        .find(|l| l.starts_with("| kept |"))
         .expect("a kept row");
     assert!(kept.contains("1 entry"), "{kept}");
     assert!(kept.contains("KB"), "size: {kept}");
     assert!(kept.contains('%'), "share: {kept}");
     assert!(out.contains("`cost-estimate`"), "the name it counts: {out}");
 
-    // The tool set stays a TOTAL: no row may name a tool.
-    let tools = out
-        .lines()
-        .find(|l| l.contains("tools"))
+    let tools = lines
+        .iter()
+        .find(|l| l.starts_with("| tools |"))
         .expect("a tools total row");
     // 28_672 B = 28.0 KB, 7_400 tok of 200 K = 3.7 %.
     assert!(tools.contains("3 · 28.0KB · 3.7%"), "{tools}");
@@ -395,21 +441,33 @@ fn the_card_emits_no_tables() {
 }
 
 #[test]
-fn the_summary_is_a_row_not_a_table() {
-    // Both tables the owner called worthless are gone. The summary's total
-    // rides the same labelled row the classic leg uses, so the two planes
-    // agree on the number even though they disagree on the chrome.
+fn the_summary_rides_the_one_table() {
+    // The summary is a ROW in the card's single table, not a second table of
+    // its own: one header, one separator, and `| summary |` as a row beneath
+    // them. A second header would mean the card had grown a sub-table, which is
+    // exactly the shape the rich plane cannot carry.
     let out = consolidate_card(numbered_document());
-    assert!(
-        !out.lines().any(|l| l.starts_with("| summary part")),
-        "no summary table: {out}"
+    assert_eq!(
+        out.lines().filter(|l| l.starts_with("| metric |")).count(),
+        1,
+        "one header for the whole card: {out}"
+    );
+    assert_eq!(
+        out.lines().filter(|l| l.starts_with("|---")).count(),
+        1,
+        "one separator for the whole card: {out}"
     );
     let head = out
         .lines()
-        .find(|l| l.contains("summary"))
+        .find(|l| l.starts_with("| summary |"))
         .expect("a summary row");
     assert!(head.contains("2 parts"), "{head}");
     assert!(head.contains("KB"), "summary size: {head}");
+    // The per-part rows are gone: the total is the whole claim.
+    assert!(
+        !out.contains("§0 IMMEDIATE TASK"),
+        "no per-part rows: {out}"
+    );
 }
 
 #[test]
@@ -425,10 +483,15 @@ fn every_row_occupies_its_own_line() {
     assert!(lines.len() >= 6, "a row per line, got {}: {out}", lines.len());
 
     for label in ["tokens", "fill", "took", "scope", "summary", "tools"] {
+        // The label sits in the table's FIRST cell, so the row reads
+        // `| tokens | … |`. Matching the cell rather than a bare prefix keeps
+        // this honest: `|  | … |` continuation rows start with a pipe and no
+        // label, and a row that lost its label would otherwise slip through.
+        let cell = format!("| {label} |");
         let hits: Vec<&str> = lines
             .iter()
             .copied()
-            .filter(|l| l.trim_start().starts_with(label))
+            .filter(|l| l.starts_with(&cell))
             .collect();
         assert_eq!(hits.len(), 1, "exactly one `{label}` row: {out}");
     }
@@ -436,9 +499,9 @@ fn every_row_occupies_its_own_line() {
     // No row may carry another row's label inside it, which is what a collapsed
     // card looks like once the newlines are gone.
     for line in &lines {
-        let labels_on_this_line = ["tokens", "fill ", "took", "scope"]
+        let labels_on_this_line = ["| tokens |", "| fill |", "| took |", "| scope |"]
             .iter()
-            .filter(|l| line.contains(*l))
+            .filter(|cell| line.contains(*cell))
             .count();
         assert!(
             labels_on_this_line <= 1,
@@ -457,7 +520,7 @@ fn the_scope_row_names_which_compaction_ran() {
     let out = card(numbered_document());
     let scope = out
         .lines()
-        .find(|l| l.contains("scope"))
+        .find(|l| l.starts_with("| scope |"))
         .expect("a scope row");
     assert!(scope.contains("delta"), "the scope label: {scope}");
     // `format_token_count` renders whole K below 1M (41_300 -> `41K`), so the
@@ -471,7 +534,7 @@ fn the_scope_row_names_which_compaction_ran() {
     let rich = consolidate_card(numbered_document());
     let rich_scope = rich
         .lines()
-        .find(|l| l.contains("scope"))
+        .find(|l| l.starts_with("| scope |"))
         .expect("a scope row");
     assert!(
         rich_scope.contains("consolidate"),
@@ -501,7 +564,7 @@ fn an_unmeasured_document_states_no_payoff_ratio() {
     });
     let scope = out
         .lines()
-        .find(|l| l.contains("scope"))
+        .find(|l| l.starts_with("| scope |"))
         .expect("a scope row");
     assert!(scope.contains('—'), "unmeasurable payoff: {scope}");
     assert!(!scope.contains("0.0:1"), "{scope}");
@@ -559,14 +622,14 @@ fn a_retained_document_states_its_size_share_and_loc() {
     let out = card_with_docs(&docs, &[], no_manifest());
     let head = out
         .lines()
-        .find(|l| l.contains("docs"))
+        .find(|l| l.starts_with("| docs |"))
         .expect("a docs row");
     assert!(head.contains("1 entry"), "entry count: {head}");
     assert!(head.contains("20.0KB"), "group size: {head}");
     assert!(head.contains("2.0%"), "group share: {head}");
     let detail = out
         .lines()
-        .skip_while(|l| !l.contains("docs"))
+        .skip_while(|l| !l.starts_with("| docs |"))
         .nth(1)
         .expect("a docs detail row");
     assert!(detail.contains("`/root/proj/AGENTS.md`"), "{detail}");
@@ -608,7 +671,7 @@ fn every_refused_path_still_prints_a_row() {
     let out = card_with_docs(&[], &refusals, no_manifest());
     let row = out
         .lines()
-        .find(|l| l.contains("refused"))
+        .find(|l| l.starts_with("| refused |"))
         .expect("a refused row");
     assert!(row.contains("0 of 2 retained"), "count: {row}");
     assert!(row.contains("not a project document"), "cause: {row}");
@@ -624,10 +687,13 @@ fn a_partial_refusal_prints_both_the_rows_and_the_reason() {
         "not registered: /root/proj/CLAUDE.md (not read in this process)".to_string(),
     ];
     let out = card_with_docs(&docs, &refusals, no_manifest());
-    assert!(out.lines().any(|l| l.contains("docs")), "{out}");
+    assert!(
+        out.lines().any(|l| l.starts_with("| docs |")),
+        "a docs row beside the refusal: {out}"
+    );
     let refused = out
         .lines()
-        .find(|l| l.contains("refused"))
+        .find(|l| l.starts_with("| refused |"))
         .expect("a refused row");
     assert!(refused.contains("1 not retained"), "{refused}");
 }
@@ -635,21 +701,23 @@ fn a_partial_refusal_prints_both_the_rows_and_the_reason() {
 #[test]
 fn documents_render_as_a_row_with_a_reconciling_total() {
     // The docs group carries the same shape as kept/dropped: one labelled row
-    // stating the group's size and share, then the names it counts. No table
-    // (see `the_card_emits_no_tables`), so the total must reconcile in the
-    // head rather than in a `**total**` row.
+    // stating the group's size and share, then the names it counts. It rides
+    // the card's single table (`the_card_is_one_table`), so the total must
+    // reconcile in the head rather than in a `**total**` row of its own.
     let docs = vec![
         doc("/root/proj/AGENTS.md", 4_000, 20_480, 312),
         doc("/root/proj/docs/ops.md", 1_000, 5_120, 90),
     ];
     let out = card_with_docs(&docs, &[], mixed_manifest());
-    assert!(
-        !out.lines().any(|l| l.starts_with('|')),
-        "no docs table: {out}"
+    // One header for the whole card, and the docs group does NOT bring a second.
+    assert_eq!(
+        out.lines().filter(|l| l.starts_with("| metric |")).count(),
+        1,
+        "docs ride the one table: {out}"
     );
     let head = out
         .lines()
-        .find(|l| l.trim_start().starts_with("docs"))
+        .find(|l| l.starts_with("| docs |"))
         .expect("a docs row");
     // 25_600 B = 25.0 KB, 5_000 tok of 200 K = 2.5 % — the sum of both rows.
     assert!(head.contains("2 entries"), "{head}");

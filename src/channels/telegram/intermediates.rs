@@ -251,20 +251,20 @@ pub(crate) fn should_promote_intermediate(text: &str, fresh_images: usize) -> bo
 
 /// True when a folded intermediate is the compaction breakdown card (#833).
 ///
-/// The card carried a pipe table until 2026-11-15, and that table was the only
-/// thing promoting it out of the collapsed processing log — `contains_table`
-/// is a leg of `is_deliverable_rich_report`, and the card's own text has no
-/// ATX heading and no status callout, so none of Rules A/B/C reach it either.
-/// Removing the table (the owner's totals-only order, and the fix for message
-/// 783's mangled rows) therefore removed the promotion trigger with it, and
-/// the card would have gone from its own visible message to one row inside a
-/// tap-to-expand `<details>` block. That is the opposite of what the card is
-/// for: it is the receipt for the compaction that just changed the window, and
-/// a receipt behind a tap is not a receipt.
+/// The card's promotion used to ride on its pipe table — `contains_table` is a
+/// leg of `is_deliverable_rich_report`, and the card's own text has no ATX
+/// heading and no status callout, so none of Rules A/B/C reach it either. The
+/// owner ordered the tables removed on 2026-11-15, which removed the promotion
+/// trigger with them, so this arm was added: a card that fell into a
+/// tap-to-expand `<details>` block is not a receipt.
 ///
-/// Keyed on the card's own header, which `flow::compacted_flow_line` is the
-/// only producer of, rather than on a `|`-shaped substitute — the table is
-/// gone for good, so a predicate that needs one is a predicate that would rot.
+/// #867 brought the table back (one GFM table, argued on
+/// `flow::compaction_breakdown`), so the rich-report arm can now reach a long
+/// card again. That does NOT retire this arm: the table arm needs a table AND
+/// 200 characters, so a short card — no manifest, no documents, four rows —
+/// still reaches no other arm at all. Keyed on the card's own header, which
+/// `flow::compacted_flow_line` is the only producer of, so the predicate holds
+/// whatever the card's body is shaped like.
 pub(crate) fn is_compaction_card(text: &str) -> bool {
     text.lines()
         .any(|line| line.trim_start().starts_with("🧹 compact:"))

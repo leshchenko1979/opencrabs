@@ -237,6 +237,11 @@ fn render_grid(table: &Table, header: &[String], rows: &[Vec<String>], width: &[
 /// One- or two-column table → a `key: value` list. The header row is dropped
 /// because the columns are self-labelling (e.g. "Total commits: 52"). Wraps
 /// naturally on any width; inline formatting is preserved (not inside `<pre>`).
+///
+/// An EMPTY first cell is a CONTINUATION row, not a label: the compaction card
+/// hangs the names under the row that counts them (`|  | names |`), so a row
+/// whose label is blank renders the value alone. Emitting `<b></b>: value`
+/// would leave a bare leading colon where the label was deliberately omitted.
 fn render_key_value(table: &Table) -> String {
     // Cells come from single table lines and never contain a soft break, so
     // the wrap_p dialect flag is irrelevant here (false = no-op).
@@ -244,16 +249,13 @@ fn render_key_value(table: &Table) -> String {
     table
         .rows
         .iter()
-        .map(|row| match row.get(1) {
-            Some(val) => format!(
-                "<b>{}</b>: {}",
-                row.first().map(|c| render(c)).unwrap_or_default(),
-                render(val)
-            ),
-            None => format!(
-                "<b>{}</b>",
-                row.first().map(|c| render(c)).unwrap_or_default()
-            ),
+        .map(|row| {
+            let label = row.first().map(|c| render(c)).unwrap_or_default();
+            match row.get(1) {
+                Some(val) if label.is_empty() => render(val),
+                Some(val) => format!("<b>{label}</b>: {}", render(val)),
+                None => format!("<b>{label}</b>"),
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")

@@ -395,29 +395,23 @@ fn a_text_only_bubble_stays_burial_evidence() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_compaction_card_promotes_without_its_old_table() {
-    // #833: the card carried a pipe table, and that table was the ONLY thing
-    // promoting it out of the collapsed processing log — the card has no ATX
-    // heading and no status callout, so none of Rules A/B/C reach it. Removing
-    // the table (the owner's totals-only order, and the fix for message 783's
-    // mangled rows) removed the trigger with it, which would have moved the
-    // card from its own visible message to a row inside a tap-to-expand block.
+fn the_compaction_card_promotes_on_its_header_alone() {
+    // #833: the card has no ATX heading and no status callout, so the rich-report
+    // arm never reached it — its promotion rode on the pipe table, and when the
+    // owner ordered the tables removed that trigger went with them. The table is
+    // back (#867), which is exactly why this test now uses a fixture with NO
+    // table and NO length: the card arm has to stand on its own, and a fixture
+    // the other arms could promote would prove nothing about it.
     let header = crate::channels::telegram::flow::compacted_flow_line(
         65.0,
         34.0,
         std::time::Duration::from_secs(22),
     );
-    let card = format!(
-        "{header}\n   **post-compaction context**\n   tokens   130K → 68K   (−62K, −47.8%)\n   scope    delta 59K in · doc 2.0K · 29.5:1 payoff"
-    );
-    assert!(
-        !card.contains('|'),
-        "the card must carry no table, or this test proves nothing"
-    );
+    let card = format!("{header}\n   **post-compaction context**");
     assert!(
         !is_deliverable_rich_report(&card),
-        "sanity: without the card arm nothing else here promotes it — the \
-         text has no table, no ATX heading and no status callout"
+        "sanity: no table, no ATX heading, no status callout — only the card \
+         arm can promote this"
     );
     assert!(
         is_compaction_card(&card),
@@ -426,6 +420,29 @@ fn the_compaction_card_promotes_without_its_old_table() {
     assert!(
         should_promote_intermediate(&card, 0),
         "a compaction receipt behind a tap-to-expand is not a receipt"
+    );
+}
+
+#[test]
+fn a_card_with_its_table_promotes_too() {
+    // The reversal's own regression guard: the card carries a GFM table again,
+    // so a second arm can now reach it. Whichever arm fires, the card must still
+    // open its own bubble — a table that promotes the card is fine; a card that
+    // stops promoting because the table came back is the bug this catches.
+    let header = crate::channels::telegram::flow::compacted_flow_line(
+        65.0,
+        34.0,
+        std::time::Duration::from_secs(22),
+    );
+    let card = format!(
+        "{header}\n   **post-compaction context**\n\n| metric | value |\n|---|---|\n\
+         | tokens | 130K → 68K   (-62K, -47.8%) |\n| fill | 65% → 34% of 200K |\n\
+         | took | 22s |\n| scope | delta 59K in · doc 2.0K · 29.5:1 payoff |"
+    );
+    assert!(is_compaction_card(&card), "the header arm still sees it");
+    assert!(
+        should_promote_intermediate(&card, 0),
+        "the card promotes with its table as well as without it"
     );
 }
 

@@ -258,6 +258,32 @@ fn wide_two_column_table_renders_as_key_value() {
 }
 
 #[test]
+fn an_empty_first_cell_renders_the_value_alone() {
+    // The compaction card hangs the names under the row that counts them:
+    // `| kept | 3 entries |` then `|  | names |`. That continuation row has no
+    // label on purpose, so it must render as the value alone — `<b></b>: names`
+    // would put a bare colon where the label was deliberately omitted.
+    //
+    // The label here is deliberately long: a table whose grid fits inside
+    // NARROW_TABLE_WIDTH never reaches render_key_value at all (it stays an
+    // aligned `<pre>` grid), so a short fixture would pass without exercising
+    // the empty-cell arm this test exists for.
+    let md = "| metric | value |\n| - | - |\n\
+              | Total commits since the v0.3.40 release | 1052 |\n\
+              |  | `a.md` 20.0KB |";
+    let html = markdown_to_html(md);
+    assert!(!html.contains("<b></b>"), "no empty bold label: {html}");
+    assert!(
+        html.contains("<b>Total commits since the v0.3.40 release</b>: 1052"),
+        "labelled row keeps its label: {html}"
+    );
+    assert!(
+        html.contains("<code>a.md</code> 20.0KB"),
+        "continuation row keeps its value: {html}"
+    );
+}
+
+#[test]
 fn heading_renders_bold() {
     assert_eq!(markdown_to_html("# Hi"), "<b>Hi</b>");
     assert_eq!(markdown_to_html("### Deep"), "<b><i>Deep</i></b>");

@@ -1269,7 +1269,7 @@ fn format_breakdown_share(tokens: usize, ctx_max: u32) -> String {
     )
 }
 
-/// Summary row plus an indented detail row for one manifest list.
+/// Table row plus a name-only row beneath it for one manifest list.
 ///
 /// Every entry carries KB, share-of-window and (for a document) LOC, because a
 /// bare name says nothing about what the window is paying for. The head states
@@ -1312,7 +1312,7 @@ fn breakdown_group(
             format_breakdown_share(total_tokens, ctx_max),
         )
     };
-    lines.push(format!("   {label:<8} {head}"));
+    lines.push(format!("| {label} | {head} |"));
 
     const MAX_NAMES: usize = 8;
     let mut detail = String::new();
@@ -1343,7 +1343,10 @@ fn breakdown_group(
     if entries.len() > MAX_NAMES {
         detail.push_str(&format!(" · +{}", entries.len() - MAX_NAMES));
     }
-    lines.push(format!("     {detail}"));
+    // An EMPTY first cell: these names belong to the row above, and the rich
+    // plane renders such a row as the value alone rather than a bare
+    // `<b></b>:` (see `render_key_value`).
+    lines.push(format!("|  | {detail} |"));
 }
 
 /// The documents group (#846): what the retained `.md` set costs the window.
@@ -1407,7 +1410,7 @@ fn breakdown_documents(
     } else {
         format!("{} not retained · {}", refusals.len(), causes.join(" · "))
     };
-    lines.push(format!("   {:<8} {head}", "refused"));
+    lines.push(format!("| refused | {head} |"));
 }
 
 /// The tools rows: the measured schema set, largest first.
@@ -1421,8 +1424,7 @@ fn breakdown_tools(tool_sizes: &[ToolSize], ctx_max: u32, lines: &mut Vec<String
     let total_tokens: usize = tool_sizes.iter().map(|t| t.tokens).sum();
     let total_bytes: usize = tool_sizes.iter().map(|t| t.bytes).sum();
     lines.push(format!(
-        "   {:<8} {} · {} · {}",
-        "tools",
+        "| tools | {} · {} · {} |",
         tool_sizes.len(),
         format_breakdown_kb(total_bytes),
         format_breakdown_share(total_tokens, ctx_max),
@@ -1474,8 +1476,7 @@ fn breakdown_scope_row(scope: &str, input_tokens: usize, summary: &str) -> Strin
         format!("{:.1}:1", input_tokens as f64 / doc_tokens as f64)
     };
     format!(
-        "   {:<8} {} {} in · doc {} · {} payoff",
-        "scope",
+        "| scope | {} {} in · doc {} · {} payoff |",
         scope,
         tok(input_tokens),
         tok(doc_tokens),
@@ -1497,8 +1498,7 @@ fn breakdown_summary(summary: &str, ctx_max: u32, lines: &mut Vec<String>) {
     let total_tokens = crate::brain::tokenizer::count_tokens(summary);
     let noun = if part_count == 1 { "part" } else { "parts" };
     lines.push(format!(
-        "   {:<8} {} · {} · {} {noun}",
-        "summary",
+        "| summary | {} · {} · {} {noun} |",
         format_breakdown_kb(summary.len()),
         format_breakdown_share(total_tokens, ctx_max),
         part_count,
@@ -1506,7 +1506,12 @@ fn breakdown_summary(summary: &str, ctx_max: u32, lines: &mut Vec<String>) {
 }
 
 /// The post-compaction breakdown card (#824): the headline, a labelled
-/// section header, and what the compaction actually did.
+/// section header, and one GFM table of what the compaction actually did.
+///
+/// The headline and the `**post-compaction context**` span sit ABOVE the table
+/// and outside it — they are the card's title, not a metric, and the headline
+/// is also what `is_compaction_card` matches to keep the card out of a
+/// collapsed `<details>`, so it must stay the first line.
 ///
 /// Rows are sourced from data that already exists — the event's token counts,
 /// percentages, duration and per-tool schema measurements, plus the
@@ -1524,23 +1529,26 @@ pub(crate) fn compaction_breakdown(b: &CompactionBreakdown<'_>) -> String {
     let mut lines: Vec<String> = Vec::with_capacity(12);
     lines.push(compacted_flow_line(b.before_pct, b.after_pct, b.elapsed));
     lines.push("   **post-compaction context**".to_string());
+    // The blank line is load-bearing, not decoration: a GFM table must begin
+    // its own block, so the header row has to be separated from the span above
+    // it by an empty line or the whole card degrades to pipe text.
+    lines.push(String::new());
+    lines.push("| metric | value |".to_string());
+    lines.push("|---|---|".to_string());
     lines.push(format!(
-        "   {:<8} {} → {}   ({})",
-        "tokens",
+        "| tokens | {} → {}   ({}) |",
         tok(b.before_tokens),
         tok(b.after_tokens),
         format_breakdown_delta(b.before_tokens, b.after_tokens),
     ));
     lines.push(format!(
-        "   {:<8} {:.0}% → {:.0}% of {}",
-        "fill",
+        "| fill | {:.0}% → {:.0}% of {} |",
         b.before_pct,
         b.after_pct,
         tok(b.ctx_max as usize),
     ));
     lines.push(format!(
-        "   {:<8} {}",
-        "took",
+        "| took | {} |",
         format_breakdown_elapsed(b.elapsed)
     ));
     // #833 follow-up: WHICH compaction ran, what it read, what it wrote back.
@@ -1559,13 +1567,26 @@ pub(crate) fn compaction_breakdown(b: &CompactionBreakdown<'_>) -> String {
         let skills = crate::brain::skills::load_all_skills();
         let kept = resolve_breakdown_entries(&m.active_skills, &skills);
         let dropped = resolve_breakdown_entries(&m.discard_skills, &skills);
-        // Text rows on EVERY plane, deliberately (owner order 2026-11-15 +
-        // the message-783 mangling): a pipe table here forces the card out of
-        // the flow block and onto the rich markdown plane, where the table is
-        // re-emitted from its parsed cells and the rows arrive as `: : :`
-        // placeholders with the separator gone. The flow plane is HTML, and
-        // `soft_breaks_to_br` keeps one row per line — which is the shape the
-        // card was read in before the tables existed.
+        // ONE table on both planes — the #853 reversal, and why it is safe.
+        // #853 banned tables here because a pipe table sent the card onto the
+        // rich markdown plane and the rows arrived as `: : :` with the
+        // separator gone. Both premises of that ban have since been retired:
+        // (1) the `: : :` cells were FABRICATED placeholders, not a table
+        // artefact — `BreakdownEntry::unresolved` printed `:` for a missing
+        // count and `resolve_breakdown_entries` matches on the exact skill
+        // name, so a phantom slug (`coding`, `bash`, `miidas`) printed one;
+        // #856 removed that fabrication, and unresolved entries now state an
+        // em dash instead of being charged to the footer. (2) The one
+        // remaining rich-plane defect is a single branch in the renderer,
+        // `render_key_value` emitting `<b></b>: value` for an empty first
+        // cell, fixed there rather than worked around for ever by avoiding
+        // tables. So the card is ONE GFM table, rendered on the rich plane as
+        // `metric: value` rows — the header is dropped there by design,
+        // because column 1 IS the label, and a `|  | names |` continuation
+        // row renders as the value alone. A table narrow enough to fit a
+        // phone (grid width <= NARROW_TABLE_WIDTH) is drawn as an aligned
+        // `<pre>` grid instead, header and separator included; either way no
+        // cell is ever fabricated.
         breakdown_group("kept", &kept, b.ctx_max, "none resolve to a skill", &mut lines);
         breakdown_group("dropped", &dropped, b.ctx_max, "none resolve to a skill", &mut lines);
     }
