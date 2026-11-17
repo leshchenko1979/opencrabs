@@ -992,6 +992,10 @@ impl Tool for BashTool {
                         },
                         cmd,
                         Some(grace),
+                        // This arm armed `kill_on_drop(true)` above: the flag is
+                        // recorded on the reservation so the scope wrapper can
+                        // re-assert it after rebuilding the command (#776).
+                        true,
                     )
                     .await
                 {
