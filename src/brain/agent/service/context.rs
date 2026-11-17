@@ -499,7 +499,7 @@ impl AgentService {
         let message_service = MessageService::new(self.context.clone());
         // #854: the compaction boundary is pushed into SQL, so a session that has
         // already been compacted loads its tail instead of its whole history.
-        let db_messages = Self::load_messages_since_last_compaction(
+        let mut db_messages = Self::load_messages_since_last_compaction(
             self.context.pool(),
             session_id,
         )
@@ -511,6 +511,29 @@ impl AgentService {
                 .to_string()
         });
         let context_window = self.context_limit_for_session(session_id);
+
+        // #813: the clean `run_tool_loop` already performs before it assembles
+        // a context. This path never did it, so every persisted
+        // `<!-- reasoning -->` block, every `<!-- tools-v2 -->` ledger, the
+        // phantom-blocked sections and the compaction banner went to the
+        // provider as prompt text on all the channel call sites that reach
+        // here (model-switch confirmations, reaction guidance, interaction
+        // replies). Rows are only ever appended to, so the DB keeps its
+        // replay ledgers; only this in-memory copy is cleaned.
+        //
+        // `preserve_thinking` mirrors `run_tool_loop`: models that require the
+        // reasoning returned as `reasoning_content` get it hoisted into the
+        // `thinking` column instead of dropped (#654), and a CLI provider gets
+        // no hoist at all, because another model's chain of thought must never
+        // reach its prompt (#1522).
+        let preserve_thinking = !self
+            .provider_for_session(session_id)
+            .cli_handles_tools()
+            && crate::brain::provider::custom_openai_compatible::preserves_thinking(
+                self.provider_for_session(session_id).base_url(),
+                &model_name,
+            );
+        super::context_rows::clean_rows_for_llm(&mut db_messages, preserve_thinking);
 
         let mut context =
             AgentContext::from_db_messages(session_id, db_messages, context_window as usize);
