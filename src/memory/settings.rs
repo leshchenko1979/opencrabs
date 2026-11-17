@@ -54,6 +54,14 @@ pub(crate) fn extra_paths_config() -> Vec<ExtraPath> {
     read_memory_config().extra_paths
 }
 
+/// Whether dated daily notes are indexed (#869).
+///
+/// Read fresh on every call, like every other reader in this module, so turning
+/// it off settles within one sweep interval with no restart.
+pub(crate) fn index_daily_notes() -> bool {
+    read_memory_config().index_daily_notes
+}
+
 /// Global exclude patterns for external indexing (#1051).
 pub(crate) fn external_excludes() -> Vec<String> {
     read_memory_config().exclude

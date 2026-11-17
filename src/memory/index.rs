@@ -127,6 +127,27 @@ pub(crate) fn collection_for(path: &Path) -> &'static str {
     }
 }
 
+/// Is `key` a dated daily note — a bare `YYYY-MM-DD.md` basename (#869)?
+///
+/// Bare basename only, on purpose: archive keys are `archive/YYYY-MM.md` (retired
+/// `MEMORY.md` sections, which stay indexed) and a note like
+/// `2026-09-07-buttons-verdict-revision.md` is a hand-written note, not a daily
+/// log. Shape is checked rather than the date parsed: the question is only
+/// whether this is the auto-appended compaction-summary naming, so `9999-99-99.md`
+/// counts and `2026-9-7.md` does not.
+pub(crate) fn is_dated_daily_note(key: &str) -> bool {
+    let Some(stem) = key.strip_suffix(".md") else {
+        return false;
+    };
+    let b = stem.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[8..].iter().all(u8::is_ascii_digit)
+}
+
 /// Synchronous inner implementation for indexing a single file into a given collection.
 /// Returns `true` if new content was indexed, `false` if hash-skipped.
 fn index_file_sync(
@@ -156,6 +177,18 @@ pub(crate) fn index_file_sync_keyed(
     doc_key: &str,
     body: &str,
 ) -> Result<bool, String> {
+    // #869: dated daily notes are excluded from the index on request. Gated HERE,
+    // at the chokepoint, so the post-compaction hook (`context.rs`) and
+    // `write_opencrabs_file` cannot re-add one between reindexes. `reindex`'s own
+    // walk also skips them — and does not push them into `memory_on_disk` — which
+    // is what lets its prune leg deactivate the rows already stored.
+    if collection == COLLECTION_MEMORY
+        && !super::settings::index_daily_notes()
+        && is_dated_daily_note(doc_key)
+    {
+        return Ok(false);
+    }
+
     let hash = Store::hash_content(body);
 
     if let Ok(Some((_id, existing_hash, _title))) = store.find_active_document(collection, doc_key)
@@ -245,6 +278,12 @@ pub async fn reindex(store: &'static Mutex<Store>) -> Result<usize, String> {
     let mut brain_on_disk: Vec<String> = Vec::new();
 
     // --- Index daily memory logs ---
+    // #869: `index_daily_notes = false` skips dated notes entirely — no index call
+    // AND no `memory_on_disk` push. The push is the load-bearing half: the prune
+    // leg below deactivates every stored memory path absent from this list, so
+    // skipping the push is what removes the rows already in the store. Pushing
+    // them while declining to index would leave them active and stale.
+    let daily_notes_indexed = super::settings::index_daily_notes();
     if dir.exists() {
         let entries =
             std::fs::read_dir(&dir).map_err(|e| format!("Failed to read memory dir: {e}"))?;
@@ -256,6 +295,11 @@ pub async fn reindex(store: &'static Mutex<Store>) -> Result<usize, String> {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
+
+                if !daily_notes_indexed && is_dated_daily_note(&rel) {
+                    continue;
+                }
+
                 memory_on_disk.push(rel);
 
                 if let Err(e) = index_file(store, &path).await {

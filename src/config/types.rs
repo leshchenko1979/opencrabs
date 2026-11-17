@@ -2553,6 +2553,27 @@ pub struct MemoryConfig {
     #[serde(default = "default_vector_enabled")]
     pub vector_enabled: bool,
 
+    /// Whether the dated daily notes (`memory/YYYY-MM-DD.md`) are indexed (#869).
+    ///
+    /// Those files are auto-appended compaction summaries, and they dominate the
+    /// store: measured on the ops profile, 146 of them held 230.8 MB of a 249 MB
+    /// database. With this off, `reindex` skips the dated walk — no index call
+    /// **and no `memory_on_disk` push**, so its prune leg deactivates the rows
+    /// already stored — and the indexing chokepoint refuses a dated
+    /// `COLLECTION_MEMORY` key, so the post-compaction hook cannot re-add one
+    /// between reindexes.
+    ///
+    /// The files stay on disk: this is an index-scope change, not a deletion.
+    /// One gate covers both indexes, because embeddings are generated from
+    /// stored documents and an unindexed note is never embedded.
+    ///
+    /// Deliberately does NOT cover `memory/archive/YYYY-MM.md` (retired
+    /// `MEMORY.md` sections, not daily notes) or non-dated notes in `memory/`.
+    ///
+    /// Default true, so an existing install keeps indexing until it opts out.
+    #[serde(default = "default_index_daily_notes")]
+    pub index_daily_notes: bool,
+
     /// OpenAI-compatible embedding provider. When set, embeddings are generated
     /// via API instead of the local GGUF model. Eliminates ~300MB download + ~2.9GB RAM.
     #[serde(default)]
@@ -2658,6 +2679,11 @@ const fn default_vector_enabled() -> bool {
     true
 }
 
+/// Dated daily notes are indexed unless the install opts out (#869).
+const fn default_index_daily_notes() -> bool {
+    true
+}
+
 const fn default_backfill_interval_secs() -> u64 {
     300
 }
@@ -2666,6 +2692,7 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             vector_enabled: default_vector_enabled(),
+            index_daily_notes: default_index_daily_notes(),
             embedding: None,
             extra_paths: Vec::new(),
             exclude: default_external_excludes(),
