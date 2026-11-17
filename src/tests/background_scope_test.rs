@@ -310,19 +310,36 @@ fn a_disabled_spec_does_not_reconcile_the_pool() {
 #[tokio::test]
 async fn an_edited_cap_moves_the_next_runs_spec() {
     let _guard = crate::channels::telegram::governor::test_support::registry_guard().await;
-    let previous = crate::config::Config::current();
 
-    let mut edited = (*previous).clone();
-    edited.agent.background.scope_memory_max = "3G".to_string();
-    edited.agent.background.slice_memory_max = "4G".to_string();
-    crate::config::Config::set_current(edited);
+    // A home override, so nothing this test does can reach the live
+    // `~/.opencrabs/config.toml` even if a helper grows a disk write later. The
+    // swap below is in-memory only, but "in-memory only" is a property of the
+    // code as it stands, not of the test.
+    let home = std::env::temp_dir().join(format!("oc-scope-cfg-{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("scratch home");
 
-    let live =
-        crate::utils::scope::spec_from_config(&crate::config::Config::current().agent.background);
-    assert_eq!(live.memory_max, Some(3 << 30), "the per-run cap follows");
-    assert_eq!(live.pool_memory_max, Some(4 << 30), "so does the pool");
+    crate::config::profile::with_home_override_async(home.clone(), async {
+        let previous = crate::config::Config::current();
 
-    crate::config::Config::set_current((*previous).clone());
+        // Cloned, then mutated: `field_reassign_with_default` only fires on a
+        // `Default::default()` base, and a clone of the running config is the
+        // honest base — it is what the watcher itself hands the callbacks.
+        let mut edited = (*previous).clone();
+        edited.agent.background.scope_memory_max = "3G".to_string();
+        edited.agent.background.slice_memory_max = "4G".to_string();
+        crate::config::Config::set_current(edited);
+
+        let live = crate::utils::scope::spec_from_config(
+            &crate::config::Config::current().agent.background,
+        );
+        assert_eq!(live.memory_max, Some(3 << 30), "the per-run cap follows");
+        assert_eq!(live.pool_memory_max, Some(4 << 30), "so does the pool");
+
+        crate::config::Config::set_current((*previous).clone());
+    })
+    .await;
+
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 /// The spawn site must read the LIVE config, and the watcher must be its writer.
