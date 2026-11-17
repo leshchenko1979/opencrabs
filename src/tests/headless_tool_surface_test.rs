@@ -180,8 +180,14 @@ fn headless_roster_excludes_interactive_only_tools() {
     );
     // Sanity: the filter must not gut the roster — a real headless-reachable
     // tool still shows, and the agents group survives (minus its pair).
+    //
+    // #861: the agents group is proven by `wait_agent`/`send_input`, not by
+    // `spawn_agent` — promotion to CORE_TOOLS took `spawn_agent` out of the
+    // roster entirely (core schemas ship, so there is nothing to advertise),
+    // and asserting its presence here would now demand the very regression
+    // step 1 removed.
     assert!(
-        headless.contains("spawn_agent") && headless.contains("wait_agent"),
+        headless.contains("wait_agent") && headless.contains("send_input"),
         "headless roster must keep the agents group's other members"
     );
 

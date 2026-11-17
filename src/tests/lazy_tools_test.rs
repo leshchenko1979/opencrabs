@@ -54,13 +54,18 @@ fn catalog_splits_core_from_extended() {
     assert!(catalog::is_core("analyze_video"));
     assert!(!catalog::is_core("browser_navigate"));
     assert!(!catalog::is_core("telegram_send"));
+    // #861: delegation is core, not discovery-gated.
+    assert!(catalog::is_core("spawn_agent"));
 
     assert_eq!(catalog::tool_category("bash"), "core");
     assert_eq!(catalog::tool_category("analyze_image"), "core");
     assert_eq!(catalog::tool_category("analyze_video"), "core");
     assert_eq!(catalog::tool_category("browser_click"), "browser");
     assert_eq!(catalog::tool_category("telegram_send"), "channels");
-    assert_eq!(catalog::tool_category("spawn_agent"), "agents");
+    // #861: `tool_category` short-circuits on `is_core`, so a promoted tool
+    // reports "core" and its old group is no longer where it lives.
+    assert_eq!(catalog::tool_category("spawn_agent"), "core");
+    assert_eq!(catalog::tool_category("wait_agent"), "agents");
     assert_eq!(catalog::tool_category("generate_image"), "media");
     assert_eq!(catalog::tool_category("self_improve"), "system");
 }
@@ -106,7 +111,7 @@ fn tool_access_prompt_pairs_directive_with_roster() {
     for name in [
         "telegram_send",
         "browser_navigate",
-        "spawn_agent",
+        "wait_agent",
         "generate_document",
         "cron_manage",
         "self_improve",

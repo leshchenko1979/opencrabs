@@ -58,6 +58,19 @@ pub const CORE_TOOLS: &[&str] = &[
     "session_context",
     "plan",
     "http_request",
+    // #861: delegation is core, not discovery-gated. Every one of the eleven
+    // harnesses surveyed in `subagent-patterns-2026-11-16.md` ships its spawn
+    // primitive unconditionally and scopes delegation by which tools the CHILD
+    // gets instead — none hides it behind lazy discovery. Our roster named
+    // `spawn_agent` in a nine-name comma list with no trigger, so a session had
+    // to already know what it was for in order to decide to search for it: the
+    // measured baseline was 77 spawns in 42,011 tool calls over 7 days (0.18%),
+    // with 0.00% on the two days before #852 existed. Cost is ~1,000 tokens per
+    // session (3,061-byte schema + ~1,000-char description), an owner-approved
+    // trade 2026-11-17. It leaves `EXTENDED_TOOL_INVENTORY` in the same edit:
+    // a core schema already ships, so advertising it for `tool_search` is a lie
+    // `tool_inventory_names_are_extended_not_core` refuses.
+    "spawn_agent",
     // Loaders + system basics
     "load_brain_file",
     "write_opencrabs_file",
@@ -134,9 +147,11 @@ pub const EXTENDED_TOOL_INVENTORY: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // `spawn_agent` is deliberately ABSENT: #861 promoted it to CORE_TOOLS,
+        // so its schema always ships and listing it here would advertise a
+        // tool_search round-trip that no longer does anything.
         "agents",
         &[
-            "spawn_agent",
             "wait_agent",
             "send_input",
             "close_agent",
