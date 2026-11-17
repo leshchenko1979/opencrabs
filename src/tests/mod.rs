@@ -224,6 +224,7 @@ pub mod compaction_summary_budget_test;
 pub mod compaction_test;
 mod compaction_truncation_marker_test;
 pub mod confidential_read_deny_test;
+pub mod background_scope_test;
 pub mod config_alias_merge_test;
 pub mod config_dotted_caps_test;
 pub mod config_freeze_class_test;
