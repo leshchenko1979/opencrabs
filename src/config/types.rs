@@ -2363,6 +2363,7 @@ impl Default for AgentConfig {
             stream_idle_timeout_secs: None,
             time_marker_interval_secs: default_time_marker_interval_secs(),
             goal_max_turns: None,
+            background: BackgroundConfig::default(),
         }
     }
 }
