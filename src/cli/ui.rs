@@ -2175,6 +2175,25 @@ async fn cmd_chat_inner(
             }));
         }
 
+        // cgroup pool bound (#776) — `slice_memory_max` is a LIVE knob.
+        //
+        // Without this callback the bound would still move, but only when the
+        // next detached job happens to spawn, so an operator who tightened the
+        // pool while the daemon was idle would watch `systemctl show` keep
+        // answering the old value and reasonably conclude the edit did nothing.
+        // The reconcile is read-before-write, so an unchanged bound costs no
+        // `systemctl` call at all.
+        //
+        // Spawned on the BLOCKING pool: `systemctl` is a subprocess, and this
+        // callback runs on a tokio worker — awaiting it here would park a
+        // worker for the duration of a unit-file write.
+        callbacks.push(Arc::new(move |cfg: crate::config::Config| {
+            let spec = crate::utils::scope::spec_from_config(&cfg.agent.background);
+            tokio::task::spawn_blocking(move || {
+                crate::utils::scope::refresh_pool(&spec);
+            });
+        }));
+
         // Debug logging toggle (#678) — apply agent.debug_logs live, preserving
         // the launch-time --debug flag. Lets a non-technical user (or the agent)
         // flip file logging on/off by editing config.toml with no restart.

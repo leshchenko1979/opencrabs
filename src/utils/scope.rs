@@ -527,6 +527,21 @@ pub fn ensure_with(spec: &ScopeSpec, bin: &std::ffi::OsStr) -> bool {
     verdict
 }
 
+/// Re-reconcile the pool NOW — the config watcher's entry point.
+///
+/// [`settle_pool`] already runs on the spawn path, so a bound edited while the
+/// daemon is idle would otherwise wait for the next detached job to happen to
+/// start. This is what makes `slice_memory_max` a LIVE knob rather than a
+/// next-spawn knob. It is cheap when nothing changed: an unchanged bound is
+/// memoised, and the read-before-write means an unchanged bound issues no
+/// `systemctl` call even on the miss.
+///
+/// Call it from the blocking pool — `systemctl` is a subprocess, and a config
+/// reload must not stall a tokio worker on it.
+pub fn refresh_pool(spec: &ScopeSpec) {
+    settle_pool(spec);
+}
+
 /// The pool bound already reconciled, keyed by slice and desired value, so a
 /// spawn costs one uncontended lock and no subprocess.
 ///
