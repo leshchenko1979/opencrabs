@@ -560,3 +560,39 @@ fn the_wrapper_keeps_its_stdio_and_its_detachment() {
         "the wrapper must have the terminal detachment re-applied to it"
     );
 }
+
+/// A host that cannot scope must never be asked to reconcile the pool.
+///
+/// `settle_pool` reconciled BEFORE consulting the probe, so on a host with no
+/// user bus — a CI runner — every spawn paid two dead-bus `systemctl` timeouts.
+/// A FAILED reconcile is deliberately not memoised (a transient hiccup must be
+/// retried), so the cost landed on EVERY spawn rather than the first: the test
+/// leg ran into its 45-minute wall three times over, with the same four tests
+/// hung past 60 s each time.
+///
+/// The instrument is a fake `systemctl` that records every invocation, so "no
+/// call" is read off a log rather than inferred from a resulting bound.
+#[cfg(unix)]
+#[test]
+fn an_unscopable_host_never_consults_systemctl() {
+    let dir = scratch_dir("noprobe");
+    let ctl = fake_systemctl(&dir);
+
+    // A `systemd-run` that fails the way a runner's does: no user bus.
+    let run = dir.join("systemd-run");
+    std::fs::write(&run, "#!/bin/sh\nexit 1\n").expect("the fake run is writable");
+    let mut perms = std::fs::metadata(&run).expect("exists").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&run, perms).expect("the fake run is executable");
+
+    let spec = ScopeSpec::default();
+    assert!(spec.enabled, "the guard must not pass because scoping is off");
+
+    crate::utils::scope::settle_pool_with(&spec, run.as_os_str(), ctl.as_os_str());
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("writes")).expect("log"),
+        "",
+        "a host that cannot scope must issue no set-property call"
+    );
+}

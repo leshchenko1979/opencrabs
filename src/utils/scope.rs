@@ -177,7 +177,9 @@ pub fn systemctl_bin() -> std::ffi::OsString {
 /// `MemoryMax=infinity` (measurement 15). A pool reconciled after the first
 /// spawn therefore reconciles a slice that already exists *and is already
 /// unbounded* — and on a fresh host that is exactly the state the first run
-/// leaves behind. [`ensure`] reconciles before its probe for this reason.
+/// leaves behind. [`ensure`] reconciles before any wrapped spawn for this
+/// reason — though not before its probe, which [`settle_pool_with`] consults
+/// first so a host that cannot scope is never asked for a `systemctl` call.
 ///
 /// The write is a read-before-write, not a courtesy: `systemctl set-property`
 /// rewrites the drop-in even when the value is unchanged (measurement 13), so
@@ -187,12 +189,9 @@ pub fn systemctl_bin() -> std::ffi::OsString {
 /// A failure here is logged and NOT fatal to scoping: the per-run cap still
 /// contains a single run, so a missing pool degrades the sum bound rather than
 /// the mechanism. `false` says the pool was not established.
-pub fn reconcile_pool(spec: &ScopeSpec) -> bool {
-    reconcile_pool_with(spec, &systemctl_bin())
-}
-
-/// [`reconcile_pool`] with an explicit binary, so a test can drive a fake
-/// `systemctl` without mutating process-global environment.
+///
+/// Takes an explicit binary so a test can drive a fake `systemctl` without
+/// mutating process-global environment.
 pub fn reconcile_pool_with(spec: &ScopeSpec, bin: &std::ffi::OsStr) -> bool {
     if !spec.enabled {
         return false;
@@ -497,10 +496,11 @@ pub fn ensure(spec: &ScopeSpec) -> bool {
     if !spec.enabled {
         return false;
     }
-    // BEFORE the probe, and before any wrapped spawn: a slice created on demand
-    // by `--slice=` is born unbounded (measurement 15), so a pool reconciled
-    // after the first run would be reconciling a bound the first run already
-    // escaped.
+    // BEFORE any wrapped spawn: a slice created on demand by `--slice=` is born
+    // unbounded (measurement 15), so a pool reconciled after the first run would
+    // be reconciling a bound the first run already escaped. It is NOT before the
+    // probe — `settle_pool` consults the same probe first, and a host that
+    // cannot scope gets no `systemctl` call at all.
     settle_pool(spec);
     ensure_with(spec, &systemd_run_bin())
 }
@@ -513,9 +513,18 @@ pub fn ensure(spec: &ScopeSpec) -> bool {
 /// (the real one, and a test's stand-in), and a single flag would let the first
 /// answer speak for the second.
 pub fn ensure_with(spec: &ScopeSpec, bin: &std::ffi::OsStr) -> bool {
-    if !spec.enabled {
-        return false;
-    }
+    spec.enabled && scoping_available(bin)
+}
+
+/// Whether this host can scope at all — the memoised `systemd-run` probe.
+///
+/// Split out because [`settle_pool`] needs the same answer. A host that cannot
+/// scope must never be asked to reconcile a pool it will never use: every
+/// `systemctl` call there is a dead-bus timeout, and a failed reconcile is
+/// deliberately NOT memoised (a transient hiccup has to be retried), so without
+/// this gate each spawn pays two timeouts. On a CI runner the test suite spawns
+/// thousands of times and the leg runs into its 45-minute wall.
+fn scoping_available(bin: &std::ffi::OsStr) -> bool {
     let mut probes = PROBE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -553,6 +562,23 @@ pub fn refresh_pool(spec: &ScopeSpec) {
 static POOL: std::sync::Mutex<Option<(String, Option<u64>)>> = std::sync::Mutex::new(None);
 
 fn settle_pool(spec: &ScopeSpec) {
+    settle_pool_with(spec, &systemd_run_bin(), &systemctl_bin());
+}
+
+/// [`settle_pool`] against explicit binaries, so a test can prove that a host
+/// which cannot scope issues no `systemctl` call at all — without mutating
+/// process-global environment in a parallel suite.
+pub(crate) fn settle_pool_with(
+    spec: &ScopeSpec,
+    run_bin: &std::ffi::OsStr,
+    ctl_bin: &std::ffi::OsStr,
+) {
+    // No probe answer, no `systemctl`. Reconciling a pool on a host that cannot
+    // scope is two dead-bus timeouts per spawn — and because a failed reconcile
+    // is not memoised, the cost lands on EVERY spawn rather than the first.
+    if !scoping_available(run_bin) {
+        return;
+    }
     let key = (spec.slice.clone(), spec.pool_memory_max);
     {
         let guard = match POOL.lock() {
@@ -567,7 +593,7 @@ fn settle_pool(spec: &ScopeSpec) {
     // would serialise every concurrent spawn behind it. Two racing spawns can
     // both reconcile, which is harmless — the second reads the bound the first
     // wrote and issues no write.
-    if reconcile_pool(spec) {
+    if reconcile_pool_with(spec, ctl_bin) {
         let mut guard = match POOL.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
