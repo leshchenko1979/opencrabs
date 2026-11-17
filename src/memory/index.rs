@@ -182,9 +182,15 @@ pub(crate) fn index_file_sync_keyed(
     // `write_opencrabs_file` cannot re-add one between reindexes. `reindex`'s own
     // walk also skips them — and does not push them into `memory_on_disk` — which
     // is what lets its prune leg deactivate the rows already stored.
-    if collection == COLLECTION_MEMORY
+    //
+    // Clause ORDER is load-bearing: this is the hottest chokepoint in the index,
+    // and `index_daily_notes()` parses config.toml off disk on every call. The
+    // name-shape test is a few byte comparisons, so checking it FIRST means the
+    // config read is paid only for an actual dated note rather than for every
+    // file indexed.
+    if is_dated_daily_note(doc_key)
+        && collection == COLLECTION_MEMORY
         && !super::settings::index_daily_notes()
-        && is_dated_daily_note(doc_key)
     {
         return Ok(false);
     }
