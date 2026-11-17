@@ -174,10 +174,19 @@ fn wait_agent_description_carries_the_do_not_block_caveat() {
 }
 
 /// Step 4(b) of #861: pin the promotion in the catalog itself, not just in the
-/// registry it produces, and prove the headless roster still strips the
-/// interactive-only pair. The headless half needs a control: `headless=false`
-/// must still advertise both names, otherwise an empty roster would pass the
-/// assertion for the wrong reason.
+/// registry it produces, and prove the headless roster still strips
+/// `session_notify`. That assertion needs a control — `headless=false` must
+/// still advertise it — otherwise an empty roster would pass for the wrong
+/// reason.
+///
+/// `HEADLESS_UNADVERTISED` names two tools but only ONE of them is reachable
+/// through this roster: `session_notify` is extended, `suggest_options` is CORE
+/// (`catalog.rs:80`) and appears in no inventory group, so it is absent from
+/// both rosters and asserting its presence on the interactive one is false by
+/// construction. The first draft of this test did assert that and went red in
+/// CI (11059 passed, 1 failed) — the roster is the wrong surface to observe a
+/// core tool's headless filtering, and this test says so rather than leaving
+/// the next reader to rediscover it.
 #[test]
 fn spawn_agent_is_core_and_the_headless_roster_still_strips_interactive_tools() {
     use crate::brain::tools::catalog;
@@ -198,17 +207,24 @@ fn spawn_agent_is_core_and_the_headless_roster_still_strips_interactive_tools() 
 
     let headless = catalog::tool_inventory_prompt(true);
     let interactive = catalog::tool_inventory_prompt(false);
-    for name in ["suggest_options", "session_notify"] {
-        assert!(
-            !headless.contains(name),
-            "{name} is unregistered on every headless surface (#129), so the headless \
-             roster must not advertise it. Roster:\n{headless}"
-        );
-        assert!(
-            interactive.contains(name),
-            "CONTROL: {name} must appear on an interactive roster, otherwise the assertion \
-             above passes because the roster is empty rather than because it filtered. \
-             Roster:\n{interactive}"
-        );
-    }
+    assert!(
+        !headless.contains("session_notify"),
+        "session_notify is unregistered on every headless surface (#129), so the \
+         headless roster must not advertise it. Roster:\n{headless}"
+    );
+    assert!(
+        interactive.contains("session_notify"),
+        "CONTROL: session_notify must appear on an interactive roster, otherwise the \
+         assertion above passes because the roster is empty rather than because it \
+         filtered. Roster:\n{interactive}"
+    );
+    // `suggest_options` is the other half of HEADLESS_UNADVERTISED, but it is
+    // CORE, so it is invisible here in BOTH directions — the roster is the wrong
+    // surface for it. Pin the fact so nobody re-adds the assertion CI refuted.
+    assert!(
+        !interactive.contains("suggest_options") && !headless.contains("suggest_options"),
+        "suggest_options is CORE (#129 filters it at the registry level, not the roster), \
+         so it appears in neither roster. If this ever flips, the roster gained a core \
+         name and `tool_inventory_names_are_extended_not_core` should be failing too."
+    );
 }
