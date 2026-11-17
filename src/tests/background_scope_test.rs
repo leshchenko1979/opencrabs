@@ -350,6 +350,28 @@ fn the_spawn_site_reads_the_live_config() {
     );
 }
 
+/// The pool bound is reconciled on reload, not merely on the next spawn.
+///
+/// A bound that only moves when a detached job happens to start reads as a
+/// broken knob: an operator tightens `slice_memory_max`, runs `systemctl show`,
+/// sees the old value, and has no way to tell "not applied yet" from "ignored".
+/// Pinned in the source because the behaviour needs a live daemon to observe.
+#[test]
+fn a_reload_reconciles_the_pool_immediately() {
+    let ui = include_str!("../cli/ui.rs");
+    // One contiguous window, so the three halves cannot be satisfied by three
+    // unrelated sites elsewhere in a 2,600-line file.
+    assert!(
+        ui.contains(
+            "let spec = crate::utils::scope::spec_from_config(&cfg.agent.background);\n            \
+             tokio::task::spawn_blocking(move || {\n                \
+             crate::utils::scope::refresh_pool(&spec);"
+        ),
+        "the reload callback must derive the spec from the config it was handed, then reconcile \
+         it on the blocking pool — a subprocess must not run on a tokio worker"
+    );
+}
+
 /// (a) The wrapper argv, byte-pinned.
 ///
 /// Every element here is load-bearing rather than incidental: `--quiet` before
