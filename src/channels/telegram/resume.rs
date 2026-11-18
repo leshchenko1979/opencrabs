@@ -722,6 +722,8 @@ pub(crate) async fn resume_session_inner(
         turn_started_at: std::time::Instant::now(),
         flow_outcome: None,
         bg_count: None,
+        // #877: no mirrored external task at construction.
+        mirror_tasks: Vec::new(),
         subagent_counts: Default::default(),
         queued_count: 0,
         sent_bubbles: Vec::new(),
@@ -1549,6 +1551,7 @@ pub(crate) fn apply_bg_ack_fold(
     s: &mut crate::channels::telegram::flow::StreamingState,
     line: String,
     bg_count: Option<usize>,
+    mirror_tasks: Vec<String>,
 ) -> bool {
     if s.open_group_msg_id.is_none() {
         return false;
@@ -1556,6 +1559,11 @@ pub(crate) fn apply_bg_ack_fold(
     s.flow_entries
         .push(crate::channels::telegram::flow::FlowEntry::System(line));
     s.bg_count = bg_count;
+    // #877: the count and the mirror rows are re-stamped TOGETHER, from the
+    // same manager. A folded ack is normally a mirror finishing, so leaving
+    // this list untouched would keep a `⏏️ <label>` line for a task that is
+    // already gone.
+    s.mirror_tasks = mirror_tasks;
     true
 }
 
@@ -1580,9 +1588,12 @@ pub(crate) async fn fold_bg_ack_into_flow_card(
     };
     let line = bg_ack_line(meta);
     let bg_count = super::delivery::bg_count_for(agent, session_id);
+    // #877: same read the count comes from, so the `⏏️` row set can never
+    // disagree with the `N ⏏️` segment.
+    let mirror_tasks = super::delivery::mirror_labels_for(agent, session_id);
     let folded = {
         let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
-        apply_bg_ack_fold(&mut s, line, bg_count)
+        apply_bg_ack_fold(&mut s, line, bg_count, mirror_tasks)
     };
     if !folded {
         return false;

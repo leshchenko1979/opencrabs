@@ -102,7 +102,24 @@ pub(crate) fn is_no_media_found(e: &anyhow::Error) -> bool {
 /// `BgTaskMeta`, not from here.
 pub(crate) fn bg_count_for(agent: &AgentService, session_id: Uuid) -> Option<usize> {
     let bm = agent.background_manager()?;
-    Some(bm.running_tasks(session_id).len())
+    // #877: count runs that actually LEFT the turn, not every registered one.
+    // Every bash call is registered before the grace wait, so the roster
+    // (`running_tasks`) reported a detached task for a command still running
+    // inline — while `ToolMsg::handed_over`, the thing that swaps the roll's
+    // icon, is set only after that wait. The two cues now share one predicate.
+    Some(bm.detached_count_for(session_id))
+}
+
+/// Labels of this session's live mirrored external tasks (#877), oldest first.
+///
+/// A claude-cli background task is counted by [`bg_count_for`] but owns no tool
+/// row and no run id, so the roll renders one `⏏️ <label>` line per entry here —
+/// the row the count points at. Empty when no manager is wired.
+pub(crate) fn mirror_labels_for(agent: &AgentService, session_id: Uuid) -> Vec<String> {
+    agent
+        .background_manager()
+        .map(|bm| bm.mirror_labels_for(session_id))
+        .unwrap_or_default()
 }
 
 /// Alive sub-agent counts for the settled header (#1183): how many of THIS

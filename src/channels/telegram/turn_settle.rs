@@ -79,6 +79,10 @@ pub(crate) async fn settle_turn_block(
         let mut s = streaming.lock().unwrap_or_else(|e| e.into_inner());
         s.flow_outcome = Some(flow_outcome);
         s.bg_count = bg_count_for(agent, session_id);
+        // #877: the settled card must show the same `⏏️ <label>` rows the live
+        // ticks did — a mirror still running when the turn ends otherwise
+        // settles with a count and no row.
+        s.mirror_tasks = super::delivery::mirror_labels_for(agent, session_id);
         // Sub-agents are the second background registry (#1183): the header
         // must wait on them too, split working vs awaiting collection, or a
         // turn ending with agents mid-work reads "✅ Finished".

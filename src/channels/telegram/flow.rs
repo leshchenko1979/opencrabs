@@ -363,13 +363,26 @@ pub(crate) struct StreamingState {
     /// `None` while the turn is live.
     pub(crate) flow_outcome: Option<FlowOutcome>,
     /// Background-task count (#1144), from `agent.background_manager()`
-    /// `.running_tasks(session_id)`: `None` when no manager is wired, `Some(n)`
-    /// otherwise. Drives BOTH remaining detached cues — the settled-header
-    /// override ("Waiting for N background task(s)" instead of "✅ Finished")
-    /// and the `N ⏏️` telemetry segment. #810 removed the sibling label field
-    /// that used to feed a `🔧 … running` footer segment; the count is the
-    /// whole surface now.
+    /// `.detached_count_for(session_id)` (#877 — runs that actually LEFT the
+    /// turn, not every registered one): `None` when no manager is wired,
+    /// `Some(n)` otherwise. Drives BOTH remaining detached cues — the
+    /// settled-header override ("Waiting for N background task(s)" instead of
+    /// "✅ Finished") and the `N ⏏️` telemetry segment. #810 removed the sibling
+    /// label field that used to feed a `🔧 … running` footer segment; the count
+    /// is the whole surface now, and [`Self::mirror_tasks`] supplies the row
+    /// for the mirrored half of it.
     pub(crate) bg_count: Option<usize>,
+    /// Labels of this session's live MIRRORED external tasks (#877), oldest
+    /// first, stamped from `background_manager().mirror_labels_for(session_id)`
+    /// beside [`Self::bg_count`] — live tick, settle and resume.
+    ///
+    /// A claude-cli background task is counted by `bg_count` but owns no tool
+    /// row and no run id, so without this the footer could say `1 ⏏️` with an
+    /// empty roll. `flow_lines` renders one `⏏️ <label>` line per entry, and
+    /// because the list is read from the SAME manager rows the count reads, a
+    /// counted run can never lack a row: the line appears and disappears with
+    /// the mirror itself.
+    pub(crate) mirror_tasks: Vec<String>,
     /// Alive sub-agent counts (#1183), from the session-scoped read of the
     /// (process-global) sub-agent manager: `working` vs `awaiting` collection.
     /// Stamped on every activity tick while the turn is live (#585) and again
@@ -2046,7 +2059,8 @@ pub(crate) fn prune_handed_over(s: &mut StreamingState, live: &[String]) -> usiz
 /// Resolve the open processing-log flow (tool calls + intermediate text, in
 /// order) into renderable lines.
 pub(crate) fn flow_lines(s: &StreamingState) -> Vec<FlowLine> {
-    s.flow_entries
+    let mut lines: Vec<FlowLine> = s
+        .flow_entries
         .iter()
         .filter_map(|entry| match entry {
             FlowEntry::Tool(idx) => s.tool_msgs.get(*idx).map(|t| {
@@ -2065,7 +2079,17 @@ pub(crate) fn flow_lines(s: &StreamingState) -> Vec<FlowLine> {
             FlowEntry::Text(text) => Some(FlowLine::Text(text.clone())),
             FlowEntry::System(text) => Some(FlowLine::System(text.clone())),
         })
-        .collect()
+        .collect();
+    // #877: a mirrored external task is counted by the footer but owns no tool
+    // row — it is a shadow with no run id, so there is no row for the icon to
+    // swap on. One `⏏️ <label>` line per live mirror is the row the count
+    // points at. `System` on purpose: it is harness chrome about work outside
+    // the turn, not a tool call, so it must not inflate the `N ⛏️` count or
+    // become the collapsed header's activity preview (#444).
+    for label in &s.mirror_tasks {
+        lines.push(FlowLine::System(format!("\u{23cf}\u{fe0f} {label}")));
+    }
+    lines
 }
 
 /// Resolve the flow into final Telegram HTML. Live turn → the plain live

@@ -41,6 +41,8 @@ fn base_state(with_card: bool) -> StreamingState {
         turn_started_at: std::time::Instant::now(),
         flow_outcome: Some(FlowOutcome::Finished),
         bg_count: None,
+        // #877: no mirrored external task at construction.
+        mirror_tasks: Vec::new(),
         subagent_counts: SubagentCounts {
             working: 0,
             awaiting: 0,
@@ -72,7 +74,7 @@ fn meta(success: bool, label: &str, tail: &str) -> BgTaskMeta {
 fn fold_appends_system_line_and_stamps_counters() {
     let mut s = base_state(true);
     let line = bg_ack_line(&meta(true, "cargo test", "test result: ok"));
-    let folded = apply_bg_ack_fold(&mut s, line.clone(), Some(1));
+    let folded = apply_bg_ack_fold(&mut s, line.clone(), Some(1), Vec::new());
     assert!(folded);
     assert_eq!(s.flow_entries.len(), 1);
     match &s.flow_entries[0] {
@@ -87,7 +89,7 @@ fn fold_refuses_cardless_state_and_touches_nothing() {
     // No registered card: the fold must refuse WITHOUT mutating — the caller
     // then falls back to the #1221 standalone bubble lane.
     let mut s = base_state(false);
-    let folded = apply_bg_ack_fold(&mut s, "✅ `x` 🕒 1s".into(), Some(0));
+    let folded = apply_bg_ack_fold(&mut s, "✅ `x` 🕒 1s".into(), Some(0), Vec::new());
     assert!(!folded);
     assert!(s.flow_entries.is_empty());
     assert_eq!(s.bg_count, None);
@@ -141,11 +143,21 @@ fn two_folds_decrement_then_flip_to_finished() {
     let mut s = base_state(true);
     s.bg_count = Some(2);
 
-    let folded = apply_bg_ack_fold(&mut s, bg_ack_line(&meta(true, "task a", "")), Some(1));
+    let folded = apply_bg_ack_fold(
+        &mut s,
+        bg_ack_line(&meta(true, "task a", "")),
+        Some(1),
+        Vec::new(),
+    );
     assert!(folded);
     assert_eq!(s.bg_count, Some(1));
 
-    let folded = apply_bg_ack_fold(&mut s, bg_ack_line(&meta(false, "task b", "")), Some(0));
+    let folded = apply_bg_ack_fold(
+        &mut s,
+        bg_ack_line(&meta(false, "task b", "")),
+        Some(0),
+        Vec::new(),
+    );
     assert!(folded);
     assert_eq!(s.bg_count, Some(0));
     assert_eq!(s.flow_entries.len(), 2);

@@ -83,6 +83,21 @@ pub struct RunHandle {
     pub command: String,
     pub cwd: PathBuf,
     pub started: std::time::Instant,
+    /// Whether this run has actually LEFT the caller's turn (#877).
+    ///
+    /// Set only at a [`Handover::Detached`] arm — or on a mirrored external row,
+    /// which never runs inside the turn at all — and never at reservation.
+    /// Every bash call is reserved before the grace wait (`reserve_run` →
+    /// `started_run`), so a run's presence in the roster says "registered", not
+    /// "detached". Counting the roster made the footer claim `1 ⏏️` for a
+    /// command still running inline, while no roll row could carry the icon
+    /// because `ToolMsg::handed_over` is set only after the grace expires.
+    ///
+    /// Deliberately NOT named `handed_over`: the flow's `ToolMsg` already owns
+    /// that name for an `Option<String>` run id, and a `bool` under the same
+    /// name on a different type is exactly the confusion this field exists to
+    /// end.
+    pub detached: bool,
     /// The spawned shell's pid. `detach_session_pre_exec` calls `setsid()`, so
     /// this pid IS a process-group id: the group form of a signal reaches the
     /// whole tree, including children that re-parent away mid-sweep — the case
@@ -268,6 +283,52 @@ impl BackgroundTaskManager {
         tasks
     }
 
+    /// How many runs for `session_id` have actually LEFT the turn (#877).
+    ///
+    /// The footer's `N ⏏️` segment and the roll's `⏏️` icon both mean "this work
+    /// is out of the turn". [`Self::running_tasks`] answers a different
+    /// question — "what is registered" — and every bash call is registered for
+    /// its whole execution (`reserve_run` before the grace wait), so counting
+    /// that roster made a command still running inline claim a detached task
+    /// while no row could carry the icon.
+    ///
+    /// Mirrored external rows are included: a claude-cli background task IS out
+    /// of the turn, and the roll gains a `⏏️ <label>` line for it from
+    /// [`Self::mirror_labels_for`], so a counted run always has a row.
+    pub fn detached_count_for(&self, session_id: Uuid) -> usize {
+        self.runs
+            .lock()
+            .map(|m| {
+                m.values()
+                    .filter(|r| r.session_id == session_id && r.detached)
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Labels of the live mirrored external rows for `session_id`, oldest
+    /// first (#877).
+    ///
+    /// A mirror is a shadow with no run id and no pid, so [`Self::handles_for`]
+    /// cannot carry it to the roll and it owns no tool row. The flow renders
+    /// one `⏏️ <label>` line per entry here — that is what makes a counted run
+    /// always have something to point at, and the line disappears on its own
+    /// when [`Self::mirror_finished`] drops the row.
+    pub fn mirror_labels_for(&self, session_id: Uuid) -> Vec<String> {
+        let mut rows: Vec<(std::time::Instant, String)> = self
+            .runs
+            .lock()
+            .map(|m| {
+                m.values()
+                    .filter(|r| r.session_id == session_id && r.id.starts_with(MIRROR_ID_PREFIX))
+                    .map(|r| (r.started, r.label.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        rows.sort_by_key(|(started, _)| *started);
+        rows.into_iter().map(|(_, label)| label).collect()
+    }
+
     /// Register a run and return its id (#692).
     ///
     /// This is the point at which a spawned process becomes addressable. The
@@ -299,6 +360,22 @@ impl BackgroundTaskManager {
             && let Some(handle) = m.get_mut(id)
         {
             handle.pid = pid;
+        }
+    }
+
+    /// Mark a live run as having left the caller's turn (#877).
+    ///
+    /// Called at the [`Handover::Detached`] arms — the instant the run outlives
+    /// the grace window, or the "detach now" form was used — and never at
+    /// reservation. It mutates the ROSTER entry, not a copy: the only
+    /// `RunHandle` clones in the tree are read-time snapshots taken by
+    /// [`Self::handle`] / [`Self::handles_for`], and no caller holds one across
+    /// the handover, so the flag cannot be set on a clone that nobody reads.
+    pub(crate) fn mark_detached(&self, id: &str) {
+        if let Ok(mut m) = self.runs.lock()
+            && let Some(handle) = m.get_mut(id)
+        {
+            handle.detached = true;
         }
     }
 
@@ -354,6 +431,10 @@ impl BackgroundTaskManager {
                     command: String::new(),
                     cwd: PathBuf::new(),
                     started: std::time::Instant::now(),
+                    // A mirrored external task never runs inside the turn: it
+                    // is background work by definition, so it is detached from
+                    // the moment it is seen (#877).
+                    detached: true,
                     pid: None,
                     output_out: PathBuf::new(),
                     output_err: PathBuf::new(),
@@ -583,6 +664,7 @@ impl BackgroundTaskManager {
             command: command.to_string(),
             cwd: cwd.to_path_buf(),
             started,
+            detached: false,
             pid: None,
             output_out: output_out.clone(),
             output_err: output_err.clone(),
@@ -790,6 +872,11 @@ impl BackgroundTaskManager {
                 )
                 .await;
             });
+            // The run is out of the turn from here: flip the roster flag so the
+            // footer's count means what the roll's icon means (#877). Done
+            // BEFORE the return, so a caller that reads the roster the instant
+            // the handover lands already sees it.
+            self.mark_detached(&id);
             return Ok(Handover::Detached {
                 id,
                 pid,
@@ -853,6 +940,8 @@ impl BackgroundTaskManager {
                     )
                     .await;
                 });
+                // Same flag, same reason as the `grace: None` arm above (#877).
+                self.mark_detached(&id);
                 Ok(Handover::Detached {
                     id,
                     pid,

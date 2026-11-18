@@ -291,6 +291,11 @@ pub(crate) fn spawn_edit_loop(
                             // live-stamp argument as the #585 sub-agent counts
                             // directly above.
                             s.bg_count = super::delivery::bg_count_for(&agent, sid);
+                            // #877: the rows that count points at, read from
+                            // the same manager in the same tick — a mirrored
+                            // external task has no tool row, so the roll gets
+                            // its `⏏️ <label>` line from here.
+                            s.mirror_tasks = super::delivery::mirror_labels_for(&agent, sid);
                             // #808 cue 2, clearing side: the marker means
                             // "this call's work is still out of the turn", so
                             // it must come off the instant the run ends. This

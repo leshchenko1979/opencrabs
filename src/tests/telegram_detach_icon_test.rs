@@ -96,3 +96,32 @@ fn an_ordinary_row_keeps_its_class_icon() {
     // `read_file` with a context renders the bare class icon.
     assert_eq!(label_of(&flow_lines(&s)), "\u{1f4c4}");
 }
+
+/// #877: a MIRRORED external task is counted by the footer but owns no tool
+/// row — it is a shadow with no run id, so there is nothing for the icon to
+/// swap on. The roll gains `⏏️ <label>` instead, and the line is chrome, not a
+/// tool call: a mirror must never inflate the `N ⛏️` count.
+#[test]
+fn a_mirrored_task_gets_a_detached_row_without_becoming_a_tool_call() {
+    let mut s = base_test_state();
+    s.tool_msgs.clear();
+    s.flow_entries.clear();
+    s.display_queue.clear();
+    s.mirror_tasks = vec!["claude-cli btglunt18".to_string()];
+
+    let lines = flow_lines(&s);
+    assert_eq!(lines.len(), 1, "one mirror, one row");
+    match &lines[0] {
+        // `System` is the variant the header selectors treat as chrome, and
+        // `flow_body_entries` counts only `Tool` — so this row is visible and
+        // uncounted, exactly like the footer segment it explains.
+        FlowLine::System(text) => assert_eq!(text, "\u{23cf}\u{fe0f} claude-cli btglunt18"),
+        FlowLine::Tool { label, .. } => panic!("a mirror must not become a tool row: {label}"),
+        FlowLine::Text(t) => panic!("a mirror must not become narration: {t}"),
+    }
+
+    // The row disappears with the task — it is read from the same manager row
+    // the count is, so the two can never disagree.
+    s.mirror_tasks.clear();
+    assert!(flow_lines(&s).is_empty(), "the row goes when the task does");
+}

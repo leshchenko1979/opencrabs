@@ -203,6 +203,8 @@ async fn resume_shape_loop_edits_tools_in_place_and_never_reacts() {
         turn_started_at: std::time::Instant::now(),
         flow_outcome: None,
         bg_count: None,
+        // #877: no mirrored external task at construction.
+        mirror_tasks: Vec::new(),
         subagent_counts: Default::default(),
         queued_count: 0,
         sent_bubbles: Vec::new(),

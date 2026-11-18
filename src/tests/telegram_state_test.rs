@@ -43,6 +43,8 @@ fn open_roll() -> std::sync::Arc<std::sync::Mutex<StreamingState>> {
         turn_started_at: std::time::Instant::now(),
         flow_outcome: None,
         bg_count: None,
+        // #877: no mirrored external task at construction.
+        mirror_tasks: Vec::new(),
         subagent_counts: Default::default(),
         queued_count: 0,
         sent_bubbles: Vec::new(),

@@ -58,6 +58,8 @@ pub(crate) fn base_test_state() -> StreamingState {
         turn_started_at: std::time::Instant::now() - std::time::Duration::from_secs(42),
         flow_outcome: None,
         bg_count: None,
+        // #877: no mirrored external task at construction.
+        mirror_tasks: Vec::new(),
         subagent_counts: SubagentCounts {
             working: 0,
             awaiting: 0,

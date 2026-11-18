@@ -5,9 +5,9 @@ use crate::brain::agent::PushOrigin;
 use crate::brain::agent::service::MessageEnqueueCallback;
 use crate::brain::agent::service::QueuedUserMessage;
 use crate::brain::agent::service::background_tasks::{
-    BackgroundTaskManager, ClaudeTurnTasks, CmdResult, RunRequest, claude_completion_message,
-    claude_needs_survival_delivery, claude_task_label, completion_message, format_elapsed,
-    short_label, tail_lines, wake_message,
+    BackgroundTaskManager, ClaudeTurnTasks, CmdResult, RunHandle, RunRequest,
+    claude_completion_message, claude_needs_survival_delivery, claude_task_label,
+    completion_message, format_elapsed, short_label, tail_lines, wake_message,
 };
 use crate::brain::agent::service::restart_recovery;
 use crate::brain::agent::service::work_status::RunCause;
@@ -557,4 +557,80 @@ fn claude_completion_message_failed_wording_and_summary_fallback() {
     assert!(msg.context_text.contains("Status: failed"));
     assert!(msg.context_text.contains("Summary: (no summary provided)"));
     assert_eq!(msg.display_text, "\u{274c} claude-cli bBBB2222");
+}
+// --- #877: REGISTERED is not DETACHED ---
+
+/// A run that is merely registered (reserved before its grace wait) must not
+/// reach the footer's `N ⏏️` segment: nothing has left the turn, so no roll row
+/// can carry the icon either. The roster keeps answering "what is running" —
+/// that question is unchanged — but the detach count answers a narrower one.
+#[test]
+fn a_registered_run_is_not_counted_as_detached() {
+    let mgr = Arc::new(BackgroundTaskManager::new());
+    let sid = Uuid::new_v4();
+    mgr.started_run(RunHandle {
+        id: "run-877-inline".to_string(),
+        session_id: sid,
+        label: "sleep 30".to_string(),
+        command: "sleep 30".to_string(),
+        cwd: std::env::temp_dir(),
+        started: std::time::Instant::now(),
+        detached: false,
+        pid: None,
+        output_out: std::path::PathBuf::new(),
+        output_err: std::path::PathBuf::new(),
+    });
+
+    assert_eq!(
+        mgr.running_tasks(sid).len(),
+        1,
+        "the roster still answers what is registered"
+    );
+    assert_eq!(
+        mgr.detached_count_for(sid),
+        0,
+        "a live inline command is not a detached task"
+    );
+
+    // The handover flips the SAME row: no second registration, no new id.
+    mgr.mark_detached("run-877-inline");
+    assert_eq!(mgr.detached_count_for(sid), 1);
+    assert_eq!(mgr.running_tasks(sid).len(), 1);
+
+    // Finishing drops it from both.
+    mgr.finish_run("run-877-inline");
+    assert_eq!(mgr.detached_count_for(sid), 0);
+    assert!(mgr.running_tasks(sid).is_empty());
+}
+
+/// A mirrored external task is background work by definition, so it counts —
+/// and it carries the label the roll draws its `⏏️ <label>` row from. Both
+/// reads are session-scoped.
+#[test]
+fn a_mirrored_task_counts_as_detached_and_has_a_label() {
+    let mgr = Arc::new(BackgroundTaskManager::new());
+    let sid = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let label = claude_task_label("btglunt18");
+
+    mgr.mirror_started(sid, &label);
+    mgr.mirror_started(other, "other session task");
+
+    assert_eq!(mgr.detached_count_for(sid), 1);
+    assert_eq!(mgr.mirror_labels_for(sid), vec![label.clone()]);
+    assert_eq!(
+        mgr.mirror_labels_for(other),
+        vec!["other session task".to_string()],
+        "labels are session-scoped"
+    );
+    assert!(
+        mgr.mirror_labels_for(Uuid::new_v4()).is_empty(),
+        "a session with no mirror has no rows"
+    );
+
+    // The completion notification removes the row, and the label with it, so a
+    // counted run can never outlive the row it points at.
+    mgr.mirror_finished(sid, &label);
+    assert_eq!(mgr.detached_count_for(sid), 0);
+    assert!(mgr.mirror_labels_for(sid).is_empty());
 }
