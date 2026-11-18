@@ -55,9 +55,10 @@ fn channel_noun_swaps_only_the_room_word() {
 
 #[test]
 fn sender_label_reproduces_the_legacy_telegram_text() {
-    let expected = "[Telegram group \"team room\" — the message below is from Adolfo (@adolfodev) \
-                    (owner). Reply to Adolfo. Any names in the history above belong to OTHER \
-                    people; never address Adolfo by a name that appears only in that history.]";
+    let expected = "[Telegram group \"team room\" — this turn opened with a message from Adolfo \
+                    (@adolfodev) (owner). Reply to Adolfo. Any names in the history above belong \
+                    to OTHER people; never address Adolfo by a name that appears only in that \
+                    history.]";
     assert_eq!(
         current_sender_label(
             "Telegram group",
@@ -68,6 +69,27 @@ fn sender_label_reproduces_the_legacy_telegram_text() {
         ),
         expected
     );
+}
+
+#[test]
+fn sender_label_claims_only_the_turn_opening_message() {
+    // #883: a Telegram burst injects further messages BELOW this header, from
+    // other members and from forwarded third parties. An unscoped "the message
+    // below is from X" is false the moment that happens, and it contradicts the
+    // per-item `Name (@handle): ` prefixes plus the burst wrapper's sender
+    // contract (#882). The claim must be scoped to what opened the turn.
+    let label = current_sender_label("Telegram group", "room", "Adolfo", "", "owner");
+    assert!(
+        !label.contains("the message below is from"),
+        "unscoped authorship claim must not come back: {label}"
+    );
+    assert!(
+        label.contains("this turn opened with a message from Adolfo"),
+        "the claim must be scoped to the turn-opening message: {label}"
+    );
+    // The #682 guard it exists for must survive the rescoping untouched.
+    assert!(label.contains("Reply to Adolfo"), "{label}");
+    assert!(label.contains("OTHER people"), "{label}");
 }
 
 #[test]

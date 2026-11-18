@@ -58,6 +58,15 @@ pub(crate) fn frame_history(history_lines: &str, count: usize, noun: &str) -> St
 /// only appears in the injected history (the bug: the owner was called "Adi"
 /// because a different member named Adi was in the history).
 ///
+/// SCOPE CONTRACT (#883): the claim is scoped to the message that OPENED the
+/// turn, never to everything below the header. This label is prepended to the
+/// turn-opening message only, but a Telegram tool loop can inject further user
+/// messages into the same turn (`build_midturn_queued_message`), and those
+/// arrive below the header — from another group member, or forwarded material
+/// from a third party. An unscoped "the message below is from X" is therefore
+/// false the moment a burst lands, and it contradicts the per-item
+/// `Name (@handle): ` prefixes and the burst wrapper's sender contract (#882).
+///
 /// `surface` names the room type for the reader, e.g. `"Telegram group"`,
 /// `"Discord channel"`. `role` is "owner" or "user"; `handle` is `" (@name)"`
 /// or empty.
@@ -69,9 +78,9 @@ pub(crate) fn current_sender_label(
     role: &str,
 ) -> String {
     format!(
-        "[{surface} \"{chat_title}\" — the message below is from {name}{handle} ({role}). \
-         Reply to {name}. Any names in the history above belong to OTHER people; never address \
-         {name} by a name that appears only in that history.]"
+        "[{surface} \"{chat_title}\" — this turn opened with a message from {name}{handle} \
+         ({role}). Reply to {name}. Any names in the history above belong to OTHER people; \
+         never address {name} by a name that appears only in that history.]"
     )
 }
 
