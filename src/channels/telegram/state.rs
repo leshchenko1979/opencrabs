@@ -1873,7 +1873,10 @@ impl TelegramState {
             crate::brain::agent::service::notify_queue::clear_on_delivery(session_id, &item.msg);
         }
         let msgs: Vec<_> = queue.into_iter().map(|i| i.msg).collect();
-        crate::brain::agent::QueuedUserMessage::join(&msgs)
+        // #885: one wrapper around the whole burst, not one per message. The
+        // batch join still delegates to `QueuedUserMessage::join` for a single
+        // item and for any burst carrying a slash command.
+        crate::channels::telegram::handler::join_midturn_batch(msgs)
     }
 
     /// Take everything still queued for `session_id`, WITH origins.

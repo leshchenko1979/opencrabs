@@ -3866,6 +3866,14 @@ pub(crate) fn thinking_status_excerpt(thinking: &str) -> Option<String> {
 /// `[Forwarded from "…"]` tag. The framing therefore names those two
 /// conventions instead of assuming one "user", so the agent can tell a
 /// forwarder from the person being forwarded.
+/// Opening of the plain follow-up wrapper.
+///
+/// A const because the batch join (#885) must RECOGNISE its own wrapper rather
+/// than infer it from the payload: `QueuedUserMessage::join` concatenates
+/// `context_text`, so N wrapper-carrying items produced N copies of the
+/// wrapper around N short lines.
+const PLAIN_FOLLOWUP_WRAPPER_OPEN: &str = "[Message(s) arrived while you were still working";
+
 pub(crate) fn build_midturn_queued_message(
     command_invocation: Option<&str>,
     resolved_body: &str,
@@ -3886,7 +3894,7 @@ pub(crate) fn build_midturn_queued_message(
         },
         None => crate::brain::agent::QueuedUserMessage {
             context_text: format!(
-                "[Message(s) arrived while you were still working — factor them into the CURRENT \
+                "{PLAIN_FOLLOWUP_WRAPPER_OPEN} — factor them into the CURRENT \
                  task now, do not restart from scratch. Read the payload line by line: each line \
                  may carry its OWN sender prefix of the form `Name (@handle): `, and those \
                  senders can differ, so never assume one speaker for the whole block. A \
@@ -3899,6 +3907,46 @@ pub(crate) fn build_midturn_queued_message(
             bg_meta: None,
         },
     }
+}
+
+/// True when `q` is a plain mid-turn follow-up: its context is the plain
+/// wrapper followed by its own payload. A slash command, a background-task
+/// receipt, or anything else sharing the queue answers `false`, because their
+/// framing has to survive on its own terms.
+fn is_plain_followup(q: &crate::brain::agent::QueuedUserMessage) -> bool {
+    q.context_text.starts_with(PLAIN_FOLLOWUP_WRAPPER_OPEN)
+        && q.context_text.ends_with(q.display_text.as_str())
+}
+
+/// Join a drained mid-turn burst into ONE message carrying ONE wrapper (#885).
+///
+/// [`QueuedUserMessage::join`] concatenates `context_text`, and each queued
+/// item's `context_text` is already wrapper + payload — so N queued messages
+/// produced N copies of the wrapper around N short lines. Measured live: a
+/// 4-message burst carried 1,772 chars of framing around 191 chars of payload
+/// (9.3x), and the model read the same instruction four times.
+///
+/// A slash command is exempt: it is an explicit NEW directive whose framing
+/// must not be folded into a follow-up, so a burst containing one falls back to
+/// the per-item join rather than degrading that command's semantics.
+pub(crate) fn join_midturn_batch(
+    msgs: Vec<crate::brain::agent::QueuedUserMessage>,
+) -> Option<crate::brain::agent::QueuedUserMessage> {
+    use crate::brain::agent::QueuedUserMessage;
+
+    if msgs.len() <= 1 || !msgs.iter().all(is_plain_followup) {
+        return QueuedUserMessage::join(&msgs);
+    }
+    let joined = msgs
+        .iter()
+        .map(|m| m.display_text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut batch = build_midturn_queued_message(None, &joined, &joined);
+    // Same dominance rule as `join`: the head item decides what the echo shows.
+    batch.origin = msgs[0].origin;
+    batch.bg_meta = msgs[0].bg_meta.clone();
+    Some(batch)
 }
 
 /// Build the `chat_id: X[, thread_id: Y]` hint injected into the Telegram

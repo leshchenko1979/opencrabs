@@ -6,7 +6,7 @@
 //! turn in chat.
 
 use crate::brain::agent::QueuedUserMessage;
-use crate::channels::telegram::handler::build_midturn_queued_message;
+use crate::channels::telegram::handler::{build_midturn_queued_message, join_midturn_batch};
 
 #[test]
 fn an_empty_queue_injects_nothing() {
@@ -86,7 +86,20 @@ fn two_senders_keep_their_own_labels_and_forward_tags() {
         build_midturn_queued_message(None, alice, alice),
         build_midturn_queued_message(None, bob, bob),
     ];
-    let joined = QueuedUserMessage::join(&queued).expect("both entries join");
+    let joined = join_midturn_batch(queued).expect("both entries join");
+
+    // #885: the batch carries ONE wrapper around the whole block, not one per
+    // message. Two wrapped items joined per-item used to repeat the 443-char
+    // framing twice around two short lines.
+    assert_eq!(
+        joined
+            .context_text
+            .matches("[Message(s) arrived while you were still working")
+            .count(),
+        1,
+        "a joined burst must carry exactly one wrapper: {}",
+        joined.context_text
+    );
 
     // Both labels survive, in arrival order, on the display half too.
     assert_eq!(
@@ -133,4 +146,100 @@ fn two_senders_keep_their_own_labels_and_forward_tags() {
         joined.context_text.contains("[Forwarded from"),
         "the wrapper must explain what a forward tag means"
     );
+}
+
+/// #885: a plain burst is wrapped ONCE. Before this, `join` concatenated each
+/// item's already-wrapped `context_text`, so N messages meant N copies of the
+/// 443-char instruction around N short lines — 9.3x framing-to-payload on the
+/// live 4-message burst that surfaced it.
+#[test]
+fn a_plain_burst_carries_one_wrapper_around_all_its_lines() {
+    let queued = vec![
+        build_midturn_queued_message(None, "alice (@alice): one", "alice (@alice): one"),
+        build_midturn_queued_message(None, "alice (@alice): two", "alice (@alice): two"),
+        build_midturn_queued_message(None, "alice (@alice): three", "alice (@alice): three"),
+    ];
+    let joined = join_midturn_batch(queued).expect("burst joins");
+
+    assert_eq!(
+        joined
+            .context_text
+            .matches("[Message(s) arrived while you were still working")
+            .count(),
+        1,
+        "one wrapper per burst, not per message: {}",
+        joined.context_text
+    );
+    // Every payload line survives, in arrival order, under the single wrapper.
+    let payload = joined
+        .context_text
+        .split_once("]:\n")
+        .expect("the wrapper ends with its payload")
+        .1;
+    assert_eq!(
+        payload,
+        "alice (@alice): one\nalice (@alice): two\nalice (@alice): three"
+    );
+    // The transcript half stays bare.
+    assert_eq!(
+        joined.display_text,
+        "alice (@alice): one\nalice (@alice): two\nalice (@alice): three"
+    );
+}
+
+/// #885: a slash command is a NEW directive, so it keeps its OWN wrapper even
+/// when it lands mid-burst — folding it under the follow-up framing neutralises
+/// it (the `/drop_release` report).
+#[test]
+fn a_command_mid_burst_keeps_its_own_wrapper() {
+    let queued = vec![
+        build_midturn_queued_message(None, "alice (@alice): status?", "alice (@alice): status?"),
+        build_midturn_queued_message(
+            Some("/drop_release"),
+            "run the release drop",
+            "/drop_release",
+        ),
+    ];
+    let joined = join_midturn_batch(queued).expect("mixed burst joins");
+
+    assert!(
+        joined.context_text.contains("[The /drop_release command was invoked"),
+        "the command keeps its own directive framing: {}",
+        joined.context_text
+    );
+    assert!(
+        joined.context_text.contains("explicit NEW directive"),
+        "the command framing must survive the join: {}",
+        joined.context_text
+    );
+    // The plain half is still wrapped exactly once; the command half is not a
+    // follow-up and must not inherit the follow-up wrapper.
+    assert_eq!(
+        joined
+            .context_text
+            .matches("[Message(s) arrived while you were still working")
+            .count(),
+        1,
+        "only the plain item carries the follow-up wrapper: {}",
+        joined.context_text
+    );
+}
+
+/// A single queued message is untouched by the batch path.
+#[test]
+fn a_single_followup_still_gets_exactly_one_wrapper() {
+    let queued = vec![build_midturn_queued_message(
+        None,
+        "bob (@bob): just one",
+        "bob (@bob): just one",
+    )];
+    let joined = join_midturn_batch(queued).expect("single item joins");
+    assert_eq!(
+        joined
+            .context_text
+            .matches("[Message(s) arrived while you were still working")
+            .count(),
+        1
+    );
+    assert!(joined.context_text.ends_with("bob (@bob): just one"));
 }
