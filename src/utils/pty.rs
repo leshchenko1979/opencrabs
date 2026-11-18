@@ -122,7 +122,18 @@ impl PtyMaster {
         if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self(AsyncFd::new(fd)?))
+        // tokio 1.54 deprecates `AsyncFd::new` as unsound (it cannot enforce
+        // I/O safety) and `register` is its replacement; the gate runs clippy
+        // with `-D warnings`, so the deprecation is a hard error here.
+        // SAFETY: `register` requires that the descriptor behind
+        // `inner.as_raw_fd()` stays open and refers to the same file
+        // description for the whole life of the `AsyncFd`. `fd` is an
+        // `OwnedFd` moved into the struct, which owns it until drop, so
+        // nothing else can close or reuse it while this registration lives.
+        // On failure `into_parts()` hands the fd back and it is dropped
+        // here, closing it exactly as `new` would have.
+        let registered = unsafe { AsyncFd::register(fd) };
+        Ok(Self(registered.map_err(|e| e.into_parts().1)?))
     }
 }
 
