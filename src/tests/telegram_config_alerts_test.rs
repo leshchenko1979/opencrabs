@@ -3,7 +3,7 @@ use crate::channels::telegram::config_alerts::{
     db_integrity_problem, format_config_alert, format_config_recovery,
     resolve_recipient_chat_ids,
 };
-use crate::config::Config;
+use crate::config::{Config, EmbeddingConfig};
 
 #[test]
 fn test_audit_keys_file_missing_and_parse_error() {
@@ -627,4 +627,55 @@ fn test_audit_default_provider_alias_and_stub_deltas() {
             "{stub} has no factory, so it cannot serve as the default provider"
         );
     }
+}
+
+/// A keyless loopback embedding endpoint is not a defect.
+///
+/// `embedding.rs` only sends an `Authorization` header when `api_key` is set,
+/// so a local llama.cpp / Ollama / LM Studio server serves fine without one.
+/// This audit used to DM the owner "Memory Embedding API Key Missing" about
+/// exactly that endpoint while its store kept filling with vectors.
+///
+/// DISCRIMINATING IN BOTH DIRECTIONS, with the positive control below: a
+/// remote endpoint with no key is a genuine 401, and silencing that would be a
+/// worse bug than the false positive this fixes.
+#[test]
+fn test_audit_embedding_key_alert_skips_a_loopback_endpoint() {
+    let mut config = Config::default();
+    config.memory.vector_enabled = true;
+    config.memory.embedding = Some(EmbeddingConfig {
+        url: Some("http://127.0.0.1:8090/v1".into()),
+        api_key: None,
+        ..Default::default()
+    });
+
+    let problems = audit_config_problems(&config, "", Some(""));
+    assert!(
+        !problems
+            .iter()
+            .any(|p| matches!(p.kind, ConfigProblemKind::EmbeddingKeyMissing { .. })),
+        "a loopback endpoint takes no key, so nothing is missing; got: {problems:?}"
+    );
+}
+
+/// POSITIVE CONTROL for the test above: the fix must not silence the
+/// real defect. A remote endpoint with no key 401s on every embed call, which
+/// is the failure this alert exists to report.
+#[test]
+fn test_audit_embedding_key_alert_fires_for_a_remote_endpoint() {
+    let mut config = Config::default();
+    config.memory.vector_enabled = true;
+    config.memory.embedding = Some(EmbeddingConfig {
+        url: Some("https://api.openai.com/v1".into()),
+        api_key: None,
+        ..Default::default()
+    });
+
+    let problems = audit_config_problems(&config, "", Some(""));
+    assert!(
+        problems
+            .iter()
+            .any(|p| matches!(p.kind, ConfigProblemKind::EmbeddingKeyMissing { .. })),
+        "a keyless remote endpoint is a real defect and must still be reported; got: {problems:?}"
+    );
 }

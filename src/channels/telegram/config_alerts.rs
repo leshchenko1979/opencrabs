@@ -270,10 +270,16 @@ pub fn audit_config_problems(
     }
 
     // 6. Audit memory embeddings
+    //
+    // A loopback endpoint is a local daemon (llama.cpp, Ollama, LM Studio)
+    // that serves without auth — `embedding.rs` only sends an `Authorization`
+    // header when a key is present — so demanding one here flagged a working
+    // store as broken. A remote endpoint still needs its key.
     if config.memory.vector_enabled
         && let Some(ref emb) = config.memory.embedding
         && emb.url.is_some()
         && emb.api_key.as_ref().is_none_or(|k| k.trim().is_empty())
+        && crate::memory::keys::embedding_key_required(emb.url.as_deref())
     {
         problems.push(ConfigProblem {
             kind: ConfigProblemKind::EmbeddingKeyMissing {

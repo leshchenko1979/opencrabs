@@ -1,7 +1,7 @@
 //! The memory section of a doctor report (#1067).
 
 use super::health_report::{self, KeySource};
-use super::keys::needs_embedding_key;
+use super::keys::{embedding_key_required, needs_embedding_key};
 use super::settings::{read_memory_config, read_memory_section};
 use super::store::get_store;
 use crate::config::MemoryConfig;
@@ -47,6 +47,13 @@ fn key_source(cfg: &MemoryConfig) -> KeySource {
     }
     if !needs_embedding_key(emb.api_key.as_deref()) {
         return KeySource::KeysToml;
+    }
+    // A keyless loopback endpoint is a local daemon that serves without auth,
+    // so there is no key to call missing: `Missing` here told the owner a
+    // working store was broken. A remote endpoint keeps it — a real
+    // 401 is exactly what this line exists to surface.
+    if !embedding_key_required(emb.url.as_deref()) {
+        return KeySource::NotApplicable;
     }
     KeySource::Missing
 }
