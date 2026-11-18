@@ -363,8 +363,7 @@ impl Tool for EditTool {
         // Write modified content. The path lock was taken above, before the
         // read, and is still held here (#593). The pre-image outcome is kept so
         // a snapshot skipped under the home is reported, not silent (#539).
-        let pre_image =
-            super::fs_util::atomic_write_file(&path, new_content.as_bytes()).await?;
+        let pre_image = super::fs_util::atomic_write_file(&path, new_content.as_bytes()).await?;
         drop(write_lock);
 
         // Track file in session (fire and forget, path-only)

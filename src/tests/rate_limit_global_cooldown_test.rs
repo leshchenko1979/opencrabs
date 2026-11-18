@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use crate::channels::telegram::governor::test_support;
 use crate::channels::telegram::rate_limit::{
-    exceeds_inline_bound, is_global_cooldown_active, parse_retry_after, record_global_429,
-    reset_global_cooldown, wait_global_cooldown, wait_out, WaitOutcome, MAX_INLINE_RATE_LIMIT_WAIT,
+    MAX_INLINE_RATE_LIMIT_WAIT, WaitOutcome, exceeds_inline_bound, is_global_cooldown_active,
+    parse_retry_after, record_global_429, reset_global_cooldown, wait_global_cooldown, wait_out,
 };
 
 #[test]

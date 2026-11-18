@@ -100,23 +100,23 @@ impl ToolExecutionRepository {
         let provider = provider.map(|s| s.to_string());
         let model = model.map(|s| s.to_string());
         write_with_retry(&self.pool, &write_retry_config(), move |conn| {
-                conn.execute(
-                    "INSERT OR IGNORE INTO tool_executions \
+            conn.execute(
+                "INSERT OR IGNORE INTO tool_executions \
                      (id, message_id, session_id, tool_name, status, provider, model, duration_ms, \
                       exit_code) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    params![
-                        id,
-                        message_id,
-                        session_id,
-                        tool_name,
-                        status,
-                        provider,
-                        model,
-                        duration_ms,
-                        exit_code
-                    ],
-                )
+                params![
+                    id,
+                    message_id,
+                    session_id,
+                    tool_name,
+                    status,
+                    provider,
+                    model,
+                    duration_ms,
+                    exit_code
+                ],
+            )
         })
         .await
         .context("Failed to record tool execution")?;

@@ -762,7 +762,10 @@ pub fn active_skill_bodies(
             // onto the method so every injection path inherits it. Emitting it
             // again here would double it on this path.
             let body = skill.prompt_body();
-            section.push_str(&format!("\n\n--- Active Skill: {} ---\n{}", skill.slash_name, body));
+            section.push_str(&format!(
+                "\n\n--- Active Skill: {} ---\n{}",
+                skill.slash_name, body
+            ));
 
             // Reinject consumed auxiliary files (issue #216).
             if let Some(files) = seen_aux.get(&skill.name) {

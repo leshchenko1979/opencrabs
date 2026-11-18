@@ -476,8 +476,7 @@ pub async fn dispose_pending_row(
 /// **The wording is a contract, not copy.** *"Do not mention the restart or any
 /// interruption"* must survive: a resumed turn that announces the restart shows
 /// the user a restart notice on every swap.
-pub(crate) const RESUME_CONTINUATION_BASE: &str =
-    "[System: A restart just occurred while you were processing a request. Read the conversation \
+pub(crate) const RESUME_CONTINUATION_BASE: &str = "[System: A restart just occurred while you were processing a request. Read the conversation \
 context and continue where you left off naturally. Do not mention the restart or any \
 interruption — just pick up seamlessly.]";
 
@@ -859,9 +858,7 @@ fn clear_persisted_tombstones(session_id: Uuid) {
 /// Mirrors the framing used for detached commands: state plainly that it did
 /// not finish and hand the decision back, rather than letting the agent read
 /// an absent result as either success or failure.
-fn subagent_interrupted_message(
-    status: &super::work_status::WorkStatus,
-) -> QueuedUserMessage {
+fn subagent_interrupted_message(status: &super::work_status::WorkStatus) -> QueuedUserMessage {
     let context_text = format!(
         "[SUB-AGENT INTERRUPTED] The sub-agent `{}` (id {}) was still running when OpenCrabs \
          restarted, so it was killed and produced no result. Its task was:\n\n```\n{}\n```\n\nIt \
@@ -883,9 +880,7 @@ fn subagent_interrupted_message(
 /// any agent spawned before the binding existed) fall back to `session_id`,
 /// the pre-#26 routing value this field replaced. Returns the session to
 /// report to, if either field parses as a UUID.
-fn interrupted_report_target(
-    status: &super::work_status::WorkStatus,
-) -> Option<Uuid> {
+fn interrupted_report_target(status: &super::work_status::WorkStatus) -> Option<Uuid> {
     status
         .parent_session_id
         .as_deref()

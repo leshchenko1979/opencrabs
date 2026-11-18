@@ -10,8 +10,8 @@ use crate::brain::agent::service::background_tasks::{
     completion_message, format_elapsed, short_label, tail_lines, wake_message,
 };
 use crate::brain::agent::service::restart_recovery;
-use crate::brain::agent::service::work_status::RunCause;
 use crate::brain::agent::service::session_routes;
+use crate::brain::agent::service::work_status::RunCause;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -361,8 +361,7 @@ fn apply_context_env_sets_the_noninteractive_defaults() {
     // a default, not a lock. Pinned because the ordering inside
     // `apply_context_env` is what makes it true, and an `env_vars` loop moved
     // above the four defaults would silently override every caller.
-    ctx.env_vars
-        .insert("PAGER".to_string(), "less".to_string());
+    ctx.env_vars.insert("PAGER".to_string(), "less".to_string());
     let mut cmd2 = Command::new("true");
     apply_context_env(&mut cmd2, &ctx);
     assert!(

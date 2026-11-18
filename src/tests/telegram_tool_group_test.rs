@@ -478,7 +478,9 @@ fn live_status_rides_in_footer() {
         ],
         Some("45s"),
     );
-    assert!(out.starts_with("⚙️ • 0:00 ⏱️\n<blockquote expandable><b>Reading the handler.</b>\n\n"));
+    assert!(
+        out.starts_with("⚙️ • 0:00 ⏱️\n<blockquote expandable><b>Reading the handler.</b>\n\n")
+    );
     assert!(out.contains("<b>✅ bash</b> <code>cargo fmt</code>\n\nReading the handler.\n\n<b>⚙️ read_file</b> <code>handler.rs</code>"));
 }
 
@@ -816,7 +818,9 @@ fn details_multiple_tools_wrap_in_collapsed_details() {
     // collapsed block shows progress with the body hidden (#405); with no
     // narration it falls back to the most recent tool line.
     assert!(
-        out.starts_with("<p>⚙️ • 0:00 ⏱️</p><details><summary><sub>⛏️ read file.rs</sub></summary>")
+        out.starts_with(
+            "<p>⚙️ • 0:00 ⏱️</p><details><summary><sub>⛏️ read file.rs</sub></summary>"
+        )
     );
     assert!(out.ends_with("</details>"));
     assert!(!out.contains("<details open"));
@@ -1039,8 +1043,12 @@ fn test_tool_class_icons() {
     assert_eq!(plan_label, "📋 plan");
     assert_eq!(plan_target, "show_plan");
 
-    let (cron_icon, cron_target) =
-        crate::channels::telegram::flow::clean_tool_entry("cron_manage", Some(true), "list jobs", false);
+    let (cron_icon, cron_target) = crate::channels::telegram::flow::clean_tool_entry(
+        "cron_manage",
+        Some(true),
+        "list jobs",
+        false,
+    );
     assert_eq!(cron_icon, "⏰");
     assert_eq!(cron_target, "list jobs");
 

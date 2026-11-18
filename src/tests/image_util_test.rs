@@ -3,7 +3,8 @@
 use crate::utils::image::{
     ImageTarget, LocalImage, LocalImageFailure, LocalImageFailureReason, LocalImageScan,
     classify_image_target, code_regions, extract_img_markers, extract_local_images, failure_notice,
-    image_extension, is_remote_url, is_supported_image, is_telegram_media_ref, validate_local_image,
+    image_extension, is_remote_url, is_supported_image, is_telegram_media_ref,
+    validate_local_image,
 };
 use crate::utils::image_fetch::{
     MAX_REMOTE_IMAGES_PER_REPLY, fetch_remote_image, resolve_remote_images,
@@ -675,7 +676,10 @@ async fn local_paths_are_refused_by_the_fetch_layer() {
 async fn scan_without_remote_targets_is_returned_untouched() {
     let scan = LocalImageScan {
         text: "hi".to_string(),
-        attachments: vec![LocalImage { path: PathBuf::from("/tmp/a.png"), caption: None }],
+        attachments: vec![LocalImage {
+            path: PathBuf::from("/tmp/a.png"),
+            caption: None,
+        }],
         ..LocalImageScan::default()
     };
     let out = resolve_remote_images(scan).await;

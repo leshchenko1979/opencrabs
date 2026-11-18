@@ -57,7 +57,10 @@ fn render_lists_both_systems_with_states_and_pointers() {
     // child's session, so they never appear in the caller's detached list
     // below — without this line the model sees a child at work and has no way
     // to look at the work (#692 D6).
-    assert!(out.contains("output: /tmp/runs/child-run-1.out"), "was: {out}");
+    assert!(
+        out.contains("output: /tmp/runs/child-run-1.out"),
+        "was: {out}"
+    );
     assert!(out.contains("Detached commands (1)"), "was: {out}");
     // The row names the run's STATE, not just that it exists (#752). Before
     // this, a detached row rendered `- <id> [<label>] <elapsed>s` and nothing
@@ -82,7 +85,10 @@ fn render_lists_both_systems_with_states_and_pointers() {
     assert!(out.contains("pgid: 4242"), "was: {out}");
     assert!(out.contains("stdout: /tmp/runs/run-1.out"), "was: {out}");
     assert!(out.contains("stderr: /tmp/runs/run-1.err"), "was: {out}");
-    assert!(out.contains("status file: /tmp/detached/run-1.json"), "was: {out}");
+    assert!(
+        out.contains("status file: /tmp/detached/run-1.json"),
+        "was: {out}"
+    );
 }
 
 /// The path `tasks_list` hands the model must be a file a writer really

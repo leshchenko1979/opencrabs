@@ -319,7 +319,9 @@ fn gate_message_is_bounded_for_an_oversized_skill() {
         "guard-skill",
         "/work/guard/file.md",
         &["**/guard/**".to_string()],
-        Some(std::path::Path::new("/root/.opencrabs/skills/guard-skill/SKILL.md")),
+        Some(std::path::Path::new(
+            "/root/.opencrabs/skills/guard-skill/SKILL.md",
+        )),
     );
 
     // The bound. 2000 bytes is ~2 orders of magnitude below the payload the
@@ -352,7 +354,9 @@ fn gate_message_names_the_source_path_and_the_reload_route() {
         "guard-skill",
         "/work/guard/file.md",
         &["**/guard/**".to_string()],
-        Some(std::path::Path::new("/root/.opencrabs/skills/guard-skill/SKILL.md")),
+        Some(std::path::Path::new(
+            "/root/.opencrabs/skills/guard-skill/SKILL.md",
+        )),
     );
     assert!(!msg.contains("The full skill body follows"));
     assert!(!msg.contains("is appended below"));

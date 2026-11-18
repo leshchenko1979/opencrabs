@@ -179,7 +179,10 @@ fn overlong_task_label_is_capped_in_title() {
     let long = format!("\u{2705} {} \u{1f552} 2s", "x".repeat(500));
     let t = background_task_title(&long);
     assert!(t.chars().count() <= 120, "header must stay readable");
-    assert!(t.starts_with("\u{2705} x"), "the label leads, not a sentence: {t}");
+    assert!(
+        t.starts_with("\u{2705} x"),
+        "the label leads, not a sentence: {t}"
+    );
 }
 
 #[test]
@@ -499,7 +502,11 @@ async fn notify_receipt_card_keeps_a_4719_char_body_whole_on_the_rich_leg() {
     let gap1 = "b".repeat(outside_at - (head.len() + inside.len()));
     let gap2 = "c".repeat(tail_at - (outside_at + outside.len()));
     let body = format!("{head}{inside}{gap1}{outside}{gap2}{tail}");
-    assert_eq!(body.chars().count(), TOTAL, "fixture is the measured length");
+    assert_eq!(
+        body.chars().count(),
+        TOTAL,
+        "fixture is the measured length"
+    );
 
     let (wire, classic) = build_notify_receipt_card("Compiler", &body).await;
     let BubbleWire::Html(rich) = &wire else {
@@ -559,7 +566,10 @@ fn a_firing_cap_keeps_the_tail_and_states_the_dropped_count_on_both_legs() {
     const TOTAL: usize = 5000; // over the classic 3200, under the rich 30000
     let head = "HEAD-SENTINEL";
     let tail = "TAIL-SENTINEL-NEEDS-FROM-YOU";
-    let body = format!("{head}{}{tail}", "m".repeat(TOTAL - head.len() - tail.len()));
+    let body = format!(
+        "{head}{}{tail}",
+        "m".repeat(TOTAL - head.len() - tail.len())
+    );
     assert_eq!(body.chars().count(), TOTAL);
 
     let (wire, html) = build_bg_echo_bubble(&body, "⚙️ background task result");
@@ -597,7 +607,10 @@ async fn above_the_rich_budget_the_tail_still_survives() {
     const TOTAL: usize = 40000;
     let head = "HEAD-SENTINEL";
     let tail = "TAIL-SENTINEL-DISCLOSURES-BLOCK";
-    let body = format!("{head}{}{tail}", "m".repeat(TOTAL - head.len() - tail.len()));
+    let body = format!(
+        "{head}{}{tail}",
+        "m".repeat(TOTAL - head.len() - tail.len())
+    );
     assert_eq!(body.chars().count(), TOTAL);
 
     let (wire, classic) = build_notify_receipt_card("Compiler", &body).await;
@@ -625,7 +638,10 @@ async fn above_the_rich_budget_the_tail_still_survives() {
         "one count, adjacent to the material it describes — not repeated as chrome"
     );
     // The classic fallback is cut harder, and still keeps its tail.
-    assert!(classic.contains(tail), "classic fallback keeps its tail too");
+    assert!(
+        classic.contains(tail),
+        "classic fallback keeps its tail too"
+    );
 }
 
 /// #490 task 4 — the delivery verdict must TELL the sender its payload was

@@ -639,9 +639,8 @@ impl Tool for BashTool {
         {
             match crate::utils::long_command::classify(&input.command) {
                 Detach::Yes { marker } => {
-                    let label = crate::brain::agent::service::background_tasks::short_label(
-                        &input.command,
-                    );
+                    let label =
+                        crate::brain::agent::service::background_tasks::short_label(&input.command);
                     tracing::info!(
                         target: "background_task",
                         "Detaching '{label}' for session {}: '{marker}' starts a command",
@@ -999,9 +998,9 @@ impl Tool for BashTool {
                     )
                     .await
                 {
-                    Ok(crate::brain::agent::service::background_tasks::Handover::Inline(output)) => {
-                        output
-                    }
+                    Ok(crate::brain::agent::service::background_tasks::Handover::Inline(
+                        output,
+                    )) => output,
                     Ok(crate::brain::agent::service::background_tasks::Handover::Detached {
                         id,
                         pid,
@@ -2006,7 +2005,11 @@ fn has_sql_source(args: &[&str], short: &str, long: &str) -> bool {
 fn redis_cli_flag_takes_value(tok: &str) -> bool {
     matches!(
         tok,
-        "-h" | "-p" | "-a" | "-u" | "-s" | "-n"
+        "-h" | "-p"
+            | "-a"
+            | "-u"
+            | "-s"
+            | "-n"
             | "--host"
             | "--port"
             | "--pass"

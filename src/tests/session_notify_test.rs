@@ -22,10 +22,10 @@ use crate::brain::agent::service::session_routes::{
 };
 use crate::brain::tools::subagent::SessionNotifyTool;
 use crate::brain::tools::r#trait::{Tool, ToolExecutionContext};
+use crate::db::models::Session;
 use crate::db::{
     BindingOrigin, Database, NotifyQueueRepository, SessionBindingRepository, SessionRepository,
 };
-use crate::db::models::Session;
 use crate::services::ServiceContext;
 
 fn msg() -> QueuedUserMessage {
@@ -55,7 +55,10 @@ async fn absent_session_fails_loudly_without_queue_residue() {
         .await
         .expect("tool returns a verdict");
 
-    assert!(!result.success, "absent session must fail loudly: {result:?}");
+    assert!(
+        !result.success,
+        "absent session must fail loudly: {result:?}"
+    );
     assert_eq!(
         result.metadata.get("notify_state").map(String::as_str),
         Some("undeliverable")

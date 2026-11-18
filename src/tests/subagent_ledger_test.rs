@@ -167,7 +167,10 @@ fn overlong_text_is_truncated_rather_than_dropped() {
         "capped at 400 chars plus the ellipsis, got {}",
         entries[0].text.chars().count()
     );
-    assert!(entries[0].text.ends_with('…'), "a cut must be visible as a cut");
+    assert!(
+        entries[0].text.ends_with('…'),
+        "a cut must be visible as a cut"
+    );
 }
 
 #[test]
@@ -194,7 +197,10 @@ fn a_torn_final_line_does_not_hide_the_history_before_it() {
 fn read_returns_the_tail_in_chronological_order() {
     isolate("tail");
     for i in 0..10 {
-        ledger::append("tail-1", &LedgerEntry::new(LedgerKind::Note, format!("step {i}")));
+        ledger::append(
+            "tail-1",
+            &LedgerEntry::new(LedgerKind::Note, format!("step {i}")),
+        );
     }
     let entries = ledger::read("tail-1", 3);
     assert_eq!(entries.len(), 3, "limit takes the last N, not the first N");
@@ -217,8 +223,14 @@ fn the_ledger_dies_with_its_status_record() {
     isolate("paired_delete");
     let mut s = WorkStatus::new_agent("gone-1", "old", "sess", "task", None, None).unwrap();
     s.mark_completed("done".into()).unwrap();
-    ledger::append("gone-1", &LedgerEntry::new(LedgerKind::Note, "did the thing"));
-    assert!(progress_path("gone-1").exists(), "fixture must have a ledger");
+    ledger::append(
+        "gone-1",
+        &LedgerEntry::new(LedgerKind::Note, "did the thing"),
+    );
+    assert!(
+        progress_path("gone-1").exists(),
+        "fixture must have a ledger"
+    );
 
     let old_ts = chrono::Utc::now()
         .checked_sub_signed(chrono::Duration::days(8))
@@ -227,7 +239,11 @@ fn the_ledger_dies_with_its_status_record() {
     let raw = fs::read_to_string(status_path("gone-1")).unwrap();
     let mut parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
     parsed["finish"]["completed_at"] = serde_json::json!(old_ts);
-    fs::write(status_path("gone-1"), serde_json::to_string(&parsed).unwrap()).unwrap();
+    fs::write(
+        status_path("gone-1"),
+        serde_json::to_string(&parsed).unwrap(),
+    )
+    .unwrap();
 
     cleanup_stale(StaleWindows::uniform(Duration::from_secs(7 * 86400))).expect("sweep");
     assert!(

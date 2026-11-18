@@ -33,7 +33,10 @@ use serde_json::json;
 /// unevidenced.
 #[test]
 fn receipt_line_carries_the_tool_verdict() {
-    assert_eq!(receipt_line("bash: git status", true), "bash: git status — ok");
+    assert_eq!(
+        receipt_line("bash: git status", true),
+        "bash: git status — ok"
+    );
     assert_eq!(
         receipt_line("bash: cargo test", false),
         "bash: cargo test — FAILED"
@@ -94,7 +97,10 @@ fn files_touched_dedupes_preserving_call_order() {
 fn merge_files_touched_accumulates_across_iterations() {
     let mut acc: Vec<String> = Vec::new();
     merge_files_touched(&mut acc, &["Write ~/a.md".to_string()]);
-    merge_files_touched(&mut acc, &["Edit ~/a.md".to_string(), "Edit ~/b.rs".to_string()]);
+    merge_files_touched(
+        &mut acc,
+        &["Edit ~/a.md".to_string(), "Edit ~/b.rs".to_string()],
+    );
     merge_files_touched(&mut acc, &["Edit ~/b.rs".to_string()]);
     assert_eq!(acc, vec!["~/a.md".to_string(), "~/b.rs".to_string()]);
 }
@@ -132,7 +138,10 @@ fn tool_summary_produces_the_prefixes_files_touched_strips() {
 
     // And the collector reads exactly those strings.
     let collected = files_touched_from(&[written.clone(), edited.clone(), read.clone()]);
-    assert_eq!(collected, vec!["/tmp/a.md".to_string(), "/tmp/b.rs".to_string()]);
+    assert_eq!(
+        collected,
+        vec!["/tmp/a.md".to_string(), "/tmp/b.rs".to_string()]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +171,10 @@ fn receipts_are_capped_and_the_overflow_is_declared() {
     assert!(lines[0].contains("160 earlier receipt(s) omitted"));
     // The MOST RECENT are kept: the first rendered receipt is the one just
     // after the omitted prefix, and the last is the newest.
-    assert_eq!(lines[1], format!("- bash: step{}", total - MAX_TOOL_RECEIPTS));
+    assert_eq!(
+        lines[1],
+        format!("- bash: step{}", total - MAX_TOOL_RECEIPTS)
+    );
     assert_eq!(lines[lines.len() - 1], format!("- bash: step{}", total - 1));
     // The omitted prefix is genuinely absent, not merely summarised.
     assert!(!rendered.contains("- bash: step0\n"));
@@ -173,7 +185,9 @@ fn receipts_are_capped_and_the_overflow_is_declared() {
 #[test]
 fn receipts_under_the_cap_are_all_rendered() {
     let evidence = GoalEvidence {
-        tool_receipts: (0..MAX_TOOL_RECEIPTS).map(|i| format!("bash: step{i}")).collect(),
+        tool_receipts: (0..MAX_TOOL_RECEIPTS)
+            .map(|i| format!("bash: step{i}"))
+            .collect(),
         ..GoalEvidence::default()
     };
     let rendered = evidence.render();
@@ -210,7 +224,10 @@ fn long_receipt_lines_are_truncated_on_a_char_boundary() {
         .and_then(|section| section.lines().find(|l| l.starts_with("- ")))
         .expect("a receipt line");
     let prefix = receipt_line.trim_start_matches("- ").trim_end_matches('…');
-    assert!(receipt_line.ends_with('…'), "long multibyte line not capped");
+    assert!(
+        receipt_line.ends_with('…'),
+        "long multibyte line not capped"
+    );
     assert!(
         multibyte.starts_with(prefix),
         "the cut must be a prefix of the original, not a split char"

@@ -20,9 +20,7 @@
 //! label, which is the question the suppression arm is actually asking: does
 //! this bubble already SAY this reply?
 
-use crate::channels::telegram::intermediates::{
-    normalize_for_dedup, normalize_reference_spelling,
-};
+use crate::channels::telegram::intermediates::{normalize_for_dedup, normalize_reference_spelling};
 
 /// The three spellings of one reply must compare equal — the measured failure.
 #[test]
@@ -65,7 +63,8 @@ fn a_remote_hyperlink_keeps_its_target() {
     // The link itself survives intact — this predicate erases file and media
     // references only, never prose the author wrote.
     assert!(
-        normalize_reference_spelling(a).contains("https://github.com/leshchenko1979/opencrabs/issues/825"),
+        normalize_reference_spelling(a)
+            .contains("https://github.com/leshchenko1979/opencrabs/issues/825"),
         "a remote target must be left byte-identical"
     );
 }
@@ -93,7 +92,10 @@ fn an_image_reference_collapses_to_its_alt_text() {
 #[test]
 fn the_marker_emoji_does_not_survive_normalization() {
     assert_eq!(normalize_reference_spelling("📎 report.pdf"), "report.pdf");
-    assert_eq!(normalize_reference_spelling("📎   spaced.pdf"), "spaced.pdf");
+    assert_eq!(
+        normalize_reference_spelling("📎   spaced.pdf"),
+        "spaced.pdf"
+    );
 }
 
 /// Text that is not a reference is untouched, and a half-written link is left

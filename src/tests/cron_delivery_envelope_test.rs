@@ -122,7 +122,10 @@ fn blank_target_list_is_targetless() {
 fn multiple_targets_are_all_named() {
     let e = delivery_envelope(JOB, Some("telegram:111, session:abc ,discord:222"));
     for t in ["telegram:111", "session:abc", "discord:222"] {
-        assert!(e.contains(t), "every configured target must be listed: {t} in {e}");
+        assert!(
+            e.contains(t),
+            "every configured target must be listed: {t} in {e}"
+        );
     }
     assert!(
         e.contains("Delivery targets: telegram:111, session:abc, discord:222"),

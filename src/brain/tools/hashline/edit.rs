@@ -184,8 +184,7 @@ impl Tool for HashlineEditTool {
         // write that stood here was the third silent path: it neither renamed
         // atomically nor left a pre-image under the profile home.
         let pre_image =
-            crate::brain::tools::fs_util::atomic_write_file(&path, new_content.as_bytes())
-                .await?;
+            crate::brain::tools::fs_util::atomic_write_file(&path, new_content.as_bytes()).await?;
         // Release the path lock taken before the read (#593).
         drop(write_lock);
 

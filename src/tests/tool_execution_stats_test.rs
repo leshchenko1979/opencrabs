@@ -26,12 +26,32 @@ async fn counts_totals_and_errors_per_tool_ordered_by_usage() {
         .await
         .unwrap();
     // read_file: 2 calls, 0 errors
-    repo.record("4", "m", "s", "read_file", "success", None, None, None, None)
-        .await
-        .unwrap();
-    repo.record("5", "m", "s", "read_file", "success", None, None, None, None)
-        .await
-        .unwrap();
+    repo.record(
+        "4",
+        "m",
+        "s",
+        "read_file",
+        "success",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.record(
+        "5",
+        "m",
+        "s",
+        "read_file",
+        "success",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     let stats = repo.stats_with_failures(None).await.unwrap();
 

@@ -14,8 +14,8 @@
 //!   2. they reach it through the FALLBACK path too — which returns a
 //!      `dyn Provider`, so it can only be inspected through the trait.
 
-use crate::brain::provider::factory::{configure_openai_compatible, create_provider_by_name};
 use crate::brain::provider::OpenAIProvider;
+use crate::brain::provider::factory::{configure_openai_compatible, create_provider_by_name};
 use crate::config::{Config, ProviderConfig};
 use crate::utils::retry::RetryConfig;
 
@@ -89,7 +89,10 @@ fn configured_retry_keys_reach_the_provider_the_choke_point_builds() {
     // Keys the operator did not set keep the built-in default: overrides are
     // layered per KEY, never a wholesale replacement.
     let default = RetryConfig::default();
-    assert_eq!(resolved.initial_delay, default.initial_delay, "initial_delay");
+    assert_eq!(
+        resolved.initial_delay, default.initial_delay,
+        "initial_delay"
+    );
     assert_eq!(resolved.max_delay, default.max_delay, "max_delay");
     assert_eq!(
         resolved.backoff_multiplier, default.backoff_multiplier,
@@ -139,7 +142,10 @@ fn an_unconfigured_provider_keeps_the_family_preset_exactly() {
     let preset = RetryConfig::qwen_cli_match();
 
     assert_eq!(resolved.max_attempts, preset.max_attempts, "max_attempts");
-    assert_eq!(resolved.initial_delay, preset.initial_delay, "initial_delay");
+    assert_eq!(
+        resolved.initial_delay, preset.initial_delay,
+        "initial_delay"
+    );
     assert_eq!(resolved.max_delay, preset.max_delay, "max_delay");
     assert_eq!(
         resolved.backoff_multiplier, preset.backoff_multiplier,

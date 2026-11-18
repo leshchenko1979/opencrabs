@@ -1629,9 +1629,11 @@ async fn spawn_in_profile_scopes_home_and_name_inside_the_spawned_task() {
     // Arm 1 — through the helper, both scopes are live inside the spawned task,
     // even though the parent's own scope does not cross the spawn boundary.
     let (home_seen, name_seen) = with_profile_home_async(Some(NAME), async {
-        spawn_in_profile(Some(NAME), async { (profile_home_override(), current_profile_name()) })
-            .await
-            .expect("spawned leg panicked")
+        spawn_in_profile(Some(NAME), async {
+            (profile_home_override(), current_profile_name())
+        })
+        .await
+        .expect("spawned leg panicked")
     })
     .await;
 

@@ -111,11 +111,8 @@ impl PipelineExecutor {
 
         // ONE job-scoped session resolver (#332, D5) — archived and subagent
         // rows included, `session:`/`oc://session/` grammar handled inside.
-        let target_uuid = crate::cli::session_resolve::resolve_job_session_target(
-            &ctx.pool(),
-            deliver_to,
-        )
-        .await;
+        let target_uuid =
+            crate::cli::session_resolve::resolve_job_session_target(&ctx.pool(), deliver_to).await;
 
         if let Some(uuid) = target_uuid {
             let goal_text = if let Some(ref tmpl) = job.goal_template {

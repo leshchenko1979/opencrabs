@@ -20,8 +20,8 @@
 //! than restated here, so the assertion cannot pass against a drifted constant.
 
 use crate::brain::skills::{
-    active_skill_bodies, AuxiliaryFile, Skill, SkillSource, REVIEW_GATE_REMINDER,
-    SKILL_LINE_WARN_THRESHOLD,
+    AuxiliaryFile, REVIEW_GATE_REMINDER, SKILL_LINE_WARN_THRESHOLD, Skill, SkillSource,
+    active_skill_bodies,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -59,7 +59,10 @@ fn fixture_line_count_is_exact() {
 /// Exactly at the threshold: silent. This is the off-by-one guard.
 #[test]
 fn at_the_threshold_does_not_warn() {
-    let skills = vec![skill_with_body("canarya", &body_of_lines(SKILL_LINE_WARN_THRESHOLD))];
+    let skills = vec![skill_with_body(
+        "canarya",
+        &body_of_lines(SKILL_LINE_WARN_THRESHOLD),
+    )];
 
     let section = inject(&skills, &HashMap::new());
 
@@ -101,7 +104,10 @@ fn gated_skill_measures_its_own_body_not_the_reminder() {
 /// One line over: warns, naming the skill, the actual count, and the threshold.
 #[test]
 fn one_line_over_the_threshold_warns_and_names_the_count() {
-    let skills = vec![skill_with_body("canarya", &body_of_lines(SKILL_LINE_WARN_THRESHOLD + 1))];
+    let skills = vec![skill_with_body(
+        "canarya",
+        &body_of_lines(SKILL_LINE_WARN_THRESHOLD + 1),
+    )];
 
     let section = inject(&skills, &HashMap::new());
 
@@ -138,7 +144,10 @@ fn over_threshold_auxiliary_warns_on_the_same_terms() {
     }];
 
     let mut seen_aux = HashMap::new();
-    seen_aux.insert("canarya".to_string(), vec!["fleet-directives.md".to_string()]);
+    seen_aux.insert(
+        "canarya".to_string(),
+        vec!["fleet-directives.md".to_string()],
+    );
 
     let section = inject(&[skill], &seen_aux);
 
@@ -287,7 +296,10 @@ fn the_warning_lives_on_the_shared_prompt_body_method() {
 /// emit TWO here. Exactly one is the contract.
 #[test]
 fn the_manifest_path_emits_the_warning_once() {
-    let skills = vec![skill_with_body("canarya", &body_of_lines(SKILL_LINE_WARN_THRESHOLD + 1))];
+    let skills = vec![skill_with_body(
+        "canarya",
+        &body_of_lines(SKILL_LINE_WARN_THRESHOLD + 1),
+    )];
 
     let section = inject(&skills, &HashMap::new());
 

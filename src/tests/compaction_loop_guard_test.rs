@@ -16,7 +16,7 @@
 //! half is asserted value by value rather than inferred from the `>=`.
 
 use crate::brain::agent::service::compaction::{
-    compaction_loop_guard, CompactionOutcome, CompactionState, COMPACTION_LOOP_GUARD_STREAK,
+    COMPACTION_LOOP_GUARD_STREAK, CompactionOutcome, CompactionState, compaction_loop_guard,
 };
 
 #[test]
@@ -81,5 +81,9 @@ fn loop_guard_marker_tells_the_truth() {
     assert_ne!(marker, truncated);
     assert!(marker.starts_with("[CONTEXT COMPACTION SUSPENDED — The conversation"));
     // The trigger clause the other variants interpolate still works.
-    assert!(CompactionOutcome::LoopGuard.marker(" (mid-loop)").contains("(mid-loop)"));
+    assert!(
+        CompactionOutcome::LoopGuard
+            .marker(" (mid-loop)")
+            .contains("(mid-loop)")
+    );
 }

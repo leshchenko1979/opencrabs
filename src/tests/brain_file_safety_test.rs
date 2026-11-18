@@ -70,13 +70,7 @@ mod shrink_check {
     fn unprotected_file_is_always_allowed() {
         // Non-brain files can shrink freely — that's not what this guard
         // is for.
-        let result = check_no_shrink(
-            unprotected(),
-            "lots of content here",
-            "tiny",
-            false,
-            false,
-        );
+        let result = check_no_shrink(unprotected(), "lots of content here", "tiny", false, false);
         assert_eq!(result, ShrinkCheck::Allowed);
     }
 
@@ -425,7 +419,9 @@ mod home_predicate {
             assert!(!is_under_home(Path::new("/etc/hosts")));
             // Component-wise, not a string prefix: a SIBLING directory whose
             // name merely starts with the home's name is not inside it.
-            assert!(!is_under_home(&temp.path().join("home-evil").join("notes.md")));
+            assert!(!is_under_home(
+                &temp.path().join("home-evil").join("notes.md")
+            ));
         });
     }
 
@@ -447,7 +443,10 @@ mod home_predicate {
     fn size_cap_separates_documents_from_stores() {
         // The largest hand-edited document measured stays covered; every
         // multi-gigabyte object under the home is excluded.
-        assert!(is_snapshottable_size(9_333_669), "largest document measured");
+        assert!(
+            is_snapshottable_size(9_333_669),
+            "largest document measured"
+        );
         assert!(!is_snapshottable_size(184_529_533), "dated log file");
         assert!(!is_snapshottable_size(490_127_360), "memory/memory.db");
         assert!(!is_snapshottable_size(2_200_309_760), "opencrabs.db");

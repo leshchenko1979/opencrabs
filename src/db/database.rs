@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use deadpool_sqlite::{Config, Hook, InteractError, Pool as DeadPool, Runtime};
-use rusqlite_migration::{Migrations, M};
+use rusqlite_migration::{M, Migrations};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 

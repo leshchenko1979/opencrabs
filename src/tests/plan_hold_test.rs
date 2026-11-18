@@ -17,7 +17,9 @@ use crate::brain::agent::service::tool_loop::plan_hold_allowed;
 use crate::brain::goal::evidence::GoalEvidence;
 
 fn tasks(n: usize) -> Vec<String> {
-    (1..=n).map(|i| format!("{i}. task {i} (pending)")).collect()
+    (1..=n)
+        .map(|i| format!("{i}. task {i} (pending)"))
+        .collect()
 }
 
 /// The first nudge is always allowed: a checklist that just went Active has

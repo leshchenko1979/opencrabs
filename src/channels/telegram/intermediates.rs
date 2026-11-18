@@ -725,14 +725,7 @@ pub(crate) async fn deliver_intermediate_message(
     ) = if skipped_files.is_empty() {
         (Vec::new(), Vec::new())
     } else {
-        super::delivery::send_local_files(
-            session_id,
-            bot,
-            chat,
-            thread_id,
-            &skipped_files,
-        )
-        .await
+        super::delivery::send_local_files(session_id, bot, chat, thread_id, &skipped_files).await
     };
     file_failures.extend(skipped_refused);
     // #779: record these the moment they land, NOT inside the rich arm below.
@@ -759,8 +752,8 @@ pub(crate) async fn deliver_intermediate_message(
     let body = crate::utils::append_failure_notice(&rich_linked, &failures);
     let body = crate::utils::append_file_failure_notice(&body, &file_failures);
 
-    if let Some(id) = try_send_intermediate_rich(session_id, bot, chat, thread_id, &body, &media)
-        .await
+    if let Some(id) =
+        try_send_intermediate_rich(session_id, bot, chat, thread_id, &body, &media).await
     {
         // The bubble is non-sticky burial evidence (#1150): the flow block must
         // restick below its own output on the next append.
@@ -839,8 +832,11 @@ pub(crate) async fn deliver_intermediate_message(
     // clip has nowhere else to go: it cannot ride an array this plane does not
     // have. Each family keeps its own helper and its own refusal list.
     let mut plain = crate::utils::append_failure_notice(text, &failures);
-    let images: Vec<crate::utils::image::LocalImage> =
-        rw_stripped.entries.iter().map(|e| e.image.clone()).collect();
+    let images: Vec<crate::utils::image::LocalImage> = rw_stripped
+        .entries
+        .iter()
+        .map(|e| e.image.clone())
+        .collect();
     let (delivered, refused) =
         super::delivery::send_local_images(session_id, bot, chat, thread_id, &images).await;
     if !delivered.is_empty() {

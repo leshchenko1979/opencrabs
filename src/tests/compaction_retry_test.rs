@@ -228,11 +228,7 @@ async fn persistently_empty_document_stops_after_one_retry() {
     .await
     .expect("an empty document is not an error — it is returned, not raised");
 
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        2,
-        "one retry, never a loop"
-    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "one retry, never a loop");
     assert!(
         text_of(&response).is_empty(),
         "a persistently empty summariser surfaces the empty document it got"

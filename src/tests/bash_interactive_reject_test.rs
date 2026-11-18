@@ -475,7 +475,11 @@ mod issue_555_non_interactive_one_shots {
         // But editing a FILE needs a TTY: measured `vim FILE` → rc=1 with
         // escape-sequence noise, `nano FILE` → "standard input is not a
         // terminal".
-        for cmd in ["vim /etc/hostname", "nano /etc/hostname", "ed /etc/hostname"] {
+        for cmd in [
+            "vim /etc/hostname",
+            "nano /etc/hostname",
+            "ed /etc/hostname",
+        ] {
             assert!(
                 check_interactive_command(cmd).is_some(),
                 "should reject editor on a file: {cmd}"

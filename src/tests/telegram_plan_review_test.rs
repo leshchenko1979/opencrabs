@@ -15,14 +15,14 @@
 //! 3. The result is a one-line delta rendered as the card footer, derived from
 //!    the worker's `DELTA:` line, never from the spawn acknowledgement.
 
+use crate::channels::telegram::TelegramState;
 use crate::channels::telegram::flow_chrome::PlanKb;
 use crate::channels::telegram::plan_card::{
+    PLAN_REVIEW_LABEL, PLAN_REVIEW_RUNNING_NOTE, REVIEW_IMPL_LABEL,
     format_plan_review_running_progress, plan_card_with_footer, plan_review_agent_id,
     plan_review_brief, plan_review_delta, plan_review_effective_kb, plan_review_footer_note,
     plan_review_spawn_input, plan_review_was_cancelled, review_impl_brief, review_impl_spawn_input,
-    PLAN_REVIEW_LABEL, PLAN_REVIEW_RUNNING_NOTE, REVIEW_IMPL_LABEL,
 };
-use crate::channels::telegram::TelegramState;
 use uuid::Uuid;
 
 /// The exact rows Telegram would receive, as `(text, callback_data)` pairs.
@@ -550,10 +550,12 @@ fn structured_report_parses_summary_open_questions_and_delta() {
         "Do we need a dedicated log topic for review audits?"
     );
     assert!(parsed.full_summary.is_some());
-    assert!(parsed
-        .full_summary
-        .unwrap()
-        .contains("Verified src/channels/telegram/flow_chrome.rs"));
+    assert!(
+        parsed
+            .full_summary
+            .unwrap()
+            .contains("Verified src/channels/telegram/flow_chrome.rs")
+    );
 }
 
 #[test]
@@ -587,10 +589,12 @@ fn structured_report_parses_markdown_heading_prefixes() {
         "Do we need a dedicated log topic for review audits?"
     );
     assert!(parsed.full_summary.is_some());
-    assert!(parsed
-        .full_summary
-        .unwrap()
-        .contains("Verified src/channels/telegram/flow_chrome.rs"));
+    assert!(
+        parsed
+            .full_summary
+            .unwrap()
+            .contains("Verified src/channels/telegram/flow_chrome.rs")
+    );
 }
 
 #[test]
@@ -613,10 +617,12 @@ fn structured_report_parses_bold_and_space_variants() {
     assert_eq!(parsed.open_questions.len(), 1);
     assert_eq!(parsed.open_questions[0], "What is the default quota ratio?");
     assert!(parsed.full_summary.is_some());
-    assert!(parsed
-        .full_summary
-        .unwrap()
-        .contains("Pinned fallback candidates."));
+    assert!(
+        parsed
+            .full_summary
+            .unwrap()
+            .contains("Pinned fallback candidates.")
+    );
 }
 
 #[test]
@@ -642,10 +648,12 @@ fn structured_report_parses_blockquoted_delta_and_multiline_headings() {
     assert_eq!(parsed.open_questions.len(), 1);
     assert_eq!(parsed.open_questions[0], "None.");
     assert!(parsed.full_summary.is_some());
-    assert!(parsed
-        .full_summary
-        .unwrap()
-        .contains("Verified PostgreSQL 16 on traefik-public."));
+    assert!(
+        parsed
+            .full_summary
+            .unwrap()
+            .contains("Verified PostgreSQL 16 on traefik-public.")
+    );
 }
 
 #[test]

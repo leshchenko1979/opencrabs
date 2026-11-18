@@ -41,7 +41,9 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, EmbeddingConfig, FallbackProviderConfig, ProviderConfig, RetrySection};
+use crate::config::{
+    Config, EmbeddingConfig, FallbackProviderConfig, ProviderConfig, RetrySection,
+};
 use crate::utils::providers::{configured_providers, normalize_provider_name};
 
 // ---------------------------------------------------------------- verdicts

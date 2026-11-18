@@ -165,11 +165,7 @@ fn supersession_collapses_a_counter_within_one_kind_only() {
 #[test]
 fn compact_system_flow_entry_stays_folded_and_is_never_reclaimed_as_answer() {
     let start_line = compacting_flow_line(85.0, None);
-    let done_line = compacted_flow_line(
-        85.0,
-        32.0,
-        std::time::Duration::from_secs(5),
-    );
+    let done_line = compacted_flow_line(85.0, 32.0, std::time::Duration::from_secs(5));
 
     let mut entries = vec![
         FlowEntry::Tool(0),
@@ -191,11 +187,7 @@ fn compact_system_flow_entry_stays_folded_and_is_never_reclaimed_as_answer() {
 #[test]
 fn compaction_lines_supersede_in_place_under_compaction_progress_key() {
     let start_line = compacting_flow_line(88.0, None);
-    let done_line = compacted_flow_line(
-        88.0,
-        40.0,
-        std::time::Duration::from_secs(8),
-    );
+    let done_line = compacted_flow_line(88.0, 40.0, std::time::Duration::from_secs(8));
 
     assert_eq!(progress_key(&start_line), Some("compaction"));
     assert_eq!(progress_key(&done_line), Some("compaction"));

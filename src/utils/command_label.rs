@@ -176,8 +176,5 @@ fn value_word_len(rest: &str) -> Option<usize> {
         }
         return None;
     }
-    Some(
-        rest.find(char::is_whitespace)
-            .unwrap_or(rest.len()),
-    )
+    Some(rest.find(char::is_whitespace).unwrap_or(rest.len()))
 }

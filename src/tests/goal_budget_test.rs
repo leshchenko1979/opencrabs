@@ -46,7 +46,13 @@ async fn bind_session(db: &Database, session: Uuid) -> String {
         .expect("Failed to create session row");
     let sid = session.to_string();
     SessionBindingRepository::new(db.pool().clone())
-        .upsert(sid.clone(), "telegram", "-100344", Some(344), BindingOrigin::Text)
+        .upsert(
+            sid.clone(),
+            "telegram",
+            "-100344",
+            Some(344),
+            BindingOrigin::Text,
+        )
         .await
         .expect("Failed to upsert binding");
     sid
@@ -217,13 +223,7 @@ async fn deferral_does_not_bill_the_turn_budget() {
     let sid = Uuid::new_v4();
 
     goal_mgr
-        .set_goal(
-            sid,
-            "follow the skill".to_string(),
-            None,
-            None,
-            Some(20),
-        )
+        .set_goal(sid, "follow the skill".to_string(), None, None, Some(20))
         .await
         .expect("set_goal should succeed");
 
@@ -294,7 +294,13 @@ async fn open_plan_task_still_continues_and_bills() {
     };
 
     let decision = goal_mgr
-        .evaluate_after_turn(provider.as_ref(), "mock-model", sid, &evidence, "working on it")
+        .evaluate_after_turn(
+            provider.as_ref(),
+            "mock-model",
+            sid,
+            &evidence,
+            "working on it",
+        )
         .await;
 
     match decision {
@@ -339,7 +345,13 @@ async fn deferral_is_unreachable_while_a_plan_task_is_open() {
     };
 
     let decision = goal_mgr
-        .evaluate_after_turn(provider.as_ref(), "mock-model", sid, &evidence, "working on it")
+        .evaluate_after_turn(
+            provider.as_ref(),
+            "mock-model",
+            sid,
+            &evidence,
+            "working on it",
+        )
         .await;
 
     match decision {
@@ -375,7 +387,13 @@ async fn deferral_records_the_await_and_a_judged_turn_clears_it() {
         ..Default::default()
     };
     let _ = goal_mgr
-        .evaluate_after_turn(provider.as_ref(), "mock-model", sid, &waiting, "still running")
+        .evaluate_after_turn(
+            provider.as_ref(),
+            "mock-model",
+            sid,
+            &waiting,
+            "still running",
+        )
         .await;
 
     let binding = repo

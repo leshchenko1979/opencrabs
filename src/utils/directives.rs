@@ -13,7 +13,7 @@
 //! the delivered text. A marker block whose payload does not parse is
 //! stripped too: raw `<<...>>` markers and raw JSON never reach a channel.
 
-use crate::brain::tools::suggest_options::{RawSuggestionItem, SuggestionItem, MAX_OPTIONS};
+use crate::brain::tools::suggest_options::{MAX_OPTIONS, RawSuggestionItem, SuggestionItem};
 
 const MARKER: &str = "<<suggest_options>>";
 

@@ -618,11 +618,10 @@ impl Provider for GeminiProvider {
         // Bound ONE send's connect + TLS + response headers (#680/#682). The
         // budget is per attempt, so a retry's backoff sleep is charged to the
         // retry policy and never to this clock.
-        let send_budget =
-            crate::brain::agent::service::helpers::send_handshake_timeout_for(
-                false,
-                self.base_url(),
-            );
+        let send_budget = crate::brain::agent::service::helpers::send_handshake_timeout_for(
+            false,
+            self.base_url(),
+        );
 
         let response = retry(
             || async {

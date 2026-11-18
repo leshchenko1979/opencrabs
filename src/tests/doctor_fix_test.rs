@@ -4,8 +4,8 @@
 //! fresh ones stay; permissions tighten only where loose.
 
 use crate::cli::doctor_fix::{
-    clear_stale_preinit_markers, clear_stuck_cron_runs, clear_stuck_cron_runs_with_owner,
-    ClearPolicy, STUCK_CRON_MAX_AGE_SECS,
+    ClearPolicy, STUCK_CRON_MAX_AGE_SECS, clear_stale_preinit_markers, clear_stuck_cron_runs,
+    clear_stuck_cron_runs_with_owner,
 };
 use crate::config::profile::InstanceOwner;
 use crate::db::Database;
@@ -58,9 +58,11 @@ async fn run_status(pool: &crate::db::Pool, id: &str) -> String {
         .await
         .unwrap()
         .interact(move |conn| {
-            conn.query_row("SELECT status FROM cron_job_runs WHERE id = ?1", params![id], |r| {
-                r.get::<_, String>(0)
-            })
+            conn.query_row(
+                "SELECT status FROM cron_job_runs WHERE id = ?1",
+                params![id],
+                |r| r.get::<_, String>(0),
+            )
         })
         .await
         .unwrap()
@@ -97,9 +99,13 @@ async fn test_clear_stuck_cron_runs_marks_interrupted() {
     // running row is an orphan, so this verdict does not depend on which lock
     // the host happens to hold. The core's owner is injected in the tests
     // below, which is where the policy branches are pinned.
-    let n = clear_stuck_cron_runs(&pool, ClearPolicy::OrphanedAtStartup, STUCK_CRON_MAX_AGE_SECS)
-        .await
-        .unwrap();
+    let n = clear_stuck_cron_runs(
+        &pool,
+        ClearPolicy::OrphanedAtStartup,
+        STUCK_CRON_MAX_AGE_SECS,
+    )
+    .await
+    .unwrap();
     assert_eq!(n, 2, "startup clears every running row, however fresh");
 
     assert_eq!(run_status(&pool, &old).await, "interrupted");

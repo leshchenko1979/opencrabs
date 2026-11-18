@@ -16,9 +16,9 @@
 //!   because the notify queue (#111) holds JSON rows written by the previous
 //!   binary and `#[serde(default)]` is what lets them round-trip.
 
-use crate::brain::agent::service::work_status::RunCause;
 use crate::brain::agent::BgTaskMeta;
-use crate::channels::telegram::resume::{build_bg_receipt_card, BubbleWire};
+use crate::brain::agent::service::work_status::RunCause;
+use crate::channels::telegram::resume::{BubbleWire, build_bg_receipt_card};
 
 fn meta(cause: Option<RunCause>, exit_code: Option<i32>) -> BgTaskMeta {
     BgTaskMeta {
@@ -45,10 +45,7 @@ fn rich_html(meta: &BgTaskMeta) -> String {
 /// tell a ceiling kill from a self-inflicted exit code, and `signal 9` can.
 #[test]
 fn card_body_opens_with_the_signal_cause() {
-    let html = rich_html(&meta(
-        Some(RunCause::Signalled { signal: 9 }),
-        Some(137),
-    ));
+    let html = rich_html(&meta(Some(RunCause::Signalled { signal: 9 }), Some(137)));
     // First line after the summary: the italic cause, then the tail.
     let after_summary = html
         .split("</summary>")
@@ -77,7 +74,10 @@ fn card_body_names_an_ordinary_exit() {
 /// change, and the card has to say so.
 #[test]
 fn card_body_names_the_ceiling() {
-    let html = rich_html(&meta(Some(RunCause::Ceiling { limit_secs: 3600 }), Some(137)));
+    let html = rich_html(&meta(
+        Some(RunCause::Ceiling { limit_secs: 3600 }),
+        Some(137),
+    ));
     assert!(html.contains("<i>ceiling 3600s</i>"), "got: {html}");
 }
 
@@ -94,8 +94,7 @@ fn summary_stays_byte_identical_to_p3f() {
         .and_then(|s| s.split("</summary>").next())
         .expect("card must carry a <summary>");
     assert_eq!(
-        summary,
-        "<sub>❌ <code>sleep 4000</code> 🕒 1h 0m</sub>",
+        summary, "<sub>❌ <code>sleep 4000</code> 🕒 1h 0m</sub>",
         "P3f summary drifted"
     );
 }
@@ -107,7 +106,10 @@ fn summary_stays_byte_identical_to_p3f() {
 #[test]
 fn legacy_meta_renders_no_cause_line() {
     let html = rich_html(&meta(None, None));
-    assert!(!html.contains("<i>"), "legacy meta must not grow a cause line: {html}");
+    assert!(
+        !html.contains("<i>"),
+        "legacy meta must not grow a cause line: {html}"
+    );
     // The card is otherwise intact — this is not a "renders nothing" pass.
     assert!(html.contains("<pre>still going"), "got: {html}");
     assert!(html.contains("<summary>"), "got: {html}");

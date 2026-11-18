@@ -288,11 +288,9 @@ impl Tool for ContextTool {
         // receipt — it failed with a plain success where the notice belongs.
         let lock_at = super::path_lock::lock_path(&store_path);
         let write_lock = match lock_at {
-            Some(path) => {
-                tokio::task::spawn_blocking(move || super::path_lock::acquire_at(&path))
-                    .await
-                    .unwrap_or(None)
-            }
+            Some(path) => tokio::task::spawn_blocking(move || super::path_lock::acquire_at(&path))
+                .await
+                .unwrap_or(None),
             None => None,
         };
         let contended = write_lock.as_ref().is_some_and(|l| !l.is_held());

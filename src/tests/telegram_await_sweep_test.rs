@@ -217,7 +217,11 @@ async fn a_stale_await_is_woken_exactly_once() {
     let woken = run_once(&pool, 3_600, |t| batches.push(t)).await;
 
     assert_eq!(woken, 1, "one stale await must produce exactly one wake");
-    assert_eq!(batches.len(), 1, "the wake must be handed over exactly once");
+    assert_eq!(
+        batches.len(),
+        1,
+        "the wake must be handed over exactly once"
+    );
     assert_eq!(
         batches[0],
         vec![(parked, -100123, Some(249))],
@@ -247,7 +251,10 @@ async fn a_second_pass_over_a_consumed_record_wakes_nobody() {
     let mut second: Vec<ResumeTargets> = Vec::new();
     let again = run_once(&pool, 3_600, |t| second.push(t)).await;
     assert_eq!(again, 0, "a consumed record must not wake the lane twice");
-    assert!(second.is_empty(), "no batch may be handed over on the second pass");
+    assert!(
+        second.is_empty(),
+        "no batch may be handed over on the second pass"
+    );
 }
 
 #[tokio::test]

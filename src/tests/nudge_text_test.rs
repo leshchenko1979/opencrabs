@@ -235,8 +235,14 @@ fn local_file_regen_nudge_quotes_each_link_and_the_base_dir() {
         "the nudge must name the FILE family: {nudge}"
     );
     assert!(nudge.contains("q3.pdf (file not found)"), "{nudge}");
-    assert!(nudge.contains("notes.txt (file is empty (0 bytes))"), "{nudge}");
-    assert!(nudge.contains("/srv/work"), "must name the base dir: {nudge}");
+    assert!(
+        nudge.contains("notes.txt (file is empty (0 bytes))"),
+        "{nudge}"
+    );
+    assert!(
+        nudge.contains("/srv/work"),
+        "must name the base dir: {nudge}"
+    );
     assert!(nudge.contains("Regen attempt 1/2"), "{nudge}");
 }
 

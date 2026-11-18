@@ -82,7 +82,10 @@ pub(crate) fn current_sender_label(
 ///
 /// If `tz_info` is provided, the timestamp is formatted in the user's timezone;
 /// otherwise, it is formatted in UTC.
-pub(crate) fn render_history_lines(messages: &[DbChannelMessage], tz_info: Option<&TzInfo>) -> String {
+pub(crate) fn render_history_lines(
+    messages: &[DbChannelMessage],
+    tz_info: Option<&TzInfo>,
+) -> String {
     messages
         .iter()
         .rev()

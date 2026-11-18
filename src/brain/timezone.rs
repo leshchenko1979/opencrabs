@@ -95,10 +95,9 @@ pub fn parse_timezone_heuristic(text: &str) -> Option<TzInfo> {
 /// a zone can never be mistaken for the user's own word.
 fn parenthetical_label(line: &str) -> Option<String> {
     let (_, rest) = line.split_once('(')?;
-    let inner = rest
-        .trim_end_matches([')', '|', ' ', '\t'])
-        .trim();
-    if inner.is_empty() || inner.parse::<Tz>().is_ok() || parse_utc_offset_or_iana(inner).is_some() {
+    let inner = rest.trim_end_matches([')', '|', ' ', '\t']).trim();
+    if inner.is_empty() || inner.parse::<Tz>().is_ok() || parse_utc_offset_or_iana(inner).is_some()
+    {
         return None;
     }
     Some(inner.to_string())
@@ -144,9 +143,7 @@ fn normalize_declaration(line: &str) -> Option<(String, String)> {
 /// of a declaration, so `**Timezone**` and `Timezone` compare equal.
 fn unwrap_declaration_wrappers(s: &str) -> String {
     s.trim()
-        .trim_matches(|c| {
-            c == '*' || c == '_' || c == '`' || c == '"' || c == '\'' || c == '|'
-        })
+        .trim_matches(|c| c == '*' || c == '_' || c == '`' || c == '"' || c == '\'' || c == '|')
         .trim()
         .to_string()
 }

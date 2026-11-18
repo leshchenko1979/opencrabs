@@ -6,9 +6,9 @@
 //! nested lists, math) — so there is no block JSON to construct: we pass the
 //! model's markdown straight through.
 
-use crate::channels::telegram::governor::{EditClass, RichAdmission};
 use super::mermaid;
 use super::render_html::markdown_to_html_mermaid_p;
+use crate::channels::telegram::governor::{EditClass, RichAdmission};
 use crate::channels::telegram::suggest_options::enforce_button_fit;
 use teloxide::types::ThreadId;
 
@@ -364,7 +364,8 @@ async fn post_rich(
                 thread,
                 class,
             )
-            .await {
+            .await
+            {
                 RichAdmission::Now => {}
                 RichAdmission::Dropped(dropped) => {
                     tracing::debug!(
@@ -773,7 +774,8 @@ async fn post_rich_multipart(
                 thread,
                 class,
             )
-            .await {
+            .await
+            {
                 RichAdmission::Now => {}
                 RichAdmission::Dropped(dropped) => {
                     tracing::debug!(

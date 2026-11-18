@@ -72,12 +72,7 @@ fn a_video_entry_declares_the_video_type_on_the_edit_path() {
     // The edit builder is the second of the two, and #98 gave it its own copy
     // of the media-array code — so a fix applied to one is not a fix.
     let media = vec![entry("vid0", MediaKind::Video, MP4_BYTES)];
-    let body = build_body_markdown_media_edit(
-        -100,
-        42,
-        "see ![clip](tg://video?id=vid0)",
-        &media,
-    );
+    let body = build_body_markdown_media_edit(-100, 42, "see ![clip](tg://video?id=vid0)", &media);
     let arr = media_array(&body);
     assert_eq!(arr[0]["media"]["type"], "video");
     assert_eq!(arr[0]["media"]["media"], "attach://vid0");
@@ -87,8 +82,14 @@ fn a_video_entry_declares_the_video_type_on_the_edit_path() {
 fn a_photo_entry_still_declares_the_photo_type() {
     // The control: the change must not turn every entry into a video.
     let media = vec![entry("img0", MediaKind::Photo, PNG_BYTES)];
-    let body =
-        build_body_markdown_media_target(-100, None, None, "![chart](tg://photo?id=img0)", &media, None);
+    let body = build_body_markdown_media_target(
+        -100,
+        None,
+        None,
+        "![chart](tg://photo?id=img0)",
+        &media,
+        None,
+    );
     assert_eq!(media_array(&body)[0]["media"]["type"], "photo");
     assert_eq!(media_array(&body)[0]["media"]["media"], "attach://img0");
 }

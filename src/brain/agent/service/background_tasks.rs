@@ -834,7 +834,13 @@ impl BackgroundTaskManager {
         // resume that can no longer come (#763).
         if let Some(repo) = task_repo()
             && let Err(e) = repo
-                .record(run_uuid, session_id, &label, &command, &cwd.to_string_lossy())
+                .record(
+                    run_uuid,
+                    session_id,
+                    &label,
+                    &command,
+                    &cwd.to_string_lossy(),
+                )
                 .await
         {
             // Not fatal: the command still runs and still resumes the session
@@ -857,18 +863,8 @@ impl BackgroundTaskManager {
             let task_id = id.clone();
             tokio::spawn(async move {
                 continue_detached(
-                    this,
-                    run_uuid,
-                    task_id,
-                    session_id,
-                    label,
-                    command,
-                    started,
-                    child,
-                    out_reader,
-                    err_reader,
-                    wake,
-                    hook,
+                    this, run_uuid, task_id, session_id, label, command, started, child,
+                    out_reader, err_reader, wake, hook,
                 )
                 .await;
             });
@@ -907,7 +903,11 @@ impl BackgroundTaskManager {
                     // never fire beside it. `spawn_inner` sees the returned
                     // `Inline` output but skips its own delivery when a hook
                     // was passed.
-                    hook(HookContext { result, elapsed_secs }).await;
+                    hook(HookContext {
+                        result,
+                        elapsed_secs,
+                    })
+                    .await;
                 }
                 Ok(Handover::Inline(output))
             }
@@ -925,18 +925,8 @@ impl BackgroundTaskManager {
                 let task_id = id.clone();
                 tokio::spawn(async move {
                     continue_detached(
-                        this,
-                        run_uuid,
-                        task_id,
-                        session_id,
-                        label,
-                        command,
-                        started,
-                        child,
-                        out_reader,
-                        err_reader,
-                        wake,
-                        hook,
+                        this, run_uuid, task_id, session_id, label, command, started, child,
+                        out_reader, err_reader, wake, hook,
                     )
                     .await;
                 });
@@ -1065,7 +1055,11 @@ async fn wait_bounded(
 /// `detach_session_pre_exec`'s `setsid()` is why a run's recorded pid doubles
 /// as a process-group id, which is in turn why the pgid the handover reports is
 /// a stop handle that reaches a descendant re-parented to init.
-fn build_command(cwd: &std::path::Path, command: &str, session_id: Uuid) -> tokio::process::Command {
+fn build_command(
+    cwd: &std::path::Path,
+    command: &str,
+    session_id: Uuid,
+) -> tokio::process::Command {
     use crate::utils::shell::PushShellCommand;
     use tokio::process::Command;
     let (shell, shell_arg) = crate::utils::shell::shell_pair();
@@ -1197,7 +1191,10 @@ where
 /// process this feature exists to make visible. The reader is aborted and the
 /// file is read instead, which is why the file (not the task's return value) is
 /// the store.
-async fn collect_capture(mut handle: tokio::task::JoinHandle<()>, path: &std::path::Path) -> Vec<u8> {
+async fn collect_capture(
+    mut handle: tokio::task::JoinHandle<()>,
+    path: &std::path::Path,
+) -> Vec<u8> {
     // 500 ms is a flush deadline, not a read deadline: `Child::wait()` returning
     // means the child exited, and the reader then drains whatever is left and
     // hits EOF. A reader still running after that is a grandchild holding the
@@ -1786,9 +1783,7 @@ async fn continue_detached(
                 // the only marker — a `tail_lines` read could truncate it away
                 // and leave a bare `137` (#786).
                 code: 137,
-                cause: RunCause::Ceiling {
-                    limit_secs: limit,
-                },
+                cause: RunCause::Ceiling { limit_secs: limit },
                 output: format!(
                     "{}\n\n[run killed after {limit}s — the operator's ceiling on a detached \
                      run's lifetime (`agent.run_max_lifetime_secs`). Raise that ceiling if this \
@@ -1822,7 +1817,11 @@ async fn continue_detached(
         //
         // No early return: the wake watcher below must still be stopped, or a
         // finished run would leave a watcher observing a terminal stream.
-        hook(HookContext { result, elapsed_secs }).await;
+        hook(HookContext {
+            result,
+            elapsed_secs,
+        })
+        .await;
     } else {
         deliver_completion(&id, session_id, &label, &command, &result, elapsed_secs);
     }
@@ -1980,7 +1979,11 @@ pub(crate) fn completion_message(
     // and the surfaces it fed repeated both beside a duration. The owner
     // called the resulting echo redundant: icon, label and duration are the
     // three facts worth carrying, and they fit in one line.
-    let icon = if result.success { "\u{2705}" } else { "\u{274c}" };
+    let icon = if result.success {
+        "\u{2705}"
+    } else {
+        "\u{274c}"
+    };
     let duration = format_elapsed(elapsed_secs);
     let display = format!("{icon} {label} \u{1f552} {duration}");
     let mut msg = QueuedUserMessage::system(context, display);

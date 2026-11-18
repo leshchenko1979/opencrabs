@@ -391,7 +391,9 @@ fn boot_recovery_arms_ride_the_tracked_entry_point() {
         .collect();
 
     assert!(
-        !code.iter().any(|line| line.contains("resume_interrupted_turn(")),
+        !code
+            .iter()
+            .any(|line| line.contains("resume_interrupted_turn(")),
         "the boot recovery must not re-drive a held row through the untracked \
          primitive: that turn inserts no pending_requests row, so a second kill \
          consumes the wake and loses the work (#481). Second-generation hand-offs \

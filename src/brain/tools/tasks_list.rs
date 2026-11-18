@@ -208,16 +208,14 @@ impl Tool for TasksListTool {
                 // rest of this row's pointers follow. A child with no run of its
                 // own — most of them, most of the time — renders no line at all,
                 // which is what an absent pointer should look like.
-                let output_out = match (
-                    context.background_manager.as_ref(),
-                    mgr.get_session_id(&id),
-                ) {
-                    (Some(bm), Some(child_session)) => bm
-                        .handles_for(child_session)
-                        .last()
-                        .map(|h| h.output_out.display().to_string()),
-                    _ => None,
-                };
+                let output_out =
+                    match (context.background_manager.as_ref(), mgr.get_session_id(&id)) {
+                        (Some(bm), Some(child_session)) => bm
+                            .handles_for(child_session)
+                            .last()
+                            .map(|h| h.output_out.display().to_string()),
+                        _ => None,
+                    };
                 subagents.push(SubagentRow {
                     id,
                     label,

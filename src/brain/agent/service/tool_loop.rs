@@ -1094,11 +1094,8 @@ impl AgentService {
         // rows and feedback through it further down, so the binding stays even
         // though the history read no longer goes through it.
         let message_service = MessageService::new(self.context.clone());
-        let mut db_messages = Self::load_messages_since_last_compaction(
-            self.context.pool(),
-            session_id,
-        )
-        .await?;
+        let mut db_messages =
+            Self::load_messages_since_last_compaction(self.context.pool(), session_id).await?;
 
         // Resolve model name: explicit caller arg > session's saved model >
         // current provider's default. The session.model fallback is critical
@@ -6701,8 +6698,7 @@ impl AgentService {
                             cb(
                                 session_id,
                                 ProgressEvent::SelfHealingAlert {
-                                    message: "Plan continues, re-entering tool loop"
-                                        .to_string(),
+                                    message: "Plan continues, re-entering tool loop".to_string(),
                                 },
                             );
                         }
@@ -7904,9 +7900,8 @@ impl AgentService {
                             let mid = assistant_db_msg.id.to_string();
                             let sid = session_id.to_string();
                             let tname = tool_name.clone();
-                            let status = crate::db::repository::tool_outcome_status(
-                                success, exit_code,
-                            );
+                            let status =
+                                crate::db::repository::tool_outcome_status(success, exit_code);
                             let prov = self.provider_name_for_session(session_id);
                             let mdl = Some(self.provider_model_for_session(session_id));
                             let dur_ms = tool_start.elapsed().as_millis() as i64;
@@ -8090,14 +8085,11 @@ impl AgentService {
                 // through, and because the two source vectors are cleared a few
                 // lines below — after that the turn's tool work is unrecoverable
                 // in memory, and the judge runs later in the same turn.
-                turn_tool_receipts.extend(
-                    tool_descriptions
-                        .iter()
-                        .zip(tool_outputs.iter())
-                        .map(|(desc, (success, _))| {
-                            crate::brain::goal::evidence::receipt_line(desc, *success)
-                        }),
-                );
+                turn_tool_receipts.extend(tool_descriptions.iter().zip(tool_outputs.iter()).map(
+                    |(desc, (success, _))| {
+                        crate::brain::goal::evidence::receipt_line(desc, *success)
+                    },
+                ));
                 crate::brain::goal::evidence::merge_files_touched(
                     &mut turn_tool_files,
                     &tool_descriptions,
@@ -8788,37 +8780,33 @@ impl AgentService {
         // says AFTER the mutation, never by a second disk read. A failure to
         // persist stays non-fatal here (turn settle must not fail the turn) but
         // is now distinguishable: the mutation reports whether it landed.
-        match crate::utils::plan_files::mutate_plan(
-            session_id,
-            |plan| {
-                let Some(finished) = plan.as_mut() else {
-                    return Ok((false, false));
-                };
-                // A plan whose only remaining task is the trailing delivery step
-                // never reaches is_complete() on its own — delivering the answer
-                // is what leaves that box unchecked, so the card lingers with
-                // 1/N done (#737). When THIS turn delivered a final response,
-                // complete that trailing task so the archive below fires.
-                let mutated = !final_text.trim().is_empty()
-                    && finished.complete_trailing_delivery_task();
-                // The archive decision follows the document's completeness
-                // AFTER the mutation — never the mutation itself. Binding it to
-                // `mutated` meant a plan whose LAST task the agent completed
-                // through the tool (so `complete_trailing_delivery_task` has
-                // nothing left to do) never archived at all: every box ticked,
-                // `status: Active`, card still live, session never back to
-                // NoPlan (#597).
-                Ok((mutated, finished.is_complete()))
-            },
-        )
+        match crate::utils::plan_files::mutate_plan(session_id, |plan| {
+            let Some(finished) = plan.as_mut() else {
+                return Ok((false, false));
+            };
+            // A plan whose only remaining task is the trailing delivery step
+            // never reaches is_complete() on its own — delivering the answer
+            // is what leaves that box unchecked, so the card lingers with
+            // 1/N done (#737). When THIS turn delivered a final response,
+            // complete that trailing task so the archive below fires.
+            let mutated =
+                !final_text.trim().is_empty() && finished.complete_trailing_delivery_task();
+            // The archive decision follows the document's completeness
+            // AFTER the mutation — never the mutation itself. Binding it to
+            // `mutated` meant a plan whose LAST task the agent completed
+            // through the tool (so `complete_trailing_delivery_task` has
+            // nothing left to do) never archived at all: every box ticked,
+            // `status: Active`, card still live, session never back to
+            // NoPlan (#597).
+            Ok((mutated, finished.is_complete()))
+        })
         .await
         {
             Ok((mutated, archived)) => {
                 if mutated {
                     tracing::info!("Plan: auto-completed trailing delivery task at turn settle");
                 }
-                if archived
-                    && let Err(e) = crate::utils::plan_files::archive_plan(session_id).await
+                if archived && let Err(e) = crate::utils::plan_files::archive_plan(session_id).await
                 {
                     tracing::warn!("Failed to archive completed plan at turn settle: {e}");
                 }

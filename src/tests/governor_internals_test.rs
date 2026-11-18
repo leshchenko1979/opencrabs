@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use teloxide::types::ChatId;
 
 use crate::channels::telegram::governor::{
-    ensure_bucket, format_summary, is_permanent_edit_error, note_429_pause, Bucket, Counters,
-    EditClass, EditPayload, INTERACTIVE_RESERVE, MAX_429_PAUSE,
+    Bucket, Counters, EditClass, EditPayload, INTERACTIVE_RESERVE, MAX_429_PAUSE, ensure_bucket,
+    format_summary, is_permanent_edit_error, note_429_pause,
 };
 use crate::config::Config;
 
@@ -254,8 +254,7 @@ fn spacing_floor_defaults_to_one_second_and_the_template_still_parses() {
     let parsed: Config = toml::from_str(include_str!("../../config.toml.example"))
         .expect("embedded config.toml.example must still parse with the floor commented out");
     assert_eq!(
-        parsed.channels.telegram.rate_limiter.spacing_floor_ms,
-        1000,
+        parsed.channels.telegram.rate_limiter.spacing_floor_ms, 1000,
         "an ABSENT key must fall back to the default, not fail the parse"
     );
 }
@@ -359,7 +358,10 @@ async fn global_pacer_burst_smoothing_and_cooldown() {
         crate::channels::telegram::rate_limit::MAX_INLINE_RATE_LIMIT_WAIT,
     )
     .await;
-    assert!(clear, "an in-bound cooldown must be waited out, not deferred");
+    assert!(
+        clear,
+        "an in-bound cooldown must be waited out, not deferred"
+    );
     assert!(
         started.elapsed() >= Duration::from_millis(6900),
         "the full ~7s window must be slept, not truncated to a cap"

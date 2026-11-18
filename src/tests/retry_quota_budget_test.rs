@@ -14,14 +14,14 @@
 //! with a genuine billing 429 must still fall back immediately, i.e. burn
 //! zero in-place attempts. That is #952, and #346 must not reopen it.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::brain::provider::error::{should_try_next_provider, ProviderError};
+use crate::brain::provider::error::{ProviderError, should_try_next_provider};
 use crate::brain::provider::retry_policy::{
-    self, RetryOverrides, QUOTA_RETRY_ATTEMPTS, QUOTA_RETRY_DELAY,
+    self, QUOTA_RETRY_ATTEMPTS, QUOTA_RETRY_DELAY, RetryOverrides,
 };
-use crate::utils::retry::{retry_with_notify, RetryConfig, RetryableError};
+use crate::utils::retry::{RetryConfig, RetryableError, retry_with_notify};
 
 /// A 429 whose body carries a HARD quota phrase — the aggregator case.
 fn quota_429() -> ProviderError {

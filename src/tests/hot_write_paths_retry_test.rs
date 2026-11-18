@@ -68,9 +68,7 @@ impl ContendedDb {
                     conn.interact(|conn| conn.execute_batch("PRAGMA busy_timeout = 0;"))
                         .await
                         .map_err(|e| deadpool_sqlite::HookError::Message(e.to_string().into()))?
-                        .map_err(|e| {
-                            deadpool_sqlite::HookError::Message(e.to_string().into())
-                        })?;
+                        .map_err(|e| deadpool_sqlite::HookError::Message(e.to_string().into()))?;
                     Ok(())
                 })
             }))
@@ -116,7 +114,9 @@ async fn clear_matching_retries_a_contended_write() {
 
     let holder = fx.hold_write_lock();
     let started = Instant::now();
-    let contended = repo.clear_matching(session, "context body", "display line").await;
+    let contended = repo
+        .clear_matching(session, "context body", "display line")
+        .await;
     let elapsed = started.elapsed();
 
     let err = contended.expect_err("a held write lock must not be silently absorbed");

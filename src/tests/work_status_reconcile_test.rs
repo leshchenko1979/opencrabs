@@ -44,11 +44,18 @@ fn running_command_file_is_finalized_and_completed_one_is_spared() {
     let _guard = TempStatusDir::new();
 
     // A command killed by a restart: written Running, process now gone.
-    WorkStatus::new_command("stale-cmd", "sess-1", "gh run watch", "gh run watch 1", CommandPaths::none())
-        .expect("write running command");
+    WorkStatus::new_command(
+        "stale-cmd",
+        "sess-1",
+        "gh run watch",
+        "gh run watch 1",
+        CommandPaths::none(),
+    )
+    .expect("write running command");
 
     // A command that finished normally must be left untouched.
-    WorkStatus::new_command("done-cmd", "sess-2", "true", "true", CommandPaths::none()).expect("write command");
+    WorkStatus::new_command("done-cmd", "sess-2", "true", "true", CommandPaths::none())
+        .expect("write command");
     WorkStatus::finish_command(
         "done-cmd",
         "sess-2",
@@ -93,10 +100,22 @@ fn running_command_file_is_finalized_and_completed_one_is_spared() {
 fn a_running_file_the_index_does_not_name_is_left_alone() {
     let _guard = TempStatusDir::new();
 
-    WorkStatus::new_command("killed-cmd", "sess-1", "sleep 900", "sleep 900", CommandPaths::none())
-        .expect("write running command");
-    WorkStatus::new_command("unnamed-cmd", "sess-2", "sleep 900", "sleep 900", CommandPaths::none())
-        .expect("write second running command");
+    WorkStatus::new_command(
+        "killed-cmd",
+        "sess-1",
+        "sleep 900",
+        "sleep 900",
+        CommandPaths::none(),
+    )
+    .expect("write running command");
+    WorkStatus::new_command(
+        "unnamed-cmd",
+        "sess-2",
+        "sleep 900",
+        "sleep 900",
+        CommandPaths::none(),
+    )
+    .expect("write second running command");
 
     let finalized = WorkStatus::reconcile_stale_commands(&["killed-cmd".to_string()]);
     assert_eq!(finalized, 1, "only the named run is finalized");

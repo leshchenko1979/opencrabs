@@ -16,8 +16,8 @@
 use crate::brain::agent::service::AgentService;
 use crate::brain::provider::Provider;
 use crate::brain::skills::{
-    retained_set_budget_tokens, retained_set_tokens, AuxiliaryFile, RETAINED_SET_BUDGET_RATIO,
-    Skill, SkillSource,
+    AuxiliaryFile, RETAINED_SET_BUDGET_RATIO, Skill, SkillSource, retained_set_budget_tokens,
+    retained_set_tokens,
 };
 use crate::brain::tools::seen_skills;
 use crate::db::Database;

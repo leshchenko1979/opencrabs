@@ -10,9 +10,9 @@ use crate::memory::db::{MemoryGcReport, Store};
 use crate::services::context::ServiceContext;
 use crate::services::maintenance::{
     MAINTENANCE_CONTENDED_RETRY, MAX_CONSECUTIVE_FAILURE_RETRIES, MEMORY_RECLAIM_TICK,
-    MaintenanceTiming, RECLAIM_WARMUP_OFFSET, SWEEP_WARMUP, MaintenanceService, SweepOutcome,
-    enter_maintenance, leave,
-    next_sweep_delay, note_subagent_catchup_done, reclaim_is_due, take_subagent_catchup, try_enter,
+    MaintenanceService, MaintenanceTiming, RECLAIM_WARMUP_OFFSET, SWEEP_WARMUP, SweepOutcome,
+    enter_maintenance, leave, next_sweep_delay, note_subagent_catchup_done, reclaim_is_due,
+    take_subagent_catchup, try_enter,
 };
 use crate::services::session::SessionService;
 use tempfile::tempdir;
@@ -505,7 +505,11 @@ fn test_failed_sweep_retries_short_then_escalates() {
     // Past the bound it goes back to the configured interval, so a broken sweep
     // cannot spin against the database it is failing on.
     assert_eq!(
-        next_sweep_delay(SweepOutcome::Failed, MAX_CONSECUTIVE_FAILURE_RETRIES, &timing),
+        next_sweep_delay(
+            SweepOutcome::Failed,
+            MAX_CONSECUTIVE_FAILURE_RETRIES,
+            &timing
+        ),
         interval,
         "a persistently failing sweep must escalate back to the full interval"
     );

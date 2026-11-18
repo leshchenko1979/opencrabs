@@ -230,8 +230,15 @@ async fn clear_dead_sessions_reaps_only_rows_for_missing_sessions() {
     .expect("record dead");
 
     let reaped = repo.clear_dead_sessions().await.expect("reap");
-    assert_eq!(reaped.len(), 1, "only the row whose session is gone is dropped");
-    assert_eq!(reaped[0].session_id, dead, "reaper returns the dead row for auditing");
+    assert_eq!(
+        reaped.len(),
+        1,
+        "only the row whose session is gone is dropped"
+    );
+    assert_eq!(
+        reaped[0].session_id, dead,
+        "reaper returns the dead row for auditing"
+    );
     assert_eq!(reaped[0].origin, PushOrigin::SessionNotify);
 
     let rows = repo.all().await.expect("all");
@@ -374,7 +381,7 @@ async fn clear_batch_removes_multiple_rows_atomically() {
 // ---------------------------------------------------------------------------
 
 use crate::brain::agent::service::notify_queue::{
-    durable_context_text, strip_busy_wrapper, wrap_busy_once, BUSY_LANE_WRAPPER,
+    BUSY_LANE_WRAPPER, durable_context_text, strip_busy_wrapper, wrap_busy_once,
 };
 
 #[test]

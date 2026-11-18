@@ -402,10 +402,8 @@ fn render_emits_one_not_retained_header_when_both_causes_fire() {
     let unread = dir.join("never-read.md");
     std::fs::write(&unread, "# never read\n").unwrap();
 
-    let (registered, rejected) = register(
-        sid,
-        &[law_display.clone(), unread.display().to_string()],
-    );
+    let (registered, rejected) =
+        register(sid, &[law_display.clone(), unread.display().to_string()]);
     assert_eq!(registered.len(), 1, "the read document is carried");
     assert_eq!(rejected.len(), 1, "the unread one is refused");
 

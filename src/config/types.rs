@@ -1862,19 +1862,35 @@ pub struct AgentConfig {
     /// Kept on the wire under its original name so an existing config keeps
     /// its exact behaviour; [`AgentConfig::subagent_session_ttl_days`] resolves
     /// the cascade. New configs should use the section.
-    #[serde(default, rename = "subagent_session_ttl_days", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "subagent_session_ttl_days",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub legacy_subagent_session_ttl_days: Option<u32>,
 
     /// Deprecated flat key — use `[agent.retention].messages` (#844).
-    #[serde(default, rename = "message_retention_days", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "message_retention_days",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub legacy_message_retention_days: Option<u32>,
 
     /// Deprecated flat key — use `[agent.retention].feedback_ledger` (#844).
-    #[serde(default, rename = "feedback_ledger_retention_days", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "feedback_ledger_retention_days",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub legacy_feedback_ledger_retention_days: Option<u32>,
 
     /// Deprecated flat key — use `[agent.retention].tool_output_files` (#844).
-    #[serde(default, rename = "tool_output_retention_days", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "tool_output_retention_days",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub legacy_tool_output_retention_days: Option<u32>,
 
     /// Retention windows for the maintenance sweep (#844).

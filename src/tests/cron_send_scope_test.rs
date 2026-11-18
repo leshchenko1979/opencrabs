@@ -468,10 +468,16 @@ async fn an_unbound_session_target_permits_nothing() {
     let id = seed_bound_session(&pool, None, "").await;
     let deliver_to = format!("session:{id}");
 
-    assert!(expand_session_targets(&pool, Some(&deliver_to)).await.is_empty());
+    assert!(
+        expand_session_targets(&pool, Some(&deliver_to))
+            .await
+            .is_empty()
+    );
     assert_eq!(
         cron_job_scope_async(&pool, Some(&deliver_to)).await,
-        SendScope::Nowhere(NoTargetReason::Unresolvable { declared: deliver_to.clone() }),
+        SendScope::Nowhere(NoTargetReason::Unresolvable {
+            declared: deliver_to.clone()
+        }),
         "the job DID declare a destination — it just cannot be resolved"
     );
 }
@@ -505,10 +511,16 @@ async fn an_archived_session_target_permits_nothing() {
     );
 
     let deliver_to = format!("session:{id}");
-    assert!(expand_session_targets(&pool, Some(&deliver_to)).await.is_empty());
+    assert!(
+        expand_session_targets(&pool, Some(&deliver_to))
+            .await
+            .is_empty()
+    );
     assert_eq!(
         cron_job_scope_async(&pool, Some(&deliver_to)).await,
-        SendScope::Nowhere(NoTargetReason::Unresolvable { declared: deliver_to.clone() })
+        SendScope::Nowhere(NoTargetReason::Unresolvable {
+            declared: deliver_to.clone()
+        })
     );
 }
 
@@ -558,7 +570,11 @@ async fn non_session_segments_are_untouched_by_the_expansion() {
     let pool = scope_test_pool().await;
     let deliver_to = "telegram:-100999111, https://example.test/hook";
 
-    assert!(expand_session_targets(&pool, Some(deliver_to)).await.is_empty());
+    assert!(
+        expand_session_targets(&pool, Some(deliver_to))
+            .await
+            .is_empty()
+    );
     assert_eq!(
         cron_job_scope_async(&pool, Some(deliver_to)).await,
         SendScope::Permitted(vec![PermittedTarget {
@@ -712,9 +728,10 @@ async fn the_nowhere_refusals_are_pairwise_distinct() {
         async { refusal_for("telegram", "-1") },
     )
     .await;
-    let unknown = with_send_scope(Some(SendScope::Nowhere(NoTargetReason::JobUnknown)), async {
-        refusal_for("telegram", "-1")
-    })
+    let unknown = with_send_scope(
+        Some(SendScope::Nowhere(NoTargetReason::JobUnknown)),
+        async { refusal_for("telegram", "-1") },
+    )
     .await;
 
     assert_ne!(undeclared, unresolvable);
@@ -736,7 +753,9 @@ async fn an_unbound_session_job_refuses_with_the_unresolvable_reason() {
     let scope = cron_job_scope_async(&pool, Some(&deliver_to)).await;
     assert_eq!(
         scope,
-        SendScope::Nowhere(NoTargetReason::Unresolvable { declared: deliver_to.clone() }),
+        SendScope::Nowhere(NoTargetReason::Unresolvable {
+            declared: deliver_to.clone()
+        }),
         "a job that DID declare a destination must not be read as undeclared"
     );
 

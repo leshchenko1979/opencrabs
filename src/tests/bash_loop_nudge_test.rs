@@ -4,7 +4,7 @@
 use crate::brain::agent::error::format_user_error;
 use crate::brain::agent::service::loop_break::loop_break_error;
 use crate::brain::agent::service::tool_loop::{
-    is_bash_call_signature, is_file_mod_call_signature, repeat_loop_action, RepeatLoopAction,
+    RepeatLoopAction, is_bash_call_signature, is_file_mod_call_signature, repeat_loop_action,
 };
 
 #[test]

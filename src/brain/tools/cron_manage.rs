@@ -288,7 +288,6 @@ impl CronManageTool {
             )));
         }
 
-
         let trigger_cmd = input
             .get("trigger_cmd")
             .and_then(|v| v.as_str())

@@ -9,7 +9,7 @@ use teloxide::types::{ChatAction, ChatId, ThreadId};
 
 use super::flow::{
     COMPACTING_HEADER_TEXT, CompactionBreakdown, DisplayItem, StreamingState, ToolMsg,
-    compaction_breakdown, compacting_flow_line, detach_flow_for_followup, echoes_as_system_line,
+    compacting_flow_line, compaction_breakdown, detach_flow_for_followup, echoes_as_system_line,
     queued_preview,
 };
 use super::handler::tool_context;
@@ -211,11 +211,10 @@ pub(crate) fn build_progress_cb(
             }
             ProgressEvent::SelfHealingAlert { message } => {
                 if let Ok(mut s) = st.lock() {
-                    s.display_queue
-                        .push(DisplayItem::System(format!(
-                            "🔧 {}",
-                            crate::utils::sanitize::normalize_dashes(&message)
-                        )));
+                    s.display_queue.push(DisplayItem::System(format!(
+                        "🔧 {}",
+                        crate::utils::sanitize::normalize_dashes(&message)
+                    )));
                 }
             }
             ProgressEvent::RetryAttempt {

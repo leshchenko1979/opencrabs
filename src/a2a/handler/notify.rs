@@ -31,8 +31,8 @@ use crate::brain::agent::service::notify_policy::{
 };
 use crate::brain::agent::service::notify_receipts;
 use crate::brain::agent::service::quiet_delivery;
-use crate::brain::agent::service::session_routes::deliver_to_session;
 use crate::brain::agent::service::session_routes::Delivery;
+use crate::brain::agent::service::session_routes::deliver_to_session;
 use crate::brain::agent::{PushOrigin, QueuedUserMessage};
 use crate::services::{ServiceContext, SessionService};
 
