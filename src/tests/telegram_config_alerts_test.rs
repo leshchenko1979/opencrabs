@@ -679,3 +679,76 @@ fn test_audit_embedding_key_alert_fires_for_a_remote_endpoint() {
         "a keyless remote endpoint is a real defect and must still be reported; got: {problems:?}"
     );
 }
+
+/// A key in keys.toml is a key — the documented config/keys split must not
+/// raise "no API key is set".
+///
+/// `ProviderConfigs` has no `memory_embedding` field and carries no
+/// `deny_unknown_fields`, so `[providers.memory_embedding]` is dropped at
+/// serde: `config.memory.embedding.api_key` is None for every endpoint
+/// configured the documented way, and this audit DM'd the owner about a store
+/// that was filling normally (#881).
+#[test]
+fn test_audit_embedding_key_alert_reads_the_key_from_keys_toml() {
+    let mut config = Config::default();
+    config.memory.vector_enabled = true;
+    config.memory.embedding = Some(EmbeddingConfig {
+        url: Some("https://api.openai.com/v1".into()),
+        api_key: None,
+        ..Default::default()
+    });
+
+    let raw_keys = "[providers.memory_embedding]\napi_key = \"sk-a-real-credential\"\n";
+    let problems = audit_config_problems(&config, "", Some(raw_keys));
+    assert!(
+        !problems
+            .iter()
+            .any(|p| matches!(p.kind, ConfigProblemKind::EmbeddingKeyMissing { .. })),
+        "the credential is in keys.toml, so nothing is missing; got: {problems:?}"
+    );
+}
+
+/// POSITIVE CONTROL for the test above: reading keys.toml must not decay into
+/// "any keys.toml silences the alert". The same keyless remote endpoint, with a
+/// keys.toml that carries no embedding credential, is still a real 401.
+#[test]
+fn test_audit_embedding_key_alert_fires_when_keys_toml_lacks_the_section() {
+    let mut config = Config::default();
+    config.memory.vector_enabled = true;
+    config.memory.embedding = Some(EmbeddingConfig {
+        url: Some("https://api.openai.com/v1".into()),
+        api_key: None,
+        ..Default::default()
+    });
+
+    let raw_keys = "[providers.openai]\napi_key = \"sk-someone-elses-credential\"\n";
+    let problems = audit_config_problems(&config, "", Some(raw_keys));
+    assert!(
+        problems
+            .iter()
+            .any(|p| matches!(p.kind, ConfigProblemKind::EmbeddingKeyMissing { .. })),
+        "keys.toml without [providers.memory_embedding] leaves the endpoint keyless; got: {problems:?}"
+    );
+}
+
+/// A whitespace-only key in keys.toml is not a credential: it reaches the
+/// provider as an empty bearer token and 401s exactly like no key at all.
+#[test]
+fn test_audit_embedding_key_alert_ignores_a_blank_key_in_keys_toml() {
+    let mut config = Config::default();
+    config.memory.vector_enabled = true;
+    config.memory.embedding = Some(EmbeddingConfig {
+        url: Some("https://api.openai.com/v1".into()),
+        api_key: None,
+        ..Default::default()
+    });
+
+    let raw_keys = "[providers.memory_embedding]\napi_key = \"   \"\n";
+    let problems = audit_config_problems(&config, "", Some(raw_keys));
+    assert!(
+        problems
+            .iter()
+            .any(|p| matches!(p.kind, ConfigProblemKind::EmbeddingKeyMissing { .. })),
+        "a blank key is no key, so the alert still fires; got: {problems:?}"
+    );
+}

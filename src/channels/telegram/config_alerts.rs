@@ -275,10 +275,23 @@ pub fn audit_config_problems(
     // that serves without auth — `embedding.rs` only sends an `Authorization`
     // header when a key is present — so demanding one here flagged a working
     // store as broken. A remote endpoint still needs its key.
+    //
+    // #881: the credential may live in keys.toml, which is the documented
+    // config/keys split. `ProviderConfigs` has no `memory_embedding` field and
+    // carries no `deny_unknown_fields`, so that section is dropped at serde and
+    // `config.memory.embedding.api_key` is None for EVERY endpoint configured
+    // the documented way — this alert fired at owners whose store was filling
+    // normally. The keys text is already an input here; read the same section
+    // `read_memory_config()` resolves through rather than growing a second copy
+    // of the rule.
+    let keys_toml_supplies_key = raw_keys_toml
+        .and_then(crate::memory::keys::memory_embedding_key_in)
+        .is_some();
     if config.memory.vector_enabled
         && let Some(ref emb) = config.memory.embedding
         && emb.url.is_some()
-        && emb.api_key.as_ref().is_none_or(|k| k.trim().is_empty())
+        && crate::memory::keys::needs_embedding_key(emb.api_key.as_deref())
+        && !keys_toml_supplies_key
         && crate::memory::keys::embedding_key_required(emb.url.as_deref())
     {
         problems.push(ConfigProblem {
