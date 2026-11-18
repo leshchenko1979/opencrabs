@@ -4,7 +4,7 @@
 //! source attribution. Implements decay logic and contradiction detection.
 //!
 //! Design:
-//! - Confidence levels: verified, inferred, uncertain, contradicted
+//! - Confidence levels: verified, inferred, uncertain, expired, contradicted
 //! - Source attribution: every belief tagged with origin
 //! - Decay: unverified beliefs lose confidence after 30 days
 //! - Contradiction detection: new fact conflicts existing belief → flagged
@@ -22,8 +22,16 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {
-    /// Conflicts with another belief — needs resolution (lowest confidence)
+    /// Conflicts with another belief — needs resolution (lowest confidence).
+    ///
+    /// Reserved for a REAL value conflict: the only writer is `add_belief`
+    /// when a key's value changes. Decay never lands here, so
+    /// `list_contradictions()` reports conflicts and not mere staleness.
     Contradicted,
+    /// Stale: nobody looked at this for the decay window. Terminal — decay
+    /// never moves it further, and an injection (`touch_belief`) is weak
+    /// evidence of relevance, so it rehabilitates back to `Uncertain`.
+    Expired,
     /// Not yet verified, assumed true
     Uncertain,
     /// Derived from other beliefs or logical inference
@@ -33,12 +41,16 @@ pub enum Confidence {
 }
 
 impl Confidence {
-    /// Decay confidence by one level. Verified beliefs don't decay.
+    /// Decay confidence by one level. Verified beliefs don't decay, and
+    /// `Expired`/`Contradicted` are terminal — a stale belief stays stale
+    /// until an injection rehabilitates it, and a value conflict is never
+    /// aged away (#887).
     pub fn decay(self) -> Self {
         match self {
             Confidence::Verified => Confidence::Verified,
             Confidence::Inferred => Confidence::Uncertain,
-            Confidence::Uncertain => Confidence::Contradicted,
+            Confidence::Uncertain => Confidence::Expired,
+            Confidence::Expired => Confidence::Expired,
             Confidence::Contradicted => Confidence::Contradicted,
         }
     }
@@ -49,6 +61,7 @@ impl Confidence {
             Confidence::Verified => "verified",
             Confidence::Inferred => "inferred",
             Confidence::Uncertain => "uncertain",
+            Confidence::Expired => "expired",
             Confidence::Contradicted => "contradicted",
         }
     }
@@ -213,15 +226,30 @@ impl EpistemicStore {
         }
     }
 
-    /// Record a usage hit on a belief: increment `hits` and set `last_used`
-    /// to now. Returns true if the belief existed, false otherwise.
+    /// Record a usage hit on a belief: increment `hits`, set `last_used`
+    /// to now, and rehabilitate an `Expired` belief back to `Uncertain`.
+    /// Returns true if the belief existed, false otherwise.
     ///
     /// Called from `memory_recall.rs` when a belief's section is injected
     /// into context (#1641).
+    ///
+    /// The rehabilitation is deliberately ASYMMETRIC (#887), and the
+    /// asymmetry is the point — do not "fix" it:
+    /// - `Expired -> Uncertain`: an injection is weak evidence of relevance,
+    ///   so a stale belief can decay and recover instead of being one-way.
+    /// - `Contradicted` is NOT rehabilitated: a real value conflict is not
+    ///   cleared by a recall. Clearing it would hide the conflict that the
+    ///   `Contradicted` label exists to report, and would turn
+    ///   `list_contradictions()` back into a measure of age.
+    /// - `Verified` is immune: it never decayed, so there is nothing to
+    ///   rehabilitate.
     pub fn touch_belief(&mut self, key: &str) -> bool {
         if let Some(belief) = self.beliefs.get_mut(key) {
             belief.hits += 1;
             belief.last_used = Some(Utc::now());
+            if belief.confidence == Confidence::Expired {
+                belief.confidence = Confidence::Uncertain;
+            }
             true
         } else {
             false
@@ -305,6 +333,35 @@ impl EpistemicStore {
             },
             Err(_) => Self::new(),
         }
+    }
+
+    /// Prune the retired line-level MEMORY.md namespace (#887).
+    ///
+    /// `write_opencrabs_file` used to register one belief per MEMORY.md line
+    /// under `memory:<hash-of-first-6-words>`. Nothing ever touched those
+    /// keys: `memory_recall::touch_recalled` only formats
+    /// `MEMORY.md##<heading>`, so every line-level row sat at `hits == 0`
+    /// forever and decayed on the 30-day clock no matter how often its rule
+    /// was used. The write path is gone; this removes the rows it left.
+    ///
+    /// Section keys are untouched — `MEMORY.md##<title>` does not carry the
+    /// `memory:` prefix, and it is the live namespace the recall pass and
+    /// the archive pass key on. One-way and idempotent: a second call on a
+    /// pruned store removes nothing.
+    ///
+    /// Returns the removed keys, sorted.
+    pub fn prune_line_level_memory_beliefs(&mut self) -> Vec<String> {
+        let mut stale: Vec<String> = self
+            .beliefs
+            .keys()
+            .filter(|key| key.starts_with("memory:") && !key.starts_with("MEMORY.md##"))
+            .cloned()
+            .collect();
+        stale.sort();
+        for key in &stale {
+            self.beliefs.remove(key);
+        }
+        stale
     }
 
     /// Index MEMORY.md sections into beliefs from raw content (#1641).
@@ -628,6 +685,18 @@ fn get_store() -> &'static std::sync::Mutex<EpistemicStore> {
         let path = epistemic_store_path().expect("home dir must exist");
         let mut store = EpistemicStore::load(&path);
 
+        // One-way migration (#887): drop the retired line-level MEMORY.md
+        // namespace. Those rows were written per line by
+        // `write_opencrabs_file` under `memory:<hash>` and were never
+        // touchable, so they only accumulated and decayed. Idempotent.
+        let pruned = store.prune_line_level_memory_beliefs();
+        if !pruned.is_empty() {
+            tracing::info!(
+                "Epistemic session start: pruned {} retired line-level memory beliefs",
+                pruned.len()
+            );
+        }
+
         // Session start maintenance: decay stale beliefs + backfill MEMORY.md (#1641).
         // Decay policy comes from [epistemic] in ralph_loop.toml (piece C, #1657);
         // absent config keeps the historical default: enabled, 30 days.
@@ -655,8 +724,9 @@ fn get_store() -> &'static std::sync::Mutex<EpistemicStore> {
             }
         }
 
-        // Save if anything changed: decayed beliefs or backfilled sections.
-        if (!decayed.is_empty() || added > 0)
+        // Save if anything changed: pruned rows, decayed beliefs or
+        // backfilled sections.
+        if (!pruned.is_empty() || !decayed.is_empty() || added > 0)
             && let Err(e) = store.save(&path)
         {
             tracing::warn!("Failed to save epistemic store after session start: {}", e);

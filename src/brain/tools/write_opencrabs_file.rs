@@ -149,76 +149,6 @@ fn verify_or_rollback(
     ))
 }
 
-/// Derive the epistemic belief `(key, value)` for a single MEMORY.md line.
-/// Returns `None` for lines that shouldn't be tracked (blanks, markdown
-/// headers, separators, short noise). Pure — no store access — so the
-/// key-derivation logic is unit-testable without touching disk.
-pub(crate) fn memory_belief_key_value(line: &str) -> Option<(String, String)> {
-    let line = line.trim();
-    if line.is_empty()
-        || line.starts_with('#')
-        || line.starts_with("---")
-        || line.starts_with('*')
-        || line.chars().count() < 12
-    {
-        return None;
-    }
-    // A belief's identity is its normalized topic (first few words) so a
-    // rewrite of the same rule collides on the same key and the engine can
-    // detect the value change as a contradiction.
-    let topic: String = line
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect::<String>()
-        .split_whitespace()
-        .take(6)
-        .collect::<Vec<_>>()
-        .join(" ");
-    if topic.is_empty() {
-        return None;
-    }
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    topic.hash(&mut hasher);
-    Some((format!("memory:{:016x}", hasher.finish()), line.to_string()))
-}
-
-/// Epistemic engine integration (#862): when MEMORY.md is written, register
-/// each meaningful line as a belief so the engine can decay stale memories
-/// and flag contradictions when a rule about the same topic is rewritten.
-/// Only MEMORY.md is tracked — SOUL/AGENTS/CODE/etc. are identity and config,
-/// not beliefs. Contradictions are logged, never blocking.
-fn track_memory_belief(path_str: &str, written: &str) {
-    let file_name = std::path::Path::new(path_str)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    if file_name != "MEMORY.md" {
-        return;
-    }
-    for line in written.lines() {
-        let Some((key, value)) = memory_belief_key_value(line) else {
-            continue;
-        };
-        let result = super::epistemic::add_belief(
-            &key,
-            &value,
-            super::epistemic::Confidence::Inferred,
-            "write_opencrabs_file:MEMORY.md",
-        );
-        if let super::epistemic::ContradictionResult::Contradicted {
-            old_value,
-            new_value,
-        } = result
-        {
-            tracing::warn!(
-                "write_opencrabs_file: MEMORY.md belief contradicted — '{old_value}' → '{new_value}'"
-            );
-        }
-    }
-}
-
 #[async_trait]
 impl Tool for WriteOpenCrabsFileTool {
     fn name(&self) -> &str {
@@ -419,8 +349,6 @@ impl Tool for WriteOpenCrabsFileTool {
                         if let Err(msg) = verify_or_rollback(&full_path, content, &backup_path) {
                             return Ok(ToolResult::error(msg));
                         }
-                        // Epistemic engine (#862): track MEMORY.md facts as beliefs.
-                        track_memory_belief(path_str, content);
                         Ok(ToolResult::success(format!(
                             "Wrote {} bytes to {}",
                             content.len(),
@@ -494,8 +422,6 @@ impl Tool for WriteOpenCrabsFileTool {
                             {
                                 return Ok(ToolResult::error(msg));
                             }
-                            // Epistemic engine (#862): track MEMORY.md beliefs on append.
-                            track_memory_belief(path_str, &effective_content);
                             if brain_file_safety::is_protected_path(&full_path) {
                                 // Index what we just wrote (#1018). The index was
                                 // stayed unsearchable until the next restart — the
@@ -638,8 +564,6 @@ impl Tool for WriteOpenCrabsFileTool {
                         if let Err(msg) = verify_or_rollback(&full_path, &updated, &backup_path) {
                             return Ok(ToolResult::error(msg));
                         }
-                        // Epistemic engine (#862): track MEMORY.md beliefs on replace.
-                        track_memory_belief(path_str, new_text);
                         Ok(ToolResult::success(format!(
                             "Replaced text in {}",
                             full_path.display()
