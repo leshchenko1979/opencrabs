@@ -510,10 +510,12 @@ jobs:
           # cannot accumulate flat time at all. Both arms were driven before this
           # landed — a CPU-burning process survived 20s at a 6s threshold, and a
           # sleeping one fired at 6s with wchan=hrtimer_nanosleep.
-          # On fire: wchan + /proc/<pid>/syscall + kernel stack + vmstat (none of which
-          # needs gdb), then SIGTERM the build — futex vs
+          # On fire: wchan + kernel stack + vmstat, then SIGTERM the build — futex vs
           # read/fsync is the #781-deadlock vs I/O-thrash discriminator, and the
           # step fails in ~10 min instead of burning to the 45-min job cap.
+          # /proc/<pid>/syscall is attempted but DENIED on the runner (measured
+          # 2026-11-18, run 44276536423: 'Operation not permitted' on both pids), so
+          # it is reported as unavailable and never counted as evidence.
           # FAIL-OPEN by construction: no python3 or an unparsable heredoc warns
           # and continues. A broken detector must never block a gate.
           # Revert = delete this block and the STALLWATCH teardown below.
@@ -655,9 +657,12 @@ jobs:
                       print("STALLWATCH %s pid=%d: %s" % (label, pid, out[:2000]), flush=True)
               print("----- user stacks -----")
               if not shutil.which("gdb"):
-                  print("STALLWATCH: gdb not on PATH - user stacks skipped (wchan+syscall+kstack "
-                        "above carry the futex-vs-IO discriminator); dispatch with hangdump=true "
-                        "to install it")
+                  print("STALLWATCH: gdb not on PATH - user stacks skipped. The kernel-side "
+                        "evidence above (wchan + kstack, plus vmstat) separates futex from "
+                        "read/fsync; /proc/<pid>/syscall is DENIED on the runner (measured "
+                        "2026-11-18: 'Operation not permitted' for both pids) and is reported "
+                        "as unavailable when it is. Dispatch with hangdump=true to install gdb "
+                        "and get the user-space frames.")
               for pid, (comm, _) in sorted(procs.items() if shutil.which("gdb") else []):
                   print("===== STALLWATCH stack pid=%d comm=%s =====" % (pid, comm))
                   # sudo: YAMA exempts root from ptrace_scope on the runner
