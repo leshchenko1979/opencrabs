@@ -76,6 +76,11 @@ on:
         required: false
         default: false
         type: boolean
+      lockupdate:
+        description: "true = cargo update (newest semver-compatible for every package) with the existing Cargo.lock; uploads the updated lock as the updated-lock artifact instead of gating"
+        required: false
+        default: false
+        type: boolean
       swap:
         description: "true = swap prep: mirror build-leg gate 4 (Session-Id trailer) on the gated ref before the gates; swap-mode GREEN means swappable"
         required: false
@@ -276,7 +281,7 @@ jobs:
   # this job and nothing else; the build family is gated off by `if:`.
   pr-gates:
     if: ${{ inputs.mode == 'gate' }}
-    name: PR-lane gates (${{ inputs.ref }}${{ inputs.fix && ' — FIX MODE' || inputs.lockregen && ' — LOCK REGEN' || inputs.swap && ' — SWAP MODE' || inputs.fast && ' — FAST' || '' }})
+    name: PR-lane gates (${{ inputs.ref }}${{ inputs.fix && ' — FIX MODE' || inputs.lockregen && ' — LOCK REGEN' || inputs.lockupdate && ' — LOCK UPDATE' || inputs.swap && ' — SWAP MODE' || inputs.fast && ' — FAST' || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -285,7 +290,7 @@ jobs:
           ref: ${{ inputs.ref }}
 
       - name: Gate 4 mirror — Session-Id trailer on the gated ref (swap mode)
-        if: ${{ inputs.swap && !inputs.fix && !inputs.lockregen }}
+        if: ${{ inputs.swap && !inputs.fix && !inputs.lockregen && !inputs.lockupdate }}
         # Mirrors quick-build-linux.yml ORDER gate 4 EXACTLY (same regex), so
         # a swap-mode RED here equals the build-leg refusal — caught minutes
         # earlier, before a wasted build dispatch.
@@ -307,18 +312,18 @@ jobs:
           save-if: true # pre-PR branches re-run on fix-forward; warm cache turns the second dispatch into minutes
 
       - name: Run sccache-action
-        if: ${{ !inputs.fix && !inputs.lockregen }}
+        if: ${{ !inputs.fix && !inputs.lockregen && !inputs.lockupdate }}
         uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Install system deps (pkg-config, ALSA dev, mold + clang)
-        if: ${{ !inputs.fix && !inputs.lockregen }}
+        if: ${{ !inputs.fix && !inputs.lockregen && !inputs.lockupdate }}
         # Mirrors upstream ci.yml's libasound2-dev (local-stt/cpal) plus the
         # pkg-config that alsa-sys needs to compile at all (carrier lesson,
         # 378a68a8), and mold+clang upfront for fast linking.
         run: sudo apt-get update -qq && sudo apt-get install -y pkg-config libasound2-dev mold clang
 
       - name: Check formatting
-        if: ${{ !inputs.fix && !inputs.lockregen }}
+        if: ${{ !inputs.fix && !inputs.lockregen && !inputs.lockupdate }}
         # Soft-fail, mirroring upstream ci.yml verbatim: "legacy un-formatted
         # code blocks shouldn't block PRs yet. Promote to hard-fail once a fmt
         # sweep lands on main." When upstream promotes it, so do we — not before.
@@ -326,14 +331,14 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        if: ${{ !inputs.fix && !inputs.lockregen }}
+        if: ${{ !inputs.fix && !inputs.lockregen && !inputs.lockupdate }}
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"
         run: cargo clippy --locked --lib --bins --tests --all-features -- -D warnings
 
       - name: "Diagnose: resource envelope BEFORE test leg"
-        if: ${{ inputs.diagnose && !inputs.fix && !inputs.lockregen && !inputs.fast }}
+        if: ${{ inputs.diagnose && !inputs.fix && !inputs.lockregen && !inputs.lockupdate && !inputs.fast }}
         # Input-gated diagnostic (default false). Every probe is `|| true`:
         # a measurement that can fail the gate it measures is worthless.
         run: |
@@ -403,7 +408,7 @@ jobs:
 
       - name: Run tests
         id: tests
-        if: ${{ !inputs.fix && !inputs.lockregen && !inputs.fast }}
+        if: ${{ !inputs.fix && !inputs.lockregen && !inputs.lockupdate && !inputs.fast }}
         # v0.4.23 law: the all-features test gate. Flags mirror upstream's
         # `test` job exactly (profile ci + mold linker).
         #
@@ -786,7 +791,7 @@ jobs:
           exit $RC
 
       - name: "Diagnose: resource envelope AFTER test leg"
-        if: ${{ always() && inputs.diagnose && !inputs.fix && !inputs.lockregen && !inputs.fast }}
+        if: ${{ always() && inputs.diagnose && !inputs.fix && !inputs.lockregen && !inputs.lockupdate && !inputs.fast }}
         # `always()` is load-bearing: the value of this leg is the CONTRAST.
         # On an ordinary test failure GitHub still runs it (and post-steps) and
         # the envelope is captured; on a runner teardown it never runs at all,
@@ -862,5 +867,33 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: regen-lock
+          path: Cargo.lock
+          if-no-files-found: error
+
+      - name: "Guard: existing Cargo.lock present (lock-update mode)"
+        if: ${{ inputs.lockupdate }}
+        # `cargo update` rewrites an existing lock. With no lock it would
+        # resolve from scratch, which is a different (and unreviewable) delta.
+        run: test -f Cargo.lock
+
+      - name: Full semver-compatible lock update (lock-update mode)
+        if: ${{ inputs.lockupdate }}
+        # `cargo update` with no arguments moves every package to the newest
+        # version its REQUIREMENT in Cargo.toml still admits — patch and minor
+        # for 1.x+, patch only for 0.x. Requirements are never rewritten here;
+        # a 0.x minor bump is a manifest edit and a separate, gated change.
+        run: |
+          cargo update 2>&1 | tee /tmp/cargo-update.log
+          echo "=== packages moved ==="
+          grep -cE '^\s+Updating ' /tmp/cargo-update.log || true
+          echo "=== lock delta ==="
+          git diff --stat Cargo.lock
+          git diff Cargo.lock | head -400
+
+      - name: Upload updated-lock (lock-update mode)
+        if: ${{ inputs.lockupdate }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: updated-lock
           path: Cargo.lock
           if-no-files-found: error

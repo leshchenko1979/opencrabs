@@ -27,6 +27,13 @@ name: PR-lane gates
 # uploads the regenerated lock as the `regen-lock` artifact for box-side
 # application (box law 2026-08-28: no cargo on the box). Lock-regen mode
 # skips the gate steps. Revert = delete the lockregen input + its steps.
+# Lock-update mode (2026-11-18):
+#   gh workflow run pr-checks.yml --ref ci/quick-build-linux -f ref=<branch> -f lockupdate=true
+# runs a real `cargo update` — every package to the newest version its Cargo.toml
+# REQUIREMENT still admits (patch+minor for 1.x+, patch only for 0.x), requirements
+# themselves untouched — and uploads the result as the `updated-lock` artifact.
+# Distinct from lock-regen, which deliberately keeps every locked version. Revert =
+# delete the lockupdate input + its steps.
 # Swap mode (owner 2026-09-03, fleet-directives 'Swap-head signature for
 # merge-derived binaries'):
 #   gh workflow run pr-checks.yml --ref ci/quick-build-linux -f ref=<swap-head-sha> -f swap=true
@@ -63,6 +70,11 @@ on:
         type: boolean
       lockregen:
         description: "true = cargo metadata minimal re-resolve with the existing Cargo.lock; uploads the regenerated lock as the regen-lock artifact instead of gating"
+        required: false
+        default: false
+        type: boolean
+      lockupdate:
+        description: "true = cargo update (newest semver-compatible for every package) with the existing Cargo.lock; uploads the updated lock as the updated-lock artifact instead of gating"
         required: false
         default: false
         type: boolean
@@ -192,6 +204,7 @@ jobs:
       ref: ${{ inputs.ref || github.ref_name }}
       fix: ${{ inputs.fix }}
       lockregen: ${{ inputs.lockregen }}
+      lockupdate: ${{ inputs.lockupdate }}
       swap: ${{ inputs.swap }}
       fast: ${{ inputs.fast }}
       diagnose: ${{ inputs.diagnose }}
