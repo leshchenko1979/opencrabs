@@ -494,12 +494,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "beea02de84f7d4c090ccf9a2bddcd0595105b35c2ed0c9a0ed66aca4b79559bd"
 
 [[package]]
-name = "base16ct"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd307490d624467aa6f74b0eabb77633d1f758a7b25f12bceb0b22e08d9726f6"
-
-[[package]]
 name = "base64"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1723,19 +1717,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
-name = "crypto-bigint"
-version = "0.7.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "914c195c4d7fbc5ed7f88d14cbf85914d5c664967658d43404b263913a477e82"
-dependencies = [
- "cpubits",
- "ctutils",
- "num-traits",
- "rand_core 0.10.1",
- "serdect",
-]
-
-[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1752,16 +1733,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
  "hybrid-array",
-]
-
-[[package]]
-name = "crypto-primes"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3633a51a39c69ebbaa4feaa694bd83d241e4093901c84a0963b19d9bb3f0cf8f"
-dependencies = [
- "crypto-bigint",
- "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -1794,7 +1765,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
 dependencies = [
  "quote",
- "syn 3.0.10",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3127,18 +3098,16 @@ checksum = "5ca63cb2488b847c12d1ca56034ba0f15613972c0dc0f8a957f525707567b23d"
 
 [[package]]
 name = "glass_pumpkin"
-version = "2.0.0"
+version = "2.0.0-rc0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ff9ef01d1ba41822349a2a9970e706dc6035637957cdddecf32482a8a90e86e"
+checksum = "ec260059e5d59a4899d78dff8bf59abf81f8f5b3b44e9d3ba25c9dade1390a36"
 dependencies = [
- "crypto-bigint",
- "crypto-primes",
  "getrandom 0.4.3",
- "num-bigint 0.5.1",
+ "num-bigint",
  "num-integer",
  "num-traits",
+ "once_cell",
  "rand_core 0.10.1",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3196,7 +3165,7 @@ dependencies = [
  "getrandom 0.4.3",
  "glass_pumpkin",
  "hmac 0.13.0",
- "num-bigint 0.4.8",
+ "num-bigint",
  "num-traits",
  "pbkdf2 0.13.0",
  "sha1 0.11.0",
@@ -3216,7 +3185,7 @@ dependencies = [
  "grammers-crypto",
  "grammers-tl-types",
  "log",
- "num-bigint 0.4.8",
+ "num-bigint",
  "sha1 0.11.0",
 ]
 
@@ -5075,7 +5044,7 @@ version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
 dependencies = [
- "num-bigint 0.4.8",
+ "num-bigint",
  "num-complex",
  "num-integer",
  "num-iter",
@@ -5091,17 +5060,6 @@ checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
 dependencies = [
  "num-integer",
  "num-traits",
-]
-
-[[package]]
-name = "num-bigint"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
-dependencies = [
- "num-integer",
- "num-traits",
- "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -5156,7 +5114,7 @@ version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
 dependencies = [
- "num-bigint 0.4.8",
+ "num-bigint",
  "num-integer",
  "num-traits",
 ]
@@ -7681,16 +7639,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serdect"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66cf8fedced2fcf12406bcb34223dffb92eaf34908ede12fed414c82b7f00b3e"
-dependencies = [
- "base16ct",
- "serde",
-]
-
-[[package]]
 name = "serenity"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8585,7 +8533,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
