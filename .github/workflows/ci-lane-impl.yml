@@ -486,14 +486,25 @@ jobs:
           CMD="cargo test --locked --profile ci --all-features --verbose${{ inputs.test_threads && format(' -- --test-threads={0}', inputs.test_threads) || '' }}"
           echo "+ $CMD"
           # stallwatch — phase-agnostic stall detector (HQ 2026-11-17; #331).
-          # WHY: HANGDUMP above arms on the TEST BINARY appearing, so it is
-          # BLIND to a COMPILE-phase stall — 12/12 sampled 45-min cap-hits ran
-          # ZERO tests, the last line always cargo running rustc over the
-          # dev-dependency tree. This watches FLAT CPU instead, which is
-          # phase-agnostic: a progressing build always advances utime+stime.
+          # WHY: HANGDUMP above arms on the TEST BINARY appearing and needs gdb
+          # attached to it. This watches FLAT CPU over the step's whole process
+          # tree instead, so it is phase-agnostic: a progressing build always
+          # advances utime+stime, and so does a suite still producing results.
+          # CORRECTED 2026-11-18 (first production FIRE, run 44276536423): this
+          # rationale used to claim "12/12 sampled 45-min cap-hits ran ZERO
+          # tests, the last line always cargo running rustc". That was FALSE —
+          # an artifact of `gh run view --log`, which truncates the step
+          # mid-compile. The full job archives show 4/4 re-sampled cap-hits DID
+          # run tests (2,640-4,029 "... ok" lines) and wedged with FOUR tests at
+          # "has been running for over 60 seconds": the #781 class at the
+          # libtest default --test-threads=4. The compile-only reading was the
+          # truncation point, never the run.
           # THRESHOLD 300s (owner order 2026-11-17; lowered from 600s) = 2.2x the
           # longest legitimate log silence measured in a green run (2.28 min /
-          # ~10,700 lines); the stalls ran 32-48 min. The margin is CONSERVATIVE
+          # ~10,700 lines); the stalls ran 14-22 min. (An earlier version of this
+          # line said 32-48 min — that was inflated by the same `gh run view
+          # --log` truncation corrected above; re-measured from full job
+          # archives 2026-11-18.) The margin is CONSERVATIVE
           # even so, because the trigger is FLAT CPU and not log silence: a
           # compiling rustc advances utime+stime on every sample, so healthy work
           # cannot accumulate flat time at all. Both arms were driven before this
@@ -513,9 +524,12 @@ jobs:
           """Phase-agnostic stall watchdog for the CI gate.
 
           Fires on FLAT CPU across the STEP'S OWN process tree, not on log text and not on
-          the test binary appearing. A compile-phase stall emits no log line and never
-          starts a test binary, which is why HANGDUMP is blind to it (12/12 sampled
-          45-minute cap-hits were compile-only, zero tests run).
+          the test binary appearing. Phase-agnostic by construction: a compile-phase stall
+          emits no log line and never starts a test binary, and a test-phase hang stops
+          advancing CPU while the binary sits in a futex -- both leave the sum flat, and the
+          dump separates them. (An earlier version of this docstring claimed every sampled
+          45-minute cap-hit was compile-only; that was a `gh run view --log` truncation
+          artifact, not a measurement -- see the stallwatch comment in the step above.)
 
           Signal: sum(utime+stime) over EVERY process descending from the step shell.
           (STALLWATCH_ROOT). Tree scoping is load-bearing: a box-wide comm
@@ -573,10 +587,11 @@ jobs:
               build-tools filter left it out of both the dump and the CPU sum, so a LOCAL
               drive on 2026-11-17 reported procs=1 -- the parked `cargo` in wait4 -- and never
               named the process that was actually stuck. That observation came from driving
-              the script by hand, NOT from a gate run: swept 2026-11-18, no production dispatch
-              has ever fired this watchdog (24 pr-checks runs 11-17 10:00-18:00Z + 13 build
-              runs = zero runtime FIRE lines). The fix stands on the reason, not on a
-              production catch. Tree scoping already excludes
+              the script by hand, NOT from a gate run. FIRST PRODUCTION FIRE:
+              2026-11-18, run 44276536423 (job 134706016808) — fired at flat=300s with
+              procs=2, naming the wedged `opencrabs-e23d8` test binary
+              (wchan=futex_do_wait) and its parked `cargo` (wchan=do_wait), so the
+              no-comm-filter fix is confirmed in production. Tree scoping already excludes
               unrelated processes, so the filter bought nothing and cost the one process
               that mattered.
 
