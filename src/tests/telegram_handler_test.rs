@@ -113,11 +113,15 @@ fn slash_command_midturn_is_a_distinct_directive() {
 #[test]
 fn plain_followup_midturn_keeps_the_fold_in_wrapper() {
     let q = build_midturn_queued_message(None, "resolved", "also check the logs");
-    assert!(q.context_text.contains("factor it into the CURRENT task"));
+    // "them", not "it": a drained block can carry several messages (#882).
+    assert!(q.context_text.contains("factor them into the CURRENT task"));
     assert!(q.context_text.contains("do not restart from scratch"));
     assert!(q.context_text.contains("also check the logs"));
     // A plain follow-up must NOT read as a command invocation.
     assert!(!q.context_text.contains("explicit NEW directive"));
+    // #882: the wrapper must not attribute the whole block to one speaker.
+    assert!(!q.context_text.contains("The user sent this follow-up"));
+    assert!(q.context_text.contains("senders can differ"));
     assert_eq!(q.display_text, "also check the logs");
 }
 
