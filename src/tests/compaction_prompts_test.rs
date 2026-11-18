@@ -466,6 +466,31 @@ fn no_body_carries_an_ungated_continue_directive() {
     );
 }
 
+/// #886 ask 4: a partial inventory of remainder ("only X remains") reads as a
+/// complete one, and a resumed lane stops early on it. The ban rides the
+/// status rule, so it reaches all 10 bodies — fun and silent alike — and no
+/// body can invite the phrasing without also forbidding it.
+#[test]
+fn every_body_bans_an_inventory_of_remainder() {
+    let mut checked = 0usize;
+    for kind in ALL_KINDS {
+        for silent in [false, true] {
+            let body = build_continuation(kind, silent, true, PlanRecovery::Active);
+            assert!(
+                body.contains("Never write \"only X remains\""),
+                "{kind:?} silent={silent} must ban the inventory-of-remainder \
+                 phrasing: {body}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 10,
+        "the ban was checked on only {checked} bodies — the guard is measuring \
+         the wrong surface"
+    );
+}
+
 // ── #817: the summariser prompt must not teach a read-only loop ──────────────
 //
 // The pre-#817 §7 example was `git status` -> `git diff` -> `read_file` ->

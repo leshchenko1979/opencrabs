@@ -538,6 +538,73 @@ fn status_must_be_derived_not_carried_forward() {
     );
 }
 
+/// #886 ask 1: a next step with a SIDE EFFECT must carry its carrier state
+/// and the store that decides it. A bare imperative for a send, comment,
+/// close or push is what re-executes on resume — so the spec must demand the
+/// stamp, and must forbid the bare imperative it replaces.
+#[test]
+fn side_effecting_next_step_must_carry_its_carrier_state() {
+    assert!(
+        CONTEXT_SRC.contains("A next step with a SIDE EFFECT"),
+        "#886: the spec must name the side-effecting step class explicitly"
+    );
+    for marker in [
+        "state at [snapshot time]",
+        "re-executing. If it already landed",
+        "state: UNKNOWN — check [store] first",
+    ] {
+        assert!(
+            CONTEXT_SRC.contains(marker),
+            "#886: the carrier rule must carry `{marker}` — a step whose carrier \
+             state cannot be established is UNKNOWN, never a bare imperative"
+        );
+    }
+    let rule_at = CONTEXT_SRC
+        .find("A next step with a SIDE EFFECT")
+        .expect("the carrier rule must exist");
+    // Bound the slice on a FIND, never a byte offset: the rule carries em
+    // dashes, so an arbitrary index can land mid-codepoint and panic.
+    let rule_tail = &CONTEXT_SRC[rule_at..];
+    let rule_end = rule_tail
+        .find("This is the MOST IMPORTANT section")
+        .expect("the carrier rule must precede the section-0 closer");
+    let rule = &rule_tail[..rule_end];
+    assert!(
+        rule.contains("never a bare imperative"),
+        "the carrier rule must forbid the bare imperative it replaces: {rule}"
+    );
+}
+
+/// #886 ask 3: a status the summariser cannot evidence is UNKNOWN. Without
+/// this the UNKNOWN arm is decorative — the same pass writes the status and
+/// the evidence, so they always agree and prove nothing about the world.
+#[test]
+fn status_without_a_cited_command_is_unknown() {
+    assert!(
+        CONTEXT_SRC.contains("A status MUST"),
+        "#886: the spec must require the status to cite its evidence"
+    );
+    assert!(
+        CONTEXT_SRC.contains("A status with no such citation is UNKNOWN, never"),
+        "#886: an unevidenced status must default to UNKNOWN, never OPEN"
+    );
+}
+
+/// #886 ask 2: section 1 must record a receipt, and a task without one is
+/// "unverified" rather than "pending". Without the receipt slot the status
+/// rests on nothing but the same pass's own prose.
+#[test]
+fn section_1_records_a_receipt_and_defaults_to_unverified() {
+    assert!(
+        CONTEXT_SRC.contains("- RECEIPT:"),
+        "#886: section 1 must carry a receipt slot"
+    );
+    assert!(
+        CONTEXT_SRC.contains("and section 0 must say so"),
+        "#886: a task with no receipt must not default to pending"
+    );
+}
+
 /// Behavioral half: a section 0 that carries the status line must not break
 /// manifest parsing — the status is inserted ahead of the fenced block, so a
 /// parser that keys on section offsets would silently lose the manifest.

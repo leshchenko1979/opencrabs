@@ -185,6 +185,9 @@ const OBLIGATION_STATUS_RULE: &str = "\n\nOBLIGATION STATUS (section 0 of the su
      - DONE - the obligation is finished (section 0 says so, and the work is committed, \
      shipped or verified): do NOT redo it, do NOT re-run its steps. Say what remains; if \
      nothing does, report completion and stop.\n\
+     Never write \"only X remains\" or any other inventory-of-remainder: it reads as a \
+     complete list of what is left when it is a partial one, and a resumed lane stops early \
+     on it. Name the next concrete step instead.\n\
      - UNKNOWN - the status is missing, or section 0 disagrees with the rest of the \
      document: resolve it against the live artifact (git state, files, tests) BEFORE \
      acting, and never treat an unresolved obligation as a critical directive.\n\

@@ -1589,7 +1589,10 @@ impl AgentService {
              **Obligation status: OPEN** or **Obligation status: DONE** or **Obligation status: UNKNOWN**\n\
              Determine it from the completion evidence you record in section 1 below \
              (\"Whether it was completed, committed, pushed, or still pending\") — do NOT \
-             guess, and do NOT carry a status forward from an earlier summary:\n\
+             guess, and do NOT carry a status forward from an earlier summary. A status MUST \
+             cite the command and the output that establishes it — a `git log` line, a store \
+             read, a message id, a run id. A status with no such citation is UNKNOWN, never \
+             OPEN: UNKNOWN is the honest answer, not a failure:\n\
              - OPEN — the work is still owed. Write the DIRECTIVE exactly as specified below.\n\
              - DONE — the work is already complete. Say so in one line and name the NEXT \
              actual work instead. Do NOT restate the completed obligation as a directive.\n\
@@ -1600,6 +1603,16 @@ impl AgentService {
              You were [exact action in progress — e.g. 'editing file X at line Y', 'running command Z']. \
              Your next step is [specific next action]. \
              Do NOT deviate to any other topic.\"\n\n\
+             A next step with a SIDE EFFECT — a send, a comment, a close, a push, a merge, \
+             a deploy, a file write — MUST carry its carrier state and the store that decides \
+             it, never a bare imperative:\n\
+             \"Your next step is [action]. state at [snapshot time]: not sent / not filed / \
+             not pushed (unverified) — read [the store that decides it: the target's message \
+             store, the issue's comments, `git rev-parse origin/main`, the run id] before \
+             re-executing. If it already landed, report that and do NOT repeat it.\"\n\
+             A side-effecting step whose carrier state you cannot establish is written \
+             \"state: UNKNOWN — check [store] first\". The resumed agent executes a bare \
+             imperative, so an unverified \"not yet done\" duplicates a real side effect.\n\n\
              This is the MOST IMPORTANT section. If nothing else survives compaction, this must. \
              The fresh agent will read this section FIRST and act on it IMMEDIATELY.\n\n\
              {progress_guidance}\n\n\
@@ -1663,7 +1676,10 @@ impl AgentService {
              - What was requested\n\
              - What was done (with exact file paths and line numbers where relevant)\n\
              - Exact code snippets for any changes made (show before/after when applicable)\n\
-             - Whether it was completed, committed, pushed, or still pending\n\n\
+             - Whether it was completed, committed, pushed, or still pending\n\
+             - RECEIPT: the message id, comment id, sha, run id or file state that proves it, \
+             and the command that produced that reading. A task with no receipt is NOT \
+             \"pending\" by default — it is \"unverified\", and section 0 must say so.\n\n\
              ## 2. Files Modified\n\
              List EVERY file that was created, edited, read, or discussed. For each file include:\n\
              - Full file path\n\
