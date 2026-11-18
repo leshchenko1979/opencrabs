@@ -1848,25 +1848,32 @@ impl TelegramState {
         }
     }
 
-    /// Pop the next queued reaction for `session_id` (FIFO), if any. Removes the
-    /// per-session entry once its queue is empty so the map doesn't grow.
+    /// Drain EVERYTHING queued for `session_id` (FIFO), folded into ONE
+    /// joined message (#1837).
+    ///
+    /// The tool loop invokes the queue callback once per round-end, so a
+    /// pop-one drain fragmented a burst of rapid follow-ups into N injections,
+    /// N model calls and N separate replies, all after the user's last
+    /// message. The shared/TUI callback (`cli/ui.rs`) already takes the whole
+    /// stack and joins it; this path now does the same via
+    /// [`QueuedUserMessage::join`], so one round-end answers the whole burst
+    /// in a single injection. Returns `None` when nothing is queued.
     pub(crate) fn drain_reaction(
         &self,
         session_id: Uuid,
     ) -> Option<crate::brain::agent::QueuedUserMessage> {
         let mut map = self.pending_reactions.lock().ok()?;
-        let queue = map.get_mut(&session_id)?;
-        let item = queue.pop_front();
-        if queue.is_empty() {
-            map.remove(&session_id);
-        }
+        // Removing the entry up front is the "empty queue leaves no husk"
+        // behaviour the old pop-one path got with its is_empty check.
+        let queue = map.remove(&session_id)?;
         // Delivered into the running loop (#111): the durable twin is
-        // redundant from here. A failed clear costs a next-boot duplicate,
-        // never a loss.
-        if let Some(i) = &item {
-            crate::brain::agent::service::notify_queue::clear_on_delivery(session_id, &i.msg);
+        // redundant from here, for EVERY item. A failed clear costs a
+        // next-boot duplicate, never a loss.
+        for item in &queue {
+            crate::brain::agent::service::notify_queue::clear_on_delivery(session_id, &item.msg);
         }
-        item.map(|i| i.msg)
+        let msgs: Vec<_> = queue.into_iter().map(|i| i.msg).collect();
+        crate::brain::agent::QueuedUserMessage::join(&msgs)
     }
 
     /// Take everything still queued for `session_id`, WITH origins.

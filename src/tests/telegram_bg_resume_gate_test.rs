@@ -55,7 +55,8 @@ fn a_losing_completion_hands_its_result_to_the_running_turn() {
 
 #[test]
 fn every_queued_result_survives_in_order() {
-    // Four completions losing the claim must all be delivered, oldest first.
+    // Four completions losing the claim must all be delivered, oldest first —
+    // in ONE drain since #1837, because the loop drains once per round-end.
     let state = Arc::new(TelegramState::new());
     let sid = Uuid::new_v4();
     let _running = state.try_begin_turn(sid).expect("first claims");
@@ -63,11 +64,11 @@ fn every_queued_result_survives_in_order() {
     for label in ["one", "two", "three", "four"] {
         state.enqueue_reaction(sid, QueuedUserMessage::plain(label.to_string()));
     }
-    let mut seen = Vec::new();
-    while let Some(m) = state.drain_reaction(sid) {
-        seen.push(m.context_text);
-    }
-    assert_eq!(seen, vec!["one", "two", "three", "four"]);
+    let joined = state
+        .drain_reaction(sid)
+        .expect("the burst must come out in a single drain");
+    assert_eq!(joined.context_text, "one\ntwo\nthree\nfour");
+    assert!(state.drain_reaction(sid).is_none());
 }
 
 #[test]

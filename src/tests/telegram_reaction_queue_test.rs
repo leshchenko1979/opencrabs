@@ -14,13 +14,47 @@ fn reactions_drain_fifo_per_session() {
     state.enqueue_reaction(s1, QueuedUserMessage::plain("second".to_string()));
     state.enqueue_reaction(s2, QueuedUserMessage::plain("other".to_string()));
 
-    // FIFO drain, and s2's queue is never touched by draining s1.
+    // One drain takes the WHOLE burst, folded into a single joined message
+    // in FIFO order (#1837): the tool loop calls the callback once per
+    // round-end, so pop-one would have answered two queued follow-ups with
+    // two separate turns. Draining s1 never touches s2's queue.
     let drained = |v: Option<QueuedUserMessage>| v.map(|m| m.context_text);
-    assert_eq!(drained(state.drain_reaction(s1)).as_deref(), Some("first"));
-    assert_eq!(drained(state.drain_reaction(s1)).as_deref(), Some("second"));
+    assert_eq!(
+        drained(state.drain_reaction(s1)).as_deref(),
+        Some("first\nsecond"),
+        "one drain answers the whole burst (#1837)"
+    );
     assert!(state.drain_reaction(s1).is_none());
     assert_eq!(drained(state.drain_reaction(s2)).as_deref(), Some("other"));
     assert!(state.drain_reaction(s2).is_none());
+}
+
+#[test]
+fn a_burst_of_followups_becomes_one_injection_not_n_turns() {
+    // #1837 regression: three follow-ups landing mid-turn must come out of
+    // ONE drain as ONE joined message, because the tool loop only calls the
+    // queue callback once per round-end. The pop-one drain turned this
+    // burst into three injections, three model calls and three separate
+    // chat replies, all after the user's last message.
+    let state = Arc::new(TelegramState::new());
+    let sid = Uuid::new_v4();
+    for text in ["first", "second", "third"] {
+        state.enqueue_reaction(sid, QueuedUserMessage::plain(text.to_string()));
+    }
+
+    let drained = state.drain_reaction(sid).expect("burst must be drainable");
+    assert_eq!(
+        drained.context_text, "first\nsecond\nthird",
+        "FIFO order preserved across the join"
+    );
+    assert_eq!(
+        drained.display_text, "first\nsecond\nthird",
+        "display half joined separately from context"
+    );
+    assert!(
+        state.drain_reaction(sid).is_none(),
+        "nothing may linger after the single drain"
+    );
 }
 
 #[test]

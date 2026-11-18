@@ -72,18 +72,19 @@ fn test_the_flush_split_sends_only_detached_work_to_a_tool_loop() {
 #[test]
 fn test_the_live_loop_drain_is_origin_blind() {
     // Between rounds there IS a tool loop, so both kinds are injected the same
-    // way. Only the end-of-turn flush needs to distinguish them, and changing
-    // that would have been a behaviour change nobody asked for.
+    // way: now in ONE joined injection per round-end (#1837). Only the
+    // end-of-turn flush needs to distinguish them, and changing that would
+    // have been a behaviour change nobody asked for.
     let state = TelegramState::new();
     let session = Uuid::new_v4();
 
     state.enqueue_detached_result(session, msg("first"));
     state.enqueue_reaction(session, msg("second"));
 
-    assert_eq!(state.drain_reaction(session).unwrap().context_text, "first");
     assert_eq!(
         state.drain_reaction(session).unwrap().context_text,
-        "second"
+        "first\nsecond",
+        "one drain, both kinds, FIFO order"
     );
     assert!(state.drain_reaction(session).is_none());
 }
