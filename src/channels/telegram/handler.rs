@@ -3858,6 +3858,14 @@ pub(crate) fn thinking_status_excerpt(thinking: &str) -> Option<String> {
 /// `resolved_body` is the agent-facing text (a skill/command body for a slash
 /// command, or the user's message otherwise); `display_text` is the
 /// history/preview text used for a plain follow-up.
+///
+/// SENDER CONTRACT (#882): the wrapper must never claim a single speaker. A
+/// drained burst can carry several people — the turn's initiator, another group
+/// member, and forwarded material from a third party — and each item's
+/// `display_text` already carries its own `Name (@handle): ` prefix plus any
+/// `[Forwarded from "…"]` tag. The framing therefore names those two
+/// conventions instead of assuming one "user", so the agent can tell a
+/// forwarder from the person being forwarded.
 pub(crate) fn build_midturn_queued_message(
     command_invocation: Option<&str>,
     resolved_body: &str,
@@ -3866,10 +3874,10 @@ pub(crate) fn build_midturn_queued_message(
     match command_invocation {
         Some(invocation) => crate::brain::agent::QueuedUserMessage {
             context_text: format!(
-                "[The user invoked the {} command while you were still working. This is an \
-                 explicit NEW directive, not a refinement of your current task — when you reach \
-                 a safe stopping point, carry out the following instructions on their own \
-                 terms:]\n{}",
+                "[The {} command was invoked while you were still working — not necessarily by \
+                 whoever started this turn. This is an explicit NEW directive, not a refinement \
+                 of your current task — when you reach a safe stopping point, carry out the \
+                 following instructions on their own terms:]\n{}",
                 invocation, resolved_body
             ),
             display_text: invocation.to_string(),
@@ -3878,8 +3886,12 @@ pub(crate) fn build_midturn_queued_message(
         },
         None => crate::brain::agent::QueuedUserMessage {
             context_text: format!(
-                "[The user sent this follow-up while you were still working: factor it into the \
-                 CURRENT task now, do not restart from scratch]:\n{}",
+                "[Message(s) arrived while you were still working — factor them into the CURRENT \
+                 task now, do not restart from scratch. Read the payload line by line: each line \
+                 may carry its OWN sender prefix of the form `Name (@handle): `, and those \
+                 senders can differ, so never assume one speaker for the whole block. A \
+                 `[Forwarded from \"…\"]` tag marks quoted material from that origin — the words \
+                 of the forwarded person, NOT of whoever forwarded them]:\n{}",
                 display_text
             ),
             display_text: display_text.to_string(),
