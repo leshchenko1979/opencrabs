@@ -78,6 +78,11 @@ on:
         required: false
         default: false
         type: boolean
+      lock_pins:
+        description: "lockupdate only: space-separated pkg@version pins applied AFTER cargo update (e.g. 'glass_pumpkin@2.0.0-rc0')"
+        required: false
+        default: ""
+        type: string
       swap:
         description: "true = swap prep: mirror build-leg gate 4 (Session-Id trailer) on the gated ref before the gates; swap-mode GREEN means swappable"
         required: false
@@ -205,6 +210,7 @@ jobs:
       fix: ${{ inputs.fix }}
       lockregen: ${{ inputs.lockregen }}
       lockupdate: ${{ inputs.lockupdate }}
+      lock_pins: ${{ inputs.lock_pins }}
       swap: ${{ inputs.swap }}
       fast: ${{ inputs.fast }}
       diagnose: ${{ inputs.diagnose }}

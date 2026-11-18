@@ -81,6 +81,11 @@ on:
         required: false
         default: false
         type: boolean
+      lock_pins:
+        description: "lockupdate only: space-separated pkg@version pins applied AFTER cargo update (e.g. 'glass_pumpkin@2.0.0-rc0'). Holds a crate whose newest version satisfies a dependent's caret requirement but breaks its code — the prerelease-caret trap. Requirements are never rewritten."
+        required: false
+        default: ""
+        type: string
       swap:
         description: "true = swap prep: mirror build-leg gate 4 (Session-Id trailer) on the gated ref before the gates; swap-mode GREEN means swappable"
         required: false
@@ -882,10 +887,39 @@ jobs:
         # version its REQUIREMENT in Cargo.toml still admits — patch and minor
         # for 1.x+, patch only for 0.x. Requirements are never rewritten here;
         # a 0.x minor bump is a manifest edit and a separate, gated change.
+        #
+        # lock_pins then holds named crates back. Needed because a caret
+        # requirement on a PRERELEASE (`^2.0.0-rc0`) admits the release
+        # (`2.0.0`) even when the dependent was written against the rc API —
+        # measured on glass_pumpkin 2.0.0 / grammers-crypto 0.10.0, where
+        # `is_prime` gained a Result return and the dependent still negates it.
+        # A pin is a LOCK-only hold: no requirement changes, so the delta stays
+        # reviewable, and the crate that needs the newer version is a Pass-B
+        # requirement raise (grammers-crypto 0.11 wants ^2.0.0 and ^0.5).
+        env:
+          LOCK_PINS: ${{ inputs.lock_pins }}
         run: |
           cargo update 2>&1 | tee /tmp/cargo-update.log
           echo "=== packages moved ==="
           grep -cE '^\s+Updating ' /tmp/cargo-update.log || true
+          if [ -n "$LOCK_PINS" ]; then
+            echo "=== applying lock pins ==="
+            for pin in $LOCK_PINS; do
+              pkg="${pin%@*}"
+              ver="${pin##*@}"
+              if [ -z "$pkg" ] || [ -z "$ver" ] || [ "$pkg" = "$pin" ]; then
+                echo "MALFORMED PIN '$pin' (want pkg@version)" >&2
+                exit 1
+              fi
+              echo "--- pinning $pkg -> $ver"
+              cargo update -p "$pkg" --precise "$ver" 2>&1 | tee -a /tmp/cargo-update.log
+            done
+            echo "=== pinned versions in lock ==="
+            for pin in $LOCK_PINS; do
+              pkg="${pin%@*}"
+              grep -A1 "^name = \"$pkg\"$" Cargo.lock | head -2 || true
+            done
+          fi
           echo "=== lock delta ==="
           git diff --stat Cargo.lock
           git diff Cargo.lock | head -400
