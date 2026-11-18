@@ -413,6 +413,18 @@ jobs:
 
       - name: Run tests
         id: tests
+        # STEP-LEVEL timeout, deliberately BELOW the 45-minute job cap (#331,
+        # HQ 2026-11-18). A job-cap cancel leaves NO log archive at all: run
+        # 44303153279's archive is a 22-byte empty zip, so every stalled run is
+        # unattributable. A step timeout fails the STEP inside the job, so the
+        # log survives and the post-steps still run.
+        #
+        # 40 is measured, not guessed: over 50 consecutive GREEN runs the test
+        # step is min 20.1 / p50 25.3 / p90 30.2 / MAX 32.3 min, while every
+        # cap-hit since STALLWATCH landed sat at 51.5 min still in_progress.
+        # 7.7 min of headroom above the observed green maximum; a cold-cache run
+        # that exceeds it now fails with a readable log instead of vanishing.
+        timeout-minutes: 40
         if: ${{ !inputs.fix && !inputs.lockregen && !inputs.lockupdate && !inputs.fast }}
         # v0.4.23 law: the all-features test gate. Flags mirror upstream's
         # `test` job exactly (profile ci + mold linker).
