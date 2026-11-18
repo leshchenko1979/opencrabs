@@ -12,7 +12,7 @@
 //!
 //! Fixtures are synthetic and carry no real credentials.
 
-use crate::memory::keys::{memory_embedding_key_in, needs_embedding_key};
+use crate::memory::keys::{embedding_key_required, memory_embedding_key_in, needs_embedding_key};
 
 #[test]
 fn a_key_under_the_documented_section_is_found() {
@@ -86,4 +86,39 @@ fn an_absent_or_blank_config_key_defers_to_keys_toml() {
     assert!(needs_embedding_key(None));
     assert!(needs_embedding_key(Some("")));
     assert!(needs_embedding_key(Some("   ")));
+}
+
+/// A loopback endpoint takes no credential, so its absent key is not a defect.
+/// The config alert and `/doctor` both fired on a working local
+/// llama.cpp server; the runtime itself only sends an `Authorization` header
+/// when a key is set, so nothing was ever wrong.
+///
+/// The `true` rows matter as much as the `false` ones: this predicate gates a
+/// real warning, and widening "keyless" to a LAN or public host would silence
+/// the genuine 401 it exists to report.
+#[test]
+fn a_credential_is_required_only_for_a_non_loopback_endpoint() {
+    for (url, required) in [
+        // Local daemons: llama.cpp / Ollama / LM Studio on this box.
+        (Some("http://127.0.0.1:8090/v1"), false),
+        (Some("http://localhost:11434/v1"), false),
+        // `Url::parse` lowercases the host; the predicate does not rely on it.
+        (Some("http://LOCALHOST/v1"), false),
+        (Some("http://[::1]:8090/v1"), false),
+        // Remote endpoints still need their key.
+        (Some("https://api.openai.com/v1"), true),
+        // Deliberately NOT treated as keyless: a LAN address usually takes no
+        // key either, but "usually" is not a rule: loopback is the case that
+        // is unambiguously keyless, and widening this is a separate decision.
+        (Some("http://192.168.1.5:8090/v1"), true),
+        // Unknown endpoint: keep today's behaviour and ask for the key.
+        (Some("not a url"), true),
+        (None, true),
+    ] {
+        assert_eq!(
+            embedding_key_required(url),
+            required,
+            "embedding_key_required({url:?}) must be {required}"
+        );
+    }
 }

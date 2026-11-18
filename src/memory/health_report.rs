@@ -35,7 +35,8 @@ pub const EMBEDDING_HEALTH_KEY: &str = "memory_embedding";
 /// Where the embedding API key came from, or why there is none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeySource {
-    /// No embedding API configured, so no key is expected.
+    /// No credential is expected: either no embedding API is configured, or
+    /// the endpoint is a loopback daemon that serves without auth.
     NotApplicable,
     /// An API is configured and no key was found anywhere. This is the failure
     /// that produced a silent 401 on every embed call.
