@@ -570,9 +570,13 @@ jobs:
               """{pid: (comm, cpu_ticks)} for EVERY descendant of `root`, minus this watcher.
 
               No comm filter, deliberately. A wedged TEST binary is `opencrabs-<hash>`: a
-              build-tools filter left it out of both the dump and the CPU sum, so the
-              2026-11-17 fire reported procs=1 -- the parked `cargo` in wait4 -- and never
-              named the process that was actually stuck. Tree scoping already excludes
+              build-tools filter left it out of both the dump and the CPU sum, so a LOCAL
+              drive on 2026-11-17 reported procs=1 -- the parked `cargo` in wait4 -- and never
+              named the process that was actually stuck. That observation came from driving
+              the script by hand, NOT from a gate run: swept 2026-11-18, no production dispatch
+              has ever fired this watchdog (24 pr-checks runs 11-17 10:00-18:00Z + 13 build
+              runs = zero runtime FIRE lines). The fix stands on the reason, not on a
+              production catch. Tree scoping already excludes
               unrelated processes, so the filter bought nothing and cost the one process
               that mattered.
 
