@@ -8,8 +8,8 @@ use super::session_resolve;
 use crate::brain::agent::{AgentService, ProgressCallback};
 use crate::channels::group_history;
 use crate::config::{Config, RespondTo};
-use crate::db::{BindingOrigin, ChannelMessageRepository, SessionBindingRepository};
 use crate::db::models::ChannelMessage as DbChannelMessage;
+use crate::db::{BindingOrigin, ChannelMessageRepository, SessionBindingRepository};
 use crate::services::SessionService;
 use crate::utils::sanitize::redact_secrets;
 use crate::utils::truncate_str;
@@ -226,7 +226,6 @@ pub(crate) fn replied_to_bot_as_interlocutor(msg: &Message, bot_uid: Option<i64>
         from_bot && !is_chat_service_notice(&reply.kind)
     })
 }
-
 
 /// Whether a sender's display name or username collapses to the same normalized
 /// form as the owner's — i.e. the sender is mimicking the owner. Cross-checks
@@ -703,7 +702,9 @@ pub(crate) async fn teardown_binding(
         .await
     {
         Ok(n) => {
-            tracing::info!("Telegram: topic {thread} in chat {chat_id} — removed {n} binding row(s)");
+            tracing::info!(
+                "Telegram: topic {thread} in chat {chat_id} — removed {n} binding row(s)"
+            );
             n > 0
         }
         Err(e) => {
@@ -726,9 +727,9 @@ pub(crate) async fn teardown_binding(
                     "Telegram: failed to retire session {uuid} of topic {thread}: {e}"
                 ),
             },
-            Err(e) => tracing::warn!(
-                "Telegram: session {sid} bound to topic {thread} is not a uuid: {e}"
-            ),
+            Err(e) => {
+                tracing::warn!("Telegram: session {sid} bound to topic {thread} is not a uuid: {e}")
+            }
         }
     }
     removed
@@ -765,14 +766,7 @@ pub(crate) async fn handle_message(
     // has no live flow block to bury, and its forum-ness is re-taught by the
     // next real message in any of the chat's topics, so a reopen costs nothing
     // by returning here.
-    if handle_topic_teardown(
-        &msg,
-        &channel_msg_repo,
-        &session_binding_repo,
-        &session_svc,
-    )
-    .await
-    {
+    if handle_topic_teardown(&msg, &channel_msg_repo, &session_binding_repo, &session_svc).await {
         return Ok(());
     }
 
@@ -2903,7 +2897,11 @@ pub(crate) async fn handle_message(
             };
             let queued =
                 build_midturn_queued_message(command_invocation.as_deref(), &text, &display_text);
-            telegram_state.enqueue_reaction(session_id, queued);
+            // #893: carry the channel's own sequence for the chat, so a burst
+            // drains in the order it was SENT rather than the order these
+            // per-message tasks finished ingesting. `msg.id` is monotonic per
+            // chat, which is exactly the ordinal the queue needs.
+            telegram_state.enqueue_inbound(session_id, queued, msg.id.0 as i64);
             // Visible acknowledgment so the message never looks silently eaten.
             fire_reaction(&bot, msg.chat.id, msg.id, "👀").await;
             return Ok(());

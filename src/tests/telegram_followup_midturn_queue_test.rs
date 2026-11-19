@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::brain::agent::QueuedUserMessage;
 use crate::channels::telegram::TelegramState;
 use crate::channels::telegram::handler::{build_midturn_queued_message, mark_voice_note};
 use crate::channels::telegram::state::QueuedOrigin;
@@ -127,4 +128,77 @@ fn end_of_turn_flush_drains_queued_followup_tap() {
     assert_eq!(items[0].origin, QueuedOrigin::Reaction);
     assert_eq!(items[0].msg.display_text, text);
     assert!(state.drain_queued_items(sid).is_empty());
+}
+
+#[test]
+fn midturn_burst_drains_in_send_order_not_ingest_order() {
+    // #893: every inbound message is handled in its own tokio task, so ENQUEUE
+    // order is ingestion-completion order, not send order. This is the
+    // measured inversion: a message sent 20 s later was persisted first.
+    // A burst must drain in the order it was SENT, or the model answers the
+    // latest fragment and glosses the rest.
+    let state = Arc::new(TelegramState::new());
+    let sid = Uuid::new_v4();
+
+    // Enqueue in the order the handler tasks finished — last-sent first.
+    state.enqueue_inbound(sid, QueuedUserMessage::plain("later".to_string()), 99560);
+    state.enqueue_inbound(sid, QueuedUserMessage::plain("earlier".to_string()), 99558);
+    state.enqueue_inbound(sid, QueuedUserMessage::plain("middle".to_string()), 99559);
+
+    let drained: Vec<String> = state
+        .drain_queued_items(sid)
+        .into_iter()
+        .map(|item| item.msg.display_text)
+        .collect();
+    assert_eq!(
+        drained,
+        vec!["earlier", "middle", "later"],
+        "a mid-turn burst must drain in send order"
+    );
+}
+
+#[test]
+fn midturn_burst_is_send_ordered_for_one_at_a_time_drains_too() {
+    // The between-rounds drain takes ONE item per round (`drain_reaction`), so
+    // ordering has to hold there as well. It does because the queue is kept
+    // sorted on INSERT, not sorted on drain.
+    let state = Arc::new(TelegramState::new());
+    let sid = Uuid::new_v4();
+
+    state.enqueue_inbound(sid, QueuedUserMessage::plain("second".to_string()), 2);
+    state.enqueue_inbound(sid, QueuedUserMessage::plain("first".to_string()), 1);
+
+    assert_eq!(
+        state.drain_reaction(sid).map(|m| m.display_text),
+        Some("first".to_string())
+    );
+    assert_eq!(
+        state.drain_reaction(sid).map(|m| m.display_text),
+        Some("second".to_string())
+    );
+    assert!(state.drain_reaction(sid).is_none());
+}
+
+#[test]
+fn items_without_an_arrival_ordinal_do_not_displace_user_messages() {
+    // Detached work and reaction taps carry no per-chat sequence (`None`). They
+    // must not push a user message that arrived earlier behind them.
+    let state = Arc::new(TelegramState::new());
+    let sid = Uuid::new_v4();
+
+    state.enqueue_detached_result(sid, QueuedUserMessage::plain("[BG] done".to_string()));
+    state.enqueue_inbound(
+        sid,
+        QueuedUserMessage::plain("sent second".to_string()),
+        102,
+    );
+    state.enqueue_inbound(sid, QueuedUserMessage::plain("sent first".to_string()), 101);
+
+    let order: Vec<String> = state
+        .drain_queued_items(sid)
+        .into_iter()
+        .map(|item| item.msg.display_text)
+        .collect();
+    assert_eq!(order[0], "[BG] done");
+    assert_eq!(&order[1..], &["sent first", "sent second"]);
 }

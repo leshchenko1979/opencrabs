@@ -106,6 +106,19 @@ pub(crate) enum QueuedOrigin {
 pub(crate) struct QueuedItem {
     pub(crate) origin: QueuedOrigin,
     pub(crate) msg: crate::brain::agent::QueuedUserMessage,
+    /// Arrival ordinal for an inbound user message (#893): the Telegram
+    /// `message_id`, which is monotonic per chat.
+    ///
+    /// The queue used to be ordered purely by ENQUEUE time, and enqueue is not
+    /// arrival: every inbound message is handled in its own tokio task
+    /// (`spawn_handle_message`), so a short message overtakes a longer one that
+    /// arrived before it — deterministically when the earlier one is a voice
+    /// note carrying a download plus an STT round-trip. Measured inverting on
+    /// plain text too (a message sent 20 s later persisted first).
+    ///
+    /// `None` for everything that is not an inbound user message (detached
+    /// work, reaction taps): those have no per-chat sequence to honour.
+    pub(crate) arrival: Option<i64>,
 }
 
 /// Sync mirror behind the channel-ownership gate (fork #17). Maintained ONLY
@@ -1765,7 +1778,25 @@ impl TelegramState {
         session_id: Uuid,
         msg: crate::brain::agent::QueuedUserMessage,
     ) {
-        self.enqueue_item(session_id, QueuedOrigin::Reaction, msg);
+        self.enqueue_item(session_id, QueuedOrigin::Reaction, msg, None);
+    }
+
+    /// Enqueue an inbound USER message that landed mid-turn, carrying its
+    /// arrival ordinal (#893).
+    ///
+    /// `arrival` is the channel's own monotonic sequence for the chat — the
+    /// Telegram `message_id`. Use this instead of [`Self::enqueue_reaction`]
+    /// for anything the user actually SENT, so a burst is drained in the order
+    /// it was typed rather than the order the handler tasks happened to finish
+    /// ingestion (a voice note pays a download plus an STT round-trip, so it
+    /// loses that race almost every time).
+    pub(crate) fn enqueue_inbound(
+        &self,
+        session_id: Uuid,
+        msg: crate::brain::agent::QueuedUserMessage,
+        arrival: i64,
+    ) {
+        self.enqueue_item(session_id, QueuedOrigin::Reaction, msg, Some(arrival));
     }
 
     /// Enqueue the result of DETACHED work — a background command or a
@@ -1782,7 +1813,7 @@ impl TelegramState {
         session_id: Uuid,
         msg: crate::brain::agent::QueuedUserMessage,
     ) {
-        self.enqueue_item(session_id, QueuedOrigin::DetachedWork, msg);
+        self.enqueue_item(session_id, QueuedOrigin::DetachedWork, msg, None);
     }
 
     /// #286: claim this session's ONE post-delivery image re-entry.
@@ -1827,16 +1858,43 @@ impl TelegramState {
         session_id: Uuid,
         origin: QueuedOrigin,
         msg: crate::brain::agent::QueuedUserMessage,
+        arrival: Option<i64>,
     ) {
         // Durable twin (#111): the in-memory queue dies with the process, the
         // row survives it. Best-effort, fire-and-forget; a no-runtime context
         // (sync tests) skips the row and the queue alone holds the message.
         crate::brain::agent::service::notify_queue::persist(session_id, &msg);
         match self.pending_reactions.lock() {
-            Ok(mut map) => map
-                .entry(session_id)
-                .or_default()
-                .push_back(QueuedItem { origin, msg }),
+            Ok(mut map) => {
+                let queue = map.entry(session_id).or_default();
+                // #893: keep inbound user messages in ARRIVAL order, not
+                // enqueue order. The two differ because each inbound message
+                // is handled in its own task, so ingestion-completion is not
+                // send time. Inserting at the sorted position — rather than
+                // sorting on drain — means every consumer gets the right
+                // order with no change of its own, including the one-at-a-
+                // time `drain_reaction`.
+                //
+                // Items with no ordinal (`None`: detached work, reaction
+                // taps) are skipped as anchors, so they never displace a user
+                // message that arrived earlier, and keep their own relative
+                // order among themselves.
+                let pos = match arrival {
+                    Some(a) => queue
+                        .iter()
+                        .position(|it| matches!(it.arrival, Some(b) if b > a))
+                        .unwrap_or(queue.len()),
+                    None => queue.len(),
+                };
+                queue.insert(
+                    pos,
+                    QueuedItem {
+                        origin,
+                        msg,
+                        arrival,
+                    },
+                );
+            }
             Err(e) => {
                 // The message is gone at this point, and for detached work
                 // that means a result nobody will ever see.
