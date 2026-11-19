@@ -165,9 +165,15 @@ fn c3_coverage_moves_with_the_employment_count() {
     let md = index_markdown(pairs.iter().copied());
     let chars = index_block_chars(pairs.iter().copied());
 
+    // Half the index is an INTEGER count, and the index has an odd size, so it
+    // is 17/35 = 0.486 rather than 0.500. The expectation is derived from the
+    // count that was actually passed, not assumed: a test that hardcodes the
+    // fraction measures the index length, not the metric.
+    let half_count = slugs.len() / 2;
+
     let none = score(&ds, &md, &slugs, 5, chars, None);
     let all = score(&ds, &md, &slugs, 5, chars, Some(slugs.len()));
-    let some = score(&ds, &md, &slugs, 5, chars, Some(slugs.len() / 2));
+    let some = score(&ds, &md, &slugs, 5, chars, Some(half_count));
 
     assert_eq!(
         none.c3_coverage, None,
@@ -179,9 +185,15 @@ fn c3_coverage_moves_with_the_employment_count() {
         "every slug employed is full coverage"
     );
     let half = some.c3_coverage.expect("a measured C3 carries a coverage");
+    let expected_half = half_count as f64 / slugs.len() as f64;
     assert!(
-        (half - 0.5).abs() < 1e-9,
-        "half the index employed must read 0.500, got {half:.3}"
+        (half - expected_half).abs() < 1e-9,
+        "an employment count of {half_count}/{} must read {expected_half:.3}, got {half:.3}",
+        slugs.len()
+    );
+    assert!(
+        half > 0.0 && half < 1.0,
+        "the partial case must sit strictly between the two poles, got {half:.3}"
     );
     // And the card follows the value it was given.
     assert!(
