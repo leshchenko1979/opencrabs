@@ -1141,3 +1141,101 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
         run: cargo test --locked --profile ci --all-features --verbose
+
+  # ------------------------------------------------------- nextest, timing --
+  # NON-BLOCKING by design (HQ 2026-11-19; owner order "nextest only").
+  #
+  # WHY IT EXISTS: this project has ZERO per-test timing data anywhere. Every
+  # speed claim so far has been static counts plus the gate's step totals, which
+  # cannot say WHICH tests cost the 15 minutes the blocking `Run tests` step
+  # takes. cargo-nextest emits a JUnit report whose per-test `time` attributes
+  # are that measurement, and its process-per-test scheduling is the mechanism a
+  # speedup would actually be built on.
+  #
+  # WHY NON-BLOCKING: this job's product is DATA, not a verdict. The blocking
+  # verdict stays `cargo test` on the shipped feature set, untouched. Swapping
+  # the harness before the numbers exist would trade a known-good gate for a
+  # guess. `continue-on-error: true` at JOB level is what keeps the workflow run
+  # green when this job fails, exactly like pr-gates-all-features above.
+  #
+  # THE FLAG THAT BITES: nextest's `--profile` selects a NEXTEST profile (a
+  # config section), NOT a cargo profile. `--profile ci` would look for
+  # `[profile.ci]` in .config/nextest.toml and find nothing; the cargo profile
+  # is `--cargo-profile ci`. Do not "correct" this to match the leg above.
+  #
+  # JUnit has NO command-line path flag (verified against nexte.st/docs
+  # 2026-11-19): it is enabled by `[profile.default.junit] path` in
+  # .config/nextest.toml, so this job writes that file into its own checkout.
+  # Output lands at target/nextest/default/junit.xml.
+  #
+  # COVERAGE NOTE: nextest runs libtest binaries; doctests are not part of its
+  # run. Acceptable here precisely because this job produces no verdict —
+  # doctests keep running on the blocking leg.
+  #
+  # Deliberately NO sccache: RUSTC_WRAPPER=sccache on a test leg is the
+  # 2026-09-17 SIGTERM storm (3/3 killed vs 0/5-0/6 without).
+  #
+  # COST: one more full compile + test per gate dispatch, on its own rust-cache
+  # key (not shared with the blocking leg). If CI minutes become the binding
+  # constraint, add a boolean input and gate this on it, or move it to a
+  # schedule — the data is identical either way.
+  #
+  # Revert = delete this job.
+  pr-gates-nextest:
+    if: ${{ inputs.mode == 'gate' && !inputs.fix && !inputs.lockregen && !inputs.lockupdate && !inputs.fast }}
+    name: PR-lane nextest timing (non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          save-if: true
+
+      - name: Install system deps (pkg-config, ALSA dev, mold + clang)
+        run: sudo apt-get update -qq && sudo apt-get install -y pkg-config libasound2-dev mold clang
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Enable JUnit per-test timings
+        run: |
+          mkdir -p .config
+          printf '%s\n' \
+            '[profile.default.junit]' \
+            'path = "junit.xml"' \
+            'store-success-output = false' \
+            'store-failure-output = true' \
+            > .config/nextest.toml
+          cat .config/nextest.toml
+
+      - name: Run tests under nextest (shipped feature set, timing only)
+        # Step timeout INSIDE the 45-min job cap so a stall still leaves a log
+        # (a job-cap cancel archives a 22-byte empty zip; #331).
+        timeout-minutes: 40
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+        run: |
+          cargo nextest run --locked --cargo-profile ci \
+            --no-default-features --features "${{ inputs.features }}" \
+            --verbose
+
+      - name: Upload per-test timings (JUnit)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit
+          path: target/nextest/**/junit.xml
+          if-no-files-found: warn
