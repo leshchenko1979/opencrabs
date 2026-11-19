@@ -32,17 +32,230 @@
 //! nothing anywhere else. The sampler is deterministic instead: same slice,
 //! same 40 positives and 20 negatives, no clock or randomness beyond the
 //! slice window.
+//!
+//! # Why the committed fixture can FAIL (#899)
+//!
+//! The fixture leg used to publish recall 1.000 / MRR 1.000 / FPR 0.000, and
+//! every one of those was a tautology rather than a measurement:
+//!
+//! * the seeded corpus gave each message its own private nonsense vocabulary,
+//!   so a query built from three of its words could match that message and
+//!   nothing else — recall could not fail;
+//! * negatives were accepted only after a count proved ZERO co-occurrence, so
+//!   silence was guaranteed before the case was even added — FPR could not
+//!   fail.
+//!
+//! Both sides are now falsifiable. The corpus draws its words from a handful
+//! of topical clusters, so messages INSIDE a cluster share most of their
+//! vocabulary: a query selects a neighbourhood of a dozen messages, and the
+//! shipped recency-ordered search has to be lucky to put the gold on top.
+//! Negatives come in two classes — near-misses that share vocabulary with a
+//! non-gold message (a do-nothing ranker fires on them) and genuine absences —
+//! so FPR is measured in both directions instead of being pinned at zero.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Positives wanted per run. One per sampled message, spread across the slice.
 pub const POSITIVES: usize = 40;
-/// Negatives wanted per run: queries that must return nothing.
+/// Negatives wanted per run: half near-misses, half genuine absences.
 pub const NEGATIVES: usize = 20;
-/// Tokens taken from a message to build its query.
-const QUERY_TOKENS: usize = 3;
+
+/// The fixture corpus's topical clusters: a topic word, ten subject nouns and
+/// eight action words each. Every word is distinct and no word is a substring
+/// of another, because the shipped search matches on `LIKE '%word%'` — an
+/// overlapping pair would make two different words indistinguishable to it.
+///
+/// A message takes one subject and three actions from its cluster, so messages
+/// in the same cluster share most of their words. That overlap is the whole
+/// point: it is what makes a query answerable without being a lookup.
+///
+/// Test-only: the live leg reads a real store, so nothing in the shipped binary
+/// needs this table. Ungated it would be `dead_code` in the non-test lib target,
+/// which `-D warnings` turns into a build failure.
+#[cfg(test)]
+const CLUSTERS: &[(&str, &[&str], &[&str])] = &[
+    (
+        "rollout",
+        &[
+            "rollback",
+            "canary",
+            "staging",
+            "pipeline",
+            "release",
+            "restart",
+            "provision",
+            "supervisor",
+            "artifact",
+            "bluegreen",
+        ],
+        &[
+            "deploy",
+            "healthcheck",
+            "migration",
+            "hotfix",
+            "cutover",
+            "downtime",
+            "incident",
+            "outage",
+        ],
+    ),
+    (
+        "billing",
+        &[
+            "invoice",
+            "payment",
+            "refund",
+            "subscription",
+            "chargeback",
+            "receipt",
+            "currency",
+            "proration",
+            "merchant",
+            "settlement",
+        ],
+        &[
+            "gateway",
+            "payout",
+            "dispute",
+            "ledger",
+            "taxrate",
+            "discount",
+            "dunning",
+            "remittance",
+        ],
+    ),
+    (
+        "telegram",
+        &[
+            "message",
+            "channel",
+            "webhook",
+            "broadcast",
+            "sticker",
+            "notification",
+            "subscriber",
+            "thread",
+            "forward",
+            "caption",
+        ],
+        &[
+            "polling",
+            "botapi",
+            "attachment",
+            "inline",
+            "groupchat",
+            "emoji",
+            "contact",
+            "voicenote",
+        ],
+    ),
+    (
+        "memory",
+        &[
+            "recall",
+            "embedding",
+            "summary",
+            "context",
+            "retrieval",
+            "compaction",
+            "semantic",
+            "transcript",
+            "indexing",
+            "relevance",
+        ],
+        &[
+            "archive", "vectors", "chunking", "pruning", "snippet", "glossary", "digest", "profile",
+        ],
+    ),
+    (
+        "workflow",
+        &[
+            "runner",
+            "checkout",
+            "compile",
+            "coverage",
+            "dispatch",
+            "matrix",
+            "caching",
+            "linting",
+            "tarball",
+            "workspace",
+        ],
+        &[
+            "clippy", "binaries", "gatepass", "badge", "failure", "retry", "timeout", "queue",
+        ],
+    ),
+    (
+        "server",
+        &[
+            "service",
+            "systemd",
+            "journal",
+            "uptime",
+            "backup",
+            "cronjob",
+            "certificate",
+            "firewall",
+            "monitoring",
+            "container",
+        ],
+        &[
+            "reboot", "sshkey", "kernel", "diskfull", "latency", "throttle", "snapshot", "replica",
+        ],
+    ),
+    (
+        "browser",
+        &[
+            "screenshot",
+            "headless",
+            "selector",
+            "javascript",
+            "scrolling",
+            "viewport",
+            "session",
+            "cookie",
+            "navigate",
+            "rendering",
+        ],
+        &[
+            "capture",
+            "puppeteer",
+            "chromium",
+            "iframe",
+            "websocket",
+            "stall",
+            "waitfor",
+            "download",
+        ],
+    ),
+    (
+        "mailbox",
+        &[
+            "smtp",
+            "greylist",
+            "inbound",
+            "enclosure",
+            "spamtraps",
+            "header",
+            "bounce",
+            "sending",
+            "reply",
+            "filterrule",
+        ],
+        &[
+            "mailer",
+            "postfix",
+            "dkim",
+            "spf",
+            "blacklist",
+            "throttling",
+            "backlog",
+            "autoresponder",
+        ],
+    ),
+];
 
 /// One known-item case: a query a person would type, and the message it came
 /// from. `session_id` is carried so the leg can report the weaker-but-useful
@@ -176,6 +389,20 @@ fn count(conn: &Connection, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<usi
     Ok(n as usize)
 }
 
+/// How many messages in the slice contain BOTH words. Zero is a genuine
+/// absence; anything else means a do-nothing ranker fires on the pair.
+fn cooccur(conn: &Connection, since: i64, a: &str, b: &str) -> Result<usize> {
+    let pat_a = format!("%{a}%");
+    let pat_b = format!("%{b}%");
+    count(
+        conn,
+        "SELECT COUNT(*) FROM messages WHERE created_at >= ?1 \
+         AND content LIKE ?2 ESCAPE '\\' COLLATE NOCASE \
+         AND content LIKE ?3 ESCAPE '\\' COLLATE NOCASE",
+        &[&since, &pat_a, &pat_b],
+    )
+}
+
 /// Run the SHIPPED retrieval semantics over the slice.
 ///
 /// Mirrors `MessageRepository::search_by_content` (contiguous `LIKE`, recency
@@ -259,17 +486,69 @@ pub fn search_slice(conn: &Connection, since: i64, query: &str, k: usize) -> Res
 
 /// Build a known-item case from one message, or `None` when it carries too
 /// few content words to phrase a query from.
-fn case_from(content: &str, id: &str, session_id: &str) -> Option<EpisodicCase> {
-    let mut tokens = content_tokens(content);
-    // Longest first: length is the cheap, deterministic proxy for rarity, and
-    // alphabetical order inside a length band keeps the query from being a
-    // verbatim phrase lifted out of the message.
-    tokens.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
-    if tokens.len() < QUERY_TOKENS {
+///
+/// The query is shaped like a search-box query rather than a lifted phrase: one
+/// SPECIFIC word first, then one BROAD area word. Two properties matter and both
+/// come from `counts`:
+///
+/// * the specific word must be one the corpus SHARES (it occurs in at least two
+///   messages). A word unique to this message would make the query a lookup —
+///   exactly the tautology #899 removes;
+/// * the broad word is the message's most widely used content word, so the query
+///   names a topic as well as an incident.
+///
+/// A full-sentence question ("how did we fix the flaky deploy last week") is
+/// deliberately NOT used here: the shipped arm ANDs every whitespace token, so a
+/// sentence would return nothing and the leg would measure its own phrasing
+/// instead of the search.
+fn case_from(
+    content: &str,
+    id: &str,
+    session_id: &str,
+    counts: &HashMap<String, usize>,
+) -> Option<EpisodicCase> {
+    let tokens = content_tokens(content);
+    if tokens.len() < 2 {
+        return None;
+    }
+
+    // Narrowest shared word, first appearance breaking ties.
+    let mut specific: Option<&String> = None;
+    for tok in &tokens {
+        let n = counts.get(tok).copied().unwrap_or(0);
+        if n < 2 {
+            continue;
+        }
+        match specific {
+            None => specific = Some(tok),
+            Some(cur) => {
+                if n < counts.get(cur).copied().unwrap_or(0) {
+                    specific = Some(tok);
+                }
+            }
+        }
+    }
+
+    // Widest word in the message, first appearance breaking ties.
+    let mut broad: Option<&String> = None;
+    for tok in &tokens {
+        let n = counts.get(tok).copied().unwrap_or(0);
+        match broad {
+            None => broad = Some(tok),
+            Some(cur) => {
+                if n > counts.get(cur).copied().unwrap_or(0) {
+                    broad = Some(tok);
+                }
+            }
+        }
+    }
+
+    let (specific, broad) = (specific?, broad?);
+    if specific == broad {
         return None;
     }
     Some(EpisodicCase {
-        query: tokens[..QUERY_TOKENS].join(" "),
+        query: format!("{specific} {broad}"),
         message_id: id.to_string(),
         session_id: session_id.to_string(),
     })
@@ -309,6 +588,18 @@ pub fn sample(conn: &Connection, slice_days: u32) -> Result<EpisodicDataset> {
         POSITIVES
     );
 
+    // How often each content word occurs across the candidate pool. A query
+    // word that occurs ONCE names a single message — that is the tautology
+    // #899 removes — so the specific half of every query is drawn from words
+    // the corpus SHARES. Bounded so a live store of tens of thousands of
+    // messages does not pay a full tokenisation pass.
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for (_, _, content) in candidates.iter().take(2000) {
+        for tok in content_tokens(content) {
+            *counts.entry(tok).or_insert(0) += 1;
+        }
+    }
+
     // Spread the picks across the slice, then fall back to a plain scan: a
     // message too short on content words is skipped rather than allowed to
     // shorten the dataset, and the fallback keeps that skip from quietly
@@ -325,7 +616,7 @@ pub fn sample(conn: &Connection, slice_days: u32) -> Result<EpisodicDataset> {
         if positives.iter().any(|c| c.message_id == *id) {
             continue;
         }
-        if let Some(case) = case_from(content, id, session_id) {
+        if let Some(case) = case_from(content, id, session_id, &counts) {
             positives.push(case);
         }
     }
@@ -336,36 +627,55 @@ pub fn sample(conn: &Connection, slice_days: u32) -> Result<EpisodicDataset> {
         candidates.len()
     );
 
-    // Negatives: word pairs that no message in the slice contains together.
-    // Built from the same candidate pool so they are drawn from the corpus's
-    // own vocabulary — a negative made of nonsense words would be trivially
-    // silent and measure nothing.
+    // Negatives come in TWO classes, and the split is the point (#899): a set
+    // that can only be silent measures nothing.
+    //
+    //  * NEAR-MISS — a pair that DOES co-occur in some message, so a
+    //    do-nothing ranker fires on it. This is the only way FPR can be above
+    //    zero, and therefore the only way it can ever fail.
+    //  * ABSENT — a pair that co-occurs nowhere in the slice. Silence here is a
+    //    real result rather than a construction artefact.
+    //
+    // Both draw from the same candidate pool, so they are built from the
+    // corpus's own vocabulary — a negative made of nonsense words would be
+    // trivially silent and measure nothing.
     let pool: Vec<String> = candidates
         .iter()
         .flat_map(|(_, _, c)| content_tokens(c))
         .take(400)
         .collect();
-    let mut negatives = Vec::with_capacity(NEGATIVES);
+    let half = NEGATIVES / 2;
+    let mut negatives: Vec<String> = Vec::with_capacity(NEGATIVES);
+
+    // Near-miss: consecutive words of one message share its vocabulary by
+    // construction, so the shipped search returns rows for them.
     let mut i = 0usize;
-    while negatives.len() < NEGATIVES && i + 7 < pool.len() {
-        let query = format!("{} {}", pool[i], pool[i + 7]);
-        let pat_a = format!("%{}%", pool[i]);
-        let pat_b = format!("%{}%", pool[i + 7]);
-        let hits = count(
-            conn,
-            "SELECT COUNT(*) FROM messages WHERE created_at >= ?1 \
-             AND content LIKE ?2 ESCAPE '\\' COLLATE NOCASE \
-             AND content LIKE ?3 ESCAPE '\\' COLLATE NOCASE",
-            &[&since, &pat_a, &pat_b],
-        )?;
-        if hits == 0 {
-            negatives.push(query);
+    while negatives.len() < half && i + 1 < pool.len() {
+        let (a, b) = (&pool[i], &pool[i + 1]);
+        if a != b && !negatives.contains(&format!("{a} {b}")) && cooccur(conn, since, a, b)? > 0 {
+            negatives.push(format!("{a} {b}"));
         }
         i += 1;
     }
     anyhow::ensure!(
+        negatives.len() == half,
+        "track A: found only {} near-miss negatives, wanted {}",
+        negatives.len(),
+        half
+    );
+
+    // Absent: a pair drawn from different messages, proved to co-occur nowhere.
+    let mut j = 0usize;
+    while negatives.len() < NEGATIVES && j + 7 < pool.len() {
+        let (a, b) = (&pool[j], &pool[j + 7]);
+        if a != b && !negatives.contains(&format!("{a} {b}")) && cooccur(conn, since, a, b)? == 0 {
+            negatives.push(format!("{a} {b}"));
+        }
+        j += 1;
+    }
+    anyhow::ensure!(
         negatives.len() == NEGATIVES,
-        "track A: found only {} co-occurrence-free pairs, wanted {}",
+        "track A: found only {} negatives, wanted {}",
         negatives.len(),
         NEGATIVES
     );
@@ -422,8 +732,18 @@ pub fn score(conn: &Connection, dataset: &EpisodicDataset, k: usize) -> Result<E
     })
 }
 
-/// A store with `n` messages whose content words are unique per message, so
-/// every sampled query is a known item with exactly one right answer (#890).
+/// A store with `n` messages drawn from the topical clusters in `CLUSTERS`.
+///
+/// Messages inside a cluster share most of their vocabulary — that overlap is
+/// what makes the fixture able to FAIL (#899). A query built from one message's
+/// words matches a dozen of its neighbours, so the shipped recency-ordered
+/// search has to be lucky to rank the gold first, and it genuinely misses some.
+/// Every message clears the 160-character floor the sampler applies.
+///
+/// Deterministic: message `i` takes its cluster from `i % CLUSTERS.len()` and
+/// its words from pure index arithmetic inside that cluster. Only the
+/// timestamps move, and they move together, so the relative order the search
+/// ranks on is identical on every run.
 ///
 /// Lives beside the track rather than in one test file because two consumers
 /// seed it — the mechanism tests and the baseline guard — and a store built two
@@ -446,13 +766,17 @@ pub fn seeded_store(n: usize) -> Connection {
         .expect("clock")
         .as_secs() as i64;
     for i in 0..n {
-        // Eighteen unique long tokens, padded past the 160-character floor the
-        // sampler applies, and nothing shared between messages.
+        let (topic, subjects, actions) = CLUSTERS[i % CLUSTERS.len()];
+        let j = i / CLUSTERS.len();
+        let subject = subjects[j % subjects.len()];
+        let slot = (j / subjects.len()) % actions.len();
+        let a0 = actions[slot];
+        let a1 = actions[(slot + 3) % actions.len()];
+        let a2 = actions[(slot + 6) % actions.len()];
         let content = format!(
-            "zq{i}alpha zq{i}bravo zq{i}charlie zq{i}delta zq{i}echo \
-             zq{i}foxtrot zq{i}golf zq{i}hotel zq{i}india zq{i}juliet \
-             zq{i}kilo zq{i}lima zq{i}mike zq{i}november zq{i}oscar \
-             zq{i}papa zq{i}quebec zq{i}romeo zq{i}sierra zq{i}tango"
+            "{topic} {subject}: {a0} and {a1} after {a2} was not on the list, \
+             then {subject} {a0} {a1} {a2} again with the {topic} work, \
+             and the {a0} {a1} {a2} {subject} note is fine"
         );
         conn.execute(
             "INSERT INTO messages (id, session_id, role, content, created_at) \
@@ -461,7 +785,7 @@ pub fn seeded_store(n: usize) -> Connection {
                 format!("m{i}"),
                 format!("session-{}", i % 5),
                 content,
-                now - (n as i64 - i as i64)
+                now - (n as i64 - i as i64) - 60
             ],
         )
         .expect("insert");
@@ -469,13 +793,13 @@ pub fn seeded_store(n: usize) -> Connection {
     conn
 }
 
-/// The COMMITTED Track A fixture leg (#890 step 6): 90 seeded messages, a
-/// 14-day slice, 40 positives + 20 negatives, scored at `k`. Deterministic by
-/// construction, so it is CI-reproducible — unlike the real-store leg, which
-/// reads the host's own history and stays out of CI.
+/// The COMMITTED Track A fixture leg (#890 step 6): a 1,000-message seeded
+/// corpus, a 14-day slice, 40 positives + 20 negatives, scored at `k`.
+/// Deterministic by construction, so it is CI-reproducible — unlike the
+/// real-store leg, which reads the host's own history and stays out of CI.
 #[cfg(test)]
 pub fn committed_report(k: usize) -> EpisodicReport {
-    let conn = seeded_store(90);
+    let conn = seeded_store(1000);
     let dataset = sample(&conn, 14).expect("sample");
     score(&conn, &dataset, k).expect("score")
 }
