@@ -629,7 +629,7 @@ async fn import_refused_while_live_but_replaces_pre_init() {
             serde_json::to_string(&json!({
                 "title": "Imported",
                 "description": "structured",
-                "tasks": [{ "title": "t1", "description": "d", "task_type": "edit" }, { "title": "t2", "description": "d2" }]
+                "tasks": [{ "title": "t1", "description": "d", "task_type": "edit" }, { "title": "t2", "description": "d2", "task_type": "edit" }]
             }))
             .unwrap(),
         )
@@ -780,7 +780,7 @@ async fn import_requires_non_empty_root_title_and_description() {
             &no_title,
             serde_json::to_string(&json!({
                 "description": "has description but no title",
-                "tasks": [{ "title": "t1", "description": "d", "task_type": "edit" }, { "title": "t2", "description": "d2" }]
+                "tasks": [{ "title": "t1", "description": "d", "task_type": "edit" }, { "title": "t2", "description": "d2", "task_type": "edit" }]
             }))
             .unwrap(),
         )
@@ -803,7 +803,7 @@ async fn import_requires_non_empty_root_title_and_description() {
             serde_json::to_string(&json!({
                 "title": "Has title",
                 "description": "   ",
-                "tasks": [{ "title": "t1", "description": "d", "task_type": "edit" }, { "title": "t2", "description": "d2" }]
+                "tasks": [{ "title": "t1", "description": "d", "task_type": "edit" }, { "title": "t2", "description": "d2", "task_type": "edit" }]
             }))
             .unwrap(),
         )

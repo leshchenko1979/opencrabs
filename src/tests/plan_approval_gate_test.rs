@@ -124,7 +124,7 @@ async fn escape_hatch_import_arm_auto_activates_and_stamps_auto() {
         let source = json!({
             "title": "Imported exempt",
             "description": "Escape-hatch import fixture",
-            "tasks": [{"title": "t1", "description": "d1", "task_type": "edit"}, { "title": "t2", "description": "d2" }]
+            "tasks": [{"title": "t1", "description": "d1", "task_type": "edit"}, { "title": "t2", "description": "d2", "task_type": "edit" }]
         });
         let dir = TempDir::new().unwrap();
         let import_path = dir.path().join("import.json");
