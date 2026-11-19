@@ -748,6 +748,7 @@ pub mod provider_stream_total_timeout_test;
 pub mod provider_sync_test;
 pub mod provider_timeout_test;
 pub mod prune_cutoff_test;
+#[cfg(feature = "whatsapp")]
 pub mod qr_render_test;
 pub mod queued_message_test;
 pub mod quota_classification_test;
@@ -919,6 +920,7 @@ pub mod skills_test;
 pub mod slack_narration_fold_test;
 #[cfg(feature = "slack")]
 pub mod slack_reactions_test;
+#[cfg(feature = "slack")]
 pub mod slack_send_content_type_test;
 #[cfg(feature = "slack")]
 pub mod slack_tool_group_test;
