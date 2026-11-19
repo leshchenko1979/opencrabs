@@ -29,22 +29,6 @@ const STICKY_FALLBACK_THRESHOLD: u32 = 4;
 /// Default interval in seconds between mid-turn intra-loop time markers (#153).
 pub const DEFAULT_TIME_MARKER_INTERVAL_SECS: u64 = 900;
 
-/// Self-healing alert texts that reach channel posts verbatim (#1745
-/// follow-up): user-facing, so they carry no em dashes. The renderer arms
-/// normalize dashes anyway; `em_dash_guard_test` pins these constants.
-pub(crate) const PHANTOM_RETRY_ENFORCEMENT_ALERT: &str =
-    "Phantom tool calls detected: retrying with enforcement";
-pub(crate) const SELF_HEAL_BUDGET_ROLLED_ALERT: &str =
-    "Self-heal retry budget rolled: forcing another retry";
-pub(crate) const SELF_HEAL_EXHAUSTED_ALERT: &str =
-    "Self-heal exhausted: the model kept narrating without calling tools; ending the turn.";
-pub(crate) const ACCOUNT_ROTATION_ALERT: &str =
-    "Account rotation mid-task: retrying with continuation context";
-pub(crate) const CONTINUATION_EMPTY_ALERT: &str =
-    "Continuation added nothing: retrying with an anchored prompt";
-pub(crate) const EMPTY_ANSWER_ANALYSIS_ALERT: &str =
-    "Empty answer after data fetch: nudging the model to write the analysis";
-
 /// Check whether the intra-turn elapsed time warrants injecting a new time notice (#153).
 /// Returns `Some((notice_string, now))` if the interval has passed, or `None`.
 pub(crate) fn check_intra_turn_time_marker(
@@ -5668,7 +5652,8 @@ impl AgentService {
                         cb(
                             session_id,
                             ProgressEvent::SelfHealingAlert {
-                                message: PHANTOM_RETRY_ENFORCEMENT_ALERT.into(),
+                                message: "Phantom tool calls detected — retrying with enforcement"
+                                    .into(),
                             },
                         );
                     }
@@ -5741,7 +5726,9 @@ impl AgentService {
                             cb(
                                 session_id,
                                 ProgressEvent::SelfHealingAlert {
-                                    message: SELF_HEAL_BUDGET_ROLLED_ALERT.to_string(),
+                                    message:
+                                        "Self-heal retry budget rolled — forcing another retry"
+                                            .to_string(),
                                 },
                             );
                         }
@@ -5771,7 +5758,9 @@ impl AgentService {
                         cb(
                             session_id,
                             ProgressEvent::SelfHealingAlert {
-                                message: SELF_HEAL_EXHAUSTED_ALERT.to_string(),
+                                message: "Self-heal exhausted — the model kept narrating without \
+                                          calling tools; ending the turn."
+                                    .to_string(),
                             },
                         );
                     }
@@ -5837,7 +5826,9 @@ impl AgentService {
                         cb(
                             session_id,
                             ProgressEvent::SelfHealingAlert {
-                                message: ACCOUNT_ROTATION_ALERT.into(),
+                                message:
+                                    "Account rotation mid-task — retrying with continuation context"
+                                        .into(),
                             },
                         );
                     }
@@ -6341,7 +6332,9 @@ impl AgentService {
                         cb(
                             session_id,
                             ProgressEvent::SelfHealingAlert {
-                                message: CONTINUATION_EMPTY_ALERT.into(),
+                                message: "Continuation added nothing — retrying with an \
+                                          anchored prompt"
+                                    .into(),
                             },
                         );
                     }
@@ -6591,7 +6584,8 @@ impl AgentService {
                             cb(
                                 session_id,
                                 ProgressEvent::SelfHealingAlert {
-                                    message: EMPTY_ANSWER_ANALYSIS_ALERT.to_string(),
+                                    message: "Empty answer after data fetch — nudging the model to write the analysis"
+                                        .to_string(),
                                 },
                             );
                         }
