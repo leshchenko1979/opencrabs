@@ -7,17 +7,17 @@ use std::path::{Path, PathBuf};
 
 /// Core brain files — always injected (user context).
 ///
-/// SOUL.md is intentionally excluded here — it's injected at the END
-/// of the system prompt to combat the
-/// "lost in the middle" attention problem. See `build_core_brain`.
+/// SOUL.md is intentionally excluded here — it is injected after the core
+/// files and ahead of AGENTS.md, so the two static brain files ride together
+/// in the provider's cached prefix (#890). See `build_core_brain`.
 const CORE_BRAIN_FILES: &[(&str, &str)] = &[("USER.md", "user profile")];
 
 /// Always-loaded brain files beyond USER.md (which is in CORE_BRAIN_FILES) and
 /// SOUL.md (injected before AGENTS.md). AGENTS.md lives here because it owns
 /// the enforced hard rules AND the brain-file ownership/routing model — those
-/// MUST be in context on every turn and survive compaction. AGENTS.md is
-/// injected LAST (after SOUL.md) so the routing/ownership info sits closest to
-/// the model's generation point.
+/// MUST be in context on every turn and survive compaction. It is STATIC, so it
+/// sits ahead of the volatile sections (project directives, skills index,
+/// Runtime Info) and stays in the provider's cached prefix (#890).
 const ALWAYS_LOADED_FILES: &[(&str, &str)] = &[("AGENTS.md", "workspace governance + hard rules")];
 
 /// Contextual brain files — loaded on demand via the `load_brain_file` tool.
@@ -33,8 +33,9 @@ pub(crate) const CONTEXTUAL_BRAIN_FILES: &[(&str, &str)] = &[
 ];
 
 /// All brain files in assembly order — kept for `build_system_brain` (full mode).
-/// SOUL.md intentionally excluded — injected near the end.
-/// AGENTS.md intentionally excluded — injected LAST (owns the brain-file routing model).
+/// SOUL.md intentionally excluded — injected after these files, before AGENTS.md.
+/// AGENTS.md intentionally excluded — injected after SOUL.md (owns the brain-file
+/// routing model); both are static and precede the volatile sections (#890).
 /// TOOLS.md and CODE.md excluded — they're contextual now.
 /// MEMORY.md is deliberately NOT here (#995). It is the one brain file with no
 /// bound on its size: it is append-only and grows for as long as the agent is
@@ -341,16 +342,25 @@ impl BrainLoader {
 
     /// Build the full system brain from workspace files + brain preamble.
     ///
-    /// Assembly order:
+    /// Assembly order — STATIC FIRST, VOLATILE LAST (#890). The system prompt is
+    /// sent as ONE string (#693), so a provider's prefix cache survives only up
+    /// to the first byte that changed. Every section that can change on its own
+    /// schedule must therefore sit AFTER every section that does not:
+    ///
     /// 1. Brain preamble (hardcoded, always present)
     /// 2. USER.md — who the human is
     /// 3. SECURITY.md — security policies
-    /// 4. MEMORY.md — long-term context
-    /// 5. BOOT/HEARTBEAT — startup config
-    /// 6. Runtime info — model, provider, working directory, OS, current date
-    /// 7. Commands & skills awareness index
-    /// 8. SOUL.md — personality, tone
-    /// 9. AGENTS.md — workspace governance + hard rules + brain-file routing (LAST)
+    /// 4. BOOT/HEARTBEAT — startup config
+    /// 5. SOUL.md — personality, tone
+    /// 6. AGENTS.md — workspace governance + hard rules + brain-file routing
+    /// 7. Project directive files — per working directory
+    /// 8. Commands & skills awareness index — changes when a skill is added
+    /// 9. Runtime info — model, provider, cwd, OS, current date (LAST)
+    ///
+    /// Before #890 the runtime block, the directive index and the skills index
+    /// all sat BEFORE SOUL.md and AGENTS.md (~33.5 KB of static text), so
+    /// adding one skill re-wrote the entire cached prefix plus the conversation,
+    /// and the UTC date rollover did the same every midnight.
     pub fn build_system_brain(&self, runtime_info: Option<&RuntimeInfo>) -> String {
         let mut prompt = String::with_capacity(8192);
 
@@ -358,7 +368,7 @@ impl BrainLoader {
         prompt.push_str(BRAIN_PREAMBLE);
         prompt.push_str("\n\n");
 
-        // 2-7. Brain workspace files (skip missing ones silently)
+        // 2-4. Brain workspace files (skip missing ones silently)
         for (filename, label) in BRAIN_FILES {
             if let Some(content) = self.load_file(filename) {
                 let trimmed = content.trim();
@@ -371,20 +381,8 @@ impl BrainLoader {
             }
         }
 
-        // 7. Runtime info (shared with build_core_brain; #671)
-        push_runtime_info(&mut prompt, runtime_info);
-
-        // 7.5 Project directive files — scan the working directory for directive
-        // files (AGENTS.md, CLAUDE.md, .cursorrules, etc.) and list them so the
-        // agent knows to read them when working in this project.
-        let wd = runtime_info.and_then(|info| info.working_directory.as_deref());
-        self.push_project_directives(&mut prompt, wd);
-
-        // 7.6 Available commands & skills (awareness layer — see the method).
-        self.push_commands_and_skills(&mut prompt);
-
-        // 8. SOUL.md — personality, tone. Injected near the end so personality
-        //    sits close to the model's generation point, but BEFORE AGENTS.md.
+        // 7. SOUL.md — personality, tone. STATIC, so it stays in the cached
+        //    prefix ahead of AGENTS.md.
         if let Some(content) = self.load_file("SOUL.md") {
             let trimmed = content.trim();
             if !trimmed.is_empty() {
@@ -392,10 +390,9 @@ impl BrainLoader {
             }
         }
 
-        // 9. AGENTS.md — workspace governance + the enforced hard rules +
-        //    brain-file ownership/routing model. Injected LAST so the routing
-        //    info sits at the very bottom, closest to the model's generation
-        //    point.
+        // 8. AGENTS.md — workspace governance + the enforced hard rules +
+        //    brain-file ownership/routing model. Also static: it rides in the
+        //    cached prefix, and only a brain-file edit re-writes from here on.
         if let Some(content) = self.load_file("AGENTS.md") {
             let trimmed = content.trim();
             if !trimmed.is_empty() {
@@ -406,15 +403,35 @@ impl BrainLoader {
             }
         }
 
+        // 9. Project directive files — scan the working directory for directive
+        // files (AGENTS.md, CLAUDE.md, .cursorrules, etc.) and list them so the
+        // agent knows to read them when working in this project. VOLATILE: it
+        // changes with the project, so it sits after the static brain.
+        let wd = runtime_info.and_then(|info| info.working_directory.as_deref());
+        self.push_project_directives(&mut prompt, wd);
+
+        // 10. Available commands & skills (awareness layer — see the method).
+        //     VOLATILE: adding one skill rewrites only this tail.
+        self.push_commands_and_skills(&mut prompt);
+
+        // 11. Runtime info LAST (shared with build_core_brain; #671). It carries
+        //     the per-session model/provider/cwd and the UTC date, which rolls
+        //     every midnight — placing it last means the rollover costs the tail
+        //     instead of everything after it.
+        push_runtime_info(&mut prompt, runtime_info);
+
         prompt
     }
 
     /// Build a lean "core" system brain: only USER.md is injected early.
     ///
-    /// SOUL.md is injected near the end for personality, and AGENTS.md is
-    /// injected LAST so the brain-file ownership/routing model sits closest
-    /// to the model's generation point. After compaction, the model sees
-    /// AGENTS.md last and can immediately navigate to the right brain file.
+    /// SOUL.md and AGENTS.md are injected immediately after the core files and
+    /// are STATIC, so they ride in the provider's cached prefix. Everything
+    /// that can change on its own schedule — the project directive index, the
+    /// commands & skills index, and Runtime Info (model / provider / cwd / UTC
+    /// date) — follows them, with Runtime Info last (#890). That ordering means
+    /// adding a skill or crossing UTC midnight rewrites only the tail instead of
+    /// the ~33 KB of brain text plus the conversation.
     ///
     /// All other brain files (MEMORY.md, SECURITY.md, etc.) are listed in a
     /// "Available Context Files" index section so the agent knows they exist and can
@@ -547,24 +564,9 @@ impl BrainLoader {
             }
         }
 
-        // 3.5 Project directive files — scan the working directory for directive
-        // files (AGENTS.md, CLAUDE.md, .cursorrules, etc.) and list them so the
-        // agent knows to read them when working in this project. Closes gap #1
-        // from the original directive-discovery issue.
-        let wd = runtime_info.and_then(|info| info.working_directory.as_deref());
-        self.push_project_directives(&mut prompt, wd);
-
-        // 3.6 Available commands & skills — the always-on awareness layer for
-        // runtime-added slash commands / skills (see push_commands_and_skills).
-        self.push_commands_and_skills(&mut prompt);
-
-        // 4. Runtime info (shared with build_system_brain; #671)
-        push_runtime_info(&mut prompt, runtime_info);
-
-        // 5. SOUL.md — personality, tone. Injected near the end so personality
-        //    sits close to the model's generation point, but BEFORE AGENTS.md
-        //    which is the true last section (it owns the brain-file routing
-        //    model that tells the agent where everything lives).
+        // 3.5 SOUL.md — personality, tone. STATIC, so it rides in the cached
+        //     prefix. Under #890 the volatile sections (project directives,
+        //     skills index, runtime info) all follow it.
         if let Some(content) = self.load_file("SOUL.md") {
             let trimmed = content.trim();
             if !trimmed.is_empty() {
@@ -572,12 +574,10 @@ impl BrainLoader {
             }
         }
 
-        // 6. AGENTS.md — workspace governance + the enforced hard rules +
-        //    brain-file ownership/routing model. Always-loaded and injected
-        //    LAST so the routing info (what lives where, which file owns what)
-        //    sits at the very bottom, closest to the model's generation point.
-        //    After compaction, the model sees this last and can immediately
-        //    navigate to the right brain file.
+        // 3.6 AGENTS.md — workspace governance + the enforced hard rules +
+        //     brain-file ownership/routing model. Always-loaded and STATIC: it
+        //     stays in the cached prefix, and after compaction the agent still
+        //     reads the routing model because it is re-rendered every turn.
         for (filename, _label) in ALWAYS_LOADED_FILES {
             if let Some(content) = self.load_file(filename) {
                 let trimmed = content.trim();
@@ -589,6 +589,26 @@ impl BrainLoader {
                 }
             }
         }
+
+        // 3.7 Project directive files — scan the working directory for directive
+        //     files (AGENTS.md, CLAUDE.md, .cursorrules, etc.) and list them so
+        //     the agent knows to read them when working in this project. Closes
+        //     gap #1 from the original directive-discovery issue. VOLATILE: it
+        //     changes with the project, so it sits after the static brain.
+        let wd = runtime_info.and_then(|info| info.working_directory.as_deref());
+        self.push_project_directives(&mut prompt, wd);
+
+        // 3.8 Available commands & skills — the always-on awareness layer for
+        //     runtime-added slash commands / skills (see
+        //     push_commands_and_skills). VOLATILE: adding one skill rewrites
+        //     only this tail, not the ~33 KB of brain text above it.
+        self.push_commands_and_skills(&mut prompt);
+
+        // 4. Runtime info LAST (#890; shared with build_system_brain, #671). It
+        //    carries the per-session model/provider/cwd and the UTC date, which
+        //    rolls every midnight — last means that rollover costs the tail
+        //    instead of everything after it.
+        push_runtime_info(&mut prompt, runtime_info);
 
         prompt
     }

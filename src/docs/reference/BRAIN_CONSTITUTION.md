@@ -49,10 +49,10 @@ Brain Constitution — Canonical Placement Policy for OpenCrabs
 | File | Role | Position in prompt | Approx size |
 |------|------|--------------------|-------------|
 | `USER.md` | User profile: identity, preferences, corrections, pet peeves | Position 2 (after BRAIN_PREAMBLE) | ~11KB |
-| `AGENTS.md` | Workspace process + enforced hard rules / safety gates | LAST (after SOUL.md) | ~8KB |
-| `SOUL.md` | Personality / voice only (how you sound) | Near end (just before AGENTS.md) | ~18KB |
+| `AGENTS.md` | Workspace process + enforced hard rules / safety gates | Static (after SOUL.md, before the volatile tail) | ~8KB |
+| `SOUL.md` | Personality / voice only (how you sound) | Static (immediately before AGENTS.md) | ~18KB |
 
-These are the only brain files injected into every request. The agent cannot function without them. `AGENTS.md` is injected LAST (after `SOUL.md`), so the enforced hard rules sit closest to the model's generation point — the strongest spot against the "lost in the middle" attention decay; `SOUL.md` (personality/voice) sits just before it. `AGENTS.md` is always-loaded because it owns the enforced hard rules (safety/permission gates) — these must be in context every turn and survive compaction. SOUL.md was narrowed to personality/voice only (commit `9ca6182b`); hard rules live in AGENTS.md.
+These are the only brain files injected into every request. The agent cannot function without them. `SOUL.md` and `AGENTS.md` are STATIC and are injected consecutively, ahead of every volatile section (project directive index, commands & skills index, Runtime Info) — the system prompt is sent as one string, so the provider's prefix cache survives only up to the first changed byte, and anything volatile placed before them would invalidate them on every skills change and every UTC date rollover (#890). `AGENTS.md` is always-loaded because it owns the enforced hard rules (safety/permission gates) — these must be in context every turn and survive compaction. SOUL.md was narrowed to personality/voice only (commit `9ca6182b`); hard rules live in AGENTS.md.
 
 ### 2.2 Contextual Brain Files (available on demand)
 

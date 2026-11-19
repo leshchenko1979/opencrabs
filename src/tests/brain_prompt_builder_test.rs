@@ -1,7 +1,9 @@
 //! Tests for `BrainLoader::build_core_brain()`.
 //!
 //! Verifies the lean-injection model: USER.md is baked into every request;
-//! AGENTS.md is injected last (owns the brain-file routing model);
+//! SOUL.md and AGENTS.md (static, owns the brain-file routing model) ride in
+//! the cached prefix, and the volatile sections — project directives, skills
+//! index, Runtime Info — follow them with Runtime Info last (#890);
 //! other files are listed only as an index so the agent can retrieve them on demand via `load_brain_file`.
 
 use crate::brain::prompt_builder::*;
@@ -315,11 +317,12 @@ fn test_runtime_info_included_in_core_brain() {
 
 // ── SOUL.md position ─────────────────────────────────────────────────────────
 
-/// AGENTS.md must appear as the LAST section in the system prompt — it owns
-/// the brain-file ownership/routing model and the model needs it closest to
-/// its generation point to navigate brain files after compaction.
+/// AGENTS.md must still follow SOUL.md, but it is no longer the LAST section:
+/// #890 moved the volatile sections (project directives, skills index, Runtime
+/// Info) after the static brain, so a skills-index change or a UTC date roll no
+/// longer invalidates SOUL + AGENTS in the provider's prefix cache.
 #[test]
-fn test_agents_md_is_last_section() {
+fn test_agents_md_follows_soul_md() {
     let dir = TempDir::new().unwrap();
     write(&dir, "SOUL.md", "PERSONALITY_MARKER_UNIQUE_12345");
     write(&dir, "AGENTS.md", "AGENTS_MARKER_UNIQUE_67890");
@@ -335,13 +338,72 @@ fn test_agents_md_is_last_section() {
         agents_pos > soul_pos,
         "AGENTS.md must come AFTER SOUL.md (AGENTS owns the brain-file routing model)"
     );
-    // AGENTS.md should be the last brain file in the prompt
-    let after_agents = &brain[agents_pos..];
-    let trimmed = after_agents.trim();
+}
+
+/// #890: the reorder is a pure PERMUTATION of the section set — nothing added,
+/// nothing dropped — and Runtime Info is the FINAL section, so the UTC date
+/// rollover invalidates only the tail instead of the ~33 KB of brain text that
+/// used to follow it.
+#[test]
+fn volatile_sections_follow_the_static_brain_and_runtime_info_is_last() {
+    let dir = TempDir::new().unwrap();
+    let proj = dir.path().join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    write(&dir, "USER.md", "Name: Alice");
+    write(&dir, "SOUL.md", "PERSONALITY_MARKER_UNIQUE_12345");
+    write(&dir, "AGENTS.md", "AGENTS_MARKER_UNIQUE_67890");
+    write(
+        &dir,
+        "commands.toml",
+        "[[commands]]\nname = \"/deploy\"\ndescription = \"Build and ship to prod\"\nprompt = \"deploy now\"\n",
+    );
+    std::fs::write(proj.join("CLAUDE.md"), "PROJECT_RULE_UNIQUE\n").unwrap();
+
+    let info = RuntimeInfo {
+        model: Some("test-model".to_string()),
+        provider: Some("test-provider".to_string()),
+        working_directory: Some(proj.to_string_lossy().to_string()),
+    };
+    let brain = loader(&dir).build_system_brain(Some(&info));
+
+    // Every section header, in render order. A section header is a line that
+    // opens with "--- " and closes with "---" (the preamble carries none).
+    let headers: Vec<&str> = brain
+        .lines()
+        .filter(|l| l.starts_with("--- ") && l.trim_end().ends_with("---"))
+        .collect();
+
+    let expected = [
+        "--- USER.md (user) ---",
+        "--- SOUL.md (personality) ---",
+        "--- AGENTS.md (workspace governance + enforced hard rules) ---",
+        "--- Project Directive Files (in ",
+        "--- Available Commands & Skills ---",
+        "--- Runtime Info ---",
+    ];
+    assert_eq!(
+        headers.len(),
+        expected.len(),
+        "section set changed — #890 must be a PERMUTATION, not an add/drop: {headers:#?}"
+    );
+    for (i, prefix) in expected.iter().enumerate() {
+        assert!(
+            headers[i].starts_with(prefix),
+            "section {i} must be {prefix:?} (static brain first, volatile last), got {:?} — full order: {headers:#?}",
+            headers[i]
+        );
+    }
+
+    // Runtime Info is genuinely LAST: no section header follows it, and only
+    // its own body (Known paths, compiled features) remains.
+    let runtime_pos = brain
+        .find(RUNTIME_INFO_HEADER)
+        .expect("Runtime Info must be rendered");
+    let after = &brain[runtime_pos + RUNTIME_INFO_HEADER.len()..];
     assert!(
-        trimmed.ends_with("AGENTS_MARKER_UNIQUE_67890") || trimmed.ends_with("---"),
-        "AGENTS.md should be the last section in the system prompt, got trailing: {:?}",
-        &trimmed[trimmed.len().saturating_sub(100)..]
+        !after.lines().any(|l| l.starts_with("--- ") && l.ends_with("---")),
+        "Runtime Info must be the final section, found a header after it:\n{}",
+        after.lines().take(8).collect::<Vec<_>>().join("\n")
     );
 }
 
