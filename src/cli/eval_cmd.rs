@@ -40,7 +40,90 @@ pub(crate) fn cmd_eval(cmd: EvalCommands) -> Result<()> {
             k,
             json,
         } => run_recall(&track, &dataset, corpus.as_deref(), k, json),
+        EvalCommands::Skills { dataset, k, json } => run_skills(&dataset, k, json),
     }
+}
+
+/// Track C — skill SELECTION over the live skills index (#890 step 4).
+///
+/// This is a LIVE leg by design: it reads the profile's real skills, so its
+/// numbers are comparable only while those skills exist. That is why it is not
+/// wired into CI (step 6 keeps only the fixture legs there) and why every
+/// label that fails to resolve is reported rather than dropped.
+fn run_skills(dataset_path: &str, k: Option<usize>, json: bool) -> Result<()> {
+    use crate::eval::skills_track::{SkillDataset, index_block_chars, index_markdown, score};
+
+    let raw = std::fs::read_to_string(dataset_path)
+        .with_context(|| format!("eval skills: cannot read dataset {dataset_path}"))?;
+    let dataset = SkillDataset::from_json(&raw)
+        .with_context(|| format!("eval skills: {dataset_path} is not a valid skill dataset"))?;
+    if dataset.tasks.is_empty() {
+        bail!("eval skills: dataset {dataset_path} has no tasks");
+    }
+
+    // The index is read through the SAME loader the prompt builder uses, so
+    // the thing measured is the thing the agent is handed — not a copy that
+    // can drift from it.
+    let skills = crate::brain::skills::load_all_skills();
+    if skills.is_empty() {
+        bail!("eval skills: no skills found — is a brain directory configured?");
+    }
+    let entries: Vec<(String, String)> = skills
+        .iter()
+        .map(|s| (s.name.clone(), s.description.clone()))
+        .collect();
+    let as_pairs: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|(n, d)| (n.as_str(), d.as_str()))
+        .collect();
+    let index_md = index_markdown(as_pairs.iter().copied());
+    let c2_chars = index_block_chars(as_pairs.iter().copied());
+    let slugs: Vec<String> = entries.iter().map(|(n, _)| n.clone()).collect();
+
+    // C3 — the honest denominator. `session_seen_skills` is the record of what
+    // was actually loaded, so a skill with no row has never been used by any
+    // session on this host: it occupies prompt space for nothing.
+    let employed = employed_slugs(&slugs);
+    let report = score(
+        &dataset,
+        &index_md,
+        &slugs,
+        k.unwrap_or(5),
+        c2_chars,
+        employed.len(),
+    );
+
+    if json {
+        let obj = serde_json::json!({
+            "track": "C",
+            "dataset": dataset.name,
+            "ranker": "proxy: shipped BM25 over the emitted index (no skill ranker exists in the product)",
+            "k": report.k,
+            "full": report.full,
+            "positives": report.positives,
+            "negatives": report.negatives,
+            "resolved": report.resolved,
+            "c1_at_k": report.c1_at_k,
+            "c1_at_full": report.c1_at_full,
+            "c2_chars": report.c2_chars,
+            "c3_employed": report.c3_employed,
+            "c3_coverage": report.c3_coverage,
+            "c4_false_selection": report.c4_false_selection,
+            "employed": employed,
+        });
+        println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
+    } else {
+        println!("# eval skills — track C (selection)");
+        println!("dataset: {}", dataset.name);
+        println!(
+            "index:   {} skills, emitted form (ranked by the shipped BM25 — a PROXY, \
+             not the model's own choice)",
+            report.full
+        );
+        println!();
+        print!("{}", report.render());
+    }
+    Ok(())
 }
 
 fn run_recall(
@@ -181,4 +264,45 @@ fn print_json(dataset: &str, track: &str, report: &RecallReport) {
         "fpr": report.false_positive_rate(),
     });
     println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
+}
+
+/// Slugs from `index` that appear at least once in `session_seen_skills`.
+///
+/// This is the ONE piece of I/O Track C needs, so it lives with the CLI rather
+/// than in [`crate::eval::skills_track`]: the metric module stays pure and
+/// testable without a database, and the surface that has a config and a
+/// connection does the reading.
+///
+/// An unreadable database is an ERROR, never a zero. `c3_employed = 0` would
+/// read as "no skill has ever been used" — the strongest possible claim about
+/// the index — and it would be produced by a missing file.
+fn employed_slugs(index: &[String]) -> Result<Vec<String>> {
+    use rusqlite::{Connection, OpenFlags};
+
+    let config = crate::config::Config::load_for_cli(None)
+        .context("eval skills: cannot load config to locate the database")?;
+    let db_path = &config.database.path;
+    if !db_path.exists() {
+        bail!(
+            "eval skills: database not found at {} — C3 needs the session record, \
+             and reporting 0 would claim no skill was ever used",
+            db_path.display()
+        );
+    }
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("eval skills: cannot open {} read-only", db_path.display()))?;
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT slug FROM session_seen_skills")
+        .context("eval skills: session_seen_skills is not queryable")?;
+    let seen: std::collections::HashSet<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .context("eval skills: cannot read session_seen_skills")?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(index
+        .iter()
+        .filter(|s| seen.contains(*s))
+        .cloned()
+        .collect())
 }

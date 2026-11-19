@@ -1,0 +1,194 @@
+{
+  "name": "track-c-skills-2026-11",
+  "note": "35 positives (one per skill on the ops profile) + 12 negatives. Tasks are written as a user would ASK, never by quoting the skill description: a task that echoes its target's wording measures string matching, not selection (#890 step 3's inflation lesson, applied here). Labels name skills that live outside the repo, so a label can fail to resolve on another machine - that is a MISS, reported as resolved/total, never excluded.",
+  "tasks": [
+    {
+      "task": "the api container on the staging host keeps restarting every few minutes, walk me through getting it healthy again",
+      "gold": "gatus-recovery"
+    },
+    {
+      "task": "push this repo's new commit to the server and restart the service there, then check the journal for errors",
+      "gold": "vds-deploy"
+    },
+    {
+      "task": "how should I roll out a config change across my fleet of rented boxes without breaking the ones already running",
+      "gold": "infra-factory"
+    },
+    {
+      "task": "the dashboard panel shows a readonly database error and the graph is empty, fix it",
+      "gold": "grafana"
+    },
+    {
+      "task": "my workflow ran but nothing happened, show me the execution history and what failed",
+      "gold": "n8n-ops"
+    },
+    {
+      "task": "fix this bug in the opencrabs source and get it through the gate and merged",
+      "gold": "opencrabs-dev"
+    },
+    {
+      "task": "the html to png crate is failing its contract tests, take a look",
+      "gold": "pageplate"
+    },
+    {
+      "task": "survey the factories under the agent-factories repo and tell me which member is behind",
+      "gold": "meta-factory"
+    },
+    {
+      "task": "triage the incoming issues for the miidas accounting assistant and brief its lane",
+      "gold": "miidas"
+    },
+    {
+      "task": "the avito bot answered a buyer with the wrong price, review the dialogue rules",
+      "gold": "avito-realty-bot"
+    },
+    {
+      "task": "check which model routes are worth keeping based on their measured intelligence and throughput",
+      "gold": "inferhub-auto-route"
+    },
+    {
+      "task": "run the periodic self-improvement cycle for the inferhub watch project",
+      "gold": "inferhub"
+    },
+    {
+      "task": "read the donor group and reply to the people who answered our pitch",
+      "gold": "outreach-reply-sweep"
+    },
+    {
+      "task": "send the first contact messages to the next batch of prospects",
+      "gold": "outreach-sprint"
+    },
+    {
+      "task": "turn this note into something that would do well on x, maybe a thread",
+      "gold": "viral-x-post"
+    },
+    {
+      "task": "write the landing page hero and the three benefit blocks for a new client offer",
+      "gold": "great-web-copy"
+    },
+    {
+      "task": "draft a cold email sequence for this offer using proven direct response frameworks",
+      "gold": "marketing-skills"
+    },
+    {
+      "task": "build out the seo plan and the paid channel mix for this site",
+      "gold": "kostja94-marketing-skills"
+    },
+    {
+      "task": "rewrite this sales page so it converts better, keep the client's voice",
+      "gold": "copy-skill"
+    },
+    {
+      "task": "audit this draft for the usual ai tells and tighten the hook",
+      "gold": "copywriting-skill"
+    },
+    {
+      "task": "this readme reads badly, make it clear and cut the fluff",
+      "gold": "writing-clearly"
+    },
+    {
+      "task": "we are about to start a complicated migration and I want the unknowns interrogated before anyone writes code",
+      "gold": "grill-for-unknowns"
+    },
+    {
+      "task": "review this document hard from more than one angle, one pass is not catching enough",
+      "gold": "subagent-review"
+    },
+    {
+      "task": "work out which constraint is actually holding this system back and what to do about it",
+      "gold": "toc-thinking"
+    },
+    {
+      "task": "make this interface look intentional rather than like a default template",
+      "gold": "frontend-design"
+    },
+    {
+      "task": "polish the spacing, hierarchy and typography across the whole app shell",
+      "gold": "impeccable"
+    },
+    {
+      "task": "do the least amount of work that solves this, no speculative abstraction",
+      "gold": "ponytail"
+    },
+    {
+      "task": "list every markdown document in this repo with its title and summary",
+      "gold": "md-index"
+    },
+    {
+      "task": "queue these tasks so they show up in their own telegram topics and I can approve them",
+      "gold": "task-queue"
+    },
+    {
+      "task": "build a deck with slides, deal diagrams and charts for the investor meeting",
+      "gold": "presentations"
+    },
+    {
+      "task": "assess how this roadmap item will actually affect the user journey and where it could break",
+      "gold": "roadmap-ux-analysis"
+    },
+    {
+      "task": "reverse this linked list in place and show me the result",
+      "gold": null
+    },
+    {
+      "task": "what is the time difference between moscow and tokyo right now",
+      "gold": null
+    },
+    {
+      "task": "convert this csv file into json for me",
+      "gold": null
+    },
+    {
+      "task": "how do I install docker on a fresh debian machine",
+      "gold": null
+    },
+    {
+      "task": "explain what a mutex is in one paragraph",
+      "gold": null
+    },
+    {
+      "task": "find the duplicate rows in this spreadsheet and delete them",
+      "gold": null
+    },
+    {
+      "task": "translate this paragraph into spanish",
+      "gold": null
+    },
+    {
+      "task": "what will the weather be like tomorrow in moscow",
+      "gold": null
+    },
+    {
+      "task": "how many bytes are in a megabyte",
+      "gold": null
+    },
+    {
+      "task": "rename this variable from x to counter",
+      "gold": null
+    },
+    {
+      "task": "sort this list of names alphabetically",
+      "gold": null
+    },
+    {
+      "task": "what does the acronym http stand for",
+      "gold": null
+    },
+    {
+      "task": "the antispam bot let a spam message through into the chat, work out why and tighten it",
+      "gold": "ai-antispam"
+    },
+    {
+      "task": "what is the right order of steps before writing a python change here, and where does the decision record go",
+      "gold": "coding-process"
+    },
+    {
+      "task": "is the deck pipeline still using that old rendering tool, and what replaced it",
+      "gold": "ogre-contribute"
+    },
+    {
+      "task": "write the instructions file an agent reads before working in this repo",
+      "gold": "writing-for-agents"
+    }
+  ]
+}

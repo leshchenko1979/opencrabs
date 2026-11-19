@@ -378,6 +378,7 @@ pub mod memory_local_engine_test;
 pub mod memory_maintenance_test;
 pub mod eval_cli_recall_test;
 pub mod eval_inflation_test;
+pub mod eval_skills_track_test;
 pub mod memory_recall_eval_test;
 pub mod memory_recall_multilingual_test;
 pub mod memory_recall_test;

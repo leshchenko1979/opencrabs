@@ -377,6 +377,27 @@ pub enum EvalCommands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Score SKILL SELECTION against the live skills index (Track C)
+    ///
+    /// Reports C1@k (is the right skill near the top?), C2 (index characters),
+    /// C3 (skills ever employed, from `session_seen_skills`) and C4 (false
+    /// selection on negatives). The ranking is the shipped BM25 as a PROXY —
+    /// there is no skill ranker in the product, and the scorecard says so.
+    Skills {
+        /// Dataset JSON path (tasks -> gold skill slug; null gold = negative)
+        #[arg(long)]
+        dataset: String,
+
+        /// Budgeted window for C1 (default 5). `--k 35` reproduces the
+        /// vacuous full-index baseline.
+        #[arg(long)]
+        k: Option<usize>,
+
+        /// Emit the scorecard as JSON instead of the rendered summary
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
