@@ -70,26 +70,28 @@ fn index_markdown_is_one_section_per_entry_in_order() {
     }
 }
 
-/// C2 counts the bytes the PROMPT pays: the same `- slug: desc` lines, the
-/// same 120-char clip, the same header. A number measured against a different
-/// shape would be a budget for a block that does not exist.
+/// C2 counts the CHARACTERS the PROMPT pays: the same `- slug: desc` lines,
+/// the same 120-char clip, the same header. A number measured against a
+/// different shape would be a budget for a block that does not exist.
+///
+/// Both sides count chars — the metric's own unit (`index_block_chars`, and
+/// the prompt builder's `clip` which uses `chars().count()`/`chars().take(n)`).
+/// Counting the ellipsis in BYTES here is what failed this assertion against a
+/// function that was right: `…` is one char and three bytes, so `len_utf8()`
+/// inflated the expectation by two and the unit mismatch read as a metric bug.
 #[test]
 fn index_block_chars_matches_the_emitted_form_and_clips_at_120() {
+    let header = "--- Available Commands & Skills ---\n";
+
     let short = index_block_chars([("a", "one line")]);
-    let expected_short = "--- Available Commands & Skills ---\n".len() + "- a: one line\n".len() + 1;
-    assert_eq!(short, expected_short);
+    assert_eq!(short, header.chars().count() + "- a: one line\n".chars().count() + 1);
 
     // A long description is clipped to 120 chars plus the ellipsis, so the
     // block does not grow past the clip however long the source is.
     let long_desc = "x".repeat(500);
     let clipped = index_block_chars([("a", long_desc.as_str())]);
-    let expected_clipped = "--- Available Commands & Skills ---\n".len()
-        + "- a: ".len()
-        + 120
-        + '…'.len_utf8()
-        + 1
-        + 1;
-    assert_eq!(clipped, expected_clipped);
+    let expected_line = format!("- a: {}…\n", "x".repeat(120));
+    assert_eq!(clipped, header.chars().count() + expected_line.chars().count() + 1);
 }
 
 /// The vacuous baseline: when every label resolves, C1 at the FULL window is
