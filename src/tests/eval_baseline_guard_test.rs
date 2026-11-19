@@ -50,9 +50,12 @@ fn baseline(json: &str, track: &str) -> TrackBaseline {
     b
 }
 
-/// Track A: the in-memory fixture leg. Its 90-message corpus has one unique
-/// vocabulary per message, so a working retriever resolves EVERY known-item
-/// query — which is why this track's floors are exact rather than a token 0.01.
+/// Track A: the in-memory fixture leg. Its 1,000-message corpus draws from
+/// eight topical clusters, so a query matches a NEIGHBOURHOOD and the leg can
+/// fail on both sides (#899): it publishes recall `0.800`, MRR `0.227` and an
+/// FPR of `0.500`, and the floors sit below each of those rather than at the
+/// ceiling v1 pinned. The values are published in
+/// `results/track-a-episodic-v2.md`; only the floors are pinned here.
 #[test]
 fn track_a_matches_its_committed_baseline() {
     let b = baseline(TRACK_A, "A");
