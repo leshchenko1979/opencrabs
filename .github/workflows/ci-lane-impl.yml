@@ -515,108 +515,86 @@ jobs:
           CMD="cargo test --locked --profile ci --all-features --verbose${{ inputs.test_threads && format(' -- --test-threads={0}', inputs.test_threads) || '' }}"
           echo "+ $CMD"
           # stallwatch — TWO-predicate stall detector (HQ 2026-11-17; predicate B
-          # 2026-11-19; #331). WHY TWO: a stall has two shapes and one predicate
-          # cannot see both.
+          # 2026-11-19; #331). A stall has two shapes and one predicate cannot see both:
           #
-          #   A. FLAT CPU over the step's process tree (STALLWATCH_SECS, 480).
-          #      Sees the COMPILE phase and any futex wedge: rustc stops advancing
-          #      utime+stime. First production fire 2026-11-18 (run 44276536423)
-          #      named the wedged `opencrabs-e23d8` at wchan=futex_do_wait.
-          #      STRUCTURALLY BLIND to a test spinning on CPU -- a spinning process
-          #      is not flat. That is why it fired on 0 of 6 job-cap stalls.
+          #   A. FLAT CPU over the step's process tree (STALLWATCH_SECS, 480). Sees the
+          #      COMPILE phase and any futex wedge (rustc stops advancing utime+stime).
+          #      First production fire 2026-11-18, run 44276536423, named the wedged
+          #      `opencrabs-e23d8` at wchan=futex_do_wait. STRUCTURALLY BLIND to a test
+          #      spinning on CPU -- it fired on 0 of 6 job-cap stalls.
           #   B. NO TEST COMPLETING (STALLWATCH_PROGRESS_SECS, 600). Counts libtest
-          #      result lines in /tmp/test-leg.log (doc-tests included) and fires
-          #      when the count stops advancing. ARMS ONLY AFTER THE FIRST
-          #      COMPLETION: compile produces zero result lines for 20+ minutes, so
-          #      a naive "no progress" clock would kill every cold run. Compile
-          #      stays on A; the test phase gets B.
+          #      result lines in /tmp/test-leg.log (doc-tests included) and fires when
+          #      the count stops advancing. ARMS ONLY AFTER THE FIRST COMPLETION:
+          #      compile produces zero result lines for 20+ minutes, so a naive "no
+          #      progress" clock would kill every cold run.
           #
-          # CALIBRATION FOR B (measured 2026-11-19 from six GREEN runs' full log
-          # ARCHIVES -- 44323730941, 44337942773, 44369135092, 44414539307,
-          # 44500485926, 44511279765; ~67,000 completions): the longest stretch
-          # with NO completion in a healthy run is 63 s, always the same slow
-          # rate-limit deadline test (the run prints "has been running for over
-          # 60 seconds" while healthy). p99 and p95 are 0 s -- completions arrive
-          # in bursts. 600 s is 9.5x that worst gap and ~4x the ENTIRE healthy
-          # test phase (2-3 min for ~11,180 tests). Do NOT derive B's number from
-          # log silence (2.28 min): that is A's calibration, and conflating the
-          # two is exactly how the detector ended up firing zero times.
-          # A false trip fails a healthy gate, so B is a multiple of the WORST
-          # observed gap, never of the median.
+          # CALIBRATION FOR B (six GREEN log archives, 2026-11-19: 44323730941,
+          # 44337942773, 44369135092, 44414539307, 44500485926, 44511279765; ~67,000
+          # completions): longest healthy gap with NO completion is 63 s -- always the
+          # slow rate-limit deadline test, which prints "has been running for over 60
+          # seconds" while perfectly healthy; p99 = p95 = 0 s. 600 s is 9.5x that gap
+          # and ~4x the ENTIRE healthy test phase. Do NOT derive it from log silence
+          # (2.28 min) -- that is A's calibration. The full rationale, the fire-time
+          # dump contract and the tree-scoping trap are in the script's docstring below.
           #
-          # WHY THE LOG EXISTS AT ALL: B needs something to count, so the step now
-          # runs `$CMD 2>&1 | tee /tmp/test-leg.log` and takes the exit code from
-          # ${PIPESTATUS[0]}. A bare `$CMD | tee` would make $? the exit status of
-          # TEE -- a failing test would report 0, which is the false-green class
-          # this factory exists to kill.
+          # WHY THE LOG EXISTS: B needs something to count, so the step runs
+          # `$CMD 2>&1 | tee /tmp/test-leg.log` and takes the exit code from
+          # ${PIPESTATUS[0]}. A bare `$CMD | tee` makes $? TEE's status -- a failing
+          # test would report 0, the false-green class this factory exists to kill.
           #
-          # CORRECTED 2026-11-18 (first production FIRE, run 44276536423): an
-          # earlier version claimed "12/12 sampled 45-min cap-hits ran ZERO tests".
-          # That was FALSE -- an artifact of `gh run view --log`, which truncates
-          # the step mid-compile. The full archives show those cap-hits DID run
-          # tests and wedged with FOUR at "has been running for over 60 seconds":
-          # the #781 class at the libtest default --test-threads=4.
-          #
-          # On fire: predicate name + both counters, wchan, kernel stack, vmstat,
-          # the log tail (names the in-flight test) and user stacks when gdb is
-          # present, THEN SIGTERM. The dump runs before the kill, so even a wrong
-          # fire yields evidence. /proc/<pid>/syscall is DENIED on the runner
-          # (measured 2026-11-18, run 44276536423) and reported as unavailable.
+          # CORRECTED 2026-11-18 (run 44276536423): an earlier version of this comment
+          # claimed "12/12 sampled 45-min cap-hits ran ZERO tests". That was FALSE, an
+          # artifact of `gh run view --log` truncating mid-compile. The full archives
+          # show those cap-hits DID run tests and wedged with FOUR at "has been running
+          # for over 60 seconds" -- the #781 class at the default --test-threads=4.
           #
           # FAIL-OPEN, but VISIBLY SO: no python3 or an unparsable heredoc emits a
-          # `::warning::` annotation and continues, and arming emits a `::notice::`.
-          # Without those, "no stall detected" and "the detector never ran" are the
-          # same green run -- the #1936 trap. A broken detector must never block a
-          # gate, but it must never be invisible either.
-          # Revert = delete this block and the STALLWATCH teardown below.
+          # `::warning::` and continues; arming emits a `::notice::`. Without those,
+          # "no stall detected" and "the detector never ran" are the same green run --
+          # the #1936 trap. A broken detector must never block a gate, and never be
+          # invisible either. Revert = delete this block and the STALLWATCH teardown.
           STALLWATCH=""
           if command -v python3 >/dev/null 2>&1; then
           cat > /tmp/stallwatch.py <<'STALLWATCH_PY'
           #!/usr/bin/env python3
           """Stall watchdog for the CI gate. TWO predicates, because a stall has two shapes.
 
-          Predicate A -- FLAT CPU over the step's own process tree (STALLWATCH_SECS, default 480).
-            Covers the COMPILE phase and any futex wedge: a rustc that stops advancing utime+stime,
-            or a test binary parked in futex_do_wait. First production fire 2026-11-18 (run
-            44276536423) named `opencrabs-e23d8` at wchan=futex_do_wait. Correct, but structurally
-            BLIND to predicate B's failure: a test spinning on CPU keeps ticks advancing, so the
-            flat clock never accumulates. It fired on 0 of 6 job-cap stalls for exactly that reason.
+          Predicate A -- FLAT CPU over the step's own process tree (STALLWATCH_SECS, 480).
+            Covers the COMPILE phase and any futex wedge: a rustc that stops advancing
+            utime+stime, or a test parked in futex_do_wait. First production fire 2026-11-18
+            (run 44276536423) named `opencrabs-e23d8` at wchan=futex_do_wait. BLIND to a test
+            spinning on CPU: ticks keep advancing, so the flat clock never accumulates -- it
+            fired on 0 of 6 job-cap stalls for exactly that reason.
 
-          Predicate B -- NO TEST COMPLETING (STALLWATCH_PROGRESS_SECS, default 600).
-            Counts libtest result lines (`test <name> ... ok|FAILED|ignored`, doc-tests included) in
-            the step's own log file, and fires when the count stops advancing while tests are running.
-            ARMS ONLY AFTER THE FIRST COMPLETION: the compile phase legitimately produces zero result
-            lines for 20+ minutes, so a naive "no progress in N" would kill every cold run. Compile
-            stays on predicate A; the test phase gets predicate B.
+          Predicate B -- NO TEST COMPLETING (STALLWATCH_PROGRESS_SECS, 600).
+            Counts libtest result lines (`test <name> ... ok|FAILED|ignored`, doc-tests
+            included) in the step's own log, and fires when the count stops advancing.
+            ARMS ONLY AFTER THE FIRST COMPLETION: compile legitimately produces zero result
+            lines for 20+ minutes, so a naive "no progress in N" would kill every cold run.
 
-            CALIBRATION (measured 2026-11-19, six GREEN runs -- 44323730941, 44337942773,
-            44369135092, 44414539307, 44500485926, 44511279765 -- ~67,000 completions):
-            the longest stretch with NO completion in a healthy run is 63 s, and it is always the
-            same slow rate-limit deadline test (the run even prints "has been running for over 60
-            seconds" while it is healthy). p99 and p95 are 0 s: completions normally arrive in
-            bursts. 600 s is 9.5x the worst healthy gap and 4x the ENTIRE healthy test phase
-            (2-3 min for ~11,180 tests). Do NOT derive this number from log silence (2.28 min) --
-            that is predicate A's calibration, and conflating the two is what left the detector
-            firing zero times for six stalls.
-
-            A false trip is not free: it fails a healthy gate. That is why the threshold is a
-            multiple of the WORST observed gap and not of the median.
+            CALIBRATION (2026-11-19, six GREEN runs: 44323730941, 44337942773, 44369135092,
+            44414539307, 44500485926, 44511279765; ~67,000 completions): the longest healthy
+            stretch with NO completion is 63 s, always the same slow rate-limit deadline test
+            (it prints "has been running for over 60 seconds" while healthy); p99 = p95 = 0 s.
+            600 s is 9.5x the worst healthy gap and 4x the ENTIRE healthy test phase. Do NOT
+            derive it from log silence (2.28 min) -- that is A's calibration, and conflating
+            the two is what left the detector firing zero times for six stalls. A false trip
+            fails a healthy gate, so the threshold is a multiple of the WORST gap, never of
+            the median.
 
           Signal for A: sum(utime+stime) over EVERY process descending from the step shell
-          (STALLWATCH_ROOT). Tree scoping is load-bearing: a box-wide comm match picks up unrelated
-          processes and resets the flat clock forever (measured locally -- the opencrabs daemon
-          matched `opencrabs` and the instrument never fired). `tee` (see the step's pipe) is a
-          descendant and sits INSIDE the sum, which is harmless only because it is idle exactly when
-          output stops. Do not widen the tree scope to "fix" that.
+          (STALLWATCH_ROOT). Tree scoping is load-bearing: a box-wide comm match picks up
+          unrelated processes and resets the flat clock forever (measured -- the opencrabs
+          daemon matched `opencrabs` and the instrument never fired). `tee` is a descendant
+          and sits INSIDE the sum, harmless only because it is idle exactly when output
+          stops. Do not widen the tree scope to "fix" that.
 
-          On fire: dump wchan, /proc/<pid>/syscall, kernel stack, vmstat and user stacks (gdb), plus
-          the tail of the test log so the in-flight test is named, then SIGTERM the tree so the step
-          fails fast instead of burning to the 40-minute step timeout. The dump runs BEFORE the
-          SIGTERM, so even a wrong fire yields evidence.
-
-          Every fire line names WHICH predicate fired and both counters: two triggers writing one
-          message shape would leave the next reader unable to tell a spin from a wedge, and the
-          discriminator is the whole point.
+          On fire: dump wchan, /proc/<pid>/syscall, kernel stack, vmstat and user stacks
+          (gdb), plus the test-log tail so the in-flight test is named, then SIGTERM the
+          tree so the step fails fast instead of burning to the 40-minute timeout. The dump
+          runs BEFORE the SIGTERM, so even a wrong fire yields evidence. Every fire line
+          names WHICH predicate fired and both counters: one message shape for two triggers
+          would leave the next reader unable to tell a spin from a wedge.
           """
           import os
           import re
@@ -664,16 +642,16 @@ jobs:
               """{pid: (comm, cpu_ticks)} for EVERY descendant of `root`, minus this watcher.
 
               No comm filter, deliberately. A wedged TEST binary is `opencrabs-<hash>`: a
-              build-tools filter left it out of both the dump and the CPU sum, so a LOCAL drive on
-              2026-11-17 reported procs=1 -- the parked `cargo` in wait4 -- and never named the
-              process that was actually stuck. FIRST PRODUCTION FIRE 2026-11-18, run 44276536423
-              (job 134706016808): fired at flat=300s with procs=2, naming the wedged
-              `opencrabs-e23d8` (wchan=futex_do_wait) and its parked `cargo` (wchan=do_wait), so the
-              no-comm-filter fix is confirmed in production.
+              build-tools filter left it out of both the dump and the CPU sum, so a local
+              drive on 2026-11-17 reported procs=1 -- the parked `cargo` in wait4 -- and never
+              named the process that was stuck. FIRST PRODUCTION FIRE 2026-11-18, run
+              44276536423: flat=300s, procs=2, naming the wedged `opencrabs-e23d8`
+              (wchan=futex_do_wait) and its parked `cargo` (wchan=do_wait), so the fix is
+              confirmed in production.
 
-              It also closes a false-positive path: with the sum over build tools only, `cargo`
-              parked in wait4 reads as FLAT for the whole test phase, so any suite legitimately
-              slower than the threshold would have been killed as a stall.
+              It also closes a false-positive path: over build tools only, `cargo` parked in
+              wait4 reads as FLAT for the whole test phase, so any suite legitimately slower
+              than the threshold would have been killed as a stall.
               """
               table = {}
               for entry in os.listdir("/proc"):
