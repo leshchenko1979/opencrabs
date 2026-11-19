@@ -100,7 +100,7 @@ async fn omitted_mode_disambiguates_by_tasks() {
         let (ok, out) = run(
             &tool,
             &ctx2,
-            json!({ "operation": "init", "title": "C", "tasks": [{ "title": "t1", "description": "d1" }] }),
+            json!({ "operation": "init", "title": "C", "tasks": [{ "title": "t1", "description": "d1" }, { "title": "t2", "description": "d2" }] }),
         )
         .await;
         assert!(ok, "checklist init must succeed, got: {out}");
@@ -162,7 +162,7 @@ async fn checklist_init_creates_no_design_md() {
             json!({
                 "operation": "init",
                 "title": "Ship fix",
-                "tasks": [{ "title": "t1", "description": "d1" }]
+                "tasks": [{ "title": "t1", "description": "d1" }, { "title": "t2", "description": "d2" }]
             }),
         )
         .await;
@@ -185,7 +185,7 @@ async fn checklist_init_creates_no_design_md() {
             plan.pending_approval,
             "#20: auto-approve no longer self-activates; the plan waits"
         );
-        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.tasks.len(), 2);
     })
     .await;
 }
@@ -203,7 +203,7 @@ async fn checklist_init_editing_creates_no_design_md() {
             json!({
                 "operation": "init",
                 "title": "Ship fix",
-                "tasks": [{ "title": "t1", "description": "d1" }]
+                "tasks": [{ "title": "t1", "description": "d1" }, { "title": "t2", "description": "d2" }]
             }),
         )
         .await;
@@ -222,7 +222,7 @@ async fn checklist_init_editing_creates_no_design_md() {
         );
         let plan = load_plan(ctx.session_id).await.unwrap();
         assert_eq!(plan.status, PlanStatus::Editing);
-        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.tasks.len(), 2);
     })
     .await;
 }
@@ -285,7 +285,7 @@ async fn design_init_waits_in_editing_under_auto_approve_when_gate_on() {
         let (ok, _) = run(
             &tool,
             &ctx_checklist,
-            json!({ "operation": "init", "title": "Yolo checklist", "tasks": [{ "title": "t", "description": "d" }] }),
+            json!({ "operation": "init", "title": "Yolo checklist", "tasks": [{ "title": "t", "description": "d" }, { "title": "t2", "description": "d2" }] }),
         )
         .await;
         assert!(ok, "checklist init must succeed");
@@ -381,7 +381,7 @@ async fn pre_init_upgrades_to_design_and_replaces_for_checklist() {
         let (ok, _) = run(
             &tool,
             &ctx2,
-            json!({ "operation": "init", "title": "Changed my mind", "tasks": [{ "title": "t", "description": "d" }] }),
+            json!({ "operation": "init", "title": "Changed my mind", "tasks": [{ "title": "t", "description": "d" }, { "title": "t2", "description": "d2" }] }),
         )
         .await;
         assert!(ok, "checklist init from pre-init must replace the flag");
@@ -420,7 +420,7 @@ async fn reinit_refused_while_plan_is_live() {
         run(
             &tool,
             &ctx2,
-            json!({ "operation": "init", "title": "Live", "tasks": [{ "title": "t", "description": "d" }] }),
+            json!({ "operation": "init", "title": "Live", "tasks": [{ "title": "t", "description": "d" }, { "title": "t2", "description": "d2" }] }),
         )
         .await;
         let (ok, msg) = run(
@@ -472,7 +472,7 @@ async fn add_tasks_appends_multiple_and_alias_still_works() {
         run(
             &tool,
             &ctx,
-            json!({ "operation": "init", "title": "List", "tasks": [{ "title": "one", "description": "d1" }] }),
+            json!({ "operation": "init", "title": "List", "tasks": [{ "title": "one", "description": "d1" }, { "title": "t2", "description": "d2" }] }),
         )
         .await;
         approve_plan(&ctx).await;
@@ -484,7 +484,7 @@ async fn add_tasks_appends_multiple_and_alias_still_works() {
         )
         .await;
         assert!(ok, "add_tasks must succeed, got: {out}");
-        assert!(out.contains("2 task(s)") && out.contains("3 tasks"), "got: {out}");
+        assert!(out.contains("2 task(s)") && out.contains("4 tasks"), "got: {out}");
 
         let (ok, out) = run(
             &tool,
@@ -493,7 +493,7 @@ async fn add_tasks_appends_multiple_and_alias_still_works() {
         )
         .await;
         assert!(ok, "add_task alias must keep working, got: {out}");
-        assert_eq!(load_plan(ctx.session_id).await.unwrap().tasks.len(), 4);
+        assert_eq!(load_plan(ctx.session_id).await.unwrap().tasks.len(), 5);
 
         let (ok, msg) = run(&tool, &ctx, json!({ "operation": "add_tasks", "tasks": [] })).await;
         assert!(!ok, "empty add_tasks must be refused, got: {msg}");
@@ -509,7 +509,7 @@ async fn first_start_does_not_auto_approve() {
         run(
             &tool,
             &ctx,
-            json!({ "operation": "init", "title": "NoAutoApprove", "tasks": [{ "title": "t", "description": "d" }] }),
+            json!({ "operation": "init", "title": "NoAutoApprove", "tasks": [{ "title": "t", "description": "d" }, { "title": "t2", "description": "d2" }] }),
         )
         .await;
         // Start is blocked until approval.
@@ -538,15 +538,24 @@ async fn completing_last_task_keeps_plan_live_until_settle() {
         run(
             &tool,
             &ctx,
-            json!({ "operation": "init", "title": "Short", "tasks": [{ "title": "only", "description": "d" }] }),
+            json!({ "operation": "init", "title": "Short", "tasks": [{ "title": "only", "description": "d" }, { "title": "t2", "description": "d2" }] }),
         )
         .await;
         approve_plan(&ctx).await;
         run(&tool, &ctx, json!({ "operation": "start" })).await;
-        let (ok, out) = run(
+        let (ok, _) = run(
             &tool,
             &ctx,
             json!({ "operation": "complete", "task_order": 1, "action": "success" }),
+        )
+        .await;
+        assert!(ok);
+        // #891: a plan needs two tasks, so the LAST task is #2 — the
+        // "Plan complete" report belongs to the completion that resolves it.
+        let (ok, out) = run(
+            &tool,
+            &ctx,
+            json!({ "operation": "complete", "task_order": 2, "action": "success" }),
         )
         .await;
         assert!(ok);
@@ -620,7 +629,7 @@ async fn import_refused_while_live_but_replaces_pre_init() {
             serde_json::to_string(&json!({
                 "title": "Imported",
                 "description": "structured",
-                "tasks": [{ "title": "t1", "description": "d", "task_type": "edit" }]
+                "tasks": [{ "title": "t1", "description": "d", "task_type": "edit" }, { "title": "t2", "description": "d2" }]
             }))
             .unwrap(),
         )
@@ -703,7 +712,7 @@ async fn tasks_require_non_empty_description_on_every_entry_point() {
                 "operation": "init",
                 "title": "Checklist",
                 "mode": "checklist",
-                "tasks": [{ "title": "t1", "description": "real work" }]
+                "tasks": [{ "title": "t1", "description": "real work" }, { "title": "t2", "description": "d2" }]
             }),
         )
         .await;
@@ -771,7 +780,7 @@ async fn import_requires_non_empty_root_title_and_description() {
             &no_title,
             serde_json::to_string(&json!({
                 "description": "has description but no title",
-                "tasks": [{ "title": "t1", "description": "d", "task_type": "edit" }]
+                "tasks": [{ "title": "t1", "description": "d", "task_type": "edit" }, { "title": "t2", "description": "d2" }]
             }))
             .unwrap(),
         )
@@ -794,7 +803,7 @@ async fn import_requires_non_empty_root_title_and_description() {
             serde_json::to_string(&json!({
                 "title": "Has title",
                 "description": "   ",
-                "tasks": [{ "title": "t1", "description": "d", "task_type": "edit" }]
+                "tasks": [{ "title": "t1", "description": "d", "task_type": "edit" }, { "title": "t2", "description": "d2" }]
             }))
             .unwrap(),
         )
@@ -1038,6 +1047,166 @@ async fn show_plan_windowing_and_full_flag() {
         for i in 1..=15 {
             assert!(out_full.contains(&format!("task {i}")));
         }
+    })
+    .await;
+}
+
+// ── #891: a one-task plan is refused at every door that can birth one ──────
+//
+// Owner ruling: "a one-point plan is a nonsense and should not be allowed to
+// be created." One task wearing a plan's ceremony (review pause, card,
+// Editing/Active cycle) is strictly worse than doing the work directly.
+// The control below matters as much as the refusals: a sweep whose positive
+// case also fails would prove nothing about the rule, only that plans broke.
+
+const ONE_TASK_REFUSAL: &str = "a plan with a single task is not a plan";
+
+#[tokio::test]
+async fn one_task_checklist_init_is_refused() {
+    in_temp_home(async {
+        let tool = PlanTool;
+        let ctx = ToolExecutionContext::new(uuid::Uuid::new_v4());
+        let (ok, msg) = run(
+            &tool,
+            &ctx,
+            json!({
+                "operation": "init",
+                "title": "One step",
+                "tasks": [{ "title": "only", "description": "d" }]
+            }),
+        )
+        .await;
+        assert!(!ok, "single-task checklist init must be refused, got: {msg}");
+        assert!(msg.contains(ONE_TASK_REFUSAL), "got: {msg}");
+
+        // Nothing was persisted: the refusal is a birth-door check, not a
+        // post-write cleanup.
+        assert_eq!(plan_mode_state(ctx.session_id).await, PlanModeState::NoPlan);
+        assert!(
+            !plan_json_path(ctx.session_id).await.exists(),
+            "a refused init must leave no plan JSON"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn one_task_import_is_refused() {
+    in_temp_home(async {
+        let tool = PlanTool;
+        let ctx = ToolExecutionContext::new(uuid::Uuid::new_v4());
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("one-task.json");
+        std::fs::write(
+            &file,
+            serde_json::to_string(&json!({
+                "title": "Imported one",
+                "description": "structured",
+                "tasks": [{ "title": "only", "description": "d", "task_type": "edit" }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (ok, msg) = run(
+            &tool,
+            &ctx,
+            json!({ "operation": "init", "file_path": file.to_str().unwrap() }),
+        )
+        .await;
+        assert!(!ok, "single-task import must be refused, got: {msg}");
+        assert!(msg.contains(ONE_TASK_REFUSAL), "got: {msg}");
+        assert_eq!(plan_mode_state(ctx.session_id).await, PlanModeState::NoPlan);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn one_task_seed_on_empty_plan_is_refused() {
+    in_temp_home(async {
+        let tool = PlanTool;
+        let ctx = ToolExecutionContext::new(uuid::Uuid::new_v4());
+        // A design plan is born with ZERO tasks and is approved into Active;
+        // that is the state a design plan's seed turn writes into.
+        run(
+            &tool,
+            &ctx,
+            json!({ "operation": "init", "title": "Design", "mode": "design" }),
+        )
+        .await;
+        approve_plan(&ctx).await;
+        assert_eq!(plan_mode_state(ctx.session_id).await, PlanModeState::Active);
+
+        let (ok, msg) = run(
+            &tool,
+            &ctx,
+            json!({ "operation": "add_tasks", "tasks": [{ "title": "only", "description": "d" }] }),
+        )
+        .await;
+        assert!(!ok, "seeding one task onto an empty plan must be refused, got: {msg}");
+        assert!(msg.contains(ONE_TASK_REFUSAL), "got: {msg}");
+
+        let (ok, msg) = run(
+            &tool,
+            &ctx,
+            json!({ "operation": "add_task", "title": "only", "description": "d" }),
+        )
+        .await;
+        assert!(!ok, "the add_task alias must refuse too, got: {msg}");
+        assert!(msg.contains(ONE_TASK_REFUSAL), "got: {msg}");
+
+        // The plan is still empty — neither refusal half-seeded it.
+        assert!(
+            load_plan(ctx.session_id)
+                .await
+                .expect("plan still live")
+                .tasks
+                .is_empty(),
+            "refused seeds must not land a task"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn two_task_plan_is_still_allowed() {
+    in_temp_home(async {
+        let tool = PlanTool;
+        let ctx = ToolExecutionContext::new(uuid::Uuid::new_v4());
+        let (ok, out) = run(
+            &tool,
+            &ctx,
+            json!({
+                "operation": "init",
+                "title": "Two steps",
+                "tasks": [
+                    { "title": "one", "description": "d1" },
+                    { "title": "two", "description": "d2" }
+                ]
+            }),
+        )
+        .await;
+        assert!(ok, "a two-task plan is a plan and must be allowed, got: {out}");
+        assert_eq!(plan_mode_state(ctx.session_id).await, PlanModeState::PostInitEditing);
+        assert_eq!(
+            load_plan(ctx.session_id).await.expect("plan live").tasks.len(),
+            2
+        );
+
+        // Growing a live checklist ONE task at a time stays legal: the rule
+        // governs creation, not execution.
+        approve_plan(&ctx).await;
+        let (ok, out) = run(
+            &tool,
+            &ctx,
+            json!({ "operation": "add_task", "title": "three", "description": "d3" }),
+        )
+        .await;
+        assert!(ok, "growing a live checklist by one task must stay legal, got: {out}");
+        assert_eq!(
+            load_plan(ctx.session_id).await.expect("plan live").tasks.len(),
+            3
+        );
     })
     .await;
 }

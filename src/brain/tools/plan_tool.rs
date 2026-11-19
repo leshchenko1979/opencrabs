@@ -478,6 +478,22 @@ fn checklist_blocked_reason(state: crate::utils::plan_files::PlanModeState) -> O
     }
 }
 
+/// #891: a checklist is born with at least two tasks.
+///
+/// A single-task plan is a task wearing a plan's ceremony — a review pause, a
+/// card, an Editing/Active state machine and a start/complete cycle — for work
+/// that fits in one step. Refused at every door that can birth a checklist:
+/// `init` create, `init` import, `add_tasks` onto an EMPTY plan and `add_task`
+/// onto an EMPTY plan. Growing a live checklist one task at a time stays legal:
+/// the rule governs creation, not execution.
+fn one_task_plan_refusal() -> String {
+    "Refused: a plan with a single task is not a plan — it is one task wearing a \
+     plan's ceremony (a review pause, a card, an Editing/Active cycle) for work that \
+     fits in one step. Do that work directly with real tool calls. If the job really \
+     has more than one step, pass at least 2 tasks that each stand alone, in ONE call."
+        .to_string()
+}
+
 /// Map a plan task outcome verb to an epistemic confidence level.
 /// Pure — unit-testable without store access.
 pub(crate) fn task_outcome_confidence(verb: &str) -> super::epistemic::Confidence {
@@ -1952,6 +1968,12 @@ impl Tool for PlanTool {
                                 .to_string(),
                         ));
                     }
+                    // #891: a one-task import is the same nonsense as a one-task
+                    // init — this is a birth door too. The empty case above keeps
+                    // its own message, because its remedy is the design track.
+                    if imported.tasks.len() < 2 {
+                        return Ok(ToolResult::error(one_task_plan_refusal()));
+                    }
 
                     // #20: tool auto-approve (yolo / cron / run / a2a) does NOT
                     // satisfy plan approval by default — the imported checklist
@@ -2129,6 +2151,16 @@ impl Tool for PlanTool {
                         )?;
                     }
 
+                    // #891: a checklist is born with at least two tasks. Placed
+                    // AFTER the creation loop on purpose: a blank-description entry
+                    // has already returned its own "Task description cannot be
+                    // empty" error by now, and this sees the effective count rather
+                    // than the raw array length. Nothing is persisted yet —
+                    // `new_plan` only reaches the store further down.
+                    if !design && new_plan.tasks.len() < 2 {
+                        return Ok(ToolResult::error(one_task_plan_refusal()));
+                    }
+
                     // #20: tool auto-approve (yolo / cron / run / a2a) does NOT
                     // satisfy plan approval by default — the checklist waits in
                     // Editing for a human Approve. Only the explicit
@@ -2224,6 +2256,13 @@ impl Tool for PlanTool {
                     ));
                 }
 
+                // #891: onto an EMPTY plan this is a birth door — it is where a
+                // design plan's seed turn lands. Onto a checklist that already has
+                // tasks it is growth, and one task at a time stays legal there.
+                if current_plan.tasks.is_empty() && tasks.len() < 2 {
+                    return Ok(ToolResult::error(one_task_plan_refusal()));
+                }
+
                 let target_idx = match resolve_insertion_index(
                     current_plan,
                     insert_before.as_ref(),
@@ -2307,6 +2346,13 @@ impl Tool for PlanTool {
                         "No active plan. Create one with 'init' first.".to_string(),
                     )
                 })?;
+
+                // #891: this alias adds exactly one task, so on an EMPTY plan it
+                // would birth a one-task checklist. Use `add_tasks` with the whole
+                // set in one call instead.
+                if current_plan.tasks.is_empty() {
+                    return Ok(ToolResult::error(one_task_plan_refusal()));
+                }
 
                 let target_idx = match resolve_insertion_index(
                     current_plan,

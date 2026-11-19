@@ -636,16 +636,24 @@ async fn complete_auto_starts_next_task() {
 async fn complete_last_task_reports_plan_complete() {
     in_temp_home(async {
         let tool = PlanTool;
-        let ctx = setup_plan_with_tasks(&tool, 1).await;
+        let ctx = setup_plan_with_tasks(&tool, 2).await;
 
         tool.execute(serde_json::json!({ "operation": "start" }), &ctx)
             .await
             .unwrap();
+        // #891: a plan needs two tasks, so finishing the plan takes two
+        // completions; the "Plan complete" report rides the last one.
+        tool.execute(
+            serde_json::json!({ "operation": "complete", "task_order": 1, "action": "success" }),
+            &ctx,
+        )
+        .await
+        .unwrap();
         let result = tool
             .execute(
                 serde_json::json!({
                     "operation": "complete",
-                    "task_order": 1,
+                    "task_order": 2,
                     "action": "success"
                 }),
                 &ctx,
@@ -760,7 +768,7 @@ async fn approve_op_is_gated_on_granted_autonomy() {
             serde_json::json!({
                 "operation": "init",
                 "title": "Autonomy test",
-                "tasks": [{ "title": "a", "description": "d", "task_type": "edit" }]
+                "tasks": [{ "title": "a", "description": "d", "task_type": "edit" }, { "title": "t2", "description": "d2" }]
             }),
             &ctx,
         )
@@ -834,7 +842,7 @@ async fn discard_op_abandons_the_plan_and_show_plan_reports_state() {
             serde_json::json!({
                 "operation": "init",
                 "title": "Scrap me",
-                "tasks": [{ "title": "a", "description": "d", "task_type": "edit" }]
+                "tasks": [{ "title": "a", "description": "d", "task_type": "edit" }, { "title": "t2", "description": "d2" }]
             }),
             &ctx,
         )
@@ -1129,7 +1137,7 @@ async fn worker_brief_is_self_contained() {
                     "description": "D1",
                     "task_type": "edit",
                     "acceptance_criteria": ["AC1", "AC2"]
-                }]
+                }, { "title": "t2", "description": "d2" }]
             }),
             &ctx,
         )

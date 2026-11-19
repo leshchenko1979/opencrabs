@@ -62,7 +62,7 @@ async fn create_arm_auto_approve_waits_in_editing_by_default() {
             "operation": "init",
             "title": "Yolo checklist",
             "mode": "checklist",
-            "tasks": [{"title": "t1", "description": "d1"}]
+            "tasks": [{"title": "t1", "description": "d1"}, { "title": "t2", "description": "d2" }]
         });
 
         let result = tool.execute(input, &ctx).await.unwrap();
@@ -94,7 +94,7 @@ async fn escape_hatch_create_arm_auto_activates_and_stamps_auto() {
             "operation": "init",
             "title": "Exempt checklist",
             "mode": "checklist",
-            "tasks": [{"title": "t1", "description": "d1"}]
+            "tasks": [{"title": "t1", "description": "d1"}, { "title": "t2", "description": "d2" }]
         });
 
         let result = tool.execute(input, &ctx).await.unwrap();
@@ -124,7 +124,7 @@ async fn escape_hatch_import_arm_auto_activates_and_stamps_auto() {
         let source = json!({
             "title": "Imported exempt",
             "description": "Escape-hatch import fixture",
-            "tasks": [{"title": "t1", "description": "d1", "task_type": "edit"}]
+            "tasks": [{"title": "t1", "description": "d1", "task_type": "edit"}, { "title": "t2", "description": "d2" }]
         });
         let dir = TempDir::new().unwrap();
         let import_path = dir.path().join("import.json");
@@ -382,7 +382,7 @@ async fn headless_checklist_auto_activates_and_stamps_headless() {
             "operation": "init",
             "title": "Cron checklist",
             "mode": "checklist",
-            "tasks": [{"title": "t1", "description": "d1"}]
+            "tasks": [{"title": "t1", "description": "d1"}, { "title": "t2", "description": "d2" }]
         });
 
         let result = tool.execute(input, &ctx).await.unwrap();
