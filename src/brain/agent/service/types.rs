@@ -178,7 +178,6 @@ pub enum ProgressEvent {
         text: String,
     },
     /// Self-healing action was taken (config recovery, emergency compaction, truncation, etc.)
-    /// Renderers normalize dashes on display (#1745), so producers need not.
     SelfHealingAlert {
         message: String,
     },

@@ -1615,11 +1615,7 @@ pub(crate) async fn handle_message(
             ProgressEvent::SelfHealingAlert { message } => {
                 let client = client_cb.clone();
                 let jid = jid_cb.clone();
-                let alert = format!(
-                    "{}\n\n🔧 {}",
-                    MSG_HEADER,
-                    crate::utils::sanitize::normalize_dashes(&message)
-                );
+                let alert = format!("{}\n\n🔧 {}", MSG_HEADER, message);
                 tokio::spawn(async move {
                     let msg = waproto::whatsapp::Message {
                         conversation: Some(alert),

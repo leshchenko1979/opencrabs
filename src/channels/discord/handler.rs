@@ -1085,10 +1085,7 @@ pub(crate) async fn handle_message(
                 }
                 ProgressEvent::SelfHealingAlert { message } => {
                     tokio::spawn(async move {
-                        let text = format!(
-                            "🔧 {}",
-                            crate::utils::sanitize::normalize_dashes(&message)
-                        );
+                        let text = format!("🔧 {}", message);
                         if let Err(e) = channel.say(&http, &text).await {
                             tracing::warn!(error = %e, "failed to send Discord message");
                         }
