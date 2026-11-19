@@ -83,8 +83,14 @@ fn track_a_matches_its_committed_baseline() {
     );
 }
 
-/// Track B: 60+15 over the committed corpus. Floors are set where silence
-/// cannot reach them; the values themselves are published, not pinned.
+/// Track B: 60+15 over the committed corpus, scored by the depth leg at k=10.
+///
+/// The floors were `0.01` while the leg published `0.017` — they could only
+/// catch a leg that had gone blind, which the mutation test already covers.
+/// Now that the leg publishes `0.100 / 0.092 / 0.094`, the floors sit at
+/// roughly half of each: a real regression guard with headroom, and the values
+/// themselves are still published in `results/track-b-recall-v2.md` rather
+/// than pinned here.
 #[test]
 fn track_b_matches_its_committed_baseline() {
     let b = baseline(TRACK_B, "B");

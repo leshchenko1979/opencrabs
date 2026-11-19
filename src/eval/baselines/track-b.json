@@ -4,6 +4,6 @@
   "dataset": { "positives": 60, "negatives": 15 },
   "window": 10,
   "metrics": ["R=", "MRR=", "nDCG=", "FPR="],
-  "floors": { "recall": 0.01, "mrr": 0.01, "ndcg": 0.01 },
+  "floors": { "recall": 0.05, "mrr": 0.04, "ndcg": 0.04 },
   "live_legs": []
 }

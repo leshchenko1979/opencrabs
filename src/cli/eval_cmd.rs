@@ -285,17 +285,51 @@ fn run_recall(
 /// test rather than only printed: a ranking change that moves a scorecard has
 /// to move the test with it, or the gate goes RED (#890 step 5).
 pub(crate) fn score_recall(dataset: &RecallDataset, corpus: &str, k: usize) -> RecallReport {
+    score_recall_with(dataset, corpus, k, RECALL_MAX_SECTIONS, RECALL_MAX_CHARS)
+}
+
+/// Score the RANKER at depth `k`: retrieve `k` sections with no character
+/// budget.
+///
+/// This is a different question from [`score_recall`], and conflating the two
+/// is what made Track B unreadable (#899). `score_recall` models what
+/// PRODUCTION injects — at most `RECALL_MAX_SECTIONS` sections inside a
+/// `RECALL_MAX_CHARS` budget — which is the right thing to score when the
+/// subject is the shipped configuration. It is the wrong thing to score when
+/// the subject is ranking quality, because the window is narrower than any `k`
+/// a scorecard asks for: a k=10 scorecard run through it measures two sections
+/// and prints a ten.
+///
+/// So the window stays available where it is meaningful, and the scorecard leg
+/// retrieves the depth it names.
+///
+/// `#[cfg(test)]` because the scorecard is its only caller: the CLI scores the
+/// production window, and a lib build with no test harness would otherwise
+/// carry this as dead code (the gate runs clippy with `-D warnings`).
+#[cfg(test)]
+pub(crate) fn score_recall_at_depth(
+    dataset: &RecallDataset,
+    corpus: &str,
+    k: usize,
+) -> RecallReport {
+    score_recall_with(dataset, corpus, k, k, usize::MAX)
+}
+
+/// Shared body: retrieve with an explicit window, then score it at `k`.
+fn score_recall_with(
+    dataset: &RecallDataset,
+    corpus: &str,
+    k: usize,
+    max_sections: usize,
+    max_chars: usize,
+) -> RecallReport {
     let ranked = Ranked::build(corpus);
     let results: Vec<Vec<String>> = dataset
         .cases
         .iter()
         .map(|case| {
-            let matches: Matches = ranked.find_relevant(
-                &case.query,
-                RECALL_MAX_SECTIONS,
-                RECALL_MAX_CHARS,
-                RECALL_MIN_SCORE,
-            );
+            let matches: Matches =
+                ranked.find_relevant(&case.query, max_sections, max_chars, RECALL_MIN_SCORE);
             section_ids(&matches)
         })
         .collect();

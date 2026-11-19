@@ -10,8 +10,11 @@
 //! still the map of what remains: the injection window is still 2 sections
 //! wide, and the floor still starves most of a 293-section corpus.
 //!
-//! 1. DEPTH — the leg asks for `RECALL_MAX_SECTIONS` (2) sections no matter
-//!    what `k` says, then scores that two-element list at k=10. `k` is inert.
+//! 1. DEPTH — the leg asked for `RECALL_MAX_SECTIONS` (2) sections no matter
+//!    what `k` said, then scored that two-element list at k=10. `k` was inert.
+//!    FIXED: the scorecard now reads `score_recall_at_depth`, which retrieves
+//!    the cutoff it names. The production window keeps its cap on purpose, so
+//!    both halves of this defect are pinned below.
 //! 2. THRESHOLD — with the shipped `RECALL_MIN_SCORE` on a 293-section corpus,
 //!    most positives come back EMPTY. The 0.017 is the one query that survived.
 //! 3. RANKER — with the floor removed and full depth, every gold is
@@ -24,7 +27,7 @@
 
 use crate::brain::memory_recall::{RECALL_MAX_CHARS, RECALL_MAX_SECTIONS, RECALL_MIN_SCORE};
 use crate::brain::section_rank::Ranked;
-use crate::cli::eval_cmd::score_recall;
+use crate::cli::eval_cmd::{score_recall, score_recall_at_depth};
 use crate::eval::recall::RecallDataset;
 
 const DATASET: &str = include_str!("../eval/fixtures/track_b_recall.json");
@@ -77,27 +80,54 @@ fn the_shipped_leg_reproduces_the_current_scorecard() {
     assert_eq!(report.negatives, 15, "15 negative queries");
 }
 
-/// DEFECT 1 — `k` never reaches the retriever, so a k=10 scorecard is a
-/// two-deep measurement wearing a ten label.
+/// DEFECT 1 — `k` never reached the retriever on the PRODUCTION window, so a
+/// k=10 scorecard was a two-deep measurement wearing a ten label.
 ///
 /// The proof is exact rather than approximate: because the returned list can
 /// never exceed two entries, scoring it at k=10 and at k=2 produces the SAME
 /// aggregate. A metric that is identical at two different cutoffs is not
 /// measuring the cutoff it names.
+///
+/// This stays true of `score_recall` on purpose — it models what production
+/// injects, and production does not inject ten sections. The scorecard moved to
+/// its own leg instead, and the test after this one pins that the move worked.
 #[test]
-fn the_k10_score_is_identical_to_the_k2_score_because_k_is_inert() {
+fn the_production_window_ignores_k_because_it_caps_at_two_sections() {
     let ds = dataset();
     let at_two = score_recall(&ds, CORPUS, INJECTED_K);
     let at_ten = score_recall(&ds, CORPUS, PUBLISHED_K);
 
     assert_eq!(
         at_ten.aggregate, at_two.aggregate,
-        "k is inert: the leg caps the list at {RECALL_MAX_SECTIONS} sections regardless of k, \
+        "the production window caps the list at {RECALL_MAX_SECTIONS} sections regardless of k, \
          so k=10 and k=2 score identically"
     );
     assert_ne!(
         at_ten.k, at_two.k,
         "the report still records which k was asked for"
+    );
+}
+
+/// DEFECT 1, FIXED — the scorecard leg reaches past the production window.
+///
+/// The regression guard for the split: if the leg ever collapses back onto the
+/// window, the two scores go equal and this fails. It is the only assertion
+/// here that can tell the two legs apart, because the FLOOR still truncates
+/// most queries to a single section — at `RECALL_MIN_SCORE` the depth leg's
+/// recall@2 and recall@10 are equal for the same reason the window's were, and
+/// that is defect 2, still open.
+#[test]
+fn the_scorecard_leg_reaches_deeper_than_the_production_window() {
+    let ds = dataset();
+    let window = score_recall(&ds, CORPUS, PUBLISHED_K);
+    let depth = score_recall_at_depth(&ds, CORPUS, PUBLISHED_K);
+
+    assert!(
+        depth.aggregate.recall > window.aggregate.recall,
+        "at k={PUBLISHED_K} the depth leg found {:.3} recall and the production \
+         window found {:.3}; if they match, the scorecard is reading the window again",
+        depth.aggregate.recall,
+        window.aggregate.recall
     );
 }
 

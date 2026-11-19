@@ -217,9 +217,17 @@ impl RecallReport {
 /// Shared by the scorecard test and the baseline guard so both read the same
 /// leg — a baseline recorded against one builder and checked against another
 /// would be a guard for a number nobody publishes.
+///
+/// This reads the RANKER leg ([`score_recall_at_depth`]), not the production
+/// window: Track B's subject is ranking quality over a 293-section corpus, and
+/// the injection window is narrower than any cutoff it publishes (#899).
 #[cfg(test)]
 pub fn committed_report(k: usize) -> RecallReport {
     let dataset = RecallDataset::from_json(include_str!("fixtures/track_b_recall.json"))
         .expect("the committed Track B dataset parses");
-    crate::cli::eval_cmd::score_recall(&dataset, include_str!("fixtures/track_b_corpus.md"), k)
+    crate::cli::eval_cmd::score_recall_at_depth(
+        &dataset,
+        include_str!("fixtures/track_b_corpus.md"),
+        k,
+    )
 }
