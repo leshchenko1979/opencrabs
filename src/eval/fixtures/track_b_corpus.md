@@ -1,9 +1,13 @@
 # Track B — reference documentation corpus
 
-Generated from the binary's own embedded reference docs (`src/docs/**/*.md`).
+Generated from the binary's own embedded reference docs (`src/docs/**/*.md`) by
+`src/eval/fixtures/generate_track_b_corpus.py` — do not edit by hand.
+
 Each section heading carries its source document path so a label names exactly
-one section; deeper headings are folded into the body so a section is the unit
-of retrieval.
+one section; deeper headings are folded into the body so a section stays the
+unit of retrieval. Every section carries a balanced set of code fences, and the
+body cap is applied before the balance check, so a truncated block cannot leave
+a fence open.
 
 ## reference/ADDING_NEW_PROVIDERS · Overview
 
@@ -53,6 +57,7 @@ The factory uses a **registry pattern**. All providers are registered in the `RE
 
 ```rust
 …
+```
 
 ## reference/ADDING_NEW_PROVIDERS · Config.toml Examples
 
@@ -150,6 +155,7 @@ if let Some(ref usage) = chunk.usage {
         
         events.push(Ok(StreamEvent::MessageDelta {
 …
+```
 
 ## reference/ADDING_NEW_PROVIDERS · Testing
 
@@ -296,6 +302,7 @@ async fn try_create_yourprovider(config: &Config) -> Result<Option<Arc<dyn Provi
         Arc::new(move || mgr_clone.get_cached_token());
 
 …
+```
 
 ## reference/ADDING_NEW_PROVIDERS · Troubleshooting
 
@@ -2379,6 +2386,7 @@ Phase 8: Telegram Approve/Discard + Editing prose; title/goal/checklist via Phas
 ## Implementation steps
 1. Add Approve validator — implement Rust scan in Phase 6 harness.
 …
+```
 
 ## reference/plans/plan-mode/umbrella · Deviation policy
 
@@ -4471,13 +4479,13 @@ Format the handoff like:
 ```
 ## Context from previous phases
 
-**Planner said:**
+### Planner said:
 <planner output>
 
-**Your task:**
+### Your task:
 <executor task>
 
-**Constraints:**
+### Constraints:
 <user constraints>
 ```
 
