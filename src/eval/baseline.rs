@@ -138,3 +138,100 @@ fn check(dim: &str, baseline: f64, current: f64, tolerance: f64, out: &mut Vec<R
         });
     }
 }
+
+/// A COMMITTED per-track contract baseline (#890 step 6).
+///
+/// Deliberately NOT a pinned score. A metric value is only reproducible against
+/// a frozen corpus AND a frozen ranker, so a pinned figure would make every
+/// legitimate ranking improvement look like a regression — and it would be a
+/// second copy of a number whose authority is a results document. What is
+/// pinned here is everything that must never move silently:
+///
+/// * the dataset SHAPE — a shrink lifts every average by dropping the hard
+///   cases, and no other assertion in the suite would see it;
+/// * the metric SURFACE — a leg that stops printing one metric while still
+///   reporting the others reads as green;
+/// * the `floors` — lower bounds on the ranking-sensitive figures. A floor is
+///   a smoke bound, not a measurement: it says the leg still retrieves
+///   something, and it is set where a BROKEN ranker (one that returns nothing)
+///   falls through it. That sensitivity is proved in-run by the guard test's
+///   own positive control, never assumed.
+///
+/// The live legs are named in `live_legs` and stay OUT of CI: they read the
+/// real store through the CLI (`src/cli/eval_cmd.rs`), so CI cannot reproduce
+/// them and must not pretend to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackBaseline {
+    pub track: String,
+    pub label: String,
+    pub dataset: DatasetShape,
+    pub window: usize,
+    /// Substrings that must appear in the rendered scorecard.
+    pub metrics: Vec<String>,
+    /// Lower bounds on ranking-sensitive figures. Empty is legal: a track whose
+    /// scored values need a live store has no CI-reproducible floor.
+    #[serde(default)]
+    pub floors: BTreeMap<String, f64>,
+    /// Legs that need a live store, named so their absence from CI is DECLARED
+    /// rather than implied.
+    #[serde(default)]
+    pub live_legs: Vec<String>,
+}
+
+/// The dataset shape a baseline pins.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct DatasetShape {
+    pub positives: usize,
+    pub negatives: usize,
+}
+
+impl TrackBaseline {
+    pub fn from_json(json: &str) -> serde_json::Result<Self> {
+        serde_json::from_str(json)
+    }
+
+    /// Metrics the rendered scorecard does NOT carry, sorted by their order in
+    /// `metrics`. Empty means the leg still publishes everything it was
+    /// recorded with.
+    pub fn missing_metrics(&self, rendered: &str) -> Vec<String> {
+        self.metrics
+            .iter()
+            .filter(|m| !rendered.contains(m.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    /// Dataset-shape violations. A mismatch is a silent dataset edit, which is
+    /// the one change that lifts every average without touching the code.
+    pub fn shape_violations(&self, positives: usize, negatives: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        if positives != self.dataset.positives {
+            out.push(format!(
+                "positives {} != baseline {}",
+                positives, self.dataset.positives
+            ));
+        }
+        if negatives != self.dataset.negatives {
+            out.push(format!(
+                "negatives {} != baseline {}",
+                negatives, self.dataset.negatives
+            ));
+        }
+        out
+    }
+
+    /// Floor violations, given the figures the leg measured.
+    pub fn floor_violations(&self, measured: &BTreeMap<String, f64>) -> Vec<String> {
+        let mut out = Vec::new();
+        for (key, &floor) in &self.floors {
+            match measured.get(key) {
+                Some(&value) if value >= floor => {}
+                Some(&value) => out.push(format!(
+                    "{key} {value:.3} fell below its floor {floor:.3}"
+                )),
+                None => out.push(format!("{key} was not measured at all (floor {floor:.3})")),
+            }
+        }
+        out
+    }
+}

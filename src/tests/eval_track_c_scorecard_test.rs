@@ -23,7 +23,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::eval::skills_track::{SkillDataset, index_block_chars, index_markdown, score};
+use crate::eval::skills_track::SkillDataset;
 
 const DATASET: &str = include_str!("../eval/fixtures/track_c_skills.json");
 
@@ -41,21 +41,10 @@ fn slugs() -> Vec<String> {
     set.into_iter().collect()
 }
 
-/// One entry per slug. The description is the slug itself: this index exists to
-/// test LABEL RESOLUTION at a full window, not to rank by prose, and inventing
-/// descriptions would make the fixture depend on vocabulary nobody committed.
-fn entries() -> Vec<(String, String)> {
-    slugs().into_iter().map(|s| (s.clone(), s)).collect()
-}
-
+/// The fixture leg itself: one builder, in the module, so this test and the
+/// baseline guard score the same index.
 fn report_at(k: usize) -> crate::eval::skills_track::SkillReport {
-    let entries = entries();
-    let md = index_markdown(entries.iter().map(|(s, d)| (s.as_str(), d.as_str())));
-    let chars = index_block_chars(entries.iter().map(|(s, d)| (s.as_str(), d.as_str())));
-    let names: Vec<String> = entries.iter().map(|(s, _)| s.clone()).collect();
-    // C3 is a LIVE figure (it needs `session_seen_skills`), so this module-level
-    // scoring passes 0 and asserts the C3 SURFACE below rather than its value.
-    score(&dataset(), &md, &names, k, chars, 0)
+    crate::eval::skills_track::committed_report_at(k)
 }
 
 /// The committed dataset is the shape the plan specifies: 35 skills + 12

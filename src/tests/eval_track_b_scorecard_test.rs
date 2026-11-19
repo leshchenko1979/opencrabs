@@ -24,10 +24,9 @@
 //! queries are written from a SCENARIO, never by summarising the section they
 //! label, so a high score cannot come from the query quoting its own answer.
 
-use crate::cli::eval_cmd::{score_rankings, score_recall};
+use crate::cli::eval_cmd::score_rankings;
 use crate::eval::recall::{RecallDataset, RecallReport};
 
-const CORPUS: &str = include_str!("../eval/fixtures/track_b_corpus.md");
 const DATASET: &str = include_str!("../eval/fixtures/track_b_recall.json");
 
 /// The published cutoff. Ten is the window the plan budgets, not the shipped
@@ -40,7 +39,7 @@ fn dataset() -> RecallDataset {
 }
 
 fn report() -> RecallReport {
-    score_recall(&dataset(), CORPUS, K)
+    crate::eval::recall::committed_report(K)
 }
 
 /// The dataset is the shape the plan specifies: 60 positives + 15 negatives,

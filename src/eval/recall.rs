@@ -210,3 +210,16 @@ impl RecallReport {
         out
     }
 }
+
+/// The COMMITTED Track B fixture leg (#890 step 6): the 60+15 dataset scored
+/// against the corpus that ships beside it, at the published cutoff.
+///
+/// Shared by the scorecard test and the baseline guard so both read the same
+/// leg — a baseline recorded against one builder and checked against another
+/// would be a guard for a number nobody publishes.
+#[cfg(test)]
+pub fn committed_report(k: usize) -> RecallReport {
+    let dataset = RecallDataset::from_json(include_str!("fixtures/track_b_recall.json"))
+        .expect("the committed Track B dataset parses");
+    crate::cli::eval_cmd::score_recall(&dataset, include_str!("fixtures/track_b_corpus.md"), k)
+}

@@ -279,3 +279,33 @@ pub fn score(
 
     report
 }
+
+/// The COMMITTED Track C fixture leg (#890 step 6).
+///
+/// One builder, two consumers — the scorecard test and the baseline guard —
+/// because two builders would drift and a baseline recorded against one would
+/// then be checked against the other. The index is built from the dataset's own
+/// 35 gold slugs with the slug as its description: that is the only index this
+/// module can construct without a live profile, and it is the right one for the
+/// full-window question, which depends on the LABELS rather than on prose.
+#[cfg(test)]
+pub fn committed_report_at(k: usize) -> SkillReport {
+    use std::collections::BTreeSet;
+
+    let dataset = SkillDataset::from_json(include_str!("fixtures/track_c_skills.json"))
+        .expect("the committed Track C dataset parses");
+    let slugs: Vec<String> = dataset
+        .tasks
+        .iter()
+        .filter_map(|t| t.gold.clone())
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect();
+    let entries: Vec<(String, String)> = slugs.iter().map(|s| (s.clone(), s.clone())).collect();
+    let md = index_markdown(entries.iter().map(|(s, d)| (s.as_str(), d.as_str())));
+    let chars = index_block_chars(entries.iter().map(|(s, d)| (s.as_str(), d.as_str())));
+    let names: Vec<String> = entries.iter().map(|(s, _)| s.clone()).collect();
+    // C3 is a LIVE figure (it needs `session_seen_skills`), so this scoring
+    // passes 0 and the card asserts the C3 SURFACE rather than its value.
+    score(&dataset, &md, &names, k, chars, 0)
+}

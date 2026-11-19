@@ -419,3 +419,61 @@ pub fn score(conn: &Connection, dataset: &EpisodicDataset, k: usize) -> Result<E
         false_positives,
     })
 }
+
+/// A store with `n` messages whose content words are unique per message, so
+/// every sampled query is a known item with exactly one right answer (#890).
+///
+/// Lives beside the track rather than in one test file because two consumers
+/// seed it — the mechanism tests and the baseline guard — and a store built two
+/// ways would make their numbers incomparable.
+#[cfg(test)]
+pub fn seeded_store(n: usize) -> Connection {
+    let conn = Connection::open_in_memory().expect("in-memory store");
+    conn.execute_batch(
+        "CREATE TABLE messages (
+            id TEXT PRIMARY KEY NOT NULL,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );",
+    )
+    .expect("schema");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64;
+    for i in 0..n {
+        // Eighteen unique long tokens, padded past the 160-character floor the
+        // sampler applies, and nothing shared between messages.
+        let content = format!(
+            "zq{i}alpha zq{i}bravo zq{i}charlie zq{i}delta zq{i}echo \
+             zq{i}foxtrot zq{i}golf zq{i}hotel zq{i}india zq{i}juliet \
+             zq{i}kilo zq{i}lima zq{i}mike zq{i}november zq{i}oscar \
+             zq{i}papa zq{i}quebec zq{i}romeo zq{i}sierra zq{i}tango"
+        );
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, created_at) \
+             VALUES (?1, ?2, 'user', ?3, ?4)",
+            params![
+                format!("m{i}"),
+                format!("session-{}", i % 5),
+                content,
+                now - (n as i64 - i as i64)
+            ],
+        )
+        .expect("insert");
+    }
+    conn
+}
+
+/// The COMMITTED Track A fixture leg (#890 step 6): 90 seeded messages, a
+/// 14-day slice, 40 positives + 20 negatives, scored at `k`. Deterministic by
+/// construction, so it is CI-reproducible — unlike the real-store leg, which
+/// reads the host's own history and stays out of CI.
+#[cfg(test)]
+pub fn committed_report(k: usize) -> EpisodicReport {
+    let conn = seeded_store(90);
+    let dataset = sample(&conn, 14).expect("sample");
+    score(&conn, &dataset, k).expect("score")
+}

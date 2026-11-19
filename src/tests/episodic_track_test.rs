@@ -1,55 +1,14 @@
 //! Track A (episodic recall) — dataset generation and scoring (#890 step 5).
 //!
 //! These tests run the leg END TO END against an in-memory store: 40
-//! positives + 20 negatives sampled from a corpus built here, then scored
+//! positives + 20 negatives sampled from a corpus seeded beside the track
+//! (`episodic_track::seeded_store`), then scored
 //! through the same `search_slice` the CLI uses. The corpus is synthetic and
 //! deliberately tiny; what is asserted is the MECHANISM (sampling counts,
 //! known-item resolution, silence on negatives), never a quality number,
 //! because the live leg's numbers belong to the host's own history.
 
-use crate::eval::episodic_track::{NEGATIVES, POSITIVES, sample, score, search_slice};
-
-/// A store with `n` messages whose content words are unique per message, so
-/// every sampled query is a known item with exactly one right answer.
-fn seeded_store(n: usize) -> rusqlite::Connection {
-    let conn = rusqlite::Connection::open_in_memory().expect("in-memory store");
-    conn.execute_batch(
-        "CREATE TABLE messages (
-            id TEXT PRIMARY KEY NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-        );",
-    )
-    .expect("schema");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_secs() as i64;
-    for i in 0..n {
-        // Eight unique long tokens, padded past the 160-character floor the
-        // sampler applies, and nothing shared between messages.
-        let content = format!(
-            "zq{i}alpha zq{i}bravo zq{i}charlie zq{i}delta zq{i}echo \
-             zq{i}foxtrot zq{i}golf zq{i}hotel zq{i}india zq{i}juliet \
-             zq{i}kilo zq{i}lima zq{i}mike zq{i}november zq{i}oscar \
-             zq{i}papa zq{i}quebec zq{i}romeo zq{i}sierra zq{i}tango"
-        );
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content, created_at) \
-             VALUES (?1, ?2, 'user', ?3, ?4)",
-            rusqlite::params![
-                format!("m{i}"),
-                format!("session-{}", i % 5),
-                content,
-                now - (n as i64 - i as i64)
-            ],
-        )
-        .expect("insert");
-    }
-    conn
-}
+use crate::eval::episodic_track::{NEGATIVES, POSITIVES, sample, score, search_slice, seeded_store};
 
 #[test]
 fn samples_forty_positives_and_twenty_negatives() {

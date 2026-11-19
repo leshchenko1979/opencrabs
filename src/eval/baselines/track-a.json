@@ -1,0 +1,22 @@
+{
+  "track": "A",
+  "label": "track-a-episodic-in-memory",
+  "dataset": {
+    "positives": 40,
+    "negatives": 20
+  },
+  "window": 10,
+  "metrics": [
+    "recall=",
+    "MRR=",
+    "source-message=",
+    "silence:"
+  ],
+  "floors": {
+    "recall_at_k": 1.0,
+    "mrr": 0.99
+  },
+  "live_legs": [
+    "the real-store leg (`opencrabs eval recall --track A`) reads the live message store and stays out of CI"
+  ]
+}

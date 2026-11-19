@@ -1,0 +1,11 @@
+{
+  "track": "C",
+  "label": "track-c-skills-full-window",
+  "dataset": { "positives": 35, "negatives": 12 },
+  "window": 35,
+  "metrics": ["C1@", "chars of prompt", "skills ever employed", "false selection"],
+  "floors": { "c1_at_full": 1.0 },
+  "live_legs": [
+    "C3 employment needs `session_seen_skills` — the CLI reads it live and stays out of CI"
+  ]
+}
