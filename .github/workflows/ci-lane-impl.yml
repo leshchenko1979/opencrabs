@@ -284,6 +284,19 @@ jobs:
   # --------------------------------------------------------------- PR gates --
   # The PR-lane gate body, moved verbatim from pr-checks.yml. `mode: gate` runs
   # this job and nothing else; the build family is gated off by `if:`.
+  # SHIPPED-FEATURE SPLIT (HQ 2026-11-19; owner order "gate and split").
+  # This leg used to pass --all-features, so it compiled and tested whatsapp,
+  # discord, slack, pdfium, local-stt/-tts and telegram-userbot: 450 tests
+  # (4.0% of 11,143) plus the rwhisper / serenity / slack-morphism /
+  # pdfium-render dependency trees, for a binary that carries NONE of them
+  # (the build leg has always been --no-default-features --features
+  # telegram,code-graph,browser). The blocking verdict must answer "does the
+  # thing we SHIP work", so this leg now mirrors the build leg exactly and the
+  # --all-features coverage moved to the NON-BLOCKING pr-gates-all-features
+  # job below. Source prerequisite: the 38 test modules that import a
+  # non-shipped channel now carry their own #[cfg(feature)] gates in
+  # src/tests/mod.rs, so this leg can compile at all.
+  # Revert = restore --all-features on the Run tests step and delete that job.
   pr-gates:
     if: ${{ inputs.mode == 'gate' }}
     name: PR-lane gates (${{ inputs.ref }}${{ inputs.fix && ' — FIX MODE' || inputs.lockregen && ' — LOCK REGEN' || inputs.lockupdate && ' — LOCK UPDATE' || inputs.swap && ' — SWAP MODE' || inputs.fast && ' — FAST' || '' }})
@@ -512,7 +525,8 @@ jobs:
         # and the exit code is managed explicitly below.
         run: |
           set +e
-          CMD="cargo test --locked --profile ci --all-features --verbose${{ inputs.test_threads && format(' -- --test-threads={0}', inputs.test_threads) || '' }}"
+          # SHIPPED feature set, mirroring the build leg: see the job comment.
+          CMD="cargo test --locked --profile ci --no-default-features --features ${{ inputs.features }} --verbose${{ inputs.test_threads && format(' -- --test-threads={0}', inputs.test_threads) || '' }}"
           echo "+ $CMD"
           # stallwatch — TWO-predicate stall detector (HQ 2026-11-17; predicate B
           # 2026-11-19; #331). A stall has two shapes and one predicate cannot see both:
@@ -1074,3 +1088,56 @@ jobs:
           name: updated-lock
           path: Cargo.lock
           if-no-files-found: error
+
+  # ------------------------------------------------- all-features, advisory --
+  # NON-BLOCKING by design (HQ 2026-11-19, owner "gate and split").
+  #
+  # WHY IT EXISTS: pr-gates now tests the SHIPPED feature set, so nothing
+  # blocking compiles whatsapp/discord/slack/pdfium/local-stt/-tts/userbot any
+  # more. Those modules still live in Cargo.toml `default`, so a stock build
+  # gets them and their tests are not dead: they are just not OURS. This job
+  # keeps that coverage and reports it on the run page.
+  #
+  # WHY NON-BLOCKING: an all-features red must not withhold a swap or a PR. A
+  # red here is a real signal for whoever touches those modules; it is not a
+  # verdict on the binary we ship. `continue-on-error: true` is at JOB level,
+  # which is what keeps the workflow run green when this job fails.
+  #
+  # Deliberately NO sccache here: RUSTC_WRAPPER=sccache on a test leg is the
+  # 2026-09-17 SIGTERM storm (3/3 killed vs 0/5-0/6 without, Fisher p=0.018 /
+  # p=0.012). Same reason the blocking leg carries none.
+  #
+  # Revert = delete this job and restore --all-features on the leg above.
+  pr-gates-all-features:
+    if: ${{ inputs.mode == 'gate' && !inputs.fix && !inputs.lockregen && !inputs.lockupdate && !inputs.fast }}
+    name: PR-lane all-features tests (non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          save-if: true
+
+      - name: Install system deps (pkg-config, ALSA dev, mold + clang)
+        run: sudo apt-get update -qq && sudo apt-get install -y pkg-config libasound2-dev mold clang
+
+      - name: Run tests (all features, advisory)
+        # Step timeout INSIDE the 45-min job cap so a stall still leaves a log
+        # (a job-cap cancel archives a 22-byte empty zip; #331).
+        timeout-minutes: 40
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+        run: cargo test --locked --profile ci --all-features --verbose
