@@ -135,7 +135,9 @@ impl TransportCause {
         match self {
             Self::ListenerDead => "nothing is listening on the port (daemon booting or stopped)",
             Self::Unresponsive => "the port accepted a connection but never answered",
-            Self::Bodiless(_) => "the gateway answered with no JSON-RPC body (mid-reload or a proxy)",
+            Self::Bodiless(_) => {
+                "the gateway answered with no JSON-RPC body (mid-reload or a proxy)"
+            }
         }
     }
 }
@@ -257,9 +259,7 @@ pub(crate) async fn post_jsonrpc_with(
                         }
                         return match rpc.result {
                             Some(result) => Ok(result),
-                            None => {
-                                Err("gateway response carried neither result nor error".into())
-                            }
+                            None => Err("gateway response carried neither result nor error".into()),
                         };
                     }
                     // A response with no JSON-RPC body is NOT a decision: the

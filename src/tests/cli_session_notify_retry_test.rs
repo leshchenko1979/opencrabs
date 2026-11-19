@@ -133,10 +133,7 @@ async fn a_jsonrpc_error_is_a_decision_and_is_not_retried() {
 fn unresponsive_endpoint() -> (String, std::net::TcpListener) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let port = listener.local_addr().expect("local addr").port();
-    (
-        format!("http://127.0.0.1:{port}{GATEWAY_PATH}"),
-        listener,
-    )
+    (format!("http://127.0.0.1:{port}{GATEWAY_PATH}"), listener)
 }
 
 #[tokio::test]
@@ -231,7 +228,11 @@ fn the_backoff_grows_is_capped_and_the_budget_outlives_a_boot() {
         BACKOFF_START,
         "attempt 1 never retries, so its backoff is the base"
     );
-    assert_eq!(next_backoff(2), BACKOFF_START, "the first retry waits the base");
+    assert_eq!(
+        next_backoff(2),
+        BACKOFF_START,
+        "the first retry waits the base"
+    );
     assert!(next_backoff(3) > next_backoff(2), "the schedule must grow");
     // Doubling must never escape the cap, however long the budget lets it run.
     for attempt in 1..200u32 {
