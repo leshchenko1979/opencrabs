@@ -1,5 +1,11 @@
 # Track C — skill selection against the live index
 
+> **SUPERSEDED by `track-c-skills-v2.md` (#899).** The `C3 0/35 (0.000)` rows
+> below are an absent instrument printed as a result — a CI runner has no
+> `session_seen_skills` table — and must not be quoted as employment. v2 makes
+> C3 either measured or explicitly NOT MEASURED, and publishes the live figure
+> with its predicate.
+
 Dataset: `src/eval/fixtures/track_c_skills.json`, 35 entries / 12 negatives
 Scored by: `src/eval/skills_track.rs`, asserted by `src/tests/eval_track_c_scorecard_test.rs`
 Receipt: run `44531731211` (job `135586514752`), sha `79ac16960`, 2026-11-19T13:40:20Z
