@@ -331,6 +331,7 @@ pub mod eval_baseline_guard_test;
 pub mod eval_cli_recall_test;
 pub mod eval_inflation_test;
 pub mod eval_skills_track_test;
+pub mod eval_track_b_diagnosis_test;
 pub mod eval_track_b_scorecard_test;
 pub mod eval_track_c_scorecard_test;
 pub mod fallback_suggestion_test;
