@@ -456,7 +456,7 @@ fn skill_index_markdown() -> String {
     }
 
     let skills = crate::brain::skills::load_all_skills();
-    let index_md = crate::eval::skills_track::index_markdown(
+    let index_md = crate::brain::skills::index_markdown(
         skills
             .iter()
             .map(|s| (s.name.as_str(), s.description.as_str())),

@@ -485,6 +485,28 @@ pub(crate) fn user_skills_dir() -> PathBuf {
     crate::config::opencrabs_home().join("skills")
 }
 
+/// Render a skill index as a markdown heading block.
+///
+/// This is the corpus the section ranker (`brain::section_rank::Ranked`)
+/// consumes, and the block the runtime selector ranks every turn (#901). It
+/// lives here, beside `load_all_skills`, rather than in `eval::skills_track`,
+/// because `crate::eval` is compiled only under `test` or the `eval` feature —
+/// a runtime caller there does not build in the shipped feature set.
+pub fn index_markdown<'a, I>(entries: I) -> String
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let mut out = String::new();
+    for (slug, description) in entries {
+        out.push_str("## ");
+        out.push_str(slug);
+        out.push('\n');
+        out.push_str(description.trim());
+        out.push_str("\n\n");
+    }
+    out
+}
+
 /// Load every available skill (built-ins + project overlays + user overlays).
 ///
 /// Resolution order (last writer wins):
@@ -762,7 +784,10 @@ pub fn active_skill_bodies(
             // onto the method so every injection path inherits it. Emitting it
             // again here would double it on this path.
             let body = skill.prompt_body();
-            section.push_str(&format!("\n\n--- Active Skill: {} ---\n{}", skill.slash_name, body));
+            section.push_str(&format!(
+                "\n\n--- Active Skill: {} ---\n{}",
+                skill.slash_name, body
+            ));
 
             // Reinject consumed auxiliary files (issue #216).
             if let Some(files) = seen_aux.get(&skill.name) {

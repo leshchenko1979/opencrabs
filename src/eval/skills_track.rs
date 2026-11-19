@@ -65,26 +65,16 @@ impl SkillDataset {
     }
 }
 
-/// Render a skill index as the markdown corpus [`Ranked`] consumes.
+/// Render a skill index as the markdown corpus the ranker consumes.
 ///
 /// The ORDER is the caller's: pass the entries in the order the prompt emits
 /// them (alphabetical today), so a rank below `k` means "inside the first `k`
 /// lines the agent reads", which is the only sense in which a flat index has a
 /// position at all.
-pub fn index_markdown<'a, I>(entries: I) -> String
-where
-    I: IntoIterator<Item = (&'a str, &'a str)>,
-{
-    let mut out = String::new();
-    for (slug, description) in entries {
-        out.push_str("## ");
-        out.push_str(slug);
-        out.push('\n');
-        out.push_str(description.trim());
-        out.push_str("\n\n");
-    }
-    out
-}
+///
+/// Defined in `brain::skills` because the runtime selector ranks this block in
+/// shipped builds too, where `crate::eval` is not compiled (#901).
+pub use crate::brain::skills::index_markdown;
 
 /// Characters of the emitted index BLOCK — the budget C2 measures.
 ///
