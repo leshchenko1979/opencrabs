@@ -8,7 +8,9 @@
 //! known-item resolution, silence on negatives), never a quality number,
 //! because the live leg's numbers belong to the host's own history.
 
-use crate::eval::episodic_track::{NEGATIVES, POSITIVES, sample, score, search_slice, seeded_store};
+use crate::eval::episodic_track::{
+    NEGATIVES, POSITIVES, sample, score, search_slice, seeded_store,
+};
 
 #[test]
 fn samples_forty_positives_and_twenty_negatives() {
@@ -22,7 +24,12 @@ fn samples_forty_positives_and_twenty_negatives() {
     assert_eq!(dataset.slice_days, 14);
     // The slice is reported beside the numbers, so it must be truthful.
     assert!(dataset.positives.iter().all(|c| !c.query.is_empty()));
-    assert!(dataset.positives.iter().all(|c| c.message_id.starts_with('m')));
+    assert!(
+        dataset
+            .positives
+            .iter()
+            .all(|c| c.message_id.starts_with('m'))
+    );
 }
 
 #[test]
@@ -42,7 +49,11 @@ fn known_item_queries_resolve_to_their_source_session() {
         report.found_session, POSITIVES
     );
     assert_eq!(report.found_message, POSITIVES, "source message retrieved");
-    assert!(report.mrr > 0.99, "unique queries should rank first, MRR={}", report.mrr);
+    assert!(
+        report.mrr > 0.99,
+        "unique queries should rank first, MRR={}",
+        report.mrr
+    );
     assert_eq!(report.false_positives, 0, "negatives must stay silent");
     assert_eq!(report.false_positive_rate(), 0.0);
 }
@@ -66,7 +77,11 @@ fn negatives_are_silent_and_positives_are_not() {
 
     for query in dataset.negatives.iter().take(5) {
         let hits = search_slice(&conn, since, query, 10).expect("search");
-        assert!(hits.is_empty(), "negative {query:?} returned {} rows", hits.len());
+        assert!(
+            hits.is_empty(),
+            "negative {query:?} returned {} rows",
+            hits.len()
+        );
     }
 }
 

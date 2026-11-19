@@ -170,7 +170,9 @@ fn cutoff_unix(slice_days: u32) -> i64 {
 }
 
 fn count(conn: &Connection, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<usize> {
-    let n: i64 = conn.query_row(sql, p, |r| r.get(0)).context("count query")?;
+    let n: i64 = conn
+        .query_row(sql, p, |r| r.get(0))
+        .context("count query")?;
     Ok(n as usize)
 }
 
@@ -295,9 +297,7 @@ pub fn sample(conn: &Connection, slice_days: u32) -> Result<EpisodicDataset> {
              WHERE created_at >= ?1 AND length(content) >= 160 AND role IN ('user','assistant') \
              ORDER BY created_at ASC, id ASC",
         )?;
-        let rows = stmt.query_map(params![since], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?;
+        let rows = stmt.query_map(params![since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
     anyhow::ensure!(

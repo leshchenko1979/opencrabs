@@ -401,7 +401,9 @@ fn volatile_sections_follow_the_static_brain_and_runtime_info_is_last() {
         .expect("Runtime Info must be rendered");
     let after = &brain[runtime_pos + RUNTIME_INFO_HEADER.len()..];
     assert!(
-        !after.lines().any(|l| l.starts_with("--- ") && l.ends_with("---")),
+        !after
+            .lines()
+            .any(|l| l.starts_with("--- ") && l.ends_with("---")),
         "Runtime Info must be the final section, found a header after it:\n{}",
         after.lines().take(8).collect::<Vec<_>>().join("\n")
     );

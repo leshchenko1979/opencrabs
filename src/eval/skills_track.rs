@@ -160,10 +160,7 @@ impl SkillReport {
             self.c1_at_full,
             full = self.full
         ));
-        s.push_str(&format!(
-            "C2      {} chars of prompt\n",
-            self.c2_chars
-        ));
+        s.push_str(&format!("C2      {} chars of prompt\n", self.c2_chars));
         s.push_str(&format!(
             "C3      {}/{} skills ever employed ({:.3})\n",
             self.c3_employed, self.full, self.c3_coverage

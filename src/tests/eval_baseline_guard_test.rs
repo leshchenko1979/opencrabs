@@ -60,20 +60,27 @@ fn track_a_matches_its_committed_baseline() {
     let card = report.render();
 
     assert!(
-        b.shape_violations(report.positives, report.negatives).is_empty(),
+        b.shape_violations(report.positives, report.negatives)
+            .is_empty(),
         "Track A dataset shape moved: {:?}",
         b.shape_violations(report.positives, report.negatives)
     );
     assert_eq!((report.positives, report.negatives), (POSITIVES, NEGATIVES));
 
     let missing = b.missing_metrics(&card);
-    assert!(missing.is_empty(), "Track A stopped publishing {missing:?}\n{card}");
+    assert!(
+        missing.is_empty(),
+        "Track A stopped publishing {missing:?}\n{card}"
+    );
 
     let mut measured = BTreeMap::new();
     measured.insert("recall_at_k".to_string(), report.recall_at_k());
     measured.insert("mrr".to_string(), report.mrr);
     let violations = b.floor_violations(&measured);
-    assert!(violations.is_empty(), "Track A regressed: {violations:?}\n{card}");
+    assert!(
+        violations.is_empty(),
+        "Track A regressed: {violations:?}\n{card}"
+    );
 }
 
 /// Track B: 60+15 over the committed corpus. Floors are set where silence
@@ -85,21 +92,28 @@ fn track_b_matches_its_committed_baseline() {
     let card = report.render();
 
     assert!(
-        b.shape_violations(report.positives(), report.negatives).is_empty(),
+        b.shape_violations(report.positives(), report.negatives)
+            .is_empty(),
         "Track B dataset shape moved: {:?}",
         b.shape_violations(report.positives(), report.negatives)
     );
     assert_eq!(report.k, b.window, "scored at the baseline's window");
 
     let missing = b.missing_metrics(&card);
-    assert!(missing.is_empty(), "Track B stopped publishing {missing:?}\n{card}");
+    assert!(
+        missing.is_empty(),
+        "Track B stopped publishing {missing:?}\n{card}"
+    );
 
     let mut measured = BTreeMap::new();
     measured.insert("recall".to_string(), report.aggregate.recall);
     measured.insert("mrr".to_string(), report.aggregate.mrr);
     measured.insert("ndcg".to_string(), report.aggregate.ndcg);
     let violations = b.floor_violations(&measured);
-    assert!(violations.is_empty(), "Track B regressed: {violations:?}\n{card}");
+    assert!(
+        violations.is_empty(),
+        "Track B regressed: {violations:?}\n{card}"
+    );
 }
 
 /// Track C: the full window is the vacuous baseline, and it is pinned at
@@ -112,18 +126,25 @@ fn track_c_matches_its_committed_baseline() {
     let card = report.render();
 
     assert!(
-        b.shape_violations(report.positives, report.negatives).is_empty(),
+        b.shape_violations(report.positives, report.negatives)
+            .is_empty(),
         "Track C dataset shape moved: {:?}",
         b.shape_violations(report.positives, report.negatives)
     );
 
     let missing = b.missing_metrics(&card);
-    assert!(missing.is_empty(), "Track C stopped publishing {missing:?}\n{card}");
+    assert!(
+        missing.is_empty(),
+        "Track C stopped publishing {missing:?}\n{card}"
+    );
 
     let mut measured = BTreeMap::new();
     measured.insert("c1_at_full".to_string(), report.c1_at_full);
     let violations = b.floor_violations(&measured);
-    assert!(violations.is_empty(), "Track C regressed: {violations:?}\n{card}");
+    assert!(
+        violations.is_empty(),
+        "Track C regressed: {violations:?}\n{card}"
+    );
 }
 
 /// **The positive control.** A guard is only worth what it can reject, so the
@@ -206,7 +227,11 @@ fn live_legs_are_declared_and_stay_out_of_ci() {
     // The live legs live in the CLI, which opens the profile database. A
     // baseline naming it would make a CI artifact depend on the runner's own
     // store, which is the change this assertion exists to catch.
-    for (name, src) in [("track-a", TRACK_A), ("track-b", TRACK_B), ("track-c", TRACK_C)] {
+    for (name, src) in [
+        ("track-a", TRACK_A),
+        ("track-b", TRACK_B),
+        ("track-c", TRACK_C),
+    ] {
         assert!(
             !src.contains("opencrabs.db"),
             "baseline {name} must not name the live database: it is a CI artifact"

@@ -226,9 +226,9 @@ impl TrackBaseline {
         for (key, &floor) in &self.floors {
             match measured.get(key) {
                 Some(&value) if value >= floor => {}
-                Some(&value) => out.push(format!(
-                    "{key} {value:.3} fell below its floor {floor:.3}"
-                )),
+                Some(&value) => {
+                    out.push(format!("{key} {value:.3} fell below its floor {floor:.3}"))
+                }
                 None => out.push(format!("{key} was not measured at all (floor {floor:.3})")),
             }
         }

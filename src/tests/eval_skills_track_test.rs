@@ -62,11 +62,17 @@ fn index_markdown_is_one_section_per_entry_in_order() {
         .filter(|l| l.starts_with("## "))
         .map(|l| l.trim_start_matches("## ").trim())
         .collect();
-    assert_eq!(headings, vec!["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]);
+    assert_eq!(
+        headings,
+        vec!["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
+    );
     // Every description survives verbatim — a truncated index would score a
     // ranker against text the agent never sees.
     for (_, desc) in ENTRIES {
-        assert!(md.contains(desc), "description dropped from the index: {desc}");
+        assert!(
+            md.contains(desc),
+            "description dropped from the index: {desc}"
+        );
     }
 }
 
@@ -84,14 +90,20 @@ fn index_block_chars_matches_the_emitted_form_and_clips_at_120() {
     let header = "--- Available Commands & Skills ---\n";
 
     let short = index_block_chars([("a", "one line")]);
-    assert_eq!(short, header.chars().count() + "- a: one line\n".chars().count() + 1);
+    assert_eq!(
+        short,
+        header.chars().count() + "- a: one line\n".chars().count() + 1
+    );
 
     // A long description is clipped to 120 chars plus the ellipsis, so the
     // block does not grow past the clip however long the source is.
     let long_desc = "x".repeat(500);
     let clipped = index_block_chars([("a", long_desc.as_str())]);
     let expected_line = format!("- a: {}…\n", "x".repeat(120));
-    assert_eq!(clipped, header.chars().count() + expected_line.chars().count() + 1);
+    assert_eq!(
+        clipped,
+        header.chars().count() + expected_line.chars().count() + 1
+    );
 }
 
 /// The vacuous baseline: when every label resolves, C1 at the FULL window is
@@ -121,7 +133,10 @@ fn c1_at_a_budgeted_window_moves_off_the_baseline() {
     let ds = dataset(vec![("pipe", Some("alpha"))]);
     let tight = run_with(entries, &ds, 1);
     let roomy = run_with(entries, &ds, 2);
-    assert_eq!(tight.c1_at_full, 1.0, "the label resolves, so full-window is 1.0");
+    assert_eq!(
+        tight.c1_at_full, 1.0,
+        "the label resolves, so full-window is 1.0"
+    );
     assert_eq!(tight.c1_at_k, 0.0, "gold is rank 2, so k=1 must miss it");
     assert_eq!(roomy.c1_at_k, 1.0, "k=2 must contain it");
 }
@@ -138,7 +153,10 @@ fn an_unresolved_label_is_a_miss_not_an_exclusion() {
     let r = run(&ds, 6);
     assert_eq!(r.positives, 2);
     assert_eq!(r.resolved, 1);
-    assert_eq!(r.c1_at_full, 0.5, "the unresolvable label must drag the score");
+    assert_eq!(
+        r.c1_at_full, 0.5,
+        "the unresolvable label must drag the score"
+    );
 }
 
 /// C4 has to be able to report a CLEAN negative. If every task counts as a

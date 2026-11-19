@@ -3,9 +3,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use super::{commands, cron, migrate, ui};
 #[cfg(any(test, feature = "eval"))]
 use super::eval_cmd;
+use super::{commands, cron, migrate, ui};
 use crate::config::Config;
 
 /// OpenCrabs - High-Performance Terminal AI Orchestration Agent

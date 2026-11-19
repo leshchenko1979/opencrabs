@@ -27,12 +27,7 @@ const DATASET: &str = include_str!("../eval/fixtures/track_b_recall.json");
 fn sections() -> HashMap<String, String> {
     split_sections(CORPUS)
         .into_iter()
-        .map(|s| {
-            (
-                s.heading.trim_start_matches('#').trim().to_string(),
-                s.body,
-            )
-        })
+        .map(|s| (s.heading.trim_start_matches('#').trim().to_string(), s.body))
         .collect()
 }
 

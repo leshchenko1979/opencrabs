@@ -71,7 +71,8 @@ fn k_35_reproduces_the_vacuous_1000_baseline() {
         "every gold label must resolve against the index it names"
     );
     assert_eq!(
-        r.c1_at_full, 1.0,
+        r.c1_at_full,
+        1.0,
         "C1@35 is the VACUOUS baseline and must be exactly 1.000, got {:.3}\n{}",
         r.c1_at_full,
         r.render()

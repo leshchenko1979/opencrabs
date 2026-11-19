@@ -40,7 +40,14 @@ pub(crate) fn cmd_eval(cmd: EvalCommands) -> Result<()> {
             corpus,
             k,
             json,
-        } => run_recall(&track, dataset.as_deref(), corpus.as_deref(), k, json, slice_days),
+        } => run_recall(
+            &track,
+            dataset.as_deref(),
+            corpus.as_deref(),
+            k,
+            json,
+            slice_days,
+        ),
         EvalCommands::Skills { dataset, k, json } => run_skills(&dataset, k, json),
     }
 }
@@ -207,7 +214,10 @@ fn run_recall(
     }
 
     let Some(dataset_path) = dataset_path else {
-        bail!("eval recall: track {} needs --dataset <path>", track_norm.to_ascii_uppercase());
+        bail!(
+            "eval recall: track {} needs --dataset <path>",
+            track_norm.to_ascii_uppercase()
+        );
     };
 
     let raw = std::fs::read_to_string(dataset_path)
@@ -227,7 +237,9 @@ fn run_recall(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             let dataset = std::path::Path::new(dataset_path);
-            let dir = dataset.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let dir = dataset
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
             let stem = dataset
                 .file_stem()
                 .and_then(|s| s.to_str())
