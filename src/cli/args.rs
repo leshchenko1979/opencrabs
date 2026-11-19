@@ -3,7 +3,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use super::{commands, cron, migrate, ui};
+use super::{commands, cron, eval_cmd, migrate, ui};
 use crate::config::Config;
 
 /// OpenCrabs - High-Performance Terminal AI Orchestration Agent
@@ -68,6 +68,12 @@ pub enum Commands {
 
     /// Show system status: version, provider, channels, database, brain
     Status,
+
+    /// Run a recall benchmark track against a labeled dataset (#890)
+    Eval {
+        #[command(subcommand)]
+        command: EvalCommands,
+    },
 
     /// Run diagnostics: check config, provider connectivity, channel health, tools, brain
     Doctor {
@@ -347,6 +353,33 @@ pub enum CronCommands {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum EvalCommands {
+    /// Score retrieval against a labeled recall dataset (fixture leg)
+    Recall {
+        /// Track to run: B (brain sections over a committed corpus)
+        #[arg(long, default_value = "B")]
+        track: String,
+
+        /// Dataset JSON path
+        #[arg(long)]
+        dataset: String,
+
+        /// Corpus markdown path (default: the dataset's sibling
+        /// `memory_corpus.md`, so the committed fixture pair runs with one flag)
+        #[arg(long)]
+        corpus: Option<String>,
+
+        /// Cutoff k (default: the shipped RECALL_MAX_SECTIONS)
+        #[arg(long)]
+        k: Option<usize>,
+
+        /// Emit the scorecard as JSON instead of the rendered summary
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ChannelCommands {
     /// List configured channels and their status
     List,
@@ -615,6 +648,7 @@ pub async fn run() -> Result<()> {
             ui::cmd_chat(&config, None, true).await
         }
         Some(Commands::Status) => commands::cmd_status(&config).await,
+        Some(Commands::Eval { command }) => eval_cmd::cmd_eval(command),
         Some(Commands::Doctor { fix }) => commands::cmd_doctor(&config, fix).await,
         Some(Commands::Init { force }) => commands::cmd_init(&config, force).await,
         Some(Commands::Config { show_secrets }) => {
