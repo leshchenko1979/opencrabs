@@ -98,7 +98,7 @@ fn run_skills(dataset_path: &str, k: Option<usize>, json: bool) -> Result<()> {
         &slugs,
         k.unwrap_or(5),
         c2_chars,
-        employed.len(),
+        Some(employed.len()),
     );
 
     if json {

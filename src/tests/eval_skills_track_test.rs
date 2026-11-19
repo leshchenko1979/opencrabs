@@ -49,7 +49,7 @@ fn run_with(
     let md = index_markdown(entries.iter().copied());
     let chars = index_block_chars(entries.iter().copied());
     let names: Vec<String> = entries.iter().map(|(s, _)| s.to_string()).collect();
-    score(ds, &md, &names, k, chars, 2)
+    score(ds, &md, &names, k, chars, Some(2))
 }
 
 /// The index is rendered as one markdown section per skill, in the order given,
@@ -205,8 +205,9 @@ fn c3_coverage_is_relative_to_the_index() {
     let ds = dataset(vec![("rebuild the kerning", Some("alpha"))]);
     let r = run(&ds, 6);
     assert_eq!(r.full, 6);
-    assert_eq!(r.c3_employed, 2);
-    assert!((r.c3_coverage - (2.0 / 6.0)).abs() < 1e-9);
+    assert_eq!(r.c3_employed, Some(2));
+    let coverage = r.c3_coverage.expect("a measured C3 carries a coverage");
+    assert!((coverage - (2.0 / 6.0)).abs() < 1e-9);
 }
 
 /// The rendered card carries the vacuous baseline NEXT TO the real number, so

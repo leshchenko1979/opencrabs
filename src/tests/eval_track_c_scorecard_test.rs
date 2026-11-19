@@ -115,6 +115,82 @@ fn the_scorecard_reports_c1_c2_c3_and_c4() {
     );
 }
 
+/// C3 is NOT MEASURED in CI, and the card must say so rather than print a zero.
+///
+/// The record lives in `session_seen_skills` on a live profile; a CI runner has
+/// no such table, so any number this leg could print would be produced by the
+/// absence of the instrument. `0/35` is the worst possible wording for that:
+/// it reads as "no skill has ever been employed", which is a claim about the
+/// world, and it is the shape a reader quotes (#899).
+#[test]
+fn the_ci_card_says_c3_is_unmeasured_instead_of_printing_a_zero() {
+    let card = report_at(5).render();
+
+    assert!(
+        card.contains("NOT MEASURED"),
+        "the fixture leg must state that C3 is unmeasured here\n{card}"
+    );
+    assert!(
+        card.contains("session_seen_skills"),
+        "the card must name what C3 needs, or the reader cannot judge the gap\n{card}"
+    );
+    assert!(
+        !card.contains("0/35"),
+        "the card must never print a zero it did not measure\n{card}"
+    );
+    assert!(
+        !card.contains("ever employed (0."),
+        "a 0.000 coverage is a measurement this leg cannot take\n{card}"
+    );
+}
+
+/// C3 can MOVE — the metric is not pinned at zero by construction.
+///
+/// This is the half the fixture leg cannot answer (it has no employment
+/// record), so it is answered against the metric itself: the same dataset and
+/// index scored with three different employment counts must produce three
+/// different coverages, and `None` must stay distinguishable from `Some(0)`.
+/// A metric that cannot take two values cannot measure anything.
+#[test]
+fn c3_coverage_moves_with_the_employment_count() {
+    use crate::eval::skills_track::{index_block_chars, index_markdown, score};
+
+    let ds = dataset();
+    let slugs = slugs();
+    let entries: Vec<(String, String)> = slugs.iter().map(|s| (s.clone(), s.clone())).collect();
+    let pairs: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|(s, d)| (s.as_str(), d.as_str()))
+        .collect();
+    let md = index_markdown(pairs.iter().copied());
+    let chars = index_block_chars(pairs.iter().copied());
+
+    let none = score(&ds, &md, &slugs, 5, chars, None);
+    let all = score(&ds, &md, &slugs, 5, chars, Some(slugs.len()));
+    let some = score(&ds, &md, &slugs, 5, chars, Some(slugs.len() / 2));
+
+    assert_eq!(
+        none.c3_coverage, None,
+        "unmeasured is None, never Some(0.0)"
+    );
+    assert_eq!(
+        all.c3_coverage,
+        Some(1.0),
+        "every slug employed is full coverage"
+    );
+    let half = some.c3_coverage.expect("a measured C3 carries a coverage");
+    assert!(
+        (half - 0.5).abs() < 1e-9,
+        "half the index employed must read 0.500, got {half:.3}"
+    );
+    // And the card follows the value it was given.
+    assert!(
+        all.render().contains("35/35 skills ever employed (1.000)"),
+        "a measured C3 must render as a fraction\n{}",
+        all.render()
+    );
+}
+
 /// A budgeted window is a DIFFERENT number from the vacuous baseline, or the
 /// budget is not being measured. With the gold slugs as the only vocabulary,
 /// some task will fall outside the first five — if it did not, `k` would be

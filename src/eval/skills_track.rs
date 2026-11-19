@@ -139,8 +139,16 @@ pub struct SkillReport {
     /// the share of the index that represents. The gap between this and
     /// `full` is the honest measure of how many of those lines ever earn
     /// their place.
-    pub c3_employed: usize,
-    pub c3_coverage: f64,
+    ///
+    /// `None` means NOT MEASURED, and it is not the same thing as zero. The
+    /// record lives in the profile database, which a CI runner does not have,
+    /// so a fixture leg cannot measure this — and a `0` there would be the
+    /// strongest possible claim about the index ("no skill has ever been
+    /// used") produced by the absence of an instrument (#899). The CLI leg
+    /// supplies `Some`, the fixture leg supplies `None`, and the card says
+    /// which.
+    pub c3_employed: Option<usize>,
+    pub c3_coverage: Option<f64>,
     /// C4 — share of NEGATIVES on which the proxy still returns a top hit.
     /// 1.0 means the ranking cannot say "none of these".
     pub c4_false_selection: f64,
@@ -161,10 +169,19 @@ impl SkillReport {
             full = self.full
         ));
         s.push_str(&format!("C2      {} chars of prompt\n", self.c2_chars));
-        s.push_str(&format!(
-            "C3      {}/{} skills ever employed ({:.3})\n",
-            self.c3_employed, self.full, self.c3_coverage
-        ));
+        match (self.c3_employed, self.c3_coverage) {
+            (Some(employed), Some(coverage)) => s.push_str(&format!(
+                "C3      {employed}/{} skills ever employed ({coverage:.3})\n",
+                self.full
+            )),
+            // Never a zero: a reader who sees `0/35` quotes "no skill is ever
+            // employed", which is a claim about the world made by a missing
+            // instrument. Say what is missing instead.
+            _ => s.push_str(
+                "C3      NOT MEASURED here — needs `session_seen_skills`; \
+                 `opencrabs eval skills` reports it live\n",
+            ),
+        }
         s.push_str(&format!(
             "C4      {:.3} false selection on {} negatives\n",
             self.c4_false_selection, self.negatives
@@ -187,7 +204,7 @@ pub fn score(
     slugs: &[String],
     k: usize,
     c2_chars: usize,
-    c3_employed: usize,
+    c3_employed: Option<usize>,
 ) -> SkillReport {
     let ranked = Ranked::build(index_md);
     let full = slugs.len();
@@ -200,11 +217,13 @@ pub fn score(
         negatives: dataset.negatives(),
         c2_chars,
         c3_employed,
-        c3_coverage: if full == 0 {
-            0.0
-        } else {
-            c3_employed as f64 / full as f64
-        },
+        c3_coverage: c3_employed.map(|n| {
+            if full == 0 {
+                0.0
+            } else {
+                n as f64 / full as f64
+            }
+        }),
         ..Default::default()
     };
 
@@ -302,7 +321,8 @@ pub fn committed_report_at(k: usize) -> SkillReport {
     let md = index_markdown(entries.iter().map(|(s, d)| (s.as_str(), d.as_str())));
     let chars = index_block_chars(entries.iter().map(|(s, d)| (s.as_str(), d.as_str())));
     let names: Vec<String> = entries.iter().map(|(s, _)| s.clone()).collect();
-    // C3 is a LIVE figure (it needs `session_seen_skills`), so this scoring
-    // passes 0 and the card asserts the C3 SURFACE rather than its value.
-    score(&dataset, &md, &names, k, chars, 0)
+    // C3 is a LIVE figure (it needs `session_seen_skills`), so this leg passes
+    // `None` — not `0`. A zero here would publish "no skill is ever employed"
+    // from a runner that has no session record at all (#899).
+    score(&dataset, &md, &names, k, chars, None)
 }
