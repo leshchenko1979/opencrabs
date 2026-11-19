@@ -251,3 +251,32 @@ fn drops_alien_suggest_options_delimiter() {
     assert!(!cleaned.contains("<<suggest_options"));
     assert!(cleaned.ends_with("done"));
 }
+
+// ── provider pass: no double-handling with the settle-point recovery ─────
+
+#[test]
+fn provider_text_leak_pass_leaves_marker_grammars_to_the_settle_point() {
+    // `suggest_options` is in KNOWN_TOOL_NAMES (#892), so the provider pass
+    // now RUNS on this text. It must not claim either marker grammar: the
+    // pair form has no `</suggest_options>` closer and the colon form has no
+    // `<param>value</param>` body, so `extract_claude_style_tool_calls`
+    // matches nothing and the settle-point extractor remains the only strip.
+    let check = |text: &str| {
+        let (calls, cleaned) = extract_text_tool_calls(text);
+        assert!(calls.is_empty(), "no tool call must be minted from {text}");
+        assert_eq!(cleaned, text, "provider pass must not touch {text}");
+    };
+    check(OBSERVED_COLON);
+    check("<<suggest_options>>[\"Go\", \"Hold on\"]<<suggest_options>>");
+}
+
+#[test]
+fn provider_text_leak_pass_recognises_an_element_style_suggest_options_call() {
+    // The value of the KNOWN_TOOL_NAMES entry: a leaked Claude-style call
+    // naming `suggest_options` is now visible to the name-anchored pass.
+    let text = "<suggest_options><options>[\"A\",\"B\"]</options></suggest_options>";
+    let (calls, cleaned) = extract_text_tool_calls(text);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "suggest_options");
+    assert!(cleaned.is_empty());
+}
