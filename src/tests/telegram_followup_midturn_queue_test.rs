@@ -1,8 +1,11 @@
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::brain::agent::QueuedUserMessage;
 use crate::channels::telegram::TelegramState;
-use crate::channels::telegram::handler::build_midturn_queued_message;
+use crate::channels::telegram::handler::{
+    build_midturn_queued_message, mark_voice_note, mark_voice_note_within,
+};
 use crate::channels::telegram::state::QueuedOrigin;
 
 #[test]
@@ -37,6 +40,112 @@ fn followup_tap_during_active_turn_enqueues_reaction_and_drains_fifo() {
         state.drain_reaction(sid).is_none(),
         "queue must be empty after drain"
     );
+}
+
+#[test]
+fn midturn_voice_note_is_queued_with_voice_marker() {
+    let state = Arc::new(TelegramState::new());
+    let sid = Uuid::new_v4();
+    let _guard = state
+        .try_begin_turn(sid)
+        .expect("initial claim must succeed");
+
+    // #893: a voice note that lands mid-turn is marked at the producer — both
+    // the agent-facing text and the display/history text — so the queued row
+    // the between-rounds drain persists still says it was spoken, not typed.
+    // DM-owner shape: `display_text` is the bare text, so the marker leads it.
+    let transcript = "This is the third one.";
+    let text = mark_voice_note(transcript.to_string());
+    let display_text = text.clone();
+    let queued = build_midturn_queued_message(None, &text, &display_text);
+    state.enqueue_reaction(sid, queued);
+
+    let msg = state
+        .drain_reaction(sid)
+        .expect("queued voice note must be drainable");
+    assert!(
+        msg.display_text.starts_with("[Voice note]: "),
+        "queued voice note must keep its marker, got {:?}",
+        msg.display_text
+    );
+    assert!(
+        msg.display_text.ends_with(transcript),
+        "the marker must not replace the transcript, got {:?}",
+        msg.display_text
+    );
+    assert!(
+        msg.context_text
+            .contains("[Voice note]: This is the third one."),
+        "the model-facing payload must carry the marker too, got {:?}",
+        msg.context_text
+    );
+    assert_eq!(msg.origin, crate::brain::agent::PushOrigin::Ingress);
+}
+
+#[test]
+fn midturn_voice_note_in_a_group_chat_is_marked_exactly_once() {
+    let state = Arc::new(TelegramState::new());
+    let sid = Uuid::new_v4();
+    let _guard = state
+        .try_begin_turn(sid)
+        .expect("initial claim must succeed");
+
+    // #904: in a GROUP chat `display_text` is `Name (@handle): {text}` and
+    // `text` is already marked, so the marker sits BEHIND the sender prefix.
+    // A position-anchored idempotence check missed it and prefixed a second
+    // one — the live row read
+    //   `[Voice note]: Алексей …: [Voice note]:  Message 13`.
+    let transcript = "Message 13";
+    let text = mark_voice_note(transcript.to_string());
+    let display_text = format!("Алексей Лещенко | Редевест (@leshchenko1979): {text}");
+    let display_text = mark_voice_note_within(display_text);
+
+    assert_eq!(
+        display_text.matches("[Voice note]: ").count(),
+        1,
+        "group-chat voice display text must carry the marker exactly once, got {display_text:?}"
+    );
+    assert!(
+        display_text.ends_with(transcript),
+        "the sender prefix and transcript must survive, got {display_text:?}"
+    );
+
+    let queued = build_midturn_queued_message(None, &text, &display_text);
+    state.enqueue_reaction(sid, queued);
+    let msg = state
+        .drain_reaction(sid)
+        .expect("queued group voice note must be drainable");
+    assert_eq!(
+        msg.display_text.matches("[Voice note]: ").count(),
+        1,
+        "the drained row must not double the marker, got {:?}",
+        msg.display_text
+    );
+    assert_eq!(msg.context_text.matches("[Voice note]: ").count(), 1);
+}
+
+#[test]
+fn voice_marker_within_is_a_noop_when_the_marker_is_inside() {
+    // The group-chat shape: marker present, but not at position 0.
+    let prefixed = "Name (@handle): [Voice note]: hello".to_string();
+    assert_eq!(mark_voice_note_within(prefixed.clone()), prefixed);
+    // A bare payload still gets exactly one marker.
+    assert_eq!(
+        mark_voice_note_within("hello".to_string()),
+        "[Voice note]: hello"
+    );
+    assert_eq!(mark_voice_note_within(String::new()), "");
+}
+
+#[test]
+fn voice_marker_is_applied_once() {
+    // The tmp-fallback pickup and the mid-turn enqueue both apply the marker,
+    // so a second pass must be a no-op rather than `[Voice note]: [Voice note]: `.
+    let once = mark_voice_note("And finally the fifth".to_string());
+    assert_eq!(once, "[Voice note]: And finally the fifth");
+    assert_eq!(mark_voice_note(once.clone()), once);
+    // An empty payload is left empty — never a bare marker.
+    assert_eq!(mark_voice_note(String::new()), "");
 }
 
 #[tokio::test]
@@ -76,4 +185,76 @@ fn end_of_turn_flush_drains_queued_followup_tap() {
     assert_eq!(items[0].origin, QueuedOrigin::Reaction);
     assert_eq!(items[0].msg.display_text, text);
     assert!(state.drain_queued_items(sid).is_empty());
+}
+
+#[test]
+fn midturn_burst_drains_in_send_order_not_ingest_order() {
+    // #893: every inbound message is handled in its own tokio task, so ENQUEUE
+    // order is ingestion-completion order, not send order. This is the
+    // measured inversion: a message sent 20 s later was persisted first.
+    // A burst must drain in the order it was SENT, or the model answers the
+    // latest fragment and glosses the rest.
+    let state = Arc::new(TelegramState::new());
+    let sid = Uuid::new_v4();
+
+    // Enqueue in the order the handler tasks finished — last-sent first.
+    state.enqueue_inbound(sid, QueuedUserMessage::plain("later".to_string()), 99560);
+    state.enqueue_inbound(sid, QueuedUserMessage::plain("earlier".to_string()), 99558);
+    state.enqueue_inbound(sid, QueuedUserMessage::plain("middle".to_string()), 99559);
+
+    let drained: Vec<String> = state
+        .drain_queued_items(sid)
+        .into_iter()
+        .map(|item| item.msg.display_text)
+        .collect();
+    assert_eq!(
+        drained,
+        vec!["earlier", "middle", "later"],
+        "a mid-turn burst must drain in send order"
+    );
+}
+
+#[test]
+fn midturn_burst_is_send_ordered_through_the_between_rounds_drain() {
+    // The between-rounds drain (`drain_reaction`) takes the WHOLE burst and
+    // joins it into one message (#885: one wrapper around the burst, not one
+    // per message). So the ordering guarantee has to survive the JOIN — the
+    // joined text must read in send order, which is what this pins. It holds
+    // because the queue is kept sorted on INSERT, not sorted on drain.
+    let state = Arc::new(TelegramState::new());
+    let sid = Uuid::new_v4();
+
+    state.enqueue_inbound(sid, QueuedUserMessage::plain("second".to_string()), 2);
+    state.enqueue_inbound(sid, QueuedUserMessage::plain("first".to_string()), 1);
+
+    assert_eq!(
+        state.drain_reaction(sid).map(|m| m.display_text),
+        Some("first\nsecond".to_string()),
+        "the between-rounds drain must join the burst in send order"
+    );
+    assert!(state.drain_reaction(sid).is_none());
+}
+
+#[test]
+fn items_without_an_arrival_ordinal_do_not_displace_user_messages() {
+    // Detached work and reaction taps carry no per-chat sequence (`None`). They
+    // must not push a user message that arrived earlier behind them.
+    let state = Arc::new(TelegramState::new());
+    let sid = Uuid::new_v4();
+
+    state.enqueue_detached_result(sid, QueuedUserMessage::plain("[BG] done".to_string()));
+    state.enqueue_inbound(
+        sid,
+        QueuedUserMessage::plain("sent second".to_string()),
+        102,
+    );
+    state.enqueue_inbound(sid, QueuedUserMessage::plain("sent first".to_string()), 101);
+
+    let order: Vec<String> = state
+        .drain_queued_items(sid)
+        .into_iter()
+        .map(|item| item.msg.display_text)
+        .collect();
+    assert_eq!(order[0], "[BG] done");
+    assert_eq!(&order[1..], &["sent first", "sent second"]);
 }

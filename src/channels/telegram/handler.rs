@@ -8,8 +8,8 @@ use super::session_resolve;
 use crate::brain::agent::{AgentService, ProgressCallback};
 use crate::channels::group_history;
 use crate::config::{Config, RespondTo};
-use crate::db::{BindingOrigin, ChannelMessageRepository, SessionBindingRepository};
 use crate::db::models::ChannelMessage as DbChannelMessage;
+use crate::db::{BindingOrigin, ChannelMessageRepository, SessionBindingRepository};
 use crate::services::SessionService;
 use crate::utils::sanitize::redact_secrets;
 use crate::utils::truncate_str;
@@ -226,7 +226,6 @@ pub(crate) fn replied_to_bot_as_interlocutor(msg: &Message, bot_uid: Option<i64>
         from_bot && !is_chat_service_notice(&reply.kind)
     })
 }
-
 
 /// Whether a sender's display name or username collapses to the same normalized
 /// form as the owner's — i.e. the sender is mimicking the owner. Cross-checks
@@ -703,7 +702,9 @@ pub(crate) async fn teardown_binding(
         .await
     {
         Ok(n) => {
-            tracing::info!("Telegram: topic {thread} in chat {chat_id} — removed {n} binding row(s)");
+            tracing::info!(
+                "Telegram: topic {thread} in chat {chat_id} — removed {n} binding row(s)"
+            );
             n > 0
         }
         Err(e) => {
@@ -726,9 +727,9 @@ pub(crate) async fn teardown_binding(
                     "Telegram: failed to retire session {uuid} of topic {thread}: {e}"
                 ),
             },
-            Err(e) => tracing::warn!(
-                "Telegram: session {sid} bound to topic {thread} is not a uuid: {e}"
-            ),
+            Err(e) => {
+                tracing::warn!("Telegram: session {sid} bound to topic {thread} is not a uuid: {e}")
+            }
         }
     }
     removed
@@ -765,14 +766,7 @@ pub(crate) async fn handle_message(
     // has no live flow block to bury, and its forum-ness is re-taught by the
     // next real message in any of the chat's topics, so a reopen costs nothing
     // by returning here.
-    if handle_topic_teardown(
-        &msg,
-        &channel_msg_repo,
-        &session_binding_repo,
-        &session_svc,
-    )
-    .await
-    {
+    if handle_topic_teardown(&msg, &channel_msg_repo, &session_binding_repo, &session_svc).await {
         return Ok(());
     }
 
@@ -1730,13 +1724,14 @@ pub(crate) async fn handle_message(
         text = format!("[Forwarded from \"{origin}\"]:\n{text}");
     }
 
-    // Prepend any voice transcript picked up from tmp
+    // Prepend any voice transcript picked up from tmp. Both arms carry the
+    // marker: this is a voice note either way (#893).
     if let Some(vt) = tmp_voice_transcript {
-        if text.is_empty() {
-            text = vt;
+        text = if text.is_empty() {
+            mark_voice_note(vt)
         } else {
-            text = format!("[Voice note]: {vt}\n\n{text}");
-        }
+            format!("{VOICE_NOTE_MARKER}{vt}\n\n{text}")
+        };
     }
 
     // Append all images picked up from tmp so the agent can actually see them
@@ -1787,6 +1782,19 @@ pub(crate) async fn handle_message(
             store_channel_msg(log_content, message_type.into(), None).await;
         }
     }
+
+    // #893: mark a voice transcript as such ONCE, here — after the group log
+    // above (which carries its own `[voice] ` prefix and would otherwise read
+    // `[voice] [Voice note]: `) and before every model-facing consumer below:
+    // `display_text`, `agent_input`, and the mid-turn queue. Previously the
+    // marker existed only on the tmp-fallback path, so a normal voice note
+    // reached the model as bare text indistinguishable from typing.
+    // `mark_voice_note` is idempotent, so the tmp pickup cannot double it.
+    let text = if is_voice {
+        mark_voice_note(text)
+    } else {
+        text
+    };
 
     // Strip @bot_username only as a COMMAND SUFFIX (Telegram appends it to
     // commands from menus: /stop@opencrabsbot -> /stop, so handle_command
@@ -2870,9 +2878,30 @@ pub(crate) async fn handle_message(
             // do not restart" wrapper a plain follow-up gets (which neutralizes
             // it). `text` holds the resolved skill/command body; `command_
             // invocation` names the raw command for the framing and history.
+            //
+            // #893: apply the voice marker at the PRODUCER. `display_text` is
+            // what the between-rounds drain persists verbatim, and the model
+            // reads `text` — a voice note must carry the marker on both or the
+            // queued row arrives as bare text indistinguishable from typing.
+            // Idempotent (the normal path above already marked it), so this is
+            // a guarantee, not a second prefix.
+            let text = if is_voice {
+                mark_voice_note(text)
+            } else {
+                text
+            };
+            let display_text = if is_voice {
+                mark_voice_note_within(display_text)
+            } else {
+                display_text
+            };
             let queued =
                 build_midturn_queued_message(command_invocation.as_deref(), &text, &display_text);
-            telegram_state.enqueue_reaction(session_id, queued);
+            // #893: carry the channel's own sequence for the chat, so a burst
+            // drains in the order it was SENT rather than the order these
+            // per-message tasks finished ingesting. `msg.id` is monotonic per
+            // chat, which is exactly the ordinal the queue needs.
+            telegram_state.enqueue_inbound(session_id, queued, msg.id.0 as i64);
             // Visible acknowledgment so the message never looks silently eaten.
             fire_reaction(&bot, msg.chat.id, msg.id, "👀").await;
             return Ok(());
@@ -3844,6 +3873,46 @@ pub(crate) fn format_reply_context_pruned(
 pub(crate) fn thinking_status_excerpt(thinking: &str) -> Option<String> {
     // Single implementation lives in utils::string so the TUI shares it (#742).
     crate::utils::string::thinking_excerpt(thinking)
+}
+
+/// Marker that tells the model a block is a speech-to-text transcript rather
+/// than something the user typed (#893). One literal, one place.
+pub(crate) const VOICE_NOTE_MARKER: &str = "[Voice note]: ";
+
+/// Prefix a transcript with [`VOICE_NOTE_MARKER`], exactly once.
+///
+/// A voice note reaches `handle_message` as plain `text` with `is_voice =
+/// true`, so without this the model reads `This is the third one.`
+/// indistinguishable from typing — and a mid-turn burst of such fragments
+/// reads as one garbled message instead of five notes (#893).
+///
+/// Idempotent by design: the tmp-fallback pickup at the top of
+/// `handle_message` already marks its transcript, and the mid-turn enqueue
+/// re-applies the marker at the producer, so a second pass must never yield
+/// `[Voice note]: [Voice note]: `. An empty payload is returned untouched
+/// rather than as a bare marker.
+pub(crate) fn mark_voice_note(text: String) -> String {
+    if text.trim().is_empty() || text.starts_with(VOICE_NOTE_MARKER) {
+        text
+    } else {
+        format!("{VOICE_NOTE_MARKER}{text}")
+    }
+}
+
+/// Prefix [`VOICE_NOTE_MARKER`] only when the text does not already CONTAIN it.
+///
+/// For `display_text`, which is derived from an already-marked `text` and, in a
+/// group chat, carries a `Name (@handle): ` prefix in front of it. The
+/// position-anchored check in [`mark_voice_note`] therefore misses the marker
+/// sitting behind that prefix and prepends a second one, yielding
+/// `[Voice note]: Name (@handle): [Voice note]: …` (#904). Containment is the
+/// correct predicate here because the marker is already inside the string.
+pub(crate) fn mark_voice_note_within(text: String) -> String {
+    if text.trim().is_empty() || text.contains(VOICE_NOTE_MARKER) {
+        text
+    } else {
+        format!("{VOICE_NOTE_MARKER}{text}")
+    }
 }
 
 /// Build the `QueuedUserMessage` for a message that landed mid-turn.

@@ -6,9 +6,9 @@
 //! nested lists, math) — so there is no block JSON to construct: we pass the
 //! model's markdown straight through.
 
-use crate::channels::telegram::governor::{EditClass, RichAdmission};
 use super::mermaid;
 use super::render_html::markdown_to_html_mermaid_p;
+use crate::channels::telegram::governor::{EditClass, RichAdmission};
 use crate::channels::telegram::suggest_options::enforce_button_fit;
 use teloxide::types::ThreadId;
 
@@ -364,7 +364,8 @@ async fn post_rich(
                 thread,
                 class,
             )
-            .await {
+            .await
+            {
                 RichAdmission::Now => {}
                 RichAdmission::Dropped(dropped) => {
                     tracing::debug!(
@@ -773,7 +774,8 @@ async fn post_rich_multipart(
                 thread,
                 class,
             )
-            .await {
+            .await
+            {
                 RichAdmission::Now => {}
                 RichAdmission::Dropped(dropped) => {
                     tracing::debug!(
@@ -978,7 +980,8 @@ pub(crate) async fn send_rich_with_mermaid(
 }
 
 #[allow(clippy::too_many_arguments)]
-/// Same as [`send_rich_with_mermaid`] but returns the new message id.
+/// Same as [`send_rich_with_mermaid`] but returns the new message id together
+/// with any media entries the retry ladder sacrificed (#897).
 pub(crate) async fn send_rich_with_mermaid_id(
     api_url: &str,
     token: &str,
@@ -988,7 +991,7 @@ pub(crate) async fn send_rich_with_mermaid_id(
     reply_to: Option<i32>,
     origin: &str,
     origin_detail: &str,
-) -> anyhow::Result<i32> {
+) -> anyhow::Result<(i32, Vec<SacrificedEntry>)> {
     send_rich_with_mermaid_target_id(
         api_url,
         token,
@@ -1015,7 +1018,7 @@ pub(crate) async fn send_rich_with_mermaid_target_id(
     markdown: &str,
     origin: &str,
     origin_detail: &str,
-) -> anyhow::Result<i32> {
+) -> anyhow::Result<(i32, Vec<SacrificedEntry>)> {
     send_rich_with_media_target_id(
         api_url,
         token,
@@ -1075,13 +1078,46 @@ fn rejection_family(err: &str) -> Option<super::mermaid::MediaKind> {
     }
 }
 
+/// The family a refusal names when `media` carries no entry of it (#896).
+///
+/// Telegram names a family and never an index, so a family-naming refusal is a
+/// hypothesis the ARRAY can test — but only while the array holds a candidate
+/// for it. With none, the hypothesis is unactionable: the refusal is not about
+/// any entry in this message, and sacrificing an innocent document to satisfy
+/// it trades a delivered attachment for a body Telegram refuses again.
+///
+/// Measured 2026-11-18T20:41:26.873754Z: `RICH_MESSAGE_PHOTO_INVALID` on a
+/// document-only reply sacrificed `doc0 (passive-recall-precision.md)`, and the
+/// retry landed `msg=100166` at `len=2828` against the refused `len=2829` —
+/// exactly one byte lighter, i.e. the document reference was the only thing
+/// removed and the reader got a dead `📄` where the file should have been.
+pub(crate) fn unactionable_family(
+    media: &[super::mermaid::MediaEntry],
+    err: &str,
+) -> Option<super::mermaid::MediaKind> {
+    let family = rejection_family(err)?;
+    if media.iter().any(|entry| entry.kind == family) {
+        None
+    } else {
+        Some(family)
+    }
+}
+
 /// Indices into `media`, most-likely-guilty first.
 ///
 /// The rejection names a family and never an entry, so this order is a
 /// hypothesis the retry TESTS: entries of the family the error names come
 /// first, then every other entry in array order. A refused photo therefore
 /// costs a photo, not the six documents travelling beside it (#826).
+///
+/// An EMPTY order means the hypothesis is unactionable — the named family has
+/// no entry here (#896). The ladder reads that as "nothing to sacrifice" and
+/// falls through to the HTML dialect, because a family the message does not
+/// carry cannot be repaired by deleting something the message does carry.
 pub(crate) fn sacrifice_order(media: &[super::mermaid::MediaEntry], err: &str) -> Vec<usize> {
+    if unactionable_family(media, err).is_some() {
+        return Vec::new();
+    }
     let family = rejection_family(err);
     let mut order: Vec<usize> = (0..media.len()).collect();
     order.sort_by_key(|i| match family {
@@ -1089,6 +1125,50 @@ pub(crate) fn sacrifice_order(media: &[super::mermaid::MediaEntry], err: &str) -
         _ => 0,
     });
     order
+}
+
+/// One media entry the retry ladder dropped from a reply that still delivered
+/// (#897).
+///
+/// Sacrificing an entry is the right trade — it keeps the rest of the message
+/// on the rich plane — but until #897 the fact died at the ladder's own
+/// `tracing::warn!`: the caller saw a plain `Ok(id)`, its failure vectors
+/// stayed empty, and nothing told the model the attachment was gone. Carrying
+/// the entries out alongside the message id is what lets delivery report the
+/// loss.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SacrificedEntry {
+    /// The entry's media id (`imgN`, `docN`, `diagN`) — the id its
+    /// `tg://…?id=` reference in the body carried.
+    pub(crate) id: String,
+    /// The multipart part name Telegram would have shown (`q3-report.pdf`),
+    /// when the producer had one. `None` for photo and video entries, whose
+    /// part name is derived from their bytes.
+    pub(crate) name: Option<String>,
+    /// Which media family the entry belonged to, so the caller extends the
+    /// matching failure vector.
+    pub(crate) kind: super::mermaid::MediaKind,
+}
+
+impl SacrificedEntry {
+    /// The entry as the retry ladder logs it and the correction nudge quotes
+    /// it: `doc0 (q3-report.pdf)`, or the bare id when the producer carried
+    /// no name.
+    pub(crate) fn label(&self) -> String {
+        match self.name.as_deref() {
+            Some(name) => format!("{} ({name})", self.id),
+            None => self.id.clone(),
+        }
+    }
+
+    /// The same label, from the entry that was dropped.
+    fn of(entry: &super::mermaid::MediaEntry) -> Self {
+        Self {
+            id: entry.id.clone(),
+            name: entry.name.clone(),
+            kind: entry.kind,
+        }
+    }
 }
 
 /// Retry a refused rich media send with offending entries removed (#826 AC-3):
@@ -1115,6 +1195,9 @@ pub(crate) fn sacrifice_order(media: &[super::mermaid::MediaEntry], err: &str) -
 ///    evidence supports: a bad file costs its own entry, never the plane.
 ///
 /// `Err` means every leg failed and the caller falls back to the HTML dialect.
+/// `Ok((id, sacrificed))` means the message landed — and names every entry the
+/// ladder had to drop to get it there (#897), so the caller can report the loss
+/// instead of letting a successful send read as a complete one.
 #[allow(clippy::too_many_arguments)]
 async fn retry_rich_media_around_offender(
     api_url: &str,
@@ -1127,7 +1210,7 @@ async fn retry_rich_media_around_offender(
     origin: &str,
     origin_detail: &str,
     err: &str,
-) -> anyhow::Result<i32> {
+) -> anyhow::Result<(i32, Vec<SacrificedEntry>)> {
     use super::mermaid::neutralize_orphan_photo_refs;
 
     if err.contains("IMAGE_PROCESS_FAILED") {
@@ -1149,11 +1232,33 @@ async fn retry_rich_media_around_offender(
         )
         .await
         {
-            return Ok(id);
+            // The hedge sacrifices nothing — the identical body landed whole.
+            return Ok((id, Vec::new()));
         }
     }
 
     let order = sacrifice_order(media, err);
+    if order.is_empty() {
+        // #896 AC-1: the refusal names a family this message does not carry, so
+        // no sacrifice can test it. Spending an innocent entry here would trade
+        // a delivered attachment for a body Telegram refuses again — the caller
+        // falls back to the HTML dialect instead, losing tables, not files.
+        let carried: Vec<String> = media
+            .iter()
+            .map(|entry| SacrificedEntry::of(entry).label())
+            .collect();
+        match unactionable_family(media, err) {
+            // AC-3: the next occurrence must be diagnosable from the log alone —
+            // name the family Telegram named AND what was carried instead.
+            Some(family) => anyhow::bail!(
+                "rich media retry unactionable: the refusal names {family:?} but this message \
+                 carries no {family:?} entry — nothing sacrificed (carrying [{}]); \
+                 falling back to html",
+                carried.join(", ")
+            ),
+            None => anyhow::bail!("rich media retry found no entry to sacrifice ({err})"),
+        }
+    }
     let mut dropped: Vec<usize> = Vec::new();
     for index in order.into_iter().take(MAX_MEDIA_SACRIFICES) {
         dropped.push(index);
@@ -1163,16 +1268,13 @@ async fn retry_rich_media_around_offender(
             .filter(|(i, _)| !dropped.contains(i))
             .map(|(_, entry)| entry.clone())
             .collect();
-        let lost: Vec<String> = dropped
+        // The same list the log line has always printed, kept alive for the
+        // caller (#897) instead of dying here.
+        let sacrificed: Vec<SacrificedEntry> = dropped
             .iter()
-            .map(|i| {
-                let entry = &media[*i];
-                match entry.name.as_deref() {
-                    Some(name) => format!("{} ({name})", entry.id),
-                    None => entry.id.clone(),
-                }
-            })
+            .map(|i| SacrificedEntry::of(&media[*i]))
             .collect();
+        let lost: Vec<String> = sacrificed.iter().map(SacrificedEntry::label).collect();
         tracing::warn!(
             "rich media send refused ({err}) — retrying without {} entr{} [{}]; \
              the dropped reference is neutralised so it cannot 400 the retry",
@@ -1211,11 +1313,24 @@ async fn retry_rich_media_around_offender(
             .await
         };
         if let Ok(id) = retried {
-            return Ok(id);
+            return Ok((id, sacrificed));
         }
     }
 
-    anyhow::bail!("rich media retry exhausted after {MAX_MEDIA_SACRIFICES} sacrifices ({err})")
+    // AC-3 (#896): the next occurrence must be diagnosable from the log alone —
+    // name the family the refusals named AND every entry this ladder destroyed
+    // before giving up, so a dead `📄` reference in the shipped reply can be
+    // traced back to the sacrifice that created it.
+    let destroyed: Vec<String> = dropped
+        .iter()
+        .map(|index| SacrificedEntry::of(&media[*index]).label())
+        .collect();
+    anyhow::bail!(
+        "rich media retry exhausted after {MAX_MEDIA_SACRIFICES} sacrifices: \
+         family {:?}, destroyed [{}] ({err})",
+        rejection_family(err),
+        destroyed.join(", ")
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1232,6 +1347,11 @@ async fn retry_rich_media_around_offender(
 /// on the MERGED array: a message with no fence but with local media still has
 /// something to embed, and taking the old early return would send the `tg://`
 /// references as dead text — the exact silent loss this fixes.
+///
+/// Returns the message id together with every media entry the retry ladder had
+/// to sacrifice to get the message out (#897). A clean send answers with an
+/// empty list; a send that lost an attachment answers with it named, so the
+/// caller can report the loss rather than record a plain success.
 pub(crate) async fn send_rich_with_media_target_id(
     api_url: &str,
     token: &str,
@@ -1242,7 +1362,7 @@ pub(crate) async fn send_rich_with_media_target_id(
     local_media: &[super::mermaid::MediaEntry],
     origin: &str,
     origin_detail: &str,
-) -> anyhow::Result<i32> {
+) -> anyhow::Result<(i32, Vec<SacrificedEntry>)> {
     // Resolve every fence once: valid diagrams become markdown media
     // references, broken ones become legible failure blocks. Non-fence text
     // is left byte-identical. Runs ONLY when a fence is present, exactly as
@@ -1270,7 +1390,8 @@ pub(crate) async fn send_rich_with_media_target_id(
             origin,
             origin_detail,
         )
-        .await;
+        .await
+        .map(|id| (id, Vec::new()));
     }
 
     // Primary: markdown dialect + media array keeps pipe tables native.
@@ -1288,7 +1409,7 @@ pub(crate) async fn send_rich_with_media_target_id(
     )
     .await
     {
-        Ok(id) => Ok(id),
+        Ok(id) => Ok((id, Vec::new())),
         Err(e) => {
             // #826 AC-3: a media entry Telegram refuses to process is not a
             // verdict on the message. Before #826 every error here — a single
@@ -1311,7 +1432,7 @@ pub(crate) async fn send_rich_with_media_target_id(
                 )
                 .await
                 {
-                    Ok(id) => return Ok(id),
+                    Ok((id, sacrificed)) => return Ok((id, sacrificed)),
                     Err(retry_err) => {
                         tracing::warn!(
                             "rich media retry did not recover ({retry_err}); \
@@ -1346,6 +1467,7 @@ pub(crate) async fn send_rich_with_media_target_id(
                 origin_detail,
             )
             .await
+            .map(|id| (id, Vec::new()))
         }
     }
 }

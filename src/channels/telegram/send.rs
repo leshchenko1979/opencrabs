@@ -325,9 +325,7 @@ pub fn sniff_video_format(head: &[u8]) -> VideoFormat {
     while i + 8 <= head.len() {
         if &head[i..i + 4] == b"ftyp" {
             let brand: &[u8] = &head[i + 4..i + 8];
-            let known = MPEG4_FAMILY_BRANDS
-                .iter()
-                .any(|b| b.as_slice() == brand);
+            let known = MPEG4_FAMILY_BRANDS.iter().any(|b| b.as_slice() == brand);
             return if known {
                 VideoFormat::Mpeg4
             } else {
@@ -679,7 +677,7 @@ pub(crate) async fn send_markdown_outbox(
         )
         .await
         {
-            Ok(id) => {
+            Ok((id, _sacrificed)) => {
                 return Ok(OutboxSent {
                     sent: vec![(id, markdown.to_string())],
                     effective_thread_id: thread_id,
@@ -716,7 +714,7 @@ pub(crate) async fn send_markdown_outbox(
                     )
                     .await
                     {
-                        Ok(id) => {
+                        Ok((id, _sacrificed)) => {
                             return Ok(OutboxSent {
                                 sent: vec![(id, markdown.to_string())],
                                 effective_thread_id: None,

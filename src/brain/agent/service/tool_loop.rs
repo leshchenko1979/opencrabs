@@ -8826,22 +8826,30 @@ impl AgentService {
             }
         }
 
-        // Channel-safe suggest_options recovery (#1774): a model that fails
-        // to emit the structured call sometimes writes it as TEXT —
-        // <<suggest_options>> markers around a JSON options array (see
-        // utils::directives). Recover at the settle point: strip the block
-        // from the delivered text and fire the real SuggestedOptions event
-        // so every surface renders native buttons. An unparseable block
+        // Channel-safe suggest_options recovery (#1774, #892): a model that
+        // fails to emit the structured call sometimes writes it as TEXT —
+        // `<<suggest_options>>…<<suggest_options>>` or `<<suggest_options:…>>`
+        // (see utils::directives). Recover at the settle point: strip the
+        // block from the delivered text and fire the real SuggestedOptions
+        // event so every surface renders native buttons. An unparseable block
         // still loses its markers: raw markers and raw JSON never ship.
-        if let Some(cb) = self.progress_callback.as_ref() {
-            let (cleaned, recovered) =
-                crate::utils::directives::extract_leaked_suggestions(&final_text);
-            if cleaned != final_text {
-                final_text = cleaned;
-            }
-            if let Some(items) = recovered {
-                cb(session_id, ProgressEvent::SuggestedOptions(items));
-            }
+        //
+        // The STRIP is unconditional and the gate is on the effective
+        // per-turn callback, not `self.progress_callback`. Both matter for
+        // the channel this was reported on: channels install their callback
+        // per message (`override_progress_callback`), never on the service,
+        // so the service-level field is `None` on every channel surface and
+        // the whole block used to be skipped there — the markers shipped raw
+        // exactly as reported. Headless callers (`--quiet`, A2A, RSI) pass no
+        // sink at all and must still get clean text; only the BUTTONS need a
+        // sink.
+        let (cleaned, recovered) =
+            crate::utils::directives::extract_leaked_suggestions(&final_text);
+        if cleaned != final_text {
+            final_text = cleaned;
+        }
+        if let (Some(cb), Some(items)) = (progress_callback.as_ref(), recovered) {
+            cb(session_id, ProgressEvent::SuggestedOptions(items));
         }
 
         Ok(AgentResponse {

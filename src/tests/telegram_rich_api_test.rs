@@ -280,7 +280,9 @@ async fn the_html_fallback_wraps_each_block_in_its_own_p_tag() {
     // Fallback leg: its html body must carry one <p> per block.
     let fallback = server
         .mock("POST", "/botTESTTOKEN/sendRichMessage")
-        .match_body(mockito::Matcher::Regex(r#"<p>First paragraph\.</p>"#.to_string()))
+        .match_body(mockito::Matcher::Regex(
+            r#"<p>First paragraph\.</p>"#.to_string(),
+        ))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(r#"{"ok":true,"result":{"message_id":7}}"#)
@@ -296,7 +298,7 @@ async fn the_html_fallback_wraps_each_block_in_its_own_p_tag() {
         name: None,
     }];
 
-    let id = api::send_rich_with_media_target_id(
+    let (id, _sacrificed) = api::send_rich_with_media_target_id(
         &server.url(),
         "TESTTOKEN",
         12345,
@@ -307,13 +309,10 @@ async fn the_html_fallback_wraps_each_block_in_its_own_p_tag() {
         "test",
         "-",
     )
-    .await;
+    .await
+    .expect("the html fallback must deliver the message");
 
-    assert_eq!(
-        id.expect("the html fallback must deliver the message"),
-        7,
-        "the fallback leg must return its own message id"
-    );
+    assert_eq!(id, 7, "the fallback leg must return its own message id");
     // `expect(1)` on the fallback mock is the guard against the no-media early
     // return: if that return is taken the fallback is never called and this
     // assertion fails rather than the test passing vacuously.
