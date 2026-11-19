@@ -2,8 +2,13 @@
 //!
 //! The scorecard reported P@10 = R@10 = MRR = nDCG = 0.017 and said honestly
 //! that it could not tell a weak ranker from a broken metric. It can, and this
-//! file is that answer: the 0.017 is three defects stacked, each one able to
+//! file is that answer: the 0.017 was three defects stacked, each one able to
 //! destroy the number on its own.
+//!
+//! The first fix (the heading boost in `section_rank`) lifted the same leg to
+//! 0.083 with depth, corpus and threshold untouched. The decomposition below is
+//! still the map of what remains: the injection window is still 2 sections
+//! wide, and the floor still starves most of a 293-section corpus.
 //!
 //! 1. DEPTH — the leg asks for `RECALL_MAX_SECTIONS` (2) sections no matter
 //!    what `k` says, then scores that two-element list at k=10. `k` is inert.
@@ -42,23 +47,29 @@ fn ids(sections: &[crate::brain::brain_sections::Section]) -> Vec<String> {
         .collect()
 }
 
-/// The shipped leg reproduces the published figure. If this moves, the
+/// The shipped leg reproduces the CURRENT scorecard. If this moves, the
 /// scorecard document is describing a number the code no longer produces.
+///
+/// It read `1/60` when this file was written: that was the figure published in
+/// `track-b-recall-v1.md`, and the decomposition below is why. The heading
+/// boost (`section_rank::HEADING_BOOST`) then lifted the same leg to `5/60`
+/// without touching depth or the corpus, which is the smallest possible proof
+/// that the ranker — not the metric — was the lever.
 #[test]
-fn the_shipped_leg_reproduces_the_published_zero_point_zero_one_seven() {
+fn the_shipped_leg_reproduces_the_current_scorecard() {
     let report = score_recall(&dataset(), CORPUS, PUBLISHED_K);
-    // One of sixty positives retrieves its single gold section, at rank one,
-    // so every metric lands on exactly 1/60.
-    let expected = 1.0 / 60.0;
+    // Five of sixty positives now retrieve their single gold section at rank
+    // one, so every metric lands on exactly 5/60.
+    let expected = 5.0 / 60.0;
     assert!(
         (report.aggregate.recall - expected).abs() < 1e-9,
-        "published recall@10 was {:.4}, expected {:.4}",
+        "current recall@10 was {:.4}, expected {:.4}",
         report.aggregate.recall,
         expected
     );
     assert!(
         (report.aggregate.mrr - expected).abs() < 1e-9,
-        "published MRR was {:.4}, expected {:.4}",
+        "current MRR was {:.4}, expected {:.4}",
         report.aggregate.mrr,
         expected
     );
@@ -142,9 +153,13 @@ fn the_shipped_threshold_starves_most_positives_into_silence() {
     }
 
     assert_eq!(positives, 60, "60 positives in the committed dataset");
+    // 52 of 60 when this file was written; 46 after the heading boost. The
+    // improvement is real and nowhere near sufficient, which is the point: the
+    // floor is a PRODUCTION context budget on a 293-section corpus, and the
+    // remainder of the gap is the ranker's, not the threshold's.
     assert!(
-        empty >= 50,
-        "the shipped floor must starve at least 50 of 60 positives, saw {empty}"
+        empty >= 45,
+        "the shipped floor must still starve most positives, saw {empty} of {positives}"
     );
 }
 

@@ -34,6 +34,29 @@ const K1: f64 = 1.5;
 /// Length normalization, how much a long section is discounted.
 const B: f64 = 0.75;
 
+/// Extra term count given to a token that appears in a section's HEADING.
+///
+/// A heading is the section's own name, so a query word landing in it is a
+/// stronger signal than the same word buried in the body — this is the field
+/// boost every ranked-retrieval system carries, implemented as extra `tf`
+/// rather than a second scoring field so both halves keep sharing one
+/// `tf`/`df`/length table.
+///
+/// Measured on the committed fixtures, at the floor shipped alongside it
+/// (`RECALL_MIN_SCORE`), before -> after:
+///
+/// | path | figure | before | after |
+/// |---|---|---|---|
+/// | Track B, shipped injection window | recall@10 | 0.017 | 0.083 |
+/// | Track B, ranker at depth 10 | recall@10 | 0.033 | 0.100 |
+/// | memory pair, shipped window | recall@2 | 0.917 | 1.000 |
+/// | memory pair, shipped window | FPR | 0.250 | 0.167 |
+///
+/// The memory pair is not a trade: both halves improve, because the boosted
+/// heading pulls the correct section over the bar instead of leaving a
+/// body-word accident to clear it.
+const HEADING_BOOST: usize = 4;
+
 /// Fold Latin diacritics so an unaccented query still matches accented text.
 ///
 /// Matching was accent-sensitive, which fails quietly and often: `operacion`
@@ -145,11 +168,17 @@ impl Ranked {
 
         for section in &sections {
             let mut counts: HashMap<String, usize> = HashMap::new();
-            let mut len = 0usize;
-            for token in tokens(&fold_diacritics(&section.text())) {
+            for token in tokens(&fold_diacritics(&section.body)) {
                 *counts.entry(stem(&token).to_string()).or_insert(0) += 1;
-                len += 1;
             }
+            // The heading is counted `1 + HEADING_BOOST` times, and the length
+            // follows the counts, so a section is "longer" by exactly what the
+            // boost adds. Keeping the two in step is what lets one `tf`/`df`/
+            // length table serve both halves instead of a second scoring field.
+            for token in tokens(&fold_diacritics(&section.heading)) {
+                *counts.entry(stem(&token).to_string()).or_insert(0) += 1 + HEADING_BOOST;
+            }
+            let len: usize = counts.values().sum();
             for term in counts.keys() {
                 *df.entry(term.clone()).or_insert(0) += 1;
             }

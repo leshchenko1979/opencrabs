@@ -18,7 +18,7 @@ const CORPUS: &str = include_str!("../eval/fixtures/memory_corpus.md");
 const DATASET: &str = include_str!("../eval/fixtures/memory_recall.json");
 
 /// The committed cutoff, matching the published scorecard
-/// (`src/eval/results/memory-recall-v1.md`).
+/// (`src/eval/results/memory-recall-v2.md`).
 const K: usize = 2;
 
 fn dataset() -> RecallDataset {
@@ -30,14 +30,14 @@ fn fixture_leg_reproduces_the_committed_scorecard() {
     let report = score_recall(&dataset(), CORPUS, K);
 
     assert!(
-        (report.aggregate.precision - 0.917).abs() < 1e-3,
-        "precision@{K} must reproduce the published 0.917, got {:.3}\n{}",
+        (report.aggregate.precision - 1.000).abs() < 1e-3,
+        "precision@{K} must reproduce the published 1.000, got {:.3}\n{}",
         report.aggregate.precision,
         report.render()
     );
     assert!(
-        (report.false_positive_rate() - 0.250).abs() < 1e-3,
-        "FPR must reproduce the published 0.250, got {:.3}\n{}",
+        (report.false_positive_rate() - 0.167).abs() < 1e-3,
+        "FPR must reproduce the published 0.167, got {:.3}\n{}",
         report.false_positive_rate(),
         report.render()
     );

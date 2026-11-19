@@ -126,11 +126,17 @@ fn bm25_still_answers_topical_questions() {
 /// The trade, stated honestly: BM25 is quieter and far more precise, and it
 /// costs a little recall.
 ///
-/// It does NOT dominate the old rule. On this fixture the old rule finds every
-/// answer (recall 1.000) because it answers nearly everything, which is also
-/// why its precision is 0.625 and it fires on 5 of 12 messages that wanted
-/// silence. BM25 gives up one of twelve answers to roughly halve the noise and
-/// lift precision to 0.917.
+/// It did not dominate at v1. On this fixture the old rule finds every answer
+/// (recall 1.000) because it answers nearly everything, which is also why its
+/// precision is 0.625 and it fires on 5 of 12 messages that wanted silence.
+/// BM25 v1 gave up one of twelve answers to roughly halve the noise and lift
+/// precision to 0.917 — a trade, not a win.
+///
+/// The heading boost turned it into a win: v2 recovers that twelfth answer and
+/// fires on fewer negatives, so precision and recall are both 1.000 at an FPR
+/// of 0.167. The assertions below stay inequalities rather than equalities
+/// because the fixture is synthetic and a future ranker should be free to beat
+/// it without editing this file.
 ///
 /// The recall floor is a bound on that trade, not a target. If a future change
 /// buys silence by going quiet on real questions, this fails.

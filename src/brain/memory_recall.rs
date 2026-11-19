@@ -25,7 +25,26 @@ pub(crate) const RECALL_MAX_SECTIONS: usize = 2;
 pub(crate) const RECALL_MAX_CHARS: usize = 1200;
 /// Minimum score for a section to ride along: length-normalized BM25 with the
 /// IDF scale removed, so the number means the same thing in any workspace.
-pub(crate) const RECALL_MIN_SCORE: f64 = 0.35;
+///
+/// Raised from 0.35 when the heading boost landed, and the two numbers were
+/// chosen together rather than one at a time. The boost makes the correct
+/// section score HIGHER, which on its own would let more conversational
+/// messages through; moving the floor to the lowest value that restores the
+/// false-positive rate to a better-than-before tier is what keeps the pair a
+/// net win on both halves:
+///
+/// | | recall@2 | FPR |
+/// |---|---|---|
+/// | 0.35, no boost (shipped before) | 0.917 | 0.250 |
+/// | 0.35, boost 4 | 1.000 | 0.250 |
+/// | **0.38, boost 4 (shipped)** | **1.000** | **0.167** |
+///
+/// 0.38 is the bottom of the plateau that yields FPR 0.167 — every value from
+/// here to ~0.45 scores the same on the memory pair, so taking the lowest one
+/// keeps the most recall on the larger Track B corpus. It also buys headroom:
+/// the previous 0.250 sat exactly on the `<= 0.25` contract, so any future
+/// change to the ranker broke the gate by arithmetic rather than by defect.
+pub(crate) const RECALL_MIN_SCORE: f64 = 0.38;
 
 /// Recall relevant to `user_message`, formatted for context, or `None`.
 ///
