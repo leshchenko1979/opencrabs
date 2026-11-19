@@ -389,14 +389,26 @@ jobs:
           sccache --show-stats 2>/dev/null || echo "(sccache not on PATH)"
           echo "===== DIAG pre-test END ====="
 
-      - name: Install gdb + relax ptrace (hangdump mode only)
-        if: ${{ inputs.hangdump }}
+      - name: Install gdb + relax ptrace (any run that executes tests)
+        # ARMED ON EVERY TEST RUN, NOT HANGDUMP-ONLY (#331/#1936, HQ 2026-11-19).
+        # The previous gate was `if: inputs.hangdump`, and it made the dump
+        # unobtainable on exactly the run that stalls: STALLWATCH fires on the
+        # FIRST dispatch, while hangdump was only armed on the retry. Measured
+        # consequence, job 134706016808 (run 44276536423, 2026-11-18T10:07:04Z):
+        # the watchdog fired correctly, named `opencrabs-e23d8` in
+        # futex_do_wait, and printed "gdb not on PATH - user stacks skipped" --
+        # kernel side only, no frames. An instrument that cannot run on the
+        # failing dispatch is not an instrument.
+        # Cost: ~20-30s of apt on a 25-35 min leg. That is the price of the only
+        # evidence that will ever name this mechanism.
+        # Predicate matches the `Run tests` step exactly, so gdb is installed
+        # precisely when the test leg will execute (no apt on --fast/fix/lock*).
+        if: ${{ !inputs.fix && !inputs.lockregen && !inputs.lockupdate && !inputs.fast }}
         # #1936 Stage 2: the watchdog needs gdb, and ubuntu-latest does NOT
         # ship it — measured, run 37300036106: the step went GREEN while the
         # log read "HANGDUMP: gdb not on PATH; watchdog degrades to a no-op",
         # i.e. the instrument never ran and the dump criterion was never
-        # exercised. Gated on hangdump so the default dispatch's step list and
-        # Run tests invocation stay byte-for-byte unchanged.
+        # exercised.
         #
         # ptrace: gdb attaches to the test binary as a SIBLING, and
         # ubuntu-latest ships YAMA ptrace_scope=1, which refuses a sibling
@@ -551,15 +563,21 @@ jobs:
           locally -- the opencrabs daemon matched `opencrabs` and the instrument never
           fired). A progressing build always advances the sum, including a single-threaded
           link. A deadlock (#781 class) and an I/O-thrash stall both leave it flat -- and
-          the dump separates them: futex/parking vs read/fsync/wchan. Threshold 300s is 2.2x
+          the dump separates them: futex/parking vs read/fsync/wchan. Threshold 480s is 3.51x
           the longest legitimate log silence measured in a green run (2.28 min / ~10,700
-          lines).
+          lines). FALSE-TRIP RISK IS GOVERNED BY THE WORST GAP, NOT p99: the old 300s was
+          2.19x the worst observed gap, and the stall log's own last activity is a single
+          cold-cache rustc (-C opt-level=3 -C linker-plugin-lto -C codegen-units=16), i.e.
+          exactly the shape that legitimately goes quiet for minutes. 480s still converts a
+          55-minute loss into ~10 minutes. A false trip still pays for itself: the dump runs
+          BEFORE the SIGTERM, so even a wrong fire yields the evidence.
 
           On fire: dump wchan, /proc/<pid>/syscall and the kernel stack of every build
           process plus a vmstat sample, then SIGTERM them so the step fails fast instead
           of burning to the 45-minute job cap. User-space thread stacks are dumped too
-          when gdb is on PATH (hangdump mode installs it); without gdb the kernel-side
-          evidence above already separates futex from read/fsync.
+          when gdb is on PATH (installed for the whole test leg, not hangdump-only -- see
+          the gdb install step); without gdb the kernel-side evidence above already
+          separates futex from read/fsync.
           """
           import os
           import signal
@@ -571,7 +589,7 @@ jobs:
           # This watcher's own pid. It wakes every SAMPLE seconds, so counting it in the
           # CPU sum would reset the flat clock forever.
           SELF = os.getpid()
-          THRESHOLD = int(os.environ.get("STALLWATCH_SECS", "300"))
+          THRESHOLD = int(os.environ.get("STALLWATCH_SECS", "480"))
           SAMPLE = int(os.environ.get("STALLWATCH_SAMPLE", "30"))
 
 
@@ -669,12 +687,14 @@ jobs:
                       print("STALLWATCH %s pid=%d: %s" % (label, pid, out[:2000]), flush=True)
               print("----- user stacks -----")
               if not shutil.which("gdb"):
-                  print("STALLWATCH: gdb not on PATH - user stacks skipped. The kernel-side "
+                  print("STALLWATCH: gdb not on PATH - user stacks skipped. This should NOT "
+                        "happen on a test run: the 'Install gdb + relax ptrace' step is armed "
+                        "whenever the test leg executes (#331). If it is missing, that step "
+                        "failed or its predicate diverged from 'Run tests'. The kernel-side "
                         "evidence above (wchan + kstack, plus vmstat) separates futex from "
                         "read/fsync; /proc/<pid>/syscall is DENIED on the runner (measured "
                         "2026-11-18: 'Operation not permitted' for both pids) and is reported "
-                        "as unavailable when it is. Dispatch with hangdump=true to install gdb "
-                        "and get the user-space frames.")
+                        "as unavailable when it is.")
               for pid, (comm, _) in sorted(procs.items() if shutil.which("gdb") else []):
                   print("===== STALLWATCH stack pid=%d comm=%s =====" % (pid, comm))
                   # sudo: YAMA exempts root from ptrace_scope on the runner
