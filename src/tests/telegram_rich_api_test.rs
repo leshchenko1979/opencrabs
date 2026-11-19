@@ -309,13 +309,10 @@ async fn the_html_fallback_wraps_each_block_in_its_own_p_tag() {
         "test",
         "-",
     )
-    .await;
+    .await
+    .expect("the html fallback must deliver the message");
 
-    assert_eq!(
-        id.expect("the html fallback must deliver the message"),
-        7,
-        "the fallback leg must return its own message id"
-    );
+    assert_eq!(id, 7, "the fallback leg must return its own message id");
     // `expect(1)` on the fallback mock is the guard against the no-media early
     // return: if that return is taken the fallback is never called and this
     // assertion fails rather than the test passing vacuously.
