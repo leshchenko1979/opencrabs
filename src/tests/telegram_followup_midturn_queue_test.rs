@@ -3,7 +3,9 @@ use uuid::Uuid;
 
 use crate::brain::agent::QueuedUserMessage;
 use crate::channels::telegram::TelegramState;
-use crate::channels::telegram::handler::{build_midturn_queued_message, mark_voice_note};
+use crate::channels::telegram::handler::{
+    build_midturn_queued_message, mark_voice_note, mark_voice_note_within,
+};
 use crate::channels::telegram::state::QueuedOrigin;
 
 #[test]
@@ -78,6 +80,61 @@ fn midturn_voice_note_is_queued_with_voice_marker() {
         msg.context_text
     );
     assert_eq!(msg.origin, crate::brain::agent::PushOrigin::Ingress);
+}
+
+#[test]
+fn midturn_voice_note_in_a_group_chat_is_marked_exactly_once() {
+    let state = Arc::new(TelegramState::new());
+    let sid = Uuid::new_v4();
+    let _guard = state
+        .try_begin_turn(sid)
+        .expect("initial claim must succeed");
+
+    // #904: in a GROUP chat `display_text` is `Name (@handle): {text}` and
+    // `text` is already marked, so the marker sits BEHIND the sender prefix.
+    // A position-anchored idempotence check missed it and prefixed a second
+    // one — the live row read
+    //   `[Voice note]: Алексей …: [Voice note]:  Message 13`.
+    let transcript = "Message 13";
+    let text = mark_voice_note(transcript.to_string());
+    let display_text = format!("Алексей Лещенко | Редевест (@leshchenko1979): {text}");
+    let display_text = mark_voice_note_within(display_text);
+
+    assert_eq!(
+        display_text.matches("[Voice note]: ").count(),
+        1,
+        "group-chat voice display text must carry the marker exactly once, got {display_text:?}"
+    );
+    assert!(
+        display_text.ends_with(transcript),
+        "the sender prefix and transcript must survive, got {display_text:?}"
+    );
+
+    let queued = build_midturn_queued_message(None, &text, &display_text);
+    state.enqueue_reaction(sid, queued);
+    let msg = state
+        .drain_reaction(sid)
+        .expect("queued group voice note must be drainable");
+    assert_eq!(
+        msg.display_text.matches("[Voice note]: ").count(),
+        1,
+        "the drained row must not double the marker, got {:?}",
+        msg.display_text
+    );
+    assert_eq!(msg.context_text.matches("[Voice note]: ").count(), 1);
+}
+
+#[test]
+fn voice_marker_within_is_a_noop_when_the_marker_is_inside() {
+    // The group-chat shape: marker present, but not at position 0.
+    let prefixed = "Name (@handle): [Voice note]: hello".to_string();
+    assert_eq!(mark_voice_note_within(prefixed.clone()), prefixed);
+    // A bare payload still gets exactly one marker.
+    assert_eq!(
+        mark_voice_note_within("hello".to_string()),
+        "[Voice note]: hello"
+    );
+    assert_eq!(mark_voice_note_within(String::new()), "");
 }
 
 #[test]

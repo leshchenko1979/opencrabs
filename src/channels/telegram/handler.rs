@@ -2891,7 +2891,7 @@ pub(crate) async fn handle_message(
                 text
             };
             let display_text = if is_voice {
-                mark_voice_note(display_text)
+                mark_voice_note_within(display_text)
             } else {
                 display_text
             };
@@ -3893,6 +3893,22 @@ pub(crate) const VOICE_NOTE_MARKER: &str = "[Voice note]: ";
 /// rather than as a bare marker.
 pub(crate) fn mark_voice_note(text: String) -> String {
     if text.trim().is_empty() || text.starts_with(VOICE_NOTE_MARKER) {
+        text
+    } else {
+        format!("{VOICE_NOTE_MARKER}{text}")
+    }
+}
+
+/// Prefix [`VOICE_NOTE_MARKER`] only when the text does not already CONTAIN it.
+///
+/// For `display_text`, which is derived from an already-marked `text` and, in a
+/// group chat, carries a `Name (@handle): ` prefix in front of it. The
+/// position-anchored check in [`mark_voice_note`] therefore misses the marker
+/// sitting behind that prefix and prepends a second one, yielding
+/// `[Voice note]: Name (@handle): [Voice note]: …` (#904). Containment is the
+/// correct predicate here because the marker is already inside the string.
+pub(crate) fn mark_voice_note_within(text: String) -> String {
+    if text.trim().is_empty() || text.contains(VOICE_NOTE_MARKER) {
         text
     } else {
         format!("{VOICE_NOTE_MARKER}{text}")
