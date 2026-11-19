@@ -380,6 +380,7 @@ pub mod eval_cli_recall_test;
 pub mod episodic_track_test;
 pub mod eval_inflation_test;
 pub mod eval_skills_track_test;
+pub mod eval_track_b_scorecard_test;
 pub mod memory_recall_eval_test;
 pub mod memory_recall_multilingual_test;
 pub mod memory_recall_test;
