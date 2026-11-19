@@ -111,7 +111,7 @@ fn the_shortlist_never_exceeds_the_cap() {
     let line = listed(&out);
     let count = line.split(", ").filter(|s| !s.trim().is_empty()).count();
     assert!(
-        count >= 1 && count <= SKILL_RECALL_MAX,
+        (1..=SKILL_RECALL_MAX).contains(&count),
         "the cap is {SKILL_RECALL_MAX}, got {count}: {line:?}"
     );
 }
