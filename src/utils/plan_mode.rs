@@ -8,8 +8,8 @@
 //! here so the two surfaces cannot drift.
 
 use crate::brain::goal::GoalManager;
-use crate::services::ServiceContext;
-use crate::tui::plan::{ApprovalSource, PlanStatus};
+use crate::services::{MessageService, ServiceContext};
+use crate::tui::plan::{ApprovalSource, PlanDocument, PlanStatus, TaskStatus};
 use crate::utils::plan_files::{self, PlanModeState};
 use uuid::Uuid;
 
@@ -233,17 +233,66 @@ pub async fn discard(session_id: Uuid, svc: &ServiceContext) -> String {
         PlanModeState::NoPlan => "No live plan to discard.".to_string(),
         PlanModeState::PreInitEditing => {
             plan_files::discard_plan(session_id).await;
+            record_discard_in_history(session_id, svc, None).await;
             "Plan mode off (pre-init flag cleared).".to_string()
         }
         PlanModeState::PostInitEditing | PlanModeState::Active => {
+            // Read the plan BEFORE deleting it: the history line below names
+            // the title and how much of the checklist was done, and after
+            // `discard_plan` there is nothing left to read (#889).
+            let plan = plan_files::load_plan(session_id).await;
             plan_files::discard_plan(session_id).await;
             if let Err(e) = GoalManager::new(svc.clone()).clear_goal(session_id).await {
                 tracing::warn!("Failed to clear plan goal on discard: {e}");
             }
+            record_discard_in_history(session_id, svc, plan.as_ref()).await;
             "🗑️ Plan discarded: design document and checklist removed. The session \
              has no live plan."
                 .to_string()
         }
+    }
+}
+
+/// Persist the discard as a `system` row so the NEXT turn can see it (#889).
+///
+/// Deleting the plan files is invisible to history: the following turn loads
+/// `messages` and reads a conversation that never mentioned a plan, so it
+/// resumes the cancelled checklist, re-creates the design, or re-asks what the
+/// user just discarded. `/attach` writes its marker the same way
+/// (`channels/commands.rs`), and `from_db_messages` maps `"system"` to
+/// `Role::System`, so the row reaches the model by normal history recall.
+///
+/// Best-effort by design: the plan is already gone, and a failed history write
+/// must neither resurrect it nor fail the user's discard.
+async fn record_discard_in_history(
+    session_id: Uuid,
+    svc: &ServiceContext,
+    plan: Option<&PlanDocument>,
+) {
+    let content = match plan {
+        Some(plan) => {
+            let total = plan.tasks.len();
+            let done = plan
+                .tasks
+                .iter()
+                .filter(|t| matches!(t.status, TaskStatus::Completed))
+                .count();
+            format!(
+                "[Plan discarded by the user: \"{}\" — {done}/{total} tasks complete. \
+                 The design document and checklist are deleted. Do not resume or \
+                 re-create this plan, and do not re-ask anything it already settled.]",
+                plan.title
+            )
+        }
+        None => "[Plan mode turned off by the user before any plan was created. \
+                 No plan exists for this session; project writes are unblocked.]"
+            .to_string(),
+    };
+    if let Err(e) = MessageService::new(svc.clone())
+        .create_message(session_id, "system".to_string(), content)
+        .await
+    {
+        tracing::warn!("Failed to record the plan discard in session history: {e}");
     }
 }
 

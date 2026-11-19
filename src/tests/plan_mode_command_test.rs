@@ -320,6 +320,65 @@ async fn discard_clears_the_plan_goal() {
     .await;
 }
 
+/// #889: a discarded plan must leave a line in history — the next turn loads
+/// `messages`, and without a row it resumes, re-creates, or re-asks what the
+/// user just cancelled.
+#[tokio::test]
+async fn discard_records_itself_in_history() {
+    in_temp_home(async {
+        let db = Database::connect_in_memory().await.unwrap();
+        db.run_migrations().await.unwrap();
+        let ctx = ServiceContext::new(db.pool().clone());
+        let sid = Uuid::new_v4();
+        let msgs = crate::services::MessageService::new(ctx.clone());
+
+        // NoPlan: nothing changed, so nothing may be written.
+        let _ = discard(sid, &ctx).await;
+        assert!(
+            msgs.list_messages_for_session(sid).await.unwrap().is_empty(),
+            "a NoPlan discard changes nothing and must record nothing"
+        );
+
+        // Post-init: one row naming the plan and forbidding a resume.
+        make_post_init(sid, GOLDEN_MD).await;
+        let _ = discard(sid, &ctx).await;
+        let rows = msgs.list_messages_for_session(sid).await.unwrap();
+        assert_eq!(rows.len(), 1, "exactly one history line per discard");
+        let row = &rows[0];
+        assert_eq!(
+            row.role, "system",
+            "the line is a system row, never the user's own words"
+        );
+        assert!(
+            row.content.contains("Plan discarded by the user"),
+            "got: {}",
+            row.content
+        );
+        assert!(
+            row.content.contains("\"Golden\""),
+            "the title must be named: {}",
+            row.content
+        );
+        assert!(
+            row.content.contains("do not re-ask anything it already settled"),
+            "the directive is the point of the row: {}",
+            row.content
+        );
+
+        // Pre-init: plan mode turned off with no plan behind it.
+        set_pre_init_editing(sid).await.unwrap();
+        let _ = discard(sid, &ctx).await;
+        let rows = msgs.list_messages_for_session(sid).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows[1].content.contains("before any plan was created"),
+            "got: {}",
+            rows[1].content
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn show_plan_reports_each_state() {
     in_temp_home(async {
