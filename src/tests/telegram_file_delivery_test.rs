@@ -30,7 +30,6 @@ use crate::channels::telegram::delivery::{
 use crate::utils::image::{
     LocalFile, LocalFileScan, LocalImageFailureReason, disarm_autolink, file_marker_text,
 };
-use crate::utils::sanitize::strip_llm_artifacts;
 use std::path::{Path, PathBuf};
 
 const CHAT: i64 = 133_526_395;
@@ -563,7 +562,10 @@ fn a_delivered_file_links_with_no_inbound_message() {
     let body = "Reports: 📎 Q3 report and 📎 Q4 report.";
     let scan = scan_over(
         body,
-        &[(Path::new(Q3), "📎 Q3 report"), (Path::new(Q4), "📎 Q4 report")],
+        &[
+            (Path::new(Q3), "📎 Q3 report"),
+            (Path::new(Q4), "📎 Q4 report"),
+        ],
     );
     assert_eq!(
         link_file_markers(
@@ -637,11 +639,20 @@ fn each_marker_links_to_its_own_bubble() {
     let body = "First 📎 Q3 report then 📎 Q4 report.";
     let scan = scan_over(
         body,
-        &[(Path::new(Q3), "📎 Q3 report"), (Path::new(Q4), "📎 Q4 report")],
+        &[
+            (Path::new(Q3), "📎 Q3 report"),
+            (Path::new(Q4), "📎 Q4 report"),
+        ],
     );
     let links = vec![
-        (PathBuf::from(Q3), "https://t.me/c/1234567890/1001".to_string()),
-        (PathBuf::from(Q4), "https://t.me/c/1234567890/1002".to_string()),
+        (
+            PathBuf::from(Q3),
+            "https://t.me/c/1234567890/1001".to_string(),
+        ),
+        (
+            PathBuf::from(Q4),
+            "https://t.me/c/1234567890/1002".to_string(),
+        ),
     ];
     assert_eq!(
         link_file_markers(body, &scan, &links),
@@ -746,16 +757,19 @@ fn a_marker_whose_text_moved_is_left_plain() {
 
 #[test]
 fn a_marker_after_a_real_rewrite_still_links() {
-    // The live defect (#773) driven through the REAL transform rather than a
-    // hand-made shift. `strip_llm_artifacts` runs on every delivered reply and
-    // its `normalize_dashes` pass rewrites " —" to ":" (#1745), SHORTENING the
-    // buffer, so every span past the first em dash goes stale by exactly the
-    // bytes the dash gave up. Measured on this lane's own smoke reply: scan
-    // text 1165 B with the marker at span [889, 911), 1153 B after the
-    // normalize — the marker really at 885 — while the guard read byte 889.
+    // The live defect (#773): a pass that runs AFTER the scan shortens the
+    // buffer, so every span past the edit goes stale by exactly the bytes the
+    // edit gave up. Measured on this lane's own smoke reply: scan text 1165 B
+    // with the marker at span [889, 911), 1153 B after the transform — the
+    // marker really at 885 — while the guard read byte 889.
+    //
+    // That shortening used to come from `strip_llm_artifacts`'s dash pass
+    // (#1745), which was reverted, so the shift is driven here explicitly.
+    // What is under test is that `link_file_markers` RE-LOCATES the marker
+    // instead of trusting the recorded span, whatever shortened the buffer.
     let scan_text = "Here is the report — the one you asked for: 📎 Q3 report.";
     let scan = scan_over(scan_text, &[(Path::new(Q3), "📎 Q3 report")]);
-    let rewritten = strip_llm_artifacts(scan_text);
+    let rewritten = scan_text.replace(" —", ":");
 
     assert_ne!(rewritten, scan_text, "the transform has to actually fire");
     assert!(
@@ -884,7 +898,10 @@ fn a_dotted_label_does_not_autolink_as_a_domain() {
 fn a_label_without_a_dotted_token_is_left_alone() {
     // Nothing to disarm: the disarmer must not touch a marker it has no reason
     // to change, or every label would carry noise.
-    assert_eq!(file_marker_text("Q3 report", "/tmp/q3-report.pdf"), "Q3 report");
+    assert_eq!(
+        file_marker_text("Q3 report", "/tmp/q3-report.pdf"),
+        "Q3 report"
+    );
     assert_eq!(file_marker_text("notes", "/tmp/notes"), "notes");
 }
 
@@ -966,9 +983,7 @@ fn the_fallback_links_a_marker_to_the_intermediates_bubble() {
     // and the marker stays plain rather than pointing nowhere.
     let dm_links: Vec<(PathBuf, String)> = vec![(PathBuf::from(Q3), 91_047)]
         .into_iter()
-        .filter_map(|(path, id)| {
-            file_message_link(DM_CHAT_ID, None, id).map(|link| (path, link))
-        })
+        .filter_map(|(path, id)| file_message_link(DM_CHAT_ID, None, id).map(|link| (path, link)))
         .collect();
     assert!(dm_links.is_empty());
     assert_eq!(link_file_markers(body, &scan, &dm_links), body);
@@ -1055,8 +1070,7 @@ fn every_file_the_rich_plane_cannot_take_still_has_a_delivery_leg() {
     // double-send rule: the REWRITER's own `already_delivered` leg consumes such
     // a reference and records nothing, so without this filter the same path
     // would come back as a skipped file and ship twice.
-    let pre_delivered =
-        rewrite_local_files(&text, Some(dir.path()), std::slice::from_ref(&doc));
+    let pre_delivered = rewrite_local_files(&text, Some(dir.path()), std::slice::from_ref(&doc));
     assert!(
         pre_delivered.entries.is_empty() && !pre_delivered.rich.contains(marker),
         "a reference the rewriter consumed as already delivered leaves neither marker nor entry"

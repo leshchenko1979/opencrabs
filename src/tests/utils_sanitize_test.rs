@@ -516,3 +516,18 @@ fn strip_llm_artifacts_ansi_strip_survives_marker_then_escape_mix() {
     let input = "\u{1b}[2K<|tool\u{2581}call_begin|>hi";
     assert_eq!(strip_llm_artifacts(input), "hi");
 }
+
+#[test]
+fn strip_llm_artifacts_leaves_typographic_dashes_alone() {
+    // #1745 reversed: the boundary strips artifacts, it does not rewrite prose.
+    // A dash the model wrote is content, not an artifact.
+    let input = "want \u{2014} the one \u{2013} you asked for";
+    assert_eq!(strip_llm_artifacts(input), input);
+}
+
+#[test]
+fn strip_llm_artifacts_keeps_a_dash_next_to_a_stripped_artifact() {
+    // The passes that DO run must not disturb the dashes around them.
+    let input = "\u{1b}[2K<|tool\u{2581}call_begin|>done \u{2014} clean";
+    assert_eq!(strip_llm_artifacts(input), "done \u{2014} clean");
+}
