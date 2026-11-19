@@ -29,17 +29,18 @@ use super::args::EvalCommands;
 /// messages) and C (skill selection) read the LIVE corpora and are therefore
 /// not comparable across runs unless their targets still exist — they are
 /// deliberately NOT wired into this command yet (#890 steps 4 and 5).
-const SUPPORTED_TRACKS: &[&str] = &["b"];
+const SUPPORTED_TRACKS: &[&str] = &["a", "b"];
 
 pub(crate) fn cmd_eval(cmd: EvalCommands) -> Result<()> {
     match cmd {
         EvalCommands::Recall {
             track,
             dataset,
+            slice_days,
             corpus,
             k,
             json,
-        } => run_recall(&track, &dataset, corpus.as_deref(), k, json),
+        } => run_recall(&track, dataset.as_deref(), corpus.as_deref(), k, json, slice_days),
         EvalCommands::Skills { dataset, k, json } => run_skills(&dataset, k, json),
     }
 }
@@ -126,22 +127,88 @@ fn run_skills(dataset_path: &str, k: Option<usize>, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Track A — episodic recall over the LIVE message store (#890 step 5).
+///
+/// The corpus is the host's own history, so this is a LIVE leg: its numbers
+/// are comparable across runs only while the slice holds still, which is why
+/// every figure is printed beside the slice it came from. The dataset is
+/// generated (see [`crate::eval::episodic_track`]) rather than committed.
+fn run_episodic(k: Option<usize>, json: bool, slice_days: u32) -> Result<()> {
+    use crate::eval::episodic_track::{sample, score};
+    use rusqlite::{Connection, OpenFlags};
+
+    let config = crate::config::Config::load_for_cli(None)
+        .context("eval recall: cannot load config to locate the message store")?;
+    let db_path = &config.database.path;
+    if !db_path.exists() {
+        bail!(
+            "eval recall: track A reads the message store, and {} does not exist — \
+             reporting an empty store as a score would measure nothing",
+            db_path.display()
+        );
+    }
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("eval recall: cannot open {} read-only", db_path.display()))?;
+
+    let dataset = sample(&conn, slice_days)?;
+    // k defaults to the shipped search's own default page size, so the leg
+    // scores the window a caller actually gets.
+    let report = score(&conn, &dataset, k.unwrap_or(10))?;
+
+    if json {
+        let obj = serde_json::json!({
+            "track": "A",
+            "ranker": "shipped: LIKE recency order + tokenized AND fallback (no message ranker exists — #855)",
+            "k": report.k,
+            "slice_days": report.slice_days,
+            "slice_messages": report.slice_messages,
+            "corpus_messages": report.corpus_messages,
+            "positives": report.positives,
+            "negatives": report.negatives,
+            "recall_at_k": report.recall_at_k(),
+            "mrr": report.mrr,
+            "found_message": report.found_message,
+            "found_session": report.found_session,
+            "false_positives": report.false_positives,
+            "false_positive_rate": report.false_positive_rate(),
+        });
+        println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
+    } else {
+        println!("# eval recall — track A (episodic, live store)");
+        println!("store:   {}", db_path.display());
+        println!();
+        print!("{}", report.render());
+    }
+    Ok(())
+}
+
 fn run_recall(
     track: &str,
-    dataset_path: &str,
+    dataset_path: Option<&str>,
     corpus_path: Option<&str>,
     k: Option<usize>,
     json: bool,
+    slice_days: u32,
 ) -> Result<()> {
     let track_norm = track.trim().to_ascii_lowercase();
     if !SUPPORTED_TRACKS.contains(&track_norm.as_str()) {
         bail!(
-            "eval recall: track {:?} is not wired yet (supported: {}). \
-             Tracks A and C read the live corpora and land in #890 steps 4-5.",
+            "eval recall: track {:?} is not wired (supported: {}). \
+             Track C is `eval skills`; A and B run here.",
             track,
             SUPPORTED_TRACKS.join(", ")
         );
     }
+
+    // Track A reads the LIVE store and generates its own cases, so it takes no
+    // dataset path — a committed one would pin host-local message ids.
+    if track_norm == "a" {
+        return run_episodic(k, json, slice_days);
+    }
+
+    let Some(dataset_path) = dataset_path else {
+        bail!("eval recall: track {} needs --dataset <path>", track_norm.to_ascii_uppercase());
+    };
 
     let raw = std::fs::read_to_string(dataset_path)
         .with_context(|| format!("eval recall: cannot read dataset {dataset_path}"))?;

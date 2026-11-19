@@ -356,13 +356,21 @@ pub enum CronCommands {
 pub enum EvalCommands {
     /// Score retrieval against a labeled recall dataset (fixture leg)
     Recall {
-        /// Track to run: B (brain sections over a committed corpus)
+        /// Track to run: B (brain sections over a committed corpus), or A
+        /// (episodic recall over the LIVE message store — its dataset is
+        /// generated, so `--dataset` is not needed)
         #[arg(long, default_value = "B")]
         track: String,
 
-        /// Dataset JSON path
+        /// Dataset JSON path (Track B/C; Track A generates its own)
         #[arg(long)]
-        dataset: String,
+        dataset: Option<String>,
+
+        /// Track A only: bound the scanned corpus to the most recent N days.
+        /// The shipped search is unscoped and costs ~75 s per query on a
+        /// 45k-message store (#855), so the leg publishes the slice it used.
+        #[arg(long, default_value = "14")]
+        slice_days: u32,
 
         /// Corpus markdown path (default: the dataset's sibling
         /// `memory_corpus.md`, so the committed fixture pair runs with one flag)
