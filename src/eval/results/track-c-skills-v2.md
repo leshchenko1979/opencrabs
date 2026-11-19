@@ -93,7 +93,31 @@ than the distribution behind it.
 
 ## Next improvement
 
-`C1@5 = 0.371` is still the only real selection signal on this track. C3 is now
-either measured or honestly absent, which makes it safe to quote but not yet a
-target: moving it requires a runtime ranker that picks among the index, which is
-the remaining leg of this plan.
+`C1@5 = 0.371` was, until this branch, the only real selection signal on this
+track and nothing in the product consumed it. That is no longer true: the entry
+path now ranks the same index this scorecard scores against the user's message
+and rides the best five along with the turn (`recall_skills_from`,
+`src/brain/memory_recall.rs`), so selection@5 describes something that ships.
+
+The ranking is deliberately split from the decision to speak at all:
+
+| decision | rule | why |
+|---|---|---|
+| ORDER | whole index at floor `0.0` | the same ordering `score()` counts C1@5 from, so the measured number describes the product |
+| SILENCE | shipped `RECALL_MIN_SCORE` (0.38) | a shortlist invented from a weak match is noise paid on every turn |
+
+Building the list at the shipped floor instead would let a gold skill ranked
+third disappear for not clearing the threshold, which would make C1@5 a fact
+about the harness rather than about the product.
+
+C3 stays what it is: either measured or honestly absent. Moving it needs the
+employment record to change, which is a question about what sessions load, not
+about what the ranker can order.
+
+## What this doc does not claim
+
+The per-turn cost of the shortlist is pinned by a test on a synthetic
+eight-entry fixture (a 320-character budget), **not** measured on the live
+35-entry index. The live C2 figure above is the cost of the full index, which is
+unchanged and still emitted in the system prompt. A live before/after C2 for the
+shortlist has not been taken and must not be inferred from the fixture budget.
