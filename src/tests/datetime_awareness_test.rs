@@ -23,7 +23,11 @@ async fn subagent_or_worker_turn_ingress_carries_time_marker() {
     assert!(augmented.starts_with("[Current time: "));
     assert!(augmented.contains("UTC"));
     assert!(augmented.contains("user:"));
-    assert!(augmented.ends_with(prompt));
+    // Recall rides (#799/#285) append after the message, and the #901 skill
+    // shortlist ranks the harness's OWN index, so recall fires even against a
+    // clean brain where no memory recall ever did. The prompt is preserved
+    // verbatim but is no longer guaranteed to be the tail.
+    assert!(augmented.contains(prompt));
 }
 
 #[test]

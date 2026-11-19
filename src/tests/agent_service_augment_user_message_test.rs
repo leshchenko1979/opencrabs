@@ -31,7 +31,9 @@ async fn augment_user_message_injects_time_marker() {
     assert!(augmented.contains("[Current time:"));
     assert!(augmented.contains("UTC"));
     assert!(augmented.contains("MSK"));
-    assert!(augmented.ends_with("hello world"));
+    // The #901 shortlist is home-independent, so recall can follow the message
+    // even against a clean home; the prompt is preserved, not necessarily last.
+    assert!(augmented.contains("hello world"));
 }
 
 #[tokio::test]
@@ -47,5 +49,6 @@ async fn augment_user_message_falls_back_to_utc() {
     assert!(augmented.contains("[Current time:"));
     assert!(augmented.contains("UTC"));
     assert!(!augmented.contains("(user:"));
-    assert!(augmented.ends_with("test message"));
+    // Same #901 exposure: the shortlist is home-independent.
+    assert!(augmented.contains("test message"));
 }
