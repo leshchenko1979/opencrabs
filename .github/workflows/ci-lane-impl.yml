@@ -485,6 +485,11 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           HANGDUMP: ${{ inputs.hangdump }}
+          # stallwatch thresholds live HERE, not only as python defaults, so the
+          # effective values are visible in the workflow and the armed notice is honest.
+          STALLWATCH_SECS: "480"
+          STALLWATCH_PROGRESS_SECS: "600"
+          STALLWATCH_LOG: /tmp/test-leg.log
         # test_threads (#1936 Stage 1): empty => this line is BYTE-FOR-BYTE the
         # invocation it has always been — the separator rides INSIDE the format
         # string, so the empty case appends nothing; non-empty => libtest runs
@@ -509,92 +514,134 @@ jobs:
           set +e
           CMD="cargo test --locked --profile ci --all-features --verbose${{ inputs.test_threads && format(' -- --test-threads={0}', inputs.test_threads) || '' }}"
           echo "+ $CMD"
-          # stallwatch — phase-agnostic stall detector (HQ 2026-11-17; #331).
-          # WHY: HANGDUMP above arms on the TEST BINARY appearing and needs gdb
-          # attached to it. This watches FLAT CPU over the step's whole process
-          # tree instead, so it is phase-agnostic: a progressing build always
-          # advances utime+stime, and so does a suite still producing results.
-          # CORRECTED 2026-11-18 (first production FIRE, run 44276536423): this
-          # rationale used to claim "12/12 sampled 45-min cap-hits ran ZERO
-          # tests, the last line always cargo running rustc". That was FALSE —
-          # an artifact of `gh run view --log`, which truncates the step
-          # mid-compile. The full job archives show 4/4 re-sampled cap-hits DID
-          # run tests (2,640-4,029 "... ok" lines) and wedged with FOUR tests at
-          # "has been running for over 60 seconds": the #781 class at the
-          # libtest default --test-threads=4. The compile-only reading was the
-          # truncation point, never the run.
-          # THRESHOLD 300s (owner order 2026-11-17; lowered from 600s) = 2.2x the
-          # longest legitimate log silence measured in a green run (2.28 min /
-          # ~10,700 lines); the stalls ran 14-22 min. (An earlier version of this
-          # line said 32-48 min — that was inflated by the same `gh run view
-          # --log` truncation corrected above; re-measured from full job
-          # archives 2026-11-18.) The margin is CONSERVATIVE
-          # even so, because the trigger is FLAT CPU and not log silence: a
-          # compiling rustc advances utime+stime on every sample, so healthy work
-          # cannot accumulate flat time at all. Both arms were driven before this
-          # landed — a CPU-burning process survived 20s at a 6s threshold, and a
-          # sleeping one fired at 6s with wchan=hrtimer_nanosleep.
-          # On fire: wchan + kernel stack + vmstat, then SIGTERM the build — futex vs
-          # read/fsync is the #781-deadlock vs I/O-thrash discriminator, and the
-          # step fails in ~10 min instead of burning to the 45-min job cap.
-          # /proc/<pid>/syscall is attempted but DENIED on the runner (measured
-          # 2026-11-18, run 44276536423: 'Operation not permitted' on both pids), so
-          # it is reported as unavailable and never counted as evidence.
-          # FAIL-OPEN by construction: no python3 or an unparsable heredoc warns
-          # and continues. A broken detector must never block a gate.
+          # stallwatch — TWO-predicate stall detector (HQ 2026-11-17; predicate B
+          # 2026-11-19; #331). WHY TWO: a stall has two shapes and one predicate
+          # cannot see both.
+          #
+          #   A. FLAT CPU over the step's process tree (STALLWATCH_SECS, 480).
+          #      Sees the COMPILE phase and any futex wedge: rustc stops advancing
+          #      utime+stime. First production fire 2026-11-18 (run 44276536423)
+          #      named the wedged `opencrabs-e23d8` at wchan=futex_do_wait.
+          #      STRUCTURALLY BLIND to a test spinning on CPU -- a spinning process
+          #      is not flat. That is why it fired on 0 of 6 job-cap stalls.
+          #   B. NO TEST COMPLETING (STALLWATCH_PROGRESS_SECS, 600). Counts libtest
+          #      result lines in /tmp/test-leg.log (doc-tests included) and fires
+          #      when the count stops advancing. ARMS ONLY AFTER THE FIRST
+          #      COMPLETION: compile produces zero result lines for 20+ minutes, so
+          #      a naive "no progress" clock would kill every cold run. Compile
+          #      stays on A; the test phase gets B.
+          #
+          # CALIBRATION FOR B (measured 2026-11-19 from six GREEN runs' full log
+          # ARCHIVES -- 44323730941, 44337942773, 44369135092, 44414539307,
+          # 44500485926, 44511279765; ~67,000 completions): the longest stretch
+          # with NO completion in a healthy run is 63 s, always the same slow
+          # rate-limit deadline test (the run prints "has been running for over
+          # 60 seconds" while healthy). p99 and p95 are 0 s -- completions arrive
+          # in bursts. 600 s is 9.5x that worst gap and ~4x the ENTIRE healthy
+          # test phase (2-3 min for ~11,180 tests). Do NOT derive B's number from
+          # log silence (2.28 min): that is A's calibration, and conflating the
+          # two is exactly how the detector ended up firing zero times.
+          # A false trip fails a healthy gate, so B is a multiple of the WORST
+          # observed gap, never of the median.
+          #
+          # WHY THE LOG EXISTS AT ALL: B needs something to count, so the step now
+          # runs `$CMD 2>&1 | tee /tmp/test-leg.log` and takes the exit code from
+          # ${PIPESTATUS[0]}. A bare `$CMD | tee` would make $? the exit status of
+          # TEE -- a failing test would report 0, which is the false-green class
+          # this factory exists to kill.
+          #
+          # CORRECTED 2026-11-18 (first production FIRE, run 44276536423): an
+          # earlier version claimed "12/12 sampled 45-min cap-hits ran ZERO tests".
+          # That was FALSE -- an artifact of `gh run view --log`, which truncates
+          # the step mid-compile. The full archives show those cap-hits DID run
+          # tests and wedged with FOUR at "has been running for over 60 seconds":
+          # the #781 class at the libtest default --test-threads=4.
+          #
+          # On fire: predicate name + both counters, wchan, kernel stack, vmstat,
+          # the log tail (names the in-flight test) and user stacks when gdb is
+          # present, THEN SIGTERM. The dump runs before the kill, so even a wrong
+          # fire yields evidence. /proc/<pid>/syscall is DENIED on the runner
+          # (measured 2026-11-18, run 44276536423) and reported as unavailable.
+          #
+          # FAIL-OPEN, but VISIBLY SO: no python3 or an unparsable heredoc emits a
+          # `::warning::` annotation and continues, and arming emits a `::notice::`.
+          # Without those, "no stall detected" and "the detector never ran" are the
+          # same green run -- the #1936 trap. A broken detector must never block a
+          # gate, but it must never be invisible either.
           # Revert = delete this block and the STALLWATCH teardown below.
           STALLWATCH=""
           if command -v python3 >/dev/null 2>&1; then
           cat > /tmp/stallwatch.py <<'STALLWATCH_PY'
           #!/usr/bin/env python3
-          """Phase-agnostic stall watchdog for the CI gate.
+          """Stall watchdog for the CI gate. TWO predicates, because a stall has two shapes.
 
-          Fires on FLAT CPU across the STEP'S OWN process tree, not on log text and not on
-          the test binary appearing. Phase-agnostic by construction: a compile-phase stall
-          emits no log line and never starts a test binary, and a test-phase hang stops
-          advancing CPU while the binary sits in a futex -- both leave the sum flat, and the
-          dump separates them. (An earlier version of this docstring claimed every sampled
-          45-minute cap-hit was compile-only; that was a `gh run view --log` truncation
-          artifact, not a measurement -- see the stallwatch comment in the step above.)
+          Predicate A -- FLAT CPU over the step's own process tree (STALLWATCH_SECS, default 480).
+            Covers the COMPILE phase and any futex wedge: a rustc that stops advancing utime+stime,
+            or a test binary parked in futex_do_wait. First production fire 2026-11-18 (run
+            44276536423) named `opencrabs-e23d8` at wchan=futex_do_wait. Correct, but structurally
+            BLIND to predicate B's failure: a test spinning on CPU keeps ticks advancing, so the
+            flat clock never accumulates. It fired on 0 of 6 job-cap stalls for exactly that reason.
 
-          Signal: sum(utime+stime) over EVERY process descending from the step shell.
-          (STALLWATCH_ROOT). Tree scoping is load-bearing: a box-wide comm
-          match picks up unrelated processes and resets the flat clock forever (measured
-          locally -- the opencrabs daemon matched `opencrabs` and the instrument never
-          fired). A progressing build always advances the sum, including a single-threaded
-          link. A deadlock (#781 class) and an I/O-thrash stall both leave it flat -- and
-          the dump separates them: futex/parking vs read/fsync/wchan. Threshold 480s is 3.51x
-          the longest legitimate log silence measured in a green run (2.28 min / ~10,700
-          lines). FALSE-TRIP RISK IS GOVERNED BY THE WORST GAP, NOT p99: the old 300s was
-          2.19x the worst observed gap, and the stall log's own last activity is a single
-          cold-cache rustc (-C opt-level=3 -C linker-plugin-lto -C codegen-units=16), i.e.
-          exactly the shape that legitimately goes quiet for minutes. 480s still converts a
-          55-minute loss into ~10 minutes. A false trip still pays for itself: the dump runs
-          BEFORE the SIGTERM, so even a wrong fire yields the evidence.
+          Predicate B -- NO TEST COMPLETING (STALLWATCH_PROGRESS_SECS, default 600).
+            Counts libtest result lines (`test <name> ... ok|FAILED|ignored`, doc-tests included) in
+            the step's own log file, and fires when the count stops advancing while tests are running.
+            ARMS ONLY AFTER THE FIRST COMPLETION: the compile phase legitimately produces zero result
+            lines for 20+ minutes, so a naive "no progress in N" would kill every cold run. Compile
+            stays on predicate A; the test phase gets predicate B.
 
-          On fire: dump wchan, /proc/<pid>/syscall and the kernel stack of every build
-          process plus a vmstat sample, then SIGTERM them so the step fails fast instead
-          of burning to the 45-minute job cap. User-space thread stacks are dumped too
-          when gdb is on PATH (installed for the whole test leg, not hangdump-only -- see
-          the gdb install step); without gdb the kernel-side evidence above already
-          separates futex from read/fsync.
+            CALIBRATION (measured 2026-11-19, six GREEN runs -- 44323730941, 44337942773,
+            44369135092, 44414539307, 44500485926, 44511279765 -- ~67,000 completions):
+            the longest stretch with NO completion in a healthy run is 63 s, and it is always the
+            same slow rate-limit deadline test (the run even prints "has been running for over 60
+            seconds" while it is healthy). p99 and p95 are 0 s: completions normally arrive in
+            bursts. 600 s is 9.5x the worst healthy gap and 4x the ENTIRE healthy test phase
+            (2-3 min for ~11,180 tests). Do NOT derive this number from log silence (2.28 min) --
+            that is predicate A's calibration, and conflating the two is what left the detector
+            firing zero times for six stalls.
+
+            A false trip is not free: it fails a healthy gate. That is why the threshold is a
+            multiple of the WORST observed gap and not of the median.
+
+          Signal for A: sum(utime+stime) over EVERY process descending from the step shell
+          (STALLWATCH_ROOT). Tree scoping is load-bearing: a box-wide comm match picks up unrelated
+          processes and resets the flat clock forever (measured locally -- the opencrabs daemon
+          matched `opencrabs` and the instrument never fired). `tee` (see the step's pipe) is a
+          descendant and sits INSIDE the sum, which is harmless only because it is idle exactly when
+          output stops. Do not widen the tree scope to "fix" that.
+
+          On fire: dump wchan, /proc/<pid>/syscall, kernel stack, vmstat and user stacks (gdb), plus
+          the tail of the test log so the in-flight test is named, then SIGTERM the tree so the step
+          fails fast instead of burning to the 40-minute step timeout. The dump runs BEFORE the
+          SIGTERM, so even a wrong fire yields evidence.
+
+          Every fire line names WHICH predicate fired and both counters: two triggers writing one
+          message shape would leave the next reader unable to tell a spin from a wedge, and the
+          discriminator is the whole point.
           """
           import os
+          import re
           import signal
           import shutil
           import subprocess
           import sys
           import time
 
-          # This watcher's own pid. It wakes every SAMPLE seconds, so counting it in the
-          # CPU sum would reset the flat clock forever.
+          # This watcher's own pid. It wakes every SAMPLE seconds, so counting it in the CPU sum
+          # would reset the flat clock forever.
           SELF = os.getpid()
           THRESHOLD = int(os.environ.get("STALLWATCH_SECS", "480"))
+          PROGRESS_THRESHOLD = int(os.environ.get("STALLWATCH_PROGRESS_SECS", "600"))
           SAMPLE = int(os.environ.get("STALLWATCH_SAMPLE", "30"))
+          LOGFILE = os.environ.get("STALLWATCH_LOG", "/tmp/test-leg.log")
+
+          # libtest result line, doc-tests included (`test src/lib.rs - foo (line 12) ... ok`).
+          # Anchored at line start and requiring the full `... ok|FAILED|ignored` tail, so the
+          # stallwatch comments echoed into the log cannot be counted as completions.
+          OK_RE = re.compile(rb"^test .+ \.\.\. (ok|FAILED|ignored)", re.M)
 
 
           def _stat(pid):
-              """(comm, cpu_ticks, ppid) from /proc/<pid>/stat, or None."""
+              """(comm, cpu_ticks, ppid, state) from /proc/<pid>/stat, or None."""
               try:
                   with open("/proc/%d/stat" % pid, "rb") as fh:
                       raw = fh.read()
@@ -606,32 +653,27 @@ jobs:
               comm = raw[raw.find(b"(") + 1:close].decode("utf-8", "replace")
               fields = raw[close + 2:].split()
               try:
+                  state = fields[0]
                   ppid, utime, stime = int(fields[1]), int(fields[11]), int(fields[12])
               except (IndexError, ValueError):
                   return None
-              return comm, utime + stime, ppid
+              return comm, utime + stime, ppid, state
 
 
           def descendants(root):
               """{pid: (comm, cpu_ticks)} for EVERY descendant of `root`, minus this watcher.
 
               No comm filter, deliberately. A wedged TEST binary is `opencrabs-<hash>`: a
-              build-tools filter left it out of both the dump and the CPU sum, so a LOCAL
-              drive on 2026-11-17 reported procs=1 -- the parked `cargo` in wait4 -- and never
-              named the process that was actually stuck. That observation came from driving
-              the script by hand, NOT from a gate run. FIRST PRODUCTION FIRE:
-              2026-11-18, run 44276536423 (job 134706016808) — fired at flat=300s with
-              procs=2, naming the wedged `opencrabs-e23d8` test binary
-              (wchan=futex_do_wait) and its parked `cargo` (wchan=do_wait), so the
-              no-comm-filter fix is confirmed in production. Tree scoping already excludes
-              unrelated processes, so the filter bought nothing and cost the one process
-              that mattered.
+              build-tools filter left it out of both the dump and the CPU sum, so a LOCAL drive on
+              2026-11-17 reported procs=1 -- the parked `cargo` in wait4 -- and never named the
+              process that was actually stuck. FIRST PRODUCTION FIRE 2026-11-18, run 44276536423
+              (job 134706016808): fired at flat=300s with procs=2, naming the wedged
+              `opencrabs-e23d8` (wchan=futex_do_wait) and its parked `cargo` (wchan=do_wait), so the
+              no-comm-filter fix is confirmed in production.
 
-              It also closes a false-positive path: with the sum over build tools only,
-              `cargo` parked in wait4 reads as FLAT for the whole test phase, so any suite
-              legitimately slower than the threshold (test_threads=1, a slow runner) would
-              have been killed as a stall. Summing every descendant means a progressing
-              test binary advances the clock, which is what the design always claimed.
+              It also closes a false-positive path: with the sum over build tools only, `cargo`
+              parked in wait4 reads as FLAT for the whole test phase, so any suite legitimately
+              slower than the threshold would have been killed as a stall.
               """
               table = {}
               for entry in os.listdir("/proc"):
@@ -642,8 +684,13 @@ jobs:
                       table[int(entry)] = rec
 
               procs = {}
-              for pid, (comm, ticks, _ppid) in table.items():
-                  if pid == SELF:
+              for pid, (comm, ticks, _ppid, state) in table.items():
+                  # A ZOMBIE cannot stall anything: it has exited and is only waiting to be reaped.
+                  # Counting it keeps the tree non-empty AFTER the tests finish, so the progress
+                  # clock keeps running against a dead process (measured in the local drive: the
+                  # healthy arm false-fired on a zombie child). Zombies also burn no CPU, so they
+                  # are noise for both predicates.
+                  if pid == SELF or state == b"Z":
                       continue
                   cur, hops = pid, 0
                   while cur > 1 and hops < 64:
@@ -657,9 +704,44 @@ jobs:
                       cur, hops = parent, hops + 1
               return procs
 
-          def dump(procs, flat_s):
+
+          def read_completions(offset):
+              """(new_offset, count) -- libtest result lines appended to LOGFILE since `offset`.
+
+              Only COMPLETE lines are consumed: a partial trailing line is left for the next read,
+              so a line split across two appends is counted exactly once.
+              """
+              try:
+                  with open(LOGFILE, "rb") as fh:
+                      fh.seek(offset)
+                      chunk = fh.read()
+              except OSError:
+                  return offset, 0
+              cut = chunk.rfind(b"\n")
+              if cut < 0:
+                  return offset, 0
+              body = chunk[:cut + 1]
+              return offset + len(body), len(OK_RE.findall(body))
+
+
+          def _log_tail(n=40):
+              try:
+                  with open(LOGFILE, "rb") as fh:
+                      fh.seek(0, os.SEEK_END)
+                      size = fh.tell()
+                      fh.seek(max(0, size - 64 * 1024))
+                      lines = fh.read().decode("utf-8", "replace").splitlines()
+              except OSError:
+                  return
+              print("----- test log tail (last %d lines) -----" % n)
+              for line in lines[-n:]:
+                  print("LOGTAIL: %s" % line[:300])
+
+
+          def dump(procs, stall_s, predicate, completions):
               stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-              print("===== STALLWATCH FIRE %s flat=%.0fs procs=%d =====" % (stamp, flat_s, len(procs)))
+              print("===== STALLWATCH FIRE %s predicate=%s stall=%.0fs procs=%d completions=%d ====="
+                    % (stamp, predicate, stall_s, len(procs), completions), flush=True)
               for pid, (comm, ticks) in sorted(procs.items()):
                   try:
                       wchan = open("/proc/%d/wchan" % pid).read().strip()
@@ -668,10 +750,11 @@ jobs:
                   print("STALLWATCH: pid=%d comm=%s cpu_ticks=%d wchan=%s" % (pid, comm, ticks, wchan))
               print("----- vmstat -----")
               subprocess.run(["vmstat", "1", "3"], check=False)
-              # Kernel-side evidence needs no gdb: /proc/<pid>/syscall names the blocking
-              # syscall (futex vs read/fsync/io_schedule) and /proc/<pid>/stack is the kernel
-              # stack that put it to sleep. Both are cheap and present on every runner; the
-              # user-space stacks below need gdb, which only hangdump mode installs.
+              _log_tail()
+              # Kernel-side evidence needs no gdb: /proc/<pid>/syscall names the blocking syscall
+              # (futex vs read/fsync/io_schedule) and /proc/<pid>/stack is the kernel stack that put
+              # it to sleep. Both are cheap; /proc/<pid>/syscall is DENIED on the runner (measured
+              # 2026-11-18: 'Operation not permitted' on both pids) and is reported as unavailable.
               print("----- syscall + kernel stack -----")
               for pid, (comm, _) in sorted(procs.items()):
                   for label, argv in (
@@ -692,9 +775,7 @@ jobs:
                         "whenever the test leg executes (#331). If it is missing, that step "
                         "failed or its predicate diverged from 'Run tests'. The kernel-side "
                         "evidence above (wchan + kstack, plus vmstat) separates futex from "
-                        "read/fsync; /proc/<pid>/syscall is DENIED on the runner (measured "
-                        "2026-11-18: 'Operation not permitted' for both pids) and is reported "
-                        "as unavailable when it is.")
+                        "read/fsync.")
               for pid, (comm, _) in sorted(procs.items() if shutil.which("gdb") else []):
                   print("===== STALLWATCH stack pid=%d comm=%s =====" % (pid, comm))
                   # sudo: YAMA exempts root from ptrace_scope on the runner
@@ -710,16 +791,32 @@ jobs:
               print("===== STALLWATCH END =====", flush=True)
 
 
+          def terminate(procs, stall_s, predicate):
+              for pid in procs:
+                  try:
+                      os.kill(pid, signal.SIGTERM)
+                  except OSError:
+                      pass
+              print("STALLWATCH: SIGTERM sent to %d process(es) after %.0fs without progress (%s)"
+                    % (len(procs), stall_s, predicate), flush=True)
+
+
           def main():
               root = int(os.environ.get("STALLWATCH_ROOT") or os.getppid())
-              print("STALLWATCH: armed, root=%d threshold=%ds sample=%ds" % (root, THRESHOLD, SAMPLE),
-                    flush=True)
+              print("STALLWATCH: armed, root=%d flat=%ds progress=%ds sample=%ds log=%s"
+                    % (root, THRESHOLD, PROGRESS_THRESHOLD, SAMPLE, LOGFILE), flush=True)
               prev = None
               flat_since = None
+              offset = 0
+              completions = 0
+              progress_since = None  # None until the FIRST completion: compile has no result lines
               while True:
                   procs = descendants(root)
                   total = sum(t for _, t in procs.values())
                   now = time.time()
+
+                  # Predicate A -- flat CPU. Phase-agnostic, and the only one that can see a
+                  # compile-phase stall (no result lines exist yet).
                   if not procs:
                       prev, flat_since = None, None
                   elif prev is None or total != prev:
@@ -727,15 +824,22 @@ jobs:
                   else:
                       flat = now - flat_since
                       if flat >= THRESHOLD:
-                          dump(procs, flat)
-                          for pid in procs:
-                              try:
-                                  os.kill(pid, signal.SIGTERM)
-                              except OSError:
-                                  pass
-                          print("STALLWATCH: SIGTERM sent to %d process(es) after %.0fs of flat CPU"
-                                % (len(procs), flat), flush=True)
+                          dump(procs, flat, "flat_cpu", completions)
+                          terminate(procs, flat, "flat_cpu")
                           return 0
+
+                  # Predicate B -- no test completing. Catches the CPU-burning spin that A cannot.
+                  offset, new = read_completions(offset)
+                  if new:
+                      completions += new
+                      progress_since = now
+                  elif completions and progress_since is not None and procs:
+                      idle = now - progress_since
+                      if idle >= PROGRESS_THRESHOLD:
+                          dump(procs, idle, "progress", completions)
+                          terminate(procs, idle, "progress")
+                          return 0
+
                   time.sleep(SAMPLE)
 
 
@@ -745,10 +849,13 @@ jobs:
             if python3 -c 'import ast; ast.parse(open("/tmp/stallwatch.py").read())' 2>/dev/null; then
               python3 /tmp/stallwatch.py &
               STALLWATCH=$!
+              echo "::notice::STALLWATCH armed — flat=${STALLWATCH_SECS}s progress=${STALLWATCH_PROGRESS_SECS}s; a green run with this notice is evidence the detector RAN"
             else
+              echo "::warning::STALLWATCH DISARMED — embedded script does not parse; NO stall detection this run"
               echo "STALLWATCH: WARNING — embedded script does not parse; no stall detection this run"
             fi
           else
+            echo "::warning::STALLWATCH DISARMED — python3 not on PATH; NO stall detection this run"
             echo "STALLWATCH: WARNING — python3 not on PATH; no stall detection this run"
           fi
           WATCHDOG=""
@@ -835,8 +942,10 @@ jobs:
               DUMP_INVALID="1"
             fi
           fi
-          $CMD
-          RC=$?
+          # `tee` so predicate B has a file to count. PIPESTATUS[0], never $?:
+          # after a pipeline $? is tee's status, and a failing test would report 0.
+          $CMD 2>&1 | tee "$STALLWATCH_LOG"
+          RC=${PIPESTATUS[0]}
           if [ -n "$WATCHDOG" ]; then
             kill "$WATCHDOG" 2>/dev/null || true
             wait "$WATCHDOG" 2>/dev/null || true
