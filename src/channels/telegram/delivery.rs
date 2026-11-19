@@ -84,6 +84,51 @@ pub(crate) fn is_no_media_found(e: &anyhow::Error) -> bool {
     format!("{e:#}").contains("RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND")
 }
 
+/// One failure record for a media entry the rich plane SACRIFICED (#897).
+///
+/// The record speaks the ladder's own vocabulary — `raw` is the entry as the
+/// retry log names it (`doc0 (q3-report.pdf)`), and the reason is
+/// [`LocalImageFailureReason::DeliveryFailed`] because the channel did not put
+/// it in front of the user. `resolved` stays `None`: the entry is a Telegram
+/// media id, not a path this layer can point at.
+pub(crate) fn sacrificed_failure(entry: &super::rich::SacrificedEntry) -> LocalImageFailure {
+    LocalImageFailure {
+        raw: entry.label(),
+        resolved: None,
+        reason: LocalImageFailureReason::DeliveryFailed,
+    }
+}
+
+/// Split the rich plane's sacrificed entries into the three per-family failure
+/// vectors the post-delivery ladder already consumes (#897).
+///
+/// Returns `(images, files, videos)` — the order the vectors are declared in
+/// [`deliver_final_response`]. A `Document` lands in the FILE vector because
+/// that is the family whose ladder speaks about documents; a photo in the image
+/// vector, a clip in the video one. Pure so the mapping is testable without
+/// driving a whole turn, and so the ladder's behaviour on a sacrifice is the
+/// same code path it already takes for a channel refusal.
+pub(crate) fn sacrificed_failures(
+    sacrificed: &[super::rich::SacrificedEntry],
+) -> (
+    Vec<LocalImageFailure>,
+    Vec<LocalImageFailure>,
+    Vec<LocalImageFailure>,
+) {
+    let mut images = Vec::new();
+    let mut files = Vec::new();
+    let mut videos = Vec::new();
+    for entry in sacrificed {
+        let record = sacrificed_failure(entry);
+        match entry.kind {
+            super::rich::mermaid::MediaKind::Photo => images.push(record),
+            super::rich::mermaid::MediaKind::Video => videos.push(record),
+            super::rich::mermaid::MediaKind::Document => files.push(record),
+        }
+    }
+    (images, files, videos)
+}
+
 /// Drain all pending intermediate texts from the streaming state's display
 /// queue and send them immediately. Called by the follow-up-question callback
 /// BEFORE posting the question message, so the user sees contextual text
@@ -213,10 +258,8 @@ pub(crate) async fn deliver_final_response(
             // and this floor for everything it did not take — the `📎 <label>`
             // marker the reader falls back to, plus the failure list that
             // notice names.
-            let file_scan = crate::utils::extract_local_files(
-                &image_scan.text,
-                Some(image_cwd.as_path()),
-            );
+            let file_scan =
+                crate::utils::extract_local_files(&image_scan.text, Some(image_cwd.as_path()));
             // `text_only` is the FILE scan's output: it ran last, on the text
             // the image plane already emptied, so it is the only one that has
             // seen every reference. Taking the image scan's text here would
@@ -288,6 +331,11 @@ pub(crate) async fn deliver_final_response(
             // the notice names the family, so a missing clip must not be
             // answered with "Image not attached".
             let mut video_failures: Vec<LocalImageFailure> = video_scan.failures;
+            // #897: entries the rich plane DROPPED from a reply that still
+            // delivered. Collected here because the rich send happens far
+            // below this point and the post-delivery ladder sits far below
+            // that — the list is the only thing that carries the loss across.
+            let mut sacrificed: Vec<super::rich::SacrificedEntry> = Vec::new();
             // Strip LLM-hallucinated artifacts (<!-- tools-v2 -->, XML tool blocks)
             let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
             let text_only = redact_secrets(&text_only);
@@ -512,9 +560,10 @@ pub(crate) async fn deliver_final_response(
             let mut suppressed_final = false;
             let text_only = if !sent.is_empty() {
                 let norm_final = super::intermediates::normalize_reference_spelling(&text_only);
-                if sent.iter().any(|i| {
-                    super::intermediates::normalize_reference_spelling(i) == norm_final
-                }) {
+                if sent
+                    .iter()
+                    .any(|i| super::intermediates::normalize_reference_spelling(i) == norm_final)
+                {
                     tracing::info!(
                         "Telegram dedup: match found among {} intermediates (reference-spelling \
                          normalized) — suppressing final response",
@@ -1009,7 +1058,10 @@ pub(crate) async fn deliver_final_response(
                 )
                 .await
                 {
-                    Ok(rich_msg_id) => {
+                    Ok((rich_msg_id, rich_sacrificed)) => {
+                        // #897: a mermaid render this send had to drop is as
+                        // lost as a local document, so it joins the same list.
+                        sacrificed.extend(rich_sacrificed);
                         // Delete ONLY the intermediates this rich message
                         // re-sends (#620). The former code deleted every id it
                         // had recorded for the turn, on the premise that the
@@ -1272,136 +1324,136 @@ pub(crate) async fn deliver_final_response(
                         options_pending(streaming),
                     ))
                     && {
-                    // #487: an image-bearing body is sent from the REWRITTEN
-                    // markdown, whose `tg://photo` references only resolve
-                    // against the media array sent with it; every other body
-                    // keeps today's text, byte for byte.
-                    // #465/#1918: `rich_fw.rich` is the LAST walk's output —
-                    // the video walk's form fed through the image walk, then
-                    // through the file walk — so it carries `tg://photo`,
-                    // `tg://video` and (since #820) `tg://document` references
-                    // and is the correct body for all three families. It must be the final walk's form, not a named
-                    // family's: the earlier walk's output is missing the later
-                    // family's references, and the array below is shared, so a
-                    // body whose references are not in it would ship dead
-                    // markdown. When no family claimed anything it is
-                    // byte-identical to `rich_rw.rich`, which is what the
-                    // pre-#1918 line sent — so the image and video planes are
-                    // unchanged.
-                    let rich_md = if rich_owns_media {
-                        rich_fw.rich.clone()
-                    } else {
-                        text_only.clone()
-                    };
-                    let rich_media: &[super::rich::mermaid::MediaEntry] = if rich_owns_media {
-                        rich_media.as_slice()
-                    } else {
-                        &[]
-                    };
-                    // Send a FRESH rich message rather than editing the streamed
-                    // placeholder into rich. Editing a normal message into a rich
-                    // one glitches the client render — overlap during the
-                    // transition, and a stale pre-edit (HTML) version after a
-                    // refresh / chat switch. A fresh sendRichMessage renders clean.
-                    //
-                    // Delete the placeholder FIRST so the fresh rich message is
-                    // the LAST thing added to the chat — deleting it AFTER the
-                    // send pulls the content up and leaves the view mid-chat
-                    // instead of scrolling to the bottom on completion. `.take()`
-                    // clears the id so the HTML fallback below sends a fresh
-                    // message (not an edit of a deleted one) if the rich send fails.
-                    if let Some(mid) = streaming_msg_id.take() {
-                        best_effort_delete(bot, chat_id, mid, "pre-rich-fallback cleanup").await;
-                    }
-                    // Native BLOCKS first (#476 path B) for NON-table content: the
-                    // block value is sent as-is, so code fences render natively with
-                    // no server-side parser to mangle them into <code> artifacts. A
-                    // table would only 400 here (schema mismatch), so skip blocks
-                    // entirely when one is present and let the markdown send below
-                    // render it. On any block rejection we also fall through to
-                    // markdown, so worst case is exactly the rich-markdown render.
-                    // Straight to rich-markdown (#871). The native-blocks
-                    // attempt ran 68 times across two days and returned 400
-                    // (RICH_MESSAGE_CONTENT_REQUIRED) all 68 times, never once
-                    // succeeding, so every rich message already arrived via the
-                    // markdown fallback below. Keeping it cost a guaranteed
-                    // round-trip and a guaranteed error before every delivery.
-                    //
-                    // Markdown is also the only mode that renders tables: the
-                    // rich HTML input mode returns 200 and then flattens a table
-                    // into a run-on paragraph, which is why telegram_send now
-                    // uses this same call rather than its own.
-                    {
-                        // Rich MARKDOWN renders tables correctly; mermaid fences
-                        // are routed to the rich-HTML image path inside the sender
-                        // (#1044), everything else stays on markdown.
-                        // #tg-mermaid-delivery-hardening: retry once when
-                        // Telegram's server-side refetch of the embedded media
-                        // (mermaid.ink) died — `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND`
-                        // is a race against a flaky renderer (our resolve ran
-                        // seconds earlier), not a structural rejection. The sender
-                        // re-resolves media on every call, so the retry naturally
-                        // re-fetches from the renderer. Structural 400s are never
-                        // retried.
-                        let mut rich_send = super::delivery_dedup::send_rich_turn_guarded(
-                            session_id,
-                            bot,
-                            chat_id,
-                            thread_id,
-                            &rich_md,
-                            // #487: empty unless the rich plane owns this
-                            // body's images, in which case the references in
-                            // `rich_md` resolve against exactly these entries.
-                            rich_media,
-                        )
-                        .await;
-                        if rich_send.is_err() && is_no_media_found(rich_send.as_ref().unwrap_err())
+                        // #487: an image-bearing body is sent from the REWRITTEN
+                        // markdown, whose `tg://photo` references only resolve
+                        // against the media array sent with it; every other body
+                        // keeps today's text, byte for byte.
+                        // #465/#1918: `rich_fw.rich` is the LAST walk's output —
+                        // the video walk's form fed through the image walk, then
+                        // through the file walk — so it carries `tg://photo`,
+                        // `tg://video` and (since #820) `tg://document` references
+                        // and is the correct body for all three families. It must be the final walk's form, not a named
+                        // family's: the earlier walk's output is missing the later
+                        // family's references, and the array below is shared, so a
+                        // body whose references are not in it would ship dead
+                        // markdown. When no family claimed anything it is
+                        // byte-identical to `rich_rw.rich`, which is what the
+                        // pre-#1918 line sent — so the image and video planes are
+                        // unchanged.
+                        let rich_md = if rich_owns_media {
+                            rich_fw.rich.clone()
+                        } else {
+                            text_only.clone()
+                        };
+                        let rich_media: &[super::rich::mermaid::MediaEntry] = if rich_owns_media {
+                            rich_media.as_slice()
+                        } else {
+                            &[]
+                        };
+                        // Send a FRESH rich message rather than editing the streamed
+                        // placeholder into rich. Editing a normal message into a rich
+                        // one glitches the client render — overlap during the
+                        // transition, and a stale pre-edit (HTML) version after a
+                        // refresh / chat switch. A fresh sendRichMessage renders clean.
+                        //
+                        // Delete the placeholder FIRST so the fresh rich message is
+                        // the LAST thing added to the chat — deleting it AFTER the
+                        // send pulls the content up and leaves the view mid-chat
+                        // instead of scrolling to the bottom on completion. `.take()`
+                        // clears the id so the HTML fallback below sends a fresh
+                        // message (not an edit of a deleted one) if the rich send fails.
+                        if let Some(mid) = streaming_msg_id.take() {
+                            best_effort_delete(bot, chat_id, mid, "pre-rich-fallback cleanup")
+                                .await;
+                        }
+                        // Native BLOCKS first (#476 path B) for NON-table content: the
+                        // block value is sent as-is, so code fences render natively with
+                        // no server-side parser to mangle them into <code> artifacts. A
+                        // table would only 400 here (schema mismatch), so skip blocks
+                        // entirely when one is present and let the markdown send below
+                        // render it. On any block rejection we also fall through to
+                        // markdown, so worst case is exactly the rich-markdown render.
+                        // Straight to rich-markdown (#871). The native-blocks
+                        // attempt ran 68 times across two days and returned 400
+                        // (RICH_MESSAGE_CONTENT_REQUIRED) all 68 times, never once
+                        // succeeding, so every rich message already arrived via the
+                        // markdown fallback below. Keeping it cost a guaranteed
+                        // round-trip and a guaranteed error before every delivery.
+                        //
+                        // Markdown is also the only mode that renders tables: the
+                        // rich HTML input mode returns 200 and then flattens a table
+                        // into a run-on paragraph, which is why telegram_send now
+                        // uses this same call rather than its own.
                         {
-                            tracing::warn!(
-                                "Telegram: rich send hit NO_MEDIA_FOUND (renderer flake?) — retrying once"
-                            );
-                            // Nothing was recorded for the failed attempt, so the
-                            // guard lets this retry through (#500).
-                            rich_send = super::delivery_dedup::send_rich_turn_guarded(
-                                session_id,
-                                bot,
-                                chat_id,
-                                thread_id,
-                                &rich_md,
+                            // Rich MARKDOWN renders tables correctly; mermaid fences
+                            // are routed to the rich-HTML image path inside the sender
+                            // (#1044), everything else stays on markdown.
+                            // #tg-mermaid-delivery-hardening: retry once when
+                            // Telegram's server-side refetch of the embedded media
+                            // (mermaid.ink) died — `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND`
+                            // is a race against a flaky renderer (our resolve ran
+                            // seconds earlier), not a structural rejection. The sender
+                            // re-resolves media on every call, so the retry naturally
+                            // re-fetches from the renderer. Structural 400s are never
+                            // retried.
+                            let mut rich_send = super::delivery_dedup::send_rich_turn_guarded(
+                                session_id, bot, chat_id, thread_id, &rich_md,
+                                // #487: empty unless the rich plane owns this
+                                // body's images, in which case the references in
+                                // `rich_md` resolve against exactly these entries.
                                 rich_media,
                             )
                             .await;
-                        }
-                        match rich_send {
-                            Ok(id) => {
-                                // Success was silent, which is why an
-                                // unformatted table could not be traced (#860).
-                                tracing::info!(
-                                    "Telegram: rich markdown delivered as msg {id} ({} chars)",
-                                    rich_md.len()
+                            if rich_send.is_err()
+                                && is_no_media_found(rich_send.as_ref().unwrap_err())
+                            {
+                                tracing::warn!(
+                                    "Telegram: rich send hit NO_MEDIA_FOUND (renderer flake?) — retrying once"
                                 );
-                                sent_reply_id = Some(id);
-                                // Merge candidate (#tg-suggest-merge): the
-                                // controls can ride this bubble — table-bearing
-                                // answers included: the merge edit goes back out
-                                // on the markdown plane, whose server-side
-                                // render keeps tables intact (#79 piece 4; the
-                                // old html-plane merge flattened them,
-                                // ex-upstream adolfousier/opencrabs#679, which is
-                                // why tables used to be excluded).
-                                final_bubble = Some(super::state::MergeBubble {
-                                    message_id: teloxide::types::MessageId(id),
-                                    body: super::state::BubbleBody::Markdown(rich_md.clone()),
-                                });
-                                true
+                                // Nothing was recorded for the failed attempt, so the
+                                // guard lets this retry through (#500).
+                                rich_send = super::delivery_dedup::send_rich_turn_guarded(
+                                    session_id, bot, chat_id, thread_id, &rich_md, rich_media,
+                                )
+                                .await;
                             }
-                            Err(e) => {
-                                tracing::warn!("Telegram: rich delivery failed, using HTML: {e}");
-                                false
+                            match rich_send {
+                                Ok((id, rich_sacrificed)) => {
+                                    // Success was silent, which is why an
+                                    // unformatted table could not be traced (#860).
+                                    tracing::info!(
+                                        "Telegram: rich markdown delivered as msg {id} ({} chars)",
+                                        rich_md.len()
+                                    );
+                                    // #897: the send succeeded, but it may have
+                                    // dropped entries to get there. Keep them —
+                                    // `extend`, not assignment: the intermediate
+                                    // arm above may have recorded its own.
+                                    sacrificed.extend(rich_sacrificed);
+                                    sent_reply_id = Some(id);
+                                    // Merge candidate (#tg-suggest-merge): the
+                                    // controls can ride this bubble — table-bearing
+                                    // answers included: the merge edit goes back out
+                                    // on the markdown plane, whose server-side
+                                    // render keeps tables intact (#79 piece 4; the
+                                    // old html-plane merge flattened them,
+                                    // ex-upstream adolfousier/opencrabs#679, which is
+                                    // why tables used to be excluded).
+                                    final_bubble = Some(super::state::MergeBubble {
+                                        message_id: teloxide::types::MessageId(id),
+                                        body: super::state::BubbleBody::Markdown(rich_md.clone()),
+                                    });
+                                    true
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Telegram: rich delivery failed, using HTML: {e}"
+                                    );
+                                    false
+                                }
                             }
                         }
-                    }
-                };
+                    };
 
                 if !delivered_rich {
                     // #487: the rich plane owned this body's images and did not
@@ -1553,53 +1605,55 @@ pub(crate) async fn deliver_final_response(
                                         chat_id.0
                                     );
                                 } else {
-                                match bot
-                                    .edit_message_text(chat_id, mid, &chunks[0])
-                                    .parse_mode(ParseMode::Html)
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        sent_reply_id = Some(mid.0);
-                                        final_bubble = Some(super::state::MergeBubble {
-                                            message_id: mid,
-                                            body: super::state::BubbleBody::Html(chunks[0].clone()),
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Telegram: edit retry failed ({e}), falling back to delete+send"
-                                        );
-                                        best_effort_delete(
-                                            bot,
-                                            chat_id,
-                                            mid,
-                                            "edit-retry fallback",
-                                        )
-                                        .await;
-                                        // Never silent (#1019): this is the LAST fallback.
-                                        // The edit already failed and was logged; if the
-                                        // resend fails too the message is gone entirely,
-                                        // so the recovery path must not be the quiet one.
-                                        if let Ok(sent) = send_html_or_plain(
-                                            bot, chat_id, thread_id, &chunks[0], "turn", None,
-                                        )
+                                    match bot
+                                        .edit_message_text(chat_id, mid, &chunks[0])
+                                        .parse_mode(ParseMode::Html)
                                         .await
-                                        {
-                                            sent_reply_id = Some(sent.0);
+                                    {
+                                        Ok(_) => {
+                                            sent_reply_id = Some(mid.0);
                                             final_bubble = Some(super::state::MergeBubble {
-                                                message_id: sent,
+                                                message_id: mid,
                                                 body: super::state::BubbleBody::Html(
                                                     chunks[0].clone(),
                                                 ),
                                             });
-                                        } else {
-                                            tracing::error!(
-                                                "Telegram: delete+send fallback failed in chat {chat_id}, \
-                                                 the reply was lost"
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Telegram: edit retry failed ({e}), falling back to delete+send"
                                             );
+                                            best_effort_delete(
+                                                bot,
+                                                chat_id,
+                                                mid,
+                                                "edit-retry fallback",
+                                            )
+                                            .await;
+                                            // Never silent (#1019): this is the LAST fallback.
+                                            // The edit already failed and was logged; if the
+                                            // resend fails too the message is gone entirely,
+                                            // so the recovery path must not be the quiet one.
+                                            if let Ok(sent) = send_html_or_plain(
+                                                bot, chat_id, thread_id, &chunks[0], "turn", None,
+                                            )
+                                            .await
+                                            {
+                                                sent_reply_id = Some(sent.0);
+                                                final_bubble = Some(super::state::MergeBubble {
+                                                    message_id: sent,
+                                                    body: super::state::BubbleBody::Html(
+                                                        chunks[0].clone(),
+                                                    ),
+                                                });
+                                            } else {
+                                                tracing::error!(
+                                                    "Telegram: delete+send fallback failed in chat {chat_id}, \
+                                                 the reply was lost"
+                                                );
+                                            }
                                         }
                                     }
-                                }
                                 }
                             }
                             Err(e) => {
@@ -1750,6 +1804,83 @@ pub(crate) async fn deliver_final_response(
                     Err(e) => {
                         tracing::error!("Telegram: TTS synthesis failed: {:#}", e);
                     }
+                }
+            }
+
+            // ── #897: the rich plane's own sacrifices ────────────────────────
+            // The retry ladder drops a media entry to keep the rest of the
+            // reply on the rich plane, and the send still reports Ok. Until
+            // #897 that fact died at the ladder's `tracing::warn!`: the
+            // vectors above stayed empty, the honest notice never mentioned
+            // the lost attachment, and the model was never told — so it
+            // claimed delivery and re-emitted the reference next turn.
+            //
+            // Each sacrificed entry joins its own family's vector, so the
+            // ladder below fires on exactly the path a channel refusal
+            // already takes: the user sees the guard line, and one synthetic
+            // correction turn is handed to the model. The correction uses
+            // `sacrificed_media_nudge`, NOT `local_file_delivery_failure_nudge`
+            // — that one's "the link target is not the problem, so do not
+            // re-emit it" describes a REFUSAL, while here the reply landed
+            // and one entry was dropped from it.
+            //
+            // This leg runs FIRST because the image and file legs below share
+            // ONE re-entry latch: whichever leg spends it owns the turn's
+            // single synthetic correction, and a sacrifice is the case this
+            // issue measured. Their guard lines still fire — the entries are
+            // in their vectors — so the user is told either way.
+            let (sacrificed_images, sacrificed_files, sacrificed_videos) =
+                sacrificed_failures(&sacrificed);
+            let sacrificed_records: Vec<LocalImageFailure> = sacrificed_images
+                .iter()
+                .chain(sacrificed_files.iter())
+                .chain(sacrificed_videos.iter())
+                .cloned()
+                .collect();
+            image_failures.extend(sacrificed_images);
+            file_failures.extend(sacrificed_files);
+            video_failures.extend(sacrificed_videos);
+            if !sacrificed_records.is_empty() {
+                tracing::warn!(
+                    "Telegram: rich plane sacrificed {} attachment(s) from a reply that \
+                     still delivered: {}",
+                    sacrificed_records.len(),
+                    sacrificed
+                        .iter()
+                        .map(super::rich::SacrificedEntry::label)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                if telegram_state.try_spend_image_reentry(session_id) {
+                    let nudge = crate::brain::agent::service::nudge::sacrificed_media_nudge(
+                        &sacrificed_records,
+                    );
+                    tracing::info!(
+                        "Telegram: post-delivery sacrifice re-entry queued for session \
+                         {session_id} ({} sacrificed entr{})",
+                        sacrificed_records.len(),
+                        if sacrificed_records.len() == 1 {
+                            "y"
+                        } else {
+                            "ies"
+                        }
+                    );
+                    telegram_state.enqueue_detached_result(
+                        session_id,
+                        crate::brain::agent::QueuedUserMessage::system(
+                            nudge,
+                            format!(
+                                "📎 {} attachment(s) were dropped from the reply — asking the \
+                                 model to report them",
+                                sacrificed_records.len()
+                            ),
+                        ),
+                    );
+                } else {
+                    tracing::info!(
+                        "Telegram: post-delivery sacrifice re-entry latch already spent for \
+                         session {session_id}; notice only"
+                    );
                 }
             }
 
@@ -2639,11 +2770,7 @@ pub(crate) async fn handle_intermediate(
     // `MediaKind::Document` so it would render "at its reference"; the API
     // accepts it only in EMBED syntax, which is what this walk now emits
     // (ADR §4.1).
-    let fw_rich = crate::utils::image::rewrite_local_files(
-        &rw_rich.rich,
-        Some(cwd),
-        &delivered,
-    );
+    let fw_rich = crate::utils::image::rewrite_local_files(&rw_rich.rich, Some(cwd), &delivered);
 
     // 4. A fresh picture is report-shaped content on its own (#502); anything
     //    else keeps folding, with the failure notice carried along so a broken

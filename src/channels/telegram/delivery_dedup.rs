@@ -217,6 +217,10 @@ pub(crate) fn release(session_id: Uuid, chat_id: i64, thread_id: Option<i32>, ma
 /// The guard keys on [`content_key`] — the markdown plus the media identity —
 /// so two sends with the same text but different pictures are NOT duplicates
 /// of each other.
+///
+/// The `Ok` value carries the message id AND every media entry the rich retry
+/// ladder sacrificed to get the message out (#897). A duplicate suppression
+/// sacrifices nothing and answers with an empty list; so does a clean send.
 pub(crate) async fn send_rich_turn_guarded(
     session_id: Uuid,
     bot: &teloxide::Bot,
@@ -224,7 +228,7 @@ pub(crate) async fn send_rich_turn_guarded(
     thread_id: Option<ThreadId>,
     markdown: &str,
     media: &[super::rich::mermaid::MediaEntry],
-) -> anyhow::Result<i32> {
+) -> anyhow::Result<(i32, Vec<super::rich::SacrificedEntry>)> {
     let thread = thread_id.map(|t| t.0.0);
     let key = content_key(markdown, media);
     let hash8 = fingerprint(&key) as u32;
@@ -238,7 +242,8 @@ pub(crate) async fn send_rich_turn_guarded(
                      msg {id} (session={session_id} chat={} thread={thread:?} hash8={hash8:08x})",
                     chat_id.0
                 );
-                return Ok(id);
+                // Nothing was sent, so nothing was sacrificed.
+                return Ok((id, Vec::new()));
             }
             Admission::InFlight => {
                 if waited >= WAIT_MAX {
@@ -274,17 +279,17 @@ pub(crate) async fn send_rich_turn_guarded(
     .await;
 
     match sent {
-        Ok(id) if id != 0 => {
+        Ok((id, sacrificed)) if id != 0 => {
             mark_landed(session_id, chat_id.0, thread, &key, id, Instant::now());
-            Ok(id)
+            Ok((id, sacrificed))
         }
         // A send that returned no message id did not land, so it must not
         // suppress its own retry.
-        Ok(id) => {
+        Ok((id, sacrificed)) => {
             if owned {
                 release(session_id, chat_id.0, thread, &key);
             }
-            Ok(id)
+            Ok((id, sacrificed))
         }
         Err(e) => {
             if owned {

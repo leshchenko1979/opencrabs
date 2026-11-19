@@ -235,8 +235,14 @@ fn local_file_regen_nudge_quotes_each_link_and_the_base_dir() {
         "the nudge must name the FILE family: {nudge}"
     );
     assert!(nudge.contains("q3.pdf (file not found)"), "{nudge}");
-    assert!(nudge.contains("notes.txt (file is empty (0 bytes))"), "{nudge}");
-    assert!(nudge.contains("/srv/work"), "must name the base dir: {nudge}");
+    assert!(
+        nudge.contains("notes.txt (file is empty (0 bytes))"),
+        "{nudge}"
+    );
+    assert!(
+        nudge.contains("/srv/work"),
+        "must name the base dir: {nudge}"
+    );
     assert!(nudge.contains("Regen attempt 1/2"), "{nudge}");
 }
 
@@ -287,5 +293,57 @@ fn local_file_delivery_failure_nudge_forbids_re_emitting_the_link() {
     assert!(
         !nudge.contains("image"),
         "the file nudge must not talk about images: {nudge}"
+    );
+}
+
+#[test]
+fn sacrificed_media_nudge_names_each_dropped_attachment_and_never_claims_delivery() {
+    // #897 AC-2. The rich plane dropped an entry from a reply that still
+    // delivered, so the correction must say exactly that. The refusal-worded
+    // nudge (`local_file_delivery_failure_nudge`) is NOT reusable here: its
+    // "the link target is not the problem, so do not re-emit it" describes a
+    // send that failed, while this send succeeded and one attachment was
+    // dropped from it.
+    use crate::brain::agent::service::nudge::sacrificed_media_nudge;
+    use crate::utils::image::{LocalImageFailure, LocalImageFailureReason};
+
+    let failures = vec![
+        LocalImageFailure {
+            raw: "doc0 (passive-recall-precision.md)".to_string(),
+            resolved: None,
+            reason: LocalImageFailureReason::DeliveryFailed,
+        },
+        LocalImageFailure {
+            raw: "img0".to_string(),
+            resolved: None,
+            reason: LocalImageFailureReason::DeliveryFailed,
+        },
+    ];
+    let nudge = sacrificed_media_nudge(&failures);
+    assert!(nudge.starts_with("[System:"), "{nudge}");
+    assert!(nudge.ends_with(']'), "{nudge}");
+    assert!(
+        nudge.contains("dropped these attachments from the reply that was just delivered"),
+        "the nudge must say the entry was DROPPED from a delivered reply: {nudge}"
+    );
+    assert!(
+        nudge.contains("- doc0 (passive-recall-precision.md) (the channel could not deliver it)"),
+        "each dropped file must be named: {nudge}"
+    );
+    assert!(
+        nudge.contains("- img0 (the channel could not deliver it)"),
+        "{nudge}"
+    );
+    assert!(
+        nudge.contains("could not be attached"),
+        "the model must be told to say the attachment could not be attached: {nudge}"
+    );
+    assert!(
+        nudge.contains("Do not claim it was delivered"),
+        "the model must not claim a dropped attachment was delivered: {nudge}"
+    );
+    assert!(
+        !nudge.contains("do not re-emit it"),
+        "the refusal wording is wrong here — the target was fine: {nudge}"
     );
 }

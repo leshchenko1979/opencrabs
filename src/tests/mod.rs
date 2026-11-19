@@ -533,6 +533,7 @@ pub mod telegram_reaction_routing_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_rich_media_kind_test;
 pub mod telegram_rich_media_rejection_test;
+pub mod telegram_rich_sacrifice_test;
 #[cfg(feature = "telegram")]
 pub mod telegram_session_gate_test;
 #[cfg(feature = "telegram")]

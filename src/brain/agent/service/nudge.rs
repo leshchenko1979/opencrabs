@@ -284,6 +284,35 @@ pub(crate) fn local_file_delivery_failure_nudge(
     )
 }
 
+/// Post-delivery correction for media entries the rich plane SACRIFICED
+/// (#897): the retry ladder dropped them from a reply that still delivered, so
+/// the message reached the user WITHOUT them.
+///
+/// Deliberately NOT [`local_file_delivery_failure_nudge`]. That one is worded
+/// for a channel REFUSAL — "the link target is not the problem, so do not
+/// re-emit it" — which reads as if the send itself failed. Here the reply
+/// landed and one entry was dropped from it: the target was fine, the file
+/// exists, and the channel chose to keep the message rather than the
+/// attachment. The honest instruction is that the attachment could not be
+/// included, and the model must not claim it was delivered.
+pub(crate) fn sacrificed_media_nudge(
+    failures: &[crate::utils::image::LocalImageFailure],
+) -> String {
+    let listed = failures
+        .iter()
+        .map(|failure| format!("- {}", failure.describe()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "[System: The channel dropped these attachments from the reply that was just \
+         delivered:\n{listed}\n\
+         The reply reached the user, but WITHOUT these entries — they are not in the message \
+         the user can see, though the files themselves are intact. Tell the user plainly that \
+         each one could not be attached. Do not claim it was delivered, and do not re-emit the \
+         reference as if the attachment had worked.]"
+    )
+}
+
 // ── Shared variation directive (#32) ──
 //
 // Born from the 2026-08-29 incident: a ship call recurred through the

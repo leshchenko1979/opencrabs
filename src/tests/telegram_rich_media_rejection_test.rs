@@ -24,7 +24,7 @@
 //! refusal first and records every request body it is given.
 
 use crate::channels::telegram::rich::api::{
-    is_media_entry_rejection, sacrifice_order, send_rich_with_media_target_id,
+    SacrificedEntry, is_media_entry_rejection, sacrifice_order, send_rich_with_media_target_id,
 };
 use crate::channels::telegram::rich::mermaid::{MediaEntry, MediaKind};
 use std::time::Duration;
@@ -186,7 +186,7 @@ async fn a_refused_body_is_retried_identically_before_anything_is_dropped() {
     ));
 
     let media = vec![document("doc0", "a.pdf"), photo("img0")];
-    let id = send_rich_with_media_target_id(
+    let (id, sacrificed) = send_rich_with_media_target_id(
         &format!("http://127.0.0.1:{port}"),
         "TOKEN",
         4242,
@@ -206,6 +206,12 @@ async fn a_refused_body_is_retried_identically_before_anything_is_dropped() {
         .expect("server task");
     assert_eq!(captured.len(), 2, "one refusal, one retry");
     assert!(id > 0, "the retry's own message id is returned");
+    // #897 AC-3: the hedge path sacrifices nothing, so it must report nothing
+    // — an empty list is what keeps a clean send from firing a false nudge.
+    assert!(
+        sacrificed.is_empty(),
+        "a send that dropped no entry must report no sacrifice: {sacrificed:?}"
+    );
     // Nothing was sacrificed: both entries still ride the second request.
     let second = String::from_utf8_lossy(&captured[1]);
     assert!(
@@ -239,7 +245,7 @@ async fn a_document_rejection_costs_one_document_and_not_the_whole_message() {
         document("doc1", "b.pdf"),
         photo("img0"),
     ];
-    let id = send_rich_with_media_target_id(
+    let (id, sacrificed) = send_rich_with_media_target_id(
         &format!("http://127.0.0.1:{port}"),
         "TOKEN",
         4242,
@@ -259,6 +265,18 @@ async fn a_document_rejection_costs_one_document_and_not_the_whole_message() {
         .expect("server task");
     assert_eq!(captured.len(), 2, "one refusal, one sacrifice");
     assert!(id > 0);
+    // #897 AC-1: the entry the ladder dropped must come back with the id,
+    // named exactly as the retry log names it. Before #897 this list died at
+    // the `tracing::warn!` and the caller saw a plain success.
+    assert_eq!(
+        sacrificed,
+        vec![SacrificedEntry {
+            id: "doc0".to_string(),
+            name: Some("a.pdf".to_string()),
+            kind: MediaKind::Document,
+        }],
+        "the sacrificed document must be reported with its id, name and family"
+    );
 
     let second = String::from_utf8_lossy(&captured[1]);
     assert!(
