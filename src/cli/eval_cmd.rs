@@ -83,7 +83,7 @@ fn run_skills(dataset_path: &str, k: Option<usize>, json: bool) -> Result<()> {
     // C3 — the honest denominator. `session_seen_skills` is the record of what
     // was actually loaded, so a skill with no row has never been used by any
     // session on this host: it occupies prompt space for nothing.
-    let employed = employed_slugs(&slugs);
+    let employed = employed_slugs(&slugs)?;
     let report = score(
         &dataset,
         &index_md,
