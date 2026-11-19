@@ -294,6 +294,24 @@ impl Ranked {
         indices
     }
 
+    /// Whether any section's RAW BM25 score clears `min_score`.
+    ///
+    /// Raw means the length normalization [`Self::find_relevant`] applies is
+    /// left off, so a shared term counts at full weight however long the
+    /// query is. That normalization is what makes a fixed `min_score` mean
+    /// the same thing for a three-word question and a forty-word one — and
+    /// also what makes a forty-word message touching eight topics score
+    /// every entry it genuinely names at a fraction of a focused question's
+    /// strength. Callers that must not go silent on such messages use this
+    /// door beside the normalized one.
+    pub fn any_clears_raw(&self, query: &str, min_score: f64) -> bool {
+        let terms = query_terms(query);
+        if terms.is_empty() {
+            return false;
+        }
+        (0..self.sections.len()).any(|i| self.score(&terms, i) >= min_score)
+    }
+
     /// Sections whose length-normalized BM25 score clears `min_score`, best
     /// first, bounded by section count and total characters.
     ///

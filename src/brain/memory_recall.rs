@@ -46,6 +46,23 @@ pub(crate) const RECALL_MAX_CHARS: usize = 1200;
 /// change to the ranker broke the gate by arithmetic rather than by defect.
 pub(crate) const RECALL_MIN_SCORE: f64 = 0.38;
 
+/// Raw (length-unnormalized) BM25 score an entry must reach before a
+/// multi-topic message may summon the skill shortlist through the raw door.
+///
+/// [`RECALL_MIN_SCORE`] is divided by query length — right for ranking, and
+/// wrong as the only silence gate: a message naming eight topics scores
+/// every entry it genuinely matches at a fraction of what a focused message
+/// scores, so matching MORE skills reads as matching NONE. This door drops
+/// the normalization. With IDF normalized to at most 1.0, one shared term
+/// scores 1.0 raw at typical entry length (2.5 / (1 + K1), K1 = 1.5) and
+/// stays under ~1.3 short of pathological length ratios, so 1.5 sits above
+/// the single-coincidence shape and at or below where two distinct shared
+/// terms land (~2.0). Pinned by the battery:
+/// `the_shortlist_never_exceeds_the_cap` (the eight-topic shape) must stay
+/// loud, and `an_unmatched_message_produces_no_shortlist` (zero overlap)
+/// must stay silent.
+pub(crate) const SKILL_RECALL_RAW_FLOOR: f64 = 1.5;
+
 /// Recall relevant to `user_message`, formatted for context, or `None`.
 ///
 /// Pure: takes the file content, so the decision is testable without a home
@@ -417,9 +434,16 @@ pub fn recall_skills_from(index_md: &str, user_message: &str) -> Option<String> 
     }
     let ranked = Ranked::build(index_md);
 
-    // Silence unless something genuinely matches.
+    // Silence unless something genuinely matches. Two doors: the shipped
+    // length-normalized floor for focused messages, and — because that
+    // normalization makes a message naming many topics score each entry it
+    // genuinely matches at a fraction of a focused message's strength — a
+    // raw unnormalized floor ([`SKILL_RECALL_RAW_FLOOR`]) for multi-topic
+    // ones. Matching more skills must never read as matching none.
     let any_clears = ranked.find_relevant(user_message, 1, usize::MAX, RECALL_MIN_SCORE);
-    if any_clears.sections.is_empty() {
+    if any_clears.sections.is_empty()
+        && !ranked.any_clears_raw(user_message, SKILL_RECALL_RAW_FLOOR)
+    {
         return None;
     }
 
