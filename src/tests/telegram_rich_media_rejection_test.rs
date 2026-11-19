@@ -25,6 +25,7 @@
 
 use crate::channels::telegram::rich::api::{
     SacrificedEntry, is_media_entry_rejection, sacrifice_order, send_rich_with_media_target_id,
+    unactionable_family,
 };
 use crate::channels::telegram::rich::mermaid::{MediaEntry, MediaKind};
 use std::time::Duration;
@@ -294,5 +295,109 @@ async fn a_document_rejection_costs_one_document_and_not_the_whole_message() {
     assert!(
         second.contains("![b.pdf](tg://document?id=doc1)"),
         "the surviving document's own reference must be left byte-identical"
+    );
+}
+
+// ── #896: a family the message does not carry is unactionable ────────────
+
+/// The gate itself: the named family must be PRESENT for a sacrifice to test it.
+///
+/// Measured 2026-11-18T20:41:26.873754Z, chat `-1003936827469` thread `36841`: a
+/// document-only reply was refused `RICH_MESSAGE_PHOTO_INVALID`, the ladder
+/// sacrificed `doc0 (passive-recall-precision.md)`, and the retry landed
+/// `msg=100166` at `len=2828` against the refused `len=2829` — one byte lighter,
+/// i.e. the document reference was the only thing removed. The reader got a dead
+/// `📄` where the attachment should have been, and Telegram had never named a
+/// document at all.
+#[test]
+fn a_family_the_message_does_not_carry_is_unactionable() {
+    let docs_only = vec![document("doc0", "a.pdf"), document("doc1", "b.pdf")];
+
+    assert_eq!(
+        unactionable_family(&docs_only, "Bad Request: RICH_MESSAGE_PHOTO_INVALID"),
+        Some(MediaKind::Photo),
+        "a PHOTO_ refusal on a message with no photo entry names a family that is \
+         not here — there is nothing to sacrifice and nothing to learn"
+    );
+    assert_eq!(
+        sacrifice_order(&docs_only, "Bad Request: RICH_MESSAGE_PHOTO_INVALID"),
+        Vec::<usize>::new(),
+        "an unactionable family must yield an EMPTY order, not a list of innocent \
+         documents to burn"
+    );
+
+    // The gate must not fire when the named family IS present — that is the
+    // #826 repair, and narrowing must not undo it.
+    let with_photo = vec![document("doc0", "a.pdf"), photo("img0")];
+    assert_eq!(
+        unactionable_family(&with_photo, "Bad Request: RICH_MESSAGE_PHOTO_INVALID"),
+        None,
+        "a photo refusal on a message that HAS a photo is actionable"
+    );
+    assert_eq!(
+        sacrifice_order(&with_photo, "Bad Request: RICH_MESSAGE_PHOTO_INVALID").first(),
+        Some(&1),
+        "and the photo must still be sacrificed before the document"
+    );
+}
+
+/// AC-1 + AC-2 (#896): the measured scenario must sacrifice ZERO documents and
+/// must not produce a lighter-but-"successful" retry.
+///
+/// One request is scripted — the refusal. If the ladder sacrifices anything it
+/// makes a second request; if it falls through to the HTML dialect the fallback
+/// also makes a second request, so the discriminator is not the count but the
+/// BODY: a sacrifice retry re-sends the rich markdown with `attach://` parts
+/// (minus the burned entry), while the fallback carries no media array at all.
+#[tokio::test]
+async fn a_photo_refusal_on_a_document_only_reply_sacrifices_nothing() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(serve_script(
+        listener,
+        vec![(400, "Bad Request: RICH_MESSAGE_PHOTO_INVALID"), (200, "")],
+    ));
+
+    let media = vec![document("doc0", "a.pdf"), document("doc1", "b.pdf")];
+    let (id, sacrificed) = send_rich_with_media_target_id(
+        &format!("http://127.0.0.1:{port}"),
+        "TOKEN",
+        4242,
+        None,
+        None,
+        "![a.pdf](tg://document?id=doc0) ![b.pdf](tg://document?id=doc1)",
+        &media,
+        "test",
+        "-",
+    )
+    .await
+    .expect("the reply must still land — a refusal it cannot repair falls back, it does not fail");
+
+    let captured = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the scripted server must see every request")
+        .expect("server task");
+
+    assert!(id > 0, "the reply still landed");
+    assert_eq!(
+        sacrificed,
+        Vec::<SacrificedEntry>::new(),
+        "AC-1: a PHOTO_ refusal with no photo entry must sacrifice ZERO documents"
+    );
+    assert!(
+        captured.len() >= 2,
+        "the refusal and the fallback must both be visible: {}",
+        captured.len()
+    );
+    let second = String::from_utf8_lossy(&captured[1]);
+    assert!(
+        !second.contains("attach://"),
+        "AC-2: the second request must be the HTML fallback, never a retry that \
+         drops only a document reference — that retry is the len N → len N-1 shape: {second}"
+    );
+    assert!(
+        !second.to_ascii_lowercase().contains("\"media\""),
+        "AC-2: the fallback carries no media array at all — nothing was sacrificed, \
+         so no rich retry with a burned entry may exist: {second}"
     );
 }
