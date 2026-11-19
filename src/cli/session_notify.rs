@@ -74,13 +74,22 @@ pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// two seconds and journalled `cannot reach … (exit 4)` — 69 of them on that
 /// date alone, while nothing was wrong with the network.
 ///
-/// So the bound is now a BUDGET in wall-clock time rather than a count. It is
-/// deliberately larger than a boot window, because "the daemon is starting" is
-/// the single most common cause of a refused connection on this box.
+/// So the bound is now a BUDGET in wall-clock time rather than a count, and it
+/// is sized against the MEASURED window rather than against a healthy daemon:
+/// the 11-15 boot spent 279.6 s before the bind, and the 11-13→11-15 population
+/// ranged 167–767 s (median ~320 s). 300 s clears the low end of that range and
+/// the single 279.6 s measurement with margin, which is what "outlive a boot
+/// window" can honestly mean from the client side.
+///
+/// It deliberately does NOT try to cover the extreme of that range: a boot
+/// running six minutes late is a STARTUP defect (#858 — two synchronous sweeps
+/// of 28k status files on a saturated disk), and the remedy for it is to make
+/// startup fast, not to make every caller wait ten minutes. The cause in the
+/// journal is what tells the operator which of the two they are looking at.
 ///
 /// Override with `OPENCRABS_NOTIFY_RETRY_BUDGET_SECS` (a caller that would
 /// rather fail fast sets it to `0`).
-pub(crate) const DEFAULT_RETRY_BUDGET: Duration = Duration::from_secs(120);
+pub(crate) const DEFAULT_RETRY_BUDGET: Duration = Duration::from_secs(300);
 
 /// First retry delay; doubles each attempt up to [`BACKOFF_CAP`].
 /// `pub(crate)` so the schedule's shape is assertable in tests.

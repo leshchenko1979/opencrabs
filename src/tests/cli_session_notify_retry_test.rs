@@ -240,12 +240,20 @@ fn the_backoff_grows_is_capped_and_the_budget_outlives_a_boot() {
             "attempt {attempt} escaped the cap"
         );
     }
-    // The regression guard: #858 measured a 279.6 s boot with the gateway's
-    // bind at the very end, so #199's 3-attempt / 1.5 s budget is provably too
-    // small to outlive a boot. The default must be well clear of that window.
+    // The regression guard, pinned to the MEASUREMENT rather than to a round
+    // number: #858 measured a 279.6 s boot with the gateway's bind at the very
+    // end, so #199's 3-attempt / 1.5 s budget is provably too small to outlive
+    // a boot. A budget that only clears 60 s would satisfy the prose and fail
+    // the criterion, so the assertion clears the measured window itself.
     assert!(
-        DEFAULT_RETRY_BUDGET > Duration::from_secs(60),
-        "the budget must outlive a boot window, not a healthy daemon"
+        DEFAULT_RETRY_BUDGET > Duration::from_millis(279_600),
+        "the budget must outlive the measured 279.6 s boot window (#858), \
+         not merely exceed a healthy daemon's response time"
+    );
+    // Bounded, not unbounded: a caller must never be able to wait forever.
+    assert!(
+        DEFAULT_RETRY_BUDGET <= Duration::from_secs(900),
+        "the budget stays bounded — a quarter hour is the ceiling a caller can be asked to wait"
     );
     assert!(
         REQUEST_TIMEOUT < DEFAULT_RETRY_BUDGET,
