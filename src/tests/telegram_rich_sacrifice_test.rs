@@ -12,6 +12,14 @@
 //! (`sacrificed_failures`). The transport half — that the retry ladder RETURNS
 //! the dropped entries — is pinned against a scripted server in
 //! `telegram_rich_media_rejection_test.rs`.
+//!
+//! The REPORTING half is `delivery::report_rich_plane_sacrifices`, and both
+//! bubble legs call it. It is deliberately not pinned to a leg: the first
+//! version of this fix had the final leg own the report, on the premise that an
+//! intermediate is always superseded. Measured false on 2026-11-19T18:33:49 —
+//! the intermediate landed as msg 101255 and `suppressing final response`
+//! followed 12 ms later, so the sacrifice was real, delivered, and never
+//! reported. Anything that re-introduces a single-leg owner re-opens #897.
 
 use crate::channels::telegram::delivery::{sacrificed_failure, sacrificed_failures};
 use crate::channels::telegram::rich::SacrificedEntry;

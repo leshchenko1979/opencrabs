@@ -75,6 +75,7 @@ pub(crate) fn build_last_intermediate_with_footer(
 /// takes the `None` arm, falls back to HTML, and the picture is lost a second
 /// time.
 pub(crate) async fn try_send_intermediate_rich(
+    tg: &super::state::TelegramState,
     session_id: Uuid,
     bot: &Bot,
     chat_id: ChatId,
@@ -95,9 +96,17 @@ pub(crate) async fn try_send_intermediate_rich(
     )
     .await
     {
-        // #897: an intermediate is superseded by the final reply, so a
-        // sacrifice here is not reported — the final leg owns that duty.
-        Ok((id, _sacrificed)) => Some(MessageId(id)),
+        // #897: an intermediate CAN be the bubble the user keeps. When dedup
+        // suppresses the final, this is the delivered message and the only leg
+        // that ever held the sacrificed entries (measured 2026-11-19T18:33:49:
+        // msg 101255 landed here and `suppressing final response` followed
+        // 12 ms later). Reporting it here is what makes the notice fire on the
+        // shape a sacrifice actually produces; the shared re-entry latch keeps
+        // a double report to a single correction turn.
+        Ok((id, sacrificed)) => {
+            super::delivery::report_rich_plane_sacrifices(tg, session_id, &sacrificed);
+            Some(MessageId(id))
+        }
         Err(e) => {
             tracing::warn!("Telegram: intermediate rich send failed, using HTML: {e}");
             None
@@ -755,7 +764,7 @@ pub(crate) async fn deliver_intermediate_message(
     let body = crate::utils::append_file_failure_notice(&body, &file_failures);
 
     if let Some(id) =
-        try_send_intermediate_rich(session_id, bot, chat, thread_id, &body, &media).await
+        try_send_intermediate_rich(tg, session_id, bot, chat, thread_id, &body, &media).await
     {
         // The bubble is non-sticky burial evidence (#1150): the flow block must
         // restick below its own output on the next append.

@@ -129,6 +129,81 @@ pub(crate) fn sacrificed_failures(
     (images, files, videos)
 }
 
+/// Report the rich plane's sacrificed entries to the model (#897).
+///
+/// A sacrifice keeps the rest of the reply on the rich plane and the send still
+/// reports `Ok`, so no other leg learns an attachment was dropped. This is the
+/// single home of that report, and BOTH bubble legs call it: the final response
+/// and the intermediate one.
+///
+/// The intermediate is not a lesser caller. When dedup suppresses the final,
+/// the intermediate IS the message the user keeps, and it is the only leg that
+/// ever held the fact (measured 2026-11-19T18:33:49: the intermediate landed as
+/// msg 101255 and `suppressing final response` followed 12 ms later, so a report
+/// owned by the final leg never fired). Owning the duty in one leg only is how
+/// #897 shipped mute.
+///
+/// Returns the entries split per kind so the caller folds them into its own
+/// guard-line vectors. One synthetic correction per turn: the image re-entry
+/// latch is shared with the post-delivery image leg, so whichever leg spends it
+/// owns the turn's single correction — a second report is notice-only, never a
+/// second turn.
+pub(crate) fn report_rich_plane_sacrifices(
+    tg: &TelegramState,
+    session_id: Uuid,
+    sacrificed: &[super::rich::SacrificedEntry],
+) -> (
+    Vec<LocalImageFailure>,
+    Vec<LocalImageFailure>,
+    Vec<LocalImageFailure>,
+) {
+    let (images, files, videos) = sacrificed_failures(sacrificed);
+    let records: Vec<LocalImageFailure> = images
+        .iter()
+        .chain(files.iter())
+        .chain(videos.iter())
+        .cloned()
+        .collect();
+    if !records.is_empty() {
+        tracing::warn!(
+            "Telegram: rich plane sacrificed {} attachment(s) from a reply that \
+             still delivered: {}",
+            records.len(),
+            sacrificed
+                .iter()
+                .map(super::rich::SacrificedEntry::label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if tg.try_spend_image_reentry(session_id) {
+            let nudge = crate::brain::agent::service::nudge::sacrificed_media_nudge(&records);
+            tracing::info!(
+                "Telegram: post-delivery sacrifice re-entry queued for session \
+                 {session_id} ({} sacrificed entr{})",
+                records.len(),
+                if records.len() == 1 { "y" } else { "ies" }
+            );
+            tg.enqueue_detached_result(
+                session_id,
+                crate::brain::agent::QueuedUserMessage::system(
+                    nudge,
+                    format!(
+                        "📎 {} attachment(s) were dropped from the reply — asking the \
+                         model to report them",
+                        records.len()
+                    ),
+                ),
+            );
+        } else {
+            tracing::info!(
+                "Telegram: post-delivery sacrifice re-entry latch already spent for \
+                 session {session_id}; notice only"
+            );
+        }
+    }
+    (images, files, videos)
+}
+
 /// Drain all pending intermediate texts from the streaming state's display
 /// queue and send them immediately. Called by the follow-up-question callback
 /// BEFORE posting the question message, so the user sees contextual text
@@ -1824,65 +1899,22 @@ pub(crate) async fn deliver_final_response(
             // re-emit it" describes a REFUSAL, while here the reply landed
             // and one entry was dropped from it.
             //
+            // The report itself lives in `report_rich_plane_sacrifices`,
+            // because this leg is NOT the only one that can own the fact: an
+            // intermediate bubble can be the message the user keeps when dedup
+            // suppresses this final one, and #897 shipped mute for exactly
+            // that shape. Both legs call the helper.
+            //
             // This leg runs FIRST because the image and file legs below share
             // ONE re-entry latch: whichever leg spends it owns the turn's
             // single synthetic correction, and a sacrifice is the case this
             // issue measured. Their guard lines still fire — the entries are
             // in their vectors — so the user is told either way.
             let (sacrificed_images, sacrificed_files, sacrificed_videos) =
-                sacrificed_failures(&sacrificed);
-            let sacrificed_records: Vec<LocalImageFailure> = sacrificed_images
-                .iter()
-                .chain(sacrificed_files.iter())
-                .chain(sacrificed_videos.iter())
-                .cloned()
-                .collect();
+                report_rich_plane_sacrifices(telegram_state, session_id, &sacrificed);
             image_failures.extend(sacrificed_images);
             file_failures.extend(sacrificed_files);
             video_failures.extend(sacrificed_videos);
-            if !sacrificed_records.is_empty() {
-                tracing::warn!(
-                    "Telegram: rich plane sacrificed {} attachment(s) from a reply that \
-                     still delivered: {}",
-                    sacrificed_records.len(),
-                    sacrificed
-                        .iter()
-                        .map(super::rich::SacrificedEntry::label)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                if telegram_state.try_spend_image_reentry(session_id) {
-                    let nudge = crate::brain::agent::service::nudge::sacrificed_media_nudge(
-                        &sacrificed_records,
-                    );
-                    tracing::info!(
-                        "Telegram: post-delivery sacrifice re-entry queued for session \
-                         {session_id} ({} sacrificed entr{})",
-                        sacrificed_records.len(),
-                        if sacrificed_records.len() == 1 {
-                            "y"
-                        } else {
-                            "ies"
-                        }
-                    );
-                    telegram_state.enqueue_detached_result(
-                        session_id,
-                        crate::brain::agent::QueuedUserMessage::system(
-                            nudge,
-                            format!(
-                                "📎 {} attachment(s) were dropped from the reply — asking the \
-                                 model to report them",
-                                sacrificed_records.len()
-                            ),
-                        ),
-                    );
-                } else {
-                    tracing::info!(
-                        "Telegram: post-delivery sacrifice re-entry latch already spent for \
-                         session {session_id}; notice only"
-                    );
-                }
-            }
 
             // ── Post-delivery image re-entry (#286) ──────────────────────────
             // Extraction can succeed and the CHANNEL still refuse the image:
