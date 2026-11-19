@@ -3,7 +3,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use super::{commands, cron, eval_cmd, migrate, ui};
+use super::{commands, cron, migrate, ui};
+#[cfg(any(test, feature = "eval"))]
+use super::eval_cmd;
 use crate::config::Config;
 
 /// OpenCrabs - High-Performance Terminal AI Orchestration Agent
@@ -70,6 +72,7 @@ pub enum Commands {
     Status,
 
     /// Run a recall benchmark track against a labeled dataset (#890)
+    #[cfg(any(test, feature = "eval"))]
     Eval {
         #[command(subcommand)]
         command: EvalCommands,
@@ -352,6 +355,7 @@ pub enum CronCommands {
     },
 }
 
+#[cfg(any(test, feature = "eval"))]
 #[derive(Subcommand, Debug)]
 pub enum EvalCommands {
     /// Score retrieval against a labeled recall dataset (fixture leg)
@@ -677,6 +681,7 @@ pub async fn run() -> Result<()> {
             ui::cmd_chat(&config, None, true).await
         }
         Some(Commands::Status) => commands::cmd_status(&config).await,
+        #[cfg(any(test, feature = "eval"))]
         Some(Commands::Eval { command }) => eval_cmd::cmd_eval(command),
         Some(Commands::Doctor { fix }) => commands::cmd_doctor(&config, fix).await,
         Some(Commands::Init { force }) => commands::cmd_init(&config, force).await,
