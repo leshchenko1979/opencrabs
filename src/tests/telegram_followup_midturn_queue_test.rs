@@ -158,10 +158,12 @@ fn midturn_burst_drains_in_send_order_not_ingest_order() {
 }
 
 #[test]
-fn midturn_burst_is_send_ordered_for_one_at_a_time_drains_too() {
-    // The between-rounds drain takes ONE item per round (`drain_reaction`), so
-    // ordering has to hold there as well. It does because the queue is kept
-    // sorted on INSERT, not sorted on drain.
+fn midturn_burst_is_send_ordered_through_the_between_rounds_drain() {
+    // The between-rounds drain (`drain_reaction`) takes the WHOLE burst and
+    // joins it into one message (#885: one wrapper around the burst, not one
+    // per message). So the ordering guarantee has to survive the JOIN — the
+    // joined text must read in send order, which is what this pins. It holds
+    // because the queue is kept sorted on INSERT, not sorted on drain.
     let state = Arc::new(TelegramState::new());
     let sid = Uuid::new_v4();
 
@@ -170,11 +172,8 @@ fn midturn_burst_is_send_ordered_for_one_at_a_time_drains_too() {
 
     assert_eq!(
         state.drain_reaction(sid).map(|m| m.display_text),
-        Some("first".to_string())
-    );
-    assert_eq!(
-        state.drain_reaction(sid).map(|m| m.display_text),
-        Some("second".to_string())
+        Some("first\nsecond".to_string()),
+        "the between-rounds drain must join the burst in send order"
     );
     assert!(state.drain_reaction(sid).is_none());
 }
