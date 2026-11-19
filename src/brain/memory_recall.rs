@@ -333,6 +333,13 @@ pub async fn recall_for_session(
 
     let mut parts: Vec<String> = Vec::new();
 
+    // 0. Skill selection (#901) — "which skill applies" is the most actionable
+    //    hint of the three, so it leads. The full index is still in the system
+    //    prompt; this only ranks it against the message.
+    if let Some(shortlist) = recall_skills(user_message) {
+        parts.push(shortlist);
+    }
+
     // 1. MEMORY.md
     if let Some(mem) = recall_for(user_message).await {
         parts.push(mem);
@@ -356,4 +363,119 @@ pub async fn recall_for_session(
     } else {
         Some(parts.join("\n\n"))
     }
+}
+
+// ── Skill SELECTION (#901) ────────────────────────────────────────────────
+//
+// `recall_from_active_skills` above ranks sections of skills that are ALREADY
+// active. Nothing selected which skill to activate: the system prompt emits
+// every index entry and leaves the choice to the model, which is why the
+// scorecard's C1@5 read 0.371 while no shipped code path consumed it.
+//
+// This ranks the SAME index the scorecard scores against the user's message and
+// rides the best few along with it. The full index stays in the system prompt:
+// it is stable there, so it stays cacheable, and a skill that misses the top
+// few remains reachable in that block. Only this HINT is volatile.
+
+/// At most this many skills ride along as a ranked shortlist.
+pub(crate) const SKILL_RECALL_MAX: usize = 5;
+
+/// How long the rendered index is reused before the skill files are re-read.
+///
+/// `load_all_skills()` parses every `SKILL.md`. The prompt builder already pays
+/// that once per turn; this path must not double it. A minute is short enough
+/// that a skill added at runtime still shows up promptly.
+const SKILLS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+struct CachedSkills {
+    at: std::time::Instant,
+    index_md: String,
+}
+
+static SKILLS_CACHE: std::sync::RwLock<Option<CachedSkills>> = std::sync::RwLock::new(None);
+
+/// Rank the skill index against `user_message` and render the shortlist.
+///
+/// Pure: takes the index markdown `index_markdown` produces, so the ranking is
+/// testable without a brain directory, and the corpus ranked here is the same
+/// one the Track C scorecard scores rather than a second rendering that can
+/// drift from it.
+///
+/// Two decisions, kept separate on purpose:
+///
+/// 1. **ORDER** — the whole index at floor `0.0`, exactly as the scorecard's
+///    C1@5 orders it. If this path used the shipped floor to build the list, a
+///    gold skill ranked third could vanish because nothing cleared the floor,
+///    and C1@5 would then be a number about the harness rather than about the
+///    product.
+/// 2. **SILENCE** — whether to say anything at all, decided by the shipped
+///    [`RECALL_MIN_SCORE`]. A shortlist invented from a weak match is noise paid
+///    on every turn, which is the same trade the memory recall makes.
+pub fn recall_skills_from(index_md: &str, user_message: &str) -> Option<String> {
+    if !worth_reading_for(user_message) {
+        return None;
+    }
+    let ranked = Ranked::build(index_md);
+
+    // Silence unless something genuinely matches.
+    let any_clears = ranked.find_relevant(user_message, 1, usize::MAX, RECALL_MIN_SCORE);
+    if any_clears.sections.is_empty() {
+        return None;
+    }
+
+    // `usize::MAX` chars: the shortlist is about ORDER, and truncating it by a
+    // character budget would drop entries by length rather than by score.
+    let ordered = ranked.find_relevant(user_message, SKILL_RECALL_MAX, usize::MAX, 0.0);
+    let names: Vec<String> = ordered
+        .sections
+        .iter()
+        .map(|s| s.heading.trim().trim_start_matches('#').trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    let listed = names
+        .iter()
+        .map(|n| format!("/{n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "─── skills matching this task, best first ───\n{listed}\n\
+         [Ranked against your message; the full index is in the system prompt.]"
+    ))
+}
+
+/// The live skill index, re-read at most once per [`SKILLS_CACHE_TTL`].
+fn skill_index_markdown() -> String {
+    if let Ok(cache) = SKILLS_CACHE.read()
+        && let Some(c) = cache.as_ref()
+        && c.at.elapsed() < SKILLS_CACHE_TTL
+    {
+        return c.index_md.clone();
+    }
+
+    let skills = crate::brain::skills::load_all_skills();
+    let index_md = crate::eval::skills_track::index_markdown(
+        skills
+            .iter()
+            .map(|s| (s.name.as_str(), s.description.as_str())),
+    );
+
+    if let Ok(mut cache) = SKILLS_CACHE.write() {
+        *cache = Some(CachedSkills {
+            at: std::time::Instant::now(),
+            index_md: index_md.clone(),
+        });
+    }
+    index_md
+}
+
+/// Load the live skill index and rank it against `user_message` (#901).
+pub fn recall_skills(user_message: &str) -> Option<String> {
+    // Cheap gate first: no query terms means no disk read at all.
+    if !worth_reading_for(user_message) {
+        return None;
+    }
+    recall_skills_from(&skill_index_markdown(), user_message)
 }
