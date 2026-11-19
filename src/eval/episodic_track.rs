@@ -247,9 +247,11 @@ pub fn search_slice(conn: &Connection, since: i64, query: &str, k: usize) -> Res
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
     // Stable sort by hit count descending keeps SQL recency order inside ties,
-    // exactly as the shipped re-rank does.
+    // exactly as the shipped re-rank does. `Reverse` rather than a comparator
+    // closure: clippy's `unnecessary_sort_by` is a hard error under `-D warnings`,
+    // and the key form is also the one that keeps the sort stable by construction.
     let mut ranked = pool;
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|a| std::cmp::Reverse(a.1));
     Ok(ranked.into_iter().take(k).map(|(r, _)| r).collect())
 }
 
