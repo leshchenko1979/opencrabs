@@ -1463,6 +1463,16 @@ pub(crate) const KNOWN_TOOL_NAMES: &[&str] = &[
     "resume_agent",
     "cowork_connect",
     "provider_vision",
+    // #892: `suggest_options` was missing, so a leaked call naming it was
+    // invisible to every name-anchored pass (element-style `<function><name>`,
+    // corrupted separator, Claude-style `<suggest_options>…</suggest_options>`).
+    // It does NOT double-handle the settle-point recovery in `utils::directives`:
+    // the `<<suggest_options>>` pair and `<<suggest_options:…>>` marker grammars
+    // carry no `</suggest_options>` closer and no `<param>value</param>` body,
+    // so `extract_claude_style_tool_calls` matches nothing and leaves them to
+    // `extract_leaked_suggestions`. Verified by
+    // `provider_text_leak_pass_leaves_marker_grammars_to_the_settle_point`.
+    "suggest_options",
 ];
 
 /// Extract `<TOOLNAME><PARAM>value</PARAM>…</TOOLNAME>` invocations. The
