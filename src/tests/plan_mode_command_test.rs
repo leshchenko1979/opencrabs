@@ -6,7 +6,7 @@
 
 use crate::config::profile::{home_for_profile, with_profile_home_async};
 use crate::db::Database;
-use crate::services::ServiceContext;
+use crate::services::{ServiceContext, SessionService};
 use crate::tui::plan::{ApprovalSource, PlanDocument, PlanStatus, PlanTask, TaskType};
 use crate::utils::plan_files::{
     self, PlanModeState, create_design_md, plan_md_path, plan_mode_state, save_plan,
@@ -329,7 +329,15 @@ async fn discard_records_itself_in_history() {
         let db = Database::connect_in_memory().await.unwrap();
         db.run_migrations().await.unwrap();
         let ctx = ServiceContext::new(db.pool().clone());
-        let sid = Uuid::new_v4();
+        // #889: the row lands in `messages`, whose `session_id` carries a FK to
+        // `sessions`. A real discard always has a session behind it, so the
+        // fixture creates one rather than inventing a bare uuid — otherwise the
+        // insert fails and the test would be asserting against a broken write.
+        let sid = SessionService::new(ctx.clone())
+            .create_session(Some("#889 discard history".to_string()))
+            .await
+            .expect("session row created")
+            .id;
         let msgs = crate::services::MessageService::new(ctx.clone());
 
         // NoPlan: nothing changed, so nothing may be written.
