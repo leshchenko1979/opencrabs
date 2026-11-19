@@ -68,15 +68,25 @@ fn run_recall(
         bail!("eval recall: dataset {dataset_path} has no cases");
     }
 
-    // The corpus defaults to the dataset's sibling `memory_corpus.md` so the
-    // committed fixture pair runs with one flag, and the pairing cannot drift.
+    // The corpus defaults to the dataset's sibling so the committed fixture
+    // pair runs with one flag, and the pairing cannot drift. A dataset named
+    // `<stem>_recall.json` prefers `<stem>_corpus.md` (#890 step 3: the Track B
+    // set carries its own 292-section corpus); anything else keeps the original
+    // `memory_corpus.md` sibling, so the v1 fixture pair is unchanged.
     let corpus_path = corpus_path
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            std::path::Path::new(dataset_path)
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."))
-                .join("memory_corpus.md")
+            let dataset = std::path::Path::new(dataset_path);
+            let dir = dataset.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let stem = dataset
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            let named = stem
+                .strip_suffix("_recall")
+                .map(|base| dir.join(format!("{base}_corpus.md")))
+                .filter(|p| p.is_file());
+            named.unwrap_or_else(|| dir.join("memory_corpus.md"))
         });
     let corpus_raw = std::fs::read_to_string(&corpus_path)
         .with_context(|| format!("eval recall: cannot read corpus {}", corpus_path.display()))?;

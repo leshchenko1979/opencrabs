@@ -8,6 +8,7 @@
 pub mod baseline;
 pub mod before_after;
 pub mod compaction;
+pub mod inflation;
 pub mod live;
 pub mod manifest;
 pub mod panel;

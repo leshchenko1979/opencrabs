@@ -1,0 +1,425 @@
+{
+  "name": "track-b-reference-docs-v1",
+  "cases": [
+    {
+      "query": "how do I add a brand new model vendor so the agent can talk to it",
+      "relevant": [
+        "reference/ADDING_NEW_PROVIDERS \u00b7 Overview"
+      ]
+    },
+    {
+      "query": "what must a new provider implementation supply before it is accepted",
+      "relevant": [
+        "reference/ADDING_NEW_PROVIDERS \u00b7 Provider Requirements (Mandatory)"
+      ]
+    },
+    {
+      "query": "where does the api key for a custom endpoint go in the settings file",
+      "relevant": [
+        "reference/ADDING_NEW_PROVIDERS \u00b7 Config.toml Examples"
+      ]
+    },
+    {
+      "query": "a provider integration half works, what usually goes wrong",
+      "relevant": [
+        "reference/ADDING_NEW_PROVIDERS \u00b7 Troubleshooting"
+      ]
+    },
+    {
+      "query": "how do I prove a new backend actually works before merging it",
+      "relevant": [
+        "reference/ADDING_NEW_PROVIDERS \u00b7 Testing"
+      ]
+    },
+    {
+      "query": "is there a checklist for wiring another llm backend",
+      "relevant": [
+        "reference/ADDING_NEW_PROVIDERS \u00b7 Checklist"
+      ]
+    },
+    {
+      "query": "how does the agent recover from its own mistakes without being told",
+      "relevant": [
+        "reference/ARCHITECTURE_2026_04_14 \u00b7 2. Self Healing Engine"
+      ]
+    },
+    {
+      "query": "how does the assistant improve its own instructions over time",
+      "relevant": [
+        "reference/ARCHITECTURE_2026_04_14 \u00b7 3. RSI Recursive Self Improvement"
+      ]
+    },
+    {
+      "query": "what happens when the main backend fails in the middle of a request",
+      "relevant": [
+        "reference/ARCHITECTURE_2026_04_14 \u00b7 4. Provider System and Fallback Chain"
+      ]
+    },
+    {
+      "query": "how are background helper agents started and coordinated",
+      "relevant": [
+        "reference/ARCHITECTURE_2026_04_14 \u00b7 7. Sub Agents and Teams"
+      ]
+    },
+    {
+      "query": "how do two separate opencrabs instances talk to each other",
+      "relevant": [
+        "reference/ARCHITECTURE_2026_04_14 \u00b7 10. A2A Protocol"
+      ]
+    },
+    {
+      "query": "where does conversation history actually get stored on disk",
+      "relevant": [
+        "reference/ARCHITECTURE_2026_04_14 \u00b7 8. Data Layer"
+      ]
+    },
+    {
+      "query": "how does the loop decide it has called enough tools and should answer",
+      "relevant": [
+        "reference/ARCHITECTURE_2026_04_14 \u00b7 6. Tool Loop"
+      ]
+    },
+    {
+      "query": "which credentials rotate on their own and how",
+      "relevant": [
+        "reference/ARCHITECTURE_2026_04_14 \u00b7 5. Qwen OAuth Rotation"
+      ]
+    },
+    {
+      "query": "what is the official vocabulary for the brain concepts",
+      "relevant": [
+        "reference/BRAIN_CONSTITUTION \u00b7 1. Glossary"
+      ]
+    },
+    {
+      "query": "which files count as directives and where does each one come from",
+      "relevant": [
+        "reference/BRAIN_CONSTITUTION \u00b7 2. Directive Sources \u2014 AS IS"
+      ]
+    },
+    {
+      "query": "what is known to be broken in the directive system today",
+      "relevant": [
+        "reference/BRAIN_CONSTITUTION \u00b7 4. Known Gaps (AS IS)"
+      ]
+    },
+    {
+      "query": "how are brain files maintained and reviewed over time",
+      "relevant": [
+        "reference/BRAIN_CONSTITUTION \u00b7 6. Maintenance Process"
+      ]
+    },
+    {
+      "query": "how does the decision cache avoid asking me the same question twice",
+      "relevant": [
+        "reference/DECISIONS \u00b7 How it works"
+      ]
+    },
+    {
+      "query": "what makes a cached decision stop being valid",
+      "relevant": [
+        "reference/DECISIONS \u00b7 Release-day evaluation (the kill rule)"
+      ]
+    },
+    {
+      "query": "where are cached decisions persisted",
+      "relevant": [
+        "reference/DECISIONS \u00b7 Storage"
+      ]
+    },
+    {
+      "query": "what does the decisions feature cost in tokens",
+      "relevant": [
+        "reference/DECISIONS \u00b7 Accounting"
+      ]
+    },
+    {
+      "query": "how do I run many agents in parallel over a list of items",
+      "relevant": [
+        "reference/DYNAMIC_WORKFLOWS \u00b7 Recipe 1: Fan-out map (N parallel agents)"
+      ]
+    },
+    {
+      "query": "can I force an agent to return json in a fixed shape",
+      "relevant": [
+        "reference/DYNAMIC_WORKFLOWS \u00b7 Recipe 2: Structured outputs (\"schema enforcement\")"
+      ]
+    },
+    {
+      "query": "how do I resume a long workflow that died halfway through",
+      "relevant": [
+        "reference/DYNAMIC_WORKFLOWS \u00b7 Recipe 4: Checkpoint and resume"
+      ]
+    },
+    {
+      "query": "how do I stop two agents from editing the same repo at once",
+      "relevant": [
+        "reference/DYNAMIC_WORKFLOWS \u00b7 Recipe 5: Isolation (repo-mutating agents)"
+      ]
+    },
+    {
+      "query": "can something kick off on a timer rather than when I ask",
+      "relevant": [
+        "reference/DYNAMIC_WORKFLOWS \u00b7 Recipe 7: Time-based triggers"
+      ]
+    },
+    {
+      "query": "what are the traps when building agent workflows",
+      "relevant": [
+        "reference/DYNAMIC_WORKFLOWS \u00b7 Honest gotchas"
+      ]
+    },
+    {
+      "query": "what are the core concepts this project is organised around",
+      "relevant": [
+        "reference/ONTOLOGY \u00b7 Core concepts"
+      ]
+    },
+    {
+      "query": "what is the least I have to write for a plan to be accepted",
+      "relevant": [
+        "reference/plans/plan-json-spec \u00b7 Minimal Import Format"
+      ]
+    },
+    {
+      "query": "which fields are generated for me and must be left out",
+      "relevant": [
+        "reference/plans/plan-json-spec \u00b7 Auto-Generated Fields (Do NOT Provide)"
+      ]
+    },
+    {
+      "query": "what kinds of task can appear in a plan",
+      "relevant": [
+        "reference/plans/plan-json-spec \u00b7 task_type Values"
+      ]
+    },
+    {
+      "query": "how do I express that one task must wait for another",
+      "relevant": [
+        "reference/plans/plan-json-spec \u00b7 Dependencies"
+      ]
+    },
+    {
+      "query": "where is the machine readable schema for plans",
+      "relevant": [
+        "reference/plans/plan-json-spec \u00b7 JSON Schema (Machine-Readable)"
+      ]
+    },
+    {
+      "query": "how should the agent behave on the very first session",
+      "relevant": [
+        "reference/templates/AGENTS \u00b7 First Run"
+      ]
+    },
+    {
+      "query": "when do I run in the terminal versus as a background service",
+      "relevant": [
+        "reference/templates/AGENTS \u00b7 Running: TUI vs Daemon"
+      ]
+    },
+    {
+      "query": "what must the agent do at the start of every session",
+      "relevant": [
+        "reference/templates/AGENTS \u00b7 Every Session"
+      ]
+    },
+    {
+      "query": "what is the rule about tracking a bug fix in an issue tracker",
+      "relevant": [
+        "reference/templates/AGENTS \u00b7 Bug Fixes & Improvements \u2014 Tracking Workflow (Hard Rule)"
+      ]
+    },
+    {
+      "query": "what is the difference between the workspace and a repository",
+      "relevant": [
+        "reference/templates/AGENTS \u00b7 Workspace vs Repository (CRITICAL)"
+      ]
+    },
+    {
+      "query": "how should the agent handle a pasted screenshot",
+      "relevant": [
+        "reference/templates/AGENTS \u00b7 NEVER Ignore Images"
+      ]
+    },
+    {
+      "query": "what do I do when the user interrupts with a correction",
+      "relevant": [
+        "reference/templates/AGENTS \u00b7 \ud83d\udea8 RESPOND FIRST, INVESTIGATE SECOND"
+      ]
+    },
+    {
+      "query": "how does the agent separate what it knows from what it assumes",
+      "relevant": [
+        "reference/templates/AGENTS \u00b7 Epistemic Protocol"
+      ]
+    },
+    {
+      "query": "what should happen when told to figure something out alone",
+      "relevant": [
+        "reference/templates/AGENTS \u00b7 \"Figure It Out\" Directive"
+      ]
+    },
+    {
+      "query": "what should the agent load when it starts up",
+      "relevant": [
+        "reference/templates/BOOT \u00b7 Context"
+      ]
+    },
+    {
+      "query": "how do I make important facts survive a restart",
+      "relevant": [
+        "reference/templates/BOOT \u00b7 Auto-Save Important Memories"
+      ]
+    },
+    {
+      "query": "the agent tried to run something and the confirmation never arrived, what now",
+      "relevant": [
+        "reference/templates/BOOT \u00b7 Tool Approval Failures"
+      ]
+    },
+    {
+      "query": "I want it running unattended after I log out",
+      "relevant": [
+        "reference/templates/BOOT \u00b7 Running as a Service (Daemon)"
+      ]
+    },
+    {
+      "query": "what changes after the binary is upgraded in place",
+      "relevant": [
+        "reference/templates/BOOT \u00b7 Post-Evolve Behavior"
+      ]
+    },
+    {
+      "query": "how should tests be organised and what must they cover",
+      "relevant": [
+        "reference/templates/CODE \u00b7 Testing"
+      ]
+    },
+    {
+      "query": "what are the non negotiable coding rules",
+      "relevant": [
+        "reference/templates/CODE \u00b7 Hard Rules (Non-Negotiable)"
+      ]
+    },
+    {
+      "query": "is it fine to call my arguments arg1 and arg2",
+      "relevant": [
+        "reference/templates/CODE \u00b7 Parameter Naming \u2014 Use Descriptive Names, Never Numeric Indices"
+      ]
+    },
+    {
+      "query": "when I publish a version, what must the write-up look like",
+      "relevant": [
+        "reference/templates/CODE \u00b7 Release Note Format \u2014 NEVER USE TABLES"
+      ]
+    },
+    {
+      "query": "what must I confirm before I hand a fix over",
+      "relevant": [
+        "reference/templates/CODE \u00b7 Change Discipline \u2014 Verify Before You Ship"
+      ]
+    },
+    {
+      "query": "what to check before installing a third party skill",
+      "relevant": [
+        "reference/templates/SECURITY \u00b7 When Installing Skills/MCP/Packages"
+      ]
+    },
+    {
+      "query": "how should a compromised credential be handled",
+      "relevant": [
+        "reference/templates/SECURITY \u00b7 Incident Response"
+      ]
+    },
+    {
+      "query": "which files must never leave the machine",
+      "relevant": [
+        "reference/templates/SECURITY \u00b7 Confidential File Protection"
+      ]
+    },
+    {
+      "query": "why did a skill body suddenly appear when I touched a directory",
+      "relevant": [
+        "reference/templates/TOOLS \u00b7 Skill `globs:` frontmatter (path-scoped skill gate, #150)"
+      ]
+    },
+    {
+      "query": "how do I set up a job that runs on a recurring schedule",
+      "relevant": [
+        "reference/templates/TOOLS \u00b7 Scheduling (Cron)"
+      ]
+    },
+    {
+      "query": "where do profile specific paths resolve to",
+      "relevant": [
+        "reference/templates/TOOLS \u00b7 Profile-Aware Paths"
+      ]
+    },
+    {
+      "query": "how is a recurring schedule expression written",
+      "relevant": [
+        "reference/templates/cron/README \u00b7 Cron expression format"
+      ]
+    },
+    {
+      "query": "how do I configure a kubernetes ingress with cert-manager",
+      "relevant": []
+    },
+    {
+      "query": "what is the recommended dose of amoxicillin for a cat with an ear infection",
+      "relevant": []
+    },
+    {
+      "query": "which company manufactures the battery in a dji mini drone",
+      "relevant": []
+    },
+    {
+      "query": "how do I file a patent application in the european union",
+      "relevant": []
+    },
+    {
+      "query": "what is the boiling point of mercury at low pressure",
+      "relevant": []
+    },
+    {
+      "query": "how do I replace a hydraulic brake hose on a bicycle",
+      "relevant": []
+    },
+    {
+      "query": "how are crypto staking rewards taxed in japan",
+      "relevant": []
+    },
+    {
+      "query": "how do I calibrate a colorimeter for automotive paint matching",
+      "relevant": []
+    },
+    {
+      "query": "which vitamin deficiency causes night blindness",
+      "relevant": []
+    },
+    {
+      "query": "how do I train a puppy to stop chewing furniture",
+      "relevant": []
+    },
+    {
+      "query": "what track gauge do british model railways use",
+      "relevant": []
+    },
+    {
+      "query": "how do I appeal a parking ticket in berlin",
+      "relevant": []
+    },
+    {
+      "query": "why does my sourdough starter smell like acetone",
+      "relevant": []
+    },
+    {
+      "query": "how do I measure salinity in a reef aquarium",
+      "relevant": []
+    },
+    {
+      "query": "what is the best way to remove a stripped screw",
+      "relevant": []
+    }
+  ]
+}
