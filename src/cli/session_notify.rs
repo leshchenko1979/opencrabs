@@ -218,9 +218,12 @@ pub(crate) async fn post_jsonrpc_with(
     let started = std::time::Instant::now();
     let mut attempts: u32 = 0;
     let mut first_cause: Option<TransportCause> = None;
-    let mut last_cause: Option<TransportCause> = None;
 
-    loop {
+    // The loop YIELDS the last cause: it is the only value the caller needs
+    // after the budget runs out, so it is carried out by `break` rather than
+    // through a variable that is reassigned every iteration (clippy
+    // `unused_assignments`, -D warnings).
+    let cause = loop {
         attempts += 1;
         let mut req = reqwest::Client::new()
             .post(url)
@@ -260,7 +263,6 @@ pub(crate) async fn post_jsonrpc_with(
             }
         };
 
-        last_cause = Some(cause);
         first_cause.get_or_insert(cause);
 
         // Back off, but only if the budget can absorb both the sleep and a
@@ -268,7 +270,7 @@ pub(crate) async fn post_jsonrpc_with(
         let backoff = next_backoff(attempts);
         let spent = started.elapsed();
         if spent + backoff >= budget {
-            break;
+            break cause;
         }
         tracing::debug!(
             attempt = attempts,
@@ -278,10 +280,9 @@ pub(crate) async fn post_jsonrpc_with(
             "retrying A2A transport"
         );
         tokio::time::sleep(backoff).await;
-    }
+    };
 
     let elapsed = started.elapsed();
-    let cause = last_cause.unwrap_or(TransportCause::Unresponsive);
     let mut detail = format!(
         "cannot reach the A2A gateway at {url}: cause={} — {}; {attempts} attempt(s) over {:.1}s",
         cause.label(),
