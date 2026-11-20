@@ -24,7 +24,7 @@
 //! variant is a new arm in one place, never a second delimiter branch bolted
 //! beside the first.
 
-use crate::brain::tools::suggest_options::{RawSuggestionItem, SuggestionItem, MAX_OPTIONS};
+use crate::brain::tools::suggest_options::{MAX_OPTIONS, RawSuggestionItem, SuggestionItem};
 
 /// Marker stem shared by both grammars: the pair form opens with
 /// `<<suggest_options>>` and the colon form with `<<suggest_options:`.
@@ -85,6 +85,15 @@ pub fn extract_leaked_suggestions(text: &str) -> (String, Option<Vec<SuggestionI
     let cleaned = strip_blocks(text, &blocks);
     let recovered = (!items.is_empty()).then_some(items);
     (cleaned, recovered)
+}
+
+/// Cheap pre-check: does this text carry an opening marker at all?
+///
+/// The settle-time repair (#894) runs against the stored assistant row on
+/// every turn, so the common case — no marker — must not allocate a copy of
+/// the text. Kept beside the scanner so the token has exactly one home.
+pub fn contains_leaked_suggestions(text: &str) -> bool {
+    text.contains(OPEN)
 }
 
 /// The shared scanner: yields every block, in document order, for BOTH
@@ -154,7 +163,12 @@ fn scan_leaked_blocks(text: &str) -> Vec<LeakedBlock<'_>> {
                 .filter(|rel| *rel <= ALIEN_DELIMITER_WINDOW)
                 .map(|rel| after_open + rel + CLOSE.len())
                 .unwrap_or(after_open);
-            blocks.push(LeakedBlock { start, end, payload: "", terminated: false });
+            blocks.push(LeakedBlock {
+                start,
+                end,
+                payload: "",
+                terminated: false,
+            });
             cursor = end;
         }
     }

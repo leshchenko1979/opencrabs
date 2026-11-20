@@ -181,6 +181,23 @@ impl MessageService {
         Ok(())
     }
 
+    /// Read one message by id (turn-settle leak repair, #894).
+    pub async fn find_by_id(&self, id: Uuid) -> Result<Option<Message>> {
+        let repo = MessageRepository::new(self.context.pool());
+        repo.find_by_id(id)
+            .await
+            .context("Failed to read message by id")
+    }
+
+    /// Overwrite a message's content in place (turn-settle leak repair, #894).
+    pub async fn set_content(&self, id: Uuid, content: &str) -> Result<()> {
+        let repo = MessageRepository::new(self.context.pool());
+        repo.set_content(id, content)
+            .await
+            .context("Failed to set message content")?;
+        Ok(())
+    }
+
     /// Set thinking/reasoning content on a message (non-CLI providers).
     pub async fn set_thinking(&self, id: Uuid, thinking: &str) -> Result<()> {
         let repo = MessageRepository::new(self.context.pool());

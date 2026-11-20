@@ -12,7 +12,7 @@
 
 use crate::brain::provider::custom_openai_compatible::extract_text_tool_calls;
 use crate::brain::tools::suggest_options::{MAX_OPTIONS, SuggestionStyle};
-use crate::utils::directives::extract_leaked_suggestions;
+use crate::utils::directives::{contains_leaked_suggestions, extract_leaked_suggestions};
 
 // ── recovery: parseable blocks ───────────────────────────────────────────
 
@@ -170,10 +170,15 @@ fn colon_form_takes_bare_strings() {
 
 #[test]
 fn colon_form_caps_at_max_options() {
-    let quoted: Vec<String> = (0..MAX_OPTIONS + 5).map(|i| format!("\"opt{i}\"")).collect();
+    let quoted: Vec<String> = (0..MAX_OPTIONS + 5)
+        .map(|i| format!("\"opt{i}\""))
+        .collect();
     let text = format!("<<suggest_options:[{}]>>", quoted.join(","));
     let (_, items) = extract_leaked_suggestions(&text);
-    assert_eq!(items.expect("oversized array still recovers").len(), MAX_OPTIONS);
+    assert_eq!(
+        items.expect("oversized array still recovers").len(),
+        MAX_OPTIONS
+    );
 }
 
 #[test]
@@ -279,4 +284,76 @@ fn provider_text_leak_pass_recognises_an_element_style_suggest_options_call() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "suggest_options");
     assert!(cleaned.is_empty());
+}
+
+// ── stored-row repair (#894) ─────────────────────────────────────────────
+//
+// The strip at turn settle repairs DELIVERY. The assistant row is a separate
+// artifact and it is the one the model reads back: appended per iteration, so
+// its content is the whole turn's concatenation while `final_text` is only the
+// last iteration. A row left carrying the raw marker becomes a worked example
+// the model imitates on later turns (16 leaks in one session, 58 rows across
+// five), so the settle hook repairs the row's OWN content.
+
+#[test]
+fn pre_check_finds_both_marker_grammars_and_nothing_else() {
+    assert!(contains_leaked_suggestions(
+        "pick one <<suggest_options>>[\"A\",\"B\"]<<suggest_options>>"
+    ));
+    assert!(contains_leaked_suggestions("<<suggest_options:[\"A\"]>>"));
+    // The bare stem alone still counts: a lone marker is stripped too.
+    assert!(contains_leaked_suggestions("trailing <<suggest_options"));
+
+    // Negative controls — the common turn must take the no-op path.
+    assert!(!contains_leaked_suggestions("plain answer, no markers"));
+    assert!(!contains_leaked_suggestions(""));
+    // A lookalike that is not the directive must not trigger a rewrite.
+    assert!(!contains_leaked_suggestions("suggest_options was called"));
+}
+
+#[test]
+fn row_repair_strips_the_marker_and_keeps_every_earlier_iteration() {
+    // Shape of a real assistant row after two iterations: the first produced
+    // prose, the second leaked the directive. Rebuilding the row from
+    // `final_text` would drop the first iteration; the repair must only strip.
+    let stored = "Iteration one: read the file and found the cause.\n\n\
+                  Iteration two: here are the next steps.\n\
+                  <<suggest_options>>\n\
+                  [{\"label\":\"Run the gates\"},{\"label\":\"Park it\"}]\n\
+                  <<suggest_options>>";
+    assert!(contains_leaked_suggestions(stored));
+
+    let (repaired, items) = extract_leaked_suggestions(stored);
+
+    assert!(
+        !repaired.contains("<<suggest_options"),
+        "repaired row must carry no raw marker, got: {repaired}"
+    );
+    assert!(
+        !repaired.contains("Run the gates"),
+        "the recovered payload must leave the row too, got: {repaired}"
+    );
+    assert!(
+        repaired.contains("Iteration one: read the file and found the cause."),
+        "earlier iterations must survive the repair, got: {repaired}"
+    );
+    assert!(
+        repaired.contains("Iteration two: here are the next steps."),
+        "the leaking iteration's prose must survive, got: {repaired}"
+    );
+    // The repair is idempotent: a second pass finds nothing to strip.
+    assert_eq!(extract_leaked_suggestions(&repaired).0, repaired);
+}
+
+#[test]
+fn row_repair_also_cleans_an_unparseable_payload() {
+    // A malformed block (one trailing comma) recovers no items, but its
+    // markers and payload must still leave the row — otherwise the model
+    // reads raw JSON back as an example of "how I format options".
+    let stored = "Options:\n<<suggest_options>>[{\"label\":\"A\"},]<<suggest_options>>";
+    let (repaired, items) = extract_leaked_suggestions(stored);
+
+    assert!(items.is_none(), "a malformed payload recovers no items");
+    assert!(!repaired.contains("<<suggest_options"));
+    assert!(!repaired.contains("{\"label\":\"A\"}"));
 }

@@ -8922,6 +8922,44 @@ impl AgentService {
             cb(session_id, ProgressEvent::SuggestedOptions(items));
         }
 
+        // #894: the strip above repairs DELIVERY. The stored row is a different
+        // artifact — and it is the one the model reads back.
+        //
+        // The assistant row is appended per iteration (`append_content`), so its
+        // content is the concatenation of the whole turn while `final_text` is
+        // only the LAST iteration: the two are not equal by construction, and
+        // `cleaned != final_text` therefore says nothing about what the row
+        // holds. Left un-repaired the DB keeps the raw marker, and the model
+        // reads its own leaked directive back as history on every later turn —
+        // a worked example of "how I format options" that it then imitates
+        // (measured: 16 leaked markers in one session, 58 rows across five).
+        // Cleaning only on the way out leaves the way back in untouched.
+        //
+        // Read-modify-write on the row's OWN content, never a rebuild from
+        // `final_text`: rebuilding would drop every earlier iteration. The
+        // pre-check keeps the common turn — no marker at all — allocation-free,
+        // and a failure here is non-fatal, because the turn has already
+        // delivered.
+        match message_service.find_by_id(assistant_db_msg.id).await {
+            Ok(Some(stored))
+                if crate::utils::directives::contains_leaked_suggestions(&stored.content) =>
+            {
+                let (row_cleaned, _) =
+                    crate::utils::directives::extract_leaked_suggestions(&stored.content);
+                if row_cleaned != stored.content
+                    && let Err(e) = message_service
+                        .set_content(assistant_db_msg.id, &row_cleaned)
+                        .await
+                {
+                    tracing::warn!("failed to repair leaked suggest_options in stored row: {e:#}");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("failed to read assistant row for leak repair: {e:#}");
+            }
+        }
+
         Ok(AgentResponse {
             message_id: assistant_db_msg.id,
             content: final_text,

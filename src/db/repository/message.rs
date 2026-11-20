@@ -304,6 +304,30 @@ impl MessageRepository {
         Ok(())
     }
 
+    /// Overwrite a message's content in place.
+    ///
+    /// The turn-settle leak repair (#894) needs this and `append_content`
+    /// cannot express it: the assistant row is built by appending every
+    /// iteration, so its content is the concatenation of the whole turn, while
+    /// the text the settle hook holds is only the LAST iteration. Repairing
+    /// the row means rewriting what is already there, not adding to it.
+    pub async fn set_content(&self, id: Uuid, content: &str) -> Result<()> {
+        let id_str = id.to_string();
+        let content = content.to_string();
+        let len = content.len();
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
+            conn.execute(
+                "UPDATE messages SET content = ?1 WHERE id = ?2",
+                params![content, id_str],
+            )
+        })
+        .await
+        .context("Failed to set message content")?;
+
+        tracing::debug!("Set content ({} chars) on message: {}", len, id);
+        Ok(())
+    }
+
     /// Set the thinking/reasoning content on an existing message.
     /// Called once per iteration for non-CLI providers to persist reasoning
     /// that was collected during streaming into the `thinking` column.
