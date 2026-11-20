@@ -152,6 +152,30 @@ fn unix_shell_pair() -> (&'static str, &'static str) {
     ("sh", "-c")
 }
 
+/// Does the resolved shell expose bash's `${PIPESTATUS[@]}` (#910)?
+///
+/// Answered by the SAME memoised probe that picked the pair, so the two can
+/// never disagree: `true` means a real bash is in force, `false` means the
+/// `sh` fallback (or Windows' `cmd`), where per-element pipeline statuses do
+/// not exist and a caller must keep the last element's status.
+pub fn shell_reports_pipestatus() -> bool {
+    if cfg!(target_os = "windows") {
+        false
+    } else {
+        unix_shell_reports_pipestatus()
+    }
+}
+
+#[cfg(not(windows))]
+fn unix_shell_reports_pipestatus() -> bool {
+    BASH.get_or_init(resolve_bash).is_some()
+}
+
+#[cfg(windows)]
+fn unix_shell_reports_pipestatus() -> bool {
+    false
+}
+
 /// Append the platform shell flag and a full command string to a
 /// [`std::process::Command`] or [`tokio::process::Command`].
 ///
