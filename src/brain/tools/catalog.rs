@@ -154,7 +154,7 @@ pub const EXTENDED_TOOL_INVENTORY: &[(&str, &[&str])] = &[
         &[
             "wait_agent",
             "send_input",
-            "close_agent",
+            "stop_agent",
             "resume_agent",
             "agent_progress",
             "session_notify",
@@ -326,7 +326,7 @@ pub fn tool_category(name: &str) -> &'static str {
         n if n.starts_with("spawn_agent")
             || n.starts_with("wait_agent")
             || n.starts_with("send_input")
-            || n.starts_with("close_agent")
+            || n.starts_with("stop_agent")
             || n.starts_with("resume_agent")
             || n.starts_with("session_notify")
             || n.starts_with("team_") =>

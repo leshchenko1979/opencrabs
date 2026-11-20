@@ -66,6 +66,11 @@ fn catalog_splits_core_from_extended() {
     // reports "core" and its old group is no longer where it lives.
     assert_eq!(catalog::tool_category("spawn_agent"), "core");
     assert_eq!(catalog::tool_category("wait_agent"), "agents");
+    // #924: `stop_agent` is the only tool whose category comes from the
+    // `n.starts_with(…)` arm alone — no other test pins it, so missing that
+    // arm would silently drop it out of `tool_search`'s `agents` group with
+    // no error and no failing test.
+    assert_eq!(catalog::tool_category("stop_agent"), "agents");
     assert_eq!(catalog::tool_category("generate_image"), "media");
     assert_eq!(catalog::tool_category("self_improve"), "system");
 }

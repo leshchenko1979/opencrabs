@@ -7,7 +7,7 @@
 //! `wait_agent`'s own description say the opposite), and `report_progress` said
 //! "wait to be resumed" when #859 made the park reachable by `send_input`.
 //!
-//! The behavioural half is `close_agent`: it reported "cancelled" for an agent
+//! The behavioural half is `stop_agent`: it reported "cancelled" for an agent
 //! that had already finished, claiming an action that never happened. That is
 //! testable, so it is tested rather than pinned as source.
 //!
@@ -15,7 +15,7 @@
 
 use crate::brain::tools::Tool;
 use crate::brain::tools::ToolExecutionContext;
-use crate::brain::tools::subagent::{CloseAgentTool, SubAgent, SubAgentManager, SubAgentState};
+use crate::brain::tools::subagent::{StopAgentTool, SubAgent, SubAgentManager, SubAgentState};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -148,13 +148,13 @@ fn send_input_describes_the_parked_case() {
 /// whose work had completed, which reads to the caller as "I stopped live
 /// work".
 #[tokio::test]
-async fn close_agent_reports_an_already_finished_agent_honestly() {
+async fn stop_agent_reports_an_already_finished_agent_honestly() {
     let manager = Arc::new(SubAgentManager::new());
     let mut agent = SubAgent::new("done-1", "worker", Uuid::new_v4(), Uuid::new_v4());
     agent.state = SubAgentState::Completed;
     manager.insert(agent);
 
-    let tool = CloseAgentTool::new(manager.clone());
+    let tool = StopAgentTool::new(manager.clone());
     let result = tool
         .execute(
             serde_json::json!({ "agent_id": "done-1" }),
@@ -183,13 +183,13 @@ async fn close_agent_reports_an_already_finished_agent_honestly() {
 /// cancelled, or the honest wording would have been bought by breaking the
 /// tool's actual job.
 #[tokio::test]
-async fn close_agent_still_cancels_a_running_agent() {
+async fn stop_agent_still_cancels_a_running_agent() {
     let manager = Arc::new(SubAgentManager::new());
     let agent = SubAgent::new("live-1", "worker", Uuid::new_v4(), Uuid::new_v4());
     let token = agent.cancel_token.clone();
     manager.insert(agent);
 
-    let tool = CloseAgentTool::new(manager.clone());
+    let tool = StopAgentTool::new(manager.clone());
     let result = tool
         .execute(
             serde_json::json!({ "agent_id": "live-1" }),
@@ -213,13 +213,13 @@ async fn close_agent_still_cancels_a_running_agent() {
 /// Behavioural: `remove` is independent of cancellation — dropping the record
 /// must work even when there was nothing live to stop.
 #[tokio::test]
-async fn close_agent_removes_a_finished_agent_when_asked() {
+async fn stop_agent_removes_a_finished_agent_when_asked() {
     let manager = Arc::new(SubAgentManager::new());
     let mut agent = SubAgent::new("done-2", "worker", Uuid::new_v4(), Uuid::new_v4());
     agent.state = SubAgentState::Failed("boom".into());
     manager.insert(agent);
 
-    let tool = CloseAgentTool::new(manager.clone());
+    let tool = StopAgentTool::new(manager.clone());
     let result = tool
         .execute(
             serde_json::json!({ "agent_id": "done-2", "remove": true }),
