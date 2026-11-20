@@ -297,7 +297,10 @@ jobs:
           # "unset", so a gate call (fork_version default "") still builds the
           # plain upstream version.
           OPENCRABS_FORK_VERSION: ${{ inputs.fork_version }}
-        run: cargo build --locked --profile ci --no-default-features --features "${{ inputs.features }}"
+          # inputs.* is never interpolated INSIDE a run: block (file header rule);
+          # it reaches the shell as an env var, so it cannot inject syntax.
+          FEATURES: ${{ inputs.features }}
+        run: cargo build --locked --profile ci --no-default-features --features "$FEATURES"
 
       # No `strip` step here: `[profile.ci]` inherits `[profile.release]`, whose
       # `strip = true` (Cargo.toml on the gated tree) cargo already applies to
@@ -1159,9 +1162,10 @@ jobs:
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          FEATURES: ${{ inputs.features }}
         run: |
           cargo test --locked --profile ci \
-            --no-default-features --features "${{ inputs.features }}" --doc
+            --no-default-features --features "$FEATURES" --doc
 
       - name: Upload per-test timings + failure names (JUnit)
         if: always()
