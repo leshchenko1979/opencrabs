@@ -112,7 +112,7 @@ A bare area prefix (`TUI:`, `z.ai:`, `Reasoning stream:`) is not the convention.
 
 ### Prerequisites
 
-- **Rust** 1.91 or later (edition 2024)
+- **Rust** 1.95 or later (edition 2024; source of truth: `rust-version` in `Cargo.toml`)
 - **SQLite** (bundled via `rusqlite`)
 - **Git**
 
