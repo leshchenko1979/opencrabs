@@ -94,9 +94,25 @@ async fn a_search_that_matched_nothing_states_exit_one() {
         "a no-match search is a successful empty search (#663), body: {:?}",
         result.output
     );
+    // The status is the part #914 owns, so that is what this pins. The WORDING
+    // of the zero-result body is not ours: with the `rtk` feature the command is
+    // rewritten before it runs and rtk prints its own `0 matches for '...'`
+    // instead of leaving stdout empty, so asserting `(no matches found)` passes
+    // under default features and fails under `--all-features`. What the issue is
+    // actually about is the ambiguity between "ran and found nothing" and "no
+    // output at all", so assert the trailer is present AND that something
+    // precedes it.
+    let body = result.output.trim_end();
     assert!(
-        result.output.contains("(no matches found) · exit=1"),
-        "the body must say the search ran and returned 1, got: {:?}",
+        body.ends_with("exit=1"),
+        "the body must state the status even though a no-match search is not a \
+         failure, got: {:?}",
+        result.output
+    );
+    let before_status = body.strip_suffix("exit=1").unwrap_or(body).trim_end();
+    assert!(
+        !before_status.is_empty(),
+        "the body must say the search ran, not carry the status alone, got: {:?}",
         result.output
     );
 }
