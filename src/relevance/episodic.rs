@@ -123,7 +123,10 @@ where
         .into_iter()
         .map(|row| (score_lower(content(&row), &lower_terms), row))
         .collect();
-    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    // NEUTER EXPERIMENT (not for merge): `leading` is DELETED from the
+    // comparison while still being computed, which is exactly the card's
+    // claim — "Deleting `leading` turns `opening_zone_breaks_a_hit_tie` red."
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse((score.hits, score.adjacency)));
     scored.into_iter().map(|(_, row)| row).collect()
 }
 
