@@ -458,6 +458,7 @@ pub mod ralph_receipt_binding_test;
 pub mod ralph_verification_gate_test;
 pub mod readme_channel_surface_test;
 pub mod reasoning_split_test;
+pub mod recall_line_test;
 pub mod reload_phantom_blocked_test;
 pub mod reload_quoted_markers_test;
 pub mod repetition_fenced_code_test;

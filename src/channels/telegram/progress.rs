@@ -9,7 +9,7 @@ use teloxide::types::{ChatAction, ChatId, ThreadId};
 
 use super::flow::{
     COMPACTING_HEADER_TEXT, CompactionBreakdown, DisplayItem, StreamingState, ToolMsg,
-    compaction_breakdown, compacting_flow_line, detach_flow_for_followup, echoes_as_system_line,
+    compacting_flow_line, compaction_breakdown, detach_flow_for_followup, echoes_as_system_line,
     queued_preview,
 };
 use super::handler::tool_context;
@@ -240,6 +240,16 @@ pub(crate) fn build_progress_cb(
                         format!("🔀 fallback: {}/{}", to_name, to_model)
                     };
                     s.display_queue.push(DisplayItem::System(text));
+                }
+            }
+            // Passive recall fired this turn (#928): one chrome line naming
+            // WHAT was injected. It arrives rendered by the brain layer, so it
+            // is pushed as SYSTEM — folded into the roll by
+            // `append_system_to_flow`, never eligible to be reclaimed as the
+            // answer (#1253).
+            ProgressEvent::RecallLine { line } => {
+                if let Ok(mut s) = st.lock() {
+                    s.display_queue.push(DisplayItem::System(line));
                 }
             }
             // Optional follow-up suggestions (#597): post tap-to-send

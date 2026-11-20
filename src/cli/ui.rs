@@ -875,6 +875,10 @@ async fn cmd_chat_inner(
                     session_id,
                     text: format!("⏳ Retry {}/{} — {}", attempt, max, reason),
                 }),
+                // Passive recall's receipt is a channel flow-roll line (#928);
+                // the TUI has no such surface, so it stays out of the
+                // transcript rather than inventing a second rendering.
+                ProgressEvent::RecallLine { .. } => return,
                 ProgressEvent::SuggestedOptions(options) => {
                     progress_sender.send(TuiEvent::SuggestedOptions {
                         session_id,
@@ -2030,10 +2034,7 @@ async fn cmd_chat_inner(
     // and before the channel manager so the pass is live before any channel can
     // route a wake into a topic this may retire.
     #[cfg(feature = "telegram")]
-    crate::channels::telegram::topic_reconcile::spawn(
-        db.pool().clone(),
-        telegram_state.clone(),
-    );
+    crate::channels::telegram::topic_reconcile::spawn(db.pool().clone(), telegram_state.clone());
 
     // Channel manager — handles dynamic spawn/stop of channel agents on config reload
     let channel_manager = Arc::new(crate::channels::ChannelManager::new(
@@ -2415,7 +2416,9 @@ async fn cmd_chat_inner(
             }
             let _scheduler_lock = guard;
             if a2a_enabled && !a2a_ready {
-                tracing::error!("Cron scheduler not spawned: A2A gateway did not become ready (#196)");
+                tracing::error!(
+                    "Cron scheduler not spawned: A2A gateway did not become ready (#196)"
+                );
                 return;
             }
             let cron_scheduler = crate::cron::CronScheduler::new(
