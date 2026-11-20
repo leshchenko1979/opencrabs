@@ -279,6 +279,7 @@ mod manager {
     /// session and transcript are both still on disk.
     #[test]
     fn prepare_resume_from_stopped_succeeds() {
+        // Kills the mutant that refuses to resume a Cancelled agent, which would make every stop a permanent loss of the child's context.
         let mgr = SubAgentManager::new();
         mgr.insert(make_agent("a1", "test"));
         mgr.cancel("a1");
@@ -689,6 +690,7 @@ mod stop_agent_tool {
 
     #[tokio::test]
     async fn stop_nonexistent_returns_error() {
+        // Kills the mutant that stops any id it can see: a stop must be scoped to the caller's own children, so a foreign or absent id answers identically and says so.
         isolate("nonexistent");
         let mgr = Arc::new(SubAgentManager::new());
         let tool = StopAgentTool::new(mgr);
@@ -713,6 +715,7 @@ mod stop_agent_tool {
 
     #[tokio::test]
     async fn stop_running_agent_cancels() {
+        // Kills the mutant that marks a stop without firing the token (the child keeps working) and the one that deletes the record instead of ending its work.
         isolate("running");
         let mgr = Arc::new(SubAgentManager::new());
         let agent = make_running_agent("a1");
@@ -739,6 +742,7 @@ mod stop_agent_tool {
 
     #[tokio::test]
     async fn stop_already_completed_agent() {
+        // Kills the mutant that rewrites a finished agent's outcome to Cancelled: a stop cannot retroactively change work that already landed.
         isolate("completed");
         let mgr = Arc::new(SubAgentManager::new());
         mgr.insert(make_running_agent("a1"));
@@ -869,7 +873,13 @@ mod wait_agent_tool {
 
         let result = tool.execute(json!({"agent_id": "a1"}), &ctx).await.unwrap();
         assert!(!result.success);
-        assert!(result.error.as_ref().unwrap().contains("cancelled"));
+        // Kills the mutant that reports a stopped agent as a dead end: #924
+        // makes a stop end the WORK, not the agent, so the message has to
+        // name the stop AND point at resume_agent. The old wording said
+        // "was cancelled", which read as terminal and stranded the work.
+        let err = result.error.as_ref().unwrap();
+        assert!(err.contains("stopped"));
+        assert!(err.contains("resume_agent"));
     }
 
     #[tokio::test]
@@ -1016,6 +1026,7 @@ mod lifecycle {
     /// agent that is still working, so the Running arm is asserted to REFUSE.
     #[test]
     fn stopped_agent_can_resume_but_a_live_one_cannot() {
+        // Kills the mutant that resumes a RUNNING agent, silently swapping its token and orphaning the task already holding the old one.
         let mgr = Arc::new(SubAgentManager::new());
         let (agent, _rx) = make_agent("a1");
         mgr.insert(agent);
@@ -1640,6 +1651,7 @@ mod deliberate_stop {
     /// running child as deliberately stopped the instant anything asks.
     #[test]
     fn an_uncancelled_token_is_not_a_stop() {
+        // Kills the mutant that treats every unfinished agent as a deliberate stop, regardless of whether its token ever fired.
         with_clean_flag(|| {
             let token = CancellationToken::new();
             assert!(!is_deliberate_stop(&token));
@@ -1653,6 +1665,7 @@ mod deliberate_stop {
     /// only fails the next one, which is exactly why the pair exists.
     #[test]
     fn a_cancel_while_running_is_a_deliberate_stop() {
+        // Kills the mutant that records a parent's own stop as a failure, blaming the parent for a decision it made on purpose.
         with_clean_flag(|| {
             let token = CancellationToken::new();
             token.cancel();
@@ -1672,6 +1685,7 @@ mod deliberate_stop {
     /// silent lie about why it stopped.
     #[test]
     fn a_cancel_during_shutdown_is_not_a_deliberate_stop() {
+        // Kills the mutant that reads a shutdown-time cancel as a deliberate stop, marking resumable work as a decision nobody made.
         with_clean_flag(|| {
             let token = CancellationToken::new();
             token.cancel();
