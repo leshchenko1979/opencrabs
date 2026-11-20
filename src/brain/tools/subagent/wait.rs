@@ -302,7 +302,7 @@ impl WaitAgentTool {
                 agent_id, err
             ))),
             SubAgentState::Cancelled => Some(ToolResult::error(format!(
-                "Sub-agent {} was cancelled",
+                "Sub-agent {} was stopped — resume_agent can continue it with a new prompt.",
                 agent_id
             ))),
             SubAgentState::Running => None,
