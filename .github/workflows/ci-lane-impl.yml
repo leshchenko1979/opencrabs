@@ -581,7 +581,13 @@ jobs:
     if: ${{ inputs.mode == 'gate' && !inputs.fix && !inputs.lockregen && !inputs.lockupdate && !inputs.fast }}
     name: PR-lane nextest (blocking verdict)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 60, NOT 45 (2026-11-20). The two step ceilings alone are 40 (nextest) +
+    # 15 (doctests) = 55, before ~2 min of setup and the envelope probes. A 45
+    # job cap therefore guaranteed that any run reaching its own step timeouts
+    # lost the DOCTEST leg to a job-cap cancel — which archives an empty log, so
+    # the loss was invisible (#331). The step timeouts stay the primary guard;
+    # the job cap is now only the backstop above their sum.
+    timeout-minutes: 60
     # JOB-level, deliberately: this job runs cargo twice (nextest, then the
     # doctest `cargo test`), and a step-level variable would make the two
     # disagree on the profile and force a second full rebuild of the same units.
@@ -710,12 +716,18 @@ jobs:
         # THREE predicates, because a stall has three shapes:
         #   A. FLAT CPU over this step's own process tree (480 s). Covers compile
         #      and futex wedges; BLIND to a test spinning on CPU.
-        #   B. NO TEST COMPLETING (600 s), counted from this step's own log. Armed
+        #   B. NO TEST COMPLETING (780 s), counted from this step's own log. Armed
         #      only after the FIRST completion: compile legitimately prints zero
         #      result lines for 20+ minutes. Recognises libtest AND nextest shapes.
         #      CALIBRATION 2026-11-19, six GREEN runs (~67,000 completions): worst
         #      healthy gap with no completion is 63 s, always the slow rate-limit
-        #      deadline test. 600 s is 9.5x that.
+        #      deadline test. 780 s is 12.4x that.
+        #      780, NOT 600 (2026-11-20): nextest's OWN terminate ceiling is
+        #      5 x 120 s = 600 s, so a 600 s predicate B fired at the SAME instant
+        #      as nextest's termination and our SIGTERM beat nextest's — destroying
+        #      the one thing worth having on a hung last test case, the NAME of the
+        #      test nextest would have reported. 780 clears that ceiling by 180 s
+        #      while staying 5.2x the entire healthy test phase.
         #   C. LOG SILENCE (900 s). Covers the shape A and B both miss: CPU
         #      advancing while no output is emitted. CALIBRATION measured
         #      2026-11-20 from FULL per-job archives (gh api
@@ -748,7 +760,7 @@ jobs:
           # Moved out of the run block on purpose -- see NO `${{ }}` above.
           FEATURES: ${{ inputs.features }}
           STALLWATCH_SECS: "480"
-          STALLWATCH_PROGRESS_SECS: "600"
+          STALLWATCH_PROGRESS_SECS: "780"
           STALLWATCH_SILENCE_SECS: "900"
           STALLWATCH_LOG: /tmp/test-leg.log
         run: |
@@ -765,7 +777,7 @@ jobs:
             spinning on CPU: ticks keep advancing, so the flat clock never accumulates -- it
             fired on 0 of 6 job-cap stalls for exactly that reason.
 
-          Predicate B -- NO TEST COMPLETING (STALLWATCH_PROGRESS_SECS, 600).
+          Predicate B -- NO TEST COMPLETING (STALLWATCH_PROGRESS_SECS, 780).
             Counts COMPLETION markers in the step's own log and fires when the count stops
             advancing. Two harness shapes are recognised: libtest
             (`test <name> ... ok|FAILED|ignored`, doc-tests included) and nextest
@@ -778,7 +790,7 @@ jobs:
             44414539307, 44500485926, 44511279765; ~67,000 completions): the longest healthy
             stretch with NO completion is 63 s, always the same slow rate-limit deadline test
             (it prints "has been running for over 60 seconds" while healthy); p99 = p95 = 0 s.
-            600 s is 9.5x the worst healthy gap and 4x the ENTIRE healthy test phase. Do NOT
+            780 s is 12.4x the worst healthy gap and 5.2x the ENTIRE healthy test phase. Do NOT
             derive it from log silence -- that is C's calibration and a DIFFERENT number.
             Conflating them is what left the detector firing zero times for six stalls. A
             false trip fails a healthy gate, so every threshold is a multiple of the WORST
@@ -820,7 +832,7 @@ jobs:
           # would reset the flat clock forever.
           SELF = os.getpid()
           THRESHOLD = int(os.environ.get("STALLWATCH_SECS", "480"))
-          PROGRESS_THRESHOLD = int(os.environ.get("STALLWATCH_PROGRESS_SECS", "600"))
+          PROGRESS_THRESHOLD = int(os.environ.get("STALLWATCH_PROGRESS_SECS", "780"))
           SILENCE_THRESHOLD = int(os.environ.get("STALLWATCH_SILENCE_SECS", "900"))
           SAMPLE = int(os.environ.get("STALLWATCH_SAMPLE", "30"))
           LOGFILE = os.environ.get("STALLWATCH_LOG", "/tmp/test-leg.log")
@@ -1077,6 +1089,13 @@ jobs:
           else
             echo "::warning::STALLWATCH DISARMED -- python3 not on PATH; NO stall detection this run"
           fi
+          # junit.xml lives under target/nextest/, and rust-cache RESTORES target/,
+          # so a cached report from an EARLIER run survives into this one. The
+          # upload below is `if: always()` and would then publish a previous run's
+          # results as this run's — a false-green surface on the exact artifact the
+          # per-test timings come from. Delete the directory first: absence of a
+          # report must read as "no report", never as "green".
+          rm -rf target/nextest
           # tee so B and C have a file; PIPESTATUS[0], never $? (see above).
           cargo nextest run --locked --cargo-profile ci \
             --no-default-features --features "$FEATURES" \
