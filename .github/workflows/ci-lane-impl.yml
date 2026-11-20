@@ -334,7 +334,7 @@ jobs:
 
       # Toolchain resolved in ONE place — see the TOOLCHAIN DECISION note in the
       # file header. This is the form pr-checks.yml already used, unchanged.
-      - name: Install Rust (from rust-toolchain.toml)
+      - name: Install Rust (pinned 1.100.0, see TOOLCHAIN DECISION)
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.100.0
@@ -1199,7 +1199,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Install Rust (from rust-toolchain.toml)
+      - name: Install Rust (pinned 1.100.0, see TOOLCHAIN DECISION)
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.100.0
@@ -1272,7 +1272,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Install Rust (from rust-toolchain.toml)
+      - name: Install Rust (pinned 1.100.0, see TOOLCHAIN DECISION)
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.100.0
