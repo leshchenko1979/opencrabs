@@ -1803,6 +1803,13 @@ impl AgentService {
         // completed work (logged in user reports as "phantom detected"
         // x8+ after a clean commit+push).
         let mut tool_calls_completed_this_turn: usize = 0;
+        // #920: rule 26's spawn threshold is observed here rather than left to
+        // the model's own estimate. `spawned_this_turn` records that the turn
+        // took the advice (a refused spawn still counts — it tried), and
+        // `delegation_nudge_tier_fired` bounds the nudge to one message per
+        // tier so a long turn is never nagged into noise.
+        let mut spawned_this_turn = false;
+        let mut delegation_nudge_tier_fired: u8 = 0;
         // Every tool result this turn, for checking quoted evidence against
         // what the tools actually returned (#785). Turn-scoped because the
         // fabrication appears in a LATER iteration than the call it claims.
@@ -7293,6 +7300,13 @@ impl AgentService {
                 tool_uses.first().map(|(_, name, _)| name.clone()),
             );
 
+            // #920: note a spawn in this batch BEFORE dispatch, because the
+            // parallel path consumes `tool_uses`. A call that then fails still
+            // counts as having taken the advice.
+            if tool_uses.iter().any(|(_, name, _)| name == "spawn_agent") {
+                spawned_this_turn = true;
+            }
+
             // Execute tools and build response message
             let mut tool_results = Vec::new();
             let mut tool_descriptions: Vec<String> = Vec::new(); // For DB persistence
@@ -8319,6 +8333,46 @@ impl AgentService {
                     tool_repeat.consecutive()
                 );
                 context.add_message(Message::user(nudge));
+            }
+
+            // #920: rule 26 observed mid-turn instead of predicted at turn
+            // start. Three guards, each removing a way the nudge would be
+            // wrong rather than merely unhelpful:
+            //
+            //  - a session that is ITSELF a sub-agent has no `spawn_agent`, so
+            //    the advice is unsatisable there (`find_by_session` is the
+            //    same predicate the plan-hold uses for "this is a child");
+            //  - a registry without `spawn_agent` (lazy discovery, a stripped
+            //    grant) must not be told to call a tool it cannot see;
+            //  - a turn that already spawned has taken the advice.
+            //
+            // `delegation_nudge_tier` bounds it to one message per tier, so a
+            // 40-call turn receives two lines, never one per iteration.
+            {
+                let is_subagent = self
+                    .subagent_manager
+                    .as_ref()
+                    .is_some_and(|m| m.find_by_session(session_id).is_some());
+                if !is_subagent && self.tool_registry.has_tool("spawn_agent") {
+                    let tier = super::nudge::delegation_nudge_tier(
+                        tool_calls_completed_this_turn,
+                        spawned_this_turn,
+                        delegation_nudge_tier_fired,
+                    );
+                    if tier > delegation_nudge_tier_fired {
+                        delegation_nudge_tier_fired = tier;
+                        tracing::info!(
+                            target: "delegation",
+                            tools_completed = tool_calls_completed_this_turn,
+                            tier,
+                            "Delegation threshold crossed with no spawn; nudging in-turn (#920)"
+                        );
+                        context.add_message(Message::user(super::nudge::delegation_nudge(
+                            tool_calls_completed_this_turn,
+                            tier,
+                        )));
+                    }
+                }
             }
 
             // Fire token count update after tool results are added — keeps TUI in sync.

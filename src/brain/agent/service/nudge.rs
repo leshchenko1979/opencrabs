@@ -336,3 +336,77 @@ pub fn variation_directive() -> &'static str {
      again, then take a genuinely different action — different flags, a different command, or \
      report completion if there is nothing left to do."
 }
+
+// ── Mid-turn delegation nudge (#920) ──
+//
+// Rule 26 tells a session to spawn a child once a turn passes ten tool calls.
+// It is a PREDICTIVE rule: it asks the model to estimate the size of work it
+// has not started yet. Measured over the 24h after the rule was last rewritten
+// (`tool_executions` grouped by `message_id`), compliance collapses exactly at
+// the band the rule names — 117 turns of 10-14 tool calls produced ZERO
+// spawns, and 221 turns of 15-29 produced four. The instruction is loaded and
+// readable; the failure is timing, not wording. A session cannot count its own
+// tool calls, so the only moment it could obey is a moment it cannot perceive.
+//
+// So the harness says it instead, at the instant it becomes true. Same shape as
+// the repeat correction and the intra-turn time marker beside it: one message
+// injected after tool results, never a suppressed call and never a turn end.
+
+/// Tool calls after which the first delegation nudge fires. Deliberately the
+/// same number as rule 26's own `>= 10`, so the harness and the written law
+/// cannot drift apart.
+pub(crate) const DELEGATION_NUDGE_AT: usize = 10;
+
+/// Tool calls after which the firmer nudge fires. A turn this long is holding
+/// far more than one context should, whatever it is doing.
+pub(crate) const DELEGATION_NUDGE_AGAIN_AT: usize = 25;
+
+/// Which delegation nudge a turn has earned, as a tier: `0` none, `1` the
+/// threshold nudge, `2` the firm one. Pure so the decision is testable without
+/// driving a provider.
+///
+/// `already_fired` is the highest tier already emitted this turn, so each tier
+/// fires once and a turn that keeps working is never re-nagged. A turn that has
+/// already spawned has taken the advice — telling it again is noise on top of
+/// work in progress, so it returns `already_fired` unchanged.
+pub(crate) fn delegation_nudge_tier(
+    tools_done: usize,
+    spawned_this_turn: bool,
+    already_fired: u8,
+) -> u8 {
+    if spawned_this_turn {
+        return already_fired;
+    }
+    if tools_done >= DELEGATION_NUDGE_AGAIN_AT && already_fired < 2 {
+        return 2;
+    }
+    if tools_done >= DELEGATION_NUDGE_AT && already_fired < 1 {
+        return 1;
+    }
+    already_fired
+}
+
+/// The message itself. It names the count the model cannot see, and it keeps
+/// the inline case legitimate: a deep task whose next step genuinely needs the
+/// context already built is the one reading that must not be talked out of.
+/// Without that clause the nudge becomes a blanket order to delegate, which is
+/// the opposite failure — spawning children for one-line edits.
+pub(crate) fn delegation_nudge(tools_done: usize, tier: u8) -> String {
+    if tier >= 2 {
+        format!(
+            "[System: {tools_done} tool calls in this turn — well past what one context should \
+             carry. If any remaining part of this work does not need the context you have built \
+             (research, a bulk file pass, a separate code change), hand it to spawn_agent now \
+             with a prompt carrying what the child needs, and let it run in the background while \
+             you continue here.]"
+        )
+    } else {
+        format!(
+            "[System: {tools_done} tool calls in this turn. Before the next one, weigh the \
+             remaining work: if it is independent of the context you have built (multi-source \
+             research, a bulk file pass, a code change across several files), spawn_agent it and \
+             keep this turn free. Stay inline when the next step genuinely needs what you have \
+             already read, and do not spawn for a single command or one file.]"
+        )
+    }
+}
