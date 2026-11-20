@@ -272,7 +272,9 @@ fn absent_negatives_survive_a_dense_vocabulary() {
     for i in 0..60usize {
         let content = format!(
             "common00 spec{:02} rare{:02}a rare{:02}b common{:02} \
-             and the rest of this line is padding so the message clears the floor",
+             and the rest of this line is padding so the message clears the floor \
+             because every sampled message must exceed the required length threshold \
+             before the sampler will consider it a candidate for this leg",
             i / 2,
             i,
             i,
@@ -290,18 +292,18 @@ fn absent_negatives_survive_a_dense_vocabulary() {
     let dataset = sample(&conn, 14).expect("dense-vocabulary store must still sample");
     assert_eq!(dataset.negatives.len(), NEGATIVES, "full negative set");
 
-    // The absent half came from the rare tail, not from the dense pool: a pair
-    // built out of `commonNN` words can never be proved absent here.
-    let from_rare = dataset
-        .negatives
-        .iter()
-        .filter(|n| n.contains("rare"))
-        .count();
-    assert!(
-        from_rare >= NEGATIVES / 2,
-        "only {from_rare} negatives came from the rare tail — the dense pool cannot \
-         supply an absence, so the fix is not being exercised: {:?}",
-        dataset.negatives
+    // The ABSENT half — everything after the near-miss half — must come from the
+    // rarity pass, not from the frequency-ordered pool. That pool is entirely
+    // `commonNN` here and those words co-occur by construction, so a pool-built
+    // absence is impossible: if any absent pair still names a `commonNN` word,
+    // attempt 2 did not run and this test would be passing for the wrong reason.
+    let half = NEGATIVES / 2;
+    let absent = &dataset.negatives[half..];
+    let from_pool = absent.iter().filter(|n| n.contains("common")).count();
+    assert_eq!(
+        from_pool, 0,
+        "the absent half drew {from_pool} pairs from the dense pool — the rarity \
+         pass did not supply them: {absent:?}"
     );
 
     // Anti-tautology (#899): every word in every negative must occur in the
