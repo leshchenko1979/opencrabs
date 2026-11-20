@@ -123,7 +123,11 @@ where
         .into_iter()
         .map(|row| (score_lower(content(&row), &lower_terms), row))
         .collect();
-    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    // NEUTER EXPERIMENT (not for merge): rank on `hits` alone so the
+    // tie-break term is removed from the comparison while the field is
+    // still computed. Expect `opening_zone_breaks_a_hit_tie` and
+    // `adjacency_breaks_a_tie_on_equal_hits_and_leading` to go RED.
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(score.hits));
     scored.into_iter().map(|(_, row)| row).collect()
 }
 
