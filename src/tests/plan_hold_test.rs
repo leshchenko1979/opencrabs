@@ -17,7 +17,9 @@ use crate::brain::agent::service::tool_loop::plan_hold_allowed;
 use crate::brain::goal::evidence::GoalEvidence;
 
 fn tasks(n: usize) -> Vec<String> {
-    (1..=n).map(|i| format!("{i}. task {i} (pending)")).collect()
+    (1..=n)
+        .map(|i| format!("{i}. task {i} (pending)"))
+        .collect()
 }
 
 /// The first nudge is always allowed: a checklist that just went Active has
@@ -25,8 +27,8 @@ fn tasks(n: usize) -> Vec<String> {
 /// for. Without this the turn would still end on the first text-only response.
 #[test]
 fn first_hold_fires() {
-    assert!(plan_hold_allowed(&tasks(3), None));
-    assert!(plan_hold_allowed(&tasks(1), None));
+    assert!(plan_hold_allowed(&tasks(3), None, false));
+    assert!(plan_hold_allowed(&tasks(1), None, false));
 }
 
 /// The bound: a second hold with the same open count is refused. Nothing was
@@ -37,7 +39,7 @@ fn second_hold_with_unchanged_count_does_not_fire() {
     let open = tasks(3);
     let baseline = Some(open.len());
     assert!(
-        !plan_hold_allowed(&open, baseline),
+        !plan_hold_allowed(&open, baseline, false),
         "an unchanged open count must not hold again"
     );
 }
@@ -50,7 +52,7 @@ fn second_hold_after_a_completed_task_fires() {
     let before = tasks(3);
     let after = tasks(2);
     assert!(
-        plan_hold_allowed(&after, Some(before.len())),
+        plan_hold_allowed(&after, Some(before.len()), false),
         "a decreased open count must hold again"
     );
 }
@@ -61,9 +63,9 @@ fn second_hold_after_a_completed_task_fires() {
 /// today, so the emptiness check is the first condition and not an assumption.
 #[test]
 fn empty_list_never_fires() {
-    assert!(!plan_hold_allowed(&[], None));
-    assert!(!plan_hold_allowed(&[], Some(0)));
-    assert!(!plan_hold_allowed(&[], Some(4)));
+    assert!(!plan_hold_allowed(&[], None, false));
+    assert!(!plan_hold_allowed(&[], Some(0), false));
+    assert!(!plan_hold_allowed(&[], Some(4), false));
     assert!(
         format_plan_hold(&[]).is_none(),
         "the renderer must produce nothing to inject"
@@ -81,7 +83,30 @@ fn running_task_with_no_open_plan_tasks_never_fires() {
         ..GoalEvidence::default()
     };
     assert!(evidence.unresolved_tasks.is_empty());
-    assert!(!plan_hold_allowed(&evidence.unresolved_tasks, None));
+    assert!(!plan_hold_allowed(&evidence.unresolved_tasks, None, true));
+}
+
+/// #919: work that LEFT the turn is not a stall. A detached command or a live
+/// sub-agent means the turn ended by handing off, and the completion wake opens
+/// a fresh turn on its own — so the hold stays silent even with a full
+/// checklist and no baseline, which is otherwise the first-hold case.
+///
+/// The last assertion is the control: the same open list with nothing in
+/// flight still holds, so the suppression is the flag's and not the list's.
+#[test]
+fn in_flight_work_suppresses_the_hold() {
+    assert!(
+        !plan_hold_allowed(&tasks(3), None, true),
+        "a detached task or live sub-agent must end the turn, not hold it"
+    );
+    assert!(
+        !plan_hold_allowed(&tasks(3), Some(3), true),
+        "in flight outranks the baseline arithmetic too"
+    );
+    assert!(
+        plan_hold_allowed(&tasks(3), None, false),
+        "the same call with nothing in flight must still fire"
+    );
 }
 
 /// The rendered prompt names every open task and carries the honest exit. The

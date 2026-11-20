@@ -1078,11 +1078,8 @@ impl AgentService {
         // rows and feedback through it further down, so the binding stays even
         // though the history read no longer goes through it.
         let message_service = MessageService::new(self.context.clone());
-        let mut db_messages = Self::load_messages_since_last_compaction(
-            self.context.pool(),
-            session_id,
-        )
-        .await?;
+        let mut db_messages =
+            Self::load_messages_since_last_compaction(self.context.pool(), session_id).await?;
 
         // Resolve model name: explicit caller arg > session's saved model >
         // current provider's default. The session.model fallback is critical
@@ -6666,8 +6663,36 @@ impl AgentService {
                     // exists, still owns continuation entirely: it already
                     // holds on open plan tasks, already accounts `max_turns`,
                     // and already tells a wait from a hold (#567).
+                    //
+                    // #919: a turn that ends with work still in flight has
+                    // HANDED OFF, not stalled. The completion wake opens a
+                    // fresh turn by itself, so holding here buys nothing but a
+                    // duplicate report — and bills a turn for it. The goal path
+                    // already draws this line (#567: it defers rather than
+                    // holds when a running task is the blocker); the plan path,
+                    // added later, never got it.
+                    //
+                    // Both legs are read from state the harness already holds.
+                    // `running_tasks` is honest at this point: every bash call
+                    // is registered for its whole execution, but a run that
+                    // returned inline is dropped from the roster, so a
+                    // non-empty list in a text-only iteration is work that left
+                    // the turn. A live sub-agent is counted whether it is
+                    // mid-round (`Running`) or parked with output to collect
+                    // (`AwaitingInput`) — both mean the parent's turn ended
+                    // with a child still owning work.
+                    let in_flight = !evidence.running_tasks.is_empty()
+                        || self.subagent_manager.as_ref().is_some_and(|m| {
+                            let (working, awaiting) = m.alive_counts_for(session_id);
+                            working + awaiting > 0
+                        });
+
                     if goal_mgr.get_goal(session_id).await.ok().flatten().is_none()
-                        && plan_hold_allowed(&evidence.unresolved_tasks, plan_hold_baseline)
+                        && plan_hold_allowed(
+                            &evidence.unresolved_tasks,
+                            plan_hold_baseline,
+                            in_flight,
+                        )
                         && let Some(prompt) = format_plan_hold(&evidence.unresolved_tasks)
                     {
                         let open = evidence.unresolved_tasks.len();
@@ -6695,8 +6720,7 @@ impl AgentService {
                             cb(
                                 session_id,
                                 ProgressEvent::SelfHealingAlert {
-                                    message: "Plan continues, re-entering tool loop"
-                                        .to_string(),
+                                    message: "Plan continues, re-entering tool loop".to_string(),
                                 },
                             );
                         }
@@ -7898,9 +7922,8 @@ impl AgentService {
                             let mid = assistant_db_msg.id.to_string();
                             let sid = session_id.to_string();
                             let tname = tool_name.clone();
-                            let status = crate::db::repository::tool_outcome_status(
-                                success, exit_code,
-                            );
+                            let status =
+                                crate::db::repository::tool_outcome_status(success, exit_code);
                             let prov = self.provider_name_for_session(session_id);
                             let mdl = Some(self.provider_model_for_session(session_id));
                             let dur_ms = tool_start.elapsed().as_millis() as i64;
@@ -8084,14 +8107,11 @@ impl AgentService {
                 // through, and because the two source vectors are cleared a few
                 // lines below — after that the turn's tool work is unrecoverable
                 // in memory, and the judge runs later in the same turn.
-                turn_tool_receipts.extend(
-                    tool_descriptions
-                        .iter()
-                        .zip(tool_outputs.iter())
-                        .map(|(desc, (success, _))| {
-                            crate::brain::goal::evidence::receipt_line(desc, *success)
-                        }),
-                );
+                turn_tool_receipts.extend(tool_descriptions.iter().zip(tool_outputs.iter()).map(
+                    |(desc, (success, _))| {
+                        crate::brain::goal::evidence::receipt_line(desc, *success)
+                    },
+                ));
                 crate::brain::goal::evidence::merge_files_touched(
                     &mut turn_tool_files,
                     &tool_descriptions,
@@ -8782,37 +8802,33 @@ impl AgentService {
         // says AFTER the mutation, never by a second disk read. A failure to
         // persist stays non-fatal here (turn settle must not fail the turn) but
         // is now distinguishable: the mutation reports whether it landed.
-        match crate::utils::plan_files::mutate_plan(
-            session_id,
-            |plan| {
-                let Some(finished) = plan.as_mut() else {
-                    return Ok((false, false));
-                };
-                // A plan whose only remaining task is the trailing delivery step
-                // never reaches is_complete() on its own — delivering the answer
-                // is what leaves that box unchecked, so the card lingers with
-                // 1/N done (#737). When THIS turn delivered a final response,
-                // complete that trailing task so the archive below fires.
-                let mutated = !final_text.trim().is_empty()
-                    && finished.complete_trailing_delivery_task();
-                // The archive decision follows the document's completeness
-                // AFTER the mutation — never the mutation itself. Binding it to
-                // `mutated` meant a plan whose LAST task the agent completed
-                // through the tool (so `complete_trailing_delivery_task` has
-                // nothing left to do) never archived at all: every box ticked,
-                // `status: Active`, card still live, session never back to
-                // NoPlan (#597).
-                Ok((mutated, finished.is_complete()))
-            },
-        )
+        match crate::utils::plan_files::mutate_plan(session_id, |plan| {
+            let Some(finished) = plan.as_mut() else {
+                return Ok((false, false));
+            };
+            // A plan whose only remaining task is the trailing delivery step
+            // never reaches is_complete() on its own — delivering the answer
+            // is what leaves that box unchecked, so the card lingers with
+            // 1/N done (#737). When THIS turn delivered a final response,
+            // complete that trailing task so the archive below fires.
+            let mutated =
+                !final_text.trim().is_empty() && finished.complete_trailing_delivery_task();
+            // The archive decision follows the document's completeness
+            // AFTER the mutation — never the mutation itself. Binding it to
+            // `mutated` meant a plan whose LAST task the agent completed
+            // through the tool (so `complete_trailing_delivery_task` has
+            // nothing left to do) never archived at all: every box ticked,
+            // `status: Active`, card still live, session never back to
+            // NoPlan (#597).
+            Ok((mutated, finished.is_complete()))
+        })
         .await
         {
             Ok((mutated, archived)) => {
                 if mutated {
                     tracing::info!("Plan: auto-completed trailing delivery task at turn settle");
                 }
-                if archived
-                    && let Err(e) = crate::utils::plan_files::archive_plan(session_id).await
+                if archived && let Err(e) = crate::utils::plan_files::archive_plan(session_id).await
                 {
                     tracing::warn!("Failed to archive completed plan at turn settle: {e}");
                 }
@@ -8890,8 +8906,19 @@ impl AgentService {
 /// is never interrupted, a model that stalls is not re-prompted twice. An empty
 /// list never fires — no plan, an `Editing` plan and a finished checklist all
 /// arrive here as an empty vector (see `build_goal_evidence`).
-pub(crate) fn plan_hold_allowed(unresolved: &[String], baseline: Option<usize>) -> bool {
-    if unresolved.is_empty() {
+///
+/// #919: `in_flight` refuses the hold outright. A turn that ends with a
+/// detached command or a live sub-agent has handed its work off, and the
+/// completion wake opens a fresh turn on its own — holding here would only
+/// re-report the hand-off. This is the line the goal path already draws (#567
+/// defers instead of holding when a running task is the blocker); the baseline
+/// stays untouched, so a stalled model is still capped once the work lands.
+pub(crate) fn plan_hold_allowed(
+    unresolved: &[String],
+    baseline: Option<usize>,
+    in_flight: bool,
+) -> bool {
+    if in_flight || unresolved.is_empty() {
         return false;
     }
     match baseline {
