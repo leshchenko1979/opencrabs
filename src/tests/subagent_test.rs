@@ -606,10 +606,10 @@ mod send_input_tool {
     }
 }
 
-// ─── CloseAgentTool Tests ──────────────────────────────────────────────────
+// ─── StopAgentTool Tests ──────────────────────────────────────────────────
 
-mod close_agent_tool {
-    use crate::brain::tools::subagent::CloseAgentTool;
+mod stop_agent_tool {
+    use crate::brain::tools::subagent::StopAgentTool;
     use crate::brain::tools::subagent::{SubAgent, SubAgentManager, SubAgentState};
     use crate::brain::tools::{Tool, ToolExecutionContext};
     use serde_json::json;
@@ -641,7 +641,7 @@ mod close_agent_tool {
     #[tokio::test]
     async fn missing_agent_id_returns_error() {
         let mgr = Arc::new(SubAgentManager::new());
-        let tool = CloseAgentTool::new(mgr);
+        let tool = StopAgentTool::new(mgr);
         let ctx = test_context();
 
         let result = tool.execute(json!({}), &ctx).await;
@@ -651,7 +651,7 @@ mod close_agent_tool {
     #[tokio::test]
     async fn close_nonexistent_returns_error() {
         let mgr = Arc::new(SubAgentManager::new());
-        let tool = CloseAgentTool::new(mgr);
+        let tool = StopAgentTool::new(mgr);
         let ctx = test_context();
 
         let result = tool
@@ -675,7 +675,7 @@ mod close_agent_tool {
         let token = agent.cancel_token.clone();
         mgr.insert(agent);
 
-        let tool = CloseAgentTool::new(mgr.clone());
+        let tool = StopAgentTool::new(mgr.clone());
         let ctx = test_context();
 
         let result = tool.execute(json!({"agent_id": "a1"}), &ctx).await.unwrap();
@@ -692,7 +692,7 @@ mod close_agent_tool {
         let mgr = Arc::new(SubAgentManager::new());
         mgr.insert(make_running_agent("a1"));
 
-        let tool = CloseAgentTool::new(mgr.clone());
+        let tool = StopAgentTool::new(mgr.clone());
         let ctx = test_context();
 
         let result = tool
@@ -710,7 +710,7 @@ mod close_agent_tool {
         mgr.insert(make_running_agent("a1"));
         mgr.mark_completed("a1", "done".to_string());
 
-        let tool = CloseAgentTool::new(mgr.clone());
+        let tool = StopAgentTool::new(mgr.clone());
         let ctx = test_context();
 
         // Close on a completed agent should still succeed (just doesn't cancel)

@@ -844,7 +844,7 @@ impl AgentService {
     /// - session plan artifacts, so the post-compaction agent resumes the plan
     ///   instead of rediscovering it;
     /// - live sub-agent IDs, so `wait_agent` / `send_input` / `resume_agent` /
-    ///   `close_agent` still have something to address (#936);
+    ///   `stop_agent` still have something to address (#936);
     /// - documents this session read whole, so project law it obeyed survives
     ///   the summary that dropped it (#831).
     ///

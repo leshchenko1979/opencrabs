@@ -1459,7 +1459,7 @@ pub(crate) const KNOWN_TOOL_NAMES: &[&str] = &[
     "spawn_agent",
     "wait_agent",
     "send_input",
-    "close_agent",
+    "stop_agent",
     "resume_agent",
     "cowork_connect",
     "provider_vision",

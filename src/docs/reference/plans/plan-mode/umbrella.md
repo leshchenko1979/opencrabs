@@ -272,7 +272,7 @@ The original gate premise ("exploration happened before plan init") was wrong. E
 3. **Three-state gate.** `check_plan_gate` returns `GateDecision::Allow | Deny(reason) | RequireApproval(reason)`. RequireApproval overrides auto-approve for the Editing window: the registry returns `ApprovalRequired` regardless of the session's `auto_approve` setting.
 4. **Editing is interactive-only.** The discriminator is `question_callback`: wired for interactive channels (TUI/Telegram), `None` for cron and a2a. When `None`, design `init` refuses. Editing in cron/a2a is unenforceable: cron installs an auto-approve rubber stamp, so an approval-based freeze is a no-op there.
 5. **Subagents inherit the freeze.** A child spawned while the parent is Editing gets a read-only registry (`restrict_registry_to_read_only`): mutating tools are stripped at spawn time. The child can read, search, and analyze to inform the design, but cannot write the project or mint a non-restricted grandchild.
-6. **Name list is a supplement, not the axis.** `EDITING_DENIED_NAMES` catches tools whose capabilities don't express the full restriction (e.g. channel sends with `Network` only, `close_agent` with empty caps). Tools caught by capability checks (`spawn_agent` with `SystemModification`) don't need name-list entries.
+6. **Name list is a supplement, not the axis.** `EDITING_DENIED_NAMES` catches tools whose capabilities don't express the full restriction (e.g. channel sends with `Network` only, `stop_agent` with empty caps). Tools caught by capability checks (`spawn_agent` with `SystemModification`) don't need name-list entries.
 
 ---
 

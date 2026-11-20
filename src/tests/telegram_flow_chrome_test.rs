@@ -974,7 +974,7 @@ fn settled_header_waits_when_subagents_alive() {
     // read, so a turn ending with agents mid-work still said "✅ Finished".
     // The waiting override now covers them, split working vs awaiting
     // collection — the two need different things from the user (time vs a
-    // wait_agent/send_input/close_agent decision).
+    // wait_agent/send_input/stop_agent decision).
     let working_only = SubagentCounts {
         working: 2,
         awaiting: 0,

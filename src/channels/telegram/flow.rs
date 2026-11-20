@@ -1649,7 +1649,7 @@ impl FlowOutcome {
 /// round boundary whose output is ready to collect (`AwaitingInput`). The
 /// settle card distinguishes the two because they need different things from
 /// the user: working agents just need time, parked ones need a
-/// `wait_agent`/`send_input`/`close_agent` decision.
+/// `wait_agent`/`send_input`/`stop_agent` decision.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SubagentCounts {
     pub(crate) working: usize,
@@ -2004,7 +2004,7 @@ impl ToolClass {
                 ToolClass::Config
             }
             "cron_manage" => ToolClass::Cron,
-            "spawn_agent" | "wait_agent" | "send_input" | "close_agent" | "resume_agent"
+            "spawn_agent" | "wait_agent" | "send_input" | "stop_agent" | "resume_agent"
             | "team_create" | "team_delete" | "team_broadcast" => ToolClass::Agent,
             "suggest_options" => ToolClass::Suggest,
             _ => ToolClass::Other,
