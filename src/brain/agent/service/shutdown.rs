@@ -72,3 +72,18 @@ pub(crate) fn keeps_recovery_row<T>(
 pub(crate) fn reset_for_test() {
     SHUTTING_DOWN.store(false, Ordering::SeqCst);
 }
+
+/// Serialises every test that mutates the process-global shutdown flag.
+///
+/// The flag is one `AtomicBool` for the whole test binary, and libtest runs
+/// cases in parallel threads of one process. A lock owned by ONE test module
+/// only excludes that module's cases from each other, so the moment a second
+/// module exercises the flag (`keeps_recovery_row` and `is_deliberate_stop`
+/// both do) the two sets interleave and one's `reset_for_test` lands inside the
+/// other's assertion. The lock lives here, beside the flag it protects, so a
+/// third module cannot reintroduce the same bug by forgetting to share.
+#[cfg(test)]
+pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}

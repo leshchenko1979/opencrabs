@@ -708,3 +708,82 @@ fn cleanup_stale_leaves_the_runs_leg_to_its_owner() {
         "the .err capture is the temp purge's to remove, not this sweep's"
     );
 }
+
+// ── #924: a deliberate stop is a recorded outcome, not a deletion ───────────
+//
+// `close_agent` promised to terminate AND clean up, and the second half was a
+// lie: nothing was ever removed, so a parent that trusted it kept polling a
+// record it thought was gone. The tool is now `stop_agent` and the record is
+// the product — it is what `agent_progress` reads afterwards and what
+// `resume_agent` rehydrates from. These two tests pin that contract on the
+// status file itself, because the tool's tests can only see the in-memory map.
+
+/// `mark_cancelled` persists a terminal record that keeps its identity.
+///
+/// The mutant this kills: a `mark_cancelled` that only sets the in-memory state
+/// (or reuses `mark_failed`). Either would pass a map-level assertion in the
+/// tool's tests while leaving the file `Running`, so a parent that restarts
+/// rehydrates a child it already stopped — and `reconcile_with` then rewrites
+/// the honest "cancelled" as "interrupted", blaming a restart for a decision
+/// the parent made.
+#[test]
+fn agent_cancelled_records_a_terminal_state_that_is_not_a_failure() {
+    isolate("cancelled");
+    let mut s =
+        WorkStatus::new_agent("test-cxl", "test", "sess-1", "do things", None, None).unwrap();
+    s.mark_cancelled().unwrap();
+
+    // Re-read from disk: the assertion is about what SURVIVES the process, so
+    // reading the handle we just mutated would prove nothing.
+    let back =
+        WorkStatus::read("test-cxl").expect("the record is still there — a stop is not a delete");
+    assert_eq!(back.state, WorkState::Cancelled);
+    assert!(
+        back.state.is_terminal(),
+        "Cancelled must be terminal, or reconcile_with marks it Interrupted at boot and the stop is lost"
+    );
+    let finish = back
+        .finish
+        .as_ref()
+        .expect("a stop stamps a finish, otherwise the record never ages out");
+    assert!(!finish.completed_at.is_empty());
+    assert!(
+        finish.output_full.is_none(),
+        "a stop produces no output — storing one would let the parent read a result the child never finished"
+    );
+    assert!(
+        finish.error.is_none(),
+        "a deliberate stop is not an error; putting one here reports the parent's own decision as a crash"
+    );
+}
+
+/// A cancelled agent keeps its original label, task and spawn instant.
+///
+/// The mutant this kills: `mark_cancelled` rebuilding the record (or a `stop`
+/// path that re-mints the id). `resume_agent` rehydrates from these fields, so
+/// a rebuilt record silently becomes a different agent — one whose task the
+/// model has to re-read from a prompt that no longer matches what it was doing.
+#[test]
+fn a_cancelled_agent_keeps_its_identity() {
+    isolate("cancelled_identity");
+    let mut s = WorkStatus::new_agent(
+        "test-cxl-id",
+        "the-label",
+        "sess-1",
+        "the original task",
+        None,
+        None,
+    )
+    .unwrap();
+    let spawned_at = s.spawned_at.clone();
+    s.mark_cancelled().unwrap();
+
+    let back = WorkStatus::read("test-cxl-id").expect("record survives the stop");
+    assert_eq!(back.label, "the-label");
+    assert_eq!(back.task, "the original task");
+    assert_eq!(
+        back.spawned_at, spawned_at,
+        "a stop must not look like a fresh spawn — `agent_progress` renders elapsed time from this"
+    );
+    assert_eq!(back.kind, WorkKind::Agent);
+}

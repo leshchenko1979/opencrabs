@@ -71,6 +71,10 @@ fn catalog_splits_core_from_extended() {
     // arm would silently drop it out of `tool_search`'s `agents` group with
     // no error and no failing test.
     assert_eq!(catalog::tool_category("stop_agent"), "agents");
+    // #924: `stop_agent` is extended, never core. Promoting it would ship its
+    // schema to every session (it is a parent-only brake) AND break the
+    // inventory guard below, which refuses a core name in the extended list.
+    assert!(!catalog::is_core("stop_agent"));
     assert_eq!(catalog::tool_category("generate_image"), "media");
     assert_eq!(catalog::tool_category("self_improve"), "system");
 }
@@ -95,6 +99,33 @@ fn tool_inventory_names_are_extended_not_core() {
             );
         }
     }
+}
+
+/// `stop_agent` is registered in exactly the two places a tool needs to be
+/// discoverable, and stripped from exactly one place it must never reach.
+///
+/// The mutant this kills: the rename landing in the catalog but not in
+/// `ALWAYS_EXCLUDED`. That would hand every spawned child a tool that cancels
+/// its own siblings — the ownership gate would refuse it, so nothing would
+/// crash, and the only symptom would be a child that can be talked into trying.
+/// Missing from the inventory instead is quieter still: `tool_search` would
+/// never surface it, so the parent's own brake becomes undiscoverable and the
+/// model reports that it cannot stop an agent.
+#[test]
+fn stop_agent_is_inventoried_and_withheld_from_children() {
+    let agents = catalog::EXTENDED_TOOL_INVENTORY
+        .iter()
+        .find(|(category, _)| *category == "agents")
+        .map(|(_, names)| *names)
+        .expect("the 'agents' inventory group exists");
+    assert!(
+        agents.contains(&"stop_agent"),
+        "stop_agent must be advertised under 'agents', or tool_search never surfaces it"
+    );
+    assert!(
+        crate::brain::tools::subagent::agent_type::ALWAYS_EXCLUDED.contains(&"stop_agent"),
+        "stop_agent must be stripped from a child's registry — a child has no children of its own to stop"
+    );
 }
 
 #[test]

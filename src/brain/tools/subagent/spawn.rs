@@ -238,7 +238,7 @@ pub(crate) fn push_attention(
 /// while reporting a shutdown as a deliberate stop marks `Cancelled` a child
 /// that was really interrupted mid-work, which is precisely the state
 /// `reconcile_with` exists to record.
-fn is_deliberate_stop(token: &CancellationToken) -> bool {
+pub(crate) fn is_deliberate_stop(token: &CancellationToken) -> bool {
     token.is_cancelled() && !crate::brain::agent::service::shutdown::is_shutting_down()
 }
 
