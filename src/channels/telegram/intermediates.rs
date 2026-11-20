@@ -61,6 +61,19 @@ pub(crate) fn build_last_intermediate_with_footer(
     }
 }
 
+/// What an intermediate's rich send produced (#923): the bubble id, and the
+/// response's own account of which documents it BOUND.
+///
+/// The receipt travels out of the sender because the sender is the only place
+/// that sees the response, and the caller is the only place that knows which
+/// PATHS those entries came from. Without it the caller had to assume that a
+/// `200` meant every document the request named had landed — the false receipt
+/// of #923.
+pub(crate) struct IntermediateRichSend {
+    pub(crate) message_id: MessageId,
+    pub(crate) receipt: super::rich::RichMediaReceipt,
+}
+
 /// Send a structured intermediate segment as a native rich message, returning
 /// its id for tracking. Mermaid-aware (#1044/#1202): fences resolve to a media
 /// array; with no fence this is byte-identical to `send_rich_markdown_id`.
@@ -82,7 +95,7 @@ pub(crate) async fn try_send_intermediate_rich(
     thread_id: Option<teloxide::types::ThreadId>,
     text: &str,
     media: &[super::rich::mermaid::MediaEntry],
-) -> Option<MessageId> {
+) -> Option<IntermediateRichSend> {
     if !super::rich::should_send_native_rich_for_media(text, !media.is_empty()) {
         return None;
     }
@@ -103,9 +116,12 @@ pub(crate) async fn try_send_intermediate_rich(
         // 12 ms later). Reporting it here is what makes the notice fire on the
         // shape a sacrifice actually produces; the shared re-entry latch keeps
         // a double report to a single correction turn.
-        Ok((id, sacrificed)) => {
-            super::delivery::report_rich_plane_sacrifices(tg, session_id, &sacrificed);
-            Some(MessageId(id))
+        Ok(sent) => {
+            super::delivery::report_rich_plane_sacrifices(tg, session_id, &sent.sacrificed);
+            Some(IntermediateRichSend {
+                message_id: MessageId(sent.message_id),
+                receipt: sent.receipt,
+            })
         }
         Err(e) => {
             tracing::warn!("Telegram: intermediate rich send failed, using HTML: {e}");
@@ -763,9 +779,83 @@ pub(crate) async fn deliver_intermediate_message(
     let body = crate::utils::append_failure_notice(&rich_linked, &failures);
     let body = crate::utils::append_file_failure_notice(&body, &file_failures);
 
-    if let Some(id) =
+    if let Some(sent) =
         try_send_intermediate_rich(tg, session_id, bot, chat, thread_id, &body, &media).await
     {
+        let id = sent.message_id;
+        // ── #923: subtract against the WIRE, not against the request ────────
+        //
+        // Every line below used to read the request: `readable_files` is the
+        // set whose BYTES WERE READ, and a `200` was taken as proof the API
+        // attached them. It is not proof. A document entry the server discards
+        // silently comes back with `rich_message.documents: []` and no error
+        // (measured: msg 103595, `📎` marker with nothing behind it, turn
+        // settled as success), and the final leg then never shipped it either
+        // because this very block had already recorded the path as delivered —
+        // the double-send guard turned one false receipt into a permanent loss.
+        //
+        // So the paths recorded as delivered are the CONFIRMED ones, and every
+        // document the response does not name ships as its own bubble right
+        // here, below the body that names it. That bubble is the document's
+        // address: its id goes into `delivered_files` so the marker can point
+        // at it exactly as it does for the entries that rode the array.
+        // A response with no `rich_message` object at all is a shape we cannot
+        // read: say so once, and keep the request-side assumption rather than
+        // re-sending every document on a guess.
+        if sent.receipt.is_unconfirmed() && !readable_files.is_empty() {
+            tracing::debug!(
+                "Telegram: intermediate rich response carried no rich_message — delivery of \
+                 {} document(s) is UNCONFIRMED, keeping the request-side assumption (#923)",
+                readable_files.len()
+            );
+        }
+        let unbound_files =
+            super::delivery::documents_the_response_did_not_bind(&readable_files, &sent.receipt);
+        let (unbound_delivered, unbound_refused) = if unbound_files.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            tracing::warn!(
+                "Telegram: rich response did not bind {} document(s) the request carried — \
+                 shipping them detached (#923): {}",
+                unbound_files.len(),
+                unbound_files
+                    .iter()
+                    .map(|file| file.path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            super::delivery::send_local_files(session_id, bot, chat, thread_id, &unbound_files)
+                .await
+        };
+        // A document the detached floor ALSO refused is a real loss, and it
+        // rides the SAME report a sacrificed entry takes (#897): the guard
+        // line plus the one synthetic correction turn. No new silent path.
+        if !unbound_refused.is_empty() {
+            let lost: Vec<super::rich::SacrificedEntry> = unbound_files
+                .iter()
+                .filter(|file| {
+                    unbound_refused
+                        .iter()
+                        .any(|failure| failure.resolved.as_ref() == Some(&file.path))
+                })
+                .map(|file| {
+                    let name = super::delivery::document_part_name(&file.path);
+                    let id = walks
+                        .rich_files
+                        .entries
+                        .iter()
+                        .find(|entry| entry.file.path == file.path)
+                        .map(|entry| entry.id.clone())
+                        .unwrap_or_else(|| name.clone());
+                    super::rich::SacrificedEntry {
+                        id,
+                        name: Some(name),
+                        kind: super::rich::mermaid::MediaKind::Document,
+                    }
+                })
+                .collect();
+            super::delivery::report_rich_plane_sacrifices(tg, session_id, &lost);
+        }
         // The bubble is non-sticky burial evidence (#1150): the flow block must
         // restick below its own output on the next append.
         tg.note_bot_bubble(chat.0, id.0);
@@ -790,12 +880,26 @@ pub(crate) async fn deliver_intermediate_message(
         // in the same list so the final leg's `intermediate_file_links` can
         // re-point a marker the closing answer repeats, exactly as it does for
         // the entries that rode the array (#1939).
+        // #923: only the CONFIRMED documents ride this bubble. An unbound one
+        // has a bubble of its own (below), and pointing its marker here would
+        // name a message that does not hold it.
         let mut delivered_files: Vec<(std::path::PathBuf, i32)> = readable_files
             .iter()
+            .filter(|file| {
+                !unbound_files
+                    .iter()
+                    .any(|unbound| unbound.path == file.path)
+            })
             .map(|file| (file.path.clone(), id.0))
             .collect();
         delivered_files.extend(
             skipped_delivered
+                .iter()
+                .map(|file| (file.path.clone(), file.message_id)),
+        );
+        // The detached floor's own bubbles are their files' addresses.
+        delivered_files.extend(
+            unbound_delivered
                 .iter()
                 .map(|file| (file.path.clone(), file.message_id)),
         );
@@ -821,8 +925,23 @@ pub(crate) async fn deliver_intermediate_message(
         // #1918: and the documents, for the same reason — the only copy of each
         // is now in the rich message the reader was shown, so the final leg's
         // floor must not ship it a second time as its own bubble.
+        //
+        // #923: CONFIRMED ones only. A document the response did not bind was
+        // NOT shown inline; its copy is the detached bubble above, and it is
+        // recorded from that send's own result — recording it here on the
+        // strength of the request is the false receipt this issue is about.
+        s.delivered_image_paths.extend(
+            readable_files
+                .iter()
+                .filter(|file| {
+                    !unbound_files
+                        .iter()
+                        .any(|unbound| unbound.path == file.path)
+                })
+                .map(|file| file.path.clone()),
+        );
         s.delivered_image_paths
-            .extend(readable_files.iter().map(|file| file.path.clone()));
+            .extend(unbound_delivered.iter().map(|file| file.path.clone()));
         return true;
     }
 

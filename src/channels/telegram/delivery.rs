@@ -1493,7 +1493,9 @@ pub(crate) async fn deliver_final_response(
                                 .await;
                             }
                             match rich_send {
-                                Ok((id, rich_sacrificed)) => {
+                                Ok(sent) => {
+                                    let id = sent.message_id;
+                                    let rich_sacrificed = sent.sacrificed;
                                     // Success was silent, which is why an
                                     // unformatted table could not be traced (#860).
                                     tracing::info!(
@@ -1518,6 +1520,72 @@ pub(crate) async fn deliver_final_response(
                                         message_id: teloxide::types::MessageId(id),
                                         body: super::state::BubbleBody::Markdown(rich_md.clone()),
                                     });
+                                    // ── #923: the response's own account ─────
+                                    //
+                                    // The floor above (this function, the
+                                    // `rich_owns_documents` arm) subtracts the
+                                    // documents against `rich_fw.entries` — the
+                                    // REQUEST's entry list — and that runs
+                                    // BEFORE this send, so it cannot know what
+                                    // the server did with them. It could not
+                                    // know even in principle: `sendRichMessage`
+                                    // answering 200 is not proof an entry
+                                    // attached, and a discarded document comes
+                                    // back with `rich_message.documents: []`
+                                    // and no error (msg 103595, ADR-0001 §4.3).
+                                    //
+                                    // So the floor's suppression is corrected
+                                    // HERE, with the receipt in hand: every
+                                    // document the request carried and the
+                                    // response did not name ships detached now,
+                                    // as its own bubble, right below the body
+                                    // that carries its `📎` marker. Its refusal
+                                    // joins `file_failures`, which is what feeds
+                                    // the existing post-delivery ladder below
+                                    // (guard line + `local_file_delivery_failure_nudge`)
+                                    // — the loss is never silent.
+                                    //
+                                    // Gated on `rich_owns_documents` because
+                                    // when the plane owns NO document the floor
+                                    // above already shipped every one of them;
+                                    // reconciling here would send a second copy.
+                                    if rich_owns_documents {
+                                        let requested: Vec<crate::utils::image::LocalFile> =
+                                            file_paths
+                                                .iter()
+                                                .filter(|f| {
+                                                    rich_fw
+                                                        .entries
+                                                        .iter()
+                                                        .any(|e| e.file.path == f.path)
+                                                })
+                                                .cloned()
+                                                .collect();
+                                        let unbound =
+                                            super::delivery::documents_the_response_did_not_bind(
+                                                &requested,
+                                                &sent.receipt,
+                                            );
+                                        if !unbound.is_empty() {
+                                            tracing::warn!(
+                                                "Telegram: rich response did not bind {} of the \
+                                                 request's document(s) (response bound {:?}) — \
+                                                 shipping them detached (#923): {}",
+                                                unbound.len(),
+                                                sent.receipt.bound_documents(),
+                                                unbound
+                                                    .iter()
+                                                    .map(|file| file.path.display().to_string())
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ")
+                                            );
+                                            let (_, refused) = send_local_files(
+                                                session_id, bot, chat_id, thread_id, &unbound,
+                                            )
+                                            .await;
+                                            file_failures.extend(refused);
+                                        }
+                                    }
                                     true
                                 }
                                 Err(e) => {
@@ -2220,6 +2288,35 @@ pub(crate) async fn send_local_images(
     }
 
     (delivered, failures)
+}
+
+/// The documents a rich send's RESPONSE did not confirm it bound (#923).
+///
+/// This is the correction to the two "false receipt" sites: both legs recorded
+/// a document as delivered because the REQUEST carried an entry for it, and
+/// `sendRichMessage` answering 200 proves the request was accepted, never that
+/// the entry attached. A document reference the server cannot use is discarded
+/// silently — the delivered message comes back with `rich_message.documents: []`
+/// and no error (measured: ADR-0001 §4.3, msg 96655; the #923 incident, msg
+/// 103595).
+///
+/// `readable` is the list whose BYTES went out with the request — exactly the
+/// entries the response could be talking about — and the answer is the subset
+/// the response does not name. `receipt.document_bound` answers `true` for an
+/// UNCONFIRMED response (no `rich_message` at all), so a response shape we
+/// cannot read keeps the pre-#923 behaviour instead of re-sending everything.
+///
+/// Pure, so the predicate is unit-testable without a bot: matching is by the
+/// multipart part name, which is what the server echoes back as `file_name`.
+pub(crate) fn documents_the_response_did_not_bind(
+    readable: &[crate::utils::image::LocalFile],
+    receipt: &super::rich::RichMediaReceipt,
+) -> Vec<crate::utils::image::LocalFile> {
+    readable
+        .iter()
+        .filter(|file| !receipt.document_bound(&document_part_name(&file.path)))
+        .cloned()
+        .collect()
 }
 
 /// The filename Telegram should display for a document read from `path`.

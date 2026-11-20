@@ -1145,6 +1145,7 @@ pub mod telegram_rich_json_test;
 pub mod telegram_rich_markdown_normalize_test;
 pub mod telegram_rich_mermaid_test;
 pub mod telegram_rich_parse_test;
+pub mod telegram_rich_receipt_test;
 pub mod telegram_rich_test;
 pub mod telegram_rich_transport_retry_test;
 pub mod telegram_rich_wrap_p_test;

@@ -205,6 +205,23 @@ pub(crate) fn release(session_id: Uuid, chat_id: i64, thread_id: Option<i32>, ma
     map.remove(&key_of(session_id, chat_id, thread_id, markdown));
 }
 
+/// What a guarded rich send produced: the message id, the entries the retry
+/// ladder sacrificed to get it out (#897), and the response's own account of
+/// which documents it BOUND (#923).
+///
+/// `sacrificed` and `receipt` answer two different questions about the same
+/// send, and neither implies the other: `sacrificed` names entries this client
+/// REMOVED after a refusal, while the receipt names what the server accepted.
+/// An entry can be in neither (it was requested, nothing refused it, and the
+/// server discarded it on a 200 — the #923 incident) and only the receipt can
+/// see that.
+#[derive(Debug, Clone)]
+pub(crate) struct GuardedSend {
+    pub(crate) message_id: i32,
+    pub(crate) sacrificed: Vec<super::rich::SacrificedEntry>,
+    pub(crate) receipt: super::rich::RichMediaReceipt,
+}
+
 /// Send a turn's rich markdown under the duplicate guard (#500).
 ///
 /// Both senders that can produce the duplicate route through here, so neither
@@ -228,7 +245,7 @@ pub(crate) async fn send_rich_turn_guarded(
     thread_id: Option<ThreadId>,
     markdown: &str,
     media: &[super::rich::mermaid::MediaEntry],
-) -> anyhow::Result<(i32, Vec<super::rich::SacrificedEntry>)> {
+) -> anyhow::Result<GuardedSend> {
     let thread = thread_id.map(|t| t.0.0);
     let key = content_key(markdown, media);
     let hash8 = fingerprint(&key) as u32;
@@ -242,8 +259,15 @@ pub(crate) async fn send_rich_turn_guarded(
                      msg {id} (session={session_id} chat={} thread={thread:?} hash8={hash8:08x})",
                     chat_id.0
                 );
-                // Nothing was sent, so nothing was sacrificed.
-                return Ok((id, Vec::new()));
+                // Nothing was sent, so nothing was sacrificed — and nothing
+                // new was bound either. An UNCONFIRMED receipt is the honest
+                // answer: the earlier send's own receipt belongs to the caller
+                // that made it (#923).
+                return Ok(GuardedSend {
+                    message_id: id,
+                    sacrificed: Vec::new(),
+                    receipt: super::rich::RichMediaReceipt::default(),
+                });
             }
             Admission::InFlight => {
                 if waited >= WAIT_MAX {
@@ -279,17 +303,25 @@ pub(crate) async fn send_rich_turn_guarded(
     .await;
 
     match sent {
-        Ok((id, sacrificed)) if id != 0 => {
+        Ok((id, sacrificed, receipt)) if id != 0 => {
             mark_landed(session_id, chat_id.0, thread, &key, id, Instant::now());
-            Ok((id, sacrificed))
+            Ok(GuardedSend {
+                message_id: id,
+                sacrificed,
+                receipt,
+            })
         }
         // A send that returned no message id did not land, so it must not
         // suppress its own retry.
-        Ok((id, sacrificed)) => {
+        Ok((id, sacrificed, receipt)) => {
             if owned {
                 release(session_id, chat_id.0, thread, &key);
             }
-            Ok((id, sacrificed))
+            Ok(GuardedSend {
+                message_id: id,
+                sacrificed,
+                receipt,
+            })
         }
         Err(e) => {
             if owned {
