@@ -15,6 +15,10 @@ use crate::brain::agent::service::nudge::{
     DELEGATION_NUDGE_AGAIN_AT, DELEGATION_NUDGE_AT, delegation_nudge, delegation_nudge_tier,
 };
 
+/// The wiring site, pinned as source so a refactor that deletes the injection
+/// cannot leave this suite green.
+const TOOL_LOOP_SRC: &str = include_str!("../brain/agent/service/tool_loop.rs");
+
 #[test]
 fn the_threshold_is_the_one_rule_26_names() {
     // The harness and the written law must not drift apart: if rule 26's `>= 10`
@@ -112,4 +116,42 @@ fn both_tiers_are_framed_as_system_messages() {
         );
         assert!(nudge.ends_with(']'), "tier {tier} must be closed: {nudge}");
     }
+}
+
+#[test]
+fn the_nudge_is_wired_into_the_turn_loop() {
+    // Every test above exercises a pure function, so none of them fails if the
+    // injection is deleted from `tool_loop.rs` — the mechanism would be dead
+    // behind a green suite, which is the shape of a gate that cannot see the
+    // failure class it is aimed at. So pin the wiring itself, one assertion per
+    // guard, so removing any single one of them fails this test.
+    assert!(
+        TOOL_LOOP_SRC.contains("let mut spawned_this_turn = false;"),
+        "the spawn flag must be declared at turn scope, not per-iteration"
+    );
+    assert!(
+        TOOL_LOOP_SRC.contains("let mut delegation_nudge_tier_fired: u8 = 0;"),
+        "the tier budget must be declared at turn scope so each tier fires once"
+    );
+    assert!(
+        TOOL_LOOP_SRC.contains("name == \"spawn_agent\""),
+        "a spawn in the batch must set the flag BEFORE dispatch, because the \
+         parallel path consumes `tool_uses`"
+    );
+    assert!(
+        TOOL_LOOP_SRC.contains("super::nudge::delegation_nudge_tier("),
+        "the loop must call the tier decision rather than re-deriving it inline"
+    );
+    assert!(
+        TOOL_LOOP_SRC.contains("super::nudge::delegation_nudge("),
+        "the loop must inject the nudge text"
+    );
+    assert!(
+        TOOL_LOOP_SRC.contains("self.tool_registry.has_tool(\"spawn_agent\")"),
+        "a registry without spawn_agent must not be told to call a tool it cannot see"
+    );
+    assert!(
+        TOOL_LOOP_SRC.contains("m.find_by_session(session_id).is_some()"),
+        "a session that is itself a sub-agent must not be nudged to spawn"
+    );
 }
