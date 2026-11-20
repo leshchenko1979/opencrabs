@@ -514,6 +514,15 @@ pub(crate) fn is_split_candidate(text: &str) -> bool {
     text.encode_utf16().count() >= TELEGRAM_TEXT_LIMIT - SPLIT_MARGIN
 }
 
+/// How long a message waits for an EARLIER message in its lane to finish
+/// ingesting before it opens the turn anyway (#909).
+///
+/// The slowest observed STT in the #909 burst was 32.8 s (note `102140`), so
+/// 60 s lets a burst settle without letting a genuinely stuck ingestion hold
+/// the turn forever — the wait is a tie-breaker between messages that are all
+/// still working, not a hard guarantee.
+const INGESTION_ORDER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Which topic lifecycle event reached [`apply_topic_teardown`] (#572).
 ///
 /// Three variants, and the third is why this is an enum rather than a bool:
@@ -776,6 +785,17 @@ pub(crate) async fn handle_message(
     };
 
     let user_id = user.id.0 as i64;
+
+    // #909: register this message as INGESTING for its lane before any of the
+    // slow work below (media download, STT). Telegram ids are monotonic per
+    // chat, so a message that finishes ingesting first must not open the turn
+    // ahead of one sent before it — in the measured burst a 2.4 s STT call on
+    // the second note overtook a 32.8 s call on the first. The guard is bound
+    // at function scope so EVERY early return below deregisters; the turn
+    // opener waits on the registry (see `await_ingestion_order`) and the guard
+    // is dropped explicitly once the turn is claimed.
+    let _ingest_guard =
+        telegram_state.begin_ingestion(msg.chat.id.0, msg.thread_id.map(|t| t.0.0), msg.id.0);
 
     // Forum-topic thread id (issue #130). Every send back to this chat
     // must route via send::message_in_thread / photo_in_thread /
@@ -2407,6 +2427,27 @@ pub(crate) async fn handle_message(
         text
     };
 
+    // #909: do not open the turn ahead of an earlier message still ingesting.
+    // Ingestion (media download, STT) finished for THIS message here, but a
+    // note sent before it may still be in flight; opening now would let the
+    // faster note speak first. Bounded by INGESTION_ORDER_DEADLINE so a stuck
+    // ingestion degrades to the old behaviour instead of hanging the turn.
+    let waited = !telegram_state
+        .await_ingestion_order(
+            msg.chat.id.0,
+            msg.thread_id.map(|t| t.0.0),
+            msg.id.0,
+            INGESTION_ORDER_DEADLINE,
+        )
+        .await;
+    if waited {
+        tracing::warn!(
+            "Telegram: ingestion order deadline expired for msg {} in {} — proceeding",
+            msg.id.0,
+            msg.chat.id.0
+        );
+    }
+
     tracing::info!(
         "Telegram: reaching agent processing — text={:?}, is_voice={}, is_dm={}, chat={}",
         text,
@@ -2907,6 +2948,15 @@ pub(crate) async fn handle_message(
             return Ok(());
         }
     };
+
+    // #909: this message has now either CLAIMED the turn or been enqueued for
+    // injection mid-turn (#893), so it can no longer open a turn out of order.
+    // Deregister here rather than at function exit: `handle_message` runs the
+    // WHOLE turn inline, so holding the registration would make every later
+    // message of the burst wait for this turn to finish (up to the 60 s
+    // deadline) before it could even reach the queue — turning #893's prompt
+    // mid-turn injection into turn-length serialization.
+    drop(_ingest_guard);
 
     // ── Quiet mode (#679): fold the previous turn's answer ──────────────────
     // In an opting group the scrollback is an archive to be scanned, so the

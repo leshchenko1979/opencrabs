@@ -12,6 +12,12 @@ use tokio::sync::{Mutex, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// #909: `(chat_id, thread_id)` → the message ids still INGESTING in that
+/// lane. Telegram ids are monotonic per chat, so a lane's set is an ordered
+/// "who has not finished yet" list: a message may open the turn only when its
+/// own id is the smallest one left.
+type IngestLanes = HashMap<(i64, Option<i32>), std::collections::BTreeSet<i32>>;
+
 /// The answer bubble a merged suggestion keyboard rides on.
 ///
 /// When `suggest_options` attaches its buttons to the final response bubble
@@ -390,6 +396,14 @@ pub struct TelegramState {
     /// corruption message. Written once by the daemon before the channel
     /// agents start; read non-consuming, so no reader can clear it.
     db_integrity_detail: Mutex<Option<String>>,
+    /// #909: messages currently ingesting, per lane. Telegram message ids are
+    /// monotonic per chat, so a completed message may open a turn only when no
+    /// SMALLER id is still ingesting — otherwise a 2.4 s STT call on note #2
+    /// overtakes a 32.8 s call on note #1 and opens the turn out of order.
+    /// Keyed by (chat_id, thread_id) because a forum topic is its own lane.
+    ingest_inflight: std::sync::Mutex<IngestLanes>,
+    /// Wakes the waiters above when an ingestion completes.
+    ingest_notify: tokio::sync::Notify,
 }
 
 impl Default for TelegramState {
@@ -452,6 +466,43 @@ impl Drop for LiveFlowRegistration {
     }
 }
 
+/// #909: RAII registration of ONE in-flight ingestion.
+///
+/// While the guard is alive its message id sits in
+/// [`TelegramState::ingest_inflight`] for its lane, so a later message that
+/// finishes STT first waits for it instead of opening the turn out of send
+/// order. Drop deregisters and wakes every waiter — normal return, `?`, and
+/// panic all end here, which is why this is a guard and not a paired
+/// register/unregister call.
+pub(crate) struct IngestionGuard {
+    state: std::sync::Arc<TelegramState>,
+    chat_id: i64,
+    thread_id: Option<i32>,
+    msg_id: i32,
+}
+
+impl Drop for IngestionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.state.ingest_inflight.lock() {
+            let lane = (self.chat_id, self.thread_id);
+            let empty = match map.get_mut(&lane) {
+                Some(set) => {
+                    set.remove(&self.msg_id);
+                    set.is_empty()
+                }
+                None => false,
+            };
+            if empty {
+                map.remove(&lane);
+            }
+        }
+        // Wakes only waiters already registered; a waiter that has not yet
+        // reached its check re-reads the map under the lock and sees this
+        // message gone, so the notification is never load-bearing on its own.
+        self.state.ingest_notify.notify_waiters();
+    }
+}
+
 impl TelegramState {
     pub fn new() -> Self {
         Self {
@@ -506,6 +557,8 @@ impl TelegramState {
                 crate::channels::telegram::config_alerts::ConfigAlertState::new(),
             ),
             db_integrity_detail: Mutex::new(None),
+            ingest_inflight: std::sync::Mutex::new(HashMap::new()),
+            ingest_notify: tokio::sync::Notify::new(),
         }
     }
 
@@ -554,6 +607,75 @@ impl TelegramState {
         let entry = map.entry(chat_id).or_insert(msg_id);
         if msg_id > *entry {
             *entry = msg_id;
+        }
+    }
+
+    /// #909: register `msg_id` as currently ingesting in its lane and return
+    /// the RAII guard that deregisters it.
+    ///
+    /// Called at the TOP of `handle_message`, before the slow ingestion work
+    /// (media download, STT), so a message that finishes first can see every
+    /// earlier message that is still working. The lane is `(chat_id,
+    /// thread_id)`: a forum topic is its own conversation and its ids are
+    /// ordered independently of the General topic's.
+    pub(crate) fn begin_ingestion(
+        self: &std::sync::Arc<Self>,
+        chat_id: i64,
+        thread_id: Option<i32>,
+        msg_id: i32,
+    ) -> IngestionGuard {
+        {
+            let mut map = self
+                .ingest_inflight
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            map.entry((chat_id, thread_id)).or_default().insert(msg_id);
+        }
+        IngestionGuard {
+            state: std::sync::Arc::clone(self),
+            chat_id,
+            thread_id,
+            msg_id,
+        }
+    }
+
+    /// #909: may this message open a turn NOW?
+    ///
+    /// Returns `true` when it proceeded without waiting (no SMALLER id is
+    /// still ingesting in the lane) and `false` when `deadline` expired with
+    /// an earlier message still in flight — the caller then proceeds anyway,
+    /// because a genuinely stuck ingestion must not hold the turn forever.
+    ///
+    /// The notification is registered BEFORE the map is read: otherwise a
+    /// completion landing between the check and the `select!` would leave this
+    /// waiter asleep on a notification that already fired.
+    pub(crate) async fn await_ingestion_order(
+        &self,
+        chat_id: i64,
+        thread_id: Option<i32>,
+        msg_id: i32,
+        deadline: std::time::Duration,
+    ) -> bool {
+        let deadline_at = tokio::time::Instant::now() + deadline;
+        loop {
+            let notified = self.ingest_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let blocked = {
+                let map = self
+                    .ingest_inflight
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                map.get(&(chat_id, thread_id))
+                    .is_some_and(|set| set.range(..msg_id).next().is_some())
+            };
+            if !blocked {
+                return true;
+            }
+            tokio::select! {
+                _ = &mut notified => {}
+                _ = tokio::time::sleep_until(deadline_at) => return false,
+            }
         }
     }
 

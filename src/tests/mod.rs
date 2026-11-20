@@ -1101,6 +1101,7 @@ pub mod telegram_handed_over_marker_test;
 pub mod telegram_handler_test;
 pub mod telegram_history_dedup_test;
 pub mod telegram_impersonation_test;
+pub mod telegram_ingestion_order_test;
 pub mod telegram_join_detection_test;
 pub mod telegram_last_intermediate_footer_test;
 pub mod telegram_leading_hash_shield_test;
