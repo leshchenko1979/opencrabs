@@ -617,8 +617,30 @@ mod stop_agent_tool {
     use tokio::sync::mpsc;
     use uuid::Uuid;
 
+    /// The session these tests act as (#924). Fixed rather than random: the
+    /// ownership gate resolves only the caller's OWN children, so a fixture
+    /// parented to an independent `Uuid::new_v4()` is a stranger and
+    /// `stop_agent` correctly refuses to touch it.
+    fn parent_session() -> Uuid {
+        Uuid::from_u128(0x924)
+    }
+
+    /// Point the status-file layer at a throwaway dir (#924).
+    ///
+    /// `resolve()` falls back to reading `<detached>/<id>.json` when the map has
+    /// no entry, so a test asserting "this id is not found" is asserting against
+    /// the REAL directory unless it isolates — one leftover `ghost.json` from any
+    /// other run turns that assertion inside out. The override is thread-local
+    /// and the runner reuses threads, hence a per-test tag.
+    fn isolate(tag: &str) {
+        let dir =
+            std::env::temp_dir().join(format!("opencrabs-924-stop-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::brain::agent::service::work_status::test_override::set(dir.join("detached"));
+    }
+
     fn test_context() -> ToolExecutionContext {
-        let mut ctx = ToolExecutionContext::new(Uuid::new_v4())
+        let mut ctx = ToolExecutionContext::new(parent_session())
             .with_working_directory(std::path::PathBuf::from("/tmp"))
             .with_auto_approve(true);
         ctx.timeout_secs = 30;
@@ -633,7 +655,7 @@ mod stop_agent_tool {
                 id.to_string(),
                 "test".to_string(),
                 Uuid::new_v4(),
-                Uuid::new_v4(),
+                parent_session(),
             )
         }
     }
@@ -649,7 +671,8 @@ mod stop_agent_tool {
     }
 
     #[tokio::test]
-    async fn close_nonexistent_returns_error() {
+    async fn stop_nonexistent_returns_error() {
+        isolate("nonexistent");
         let mgr = Arc::new(SubAgentManager::new());
         let tool = StopAgentTool::new(mgr);
         let ctx = test_context();
@@ -659,17 +682,21 @@ mod stop_agent_tool {
             .await
             .unwrap();
         assert!(!result.success);
+        // The refusal names the OWNERSHIP boundary, not mere absence: an id
+        // that does not exist and another session's id answer identically on
+        // purpose, so this string is what tells the caller it was scoped.
         assert!(
             result
                 .error
                 .as_ref()
                 .unwrap()
-                .contains("No sub-agent found")
+                .contains("belongs to this session")
         );
     }
 
     #[tokio::test]
-    async fn close_running_agent_cancels() {
+    async fn stop_running_agent_cancels() {
+        isolate("running");
         let mgr = Arc::new(SubAgentManager::new());
         let agent = make_running_agent("a1");
         let token = agent.cancel_token.clone();
@@ -680,32 +707,17 @@ mod stop_agent_tool {
 
         let result = tool.execute(json!({"agent_id": "a1"}), &ctx).await.unwrap();
         assert!(result.success);
-        assert!(result.output.contains("cancelled"));
+        // The BEHAVIOUR, not the wording: the token actually fires and the
+        // state actually moves.
         assert!(token.is_cancelled());
         assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Cancelled));
-        // Still tracked
+        // Still tracked — stopping is not deleting (#924).
         assert!(mgr.exists("a1"));
     }
 
     #[tokio::test]
-    async fn close_with_remove_deletes_from_tracking() {
-        let mgr = Arc::new(SubAgentManager::new());
-        mgr.insert(make_running_agent("a1"));
-
-        let tool = StopAgentTool::new(mgr.clone());
-        let ctx = test_context();
-
-        let result = tool
-            .execute(json!({"agent_id": "a1", "remove": true}), &ctx)
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("removed"));
-        assert!(!mgr.exists("a1"));
-    }
-
-    #[tokio::test]
-    async fn close_already_completed_agent() {
+    async fn stop_already_completed_agent() {
+        isolate("completed");
         let mgr = Arc::new(SubAgentManager::new());
         mgr.insert(make_running_agent("a1"));
         mgr.mark_completed("a1", "done".to_string());
@@ -713,10 +725,11 @@ mod stop_agent_tool {
         let tool = StopAgentTool::new(mgr.clone());
         let ctx = test_context();
 
-        // Close on a completed agent should still succeed (just doesn't cancel)
         let result = tool.execute(json!({"agent_id": "a1"}), &ctx).await.unwrap();
         assert!(result.success);
-        // State stays Completed since cancel() returns false for non-running
+        assert!(result.output.contains("already finished"));
+        // State stays Completed: cancel() refuses anything not live, so a
+        // stop cannot retroactively rewrite a finished agent's outcome.
         assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Completed));
     }
 }
@@ -970,17 +983,41 @@ mod lifecycle {
         assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Running));
     }
 
+    /// A stopped agent IS resumable (#924), and a live one is not.
+    ///
+    /// Before #924 a stop was a dead end: `cancel()` parked the agent in a state
+    /// `prepare_resume` refused, so the only way to continue the work was to
+    /// spawn a fresh child with none of the old context. Stopping was therefore
+    /// destructive in practice while claiming to be reversible.
+    ///
+    /// Two-sided on purpose: widening the gate must not let a caller hijack an
+    /// agent that is still working, so the Running arm is asserted to REFUSE.
     #[test]
-    fn cancelled_cannot_resume() {
+    fn stopped_agent_can_resume_but_a_live_one_cannot() {
         let mgr = Arc::new(SubAgentManager::new());
         let (agent, _rx) = make_agent("a1");
         mgr.insert(agent);
+
+        // Control: a running agent refuses resumption — resuming it would
+        // silently swap its token and orphan the task already using the old one.
+        let (tok, tx) = (
+            CancellationToken::new(),
+            mpsc::unbounded_channel::<String>().0,
+        );
+        assert!(!mgr.prepare_resume("a1", tok, tx));
+        assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Running));
+
+        // The case under test: stop, then resume.
         mgr.cancel("a1");
+        assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Cancelled));
 
         let new_token = CancellationToken::new();
         let (new_tx, _rx2) = mpsc::unbounded_channel::<String>();
-        assert!(!mgr.prepare_resume("a1", new_token, new_tx));
-        assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Cancelled));
+        assert!(
+            mgr.prepare_resume("a1", new_token, new_tx),
+            "a stopped agent must be resumable — a stop is not a deletion (#924)"
+        );
+        assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Running));
     }
 
     #[tokio::test]

@@ -150,7 +150,11 @@ fn send_input_describes_the_parked_case() {
 #[tokio::test]
 async fn stop_agent_reports_an_already_finished_agent_honestly() {
     let manager = Arc::new(SubAgentManager::new());
-    let mut agent = SubAgent::new("done-1", "worker", Uuid::new_v4(), Uuid::new_v4());
+    // Fixed parent, not a random one: `stop_agent` resolves only the caller's
+    // OWN children (#924), so a random parent makes this a stranger's agent and
+    // the call is refused before the wording is ever reached.
+    let parent = Uuid::from_u128(0x921);
+    let mut agent = SubAgent::new("done-1", "worker", Uuid::new_v4(), parent);
     agent.state = SubAgentState::Completed;
     manager.insert(agent);
 
@@ -158,34 +162,35 @@ async fn stop_agent_reports_an_already_finished_agent_honestly() {
     let result = tool
         .execute(
             serde_json::json!({ "agent_id": "done-1" }),
-            &ToolExecutionContext::new(Uuid::new_v4()),
+            &ToolExecutionContext::new(parent),
         )
         .await
-        .expect("close executes");
+        .expect("stop executes");
 
     let text = result.output;
     assert!(
         text.contains("already finished"),
-        "must say nothing was cancelled, got: {text}"
+        "must say nothing was stopped, got: {text}"
     );
     assert!(
-        !text.contains("cancelled."),
-        "must not claim a cancellation that did not happen, got: {text}"
+        !text.contains("stopped."),
+        "must not claim a stop that did not happen, got: {text}"
     );
-    // Still tracked: no `remove` was asked for.
+    // Still tracked: stopping never deletes the record (#924).
     assert!(
         manager.exists("done-1"),
-        "an already-finished agent must stay tracked without remove:true"
+        "an already-finished agent must stay tracked"
     );
 }
 
 /// Behavioural control for the above: a genuinely live agent must still be
-/// cancelled, or the honest wording would have been bought by breaking the
+/// stopped, or the honest wording would have been bought by breaking the
 /// tool's actual job.
 #[tokio::test]
 async fn stop_agent_still_cancels_a_running_agent() {
     let manager = Arc::new(SubAgentManager::new());
-    let agent = SubAgent::new("live-1", "worker", Uuid::new_v4(), Uuid::new_v4());
+    let parent = Uuid::from_u128(0x921);
+    let agent = SubAgent::new("live-1", "worker", Uuid::new_v4(), parent);
     let token = agent.cancel_token.clone();
     manager.insert(agent);
 
@@ -193,48 +198,73 @@ async fn stop_agent_still_cancels_a_running_agent() {
     let result = tool
         .execute(
             serde_json::json!({ "agent_id": "live-1" }),
-            &ToolExecutionContext::new(Uuid::new_v4()),
+            &ToolExecutionContext::new(parent),
         )
         .await
-        .expect("close executes");
+        .expect("stop executes");
 
     let text = result.output;
     assert!(
-        text.contains("cancelled"),
-        "a running agent must be reported cancelled, got: {text}"
+        text.contains("stopped"),
+        "a running agent must be reported stopped, got: {text}"
     );
     assert!(
         !text.contains("already finished"),
         "a running agent is not already finished, got: {text}"
     );
     assert!(token.is_cancelled(), "the cancel token must actually fire");
+    assert_eq!(
+        manager.get_state("live-1"),
+        Some(SubAgentState::Cancelled),
+        "the state must record the deliberate stop"
+    );
 }
 
-/// Behavioural: `remove` is independent of cancellation — dropping the record
-/// must work even when there was nothing live to stop.
+/// Behavioural: a child owned by ANOTHER session is refused (#924). Before the
+/// ownership gate any caller could stop any agent whose id it could name — the
+/// manager is process-global, so "whose id it could name" meant "any agent on
+/// the box".
 #[tokio::test]
-async fn stop_agent_removes_a_finished_agent_when_asked() {
+async fn stop_agent_refuses_another_sessions_child() {
     let manager = Arc::new(SubAgentManager::new());
-    let mut agent = SubAgent::new("done-2", "worker", Uuid::new_v4(), Uuid::new_v4());
-    agent.state = SubAgentState::Failed("boom".into());
+    let owner = Uuid::from_u128(0x9240);
+    let stranger = Uuid::from_u128(0x9241);
+    let agent = SubAgent::new("owned-1", "worker", Uuid::new_v4(), owner);
+    let token = agent.cancel_token.clone();
     manager.insert(agent);
 
     let tool = StopAgentTool::new(manager.clone());
     let result = tool
         .execute(
-            serde_json::json!({ "agent_id": "done-2", "remove": true }),
-            &ToolExecutionContext::new(Uuid::new_v4()),
+            serde_json::json!({ "agent_id": "owned-1" }),
+            &ToolExecutionContext::new(stranger),
         )
         .await
-        .expect("close executes");
+        .expect("stop_agent executes");
 
-    let text = result.output;
+    assert!(!result.success, "a stranger's stop must not succeed");
     assert!(
-        text.contains("removed from tracking"),
-        "remove:true must report the removal, got: {text}"
+        result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("belongs to this session"),
+        "the refusal must name the ownership boundary, got: {:?}",
+        result.error
+    );
+    // The behaviour that matters, not the string: the refused call changed
+    // nothing at all.
+    assert!(
+        !token.is_cancelled(),
+        "a refused stop must not fire the cancel token"
+    );
+    assert_eq!(
+        manager.get_state("owned-1"),
+        Some(SubAgentState::Running),
+        "a refused stop must leave the agent running"
     );
     assert!(
-        !manager.exists("done-2"),
-        "remove:true must drop the record so the id stops resolving"
+        manager.exists("owned-1"),
+        "a refused stop must not delete the record"
     );
 }
