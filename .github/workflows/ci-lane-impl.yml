@@ -508,6 +508,20 @@ jobs:
           STALLWATCH_PROGRESS_SECS: "600"
           STALLWATCH_SILENCE_SECS: "900"
           STALLWATCH_LOG: /tmp/test-leg.log
+          # `${{ }}` OUT OF THE RUN BLOCK (2026-11-20; carrier head 59195497b).
+          # A `run: |` body containing ANY expression is converted to ONE template
+          # expression, and GitHub caps a template expression at 21,000 chars
+          # (ExpressionConstants.cs:32 MaxLength=21000), measured on the DEDENTED
+          # body. This body reached 22,952 -> the workflow 422'd on parse
+          # ("Exceeded max expression length 21000", Line 531) and EVERY lane
+          # dispatch was blocked. With no `${{ }}` left in the body the cap does
+          # not apply at all, so this cannot recur as the script grows (trimming
+          # comments only bought ~3k before it broke again at c67a67417).
+          # Values are unchanged: the runner interpolates each env expression
+          # itself, and TEST_THREADS keeps its leading separator INSIDE the
+          # value, so an empty value leaves the invocation byte-for-byte as it was.
+          FEATURES: ${{ inputs.features }}
+          TEST_THREADS: ${{ inputs.test_threads && format(' -- --test-threads={0}', inputs.test_threads) || '' }}
         # test_threads (#1936 Stage 1): empty => this line is BYTE-FOR-BYTE the
         # invocation it has always been — the separator rides INSIDE the format
         # string, so the empty case appends nothing; non-empty => libtest runs
@@ -531,7 +545,7 @@ jobs:
         run: |
           set +e
           # SHIPPED feature set, mirroring the build leg: see the job comment.
-          CMD="cargo test --locked --profile ci --no-default-features --features ${{ inputs.features }} --verbose${{ inputs.test_threads && format(' -- --test-threads={0}', inputs.test_threads) || '' }}"
+          CMD="cargo test --locked --profile ci --no-default-features --features $FEATURES --verbose$TEST_THREADS"
           echo "+ $CMD"
           # stallwatch — THREE-predicate stall detector (HQ 2026-11-17; predicate B
           # 2026-11-19; #331). A stall has two shapes and one predicate cannot see both:
