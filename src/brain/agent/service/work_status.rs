@@ -282,6 +282,10 @@ pub enum WorkState {
     AwaitingInput,
     Completed,
     Failed,
+    /// Stopped by the parent through `stop_agent`. Terminal — nothing is
+    /// executing this work any more — and unlike `Interrupted` the stop was
+    /// deliberate and was recorded by the process that did it.
+    Cancelled,
     /// The process that owned this work died before it reached a terminal
     /// state. Distinct from `Failed`: the work did not fail, it never
     /// finished, and nothing knows how far it got. Callers must not read it
@@ -291,10 +295,18 @@ pub enum WorkState {
 
 impl WorkState {
     /// Whether this state means the work is no longer doing anything.
+    ///
+    /// `Cancelled` MUST be here. `reconcile_with` marks every non-terminal
+    /// agent file `Interrupted` at boot, so a stop missing from this list is
+    /// re-reported to its session as "interrupted by a restart" on the next
+    /// start — a deliberate act rewritten as an accident.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            WorkState::Completed | WorkState::Failed | WorkState::Interrupted
+            WorkState::Completed
+                | WorkState::Failed
+                | WorkState::Cancelled
+                | WorkState::Interrupted
         )
     }
 
@@ -310,6 +322,9 @@ impl WorkState {
             WorkState::AwaitingInput => "awaiting input",
             WorkState::Completed => "completed",
             WorkState::Failed => "failed",
+            // Deliberate, and recorded by the process that did it — the one
+            // terminal state a reader must not mistake for a fault.
+            WorkState::Cancelled => "cancelled (stopped by the parent)",
             // Not an error: the owning process died before the run reached a
             // terminal state, so how far it got is genuinely unknown. Reporting
             // it as "failed" would assert the command went wrong; reporting it
@@ -743,6 +758,20 @@ impl WorkStatus {
         self.write()
     }
 
+    /// Mark the work stopped by its parent through `stop_agent`.
+    ///
+    /// Deliberately writes no `output_full`: a stopped round's fragment is not
+    /// a result, and storing it would let `task_output` hand a caller the very
+    /// piece of work it just cancelled. No `error` either — nothing went
+    /// wrong, so asserting a fault would be a second lie. The finish stamp is
+    /// what puts the file on the terminal retention schedule instead of the
+    /// unfinished one.
+    pub fn mark_cancelled(&mut self) -> std::io::Result<()> {
+        self.state = WorkState::Cancelled;
+        self.finish = Some(finish_now());
+        self.write()
+    }
+
     /// Mark the work failed with an error message.
     pub fn mark_failed(&mut self, error: String) -> std::io::Result<()> {
         self.state = WorkState::Failed;
@@ -936,14 +965,20 @@ impl WorkStatus {
             // state after the index was built.
             return (matches!(status.kind, WorkKind::Agent)
                 && status.session_id == session_id
-                && !matches!(status.state, WorkState::Completed | WorkState::Failed))
+                && !matches!(
+                    status.state,
+                    WorkState::Completed | WorkState::Failed | WorkState::Cancelled
+                ))
             .then_some(status);
         }
         let ids = Self::list_all().ok()?;
         ids.into_iter().filter_map(|id| Self::read(&id)).find(|s| {
             matches!(s.kind, WorkKind::Agent)
                 && s.session_id == session_id
-                && !matches!(s.state, WorkState::Completed | WorkState::Failed)
+                && !matches!(
+                    s.state,
+                    WorkState::Completed | WorkState::Failed | WorkState::Cancelled
+                )
         })
     }
 
