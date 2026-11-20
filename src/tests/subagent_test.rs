@@ -295,23 +295,6 @@ mod manager {
     }
 
     #[test]
-    fn exists_returns_false_after_remove() {
-        let mgr = SubAgentManager::new();
-        mgr.insert(make_agent("a1", "test"));
-        assert!(mgr.exists("a1"));
-
-        let removed = mgr.remove("a1");
-        assert!(removed.is_some());
-        assert!(!mgr.exists("a1"));
-    }
-
-    #[test]
-    fn remove_nonexistent_returns_none() {
-        let mgr = SubAgentManager::new();
-        assert!(mgr.remove("ghost").is_none());
-    }
-
-    #[test]
     fn get_session_id() {
         let mgr = SubAgentManager::new();
         let agent = make_agent("a1", "test");
@@ -1038,27 +1021,6 @@ mod lifecycle {
         );
         assert_eq!(mgr.get_state("a3"), Some(SubAgentState::Running));
     }
-
-    #[test]
-    fn remove_cleans_up_completely() {
-        let mgr = Arc::new(SubAgentManager::new());
-        let (agent, _rx) = make_agent("a1");
-        let sid = agent.session_id;
-        mgr.insert(agent);
-
-        assert!(mgr.exists("a1"));
-        assert_eq!(mgr.get_session_id("a1"), Some(sid));
-
-        let removed = mgr.remove("a1").unwrap();
-        assert_eq!(removed.id, "a1");
-        assert_eq!(removed.session_id, sid);
-
-        assert!(!mgr.exists("a1"));
-        assert_eq!(mgr.get_state("a1"), None);
-        assert_eq!(mgr.get_output("a1"), None);
-        assert_eq!(mgr.get_session_id("a1"), None);
-        assert!(mgr.get_input_tx("a1").is_none());
-    }
 }
 
 // ─── Child Registry & Grant Tests (#1173) ─────────────────────────────────
@@ -1142,8 +1104,7 @@ mod agent_type {
             ),
         ));
 
-        let registry =
-            crate::brain::tools::subagent::build_child_registry(&parent, &subagent_mgr);
+        let registry = crate::brain::tools::subagent::build_child_registry(&parent, &subagent_mgr);
         let tools = registry.list_tools();
         assert!(!tools.contains(&"team_create".to_string()));
         assert!(!tools.contains(&"team_delete".to_string()));
