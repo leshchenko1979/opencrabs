@@ -25,10 +25,16 @@ fn the_threshold_is_the_one_rule_26_names() {
     // changes, this constant has to move with it or the nudge fires at a count
     // no rule mentions.
     assert_eq!(DELEGATION_NUDGE_AT, 10);
-    assert!(
-        DELEGATION_NUDGE_AGAIN_AT > DELEGATION_NUDGE_AT,
-        "the firm tier must sit above the threshold tier, got {DELEGATION_NUDGE_AGAIN_AT} vs {DELEGATION_NUDGE_AT}"
-    );
+    // A `const` block, because both sides are constants: the ordering invariant
+    // is then a BUILD failure rather than a test failure, so it cannot be
+    // missed by anyone who runs the suite selectively. The message carries no
+    // interpolation because formatted panics are not const-evaluable.
+    const {
+        assert!(
+            DELEGATION_NUDGE_AGAIN_AT > DELEGATION_NUDGE_AT,
+            "the firm tier must sit above the threshold tier"
+        )
+    };
 }
 
 #[test]
