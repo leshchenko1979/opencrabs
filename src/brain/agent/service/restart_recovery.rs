@@ -295,11 +295,12 @@ pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
 /// Account for background tasks that were running when a previous process
 /// died, then clear them.
 ///
-/// Every surviving row belonged to a process that no longer exists, so its
-/// child is gone too: there is nothing to reattach to and no result coming.
-/// Each one is reported into its session as an interruption so the agent can
-/// decide whether to re-run it, rather than waiting forever on a resume that
-/// can never arrive (#763).
+/// Every surviving row belonged to a process that no longer exists, so there
+/// is no in-memory handle left to wait on. The CHILD is a different question:
+/// detached runs are `setsid()`ed and outlive the daemon by design, so each row
+/// is reported into its session with whatever the surviving surfaces can
+/// actually say about it — a measured interruption where a status file records
+/// the run, and an explicitly unknown outcome where nothing does (#763, #913).
 ///
 /// Returns the run ids it accounted for — which is also the index the status
 /// FILE leg needs, since the row id and the file id are the same uuid
@@ -499,10 +500,89 @@ an install, a commit — verify from the world whether it already landed.",
     )
 }
 
-/// What the agent is told about a command a restart killed. Deliberately
-/// states that it did NOT finish and hands the decision back, rather than
-/// re-running something expensive on the agent's behalf.
-fn interrupted_message(row: &crate::db::BackgroundTaskRow) -> QueuedUserMessage {
+/// What survives a restart about one detached run, read from the surfaces that
+/// actually recorded it (#913).
+///
+/// The DB row this report is built from carries `id, session_id, label,
+/// command, started_at` — no pid, no capture path, no exit code — so the row
+/// alone cannot say what happened to the run. The status FILE written at spawn
+/// (`tmp/detached/<id>.json`) does: it carries `pid` and both capture paths,
+/// and its `finish.code` once the child was reaped. That file exists precisely
+/// so a reader can tell live from dead across a restart, and this is the reader.
+struct RunEvidence {
+    /// The spawned shell's pid, when a surface recorded one.
+    pid: Option<u32>,
+    /// Absolute path of the run's captured stdout, when one is recorded.
+    output_out: Option<String>,
+    /// Absolute path of the run's captured stderr, when one is recorded.
+    output_err: Option<String>,
+    /// The exit code the child was reaped with, when it finished before the
+    /// restart — an exit status measured, not inferred.
+    exit_code: Option<i32>,
+}
+
+impl RunEvidence {
+    /// Gather what the restart left behind for one run: the status file first,
+    /// then the captures, which are deterministic from the run id alone.
+    fn for_row(row: &crate::db::BackgroundTaskRow) -> Self {
+        use super::work_status::{WorkStatus, command_output_path};
+
+        let id = row.id.to_string();
+        let status = WorkStatus::read(&id);
+        let recorded = |p: Option<String>| p.filter(|p| !p.is_empty());
+        // A derived path is evidence only when the file is really there: a
+        // path that 404s cannot describe the run, and a fabricated one is
+        // indistinguishable from a run whose captures were swept.
+        let existing = |stderr: bool| {
+            let path = command_output_path(&id, stderr);
+            if path.exists() {
+                Some(path.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        };
+
+        Self {
+            pid: status.as_ref().and_then(|s| s.pid),
+            output_out: recorded(status.as_ref().and_then(|s| s.output_out.clone()))
+                .or_else(|| existing(false)),
+            output_err: recorded(status.as_ref().and_then(|s| s.output_err.clone()))
+                .or_else(|| existing(true)),
+            exit_code: status
+                .as_ref()
+                .and_then(|s| s.finish.as_ref())
+                .and_then(|f| f.code),
+        }
+    }
+
+    /// Whether anything here can describe the run at all.
+    ///
+    /// `false` means no pid, no exit code and no capture: nothing measured
+    /// what became of the run, so the report must not claim it was killed or
+    /// that it produced no result. A detached run is `setsid()`ed and outlives
+    /// the daemon by design, so "the row survived a restart" says nothing
+    /// about the child — a report built on it would be a claim of absence that
+    /// the row cannot support (#913).
+    fn is_empty(&self) -> bool {
+        self.pid.is_none()
+            && self.exit_code.is_none()
+            && self.output_out.is_none()
+            && self.output_err.is_none()
+    }
+}
+
+/// What the agent is told about a command a restart interrupted. Deliberately
+/// states what is known and hands the decision back, rather than re-running
+/// something expensive on the agent's behalf.
+///
+/// With evidence on disk this keeps the long-standing interruption report.
+/// Without any — the row is all the restart left — it reports the outcome as
+/// UNKNOWN and names what to check, because "was killed and produced no
+/// result" is a measurement this path never took (#913).
+pub(crate) fn interrupted_message(row: &crate::db::BackgroundTaskRow) -> QueuedUserMessage {
+    if RunEvidence::for_row(row).is_empty() {
+        return unknown_outcome_message(row);
+    }
     let context_text = format!(
         "[BACKGROUND TASK INTERRUPTED] `{}` was still running when OpenCrabs restarted, so it \
          was killed and produced no result. The command was:\n\n```\n{}\n```\n\nIt did NOT \
@@ -513,6 +593,41 @@ fn interrupted_message(row: &crate::db::BackgroundTaskRow) -> QueuedUserMessage 
     QueuedUserMessage {
         context_text,
         display_text: format!("⚠️ Background task interrupted by restart: {}", row.label),
+        origin: PushOrigin::Recovery,
+        bg_meta: None,
+    }
+}
+
+/// The report for a run the restart left no evidence about (#913).
+///
+/// Detached runs are `setsid()`ed, so they survive the daemon's death and keep
+/// writing their captures; the old wording asserted a kill and an empty result
+/// that nothing had checked. Acting on it has already cost real work: a lane
+/// was told "killed, no result" while `ps -p` showed the process alive and the
+/// deploy it ran had already advanced. The honest report is the one that says
+/// it does not know, names what is missing, and points at the checks that can
+/// answer.
+fn unknown_outcome_message(row: &crate::db::BackgroundTaskRow) -> QueuedUserMessage {
+    let context_text = format!(
+        "[BACKGROUND TASK OUTCOME UNKNOWN] `{}` was in flight when OpenCrabs restarted, and no \
+         pid, no exit code and no captured output were recorded for it — so whether it is still \
+         running, already finished, or died with the old process is NOT KNOWN. It was not \
+         observed to be killed, and it did not necessarily produce nothing. The command \
+         was:\n\n```\n{}\n```\n\nIt ran detached (`setsid`), which means it can outlive the \
+         daemon and keep writing its output. Before you re-run it, check what the world \
+         says:\n- `ps -p <pid>` / `pgrep -af` for the command above, to see whether it is still \
+         alive;\n- `task_output` for this run, if the harness still lists it;\n- the effect the \
+         command would have (a file, a deployed sha, a sent message), to see whether it already \
+         landed.\n\nRe-running a run that is still live or already finished can duplicate a \
+         side-effecting step.",
+        row.label, row.command
+    );
+    QueuedUserMessage {
+        context_text,
+        display_text: format!(
+            "⚠️ Background task outcome unknown after restart: {}",
+            row.label
+        ),
         origin: PushOrigin::Recovery,
         bg_meta: None,
     }

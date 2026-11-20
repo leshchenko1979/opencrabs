@@ -13,10 +13,12 @@ use uuid::Uuid;
 use crate::brain::agent::QueuedUserMessage;
 use crate::brain::agent::service::MessageEnqueueCallback;
 use crate::brain::agent::service::restart_recovery::{
-    RESUME_CONTINUATION_BASE, deliver_or_park, flush_parked, parked_count, resumed_turn_prompt,
-    test_guard,
+    RESUME_CONTINUATION_BASE, deliver_or_park, flush_parked, interrupted_message, parked_count,
+    resumed_turn_prompt, test_guard,
 };
 use crate::brain::agent::service::session_routes::register_session_route;
+use crate::brain::agent::service::work_status::{CommandPaths, WorkStatus, test_override};
+use crate::db::BackgroundTaskRow;
 
 /// What a recording callback saw: (session, display text) per delivery.
 type Seen = Arc<Mutex<Vec<(Uuid, String)>>>;
@@ -167,4 +169,141 @@ fn resumed_turn_prompt_keeps_the_base_and_states_the_loss() {
     );
     assert_eq!(prompt, resumed_turn_prompt(session));
     assert_ne!(prompt, resumed_turn_prompt(Uuid::from_u128(1)));
+}
+
+// ---- #913: a boot report may only claim what it measured -------------------
+
+/// Point both the status dir and the capture dir at a throwaway temp dir.
+///
+/// The override is thread-local, so each test using it must stay
+/// single-threaded — a plain `#[test]`, never `#[tokio::test]`.
+struct TempRunDirs {
+    dir: Option<tempfile::TempDir>,
+}
+
+impl TempRunDirs {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().expect("temp dir");
+        test_override::set(dir.path().to_path_buf());
+        Self { dir: Some(dir) }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        self.dir.as_ref().expect("temp dir alive").path()
+    }
+}
+
+impl Drop for TempRunDirs {
+    fn drop(&mut self) {
+        test_override::clear();
+        // `Drop` cannot move a field out of `&mut self` (E0507).
+        let _ = self.dir.take();
+    }
+}
+
+fn row_for(id: Uuid) -> BackgroundTaskRow {
+    BackgroundTaskRow {
+        id,
+        session_id: Uuid::new_v4(),
+        label: "oc-deploy ship".to_string(),
+        command: "oc-deploy ship --wait".to_string(),
+        started_at: 0,
+    }
+}
+
+/// The defect this pins (#913): a row with no pid, no exit code and no capture
+/// cannot support a verdict, so the report must say UNKNOWN rather than "was
+/// killed and produced no result". Acting on that false claim — "it never ran,
+/// run it again" — has already come close to double-shipping a live swap.
+#[test]
+fn a_row_with_no_pid_exit_or_capture_reports_the_outcome_as_unknown() {
+    let _dirs = TempRunDirs::new();
+    let msg = interrupted_message(&row_for(Uuid::new_v4()));
+
+    assert!(
+        msg.context_text.contains("OUTCOME UNKNOWN"),
+        "no evidence must read as unknown; got: {}",
+        msg.context_text
+    );
+    assert!(
+        !msg.context_text.contains("was killed"),
+        "nothing measured a kill, so the report must not assert one: {}",
+        msg.context_text
+    );
+    assert!(
+        !msg.context_text.contains("produced no result"),
+        "nothing measured the result, so the report must not assert its absence: {}",
+        msg.context_text
+    );
+    // It names what is missing and what the agent can check instead.
+    for needle in [
+        "pid",
+        "exit code",
+        "captured output",
+        "ps -p",
+        "task_output",
+    ] {
+        assert!(
+            msg.context_text.contains(needle),
+            "the unknown report must name {needle:?}; got: {}",
+            msg.context_text
+        );
+    }
+    assert!(
+        msg.display_text.contains("unknown"),
+        "the surface line must not announce a kill either: {}",
+        msg.display_text
+    );
+}
+
+/// The other half of the contract: where a capture WAS recorded the run has
+/// evidence behind it, so the verdict stays the interruption report it has
+/// always been. A build that reported UNKNOWN unconditionally would pass the
+/// test above and fail this one.
+#[test]
+fn a_row_with_a_recorded_capture_keeps_the_interrupted_verdict() {
+    let dirs = TempRunDirs::new();
+    let id = Uuid::new_v4();
+    let capture = dirs.path().join(format!("{id}.out"));
+    std::fs::write(&capture, "deployed abc1234\n").expect("write capture");
+
+    let msg = interrupted_message(&row_for(id));
+
+    assert!(
+        !msg.context_text.contains("OUTCOME UNKNOWN"),
+        "a run with output on disk is not evidence-free; got: {}",
+        msg.context_text
+    );
+    assert!(
+        msg.context_text.contains("BACKGROUND TASK INTERRUPTED"),
+        "got: {}",
+        msg.context_text
+    );
+}
+
+/// A recorded pid is evidence too, even with no capture file — the status file
+/// carries it precisely so a reader can tell live from dead across a restart.
+#[test]
+fn a_row_with_a_recorded_pid_is_not_unknown() {
+    let _dirs = TempRunDirs::new();
+    let id = Uuid::new_v4();
+    WorkStatus::new_command(
+        &id.to_string(),
+        "sess-1",
+        "oc-deploy ship",
+        "oc-deploy ship --wait",
+        CommandPaths {
+            pid: Some(std::process::id()),
+            ..CommandPaths::none()
+        },
+    )
+    .expect("write status file");
+
+    let msg = interrupted_message(&row_for(id));
+
+    assert!(
+        !msg.context_text.contains("OUTCOME UNKNOWN"),
+        "a recorded pid is evidence; got: {}",
+        msg.context_text
+    );
 }
