@@ -28,7 +28,7 @@ name: CI lane impl
 #
 # TOOLCHAIN DECISION (implementation step 4): the Rust install step is resolved
 # ONCE here for both families, in the `dtolnay/rust-toolchain@master` form with
-# an explicit `toolchain: stable` — NOT `@stable`, and not a bare
+# an explicit `toolchain: 1.100.0` — NOT `@stable`, and not a bare
 # `rust-toolchain.toml` read. Why: `@stable` always resolves the latest stable
 # and would IGNORE a future version pin added to the tree, so a pin could never
 # take effect; the `@master` + explicit `toolchain:` form is what pr-checks.yml
@@ -37,6 +37,18 @@ name: CI lane impl
 # components ride along for both families: the build leg does not need them, but
 # resolving the toolchain in ONE place is the point of this file, and the
 # component download is small beside the build itself.
+#
+# PINNED 2026-11-20 (owner order): `stable` -> `1.100.0` at all four install
+# sites. The local sanctioned `rustfmt` is pinned to Rust 1.100.0 / commit
+# `0ef1bc3860` (owner order 2026-11-19), and `editor.md §Box law` states that
+# local and CI formatting "agree byte-for-byte" — which held only while
+# `stable` happened to resolve to 1.100.0. A floating `stable` silently
+# falsifies that the day a new release lands, turning a local `oc-fmt --check`
+# clean into a false clean against the gate. Advancing this pin means bumping
+# BOTH this file and the `/opt/rustfmt-*` install in the same change.
+# COST, stated because it is real: the pin moves the `Swatinem/rust-cache` key,
+# so the first run after it is a COLD build — the exact condition behind the
+# 45-minute cap stalls. STALLWATCH below is what makes that safe.
 #
 # DISPATCH CONSTRAINT (implementation step 5, settled from the GitHub docs, not
 # from an untested path): "To trigger the `workflow_dispatch` event, your
@@ -231,7 +243,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
+          toolchain: 1.100.0
           components: rustfmt, clippy
 
       - name: Cache cargo
@@ -325,7 +337,7 @@ jobs:
       - name: Install Rust (from rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
+          toolchain: 1.100.0
           components: rustfmt, clippy
 
       - uses: swatinem/rust-cache@v2
@@ -1190,7 +1202,7 @@ jobs:
       - name: Install Rust (from rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
+          toolchain: 1.100.0
           components: rustfmt, clippy
 
       - uses: swatinem/rust-cache@v2
@@ -1263,7 +1275,7 @@ jobs:
       - name: Install Rust (from rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
+          toolchain: 1.100.0
           components: rustfmt, clippy
 
       - uses: swatinem/rust-cache@v2
