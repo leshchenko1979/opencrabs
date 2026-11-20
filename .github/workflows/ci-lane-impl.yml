@@ -169,6 +169,26 @@ env:
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # THE PIN, MADE AUTHORITATIVE (2026-11-20). Every job below installs 1.100.0
+  # via `dtolnay/rust-toolchain@master` + `toolchain: 1.100.0`, and that action
+  # finishes with `rustup default 1.100.0` -- which the tree's
+  # `rust-toolchain.toml` (`channel = "stable"`) then OVERRIDES. CI's own log
+  # says it verbatim (run 44779316077):
+  #   "info: note that the toolchain 'stable-x86_64-unknown-linux-gnu' is
+  #    currently in use (overridden by
+  #    '/home/runner/work/opencrabs/opencrabs/rust-toolchain.toml')"
+  # So 1.100.0 was installed and then ignored, and every gate compiled on
+  # whatever `stable` the runner image happened to ship -- precisely the drift
+  # the pin exists to stop, including rustfmt divergence from the box's pinned
+  # /opt/rustfmt-1.100.0 (byte-identical formatting is only guaranteed when
+  # both sides run the same release).
+  # rustup precedence is: +arg > RUSTUP_TOOLCHAIN > directory override >
+  # rust-toolchain.toml > default. `RUSTUP_TOOLCHAIN` is therefore the ONLY
+  # lever above the tree's own file, and it pins the fmt, clippy, build and
+  # nextest jobs at once instead of patching four action invocations.
+  # Do NOT "fix" this by editing rust-toolchain.toml to 1.100.0: that file is
+  # upstream's and the sync force-pushes over it.
+  RUSTUP_TOOLCHAIN: "1.100.0"
 
 jobs:
   # ------------------------------------------------------------------ gates --
