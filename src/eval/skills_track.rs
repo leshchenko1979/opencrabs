@@ -195,6 +195,7 @@ pub fn score(
     k: usize,
     c2_chars: usize,
     c3_employed: Option<usize>,
+    floor: f64,
 ) -> SkillReport {
     let ranked = Ranked::build(index_md);
     let full = slugs.len();
@@ -250,12 +251,7 @@ pub fn score(
                 // would pin C4 at 1.000 forever — so the negative is judged
                 // against the SHIPPED floor instead: does any skill clear the
                 // threshold the product itself uses to accept a match?
-                let cleared = ranked.find_relevant(
-                    &case.task,
-                    full.max(1),
-                    usize::MAX,
-                    crate::brain::memory_recall::RECALL_MIN_SCORE,
-                );
+                let cleared = ranked.find_relevant(&case.task, full.max(1), usize::MAX, floor);
                 if !cleared.sections.is_empty() {
                     false_selections += 1;
                 }
@@ -314,5 +310,13 @@ pub fn committed_report_at(k: usize) -> SkillReport {
     // C3 is a LIVE figure (it needs `session_seen_skills`), so this leg passes
     // `None` — not `0`. A zero here would publish "no skill is ever employed"
     // from a runner that has no session record at all (#899).
-    score(&dataset, &md, &names, k, chars, None)
+    score(
+        &dataset,
+        &md,
+        &names,
+        k,
+        chars,
+        None,
+        crate::brain::memory_recall::RECALL_MIN_SCORE,
+    )
 }

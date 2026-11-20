@@ -229,5 +229,9 @@ pub fn committed_report(k: usize) -> RecallReport {
         &dataset,
         include_str!("fixtures/track_b_corpus.md"),
         k,
+        // The committed baseline is pinned to the COMPILED default on purpose:
+        // a guard that moved with each box's `[memory] recall_min_score` would
+        // stop being a baseline the moment anyone swept the knob (#912).
+        crate::brain::memory_recall::RECALL_MIN_SCORE,
     )
 }

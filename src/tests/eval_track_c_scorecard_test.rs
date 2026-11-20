@@ -23,6 +23,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::brain::memory_recall::RECALL_MIN_SCORE;
 use crate::eval::skills_track::SkillDataset;
 
 const DATASET: &str = include_str!("../eval/fixtures/track_c_skills.json");
@@ -171,9 +172,25 @@ fn c3_coverage_moves_with_the_employment_count() {
     // fraction measures the index length, not the metric.
     let half_count = slugs.len() / 2;
 
-    let none = score(&ds, &md, &slugs, 5, chars, None);
-    let all = score(&ds, &md, &slugs, 5, chars, Some(slugs.len()));
-    let some = score(&ds, &md, &slugs, 5, chars, Some(half_count));
+    let none = score(&ds, &md, &slugs, 5, chars, None, RECALL_MIN_SCORE);
+    let all = score(
+        &ds,
+        &md,
+        &slugs,
+        5,
+        chars,
+        Some(slugs.len()),
+        RECALL_MIN_SCORE,
+    );
+    let some = score(
+        &ds,
+        &md,
+        &slugs,
+        5,
+        chars,
+        Some(half_count),
+        RECALL_MIN_SCORE,
+    );
 
     assert_eq!(
         none.c3_coverage, None,

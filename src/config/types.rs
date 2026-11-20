@@ -1862,19 +1862,35 @@ pub struct AgentConfig {
     /// Kept on the wire under its original name so an existing config keeps
     /// its exact behaviour; [`AgentConfig::subagent_session_ttl_days`] resolves
     /// the cascade. New configs should use the section.
-    #[serde(default, rename = "subagent_session_ttl_days", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "subagent_session_ttl_days",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub legacy_subagent_session_ttl_days: Option<u32>,
 
     /// Deprecated flat key — use `[agent.retention].messages` (#844).
-    #[serde(default, rename = "message_retention_days", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "message_retention_days",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub legacy_message_retention_days: Option<u32>,
 
     /// Deprecated flat key — use `[agent.retention].feedback_ledger` (#844).
-    #[serde(default, rename = "feedback_ledger_retention_days", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "feedback_ledger_retention_days",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub legacy_feedback_ledger_retention_days: Option<u32>,
 
     /// Deprecated flat key — use `[agent.retention].tool_output_files` (#844).
-    #[serde(default, rename = "tool_output_retention_days", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "tool_output_retention_days",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub legacy_tool_output_retention_days: Option<u32>,
 
     /// Retention windows for the maintenance sweep (#844).
@@ -2616,6 +2632,32 @@ pub struct MemoryConfig {
     /// without a restart.
     #[serde(default = "default_backfill_interval_secs")]
     pub backfill_interval_secs: u64,
+
+    /// Minimum length-normalized BM25 score a MEMORY.md section (or a skill /
+    /// directive section) must reach before it rides along with a turn (#912).
+    ///
+    /// This is **corpus calibration**, not a product decision, which is why it
+    /// lives here and not in the binary. The score is BM25 divided by query
+    /// length with the IDF scale removed, so the SAME number admits a different
+    /// fraction of every corpus it meets: at `0.38` the 13-section MEMORY.md
+    /// recalls 1.000 with FPR 0.167, while the 293-section reference corpus
+    /// starves 46 of 60 positives into an empty ranking (#912). One compiled
+    /// number cannot serve both, and the exact digit is not a truth worth
+    /// freezing: on the memory pair every value from 0.38 to ~0.45 scores
+    /// identically, so it is a plateau rather than a point.
+    ///
+    /// `None` means "use the compiled default" (`RECALL_MIN_SCORE` in
+    /// `brain::memory_recall`), so an existing install is unchanged.
+    /// Out-of-range values are clamped rather than honoured: a typo of `0.0`
+    /// would put an unfiltered shortlist on every turn, and `5.0` would silence
+    /// recall entirely — both fail silently, so neither is left to the user.
+    ///
+    /// ```toml
+    /// [memory]
+    /// recall_min_score = 0.2
+    /// ```
+    #[serde(default)]
+    pub recall_min_score: Option<f64>,
 }
 
 /// One external index path (#1051): a bare string or `{ path, pattern }`.
@@ -2699,6 +2741,7 @@ impl Default for MemoryConfig {
             external_allowed_in_shared: false,
             sweep_interval_secs: default_sweep_interval_secs(),
             backfill_interval_secs: default_backfill_interval_secs(),
+            recall_min_score: None,
         }
     }
 }

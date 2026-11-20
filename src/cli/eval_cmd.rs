@@ -16,7 +16,9 @@
 use anyhow::{Context, Result, bail};
 
 use crate::brain::brain_sections::Matches;
-use crate::brain::memory_recall::{RECALL_MAX_CHARS, RECALL_MAX_SECTIONS, RECALL_MIN_SCORE};
+use crate::brain::memory_recall::{
+    RECALL_MAX_CHARS, RECALL_MAX_SECTIONS, clamp_recall_min_score, resolve_recall_min_score,
+};
 use crate::brain::section_rank::Ranked;
 use crate::eval::recall::{RecallDataset, RecallReport};
 
@@ -40,6 +42,7 @@ pub(crate) fn cmd_eval(cmd: EvalCommands) -> Result<()> {
             corpus,
             k,
             json,
+            floor,
         } => run_recall(
             &track,
             dataset.as_deref(),
@@ -47,8 +50,14 @@ pub(crate) fn cmd_eval(cmd: EvalCommands) -> Result<()> {
             k,
             json,
             slice_days,
+            floor,
         ),
-        EvalCommands::Skills { dataset, k, json } => run_skills(&dataset, k, json),
+        EvalCommands::Skills {
+            dataset,
+            k,
+            json,
+            floor,
+        } => run_skills(&dataset, k, json, floor),
     }
 }
 
@@ -58,7 +67,7 @@ pub(crate) fn cmd_eval(cmd: EvalCommands) -> Result<()> {
 /// numbers are comparable only while those skills exist. That is why it is not
 /// wired into CI (step 6 keeps only the fixture legs there) and why every
 /// label that fails to resolve is reported rather than dropped.
-fn run_skills(dataset_path: &str, k: Option<usize>, json: bool) -> Result<()> {
+fn run_skills(dataset_path: &str, k: Option<usize>, json: bool, floor: Option<f64>) -> Result<()> {
     use crate::eval::skills_track::{SkillDataset, index_block_chars, index_markdown, score};
 
     let raw = std::fs::read_to_string(dataset_path)
@@ -92,6 +101,11 @@ fn run_skills(dataset_path: &str, k: Option<usize>, json: bool) -> Result<()> {
     // was actually loaded, so a skill with no row has never been used by any
     // session on this host: it occupies prompt space for nothing.
     let employed = employed_slugs(&slugs)?;
+    // C4 asks "does any skill clear the floor the product accepts a match at",
+    // so it reads the SAME resolved floor the recall path does (#912).
+    let floor = floor
+        .map(|v| clamp_recall_min_score(Some(v)))
+        .unwrap_or_else(resolve_recall_min_score);
     let report = score(
         &dataset,
         &index_md,
@@ -99,6 +113,7 @@ fn run_skills(dataset_path: &str, k: Option<usize>, json: bool) -> Result<()> {
         k.unwrap_or(5),
         c2_chars,
         Some(employed.len()),
+        floor,
     );
 
     if json {
@@ -117,12 +132,14 @@ fn run_skills(dataset_path: &str, k: Option<usize>, json: bool) -> Result<()> {
             "c3_employed": report.c3_employed,
             "c3_coverage": report.c3_coverage,
             "c4_false_selection": report.c4_false_selection,
+            "floor": floor,
             "employed": employed,
         });
         println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
     } else {
         println!("# eval skills — track C (selection)");
         println!("dataset: {}", dataset.name);
+        println!("floor:   {floor}");
         println!(
             "index:   {} skills, emitted form (ranked by the shipped BM25 — a PROXY, \
              not the model's own choice)",
@@ -196,6 +213,7 @@ fn run_recall(
     k: Option<usize>,
     json: bool,
     slice_days: u32,
+    floor: Option<f64>,
 ) -> Result<()> {
     let track_norm = track.trim().to_ascii_lowercase();
     if !SUPPORTED_TRACKS.contains(&track_norm.as_str()) {
@@ -255,15 +273,24 @@ fn run_recall(
 
     // The SHIPPED retrieval, not a copy of it: if the thresholds move, the
     // scorecard moves with them instead of scoring a configuration nobody runs.
+    //
+    // The FLOOR is the shipped one unless `--floor` names a value (#912): the
+    // point of publishing a number is that it describes the configuration the
+    // box actually runs. An explicit value is clamped to the band the product
+    // can run, so every point on a swept curve is a point that could ship.
+    let floor = floor
+        .map(|v| clamp_recall_min_score(Some(v)))
+        .unwrap_or_else(resolve_recall_min_score);
     let k = k.unwrap_or(RECALL_MAX_SECTIONS);
-    let report = score_recall(&dataset, &corpus_raw, k);
+    let report = score_recall(&dataset, &corpus_raw, k, floor);
 
     if json {
-        print_json(&dataset.name, &track_norm, &report);
+        print_json(&dataset.name, &track_norm, &report, floor);
     } else {
         println!("# eval recall — track {}", track_norm.to_ascii_uppercase());
         println!("dataset: {}", dataset.name);
         println!("corpus:  {}", corpus_path.display());
+        println!("floor:   {floor}");
         println!();
         print!("{}", report.render());
         println!();
@@ -284,8 +311,20 @@ fn run_recall(
 /// Split out from the CLI so the fixture leg's exact numbers are asserted by a
 /// test rather than only printed: a ranking change that moves a scorecard has
 /// to move the test with it, or the gate goes RED (#890 step 5).
-pub(crate) fn score_recall(dataset: &RecallDataset, corpus: &str, k: usize) -> RecallReport {
-    score_recall_with(dataset, corpus, k, RECALL_MAX_SECTIONS, RECALL_MAX_CHARS)
+pub(crate) fn score_recall(
+    dataset: &RecallDataset,
+    corpus: &str,
+    k: usize,
+    floor: f64,
+) -> RecallReport {
+    score_recall_with(
+        dataset,
+        corpus,
+        k,
+        RECALL_MAX_SECTIONS,
+        RECALL_MAX_CHARS,
+        floor,
+    )
 }
 
 /// Score the RANKER at depth `k`: retrieve `k` sections with no character
@@ -311,8 +350,9 @@ pub(crate) fn score_recall_at_depth(
     dataset: &RecallDataset,
     corpus: &str,
     k: usize,
+    floor: f64,
 ) -> RecallReport {
-    score_recall_with(dataset, corpus, k, k, usize::MAX)
+    score_recall_with(dataset, corpus, k, k, usize::MAX, floor)
 }
 
 /// Shared body: retrieve with an explicit window, then score it at `k`.
@@ -322,6 +362,7 @@ fn score_recall_with(
     k: usize,
     max_sections: usize,
     max_chars: usize,
+    floor: f64,
 ) -> RecallReport {
     let ranked = Ranked::build(corpus);
     let results: Vec<Vec<String>> = dataset
@@ -329,7 +370,7 @@ fn score_recall_with(
         .iter()
         .map(|case| {
             let matches: Matches =
-                ranked.find_relevant(&case.query, max_sections, max_chars, RECALL_MIN_SCORE);
+                ranked.find_relevant(&case.query, max_sections, max_chars, floor);
             section_ids(&matches)
         })
         .collect();
@@ -362,11 +403,12 @@ fn section_ids(m: &Matches) -> Vec<String> {
 /// Machine-readable scorecard for the regression guard and any later
 /// baseline diff. Flat by design: a nested shape would invite consumers to
 /// depend on structure the framework does not promise.
-fn print_json(dataset: &str, track: &str, report: &RecallReport) {
+fn print_json(dataset: &str, track: &str, report: &RecallReport, floor: f64) {
     let obj = serde_json::json!({
         "track": track.to_ascii_uppercase(),
         "dataset": dataset,
         "k": report.k,
+        "floor": floor,
         "positives": report.positives(),
         "negatives": report.negatives,
         "false_positives": report.false_positives,

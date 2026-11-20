@@ -385,6 +385,12 @@ pub enum EvalCommands {
         #[arg(long)]
         k: Option<usize>,
 
+        /// Match floor to score with (default: the resolved shipped floor —
+        /// `[memory].recall_min_score`, else the compiled default). Clamped to
+        /// the band the product can run, so a swept value is always shippable.
+        #[arg(long)]
+        floor: Option<f64>,
+
         /// Emit the scorecard as JSON instead of the rendered summary
         #[arg(long)]
         json: bool,
@@ -405,6 +411,10 @@ pub enum EvalCommands {
         /// vacuous full-index baseline.
         #[arg(long)]
         k: Option<usize>,
+
+        /// Match floor for C4 (default: the resolved shipped floor)
+        #[arg(long)]
+        floor: Option<f64>,
 
         /// Emit the scorecard as JSON instead of the rendered summary
         #[arg(long)]

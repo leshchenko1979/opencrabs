@@ -10,8 +10,17 @@
 //! ranks first on this box" would pass or fail on which skills happen to be
 //! installed. Controlled vocabulary is what makes the ranking itself testable.
 
-use crate::brain::memory_recall::{SKILL_RECALL_MAX, recall_skills_from};
+use crate::brain::memory_recall::{RECALL_MIN_SCORE, SKILL_RECALL_MAX};
 use crate::eval::skills_track::index_markdown;
+
+/// The shipped selector at the COMPILED default floor (#912).
+///
+/// These tests pin the ranking and the silence gate at the floor the box ships
+/// with when nothing is configured; the configured floor is covered by the
+/// resolver's own tests in `memory_recall_floor_test.rs`.
+fn recall_skills_from(index_md: &str, msg: &str) -> Option<String> {
+    crate::brain::memory_recall::recall_skills_from(index_md, msg, RECALL_MIN_SCORE)
+}
 
 const ENTRIES: &[(&str, &str)] = &[
     (

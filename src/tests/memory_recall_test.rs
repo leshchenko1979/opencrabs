@@ -12,7 +12,8 @@
 //! Fixtures are synthetic and carry no user identifiers.
 
 use crate::brain::memory_recall::{
-    recall_for_session, recall_from, recall_from_active_skills, recall_from_project_directives,
+    RECALL_MIN_SCORE, recall_for_session, recall_from, recall_from_active_skills,
+    recall_from_project_directives,
 };
 
 const MEMORY: &str = "\
@@ -161,12 +162,12 @@ async fn rejections_do_not_depend_on_reading_the_file() {
 
     // A harness continuation is never recall-eligible, file or not.
     assert_eq!(
-        recall_for("[System: restart recovery] telegram gate").await,
+        recall_for("[System: restart recovery] telegram gate", RECALL_MIN_SCORE).await,
         None
     );
     // Neither is a message with no term longer than two characters.
-    assert_eq!(recall_for("ok").await, None);
-    assert_eq!(recall_for("go on").await, None);
+    assert_eq!(recall_for("ok", RECALL_MIN_SCORE).await, None);
+    assert_eq!(recall_for("go on", RECALL_MIN_SCORE).await, None);
 }
 
 /// Repeated recall against an unchanged file is stable.
@@ -178,8 +179,8 @@ async fn rejections_do_not_depend_on_reading_the_file() {
 async fn repeated_recall_is_stable_across_the_cache() {
     use crate::brain::memory_recall::recall_for;
 
-    let first = recall_for("telegram owner gate approval").await;
-    let second = recall_for("telegram owner gate approval").await;
+    let first = recall_for("telegram owner gate approval", RECALL_MIN_SCORE).await;
+    let second = recall_for("telegram owner gate approval", RECALL_MIN_SCORE).await;
     assert_eq!(
         first, second,
         "recall must be identical across calls, the cache cannot change the answer"
@@ -199,10 +200,13 @@ async fn recall_from_project_directives_matches_claude_md() {
     .await
     .unwrap();
 
-    let recalled =
-        recall_from_project_directives(temp.path(), "what are the python coding standards?")
-            .await
-            .expect("should recall from CLAUDE.md");
+    let recalled = recall_from_project_directives(
+        temp.path(),
+        "what are the python coding standards?",
+        RECALL_MIN_SCORE,
+    )
+    .await
+    .expect("should recall from CLAUDE.md");
 
     assert!(recalled.contains("from project directive CLAUDE.md"));
     assert!(recalled.contains("pytest and ruff"));
@@ -235,6 +239,7 @@ fn recall_from_active_skills_matches_active_skill() {
         let recalled = recall_from_active_skills(
             &active,
             "explain python coding process and architecture decision records",
+            RECALL_MIN_SCORE,
         )
         .expect("should recall from active coding-process skill");
 

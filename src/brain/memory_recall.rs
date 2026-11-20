@@ -46,6 +46,46 @@ pub(crate) const RECALL_MAX_CHARS: usize = 1200;
 /// change to the ranker broke the gate by arithmetic rather than by defect.
 pub(crate) const RECALL_MIN_SCORE: f64 = 0.38;
 
+/// Lower bound the configurable floor is clamped to (#912).
+///
+/// Below this the shortlist stops filtering at all, and a `0.0` typo would put
+/// an unfiltered list on every turn — degradation with no error to notice. The
+/// knob therefore cannot reach it.
+pub(crate) const RECALL_MIN_SCORE_MIN: f64 = 0.05;
+
+/// Upper bound the configurable floor is clamped to (#912).
+///
+/// 0.60 is already stricter than the memory pair's plateau, so anything larger
+/// buys no precision — only silence.
+pub(crate) const RECALL_MIN_SCORE_MAX: f64 = 0.60;
+
+/// Clamp a configured floor into the usable band (#912).
+///
+/// `None` and NaN fall back to the compiled default; a value outside the band
+/// is clamped rather than refused, because a config typo must never be able to
+/// empty every ranking (too high) or disable the filter (too low) silently.
+///
+/// Pure, so the boundaries are testable without a config file.
+pub(crate) fn clamp_recall_min_score(configured: Option<f64>) -> f64 {
+    match configured {
+        None => RECALL_MIN_SCORE,
+        Some(v) if v.is_nan() => RECALL_MIN_SCORE,
+        Some(v) if v < RECALL_MIN_SCORE_MIN => RECALL_MIN_SCORE_MIN,
+        Some(v) if v > RECALL_MIN_SCORE_MAX => RECALL_MIN_SCORE_MAX,
+        Some(v) => v,
+    }
+}
+
+/// The floor this process actually runs with (#912).
+///
+/// `[memory].recall_min_score` clamped, or the compiled default when unset.
+/// **THE one reader**: the per-turn recall path and the eval harness both call
+/// it, because a scorecard that read the constant while the box ran a
+/// configured value would publish numbers about a configuration nobody uses.
+pub(crate) fn resolve_recall_min_score() -> f64 {
+    clamp_recall_min_score(crate::config::Config::current().memory.recall_min_score)
+}
+
 /// Raw (length-unnormalized) BM25 score an entry must reach before a
 /// multi-topic message may summon the skill shortlist through the raw door.
 ///
@@ -112,7 +152,10 @@ fn touch_recalled(matches: &brain_sections::Matches) {
 }
 
 /// Recall relevant to `user_message` from MEMORY.md on disk.
-pub async fn recall_for(user_message: &str) -> Option<String> {
+///
+/// `floor` is the resolved match threshold ([`resolve_recall_min_score`] at the
+/// runtime entry point, an explicit value when the eval harness sweeps it).
+pub async fn recall_for(user_message: &str, floor: f64) -> Option<String> {
     if !worth_reading_for(user_message) {
         return None;
     }
@@ -127,12 +170,9 @@ pub async fn recall_for(user_message: &str) -> Option<String> {
         if let Some(c) = cache.as_ref()
             && c.stamp == stamp
         {
-            let matches = c.indexed.find_relevant(
-                user_message,
-                RECALL_MAX_SECTIONS,
-                RECALL_MAX_CHARS,
-                RECALL_MIN_SCORE,
-            );
+            let matches =
+                c.indexed
+                    .find_relevant(user_message, RECALL_MAX_SECTIONS, RECALL_MAX_CHARS, floor);
             touch_recalled(&matches);
             return render_memory(matches);
         }
@@ -140,12 +180,7 @@ pub async fn recall_for(user_message: &str) -> Option<String> {
 
     let memory = tokio::fs::read_to_string(&path).await.ok()?;
     let indexed = Ranked::build(&memory);
-    let matches = indexed.find_relevant(
-        user_message,
-        RECALL_MAX_SECTIONS,
-        RECALL_MAX_CHARS,
-        RECALL_MIN_SCORE,
-    );
+    let matches = indexed.find_relevant(user_message, RECALL_MAX_SECTIONS, RECALL_MAX_CHARS, floor);
 
     if let Ok(mut cache) = MEMORY_CACHE.write() {
         tracing::debug!(
@@ -188,6 +223,7 @@ struct NamedSection {
 pub fn recall_from_active_skills(
     active_skills: &HashSet<String>,
     user_message: &str,
+    floor: f64,
 ) -> Option<String> {
     if !worth_reading_for(user_message) || active_skills.is_empty() {
         return None;
@@ -237,12 +273,8 @@ pub fn recall_from_active_skills(
         .map(|ns| ns.section.clone())
         .collect::<Vec<_>>();
     let indexed = Ranked::from_sections(raw_sections);
-    let matched_indices = indexed.find_relevant_indices(
-        user_message,
-        RECALL_MAX_SECTIONS,
-        RECALL_MAX_CHARS,
-        RECALL_MIN_SCORE,
-    );
+    let matched_indices =
+        indexed.find_relevant_indices(user_message, RECALL_MAX_SECTIONS, RECALL_MAX_CHARS, floor);
 
     if matched_indices.is_empty() {
         return None;
@@ -267,6 +299,7 @@ pub fn recall_from_active_skills(
 pub async fn recall_from_project_directives(
     working_dir: &Path,
     user_message: &str,
+    floor: f64,
 ) -> Option<String> {
     if !worth_reading_for(user_message) {
         return None;
@@ -313,12 +346,8 @@ pub async fn recall_from_project_directives(
         .map(|ns| ns.section.clone())
         .collect::<Vec<_>>();
     let indexed = Ranked::from_sections(raw_sections);
-    let matched_indices = indexed.find_relevant_indices(
-        user_message,
-        RECALL_MAX_SECTIONS,
-        RECALL_MAX_CHARS,
-        RECALL_MIN_SCORE,
-    );
+    let matched_indices =
+        indexed.find_relevant_indices(user_message, RECALL_MAX_SECTIONS, RECALL_MAX_CHARS, floor);
 
     if matched_indices.is_empty() {
         return None;
@@ -348,29 +377,35 @@ pub async fn recall_for_session(
         return None;
     }
 
+    // Resolved ONCE per turn (#912): the configured floor, clamped, or the
+    // compiled default. Every source below reads this same value, so the box
+    // cannot run two thresholds at once.
+    let floor = resolve_recall_min_score();
+
     let mut parts: Vec<String> = Vec::new();
 
     // 0. Skill selection (#901) — "which skill applies" is the most actionable
     //    hint of the three, so it leads. The full index is still in the system
     //    prompt; this only ranks it against the message.
-    if let Some(shortlist) = recall_skills(user_message) {
+    if let Some(shortlist) = recall_skills(user_message, floor) {
         parts.push(shortlist);
     }
 
     // 1. MEMORY.md
-    if let Some(mem) = recall_for(user_message).await {
+    if let Some(mem) = recall_for(user_message, floor).await {
         parts.push(mem);
     }
 
     // 2. Active skills
     let active_skills = crate::brain::tools::seen_skills::active_for_session(session_id);
-    if let Some(skill_recall) = recall_from_active_skills(&active_skills, user_message) {
+    if let Some(skill_recall) = recall_from_active_skills(&active_skills, user_message, floor) {
         parts.push(skill_recall);
     }
 
     // 3. Project directives
     if let Some(wd) = working_dir
-        && let Some(directive_recall) = recall_from_project_directives(wd, user_message).await
+        && let Some(directive_recall) =
+            recall_from_project_directives(wd, user_message, floor).await
     {
         parts.push(directive_recall);
     }
@@ -425,10 +460,11 @@ static SKILLS_CACHE: std::sync::RwLock<Option<CachedSkills>> = std::sync::RwLock
 ///    gold skill ranked third could vanish because nothing cleared the floor,
 ///    and C1@5 would then be a number about the harness rather than about the
 ///    product.
-/// 2. **SILENCE** — whether to say anything at all, decided by the shipped
-///    [`RECALL_MIN_SCORE`]. A shortlist invented from a weak match is noise paid
-///    on every turn, which is the same trade the memory recall makes.
-pub fn recall_skills_from(index_md: &str, user_message: &str) -> Option<String> {
+/// 2. **SILENCE** — whether to say anything at all, decided by the resolved
+///    floor (#912: `[memory].recall_min_score`, defaulting to
+///    [`RECALL_MIN_SCORE`]). A shortlist invented from a weak match is noise
+///    paid on every turn, which is the same trade the memory recall makes.
+pub fn recall_skills_from(index_md: &str, user_message: &str, floor: f64) -> Option<String> {
     if !worth_reading_for(user_message) {
         return None;
     }
@@ -440,7 +476,7 @@ pub fn recall_skills_from(index_md: &str, user_message: &str) -> Option<String> 
     // genuinely matches at a fraction of a focused message's strength — a
     // raw unnormalized floor ([`SKILL_RECALL_RAW_FLOOR`]) for multi-topic
     // ones. Matching more skills must never read as matching none.
-    let any_clears = ranked.find_relevant(user_message, 1, usize::MAX, RECALL_MIN_SCORE);
+    let any_clears = ranked.find_relevant(user_message, 1, usize::MAX, floor);
     if any_clears.sections.is_empty()
         && !ranked.any_clears_raw(user_message, SKILL_RECALL_RAW_FLOOR)
     {
@@ -496,10 +532,10 @@ fn skill_index_markdown() -> String {
 }
 
 /// Load the live skill index and rank it against `user_message` (#901).
-pub fn recall_skills(user_message: &str) -> Option<String> {
+pub fn recall_skills(user_message: &str, floor: f64) -> Option<String> {
     // Cheap gate first: no query terms means no disk read at all.
     if !worth_reading_for(user_message) {
         return None;
     }
-    recall_skills_from(&skill_index_markdown(), user_message)
+    recall_skills_from(&skill_index_markdown(), user_message, floor)
 }

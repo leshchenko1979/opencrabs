@@ -6,6 +6,7 @@
 //! and a negative can actually be reported as "no skill" — a metric that cannot
 //! fail is not a measurement.
 
+use crate::brain::memory_recall::RECALL_MIN_SCORE;
 use crate::eval::skills_track::{
     SkillDataset, SkillTask, index_block_chars, index_markdown, score,
 };
@@ -49,7 +50,7 @@ fn run_with(
     let md = index_markdown(entries.iter().copied());
     let chars = index_block_chars(entries.iter().copied());
     let names: Vec<String> = entries.iter().map(|(s, _)| s.to_string()).collect();
-    score(ds, &md, &names, k, chars, Some(2))
+    score(ds, &md, &names, k, chars, Some(2), RECALL_MIN_SCORE)
 }
 
 /// The index is rendered as one markdown section per skill, in the order given,

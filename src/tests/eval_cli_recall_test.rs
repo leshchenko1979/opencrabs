@@ -11,6 +11,7 @@
 //!    reads as a pass. The mutation test holds the dataset fixed and mutates
 //!    only the ranking, so a blind leg fails here instead of in production.
 
+use crate::brain::memory_recall::RECALL_MIN_SCORE;
 use crate::cli::eval_cmd::{score_rankings, score_recall};
 use crate::eval::recall::RecallDataset;
 
@@ -27,7 +28,7 @@ fn dataset() -> RecallDataset {
 
 #[test]
 fn fixture_leg_reproduces_the_committed_scorecard() {
-    let report = score_recall(&dataset(), CORPUS, K);
+    let report = score_recall(&dataset(), CORPUS, K, RECALL_MIN_SCORE);
 
     assert!(
         (report.aggregate.precision - 1.000).abs() < 1e-3,
@@ -56,7 +57,7 @@ fn fixture_leg_reproduces_the_committed_scorecard() {
 #[test]
 fn a_mutated_ranking_moves_the_scorecard() {
     let ds = dataset();
-    let baseline = score_recall(&ds, CORPUS, K);
+    let baseline = score_recall(&ds, CORPUS, K, RECALL_MIN_SCORE);
 
     let silenced: Vec<Vec<String>> = ds.cases.iter().map(|_| Vec::new()).collect();
     let mutated = score_rankings(&ds, &silenced, K);

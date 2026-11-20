@@ -60,7 +60,7 @@ fn ids(sections: &[crate::brain::brain_sections::Section]) -> Vec<String> {
 /// that the ranker — not the metric — was the lever.
 #[test]
 fn the_shipped_leg_reproduces_the_current_scorecard() {
-    let report = score_recall(&dataset(), CORPUS, PUBLISHED_K);
+    let report = score_recall(&dataset(), CORPUS, PUBLISHED_K, RECALL_MIN_SCORE);
     // Five of sixty positives now retrieve their single gold section at rank
     // one, so every metric lands on exactly 5/60.
     let expected = 5.0 / 60.0;
@@ -94,8 +94,8 @@ fn the_shipped_leg_reproduces_the_current_scorecard() {
 #[test]
 fn the_production_window_ignores_k_because_it_caps_at_two_sections() {
     let ds = dataset();
-    let at_two = score_recall(&ds, CORPUS, INJECTED_K);
-    let at_ten = score_recall(&ds, CORPUS, PUBLISHED_K);
+    let at_two = score_recall(&ds, CORPUS, INJECTED_K, RECALL_MIN_SCORE);
+    let at_ten = score_recall(&ds, CORPUS, PUBLISHED_K, RECALL_MIN_SCORE);
 
     assert_eq!(
         at_ten.aggregate, at_two.aggregate,
@@ -119,8 +119,8 @@ fn the_production_window_ignores_k_because_it_caps_at_two_sections() {
 #[test]
 fn the_scorecard_leg_reaches_deeper_than_the_production_window() {
     let ds = dataset();
-    let window = score_recall(&ds, CORPUS, PUBLISHED_K);
-    let depth = score_recall_at_depth(&ds, CORPUS, PUBLISHED_K);
+    let window = score_recall(&ds, CORPUS, PUBLISHED_K, RECALL_MIN_SCORE);
+    let depth = score_recall_at_depth(&ds, CORPUS, PUBLISHED_K, RECALL_MIN_SCORE);
 
     assert!(
         depth.aggregate.recall > window.aggregate.recall,
