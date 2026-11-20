@@ -593,8 +593,32 @@ jobs:
           cache-on-failure: true
           save-if: true
 
-      - name: Install system deps (pkg-config, ALSA dev, mold + clang)
-        run: sudo apt-get update -qq && sudo apt-get install -y pkg-config libasound2-dev mold clang
+      - name: Install system deps (pkg-config, ALSA dev, mold + clang, gdb)
+        # gdb IS A TEST-LEG DEPENDENCY, not a debugging convenience (#331/#1936).
+        # STALLWATCH's fire-time dump captures kernel-side evidence with no gdb
+        # (/proc/<pid>/wchan, kstack, vmstat) but the USER stacks -- the only
+        # thing that shows a deadlock cycle -- need it. Measured consequence of
+        # NOT having it (job 134706016808, run 44276536423): the watchdog fired
+        # correctly, named `opencrabs-e23d8` in futex_do_wait, and printed
+        # "gdb not on PATH - user stacks skipped". An instrument that cannot run
+        # on the failing dispatch is not an instrument.
+        #
+        # ptrace: gdb attaches to the test binary as a SIBLING and ubuntu-latest
+        # ships YAMA ptrace_scope=1, which refuses a sibling attach -- measured,
+        # run 37317799177: the watchdog armed on the right pid and fired 3x, but
+        # every dump read "Could not attach to process ... ptrace_scope". The
+        # dump also runs under sudo (YAMA exempts root), so `|| true` is safe:
+        # some runners expose the knob read-only.
+        #
+        # Folded into THIS step rather than a separate "Install gdb" step: it
+        # reuses the apt-get update below and saves ~20-30 s per dispatch.
+        # No step-level `if:` is needed -- the JOB already requires
+        # `mode == 'gate' && !fix && !lockregen && !lockupdate && !fast`, which
+        # is a superset of the predicate the old leg carried.
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y pkg-config libasound2-dev mold clang gdb
+          sudo sysctl -w kernel.yama.ptrace_scope=0 || true
+          echo "ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo unknown)"
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -619,14 +643,388 @@ jobs:
       - name: Run tests under nextest (shipped feature set, BLOCKING verdict)
         # Step timeout INSIDE the 45-min job cap so a stall still leaves a log
         # (a job-cap cancel archives a 22-byte empty zip; #331).
+        #
+        # STALLWATCH (re-homed 2026-11-20 from the deleted `cargo test` leg).
+        # THREE predicates, because a stall has three shapes:
+        #   A. FLAT CPU over this step's own process tree (480 s). Covers compile
+        #      and futex wedges; BLIND to a test spinning on CPU.
+        #   B. NO TEST COMPLETING (600 s), counted from this step's own log. Armed
+        #      only after the FIRST completion: compile legitimately prints zero
+        #      result lines for 20+ minutes. Recognises libtest AND nextest shapes.
+        #      CALIBRATION 2026-11-19, six GREEN runs (~67,000 completions): worst
+        #      healthy gap with no completion is 63 s, always the slow rate-limit
+        #      deadline test. 600 s is 9.5x that.
+        #   C. LOG SILENCE (900 s). Covers the shape A and B both miss: CPU
+        #      advancing while no output is emitted. CALIBRATION measured
+        #      2026-11-20 from FULL per-job archives (gh api
+        #      .../actions/jobs/<id>/logs), three GREEN runs: 44689498798 = 349.3 s,
+        #      44689314886 = 392.3 s, 44589184921 = 532.4 s of healthy compile
+        #      silence, all one crate (`opencrabs` lib test) at O3/thin-LTO.
+        #      900 s is 1.69x the WORST healthy gap. A literal 600 s would have
+        #      killed run 44589184921 while it was perfectly healthy.
+        #      Never calibrate C from `gh run view --log`: it truncates mid-compile.
+        #      A false trip on a healthy gate is a CALIBRATION DEFECT to fix by
+        #      RAISING the threshold, never a reason to disable C.
+        #
+        # WHY THE LOG EXISTS: B counts completions in it and C watches its size, so
+        # the step tees and takes the exit code from ${PIPESTATUS[0]}. A bare
+        # `| tee` makes $? TEE's status -- a failing test would report 0, the
+        # false-green class this factory exists to kill.
+        #
+        # FAIL-OPEN but VISIBLY SO: no python3 or an unparsable heredoc emits a
+        # `::warning::` and continues; arming emits a `::notice::`. Without those,
+        # "no stall detected" and "the detector never ran" are the same green run
+        # (the #1936 trap). Revert = delete this block and the STALLWATCH teardown.
+        #
+        # NO `${{ }}` INSIDE THE RUN BLOCK. A template expression in a 14 KB run
+        # block trips the 21,000-char cap and made the carrier undeployable for an
+        # hour. `features` is passed via env as $FEATURES; never re-inline it.
         timeout-minutes: 40
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          # Moved out of the run block on purpose -- see NO `${{ }}` above.
+          FEATURES: ${{ inputs.features }}
+          STALLWATCH_SECS: "480"
+          STALLWATCH_PROGRESS_SECS: "600"
+          STALLWATCH_SILENCE_SECS: "900"
+          STALLWATCH_LOG: /tmp/test-leg.log
         run: |
+          STALLWATCH=""
+          if command -v python3 >/dev/null 2>&1; then
+          cat > /tmp/stallwatch.py <<'STALLWATCH_PY'
+          #!/usr/bin/env python3
+          """Stall watchdog for the CI gate. TWO predicates, because a stall has two shapes.
+
+          Predicate A -- FLAT CPU over the step's own process tree (STALLWATCH_SECS, 480).
+            Covers the COMPILE phase and any futex wedge: a rustc that stops advancing
+            utime+stime, or a test parked in futex_do_wait. First production fire 2026-11-18
+            (run 44276536423) named `opencrabs-e23d8` at wchan=futex_do_wait. BLIND to a test
+            spinning on CPU: ticks keep advancing, so the flat clock never accumulates -- it
+            fired on 0 of 6 job-cap stalls for exactly that reason.
+
+          Predicate B -- NO TEST COMPLETING (STALLWATCH_PROGRESS_SECS, 600).
+            Counts COMPLETION markers in the step's own log and fires when the count stops
+            advancing. Two harness shapes are recognised: libtest
+            (`test <name> ... ok|FAILED|ignored`, doc-tests included) and nextest
+            (`        PASS [   0.003s] <name>`). RE-HOMED 2026-11-20 from the deleted
+            `cargo test` leg into `pr-gates-nextest`, which is why both shapes are matched.
+            ARMS ONLY AFTER THE FIRST COMPLETION: compile legitimately produces zero result
+            lines for 20+ minutes, so a naive "no progress in N" would kill every cold run.
+
+            CALIBRATION (2026-11-19, six GREEN runs: 44323730941, 44337942773, 44369135092,
+            44414539307, 44500485926, 44511279765; ~67,000 completions): the longest healthy
+            stretch with NO completion is 63 s, always the same slow rate-limit deadline test
+            (it prints "has been running for over 60 seconds" while healthy); p99 = p95 = 0 s.
+            600 s is 9.5x the worst healthy gap and 4x the ENTIRE healthy test phase. Do NOT
+            derive it from log silence -- that is C's calibration and a DIFFERENT number.
+            Conflating them is what left the detector firing zero times for six stalls. A
+            false trip fails a healthy gate, so every threshold is a multiple of the WORST
+            gap, never of the median.
+
+          Signal for A: sum(utime+stime) over EVERY process descending from the step shell
+          (STALLWATCH_ROOT). Tree scoping is load-bearing: a box-wide comm match picks up
+          unrelated processes and resets the flat clock forever (measured -- the opencrabs
+          daemon matched `opencrabs` and the instrument never fired). `tee` is a descendant
+          and sits INSIDE the sum, harmless only because it is idle exactly when output
+          stops. Do not widen the tree scope to "fix" that.
+
+          Signal for C: the SIZE of /tmp/test-leg.log. C is the only predicate that reads
+          OUTPUT rather than process state, and it exists because A needs CPU to go FLAT
+          and B needs a completion to have ALREADY happened: a tree burning CPU while
+          emitting no output satisfies neither. Armed only once the file is non-empty --
+          compile starts before `tee` writes its first byte, and an absent or empty log is
+          not silence. Calibration is the WORST healthy compile gap measured from FULL
+          per-job archives; the three run ids and the 1.69x margin are in the step comment
+          above. Do NOT calibrate this from `gh run view --log`: it truncates mid-compile,
+          so the "silence" it reports is an artifact of the reader, not of the run.
+
+          On fire: dump wchan, /proc/<pid>/syscall, kernel stack, vmstat and user stacks
+          (gdb), plus the test-log tail so the in-flight test is named, then SIGTERM the
+          tree so the step fails fast instead of burning to the 40-minute timeout. The dump
+          runs BEFORE the SIGTERM, so even a wrong fire yields evidence. Every fire line
+          names WHICH predicate fired and both counters: one message shape for two triggers
+          would leave the next reader unable to tell a spin from a wedge.
+          """
+          import os
+          import re
+          import signal
+          import shutil
+          import subprocess
+          import sys
+          import time
+
+          # This watcher's own pid. It wakes every SAMPLE seconds, so counting it in the CPU sum
+          # would reset the flat clock forever.
+          SELF = os.getpid()
+          THRESHOLD = int(os.environ.get("STALLWATCH_SECS", "480"))
+          PROGRESS_THRESHOLD = int(os.environ.get("STALLWATCH_PROGRESS_SECS", "600"))
+          SILENCE_THRESHOLD = int(os.environ.get("STALLWATCH_SILENCE_SECS", "900"))
+          SAMPLE = int(os.environ.get("STALLWATCH_SAMPLE", "30"))
+          LOGFILE = os.environ.get("STALLWATCH_LOG", "/tmp/test-leg.log")
+
+          # Completion markers, BOTH harness shapes this detector has ever run under:
+          #   libtest  -- `test src/lib.rs - foo (line 12) ... ok` (doc-tests included)
+          #   nextest  -- `        PASS [   0.003s] crate::module::test_name`
+          # The libtest arm is anchored at line start and requires the full `... ok|FAILED|
+          # ignored` tail; the nextest arm requires the status word AND the `[  <dur>s]`
+          # column, so the stallwatch comments echoed into the log cannot be counted as
+          # completions by either arm.
+          OK_RE = re.compile(
+              rb"^test .+ \.\.\. (ok|FAILED|ignored)"
+              rb"|^\s*(?:PASS|FAIL|SLOW|LEAK|TIMEOUT|ABORT|SIGSEGV|SIGBUS|SIGILL)\s+\[",
+              re.M,
+          )
+
+
+          def _stat(pid):
+              """(comm, cpu_ticks, ppid, state) from /proc/<pid>/stat, or None."""
+              try:
+                  with open("/proc/%d/stat" % pid, "rb") as fh:
+                      raw = fh.read()
+              except OSError:
+                  return None
+              close = raw.rfind(b")")
+              if close < 0:
+                  return None
+              comm = raw[raw.find(b"(") + 1:close].decode("utf-8", "replace")
+              fields = raw[close + 2:].split()
+              try:
+                  state = fields[0]
+                  ppid, utime, stime = int(fields[1]), int(fields[11]), int(fields[12])
+              except (IndexError, ValueError):
+                  return None
+              return comm, utime + stime, ppid, state
+
+
+          def descendants(root):
+              """{pid: (comm, cpu_ticks)} for EVERY descendant of `root`, minus this watcher.
+
+              No comm filter, deliberately. A wedged TEST binary is `opencrabs-<hash>`: a
+              build-tools filter left it out of both the dump and the CPU sum, so a local
+              drive on 2026-11-17 reported procs=1 -- the parked `cargo` in wait4 -- and never
+              named the process that was stuck. FIRST PRODUCTION FIRE 2026-11-18, run
+              44276536423: flat=300s, procs=2, naming the wedged `opencrabs-e23d8`
+              (wchan=futex_do_wait) and its parked `cargo` (wchan=do_wait), so the fix is
+              confirmed in production.
+
+              It also closes a false-positive path: over build tools only, `cargo` parked in
+              wait4 reads as FLAT for the whole test phase, so any suite legitimately slower
+              than the threshold would have been killed as a stall.
+              """
+              table = {}
+              for entry in os.listdir("/proc"):
+                  if not entry.isdigit():
+                      continue
+                  rec = _stat(int(entry))
+                  if rec:
+                      table[int(entry)] = rec
+
+              procs = {}
+              for pid, (comm, ticks, _ppid, state) in table.items():
+                  # A ZOMBIE cannot stall anything: it has exited and is only waiting to be reaped.
+                  # Counting it keeps the tree non-empty AFTER the tests finish, so the progress
+                  # clock keeps running against a dead process (measured in the local drive: the
+                  # healthy arm false-fired on a zombie child). Zombies also burn no CPU, so they
+                  # are noise for both predicates.
+                  if pid == SELF or state == b"Z":
+                      continue
+                  cur, hops = pid, 0
+                  while cur > 1 and hops < 64:
+                      rec = table.get(cur)
+                      if rec is None:
+                          break
+                      parent = rec[2]
+                      if parent == root:
+                          procs[pid] = (comm, ticks)
+                          break
+                      cur, hops = parent, hops + 1
+              return procs
+
+
+          def read_completions(offset):
+              """(new_offset, count) -- libtest result lines appended to LOGFILE since `offset`.
+
+              Only COMPLETE lines are consumed: a partial trailing line is left for the next read,
+              so a line split across two appends is counted exactly once.
+              """
+              try:
+                  with open(LOGFILE, "rb") as fh:
+                      fh.seek(offset)
+                      chunk = fh.read()
+              except OSError:
+                  return offset, 0
+              cut = chunk.rfind(b"\n")
+              if cut < 0:
+                  return offset, 0
+              body = chunk[:cut + 1]
+              return offset + len(body), len(OK_RE.findall(body))
+
+
+          def _log_tail(n=40):
+              try:
+                  with open(LOGFILE, "rb") as fh:
+                      fh.seek(0, os.SEEK_END)
+                      size = fh.tell()
+                      fh.seek(max(0, size - 64 * 1024))
+                      lines = fh.read().decode("utf-8", "replace").splitlines()
+              except OSError:
+                  return
+              print("----- test log tail (last %d lines) -----" % n)
+              for line in lines[-n:]:
+                  print("LOGTAIL: %s" % line[:300])
+
+
+          def dump(procs, stall_s, predicate, completions):
+              stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+              print("===== STALLWATCH FIRE %s predicate=%s stall=%.0fs procs=%d completions=%d ====="
+                    % (stamp, predicate, stall_s, len(procs), completions), flush=True)
+              for pid, (comm, ticks) in sorted(procs.items()):
+                  try:
+                      wchan = open("/proc/%d/wchan" % pid).read().strip()
+                  except OSError:
+                      wchan = "?"
+                  print("STALLWATCH: pid=%d comm=%s cpu_ticks=%d wchan=%s" % (pid, comm, ticks, wchan))
+              print("----- vmstat -----")
+              subprocess.run(["vmstat", "1", "3"], check=False)
+              _log_tail()
+              # Kernel-side evidence needs no gdb: /proc/<pid>/syscall names the blocking syscall
+              # (futex vs read/fsync/io_schedule) and /proc/<pid>/stack is the kernel stack that put
+              # it to sleep. Both are cheap; /proc/<pid>/syscall is DENIED on the runner (measured
+              # 2026-11-18: 'Operation not permitted' on both pids) and is reported as unavailable.
+              print("----- syscall + kernel stack -----")
+              for pid, (comm, _) in sorted(procs.items()):
+                  for label, argv in (
+                      ("syscall", ["cat", "/proc/%d/syscall" % pid]),
+                      ("kstack", ["sudo", "cat", "/proc/%d/stack" % pid]),
+                  ):
+                      try:
+                          res = subprocess.run(argv, check=False, stdout=subprocess.PIPE,
+                                               stderr=subprocess.STDOUT, timeout=20)
+                          out = res.stdout.decode("utf-8", "replace").strip()
+                      except (OSError, subprocess.TimeoutExpired) as exc:
+                          out = "unavailable: %r" % (exc,)
+                      print("STALLWATCH %s pid=%d: %s" % (label, pid, out[:2000]), flush=True)
+              print("----- user stacks -----")
+              if not shutil.which("gdb"):
+                  print("STALLWATCH: gdb not on PATH - user stacks skipped. This should NOT "
+                        "happen on a test run: the 'Install gdb + relax ptrace' step is armed "
+                        "whenever the test leg executes (#331). If it is missing, that step "
+                        "failed or its predicate diverged from 'Run tests'. The kernel-side "
+                        "evidence above (wchan + kstack, plus vmstat) separates futex from "
+                        "read/fsync.")
+              for pid, (comm, _) in sorted(procs.items() if shutil.which("gdb") else []):
+                  print("===== STALLWATCH stack pid=%d comm=%s =====" % (pid, comm))
+                  # sudo: YAMA exempts root from ptrace_scope on the runner
+                  try:
+                      res = subprocess.run(
+                          ["sudo", "gdb", "-p", str(pid), "-batch", "-ex", "thread apply all bt"],
+                          check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          timeout=180,
+                      )
+                      sys.stdout.write(res.stdout.decode("utf-8", "replace")[:12000])
+                  except (OSError, subprocess.TimeoutExpired) as exc:
+                      print("STALLWATCH: stack dump failed for pid=%d: %r" % (pid, exc))
+              print("===== STALLWATCH END =====", flush=True)
+
+
+          def terminate(procs, stall_s, predicate):
+              for pid in procs:
+                  try:
+                      os.kill(pid, signal.SIGTERM)
+                  except OSError:
+                      pass
+              print("STALLWATCH: SIGTERM sent to %d process(es) after %.0fs without progress (%s)"
+                    % (len(procs), stall_s, predicate), flush=True)
+
+
+          def main():
+              root = int(os.environ.get("STALLWATCH_ROOT") or os.getppid())
+              print("STALLWATCH: armed, root=%d flat=%ds progress=%ds silence=%ds sample=%ds log=%s"
+                    % (root, THRESHOLD, PROGRESS_THRESHOLD, SILENCE_THRESHOLD, SAMPLE, LOGFILE),
+                    flush=True)
+              prev = None
+              flat_since = None
+              offset = 0
+              completions = 0
+              progress_since = None  # None until the FIRST completion: compile has no result lines
+              log_size = None
+              silence_since = None   # None until the log is NON-EMPTY: absent is not silence
+              while True:
+                  procs = descendants(root)
+                  total = sum(t for _, t in procs.values())
+                  now = time.time()
+
+                  # Predicate A -- flat CPU. Phase-agnostic, and the only one that can see a
+                  # compile-phase stall (no result lines exist yet).
+                  if not procs:
+                      prev, flat_since = None, None
+                  elif prev is None or total != prev:
+                      prev, flat_since = total, now
+                  else:
+                      flat = now - flat_since
+                      if flat >= THRESHOLD:
+                          dump(procs, flat, "flat_cpu", completions)
+                          terminate(procs, flat, "flat_cpu")
+                          return 0
+
+                  # Predicate B -- no test completing. Catches the CPU-burning spin that A cannot.
+                  offset, new = read_completions(offset)
+                  if new:
+                      completions += new
+                      progress_since = now
+                  elif completions and progress_since is not None and procs:
+                      idle = now - progress_since
+                      if idle >= PROGRESS_THRESHOLD:
+                          dump(procs, idle, "progress", completions)
+                          terminate(procs, idle, "progress")
+                          return 0
+
+                  # Predicate C -- log silence. The only OUTPUT-based arm: A needs CPU to go
+                  # flat, B needs a completion to have already happened, and a tree burning
+                  # CPU with no output satisfies neither. Armed only once the log is non-empty.
+                  try:
+                      size = os.path.getsize(LOGFILE)
+                  except OSError:
+                      size = None
+                  if size is None or size == 0 or not procs:
+                      silence_since = None
+                  elif log_size is None or size != log_size:
+                      silence_since = now
+                  else:
+                      silent = now - silence_since
+                      if silent >= SILENCE_THRESHOLD:
+                          dump(procs, silent, "silence", completions)
+                          terminate(procs, silent, "silence")
+                          return 0
+                  log_size = size
+
+                  time.sleep(SAMPLE)
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          STALLWATCH_PY
+            if python3 -c 'import ast; ast.parse(open("/tmp/stallwatch.py").read())' 2>/dev/null; then
+              python3 /tmp/stallwatch.py &
+              STALLWATCH=$!
+              echo "::notice::STALLWATCH armed -- flat=${STALLWATCH_SECS}s progress=${STALLWATCH_PROGRESS_SECS}s silence=${STALLWATCH_SILENCE_SECS}s; a green run carrying this notice is evidence the detector RAN"
+            else
+              echo "::warning::STALLWATCH DISARMED -- embedded script does not parse; NO stall detection this run"
+            fi
+          else
+            echo "::warning::STALLWATCH DISARMED -- python3 not on PATH; NO stall detection this run"
+          fi
+          # tee so B and C have a file; PIPESTATUS[0], never $? (see above).
           cargo nextest run --locked --cargo-profile ci \
-            --no-default-features --features "${{ inputs.features }}" \
-            --verbose
+            --no-default-features --features "$FEATURES" \
+            --verbose 2>&1 | tee "$STALLWATCH_LOG"
+          RC=${PIPESTATUS[0]}
+          if [ -n "$STALLWATCH" ]; then
+            kill "$STALLWATCH" 2>/dev/null || true
+            wait "$STALLWATCH" 2>/dev/null || true
+          fi
+          exit $RC
 
       - name: Doctests (nextest does not run them)
         # nextest runs libtest binaries only; rustdoc compiles doctests separately.
