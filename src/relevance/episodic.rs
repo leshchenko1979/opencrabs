@@ -108,6 +108,18 @@ pub fn score(content: &str, terms: &[String]) -> Score {
     score_lower(content, &lower_terms)
 }
 
+/// What a leg publishes about itself when it grades THIS ranker.
+///
+/// A provenance string is how a reader decides what a number measures, so it
+/// lives beside the code it names rather than in whichever command happens to
+/// print it. #911 replaced the ranker-less baseline with [`rank`] and left the
+/// caller's label asserting "no message ranker exists — #855": the same
+/// two-ranker-under-one-name defect, one surface over (#927). One constant,
+/// one reader-facing home — a leg that calls this module quotes this string.
+pub const RANKER_LABEL: &str = "shipped: contiguous LIKE (SQL recency order); a multi-word \
+     miss falls back to tokenized AND re-ranked by relevance::episodic::rank — \
+     (hits, leading, adjacency), ties to SQL recency";
+
 /// Order `rows` (already in the caller's fallback order — SQL recency) by
 /// relevance, best first. The sort is STABLE, so rows that tie on every signal
 /// keep the order they arrived in, which is exactly the shipped fallback.

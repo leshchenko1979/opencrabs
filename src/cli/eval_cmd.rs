@@ -182,7 +182,7 @@ fn run_episodic(k: Option<usize>, json: bool, slice_days: u32) -> Result<()> {
     if json {
         let obj = serde_json::json!({
             "track": "A",
-            "ranker": "shipped: LIKE recency order + tokenized AND fallback (no message ranker exists — #855)",
+            "ranker": crate::relevance::episodic::RANKER_LABEL,
             "k": report.k,
             "slice_days": report.slice_days,
             "slice_messages": report.slice_messages,
