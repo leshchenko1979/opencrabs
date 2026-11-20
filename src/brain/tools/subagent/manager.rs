@@ -671,7 +671,7 @@ impl SubAgentManager {
     /// Returns `None` when there are no non-terminal agents. The block is
     /// appended to the compaction summary so the post-compaction agent can
     /// still call `wait_agent`, `send_input`, `resume_agent`, and
-    /// `close_agent` on them (#936).
+    /// `stop_agent` on them (#936).
     pub fn format_running_for_compaction(&self) -> Option<String> {
         let active: Vec<(String, String, SubAgentState, Uuid)> = {
             let agents = self.agents.read().expect("subagent manager lock poisoned");
@@ -693,7 +693,7 @@ impl SubAgentManager {
             "## Running Sub-Agents\n\n\
              The following sub-agents were alive when compaction fired. \
              They are still running in the background. Use the IDs below with \
-             `wait_agent`, `send_input`, `resume_agent`, or `close_agent`. \
+             `wait_agent`, `send_input`, `resume_agent`, or `stop_agent`. \
              Do NOT spawn duplicates.\n\n\
              | Agent ID | Label | State | Session ID |\n\
              |----------|-------|-------|------------|\n",
