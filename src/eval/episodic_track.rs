@@ -408,9 +408,11 @@ fn cooccur(conn: &Connection, since: i64, a: &str, b: &str) -> Result<usize> {
 /// Mirrors `MessageRepository::search_by_content` (contiguous `LIKE`, recency
 /// order) and, when that returns nothing for a multi-word query, its
 /// `search_by_content_tokenized` companion (#1626): every token must appear,
-/// the pool is `5 * k` capped at 200, and rows are re-ranked by token-hit
-/// count with recency breaking ties. The only difference from the shipped
-/// path is the `created_at` bound, which is the documented cost bound.
+/// the pool is `5 * k` capped at 200, and rows are re-ranked by
+/// [`crate::relevance::episodic::rank`] — the very function the shipped arm
+/// calls, so this leg cannot measure a ranker the binary does not run (#911).
+/// The only difference from the shipped path is the `created_at` bound, which
+/// is the documented cost bound.
 pub fn search_slice(conn: &Connection, since: i64, query: &str, k: usize) -> Result<Vec<Ranked>> {
     let escaped = |s: &str| s.replace('%', "\\%").replace('_', "\\_");
     let pattern = format!("%{}%", escaped(query));
@@ -435,10 +437,8 @@ pub fn search_slice(conn: &Connection, since: i64, query: &str, k: usize) -> Res
     }
 
     // Tokenized fallback, mirroring the shipped arm.
-    let mut tokens: Vec<String> = query.split_whitespace().map(str::to_string).collect();
-    tokens.sort();
-    tokens.dedup();
-    tokens.truncate(8);
+    let tokens = crate::relevance::episodic::query_tokens(query);
+    let terms = crate::relevance::episodic::query_terms(query);
     if tokens.len() < 2 {
         return Ok(Vec::new());
     }
@@ -458,29 +458,26 @@ pub fn search_slice(conn: &Connection, since: i64, query: &str, k: usize) -> Res
         bind.push(p);
     }
     bind.push(&fetch_cap);
-    let pool: Vec<(Ranked, usize)> = stmt
+    // The pool carries the row text through to the shared scorer, so this leg
+    // and the shipped arm score the SAME string with the SAME function (#911).
+    // Before that, this leg counted distinct tokens while the shipped arm
+    // summed occurrences — two different rankers under one name.
+    let pool: Vec<(Ranked, String)> = stmt
         .query_map(bind.as_slice(), |r| {
             let content: String = r.get(2)?;
-            let hits = tokens
-                .iter()
-                .filter(|t| content.to_lowercase().contains(t.as_str()))
-                .count();
             Ok((
                 Ranked {
                     message_id: r.get(0)?,
                     session_id: r.get(1)?,
                 },
-                hits,
+                content,
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
-    // Stable sort by hit count descending keeps SQL recency order inside ties,
-    // exactly as the shipped re-rank does. `Reverse` rather than a comparator
-    // closure: clippy's `unnecessary_sort_by` is a hard error under `-D warnings`,
-    // and the key form is also the one that keeps the sort stable by construction.
-    let mut ranked = pool;
-    ranked.sort_by_key(|a| std::cmp::Reverse(a.1));
+    // Exactly the shipped ranking rule, reached through the same function.
+    let ranked =
+        crate::relevance::episodic::rank(pool, &terms, |pair: &(Ranked, String)| pair.1.as_str());
     Ok(ranked.into_iter().take(k).map(|(r, _)| r).collect())
 }
 

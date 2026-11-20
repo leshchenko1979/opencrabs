@@ -4,8 +4,8 @@
 
 use crate::db::Pool;
 use crate::db::database::interact_err;
-use crate::db::retry::{write_retry_config, write_with_retry};
 use crate::db::models::Message;
+use crate::db::retry::{write_retry_config, write_with_retry};
 use anyhow::{Context, Result};
 use rusqlite::params;
 use uuid::Uuid;
@@ -147,10 +147,9 @@ impl MessageRepository {
                            AND instr(content, ?4) <> 1 \
                          ORDER BY sequence DESC, rowid DESC LIMIT 1",
                     )?
-                    .query_row(
-                        params![sid, role, marker_prefix, excluded_prefix],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
+                    .query_row(params![sid, role, marker_prefix, excluded_prefix], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
                     .optional()?;
 
                 let total: i64 = conn
@@ -188,34 +187,34 @@ impl MessageRepository {
     pub async fn create(&self, message: &Message) -> Result<()> {
         let m = message.clone();
         write_with_retry(&self.pool, &write_retry_config(), move |conn| {
-                conn.execute(
-                    "INSERT INTO messages (id, session_id, role, content, sequence,
+            conn.execute(
+                "INSERT INTO messages (id, session_id, role, content, sequence,
                                          created_at, token_count, cost, input_tokens,
                                          cache_creation_tokens, cache_read_tokens, thinking,
                                          duration_secs)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                    params![
-                        m.id.to_string(),
-                        m.session_id.to_string(),
-                        m.role,
-                        m.content,
-                        m.sequence,
-                        m.created_at.timestamp(),
-                        m.token_count,
-                        m.cost,
-                        m.input_tokens,
-                        m.cache_creation_tokens,
-                        m.cache_read_tokens,
-                        m.thinking,
-                        m.duration_secs,
-                    ],
-                )?;
+                params![
+                    m.id.to_string(),
+                    m.session_id.to_string(),
+                    m.role,
+                    m.content,
+                    m.sequence,
+                    m.created_at.timestamp(),
+                    m.token_count,
+                    m.cost,
+                    m.input_tokens,
+                    m.cache_creation_tokens,
+                    m.cache_read_tokens,
+                    m.thinking,
+                    m.duration_secs,
+                ],
+            )?;
 
-                // Touch session's updated_at so /sessions sorts by last interaction
-                conn.execute(
-                    "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
-                    params![m.created_at.timestamp(), m.session_id.to_string()],
-                )
+            // Touch session's updated_at so /sessions sorts by last interaction
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                params![m.created_at.timestamp(), m.session_id.to_string()],
+            )
         })
         .await
         .context("Failed to create message")?;
@@ -232,24 +231,24 @@ impl MessageRepository {
     pub async fn update(&self, message: &Message) -> Result<()> {
         let m = message.clone();
         write_with_retry(&self.pool, &write_retry_config(), move |conn| {
-                conn.execute(
-                    "UPDATE messages
+            conn.execute(
+                "UPDATE messages
                      SET content = ?1, token_count = ?2, cost = ?3, input_tokens = ?4,
                          cache_creation_tokens = ?5, cache_read_tokens = ?6, thinking = ?7,
                          duration_secs = ?8
                      WHERE id = ?9",
-                    params![
-                        m.content,
-                        m.token_count,
-                        m.cost,
-                        m.input_tokens,
-                        m.cache_creation_tokens,
-                        m.cache_read_tokens,
-                        m.thinking,
-                        m.duration_secs,
-                        m.id.to_string()
-                    ],
-                )
+                params![
+                    m.content,
+                    m.token_count,
+                    m.cost,
+                    m.input_tokens,
+                    m.cache_creation_tokens,
+                    m.cache_read_tokens,
+                    m.thinking,
+                    m.duration_secs,
+                    m.id.to_string()
+                ],
+            )
         })
         .await
         .context("Failed to update message")?;
@@ -293,10 +292,10 @@ impl MessageRepository {
         let id_str = id.to_string();
         let content = content_to_append.to_string();
         write_with_retry(&self.pool, &write_retry_config(), move |conn| {
-                conn.execute(
-                    "UPDATE messages SET content = content || ?1 WHERE id = ?2",
-                    params![content, id_str],
-                )
+            conn.execute(
+                "UPDATE messages SET content = content || ?1 WHERE id = ?2",
+                params![content, id_str],
+            )
         })
         .await
         .context("Failed to append to message")?;
@@ -312,10 +311,10 @@ impl MessageRepository {
         let id_str = id.to_string();
         let thinking_val = thinking.to_string();
         write_with_retry(&self.pool, &write_retry_config(), move |conn| {
-                conn.execute(
-                    "UPDATE messages SET thinking = ?1 WHERE id = ?2",
-                    params![thinking_val, id_str],
-                )
+            conn.execute(
+                "UPDATE messages SET thinking = ?1 WHERE id = ?2",
+                params![thinking_val, id_str],
+            )
         })
         .await
         .context("Failed to set thinking on message")?;
@@ -330,15 +329,15 @@ impl MessageRepository {
         let id_str = id.to_string();
         let thinking = thinking_to_append.to_string();
         write_with_retry(&self.pool, &write_retry_config(), move |conn| {
-                // If thinking is NULL, just set it; otherwise concatenate with separator
-                conn.execute(
-                    "UPDATE messages SET thinking = CASE \
+            // If thinking is NULL, just set it; otherwise concatenate with separator
+            conn.execute(
+                "UPDATE messages SET thinking = CASE \
                      WHEN thinking IS NULL THEN ?1 \
                      ELSE thinking || char(10) || char(10) || ?1 \
                      END \
                      WHERE id = ?2",
-                    params![thinking, id_str],
-                )
+                params![thinking, id_str],
+            )
         })
         .await
         .context("Failed to append thinking to message")?;
@@ -472,9 +471,10 @@ impl MessageRepository {
     /// Tokenized companion to `search_by_content` (#1626): every
     /// whitespace-separated token must appear somewhere in the content (AND
     /// of substring matches) instead of one contiguous substring. Fetches a
-    /// recency-ordered pool (5x the limit, capped at 200), then re-ranks in
-    /// Rust by total token hit count descending; a stable sort keeps SQL
-    /// recency order inside every tie.
+    /// recency-ordered pool (5x the limit, capped at 200), then re-ranks it
+    /// through [`crate::relevance::episodic::rank`] — total token hits first,
+    /// then a token's opening-position signal, then query-order adjacency,
+    /// with SQL recency kept inside a full tie (#911).
     pub async fn search_by_content_tokenized(
         &self,
         session_ids: Option<&[Uuid]>,
@@ -483,11 +483,11 @@ impl MessageRepository {
     ) -> Result<Vec<Message>> {
         // Dedup exact repeats; cap the arms so a pasted paragraph of a
         // query cannot build a 50-LIKE WHERE clause — 8 tokens already
-        // pins hard.
-        let mut tokens: Vec<String> = query.split_whitespace().map(str::to_string).collect();
-        tokens.sort();
-        tokens.dedup();
-        tokens.truncate(8);
+        // pins hard. `query_tokens` is the shared tokenizer (#911); the
+        // scorer below reads `terms`, the same tokens in the query's own
+        // order, because adjacency is meaningless on a sorted list.
+        let tokens = crate::relevance::episodic::query_tokens(query);
+        let terms = crate::relevance::episodic::query_terms(query);
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
@@ -549,22 +549,17 @@ impl MessageRepository {
             .map_err(interact_err)?
             .context("Failed to search messages by content (tokenized)")?;
 
-        // Precompute hit scores once (total occurrences of every token,
-        // case-insensitive), then one stable sort by score descending.
-        let lower_tokens: Vec<String> = tokens.iter().map(|t| t.to_lowercase()).collect();
-        let mut scored: Vec<(usize, Message)> = rows
-            .into_iter()
-            .map(|m| {
-                let lower = m.content.to_lowercase();
-                let hits: usize = lower_tokens
-                    .iter()
-                    .map(|t| lower.matches(t.as_str()).count())
-                    .sum();
-                (hits, m)
-            })
-            .collect();
-        scored.sort_by_key(|(hits, _)| std::cmp::Reverse(*hits));
-        Ok(scored.into_iter().map(|(_, m)| m).take(limit).collect())
+        // ONE ranking rule, shared with the Track A harness (#911):
+        // `relevance::episodic::rank` scores by total token hits, then by the
+        // row's opening position, then by query-order adjacency, and keeps the
+        // SQL recency order inside a full tie. The harness calls the same
+        // function, so the eval leg measures the ranker this path ships.
+        Ok(
+            crate::relevance::episodic::rank(rows, &terms, |m| m.content.as_str())
+                .into_iter()
+                .take(limit)
+                .collect(),
+        )
     }
 
     /// Count messages in a session

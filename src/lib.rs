@@ -79,6 +79,7 @@ pub mod decisions;
 pub mod error;
 pub mod logging;
 pub mod memory;
+pub mod relevance;
 pub mod services;
 pub mod tui;
 pub mod utils;
