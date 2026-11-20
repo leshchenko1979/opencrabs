@@ -323,7 +323,7 @@ fn row_repair_strips_the_marker_and_keeps_every_earlier_iteration() {
                   <<suggest_options>>";
     assert!(contains_leaked_suggestions(stored));
 
-    let (repaired, items) = extract_leaked_suggestions(stored);
+    let (repaired, _items) = extract_leaked_suggestions(stored);
 
     assert!(
         !repaired.contains("<<suggest_options"),
