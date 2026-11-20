@@ -31,19 +31,32 @@ pub(crate) const RECALL_MAX_CHARS: usize = 1200;
 /// section score HIGHER, which on its own would let more conversational
 /// messages through; moving the floor to the lowest value that restores the
 /// false-positive rate to a better-than-before tier is what keeps the pair a
-/// net win on both halves:
+/// net win on both halves.
 ///
-/// | | recall@2 | FPR |
-/// |---|---|---|
-/// | 0.35, no boost (shipped before) | 0.917 | 0.250 |
-/// | 0.35, boost 4 | 1.000 | 0.250 |
-/// | **0.38, boost 4 (shipped)** | **1.000** | **0.167** |
+/// Re-measured over BOTH corpora for #912 (`opencrabs eval recall --floor <v>`,
+/// live artifact 2026-11-20). "fired" counts positives that returned a
+/// non-empty ranking; "correct" counts those whose labelled section made it
+/// through the production window:
 ///
-/// 0.38 is the bottom of the plateau that yields FPR 0.167 — every value from
-/// here to ~0.45 scores the same on the memory pair, so taking the lowest one
-/// keeps the most recall on the larger Track B corpus. It also buys headroom:
-/// the previous 0.250 sat exactly on the `<= 0.25` contract, so any future
-/// change to the ranker broke the gate by arithmetic rather than by defect.
+/// | floor | Track B fired (of 60) | Track B correct | Track B FPR (15 neg) | memory-pair FPR (12 neg) |
+/// |---|---|---|---|---|
+/// | 0.25 | 47 | 10 | 0.067 | 0.500 |
+/// | 0.30 | 26 | 9 | 0.000 | 0.250 |
+/// | 0.36 | 17 | 7 | 0.000 | 0.250 |
+/// | **0.38 (shipped)** | **14** | **5** | **0.000** | **0.167** |
+/// | 0.45 | 6 | 2 | 0.000 | 0.083 |
+///
+/// On the large corpus the floor is a VOLUME knob, not a quality one: precision
+/// among fired sections is flat across 0.30–0.45 (0.346 / 0.412 / 0.357 /
+/// 0.333), so lowering it buys more answers at the same hit rate. 0.36 was
+/// declined despite firing 3 more positives: it lands the memory pair exactly
+/// on the `<= 0.25` contract, and #911 is about to change the ranker, so the
+/// gate would break by arithmetic rather than by defect. 0.38 keeps the
+/// headroom that move bought.
+///
+/// Track B recall is capped at 11/60 even at floor 0.05, where everything
+/// fires: what limits it is the RANKING, which is #911's subject, not this
+/// constant's.
 pub(crate) const RECALL_MIN_SCORE: f64 = 0.38;
 
 /// Lower bound the configurable floor is clamped to (#912).

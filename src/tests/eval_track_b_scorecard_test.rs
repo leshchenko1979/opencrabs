@@ -24,6 +24,8 @@
 //! queries are written from a SCENARIO, never by summarising the section they
 //! label, so a high score cannot come from the query quoting its own answer.
 
+use crate::brain::memory_recall::{RECALL_MAX_CHARS, RECALL_MAX_SECTIONS, RECALL_MIN_SCORE};
+use crate::brain::section_rank::Ranked;
 use crate::cli::eval_cmd::score_rankings;
 use crate::eval::recall::{RecallDataset, RecallReport};
 
@@ -109,5 +111,52 @@ fn a_mutated_ranking_moves_the_scorecard() {
         mutated.false_positive_rate().abs() < f64::EPSILON,
         "an empty ranking fires on no negative, got {:.3}",
         mutated.false_positive_rate()
+    );
+}
+
+/// The shipped floor must not STARVE the large corpus (#912).
+///
+/// The floor is corpus calibration, not a product truth: the same number admits
+/// a different fraction of a 13-section MEMORY.md and a 293-section corpus. This
+/// pins the count of Track B positives that return a NON-EMPTY ranking at the
+/// compiled default, so moving the constant — or changing the ranker under it —
+/// fails here and forces a re-measure rather than silently emptying rankings.
+///
+/// Measured 14/60 at 0.38 (#912 sweep, recorded in `RECALL_MIN_SCORE`'s doc
+/// comment). 0.45 starves it to 6/60, which the second assertion uses to prove
+/// this pin can actually see starvation.
+#[test]
+fn the_shipped_floor_does_not_starve_track_b() {
+    const CORPUS: &str = include_str!("../eval/fixtures/track_b_corpus.md");
+    let ds = dataset();
+    let ranked = Ranked::build(CORPUS);
+
+    let fired = |floor: f64| -> usize {
+        ds.cases
+            .iter()
+            .filter(|c| !c.is_negative())
+            .filter(|c| {
+                !ranked
+                    .find_relevant(&c.query, RECALL_MAX_SECTIONS, RECALL_MAX_CHARS, floor)
+                    .sections
+                    .is_empty()
+            })
+            .count()
+    };
+
+    let shipped = fired(RECALL_MIN_SCORE);
+    assert_eq!(
+        shipped, 14,
+        "the shipped floor {RECALL_MIN_SCORE} must leave 14 of 60 Track B positives \
+         with a non-empty ranking; a change here is a floor or ranker move that owes \
+         a re-measure of the sweep in RECALL_MIN_SCORE's doc comment"
+    );
+
+    // The pin has teeth: a starving floor reads visibly different, so this is
+    // not an assertion that would pass on any input.
+    assert!(
+        fired(0.45) < shipped,
+        "0.45 must starve Track B relative to the shipped floor, else this pin \
+         cannot detect starvation at all"
     );
 }
