@@ -728,6 +728,7 @@ fn cleanup_stale_leaves_the_runs_leg_to_its_owner() {
 /// the parent made.
 #[test]
 fn agent_cancelled_records_a_terminal_state_that_is_not_a_failure() {
+    // Kills the mutant that leaves Cancelled non-terminal, so reconcile_with marks it Interrupted at boot and the stop is lost.
     isolate("cancelled");
     let mut s =
         WorkStatus::new_agent("test-cxl", "test", "sess-1", "do things", None, None).unwrap();
@@ -765,6 +766,7 @@ fn agent_cancelled_records_a_terminal_state_that_is_not_a_failure() {
 /// model has to re-read from a prompt that no longer matches what it was doing.
 #[test]
 fn a_cancelled_agent_keeps_its_identity() {
+    // Kills the mutant that resets label, task or spawned_at on a stop, making stopped work indistinguishable from a fresh spawn.
     isolate("cancelled_identity");
     let mut s = WorkStatus::new_agent(
         "test-cxl-id",
