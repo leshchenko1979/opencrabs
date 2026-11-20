@@ -351,12 +351,18 @@ impl AgentService {
     /// 1. Temporal grounding: inject [Current time: YYYY-MM-DD HH:MM:SS UTC (user: ...)] (#153).
     /// 2. Active plan reminder.
     /// 3. Memory & directive passive recall (#799, #285).
+    ///
+    /// Returns the augmented text PLUS what recall injected (#928). The summary
+    /// is `None` whenever recall fired nothing, so a caller that renders a
+    /// receipt can stay silent instead of printing an empty chrome row; this
+    /// layer stays channel-agnostic — it names sections, it never formats for a
+    /// channel.
     pub(crate) async fn augment_user_message(
         session_id: Uuid,
         user_message: &str,
         brain_dir: Option<&std::path::Path>,
         working_dir: Option<&std::path::Path>,
-    ) -> String {
+    ) -> (String, Option<crate::brain::memory_recall::RecallSummary>) {
         // Temporal grounding (#153): inject context-only time marker at turn start.
         let now = chrono::Utc::now();
         let tz_info = brain_dir
@@ -377,15 +383,20 @@ impl AgentService {
         }
 
         // Ride relevant memory, active skills, and project directives along with the message (#799, #285).
+        let mut recall_summary = None;
         if let Some(recall) =
             crate::brain::memory_recall::recall_for_session(session_id, working_dir, user_message)
                 .await
         {
-            tracing::info!("Recalled {} chars for session {session_id}", recall.len());
+            tracing::info!(
+                "Recalled {} chars for session {session_id}",
+                recall.summary.chars
+            );
             out.push_str("\n\n");
-            out.push_str(&recall);
+            out.push_str(&recall.text);
+            recall_summary = Some(recall.summary);
         }
-        out
+        (out, recall_summary)
     }
 
     pub(super) async fn active_plan_reminder(session_id: Uuid) -> Option<String> {
@@ -500,7 +511,10 @@ impl AgentService {
         // the DB only ever stores the clean user message, so it never piles up.
         let brain_dir = self.brain_workspace_path();
         let working_directory = self.get_working_directory_for_session(session_id);
-        let context_user_message = Self::augment_user_message(
+        // The recall summary is dropped here: this path has no progress
+        // callback, so there is no flow roll to name it in (#928). The recall
+        // text itself is unchanged.
+        let (context_user_message, _recall) = Self::augment_user_message(
             session_id,
             &user_message,
             brain_dir.as_deref(),

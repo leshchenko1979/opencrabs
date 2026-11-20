@@ -1517,13 +1517,22 @@ impl AgentService {
         // follow-up).
         let brain_dir = self.brain_workspace_path();
         let working_directory = self.get_working_directory_for_session(session_id);
-        let mut context_user_message = Self::augment_user_message(
+        let (mut context_user_message, recall) = Self::augment_user_message(
             session_id,
             &user_message,
             brain_dir.as_deref(),
             Some(&working_directory),
         )
         .await;
+        // Turn-start chrome (#928): name WHAT passive recall injected, so the
+        // flow roll shows recall firing without the owner reading the prompt.
+        // Silent when recall fired nothing — no empty chrome row — and carried
+        // as a progress event, so the brain layer never learns a channel type.
+        if let Some(line) = recall.as_ref().and_then(|s| s.render_line())
+            && let Some(cb) = progress_callback.as_ref()
+        {
+            cb(session_id, ProgressEvent::RecallLine { line });
+        }
         if !skill_update_hints.is_empty() {
             let hints_joined = skill_update_hints.join("\n");
             context_user_message = format!("{hints_joined}\n\n{context_user_message}");

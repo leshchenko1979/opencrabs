@@ -256,9 +256,27 @@ impl Ranked {
         max_chars: usize,
         min_score: f64,
     ) -> Vec<usize> {
+        self.ranked_indices(query, max_sections, max_chars, min_score)
+            .0
+    }
+
+    /// [`Self::find_relevant_indices`] plus how many sections cleared
+    /// `min_score` BEFORE the count and character caps — the number a recall
+    /// summary's `+K` marker names (#928).
+    ///
+    /// Both come out of ONE scoring pass, so the count can never describe a
+    /// ranking other than the one whose indices it travels with: a separate
+    /// recount would be a second BM25 pass that is free to disagree.
+    pub fn ranked_indices(
+        &self,
+        query: &str,
+        max_sections: usize,
+        max_chars: usize,
+        min_score: f64,
+    ) -> (Vec<usize>, usize) {
         let terms = query_terms(query);
         if terms.is_empty() {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
         let norm = terms.len() as f64;
 
@@ -276,6 +294,7 @@ impl Ranked {
                 .then(a.1.cmp(&b.1))
         });
 
+        let total = scored.len();
         let mut indices = Vec::new();
         let mut chars = 0usize;
         for (_, i) in scored {
@@ -291,7 +310,7 @@ impl Ranked {
             indices.push(i);
         }
 
-        indices
+        (indices, total)
     }
 
     /// Whether any section's RAW BM25 score clears `min_score`.
@@ -331,13 +350,7 @@ impl Ranked {
                 omitted: 0,
             };
         }
-        let norm = terms.len() as f64;
-
-        let total = (0..self.sections.len())
-            .filter(|&i| (self.score(&terms, i) / norm) >= min_score)
-            .count();
-
-        let indices = self.find_relevant_indices(query, max_sections, max_chars, min_score);
+        let (indices, total) = self.ranked_indices(query, max_sections, max_chars, min_score);
         let sections = indices
             .into_iter()
             .map(|i| self.sections[i].clone())

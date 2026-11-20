@@ -972,6 +972,16 @@ pub(crate) async fn resume_session_inner(
                     s.display_queue.push(DisplayItem::System(text));
                 }
             }
+            // Passive recall fired this turn (#928): one chrome line naming
+            // WHAT was injected. Ported to the resume path for parity — a
+            // resumed turn runs the same passive recall, and without this arm
+            // the roll would go silent about it (#450 is the same defect one
+            // event earlier).
+            ProgressEvent::RecallLine { line } => {
+                if let Ok(mut s) = st.lock() {
+                    s.display_queue.push(DisplayItem::System(line));
+                }
+            }
             ProgressEvent::SuggestedOptions(options) => {
                 // Stash only (#724): buttons must be the FINAL message in the
                 // chat, so render_suggestions runs after deliver_final_response

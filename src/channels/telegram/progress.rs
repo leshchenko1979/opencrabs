@@ -242,6 +242,16 @@ pub(crate) fn build_progress_cb(
                     s.display_queue.push(DisplayItem::System(text));
                 }
             }
+            // Passive recall fired this turn (#928): one chrome line naming
+            // WHAT was injected. It arrives rendered by the brain layer, so it
+            // is pushed as SYSTEM — folded into the roll by
+            // `append_system_to_flow`, never eligible to be reclaimed as the
+            // answer (#1253).
+            ProgressEvent::RecallLine { line } => {
+                if let Ok(mut s) = st.lock() {
+                    s.display_queue.push(DisplayItem::System(line));
+                }
+            }
             // Optional follow-up suggestions (#597): post tap-to-send
             // buttons under the response. Non-blocking — spawned like the
             // other async arms; a tap injects the suggestion as a new turn.

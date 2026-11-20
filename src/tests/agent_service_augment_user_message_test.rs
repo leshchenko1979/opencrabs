@@ -23,7 +23,7 @@ async fn augment_user_message_injects_time_marker() {
     // recall_for reads the live ~/.opencrabs/MEMORY.md. A populated MEMORY.md
     // matches almost any English message on tokenized FTS, so the ends_with
     // checks below only hold against a clean home. Isolate per the #1399 rule.
-    let augmented = with_home_override_async(
+    let (augmented, _recall) = with_home_override_async(
         dir.path().to_path_buf(),
         AgentService::augment_user_message(session_id, "hello world", Some(dir.path()), None),
     )
@@ -41,7 +41,7 @@ async fn augment_user_message_falls_back_to_utc() {
     use crate::config::profile::with_home_override_async;
     let dir = TempDir::new().unwrap();
     let session_id = Uuid::new_v4();
-    let augmented = with_home_override_async(
+    let (augmented, _recall) = with_home_override_async(
         dir.path().to_path_buf(),
         AgentService::augment_user_message(session_id, "test message", None, None),
     )
