@@ -266,16 +266,33 @@ mod manager {
         assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Running));
     }
 
+    /// A stopped agent IS resumable — #924 narrowed `stop_agent` to "end the
+    /// work, keep the identity", so the record survives the stop and the
+    /// parent can pick the child back up.
+    ///
+    /// The mutant this kills: the pre-#924 arm
+    /// `Completed | Failed(_)` with `Cancelled` omitted. That is the shape this
+    /// test asserted before the contract changed, and it reads as correct
+    /// until someone tries to resume a child they deliberately stopped — which
+    /// is exactly the flow `stop_agent` exists for. The failure it produces is
+    /// silent: `resume_agent` returns "cannot be resumed" for an agent whose
+    /// session and transcript are both still on disk.
     #[test]
-    fn prepare_resume_from_cancelled_fails() {
+    fn prepare_resume_from_stopped_succeeds() {
         let mgr = SubAgentManager::new();
         mgr.insert(make_agent("a1", "test"));
         mgr.cancel("a1");
+        assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Cancelled));
 
         let new_token = CancellationToken::new();
         let (new_tx, _rx) = mpsc::unbounded_channel::<String>();
 
-        assert!(!mgr.prepare_resume("a1", new_token, new_tx));
+        assert!(
+            mgr.prepare_resume("a1", new_token, new_tx),
+            "a stopped agent must stay resumable: the stop ended its work, not its identity"
+        );
+        assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Running));
+        assert!(mgr.get_input_tx("a1").is_some()); // new channel set
     }
 
     #[test]
