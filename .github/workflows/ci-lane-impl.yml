@@ -134,7 +134,7 @@ on:
       features:
         description: "Cargo feature set passed to --features (comma-separated)"
         required: false
-        default: telegram,code-graph,browser
+        default: telegram,code-graph,browser,eval
         type: string
       # BINARY IDENTITY (#865). The fork republishes on an UNCHANGED upstream
       # version (`0.5.4+fork.430` -> `0.5.4+fork.431`), so the compiled-in
@@ -290,7 +290,11 @@ jobs:
   # (4.0% of 11,143) plus the rwhisper / serenity / slack-morphism /
   # pdfium-render dependency trees, for a binary that carries NONE of them
   # (the build leg has always been --no-default-features --features
-  # telegram,code-graph,browser). The blocking verdict must answer "does the
+  # telegram,code-graph,browser; `eval` JOINED the set 2026-11-20 by owner
+  # order — it is an empty feature (`eval = []` in Cargo.toml), so it adds no
+  # crates and no dependency tree, and this comment's history above stays
+  # true of the set as it stood before that date). The blocking verdict must
+  # answer "does the
   # thing we SHIP work", so this leg now mirrors the build leg exactly and the
   # --all-features coverage moved to the NON-BLOCKING pr-gates-all-features
   # job below. Source prerequisite: the 38 test modules that import a

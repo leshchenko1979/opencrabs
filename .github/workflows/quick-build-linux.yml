@@ -1,7 +1,7 @@
 name: Quick Linux Build
 
 # Super-quick Linux amd64 binary, on demand. Feature set is a
-# dispatch parameter (`features`, default `telegram,code-graph`) — the single
+# dispatch parameter (`features`, default `telegram,code-graph,browser,eval`) — the single
 # source of truth for what we ship lives in THIS file's default,
 # not in any skill doc. Comma-separated sets are valid, e.g.
 # "telegram,browser". No tests, no matrix, no multi-platform.
@@ -53,7 +53,7 @@ on:
       features:
         description: 'Cargo feature set passed to --features (comma-separated)'
         required: false
-        default: 'telegram,code-graph,browser'
+        default: 'telegram,code-graph,browser,eval'
       fork_version:
         description: 'Version the binary reports, <upstream-ver>+fork.<cycle> (empty = plain CARGO_PKG_VERSION)'
         required: false
