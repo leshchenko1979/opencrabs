@@ -406,12 +406,15 @@ jobs:
         if: ${{ !inputs.fix && !inputs.lockregen && !inputs.lockupdate }}
         uses: mozilla-actions/sccache-action@v0.0.11
 
-      - name: Install system deps (pkg-config, ALSA dev, mold + clang)
+      - name: Install system deps (pkg-config, ALSA dev, clang)
         if: ${{ !inputs.fix && !inputs.lockregen && !inputs.lockupdate }}
         # libasound2-dev is what local-stt/local-tts need (cpal -> alsa-sys),
         # and pkg-config is what alsa-sys needs to compile at all (carrier
-        # lesson, 378a68a8); mold+clang installed upfront for fast linking.
-        run: sudo apt-get update -qq && sudo apt-get install -y pkg-config libasound2-dev mold clang
+        # lesson, 378a68a8). No fast linker: this job runs Clippy, which
+        # emits metadata and never links, so one would be dead weight. clang
+        # stays — a build script may invoke cc/clang for a C dependency, and
+        # that is not visible from this file.
+        run: sudo apt-get update -qq && sudo apt-get install -y pkg-config libasound2-dev clang
 
       # The fmt gate was DELETED 2026-11-20 (finding 16). It ran with a
       # soft-fail flag under an upstream-mirroring rationale, so a genuinely
