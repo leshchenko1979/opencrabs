@@ -120,7 +120,7 @@ fn hits_stays_the_primary_signal() {
     let leading = "deploy flaky: notes";
 
     let many_score = episodic::score(&many, &terms);
-    let leading_score = episodic::score(&leading, &terms);
+    let leading_score = episodic::score(leading, &terms);
     assert!(
         many_score.hits > leading_score.hits,
         "precondition: the scattered row must have more hits ({many_score:?} vs {leading_score:?})"
