@@ -32,7 +32,7 @@ pub const ALWAYS_EXCLUDED: &[&str] = &[
     "resume_agent",
     "wait_agent",
     "send_input",
-    "close_agent",
+    "stop_agent",
     "team_create",
     "team_delete",
     "team_broadcast",

@@ -122,7 +122,7 @@ impl Tool for ResumeAgentTool {
             }
             Some(SubAgentState::Running) | Some(SubAgentState::AwaitingInput) => {
                 return Ok(ToolResult::error(format!(
-                    "Sub-agent {} is still running. Use wait_agent first or close_agent to cancel.",
+                    "Sub-agent {} is still running. Use wait_agent first or stop_agent to cancel.",
                     agent_id
                 )));
             }

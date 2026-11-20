@@ -177,9 +177,9 @@ pub(crate) fn register_core_agent_tools(
     tool_registry.register(Arc::new(crate::brain::tools::subagent::SendInputTool::new(
         subagent_manager.clone(),
     )));
-    tool_registry.register(Arc::new(
-        crate::brain::tools::subagent::CloseAgentTool::new(subagent_manager.clone()),
-    ));
+    tool_registry.register(Arc::new(crate::brain::tools::subagent::StopAgentTool::new(
+        subagent_manager.clone(),
+    )));
     tool_registry.register(Arc::new(
         crate::brain::tools::subagent::ResumeAgentTool::new(
             subagent_manager.clone(),
