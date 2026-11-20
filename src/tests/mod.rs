@@ -943,6 +943,7 @@ pub mod slash_models_target_test;
 pub mod split_pane_test;
 pub mod subagent_attention_test;
 pub mod subagent_brain_test;
+pub mod subagent_comm_harmony_test;
 pub mod subagent_compaction_preamble_test;
 pub mod subagent_discovery_test;
 pub mod subagent_ledger_test;

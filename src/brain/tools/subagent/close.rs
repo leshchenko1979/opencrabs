@@ -25,8 +25,11 @@ impl Tool for CloseAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Terminate a running sub-agent and clean up its resources. \
-         Use this when a sub-agent's work is no longer needed."
+        "Stop a sub-agent that is still running or parked waiting for input, and \
+         optionally drop it from tracking (`remove: true`) so its id stops \
+         resolving. An agent that already completed or failed is left untouched \
+         — there is nothing to cancel, and the result says so. Use this when a \
+         sub-agent's work is no longer needed."
     }
 
     fn input_schema(&self) -> Value {
@@ -75,19 +78,30 @@ impl Tool for CloseAgentTool {
 
         let state = self.manager.get_state(agent_id);
 
-        // Cancel if running or paused waiting for input
-        if matches!(
+        // Cancel if running or paused waiting for input. Anything already
+        // finished is left alone — and must SAY so (#921): reporting
+        // "cancelled" for an agent that had already completed claims an action
+        // that never happened, which reads to the caller as "I stopped live
+        // work" when in truth nothing was running.
+        let was_live = matches!(
             state,
             Some(SubAgentState::Running) | Some(SubAgentState::AwaitingInput)
-        ) {
+        );
+        if was_live {
             self.manager.cancel(agent_id);
         }
 
-        let status = if remove {
+        // `remove` is independent of cancellation: it drops the record so the
+        // id stops resolving, whether or not anything was live to stop.
+        if remove {
             self.manager.remove(agent_id);
-            "cancelled and removed from tracking"
-        } else {
-            "cancelled"
+        }
+
+        let status = match (was_live, remove) {
+            (true, true) => "cancelled and removed from tracking",
+            (true, false) => "cancelled",
+            (false, true) => "was already finished — removed from tracking",
+            (false, false) => "was already finished — nothing to cancel",
         };
 
         Ok(ToolResult::success(format!(

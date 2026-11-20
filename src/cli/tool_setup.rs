@@ -126,9 +126,7 @@ pub(crate) fn register_core_agent_tools(
         crate::brain::tools::tasks_list::TasksListTool::new(),
     ));
     // Task wait — block on a detached run until a line matches or it finishes (#692)
-    tool_registry.register(Arc::new(
-        crate::brain::tools::task_wait::TaskWaitTool::new(),
-    ));
+    tool_registry.register(Arc::new(crate::brain::tools::task_wait::TaskWaitTool::new()));
     // Task output — read a detached run's capture mid-run or after it finishes (#692)
     tool_registry.register(Arc::new(
         crate::brain::tools::task_output::TaskOutputTool::new(),
@@ -354,4 +352,4 @@ pub const HEADLESS_PREAMBLE: &str = "\n\n## Headless session\n\nYou are running 
 /// constant also rides `cli::commands` and `cli::ui`, which have no parent at
 /// all — pointing those at `report_progress` would hand them a tool that
 /// refuses them.
-pub const SUBAGENT_ANSWER_CHANNEL: &str = "\n\n## If you get blocked\n\nYou DO have a channel to the parent that spawned you, and it is not your final message. When an answer genuinely decides the work — not a preference you could pick yourself — call `report_progress` with kind `question` (or `blocker` if something prevents progress), then END YOUR TURN. That parks you where the parent can answer, and the parent is told you are waiting. Answering costs it one `send_input`; guessing wrong costs it the whole run. Do not report a blocker you can work around, and do not ask twice.\n";
+pub const SUBAGENT_ANSWER_CHANNEL: &str = "\n\n## Talking to the parent that spawned you\n\nYou DO have a channel back to the parent, and it is not your final message. Two uses, one rule each.\n\n**Routine progress — `report_progress`, kind `note`.** On a task with several stages, record a line as each lands: a finding, a decision, what you are about to do next. It costs one sentence, the parent reads it with `agent_progress` without interrupting you, and it is how a long run stays legible instead of arriving as one opaque result at the end. Use it, but do not narrate every tool call.\n\n**A real block — `report_progress` with kind `question` or `blocker`, then END YOUR TURN.** When an answer genuinely decides the work — not a preference you could pick yourself — that call parks you where the parent can answer, and the parent is notified that you are waiting. It answers with `send_input`, which resumes you in this same context. Guessing wrong costs it the whole run, so ask; but do not report a blocker you can work around, and do not ask twice.\n\nYour final message is still the deliverable: it must stand alone with the concrete specifics. The ledger is for steering, never a substitute for the result.\n";

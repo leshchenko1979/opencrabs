@@ -25,8 +25,13 @@ impl Tool for SendInputTool {
     }
 
     fn description(&self) -> &str {
-        "Send follow-up input/instructions to a running sub-agent. \
-         The message is queued and the agent will process it at its next iteration."
+        "Send follow-up input to a sub-agent, or answer one that parked on a \
+         question. This is how you steer a running child AND how you reply to a \
+         `question` or `blocker` it recorded with report_progress — the child \
+         resumes in its own context, so you never re-explain what it already \
+         knows. A running agent processes the message at its next iteration; a \
+         parked one is waiting for exactly this call. For an agent that has \
+         already finished, use resume_agent instead."
     }
 
     fn input_schema(&self) -> Value {

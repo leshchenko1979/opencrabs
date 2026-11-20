@@ -123,7 +123,8 @@ impl Tool for ReportProgressTool {
          sentences; this is a status line, not a report. A `blocker` or \
          `question` ALSO notifies the parent that you are stuck, so it is the \
          right call when you genuinely cannot continue without an answer: \
-         record it, then end your turn and wait to be resumed."
+         record it, then end your turn. The parent answers with `send_input`, \
+         which resumes you in this same context."
     }
 
     fn input_schema(&self) -> Value {
@@ -239,7 +240,9 @@ impl Tool for AgentProgressTool {
         "Read a sub-agent's progress history without waiting for it to finish. \
          Returns the agent's state and its most recent recorded entries, oldest \
          first. Use it to check on a long-running agent, or to see the blockers \
-         and questions it recorded. For the final result use wait_agent."
+         and questions it recorded. This is the normal read-back while it works: \
+         its completion reaches you as a fresh turn, so do not wait_agent for it. \
+         To answer a question it recorded, use send_input <id>."
     }
 
     fn input_schema(&self) -> Value {

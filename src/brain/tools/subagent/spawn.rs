@@ -913,8 +913,17 @@ impl Tool for SpawnAgentTool {
             )
         });
 
+        // The verbs belong HERE, not only in the description (#921). A model
+        // reads the schema before it spawns and then gets a receipt that used
+        // to forget everything it had just been told, at the exact moment the
+        // id it needs first exists. One vocabulary, stated where it is used:
+        // send_input steers and answers, agent_progress reads, completion
+        // arrives as a new turn.
         Ok(ToolResult::success(format!(
-            "Spawned sub-agent '{}' with id: {}\nSession: {}\nAccess: {}\nBrain: {}\nPrompt: {}{}",
+            "Spawned sub-agent '{}' with id: {}\nSession: {}\nAccess: {}\nBrain: {}\n\
+             Talk to it: `send_input {}` steers it or answers a question it parked on; \
+             `agent_progress {}` reads its progress without waiting; it wakes you with its \
+             result when it finishes, so do not `wait_agent` for it.\nPrompt: {}{}",
             label,
             agent_id,
             child_session_id,
@@ -924,6 +933,8 @@ impl Tool for SpawnAgentTool {
                 "full (minus recursive/dangerous tools)"
             },
             super::brain::brain_status_label(include_brain),
+            agent_id,
+            agent_id,
             prompt,
             deprecation_note
                 .as_deref()
