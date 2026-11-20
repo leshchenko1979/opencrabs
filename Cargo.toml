@@ -298,15 +298,28 @@ inherits = "release"
 opt-level = "z"
 strip = true
 
-# Tuned for CI: release-mode correctness checks (catches release-only
-# bugs that dev builds miss) but optimised for wall-clock speed on
-# CI runners rather than runtime perf. Thin LTO compiles ~3-4x faster
-# than fat LTO with most of the optimisation; 16 codegen units use
-# the runner's full parallelism. Used by `cargo build --profile ci`
-# and `cargo nextest run --cargo-profile ci` in .github/workflows/ci.yml.
+# Tuned for CI WALL-CLOCK and MEMORY, not for runtime perf. This profile
+# builds the whole test tree INCLUDING dev-dependencies, so its cost is the
+# gate's dominant cost: `[profile.release]` is opt-level 3 + fat LTO, which
+# made every cold gate a 20-35 min compile that peaked at 97.1% of the
+# runner's RAM (#311's kill, run 38793394953).
+#
+# opt-level 1 + lto = false (2026-11-20, #331): the gate is a CORRECTNESS
+# gate — it answers "do the tests pass", never "is the shipped binary fast".
+# What must be preserved is RELEASE SEMANTICS, and that is `debug-assertions
+# = false` + `overflow-checks = false`, both inherited from release and
+# unaffected by opt-level. What is dropped is codegen effort: cross-crate
+# inlining (LTO) and aggressive optimisation, which cost memory and minutes
+# and change no test outcome. 16 codegen units still use the runner's
+# parallelism. Used by `cargo build --profile ci` and
+# `cargo nextest run --cargo-profile ci` in the carrier workflows.
+#
+# Revert to `lto = "thin"` + opt-level 3 (inherited) if a release-only
+# miscompile is ever suspected — that is the only class this trade weakens.
 [profile.ci]
 inherits = "release"
-lto = "thin"
+opt-level = 1
+lto = false
 codegen-units = 16
 
 [[bin]]
