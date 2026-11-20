@@ -429,52 +429,6 @@ jobs:
           RUSTC_WRAPPER: "sccache"
         run: cargo clippy --locked --lib --bins --tests --all-features -- -D warnings
 
-      - name: "Diagnose: resource envelope"
-        if: ${{ inputs.diagnose && !inputs.fix && !inputs.lockregen && !inputs.lockupdate && !inputs.fast }}
-        # Input-gated diagnostic (default false). Every probe is `|| true`:
-        # a measurement that can fail the gate it measures is worthless.
-        run: |
-          echo "===== DIAG pre-test $(date -u +%FT%TZ) ====="
-          echo "--- cpu ---"
-          nproc; grep -m1 'model name' /proc/cpuinfo || true
-          echo "--- mem (MiB) ---"
-          free -m || true
-          echo "--- disk ---"
-          df -h / || true; df -h "$GITHUB_WORKSPACE" || true
-          echo "--- meminfo anchor (kB) ---"
-          grep -E '^(MemTotal|MemAvailable|SwapTotal):' /proc/meminfo || true
-          echo "--- cgroup layout ---"
-          cat /proc/self/cgroup 2>/dev/null || true
-          ls -la /sys/fs/cgroup 2>/dev/null | head -25 || true
-          mount 2>/dev/null | grep -i cgroup || true
-          echo "--- cgroup memory limits (resolved path, then ancestors) ---"
-          # The 2026-09-18 baseline run showed /sys/fs/cgroup/memory.max as
-          # UNREADABLE (the loop printed nothing), so the ceiling could not be
-          # read from the fixed path. Resolve the runner's OWN cgroup from
-          # /proc/self/cgroup and walk up, labelling every hit with its full
-          # path so an absent reading is distinguishable from a real "max".
-          CG=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)
-          for base in /sys/fs/cgroup "${CG:+/sys/fs/cgroup$CG}"; do
-            [ -d "$base" ] || continue
-            d="$base"
-            while [ -n "$d" ] && [ "$d" != "/" ] && [ "$d" != "/sys" ] && [ "$d" != "/sys/fs" ]; do
-              for f in memory.max memory.peak memory.current memory.high memory.swap.max; do
-                if [ -r "$d/$f" ]; then echo "$d/$f = $(cat "$d/$f")"; fi
-              done
-              d=$(dirname "$d")
-            done
-          done
-          echo "--- cgroup v1 memory (fallback) ---"
-          for f in memory.limit_in_bytes memory.max_usage_in_bytes; do
-            [ -r "/sys/fs/cgroup/memory/$f" ] && echo "/sys/fs/cgroup/memory/$f = $(cat "/sys/fs/cgroup/memory/$f")" || true
-          done
-          echo "--- cache sizes ---"
-          du -sh target 2>/dev/null || true
-          du -sh "$HOME/.cache/sccache" 2>/dev/null || true
-          du -sh "$HOME/.cargo/registry" 2>/dev/null || true
-          echo "--- sccache stats ---"
-          sccache --show-stats 2>/dev/null || echo "(sccache not on PATH)"
-          echo "===== DIAG pre-test END ====="
 
       - name: Apply cargo fmt (fix mode)
         if: ${{ inputs.fix }}
@@ -700,6 +654,53 @@ jobs:
             'store-failure-output = true' \
             > .config/nextest.toml
           cat .config/nextest.toml
+
+      - name: "Diagnose: resource envelope"
+        if: ${{ inputs.diagnose }}
+        # Input-gated diagnostic (default false). Every probe is `|| true`:
+        # a measurement that can fail the gate it measures is worthless.
+        run: |
+          echo "===== DIAG pre-test $(date -u +%FT%TZ) ====="
+          echo "--- cpu ---"
+          nproc; grep -m1 'model name' /proc/cpuinfo || true
+          echo "--- mem (MiB) ---"
+          free -m || true
+          echo "--- disk ---"
+          df -h / || true; df -h "$GITHUB_WORKSPACE" || true
+          echo "--- meminfo anchor (kB) ---"
+          grep -E '^(MemTotal|MemAvailable|SwapTotal):' /proc/meminfo || true
+          echo "--- cgroup layout ---"
+          cat /proc/self/cgroup 2>/dev/null || true
+          ls -la /sys/fs/cgroup 2>/dev/null | head -25 || true
+          mount 2>/dev/null | grep -i cgroup || true
+          echo "--- cgroup memory limits (resolved path, then ancestors) ---"
+          # The 2026-09-18 baseline run showed /sys/fs/cgroup/memory.max as
+          # UNREADABLE (the loop printed nothing), so the ceiling could not be
+          # read from the fixed path. Resolve the runner's OWN cgroup from
+          # /proc/self/cgroup and walk up, labelling every hit with its full
+          # path so an absent reading is distinguishable from a real "max".
+          CG=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)
+          for base in /sys/fs/cgroup "${CG:+/sys/fs/cgroup$CG}"; do
+            [ -d "$base" ] || continue
+            d="$base"
+            while [ -n "$d" ] && [ "$d" != "/" ] && [ "$d" != "/sys" ] && [ "$d" != "/sys/fs" ]; do
+              for f in memory.max memory.peak memory.current memory.high memory.swap.max; do
+                if [ -r "$d/$f" ]; then echo "$d/$f = $(cat "$d/$f")"; fi
+              done
+              d=$(dirname "$d")
+            done
+          done
+          echo "--- cgroup v1 memory (fallback) ---"
+          for f in memory.limit_in_bytes memory.max_usage_in_bytes; do
+            [ -r "/sys/fs/cgroup/memory/$f" ] && echo "/sys/fs/cgroup/memory/$f = $(cat "/sys/fs/cgroup/memory/$f")" || true
+          done
+          echo "--- cache sizes ---"
+          du -sh target 2>/dev/null || true
+          du -sh "$HOME/.cache/sccache" 2>/dev/null || true
+          du -sh "$HOME/.cargo/registry" 2>/dev/null || true
+          echo "--- sccache stats ---"
+          sccache --show-stats 2>/dev/null || echo "(sccache not on PATH)"
+          echo "===== DIAG pre-test END ====="
 
       - name: Run tests under nextest (shipped feature set, BLOCKING verdict)
         # Step timeout INSIDE the 45-min job cap so a stall still leaves a log
@@ -1086,6 +1087,48 @@ jobs:
             wait "$STALLWATCH" 2>/dev/null || true
           fi
           exit $RC
+
+      - name: "Diagnose: resource envelope (post-test)"
+        if: ${{ always() && inputs.diagnose }}
+        # POST-TEST READ. `always()` is load-bearing: the envelope worth having is
+        # the one left behind by a run that FAILED or was cancelled, and a bare
+        # `inputs.diagnose` would skip exactly those. Every probe is `|| true`:
+        # a measurement that can fail the gate it measures is worthless.
+        #
+        # WHY IT IS NEEDED: the pre-test probe runs BEFORE this job compiles
+        # anything, so the `memory.peak` it prints describes whatever last ran in
+        # this cgroup -- an earlier job's leftovers, not this leg's compilation.
+        # A run's peak is only readable AFTER it. That is precisely why #331's
+        # 97.1% figure could not be attributed to a phase: the only probe we had
+        # fired before the work started.
+        run: |
+          echo "===== DIAG post-test $(date -u +%FT%TZ) ====="
+          echo "--- mem (MiB) ---"
+          free -m || true
+          echo "--- meminfo anchor (kB) ---"
+          grep -E '^(MemTotal|MemAvailable|SwapTotal):' /proc/meminfo || true
+          echo "--- cgroup memory (resolved path, then ancestors) ---"
+          CG=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)
+          for base in /sys/fs/cgroup "${CG:+/sys/fs/cgroup$CG}"; do
+            [ -d "$base" ] || continue
+            d="$base"
+            while [ -n "$d" ] && [ "$d" != "/" ] && [ "$d" != "/sys" ] && [ "$d" != "/sys/fs" ]; do
+              for f in memory.max memory.peak memory.current memory.high memory.swap.max; do
+                if [ -r "$d/$f" ]; then echo "$d/$f = $(cat "$d/$f")"; fi
+              done
+              d=$(dirname "$d")
+            done
+          done
+          echo "--- cgroup v1 memory (fallback) ---"
+          for f in memory.limit_in_bytes memory.max_usage_in_bytes memory.usage_in_bytes; do
+            [ -r "/sys/fs/cgroup/memory/$f" ] && echo "/sys/fs/cgroup/memory/$f = $(cat "/sys/fs/cgroup/memory/$f")" || true
+          done
+          echo "--- cache sizes ---"
+          du -sh target 2>/dev/null || true
+          du -sh "$HOME/.cache/sccache" 2>/dev/null || true
+          echo "--- sccache stats ---"
+          sccache --show-stats 2>/dev/null || echo "(sccache not on PATH)"
+          echo "===== DIAG post-test END ====="
 
       - name: Doctests (nextest does not run them)
         # nextest runs libtest binaries only; rustdoc compiles doctests separately.
