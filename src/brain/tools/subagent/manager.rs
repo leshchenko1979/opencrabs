@@ -658,14 +658,6 @@ impl SubAgentManager {
             .map(|a| a.parent_session_id)
     }
 
-    /// Remove a terminated agent from tracking.
-    pub fn remove(&self, id: &str) -> Option<SubAgent> {
-        self.agents
-            .write()
-            .expect("subagent manager lock poisoned")
-            .remove(id)
-    }
-
     /// Format running/paused sub-agents as a compaction preamble block.
     ///
     /// Returns `None` when there are no non-terminal agents. The block is
