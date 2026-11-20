@@ -1,0 +1,57 @@
+-- `tool_executions(session_id)` and `tool_executions(created_at)` (#916).
+--
+-- The table carries exactly one index, `idx_tool_executions_message_id`
+-- (restored by `20261009000002_recreate_tool_executions_message_id_index.sql`),
+-- while the reads the harness actually performs filter on the other two
+-- columns. Measured on the ops profile (2026-11-20, 167,884 rows / 1.1 GB):
+--
+--   EXPLAIN QUERY PLAN SELECT count(*) FROM tool_executions WHERE tool_name='bash'
+--     -> SCAN tool_executions
+--   same query, guarded by `timeout 45`
+--     -> rc=124, empty stdout (sqlite3 buffers the whole result, so a kill
+--        returns nothing at all — indistinguishable from "the table is empty")
+--
+-- The per-session self-read is not exotic: it is the documented way a lane
+-- inspects its own tool history, and it was the slowest query on the table.
+-- Five lanes hit it in one polling cycle, each burning 1 m 40 s to 5 m 35 s.
+--
+-- Both indexes below were created BY HAND on the live profile as an operational
+-- stopgap, under exactly these names. `IF NOT EXISTS` therefore makes this
+-- migration a no-op on a database that already has them (the index is not
+-- rebuilt, so there is no one-off build cost there), while a database that
+-- never received the hand-made copies — every fresh or REBUILT store — is born
+-- with them, and an existing bare one gains them on its next open.
+--
+-- What each one serves:
+--
+--   session_id  — `WHERE session_id = ?` / `WHERE session_id LIKE '…%'` on the
+--                 per-session self-read, and the `ORDER BY session_id,
+--                 created_at, id` sequence scan in
+--                 `ToolRepo::recent_session_tool_sequences`.
+--   created_at  — the `WHERE created_at >= ?` / `WHERE created_at > ?` windows
+--                 behind the analytics panel (`stats`, `stats_with_failures`,
+--                 `rsi_staleness`), the 24 h usage rollups in
+--                 `usage::data::fetch_tools`, and the `ORDER BY created_at DESC
+--                 LIMIT ?` audit read in `turn_retrieval`.
+--
+-- Not created here:
+--
+-- - `status` — deliberately skipped by `20261009000002` for the same reason it
+--   is skipped now: no query filters on it alone; it is folded into a
+--   `SUM(CASE WHEN status = 'error' …)` over a `GROUP BY tool_name`, which no
+--   index on `status` serves, and the index would be pure write amplification.
+-- - `(session_id, created_at)` composite — the suggested "ideal" shape in the
+--   issue. The two single-column indexes above cover every current read; a
+--   composite would duplicate most of the `session_id` index's bytes on a table
+--   this size for a read that is already index-bound. If a per-session
+--   time-window query ever becomes hot, the composite can replace both.
+-- - `(tool_name, created_at)` — `tool_name` is low-cardinality and its
+--   aggregates are full-table GROUP BYs by nature; an index would not remove
+--   the scan.
+--
+-- Appended last per the list invariant (a new entry must not shift any existing
+-- index, or a `user_version` stamp would map to a different migration — the
+-- #1401 class). No `MIGRATION_EFFECTS` declaration is owed: that window is the
+-- contiguous replay-crash set ending at HEAD 59, and this sits far above it.
+CREATE INDEX IF NOT EXISTS idx_tool_executions_session_id ON tool_executions(session_id);
+CREATE INDEX IF NOT EXISTS idx_tool_executions_created_at ON tool_executions(created_at);

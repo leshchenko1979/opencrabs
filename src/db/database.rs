@@ -206,6 +206,16 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // `MIGRATION_EFFECTS` declaration is owed (that window is contiguous and
     // ends far below this entry).
     include_str!("../migrations/20261010000001_add_messages_created_at_index.sql"),
+    // #916: `tool_executions(session_id)` and `tool_executions(created_at)`.
+    // The table was indexed on `message_id` only, so every per-session and
+    // per-time read — including the per-session self-read the harness asks
+    // every lane to perform — was a full scan of a 1.1 GB table. Both indexes
+    // existed only as hand-built stopgaps on the live profile, so a rebuilt
+    // store started bare; `IF NOT EXISTS` makes this a no-op where they are
+    // already present and creates them everywhere else. Appended last per the
+    // list invariant; no `MIGRATION_EFFECTS` declaration is owed (that window
+    // is contiguous and ends far below this entry).
+    include_str!("../migrations/20261120000001_add_tool_executions_session_created_indexes.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

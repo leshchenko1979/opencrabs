@@ -155,3 +155,115 @@ fn test_migration_list_is_the_on_disk_files_in_name_order() {
         );
     }
 }
+
+/// Index names on `tool_executions`, read from `sqlite_master` after migration.
+async fn tool_executions_indexes(db: &Database) -> Vec<String> {
+    db.pool()
+        .get()
+        .await
+        .unwrap()
+        .interact(|conn| {
+            conn.prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND tbl_name = 'tool_executions'",
+            )?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// #916: `tool_executions` was indexed on `message_id` only, so the
+/// per-session self-read and the `created_at` windows full-scanned a 1.1 GB
+/// table. Both indexes existed only as hand-built stopgaps on the live
+/// profile, so a REBUILT store started bare — the schema must carry them.
+#[tokio::test]
+async fn tool_executions_carries_session_and_created_at_indexes() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+
+    let indexes = tool_executions_indexes(&db).await;
+    for want in [
+        "idx_tool_executions_session_id",
+        "idx_tool_executions_created_at",
+    ] {
+        assert!(
+            indexes.iter().any(|name| name == want),
+            "index {want} missing after migrations; found {indexes:?}"
+        );
+    }
+
+    // Each is a single-column index on the column it is named for: that is the
+    // shape the per-session read and the `created_at` range plan against.
+    for (index, column) in [
+        ("idx_tool_executions_session_id", "session_id"),
+        ("idx_tool_executions_created_at", "created_at"),
+    ] {
+        let cols: Vec<String> = db
+            .pool()
+            .get()
+            .await
+            .unwrap()
+            .interact(move |conn| {
+                conn.prepare("SELECT name FROM pragma_index_info(?1)")?
+                    .query_map([index], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cols,
+            vec![column.to_owned()],
+            "{index} must be an index on ({column})"
+        );
+    }
+}
+
+/// #916: an existing store gains the indexes on its next open. A database
+/// stamped at the version just below this migration carries neither of them
+/// (that is the live shape with the hand-built copies absent), and
+/// `run_migrations` must create them without a rebuild — `IF NOT EXISTS`
+/// makes the same statement a no-op where they are already present.
+#[tokio::test]
+async fn existing_store_gains_tool_executions_indexes_on_next_open() {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.pool()
+        .get()
+        .await
+        .unwrap()
+        .interact(move |conn| -> Result<(), String> {
+            crate::db::database::build_migrations()
+                .to_version(conn, Database::MIGRATION_COUNT - 1)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let before = tool_executions_indexes(&db).await;
+    for want in [
+        "idx_tool_executions_session_id",
+        "idx_tool_executions_created_at",
+    ] {
+        assert!(
+            !before.iter().any(|name| name == want),
+            "index {want} must not exist one version below its migration; found {before:?}"
+        );
+    }
+
+    db.run_migrations().await.unwrap();
+
+    let after = tool_executions_indexes(&db).await;
+    for want in [
+        "idx_tool_executions_session_id",
+        "idx_tool_executions_created_at",
+    ] {
+        assert!(
+            after.iter().any(|name| name == want),
+            "index {want} missing after the next open; found {after:?}"
+        );
+    }
+}
