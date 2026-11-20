@@ -1,13 +1,12 @@
 name: PR-lane gates
 
-# PR-lane gates — the pre-upstream-PR checks of the deploy-model ontology
-# (v0.4.22 fmt/clippy CONTRIBUTING.md compliance + v0.4.23 all-features test).
+# PR-lane gates — the pre-merge gate for a PR-head branch: clippy over
+# `--all-features`, nextest over the SHIPPED feature set, plus doctests.
 #
-# Why this workflow exists: PR-head branches (leshchenko1979/<slug>) are
-# harvested off adolfousier/main, so they never pass fork main — the carrier
-# gates job never sees them — and upstream's own full gate only fires AFTER
-# the PR opens. This box cannot run cargo, so this dispatch-triggered workflow
-# is the only place the PR-lane gates can run BEFORE the PR exists.
+# Why this workflow exists: a PR-head branch (leshchenko1979/<slug>) has not yet
+# passed fork main, so the carrier gates job never sees it. This box cannot run
+# cargo, so this dispatch-triggered workflow is the only place the gates can run
+# BEFORE the branch merges.
 #
 # Invocation (carrier-law shape, mirrors quick-build-linux.yml):
 #   gh workflow run pr-checks.yml --ref ci/quick-build-linux -f ref=<branch-or-sha>
@@ -46,14 +45,16 @@ name: PR-lane gates
 # merge d02f4e08 passed this lane GREEN and died at the build leg.
 # The workflow yaml is read from this carrier branch (workflow_dispatch needs
 # the file on the dispatched ref); the job then checks out `inputs.ref`.
-# Keeping the yml here means PR-head branches carry zero infra commits into
-# Adolfo's diff, and fork main stays clean of workflow files (2026-08-26 law).
+# Keeping the yml here means PR-head branches carry zero infra commits, and fork
+# main stays clean of workflow files.
 #
-# Fidelity rule: every cargo invocation below mirrors adolfousier/opencrabs
-# .github/workflows/ci.yml EXACTLY, so a green run here predicts a green
-# upstream full gate on the same ref. Do not drift.
+# NO UPSTREAM-PARITY RULE (owner order 2026-11-20: "we are a standalone
+# telegram-oriented fork"). These gates are sized against THIS fork's tree and
+# its own history. They mirror no upstream workflow, a green run here predicts
+# nothing about another repo, and nothing here should be "corrected" to match
+# one. The lane exists for the exception case where the owner names a group to
+# file upstream; its gates must be honest for their own sake.
 #
-# The green run URL is the v0.4.22 citation for the PR body.
 # Revert = delete this file.
 on:
   workflow_dispatch:
@@ -99,24 +100,22 @@ on:
         default: false
         type: boolean
       diagnose:
-        description: "true = print the runner's real resource envelope (cpu/ram/disk/cgroup/sccache) around the test leg; diagnostic only, never fails the run"
+        description: "true = print the runner's real resource envelope (cpu/ram/disk/cgroup/sccache) TWICE in pr-gates-nextest: immediately before the test leg and again after it. Both reads are required — memory.peak taken before compilation is the peak of whatever ran earlier in that cgroup, so a pre-only probe cannot show what the compile-and-test leg actually reached. Diagnostic only, never fails the run."
         required: false
         default: false
         type: boolean
-      # #1936 Stage 1 (hang-capture, owner-approved design): a bounded libtest
-      # thread count. Empty => the Run tests invocation is unchanged; N => the
-      # deadlock is tested for concurrency-dependence at zero code cost.
+      # RETIRED 2026-11-20: the legacy `cargo test` leg these two inputs
+      # instrumented was deleted and `pr-gates-nextest` is the verdict now. Both
+      # stay DECLARED and accepted — a removed `workflow_call` input is a hard
+      # dispatch error for every existing caller, an ignored one is a no-op.
+      # Read by nothing; the wording matches the callee's own declaration.
       test_threads:
-        description: "libtest --test-threads value for the Run tests step (empty = libtest default). Stage 1 of the #1936 hang-capture: a bounded N discriminates concurrency-dependent deadlocks at zero code cost."
+        description: "RETIRED 2026-11-20 (the libtest leg it configured is deleted; nextest is the verdict). Accepted and IGNORED — read by nothing. Kept declared so `oc-prchecks --test-threads N` keeps dispatching instead of erroring."
         required: false
         default: ""
         type: string
-      # #1936 Stage 2 (hang-capture, owner-approved design): the gdb watchdog.
-      # false => Run tests is the unchanged `cargo test` invocation; true => the
-      # same command plus a background thread-stack dump at T+100s if the test
-      # binary is still alive. Diagnostic only: never kills, never fails.
       hangdump:
-        description: "true = run the test leg under a gdb watchdog that dumps every thread's stack ONCE at T+100s if the test binary is still alive (Stage 2 of the #1936 hang-capture). Never kills the process, never changes the step's exit code; diagnostic only."
+        description: "RETIRED 2026-11-20 (the test leg it instrumented is deleted). Accepted and IGNORED — read by nothing. Kept declared so existing dispatches keep working."
         required: false
         default: false
         type: boolean
@@ -181,19 +180,15 @@ on:
 # oc-prchecks passes -f no_cancel=true when the resolved ref is a full sha.
 # Default false => every existing caller is byte-for-byte unchanged in behavior.
 # A second workflow was rejected: it would duplicate the whole gate body and
-# fork the triad flags that editor-upstream-pr.md §PR-GATE-STANDING pins
-# VERBATIM to this one file.
+# fork the cargo flags that every dispatch of this lane must carry identically.
+# No external document pins them — the gate body in ci-lane-impl.yml is the
+# authority, and the `ci/*` carrier namespace is owned by the HQ lane.
 concurrency:
   group: prchecks-${{ inputs.ref || github.ref_name }}
   cancel-in-progress: ${{ !inputs.no_cancel }}
 
 permissions:
   contents: read
-
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-  CARGO_INCREMENTAL: 0
 
 jobs:
   # Thin caller — the gate body lives in ci-lane-impl.yml. `name:` is pinned to

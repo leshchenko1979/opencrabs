@@ -26,8 +26,11 @@ name: Quick Linux Build
 # The `gates` and `build` job bodies moved to ci-lane-impl.yml (`on:
 # workflow_call`) because this file and pr-checks.yml carried ~90% of the same
 # gate body and the two had begun to drift. This shell keeps ONLY its name, its
-# workflow_dispatch trigger, its three inputs, its env block and its
-# concurrency group — plus one caller job that maps them into the shared body.
+# workflow_dispatch trigger, its four inputs and its concurrency group — plus one
+# caller job that maps them into the shared body. Its workflow-level `env:` block
+# was DELETED 2026-11-20: a caller's workflow-level env does not propagate into a
+# `workflow_call` callee, so every key in it was dead config; the live copy is
+# ci-lane-impl.yml's own workflow-level `env:`.
 #
 # DISPATCH FORM IS UNCHANGED. The `--ref` remains MANDATORY: workflow_dispatch
 # requires the workflow file on the default branch, and this file is not on
@@ -58,10 +61,6 @@ on:
         description: 'Version the binary reports, <upstream-ver>+fork.<cycle> (empty = plain CARGO_PKG_VERSION)'
         required: false
         default: ''
-
-env:
-  CARGO_TERM_COLOR: always
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 concurrency:
   group: quick-build-linux
