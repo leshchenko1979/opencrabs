@@ -506,6 +506,7 @@ jobs:
           # effective values are visible in the workflow and the armed notice is honest.
           STALLWATCH_SECS: "480"
           STALLWATCH_PROGRESS_SECS: "600"
+          STALLWATCH_SILENCE_SECS: "900"
           STALLWATCH_LOG: /tmp/test-leg.log
         # test_threads (#1936 Stage 1): empty => this line is BYTE-FOR-BYTE the
         # invocation it has always been — the separator rides INSIDE the format
@@ -532,7 +533,7 @@ jobs:
           # SHIPPED feature set, mirroring the build leg: see the job comment.
           CMD="cargo test --locked --profile ci --no-default-features --features ${{ inputs.features }} --verbose${{ inputs.test_threads && format(' -- --test-threads={0}', inputs.test_threads) || '' }}"
           echo "+ $CMD"
-          # stallwatch — TWO-predicate stall detector (HQ 2026-11-17; predicate B
+          # stallwatch — THREE-predicate stall detector (HQ 2026-11-17; predicate B
           # 2026-11-19; #331). A stall has two shapes and one predicate cannot see both:
           #
           #   A. FLAT CPU over the step's process tree (STALLWATCH_SECS, 480). Sees the
@@ -551,9 +552,25 @@ jobs:
           # completions): longest healthy gap with NO completion is 63 s -- always the
           # slow rate-limit deadline test, which prints "has been running for over 60
           # seconds" while perfectly healthy; p99 = p95 = 0 s. 600 s is 9.5x that gap
-          # and ~4x the ENTIRE healthy test phase. Do NOT derive it from log silence
-          # (2.28 min) -- that is A's calibration. The full rationale, the fire-time
-          # dump contract and the tree-scoping trap are in the script's docstring below.
+          # and ~4x the ENTIRE healthy test phase.
+          #   C. LOG SILENCE (STALLWATCH_SILENCE_SECS, 900). Fires when /tmp/test-leg.log
+          #      grows no bytes for 900 s. Covers the one shape A and B BOTH miss: a
+          #      process tree advancing CPU while emitting no output (a spinning rustc,
+          #      a wedged codegen unit, a linker waiting on nothing). CALIBRATION,
+          #      measured 2026-11-20 from FULL per-job log archives (gh api
+          #      .../actions/jobs/<id>/logs), three GREEN runs: 44689498798 = 349.3 s,
+          #      44689314886 = 392.3 s, 44589184921 = 532.4 s of healthy compile
+          #      silence -- all one crate, `opencrabs` (lib test), at O3/thin-LTO.
+          #      900 s is 1.69x the WORST healthy gap and 2.6x the typical one.
+          #      A LITERAL 600 s (owner q77, "10-minute threshold") is 1.13x the worst
+          #      healthy gap and MUST NOT ship: it would have killed run 44589184921
+          #      while that run was perfectly healthy. The figure that used to sit here
+          #      -- "2.28 min" -- came from `gh run view --log`, which TRUNCATES
+          #      mid-compile; never calibrate a silence predicate from it.
+          #      A false C trip on a healthy gate is a CALIBRATION DEFECT to record and
+          #      fix by raising the threshold -- never a reason to disable C.
+          # The full rationale, the fire-time dump contract and the tree-scoping trap
+          # are in the script's docstring below.
           #
           # WHY THE LOG EXISTS: B needs something to count, so the step runs
           # `$CMD 2>&1 | tee /tmp/test-leg.log` and takes the exit code from
@@ -595,10 +612,10 @@ jobs:
             stretch with NO completion is 63 s, always the same slow rate-limit deadline test
             (it prints "has been running for over 60 seconds" while healthy); p99 = p95 = 0 s.
             600 s is 9.5x the worst healthy gap and 4x the ENTIRE healthy test phase. Do NOT
-            derive it from log silence (2.28 min) -- that is A's calibration, and conflating
-            the two is what left the detector firing zero times for six stalls. A false trip
-            fails a healthy gate, so the threshold is a multiple of the WORST gap, never of
-            the median.
+            derive it from log silence -- that is C's calibration and a DIFFERENT number.
+            Conflating them is what left the detector firing zero times for six stalls. A
+            false trip fails a healthy gate, so every threshold is a multiple of the WORST
+            gap, never of the median.
 
           Signal for A: sum(utime+stime) over EVERY process descending from the step shell
           (STALLWATCH_ROOT). Tree scoping is load-bearing: a box-wide comm match picks up
@@ -606,6 +623,16 @@ jobs:
           daemon matched `opencrabs` and the instrument never fired). `tee` is a descendant
           and sits INSIDE the sum, harmless only because it is idle exactly when output
           stops. Do not widen the tree scope to "fix" that.
+
+          Signal for C: the SIZE of /tmp/test-leg.log. C is the only predicate that reads
+          OUTPUT rather than process state, and it exists because A needs CPU to go FLAT
+          and B needs a completion to have ALREADY happened: a tree burning CPU while
+          emitting no output satisfies neither. Armed only once the file is non-empty --
+          compile starts before `tee` writes its first byte, and an absent or empty log is
+          not silence. Calibration is the WORST healthy compile gap measured from FULL
+          per-job archives; the three run ids and the 1.69x margin are in the step comment
+          above. Do NOT calibrate this from `gh run view --log`: it truncates mid-compile,
+          so the "silence" it reports is an artifact of the reader, not of the run.
 
           On fire: dump wchan, /proc/<pid>/syscall, kernel stack, vmstat and user stacks
           (gdb), plus the test-log tail so the in-flight test is named, then SIGTERM the
@@ -627,6 +654,7 @@ jobs:
           SELF = os.getpid()
           THRESHOLD = int(os.environ.get("STALLWATCH_SECS", "480"))
           PROGRESS_THRESHOLD = int(os.environ.get("STALLWATCH_PROGRESS_SECS", "600"))
+          SILENCE_THRESHOLD = int(os.environ.get("STALLWATCH_SILENCE_SECS", "900"))
           SAMPLE = int(os.environ.get("STALLWATCH_SAMPLE", "30"))
           LOGFILE = os.environ.get("STALLWATCH_LOG", "/tmp/test-leg.log")
 
@@ -799,13 +827,16 @@ jobs:
 
           def main():
               root = int(os.environ.get("STALLWATCH_ROOT") or os.getppid())
-              print("STALLWATCH: armed, root=%d flat=%ds progress=%ds sample=%ds log=%s"
-                    % (root, THRESHOLD, PROGRESS_THRESHOLD, SAMPLE, LOGFILE), flush=True)
+              print("STALLWATCH: armed, root=%d flat=%ds progress=%ds silence=%ds sample=%ds log=%s"
+                    % (root, THRESHOLD, PROGRESS_THRESHOLD, SILENCE_THRESHOLD, SAMPLE, LOGFILE),
+                    flush=True)
               prev = None
               flat_since = None
               offset = 0
               completions = 0
               progress_since = None  # None until the FIRST completion: compile has no result lines
+              log_size = None
+              silence_since = None   # None until the log is NON-EMPTY: absent is not silence
               while True:
                   procs = descendants(root)
                   total = sum(t for _, t in procs.values())
@@ -835,6 +866,25 @@ jobs:
                           dump(procs, idle, "progress", completions)
                           terminate(procs, idle, "progress")
                           return 0
+
+                  # Predicate C -- log silence. The only OUTPUT-based arm: A needs CPU to go
+                  # flat, B needs a completion to have already happened, and a tree burning
+                  # CPU with no output satisfies neither. Armed only once the log is non-empty.
+                  try:
+                      size = os.path.getsize(LOGFILE)
+                  except OSError:
+                      size = None
+                  if size is None or size == 0 or not procs:
+                      silence_since = None
+                  elif log_size is None or size != log_size:
+                      silence_since = now
+                  else:
+                      silent = now - silence_since
+                      if silent >= SILENCE_THRESHOLD:
+                          dump(procs, silent, "silence", completions)
+                          terminate(procs, silent, "silence")
+                          return 0
+                  log_size = size
 
                   time.sleep(SAMPLE)
 
