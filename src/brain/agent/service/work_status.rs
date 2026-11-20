@@ -150,6 +150,67 @@ pub fn truncation_marker_path(id: &str, stderr: bool) -> PathBuf {
     runs_dir().join(format!("{id}.{ext}.cap"))
 }
 
+/// What a `.cap` marker says about one stream's capture (#917).
+///
+/// Until this existed the marker was written and read by nobody: `task_output`
+/// reported a cut capture exactly as it reported one that simply ended, and the
+/// only hint was a note appended INTO the capped bytes — prose a caller has to
+/// pattern-match, and which a `tail_lines` read can drop entirely. The body's
+/// format lives here, beside the path function that names the file, so the
+/// writer (`background_tasks`) and the reader (`task_output`) cannot drift
+/// apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TruncationMarker {
+    /// The cap, in bytes, that the stream reached.
+    pub cap: u64,
+    /// When the cap was hit, RFC 3339 UTC. `None` for a marker written before
+    /// the body carried an instant: it still reports the truncation, it just
+    /// cannot date it.
+    pub at: Option<String>,
+}
+
+impl TruncationMarker {
+    /// The body as written to `<id>.<ext>.cap`.
+    ///
+    /// The instant sits INSIDE the existing sentence rather than on a second
+    /// line so that a marker written by an older binary — which has no `at`
+    /// clause — parses with the same reader: the instant is the only optional
+    /// part of the format.
+    pub fn body(&self) -> String {
+        match &self.at {
+            Some(at) => format!(
+                "cap {} bytes reached at {at}; further bytes are not captured \
+                 (the run itself keeps running)\n",
+                self.cap
+            ),
+            None => format!(
+                "cap {} bytes reached; further bytes are not captured \
+                 (the run itself keeps running)\n",
+                self.cap
+            ),
+        }
+    }
+
+    /// Parse a marker body.
+    ///
+    /// `None` means this is not a truncation record — an empty or foreign file
+    /// must not be reported as a cut capture, because a false "truncated" is
+    /// worse than no answer at all: it sends a reader looking for bytes that
+    /// were never produced.
+    pub fn parse(body: &str) -> Option<Self> {
+        let rest = body.split_once("cap ")?.1;
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let cap = digits.parse().ok()?;
+        let at = rest
+            .split_once(" at ")
+            .and_then(|(_, tail)| tail.split(';').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        Some(Self { cap, at })
+    }
+}
+
 /// Directory holding captured run streams (#692).
 ///
 /// Deliberately separate from [`status_dir`]: the status JSON is a few hundred
@@ -1458,5 +1519,49 @@ mod run_cause_tests {
             let back: RunCause = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(back, cause, "round-trip lost the cause: {json}");
         }
+    }
+}
+
+#[cfg(test)]
+mod truncation_marker_tests {
+    use super::*;
+
+    /// #917 — the marker body is now read by a consumer, so the format has two
+    /// ends. A body written by THIS binary must round-trip, cap and instant
+    /// both: a reader that lost the cap could not say how much was cut, and one
+    /// that lost the instant could not say when.
+    #[test]
+    fn a_marker_body_round_trips_through_the_reader() {
+        let marker = TruncationMarker {
+            cap: 1_048_576,
+            at: Some("2026-11-20T09:08:45Z".to_string()),
+        };
+        assert_eq!(TruncationMarker::parse(&marker.body()), Some(marker));
+    }
+
+    /// A marker written before the body carried an instant — which is every
+    /// marker already on disk — still reports its truncation. It simply cannot
+    /// date it, and saying so is better than refusing to read the file.
+    #[test]
+    fn a_body_without_an_instant_still_reports_the_cap() {
+        let body = "cap 8192 bytes reached; further bytes are not captured \
+                    (the run itself keeps running)\n";
+        assert_eq!(
+            TruncationMarker::parse(body),
+            Some(TruncationMarker {
+                cap: 8192,
+                at: None
+            })
+        );
+    }
+
+    /// A file that is not a truncation record must read as "no marker", never
+    /// as "truncated at 0 bytes": a false positive sends the caller hunting for
+    /// bytes that were never produced.
+    #[test]
+    fn a_foreign_or_empty_body_is_not_a_truncation_record() {
+        assert_eq!(TruncationMarker::parse(""), None);
+        assert_eq!(TruncationMarker::parse("hello\n"), None);
+        assert_eq!(TruncationMarker::parse("cap nope bytes\n"), None);
     }
 }

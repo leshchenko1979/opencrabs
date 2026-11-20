@@ -11,7 +11,7 @@
 
 use super::error::Result;
 use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolHints, ToolResult};
-use crate::brain::agent::service::work_status::WorkStatus;
+use crate::brain::agent::service::work_status::{TruncationMarker, WorkStatus};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
@@ -60,6 +60,9 @@ struct Tail {
     collapsed: usize,
     /// The first line was partial (the tail window started mid-line).
     partial_first_line: bool,
+    /// Set when the capture hit its cap (#917) — the marker says so, and it is
+    /// the only structured answer to "did this end, or was it cut?".
+    truncation: Option<TruncationMarker>,
 }
 
 /// Read the last `tail_bytes` of a capture, without holding the whole file.
@@ -97,7 +100,18 @@ async fn read_tail(path: &Path, tail_bytes: u64) -> std::io::Result<Tail> {
         skipped,
         collapsed,
         partial_first_line,
+        truncation: None,
     })
+}
+
+/// Read a stream's cap marker, if it has one (#917).
+///
+/// Absent marker = the stream simply ended. A marker that does not parse is
+/// treated the same way: reporting "truncated" off a file this code cannot
+/// read would send the caller hunting for bytes that may never have existed.
+async fn read_truncation_marker(marker: &Path) -> Option<TruncationMarker> {
+    let body = tokio::fs::read_to_string(marker).await.ok()?;
+    TruncationMarker::parse(&body)
 }
 
 /// Collapse carriage-return progress frames, keeping the last one per line.
@@ -149,6 +163,19 @@ fn render_stream(
         tail.size,
         path.display()
     ));
+    // A cut capture, reported as a FACT beside the payload rather than as the
+    // prose note that is buried inside the capped bytes (#917). The note is
+    // still what a raw file reader sees; this line is what a caller — or a
+    // `tail_lines` read that dropped the note — can actually branch on.
+    if let Some(t) = &tail.truncation {
+        out.push_str(&format!(
+            "\n  truncated: yes (cap {} bytes reached{}; the run continued past it)",
+            t.cap,
+            t.at.as_ref()
+                .map(|at| format!(" at {at}"))
+                .unwrap_or_default()
+        ));
+    }
     if tail.size == 0 {
         out.push_str("\n  (empty so far)");
         return;
@@ -193,6 +220,34 @@ fn render_stream(
     }
 }
 
+/// Render one stream's block from its capture file and its cap marker (#917).
+///
+/// The marker is consulted BEFORE the payload is rendered because it is the
+/// only record that survives a tail window: the in-stream note lives at the
+/// point where the bytes stopped, which is exactly what `tail_lines` and a
+/// small `tail_bytes` budget throw away first.
+async fn render_capture(
+    name: &str,
+    path: &Path,
+    marker: &Path,
+    tail_bytes: u64,
+    tail_lines: Option<usize>,
+    out: &mut String,
+) {
+    match read_tail(path, tail_bytes).await {
+        Ok(mut tail) => {
+            tail.truncation = read_truncation_marker(marker).await;
+            render_stream(name, &tail, path, tail_lines, out);
+        }
+        // A missing file for a run we can attribute means the run never
+        // reached its spawn — reported as such rather than as empty.
+        Err(e) => out.push_str(&format!(
+            "\n\n{name}: unreadable at {} ({e})",
+            path.display()
+        )),
+    }
+}
+
 #[async_trait]
 impl Tool for TaskOutputTool {
     fn name(&self) -> &str {
@@ -203,8 +258,9 @@ impl Tool for TaskOutputTool {
         "Read a detached command's captured output by run id — live while it is \
          still running, complete once it has finished. The run id comes from \
          tasks_list. Use this instead of re-reading a path by hand: it reports \
-         the run's state alongside the bytes, collapses carriage-return progress \
-         frames into their last state, and never blocks."
+         the run's state alongside the bytes, says when a capture was CUT at its \
+         output cap rather than reporting it as one that simply ended, collapses \
+         carriage-return progress frames into their last state, and never blocks."
     }
 
     fn input_schema(&self) -> Value {
@@ -375,15 +431,9 @@ impl Tool for TaskOutputTool {
                 out.push_str(&format!("\n\n{name}: (no capture path recorded)"));
                 continue;
             };
-            match read_tail(&path, tail_bytes).await {
-                Ok(tail) => render_stream(name, &tail, &path, tail_lines, &mut out),
-                // A missing file for a run we can attribute means the run never
-                // reached its spawn — reported as such rather than as empty.
-                Err(e) => out.push_str(&format!(
-                    "\n\n{name}: unreadable at {} ({e})",
-                    path.display()
-                )),
-            }
+            let marker =
+                crate::brain::agent::service::work_status::truncation_marker_path(run_id, is_err);
+            render_capture(name, &path, &marker, tail_bytes, tail_lines, &mut out).await;
         }
 
         Ok(ToolResult::success(out))
@@ -470,6 +520,7 @@ mod tests {
             skipped: 0,
             collapsed: 0,
             partial_first_line: false,
+            truncation: None,
         };
         render_stream("stdout", &tail, dir, None, &mut out);
         assert!(
@@ -487,11 +538,55 @@ mod tests {
             skipped: 0,
             collapsed: 0,
             partial_first_line: false,
+            truncation: None,
         };
         render_stream("stdout", &tail, std::path::Path::new("/tmp/x"), Some(2), &mut out);
         assert!(out.contains("last 2 of"), "got {out:?}");
         assert!(out.contains("l3") && out.contains("l4"), "got {out:?}");
         assert!(!out.contains("  l1"), "the hidden lines must be dropped");
+    }
+
+    /// #917 — a capture that hit its cap and one that simply ended used to
+    /// render IDENTICALLY. The only difference was a prose note appended inside
+    /// the capped bytes, which is precisely what a tail window drops first.
+    /// The marker file is the structured answer, so this test pins it: same
+    /// bytes, same read — only the marker distinguishes the two.
+    #[tokio::test]
+    async fn a_capped_capture_is_reported_as_truncated_and_a_complete_one_is_not() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let capture = dir.path().join("run1.out");
+        let marker = dir.path().join("run1.out.cap");
+        std::fs::write(&capture, vec![b'x'; 64]).unwrap();
+
+        // No marker: the run printed its bytes and ended.
+        let mut complete = String::new();
+        render_capture("stdout", &capture, &marker, 4096, None, &mut complete).await;
+        assert!(
+            !complete.contains("truncated"),
+            "a capture with no marker ended normally, got {complete:?}"
+        );
+
+        // The reader hit the cap and wrote its record.
+        let cut = TruncationMarker {
+            cap: 64,
+            at: Some("2026-11-20T09:08:45Z".to_string()),
+        };
+        std::fs::write(&marker, cut.body()).unwrap();
+
+        let mut truncated = String::new();
+        render_capture("stdout", &capture, &marker, 4096, None, &mut truncated).await;
+        assert!(
+            truncated.contains("truncated: yes"),
+            "a marker must be reported as truncation, got {truncated:?}"
+        );
+        assert!(
+            truncated.contains("cap 64 bytes") && truncated.contains("2026-11-20T09:08:45Z"),
+            "the report must carry the cap and the instant, got {truncated:?}"
+        );
+        assert!(
+            truncated.contains("xxxxxxxx"),
+            "the capture itself must still be shown, got {truncated:?}"
+        );
     }
 
     #[test]

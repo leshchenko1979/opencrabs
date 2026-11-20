@@ -241,7 +241,7 @@ pub struct BackgroundTaskManager {
     runs: Mutex<HashMap<String, RunHandle>>,
 }
 
-use super::work_status::{CommandExit, CommandPaths, RunCause, WorkStatus};
+use super::work_status::{CommandExit, CommandPaths, RunCause, TruncationMarker, WorkStatus};
 
 impl BackgroundTaskManager {
     pub fn new() -> Self {
@@ -1175,10 +1175,14 @@ where
                         // (`<id>.out.cap` / `<id>.err.cap`), so the body does not
                         // repeat it: a self-referential path would be the only
                         // thing on the line that a reader did not already know.
-                        let body = format!(
-                            "cap {cap} bytes reached; further bytes are not captured \
-                             (the run itself keeps running)\n"
-                        );
+                        // The instant is stamped because a record that cannot
+                        // date itself cannot say how long a run had been going
+                        // when it was cut (#917).
+                        let body = TruncationMarker {
+                            cap,
+                            at: Some(crate::utils::string::utc_timestamp()),
+                        }
+                        .body();
                         let _ = tokio::fs::write(&marker, body.as_bytes()).await;
                     }
                 }
