@@ -2752,6 +2752,33 @@ pub(crate) async fn handle_intermediate(
         fire_reaction(bot, chat, target, emoji).await;
     }
 
+    // 2b. Strip a leaked `<<suggest_options:…>>` block HERE, before either
+    //     output form is built (#923).
+    //
+    //     The settle-time recovery in `tool_loop` repairs the FINAL text only.
+    //     That is sound when the final reply supersedes the intermediate, and
+    //     #897 proved it does not always: an intermediate can be the bubble the
+    //     reader keeps. Measured 2026-11-20 — the intermediate shipped the raw
+    //     directive as visible body text while the final copy had it extracted
+    //     into four real buttons, a 148-character difference between two
+    //     copies of one reply.
+    //
+    //     That gap is also what defeated the duplicate guard. It normalises
+    //     reference SPELLING, not a directive, so the recorded bubble and the
+    //     final text never compared equal and the second copy walked through
+    //     (the #826 family). Stripping at this one point makes both paths carry
+    //     the same body, so the comparison has something to match on.
+    //
+    //     No buttons are fired from here: the settle point owns the single
+    //     SuggestedOptions event, and a second emitter would double the rows.
+    //     The value of this call is the STRIP.
+    let (text, leaked_options) = crate::utils::directives::extract_leaked_suggestions(&text);
+    if leaked_options.is_some() {
+        tracing::debug!(
+            "Telegram intermediate: stripped a leaked suggest_options block before delivery (#923)"
+        );
+    }
+
     // 3. TWO walks, VIDEO first. The order is load-bearing, and it is the same
     //    order the delivery floor uses (`extract_local_videos` then
     //    `extract_local_images`): both families read the markdown reference

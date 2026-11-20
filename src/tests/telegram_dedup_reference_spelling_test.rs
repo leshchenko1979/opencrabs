@@ -20,9 +20,7 @@
 //! label, which is the question the suppression arm is actually asking: does
 //! this bubble already SAY this reply?
 
-use crate::channels::telegram::intermediates::{
-    normalize_for_dedup, normalize_reference_spelling,
-};
+use crate::channels::telegram::intermediates::{normalize_for_dedup, normalize_reference_spelling};
 
 /// The three spellings of one reply must compare equal — the measured failure.
 #[test]
@@ -65,7 +63,8 @@ fn a_remote_hyperlink_keeps_its_target() {
     // The link itself survives intact — this predicate erases file and media
     // references only, never prose the author wrote.
     assert!(
-        normalize_reference_spelling(a).contains("https://github.com/leshchenko1979/opencrabs/issues/825"),
+        normalize_reference_spelling(a)
+            .contains("https://github.com/leshchenko1979/opencrabs/issues/825"),
         "a remote target must be left byte-identical"
     );
 }
@@ -93,7 +92,10 @@ fn an_image_reference_collapses_to_its_alt_text() {
 #[test]
 fn the_marker_emoji_does_not_survive_normalization() {
     assert_eq!(normalize_reference_spelling("📎 report.pdf"), "report.pdf");
-    assert_eq!(normalize_reference_spelling("📎   spaced.pdf"), "spaced.pdf");
+    assert_eq!(
+        normalize_reference_spelling("📎   spaced.pdf"),
+        "spaced.pdf"
+    );
 }
 
 /// Text that is not a reference is untouched, and a half-written link is left
@@ -107,5 +109,47 @@ fn non_reference_text_is_untouched() {
     assert_eq!(
         normalize_reference_spelling("[half](/tmp/x.pdf"),
         "[half](/tmp/x.pdf"
+    );
+}
+
+/// #923: a leaked `<<suggest_options:…>>` block is the OTHER way two copies of
+/// one reply stop comparing equal — and unlike a reference spelling, it is not
+/// a form the normaliser knows about.
+///
+/// Measured 2026-11-20: the intermediate shipped the raw directive as visible
+/// body text (2452 chars) while the final copy had it extracted into four
+/// buttons (2304) — 148 characters apart, 128 of them the directive itself.
+/// `normalize_reference_spelling` collapses references, never a directive, so
+/// the guard saw two different replies and let the second bubble through.
+///
+/// `handle_intermediate` now strips the block before either output form is
+/// built, so both copies carry one body. This pins that the strip is the thing
+/// that closes the gap — and that it still recovers the block, because a silent
+/// deletion would satisfy the equality while losing the buttons.
+#[test]
+fn a_leaked_directive_no_longer_makes_one_reply_look_like_two() {
+    use crate::utils::directives::extract_leaked_suggestions;
+
+    let with_directive = "Review's in.\n\n<<suggest_options:[\"Apply the free fixes\", \"Wait\"]>>";
+    let as_buttons = "Review's in.";
+
+    // The pre-fix shape: the two forms do NOT compare equal, which is the whole
+    // reason a duplicate could walk past the guard.
+    assert_ne!(
+        normalize_reference_spelling(with_directive),
+        normalize_reference_spelling(as_buttons),
+        "the raw directive is the gap the guard could not cross"
+    );
+
+    // The intermediate path's strip closes it.
+    let (cleaned, recovered) = extract_leaked_suggestions(with_directive);
+    assert!(
+        recovered.is_some(),
+        "the block must parse, not merely vanish — the buttons are still owed"
+    );
+    assert_eq!(
+        normalize_reference_spelling(&cleaned),
+        normalize_reference_spelling(as_buttons),
+        "after the strip both copies of the reply are one body"
     );
 }
