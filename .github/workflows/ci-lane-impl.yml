@@ -652,7 +652,15 @@ jobs:
           echo "ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo unknown)"
 
       - name: Install cargo-nextest
+        # PINNED (2026-11-21, factory #126). `@nextest` is not a version: the
+        # action resolves `cargo-nextest@latest` at run time, so the toolchain
+        # that decides every PR's verdict drifted with the calendar, and a bad
+        # release would fail every dispatch at once with no commit to revert.
+        # 0.9.152 is the version measured on this gate (run 44811338854).
+        # Re-pin deliberately as its own reviewable commit.
         uses: taiki-e/install-action@nextest
+        with:
+          tool: cargo-nextest@0.9.152
 
       - name: Enable JUnit per-test timings
         run: |
