@@ -351,6 +351,27 @@ This override works for **every provider** — OpenAI-compatible (custom, xiaomi
 >
 > **Leave auto-compaction on** — it's been battle-tested over months and needs no babysitting. Only run a *manual* compaction (the `/compact` command) if you have a specific, strong reason to summarize early; otherwise let it manage itself.
 
+#### Tuning the compaction prompt
+
+Every word the compaction machinery sends to a model lives in a TOML file, not in the binary — so you can tune how your summaries are written without forking anything:
+
+- **The default** ships as [`prompts/compaction.default.toml`](prompts/compaction.default.toml) and is compiled into the binary. It carries the summariser's system prompt, the ten-section continuation-document body, the budget directive, the scope preludes and the post-compaction continuation notices.
+- **Your override** goes at `<profile home>/prompts/compaction.toml` — e.g. `~/.opencrabs/profiles/default/prompts/compaction.toml`. Copy the default, edit what you want, and it takes effect on the next compaction. No restart.
+
+A broken override never breaks compaction: a missing file, a parse error or a failed validation each log a warning and fall back to the compiled default. Compaction that cannot run ends a session; compaction that runs with a stale prompt is merely suboptimal, so the loader fails open every time.
+
+**Check what you changed** with the offline gate:
+
+```bash
+opencrabs eval compaction                            # report: which prompt was loaded, and whether it still serves every fact dimension
+opencrabs eval compaction --gate                     # exit 1 if the prompt regressed against the committed baseline
+opencrabs eval compaction --summary my-summary.md    # grade a REAL summary instead of the reference one
+```
+
+The gate is two offline legs and needs no provider or network. **Structural** checks that the live prompt still contains a section for every fact dimension the eval probes — so a prompt edit that drops `## 6. Pending Tasks` fails with that dimension named, instead of silently producing summaries that forget what was pending. **Discrimination** checks that a known-faithful summary still scores full marks, which is what stops a broken scorer from making the first leg look healthy. Neither leg measures prompt *quality*: the bundled dataset is four probes and is a smoke gate, not a benchmark.
+
+**Which prompt wrote this summary?** Every stored summary's header carries `[prompt source:sha256-prefix]` — for example `[prompt default:9f2c1ab34de5]` — where the prefix is the first 12 hex characters of a sha256 over the prompt text. The same fingerprint is logged at load (`compaction prompt: source=… fingerprint=…`) and printed by `opencrabs eval compaction`, so a summary you are reading can always be traced back to the exact text that produced it.
+
 #### Prompt caching (every caching-capable provider)
 
 A long context is mostly a **stable prefix** — system prompt, brain files, earlier turns rarely change between requests. OpenCrabs caches that prefix wherever the provider supports it, so you pay full price for it once and a fraction on every reuse. Across real usage it's currently averaging **~87% cache efficiency**, which you can watch live in the **Cache Efficiency** card of `/usage`. This is the main reason a larger `context_window` costs far less than its raw token count suggests.
