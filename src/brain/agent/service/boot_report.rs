@@ -82,6 +82,14 @@ pub fn record_tracking_disabled(reason: String) {
 /// line to the session that did not come back. Emitted even when everything
 /// is zero, because "this boot had nothing to recover" is the fact that
 /// makes its absence meaningful on the boots that did.
+///
+/// `parked` is the one number here that describes a FAILURE to deliver: a
+/// report produced by recovery whose session no surface claimed yet, still
+/// waiting for a route. It is read from the parked queue at emission time,
+/// which is after the grace window, so a non-zero value is a backlog rather
+/// than a race. Without it the line read `delivered=0` on both of the day's
+/// boots while reports sat unclaimed — a clean-looking boot that had in fact
+/// routed nothing (#937).
 pub fn summary_line() -> String {
     let (interrupted, resumed, delivered, failed, disabled) = with(|l| {
         (
@@ -93,8 +101,10 @@ pub fn summary_line() -> String {
         )
     })
     .unwrap_or_default();
+    let parked = super::restart_recovery::parked_count();
     let mut line = format!(
-        "[boot] interrupted={interrupted} resumed=[{}] delivered={delivered} failed={failed}",
+        "[boot] interrupted={interrupted} resumed=[{}] delivered={delivered} failed={failed} \
+         parked={parked}",
         resumed.join(" ")
     );
     if let Some(reason) = disabled {

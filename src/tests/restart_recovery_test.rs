@@ -14,7 +14,7 @@ use crate::brain::agent::QueuedUserMessage;
 use crate::brain::agent::service::MessageEnqueueCallback;
 use crate::brain::agent::service::restart_recovery::{
     RESUME_CONTINUATION_BASE, deliver_or_park, flush_parked, interrupted_message, parked_count,
-    resumed_turn_prompt, test_guard,
+    referenced_subjects, resumed_turn_prompt, test_guard,
 };
 use crate::brain::agent::service::session_routes::register_session_route;
 use crate::brain::agent::service::work_status::{CommandPaths, WorkStatus, test_override};
@@ -305,5 +305,116 @@ fn a_row_with_a_recorded_pid_is_not_unknown() {
         !msg.context_text.contains("OUTCOME UNKNOWN"),
         "a recorded pid is evidence; got: {}",
         msg.context_text
+    );
+}
+
+// ---- #936: the row names what the command references, and claims nothing --
+
+/// A row for a command of the test's choosing.
+fn row_with(id: Uuid, command: &str) -> BackgroundTaskRow {
+    BackgroundTaskRow {
+        id,
+        session_id: Uuid::new_v4(),
+        label: "oc-ship chain wait".to_string(),
+        command: command.to_string(),
+        started_at: 0,
+    }
+}
+
+/// The row from #936, verbatim: the command watches pid 2349610 and the row's
+/// recorded pid is the WATCHER that runs the loop.
+///
+/// Pre-fix the report said "was killed and produced no result" — a claim about
+/// work nothing had measured — and never named the pid the lane needed. That
+/// lane re-derived the answer by hand four times and then started a SECOND
+/// ship chain, because it could not rule out that the first was still running.
+#[test]
+fn an_interrupted_row_names_the_pid_it_watched_and_calls_its_own_pid_the_watcher() {
+    let _dirs = TempRunDirs::new();
+    let id = Uuid::new_v4();
+    let command = "while kill -0 2349610; do sleep 30; done; echo \"=== CHAIN EXITED ===\"";
+    WorkStatus::new_command(
+        &id.to_string(),
+        "sess-1",
+        "oc-ship chain wait",
+        command,
+        CommandPaths {
+            pid: Some(2_366_240),
+            ..CommandPaths::none()
+        },
+    )
+    .expect("write status file");
+
+    let msg = interrupted_message(&row_with(id, command));
+
+    assert!(
+        msg.context_text
+            .contains("command references: pid 2349610 — liveness not checked"),
+        "the report must name the pid the command watched, and say it did not check it: {}",
+        msg.context_text
+    );
+    assert!(
+        msg.context_text
+            .contains("row pid 2366240 is the watcher, not the work"),
+        "the row's own pid is the watcher's, and a reader who confuses the two acts on \
+         the wrong process: {}",
+        msg.context_text
+    );
+    assert!(
+        !msg.context_text.contains("killed"),
+        "nothing observed the work dead, so the report must not say it was killed: {}",
+        msg.context_text
+    );
+}
+
+/// A capture holding bytes is a RESULT, and the pre-fix report called it "no
+/// result" over the deploy's own output (#936). The count and the path are
+/// what let a reader act without re-deriving anything.
+#[test]
+fn a_capture_with_bytes_is_named_by_its_count_and_path() {
+    let dirs = TempRunDirs::new();
+    let id = Uuid::new_v4();
+    let capture = dirs.path().join(format!("{id}.out"));
+    std::fs::write(&capture, "deployed abc1234\n").expect("write capture");
+
+    let msg = interrupted_message(&row_for(id));
+
+    assert!(
+        msg.context_text
+            .contains("produced 17 bytes before the restart"),
+        "the byte count is the measurement the row cannot otherwise carry: {}",
+        msg.context_text
+    );
+    assert!(
+        msg.context_text.contains(&capture.display().to_string()),
+        "and the path is how the reader gets at them: {}",
+        msg.context_text
+    );
+    assert!(
+        !msg.context_text.contains("produced no result"),
+        "bytes on disk are a result: {}",
+        msg.context_text
+    );
+}
+
+/// The scan itself: every shape the poll's rows used, in command order, with a
+/// pid named twice recorded once. Pure string work — a probe here would run on
+/// the boot path against the very processes being reported.
+#[test]
+fn the_command_scan_names_pids_patterns_and_units_in_order() {
+    let subjects = referenced_subjects(
+        "ps -p 2349610 -o pid= && pgrep -af oc-ship-chain && \
+         systemd-run --user --unit=gates-651-deadbeef --wait --pipe python3 tools/gate_select.py \
+         && kill -0 2349610",
+    );
+
+    assert_eq!(
+        subjects,
+        vec![
+            "pid 2349610".to_string(),
+            "pattern oc-ship-chain".to_string(),
+            "unit gates-651-deadbeef".to_string(),
+        ],
+        "order follows the command and the repeated pid is named once"
     );
 }

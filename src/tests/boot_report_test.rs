@@ -1,6 +1,12 @@
 //! Boot report ledger (#1242): sessions vs rows, and a wake that never left.
 
+use crate::brain::agent::PushOrigin;
+use crate::brain::agent::QueuedUserMessage;
+use crate::brain::agent::service::MessageEnqueueCallback;
 use crate::brain::agent::service::boot_report::*;
+use crate::brain::agent::service::restart_recovery::{
+    deliver_or_park, flush_parked, parked_count, test_guard as parked_guard,
+};
 use std::sync::Mutex;
 use uuid::Uuid;
 
@@ -22,10 +28,42 @@ fn uuid(n: u8) -> Uuid {
 #[test]
 fn an_empty_boot_still_says_so() {
     let _g = guard();
+    // `parked` is process-global too, so this exact-equality assertion holds
+    // the same lock the tests that park reports do (#1206's lesson).
+    let _parked = parked_guard();
     assert_eq!(
         summary_line(),
-        "[boot] interrupted=0 resumed=[] delivered=0 failed=0"
+        "[boot] interrupted=0 resumed=[] delivered=0 failed=0 parked=0"
     );
+}
+
+/// #937: both of the day's boots printed `delivered=0` while reports sat
+/// unclaimed — a clean-looking line over a backlog nobody routed. The parked
+/// count makes the backlog visible, and it has to fall back to zero once the
+/// reports go out, or it would be a constant rather than a measurement.
+#[test]
+fn the_summary_counts_reports_parked_for_a_session_no_route_claimed() {
+    let _g = guard();
+    let _parked = parked_guard();
+    let queued = |text: &str| QueuedUserMessage {
+        context_text: text.to_string(),
+        display_text: text.to_string(),
+        origin: PushOrigin::Other,
+        bg_meta: None,
+    };
+
+    // No route claims either session yet: recovery runs before channels bind.
+    assert!(!deliver_or_park(Uuid::new_v4(), queued("interrupted one")));
+    assert!(!deliver_or_park(Uuid::new_v4(), queued("interrupted two")));
+    assert_eq!(parked_count(), 2);
+    let line = summary_line();
+    assert!(line.contains("parked=2"), "two reports are waiting: {line}");
+
+    let local: MessageEnqueueCallback =
+        std::sync::Arc::new(|_session: Uuid, _msg: QueuedUserMessage| {});
+    assert_eq!(flush_parked(&local), 2);
+    let line = summary_line();
+    assert!(line.contains("parked=0"), "the backlog is gone: {line}");
 }
 
 #[test]
