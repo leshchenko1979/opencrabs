@@ -308,17 +308,25 @@ fn the_guard_runs_before_the_artifact_correction() {
     let fn_start = src
         .find("pub(super) async fn compute_compaction_summary(")
         .expect("compute_compaction_summary must exist");
-    let guard = src
+    // Scope the search to the FUNCTION BODY. A whole-file `find` cannot tell
+    // WHICH call site it found: #934 added a second, legitimate
+    // `enforce_summary_budget` call in `finalize_continuation_document`, which
+    // is defined ABOVE this function — so the unscoped search returned the
+    // decoration guard and then asserted it lived inside the summariser.
+    // Measured 2026-11-21: the PR-lane gate went RED on `fb17e4f62` for exactly
+    // that reason while the real pair was intact.
+    let after = &src[fn_start..];
+    let body_end = after
+        .find("\n    }\n")
+        .expect("compute_compaction_summary must have a body");
+    let body = &after[..body_end];
+
+    let guard = body
         .find("Self::enforce_summary_budget(")
         .expect("compute_compaction_summary must call the budget guard (#1930)");
-    let correction = src
+    let correction = body
         .find("Self::flag_unbacked_artifacts(summary, &snapshot_messages)")
         .expect("the #482 artifact correction must still run");
-
-    assert!(
-        fn_start < guard,
-        "the guard call must live inside compute_compaction_summary"
-    );
     assert!(
         guard < correction,
         "the budget guard must run BEFORE the #482 artifact correction, so a \
