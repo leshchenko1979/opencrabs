@@ -116,6 +116,22 @@ fn viewer_marks_errored_actions() {
 }
 
 #[test]
+fn viewer_marks_a_nonzero_exit_as_a_warning() {
+    // Kills the mutant that renders `nonzero` as `(err)`: a run that returned
+    // a non-zero code still did its job (#763), so #938 gives it a value of its
+    // own and the viewer must neither hide it as a success nor call it an
+    // error. The three arms have to stay distinguishable in one column.
+    let rows = vec![row("abcdefgh1234", "bash", "nonzero")];
+    let out = render_audit_rows(&rows, true);
+    assert!(out.contains("bash (warn)"), "nonzero is a warning: {out}");
+    assert!(!out.contains("(err)"), "nonzero is not an error: {out}");
+    assert!(
+        !out.contains("|bash|"),
+        "nonzero is not an unmarked success: {out}"
+    );
+}
+
+#[test]
 fn outcome_classifier_verifies_on_green_receipt() {
     let outputs =
         vec!["running tests...\ntest result: ok. 12 passed; 0 failed; 0 ignored".to_string()];
