@@ -23,6 +23,17 @@
 //! the loop. Centralising here keeps both variants side-by-side so
 //! anyone editing the fun version is one screen away from the silent
 //! mirror — they cannot accidentally drift apart.
+//!
+//! #929: the text itself no longer lives in this file. It is data now —
+//! `prompts/compaction.default.toml` compiled into the binary, overridable
+//! per profile at `<profile_home>/prompts/compaction.toml`, loaded and
+//! validated by [`super::prompt_file`]. What stays here is the behaviour:
+//! the [`CompactionKind`] matrix, the plan-state branch, and the order the
+//! pieces are concatenated in. The two `_with` variants take an
+//! already-loaded [`CompactionPrompts`]; the public entry points load one
+//! themselves so their long-standing signatures (pinned by tests) hold.
+
+use super::prompt_file::CompactionPrompts;
 
 /// Which compaction trigger fired. Each kind has a slightly different
 /// recovery story (mid-loop edits vs. provider 4xx vs. async budget),
@@ -89,57 +100,46 @@ impl PlanRecovery {
 /// `plan_recovery`: branches the recovery hint by the session's plan
 /// state. Telling an Editing session to `plan start` would corrupt the
 /// design track, and a NoPlan session gets no plan chatter at all.
+///
+/// The text itself lives in [`CompactionPrompts`] (#929) — the profile's
+/// `prompts/compaction.toml` when it loads, the compiled-in default
+/// otherwise. This four-argument shape is pinned by two source-level
+/// guards: `compaction_prompts_test.rs` calls it directly, and
+/// `compaction_single_continuation_path_test.rs` requires the loop to
+/// reach it exactly once — so the load happens here rather than at the
+/// call site, and `continuation_prompt` keeps its single call.
 pub fn build_continuation(
     kind: CompactionKind,
     silent: bool,
     auto_approve: bool,
     plan_recovery: PlanRecovery,
 ) -> String {
-    let mut text = if silent {
-        silent_body(kind).to_string()
-    } else {
-        fun_body(kind).to_string()
-    };
+    let prompts = CompactionPrompts::load(&crate::config::profile::resolve_profile_home());
+    build_continuation_with(&prompts, kind, silent, auto_approve, plan_recovery)
+}
+
+/// [`build_continuation`] against an already-loaded prompt set.
+///
+/// The continuation body, then section 0's status gate, then the
+/// session-recovery hint, then — when approval is required — the
+/// tool-approval reminder. Order is load-bearing: the status gate must
+/// follow the body so a finished obligation is never re-blessed (#499).
+pub(crate) fn build_continuation_with(
+    prompts: &CompactionPrompts,
+    kind: CompactionKind,
+    silent: bool,
+    auto_approve: bool,
+    plan_recovery: PlanRecovery,
+) -> String {
+    let mut text = prompts.continuation_body(kind, silent).to_string();
     // Issue #499: section 0 carries an explicit status; every body
     // defers to it, so a finished obligation is never re-blessed.
-    text.push_str(OBLIGATION_STATUS_RULE);
+    text.push_str(prompts.obligation_status_rule());
     // Session-recovery hint: applies to ALL variants (fun + silent).
     // Branches on plan state; the coding-standards hint rides along.
-    match plan_recovery {
-        PlanRecovery::NoPlan => {
-            text.push_str(
-                "\n\nSESSION RECOVERY: If the task involves coding, load CODE.md \
-                 for coding standards before editing files.",
-            );
-        }
-        PlanRecovery::Editing => {
-            text.push_str(
-                "\n\nSESSION RECOVERY: This session's plan is in Editing (design \
-                 prose, no live checklist). Re-read the session plan .md and \
-                 continue refining it. Do NOT call `plan` with \
-                 operation=\"start\" and do NOT edit project files; checklist \
-                 operations stay blocked until the user approves the design. \
-                 If the task involves coding, load CODE.md for coding standards \
-                 before editing files.",
-            );
-        }
-        PlanRecovery::Active => {
-            text.push_str(
-                "\n\nSESSION RECOVERY: Call `plan` with operation=\"start\" (no args) to \
-                 re-surface the in-progress task and update the TUI plan widget. If \
-                 this session has an active plan, this will show exactly where you \
-                 left off (task details, progress count). Continue executing from \
-                 there. If the task involves coding, load CODE.md for coding standards \
-                 before editing files.",
-            );
-        }
-    }
+    text.push_str(prompts.session_recovery(plan_recovery));
     if !auto_approve {
-        text.push_str(
-            "\n\nCRITICAL: Tool approval is REQUIRED. You MUST wait for user \
-             approval before EVERY tool execution. Do NOT batch tool calls \
-             without approval.",
-        );
+        text.push_str(prompts.approval_tail());
     }
     text
 }
@@ -156,163 +156,29 @@ pub fn build_continuation(
 /// in-memory session state at build time), so it is immune to the
 /// summarizer's token-budget drops — the durable-state property the
 /// research phase identified as the gap.
-pub fn append_skill_stamp(mut text: String, active_skills: &[String]) -> String {
+///
+/// The stamp template lives in [`CompactionPrompts`] (#929), keyed
+/// `continuation.shared.skill_stamp`; an empty slice skips the load
+/// entirely.
+pub fn append_skill_stamp(text: String, active_skills: &[String]) -> String {
+    if active_skills.is_empty() {
+        return text;
+    }
+    let prompts = CompactionPrompts::load(&crate::config::profile::resolve_profile_home());
+    append_skill_stamp_with(&prompts, text, active_skills)
+}
+
+/// [`append_skill_stamp`] against an already-loaded prompt set.
+pub(crate) fn append_skill_stamp_with(
+    prompts: &CompactionPrompts,
+    mut text: String,
+    active_skills: &[String],
+) -> String {
     if active_skills.is_empty() {
         return text;
     }
     let mut names: Vec<&str> = active_skills.iter().map(|s| s.as_str()).collect();
     names.sort();
-    text.push_str(&format!(
-        "\n\nSKILLS LOADED PRE-COMPACTION: {}. Session focus may have \
-         shifted — consider whether each is still relevant to the \
-         IMMEDIATE TASK; reload only those that are.",
-        names.join(", ")
-    ));
+    text.push_str(&prompts.skill_stamp(&names.join(", ")));
     text
-}
-/// Status gate for the continuation document's section 0.
-///
-/// Issue #499: a continuation document re-blessed a COMPLETED task as the
-/// critical immediate task across five compactions, because section 0 was
-/// carried near-verbatim and every body told the model to continue it
-/// unconditionally. Section 0 now opens with an explicit status line, and
-/// every body defers to it. Appended to ALL variants (fun + silent, all 5
-/// kinds) like the session-recovery hint, so no body can re-bless a
-/// finished task.
-const OBLIGATION_STATUS_RULE: &str = "\n\nOBLIGATION STATUS (section 0 of the summary): section 0 opens with a status \
-     line reading 'Obligation status: OPEN|DONE|UNKNOWN'. Read it BEFORE acting:\n\
-     - OPEN - the obligation is genuinely unfinished: resume it exactly where it left off.\n\
-     - DONE - the obligation is finished (section 0 says so, and the work is committed, \
-     shipped or verified): do NOT redo it, do NOT re-run its steps. Say what remains; if \
-     nothing does, report completion and stop.\n\
-     Never write \"only X remains\" or any other inventory-of-remainder: it reads as a \
-     complete list of what is left when it is a partial one, and a resumed lane stops early \
-     on it. Name the next concrete step instead.\n\
-     - UNKNOWN - the status is missing, or section 0 disagrees with the rest of the \
-     document: resolve it against the live artifact (git state, files, tests) BEFORE \
-     acting, and never treat an unresolved obligation as a critical directive.\n\
-     An absent status line means UNKNOWN, never OPEN.";
-
-fn fun_body(kind: CompactionKind) -> &'static str {
-    match kind {
-        CompactionKind::Regular => {
-            "[SYSTEM: Context was auto-compacted. The summary above includes a snapshot \
-             of recent messages before compaction.\n\
-             POST-COMPACTION PROTOCOL (follow in order):\n\
-             1. Read the compaction summary and the recent message snapshot to understand \
-             the current task, tools in use, and what you were doing.\n\
-             2. If the summary references older context you don't have in the snapshot, use \
-             `session_search` with specific keywords to find those messages. Example: if the \
-             summary mentions \"vision fallback investigation\", run session_search with that \
-             query to recover the details.\n\
-             3. If you need specific brain context, selectively load ONLY the relevant \
-             brain file (e.g. TOOLS.md, SOUL.md, USER.md). NEVER use name=\"all\".\n\
-             4. Open your reply with ONE short ROAST about the compaction — roast yourself, \
-             the context you just lost, or the situation. Be creative and surprise them; \
-             cursing allowed. This is part of the protocol, not a detour: one line, then \
-             straight on.\n\
-             5. If the Obligation status is OPEN, IMMEDIATELY continue the task described in the \"IMMEDIATE TASK\" section \
-             of the compaction summary. This is NOT optional — you MUST pick up exactly \
-             where you left off. Do NOT start a new topic. Do NOT ask what to do next. \
-             Do NOT deviate to unrelated work. If the IMMEDIATE TASK section says \
-             \"CONTINUE: fixing X\", then fix X.]"
-        }
-        CompactionKind::MidLoop => {
-            "[SYSTEM: Context was auto-compacted mid-loop. The summary above includes \
-             a snapshot of recent messages. POST-COMPACTION PROTOCOL:\n\
-             1. Review the summary and snapshot to understand current task state.\n\
-             2. Use `session_search` with keywords from the summary if you need older \
-             context not in the snapshot.\n\
-             3. Open your reply with ONE short ROAST about the compaction — roast yourself, \
-             the context you just lost, or the situation. Be creative and surprise them; \
-             cursing allowed. Part of the protocol, not a detour: one line, then straight \
-             on.\n\
-             4. If the Obligation status is OPEN, IMMEDIATELY continue the task described in the \"IMMEDIATE TASK\" section \
-             of the compaction summary. This is NOT optional — you MUST pick up exactly \
-             where you left off. Do NOT start a new topic. Do NOT ask what to do next. \
-             Do NOT deviate to unrelated work.]"
-        }
-        CompactionKind::Emergency => {
-            "[SYSTEM: Emergency compaction — provider rejected the prompt as \
-             too large. Context has been compacted. POST-COMPACTION PROTOCOL:\n\
-             1. Review the summary to understand where you left off.\n\
-             2. Use `session_search` with keywords if you need older context.\n\
-             3. Briefly acknowledge the compaction with a fun/cheeky ROAST — roast yourself, \
-             the lost context, or the situation; be creative, cursing allowed — then resume \
-             it only if its Obligation status is OPEN; if it is DONE, do not redo it.]"
-        }
-        CompactionKind::PostTool => {
-            "[SYSTEM: Mid-loop context compaction complete. The summary above has \
-             full context of everything done so far. POST-COMPACTION PROTOCOL:\n\
-             1. Review the summary to understand current task state.\n\
-             2. Use `session_search` with keywords if you need older context.\n\
-             Briefly acknowledge the compaction to the user with a fun/cheeky ROAST (roast \
-             yourself, the lost context, or the situation; be creative, surprise them — \
-             cursing allowed), then - if the Obligation status is OPEN - IMMEDIATELY continue the task \
-             described in the \"IMMEDIATE TASK\" section of the compaction summary. \
-             Do NOT start a new topic. Do NOT deviate to unrelated work. \
-             Do NOT re-do completed work.]"
-        }
-        CompactionKind::Manual => {
-            "[SYSTEM: Context was manually compacted. The summary above is your memory of \
-             everything before this point. Resume the IMMEDIATE TASK from the summary, but only if its Obligation status is OPEN; if it is DONE, do not redo it and say what remains. \
-             Do NOT acknowledge the compaction to the user — they already know.]"
-        }
-    }
-}
-
-fn silent_body(kind: CompactionKind) -> &'static str {
-    match kind {
-        CompactionKind::Regular => {
-            "[SYSTEM: Context was auto-compacted. The summary above includes a snapshot \
-             of recent messages before compaction.\n\n\
-             Silently continue the IMMEDIATE TASK from the summary as if nothing happened, but only while its Obligation status is OPEN; if it is DONE, do not redo it and move to what remains. \
-             Do NOT announce, narrate, apologise for, or acknowledge the compaction. The \
-             user does not know it happened and does not need to. Any file you were about \
-             to read or edit can simply be re-read on the next tool call — that's normal, \
-             not worth narrating.\n\n\
-             Use `session_search` with specific keywords if the snapshot lacks older context. \
-             Selectively load brain files (TOOLS.md / SOUL.md / USER.md) only if the task \
-             needs them — never name=\"all\".\n\n\
-             FALLBACK: only if the summary genuinely doesn't make the next step clear, send \
-             ONE short cheeky line (\"brain refresh — what was I working on?\") and ask. \
-             Default behaviour is silent continuation.]"
-        }
-        CompactionKind::MidLoop => {
-            "[SYSTEM: Context was auto-compacted mid-loop. The summary above includes \
-             a snapshot of recent messages.\n\n\
-             Silently continue the IMMEDIATE TASK exactly where you left off, but only while its Obligation status is OPEN; if it is DONE, do not redo it. Do NOT \
-             announce or narrate the compaction. Any file you were mid-edit on can be \
-             silently re-read on the next tool call — that's normal, not worth \
-             mentioning. Do NOT restart, ask what to do, or deviate.\n\n\
-             Use `session_search` with keywords from the summary if older context is \
-             missing from the snapshot.]"
-        }
-        CompactionKind::Emergency => {
-            "[SYSTEM: Emergency compaction — the prompt was too large and got \
-             compacted. The summary above contains the recovered state.\n\n\
-             Silently resume from the IMMEDIATE TASK in the summary, but only if its Obligation status is OPEN; if it is DONE, do not redo it. Do NOT \
-             acknowledge or apologise for the compaction — the user does not \
-             know it happened. Re-read any file you were mid-edit on without \
-             narrating it. Do NOT repeat completed work.\n\n\
-             Use `session_search` with specific keywords if older context is \
-             missing.\n\n\
-             FALLBACK: only if the next step is genuinely unclear from the \
-             summary, send ONE short cheeky line (\"brain refresh — what was \
-             I doing?\") and ask. Default behaviour is silent continuation.]"
-        }
-        CompactionKind::PostTool => {
-            "[SYSTEM: Mid-loop context compaction complete. The summary above has \
-             full context of everything done so far.\n\n\
-             Silently continue the IMMEDIATE TASK from the summary, but only while its Obligation status is OPEN. Do NOT announce \
-             or narrate the compaction. Do NOT start a new topic. Do NOT deviate to \
-             unrelated work. Do NOT re-do completed work.\n\n\
-             Use `session_search` with keywords if you need older context.]"
-        }
-        CompactionKind::Manual => {
-            "[SYSTEM: Context was manually compacted. Silently resume the IMMEDIATE \
-             TASK from the summary, but only while its Obligation status is OPEN. Do not acknowledge the compaction — the user \
-             triggered it intentionally and already sees the confirmation.]"
-        }
-    }
 }

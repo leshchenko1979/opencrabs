@@ -144,6 +144,13 @@ fn the_prompt_no_longer_orders_maximum_verbosity() {
         !context_src.contains("BE EXHAUSTIVE"),
         "the continuation-document prompt must not order maximum size (#1930)"
     );
+    // #929: the prompt body moved to the compiled-in prompt set — check it
+    // there too, or this assertion stops measuring the prompt at all.
+    let prompt_src = include_str!("../../prompts/compaction.default.toml");
+    assert!(
+        !prompt_src.contains("BE EXHAUSTIVE"),
+        "the continuation-document prompt must not order maximum size (#1930)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -329,19 +336,21 @@ fn the_guard_runs_before_the_artifact_correction() {
 /// the machine-readable fence the harness needs, and `extract_manifest_block`
 /// cannot re-attach a fence the source never carried.
 ///
-/// The ordering lives inside the `base_prompt` format string, built in an
+/// The ordering lives inside the continuation-document body, built in an
 /// async fn that needs a provider — so, like the guard-order test above, this
-/// reads the source text.
+/// reads the text. Since #929 that text is the compiled-in prompt set
+/// (`prompts/compaction.default.toml`), which is exactly what the summariser
+/// is handed when no profile override is present.
 #[test]
 fn the_prompt_emits_the_must_keep_blocks_before_the_prose() {
-    let src = include_str!("../brain/agent/service/context.rs");
+    let src = include_str!("../../prompts/compaction.default.toml");
     let start = src
-        .find("let base_prompt = format!(")
-        .expect("the summariser prompt must be built in one format string");
+        .find("body = \"\"\"")
+        .expect("the summariser prompt must carry a body template");
     let end = start
         + src[start..]
-            .find("\n        );")
-            .expect("the prompt format string must close");
+            .find("\nbudget_directive = ")
+            .expect("the body template must close before budget_directive");
     let prompt = &src[start..end];
 
     let pos = |needle: &str| {

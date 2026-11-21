@@ -498,10 +498,16 @@ fn every_body_bans_an_inventory_of_remainder() {
 // plans that could never complete — measured 2026-11-10, ten consecutive
 // compactions on one lane, zero commits in 4h28m. These three guards lock the
 // prompt to action-carrying guidance so the example cannot be reintroduced.
+//
+// #929: the text lives in `prompts/compaction.default.toml` and these guards read
+// the SHIPPED prompt set, not a Rust constant. That is deliberate — an operator
+// editing the TOML is exactly the change these sentences must keep policing, so
+// the assertions follow the artifact rather than a copy of it.
 
 #[test]
 fn recovery_playbook_guidance_forbids_a_state_check() {
-    let g = crate::brain::agent::service::context::RECOVERY_PLAYBOOK_GUIDANCE;
+    let prompts = crate::brain::agent::service::prompt_file::CompactionPrompts::compiled_default();
+    let g = prompts.recovery_playbook();
     assert!(
         g.contains("must produce something THIS DOCUMENT DOES NOT ALREADY CONTAIN"),
         "§7 must require each step to add information the document lacks: {g}"
@@ -518,7 +524,8 @@ fn recovery_playbook_guidance_forbids_a_state_check() {
 
 #[test]
 fn next_step_guidance_requires_one_concrete_call() {
-    let g = crate::brain::agent::service::context::NEXT_STEP_GUIDANCE;
+    let prompts = crate::brain::agent::service::prompt_file::CompactionPrompts::compiled_default();
+    let g = prompts.next_step();
     assert!(
         g.contains("ONE concrete call carrying its exact value"),
         "§8 must demand a single call with its exact value: {g}"
@@ -535,7 +542,8 @@ fn next_step_guidance_requires_one_concrete_call() {
 
 #[test]
 fn progress_stamp_guidance_forces_landed_state_on_one_line() {
-    let g = crate::brain::agent::service::context::PROGRESS_STAMP_GUIDANCE;
+    let prompts = crate::brain::agent::service::prompt_file::CompactionPrompts::compiled_default();
+    let g = prompts.progress_stamp();
     assert!(
         g.contains("PROGRESS:"),
         "§0 must mandate a PROGRESS stamp line: {g}"
