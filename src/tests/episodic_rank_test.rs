@@ -1,28 +1,32 @@
-//! The shared episodic relevance scorer (#911).
+//! The shared episodic relevance scorer (#911, #941).
 //!
-//! Two things are being pinned here, and they are different claims:
+//! Three things are being pinned here, and they are different claims:
 //!
-//! 1. the ranking RULE does what the design says — a row that OPENS with the
-//!    query's words outranks one that scatters them at EQUAL hit count, and a
-//!    stronger lexical match is never overridden by a positional one; and
+//! 1. the ranking RULE does what the design says — a row whose query terms sit
+//!    closer together outranks one that scatters them (#941), a row that OPENS
+//!    with the query's words outranks one that does not at EQUAL proximity and
+//!    hit count, a stronger lexical match breaks a proximity tie, and a row
+//!    missing one of the query terms never outranks a row containing them all;
 //! 2. the rule is actually SHARED — the shipped repository path and the Track
 //!    A harness return the same order for the same input, which is the defect
 //!    #911 names. Before the shared module they did not: the repository summed
 //!    every occurrence of a token while the harness counted distinct tokens,
-//!    so the leg was measuring a ranker the binary does not ship.
+//!    so the leg was measuring a ranker the binary does not ship; and
+//! 3. the label a leg publishes names the scorer it grades (#927).
 //!
-//! Test 1 is the one that fails if the tie-break term is deleted: it asserts
-//! the opening-zone row comes first *and* that the input order had the
-//! scattered row first, so a hits-only ranker (which keeps the stable input
-//! order) returns the opposite result.
+//! The proximity tests are the ones that fail if the primary term is deleted:
+//! each asserts the expected order AND that the input order had the losing row
+//! first, so a ranker that keeps the stable input order returns the opposite
+//! result.
 
 use crate::db::Database;
 use crate::db::models::{Message, Session};
 use crate::db::repository::SessionRepository;
 use crate::db::repository::message::MessageRepository;
 use crate::eval::episodic_track::search_slice;
-use crate::relevance::episodic::{self, LEADING_ZONE, MAX_QUERY_TOKENS};
+use crate::relevance::episodic::{self, LEADING_ZONE, MAX_QUERY_TOKENS, NO_PROXIMITY};
 use rusqlite::Connection;
+use std::cmp::Reverse;
 use uuid::Uuid;
 
 /// A long, punctuation-free lead-in. Two properties matter and both are
@@ -81,13 +85,17 @@ fn opening_zone_breaks_a_hit_tie() {
     );
 }
 
-/// Adjacency is a separate signal from the opening zone: the query's words
-/// appear in the SAME order in one row and reversed in the other, both inside
-/// the opening zone, both at equal hit count.
+/// Adjacency is a separate signal from the opening zone AND from proximity:
+/// the query's words appear in the SAME order in one row and reversed in the
+/// other, both inside the opening zone, at equal hit count, and with the SAME
+/// proximity span (the extra spaces in `phrase` pad it to the reversed row's
+/// span, so only `adjacency` can separate them).
 #[test]
 fn adjacency_breaks_a_tie_on_equal_hits_and_leading() {
     let terms = episodic::query_terms("fix flaky deploy");
-    let phrase = "fix flaky deploy";
+    // "fix" (3) + 4 spaces + "flaky" (5) + 1 + "deploy" (6) = span 13,
+    // the same span "deploy flaky fix" has: 6 + 1 + 5 + 1 = 13.
+    let phrase = "fix    flaky deploy";
     let reversed = "deploy flaky fix";
 
     let phrase_score = episodic::score(phrase, &terms);
@@ -96,6 +104,11 @@ fn adjacency_breaks_a_tie_on_equal_hits_and_leading() {
     assert_eq!(
         phrase_score.leading, reversed_score.leading,
         "the opening-zone signal must tie too, or adjacency is not what decided it"
+    );
+    assert_eq!(
+        phrase_score.proximity, reversed_score.proximity,
+        "the span must tie too, or proximity is what decided it: \
+         {phrase_score:?} vs {reversed_score:?}"
     );
     assert_eq!(phrase_score.adjacency, 3, "{phrase_score:?}");
     assert_eq!(reversed_score.adjacency, 1, "{reversed_score:?}");
@@ -108,37 +121,137 @@ fn adjacency_breaks_a_tie_on_equal_hits_and_leading() {
     assert_eq!(ranked.first().map(String::as_str), Some(phrase));
 }
 
-/// The new signals rank BELOW `hits`, so a row that simply mentions the query
-/// more often still wins. This is the guard against the positional terms
-/// turning into a heuristic that beats the lexical match.
+/// Criterion 2 of #941, literally: two rows differing ONLY in term proximity
+/// are ordered by it, and the row whose terms are 3,000 characters apart loses
+/// to the one where they are adjacent.
+///
+/// The two rows are built so proximity is the ONLY field that differs — same
+/// hit count, both terms outside the opening zone, and the same adjacency run
+/// (whitespace collapses under the word split, so 3,000 spaces are one
+/// separator, not 3,000 words). If proximity were dropped, the stable sort
+/// would keep the input order and return the far row first.
 #[test]
-fn hits_stays_the_primary_signal() {
+fn proximity_orders_rows_at_equal_hits_leading_and_adjacency() {
     let terms = episodic::query_terms("deploy flaky");
-    // Many mentions, none of them leading.
-    let many = format!("{LONG_LEAD_IN}deploy and deploy and deploy with flaky");
-    // One mention of each, both leading — the positional maximum.
-    let leading = "deploy flaky: notes";
 
-    let many_score = episodic::score(&many, &terms);
-    let leading_score = episodic::score(leading, &terms);
-    assert!(
-        many_score.hits > leading_score.hits,
-        "precondition: the scattered row must have more hits ({many_score:?} vs {leading_score:?})"
+    // Newest first, as `ORDER BY created_at DESC` delivers them: the WRONG row
+    // leads the input, so only the ranker can fix it.
+    let far = format!("{LONG_LEAD_IN}deploy{}flaky", " ".repeat(3_000));
+    let near = format!("{LONG_LEAD_IN}deploy flaky");
+    let rows = vec![far.clone(), near.clone()];
+
+    let far_score = episodic::score(&far, &terms);
+    let near_score = episodic::score(&near, &terms);
+    assert_eq!(
+        far_score.hits, near_score.hits,
+        "precondition: equal hit count, so `hits` cannot decide this: {far_score:?} vs {near_score:?}"
     );
     assert_eq!(
-        leading_score.leading, 2,
-        "precondition: the leading row must max the positional signal"
+        (far_score.leading, far_score.adjacency),
+        (near_score.leading, near_score.adjacency),
+        "precondition: leading and adjacency must TIE, or proximity is not what decided it: \
+         {far_score:?} vs {near_score:?}"
+    );
+
+    // The span is the character distance between the two first occurrences,
+    // so the lead-in cancels out and only the gap between the terms remains.
+    assert_eq!(
+        near_score.proximity,
+        Reverse("deploy".len() + 1),
+        "adjacent row: one space between the terms: {near_score:?}"
+    );
+    assert_eq!(
+        far_score.proximity,
+        Reverse("deploy".len() + 3_000),
+        "far row: 3,000 characters between the terms: {far_score:?}"
+    );
+    assert!(
+        near_score.proximity > far_score.proximity,
+        "a tighter span must compare GREATER — that is what makes it the primary \
+         signal under the derived ascending Ord: {near_score:?} vs {far_score:?}"
+    );
+
+    let ranked = episodic::rank(rows.clone(), &terms, String::as_str);
+    assert_eq!(
+        ranked.first().map(String::as_str),
+        Some(near.as_str()),
+        "the row whose query terms sit together must rank first; a ranker \
+         without the proximity term keeps the input order and returns {far:?} first"
+    );
+    assert_ne!(
+        ranked, rows,
+        "the output equals the input order — the proximity term did not fire"
+    );
+}
+
+/// Criterion 3 of #941: a row MISSING one of the query terms must never
+/// outrank a row that contains all of them, however many times the partial
+/// match repeats the term it does have.
+///
+/// This is the guard that makes the span safe to rank on: a missing term has no
+/// span, and if "no span" scored as 0 — the tightest possible cluster — every
+/// half-match would lead the list. [`NO_PROXIMITY`] is the explicit worst value
+/// instead.
+#[test]
+fn a_row_missing_a_query_term_never_outranks_a_full_match() {
+    let terms = episodic::query_terms("deploy flaky");
+
+    // Ten occurrences of "deploy", none of "flaky": a big hit count, no span.
+    let partial = format!("{LONG_LEAD_IN}deploy ".repeat(10));
+    // Both terms, once each, 3,000 characters apart: the worst FULL span.
+    let full = format!("{LONG_LEAD_IN}deploy{}flaky", " ".repeat(3_000));
+
+    let partial_score = episodic::score(&partial, &terms);
+    let full_score = episodic::score(&full, &terms);
+    assert!(
+        partial_score.hits > full_score.hits,
+        "precondition: the partial row must have the BIGGER hit count, or the \
+         guard is untested: {partial_score:?} vs {full_score:?}"
+    );
+    assert_eq!(
+        partial_score.proximity, NO_PROXIMITY,
+        "a missing term has no span and must take the explicit worst value: {partial_score:?}"
+    );
+
+    let ranked = episodic::rank(vec![partial.clone(), full.clone()], &terms, String::as_str);
+    assert_eq!(
+        ranked.first().map(String::as_str),
+        Some(full.as_str()),
+        "a row containing ALL the query terms must outrank one that contains \
+         only some of them, even a much more frequent some: {partial_score:?} vs {full_score:?}"
+    );
+}
+
+/// `hits` still decides, one level down: at EQUAL proximity it orders the
+/// rows, so a stronger lexical match wins the tie the span left.
+#[test]
+fn hits_breaks_a_proximity_tie() {
+    let terms = episodic::query_terms("deploy flaky");
+    // Same span (both start at "deploy" and put "flaky" one space later);
+    // the second row repeats "deploy" and so has one more hit.
+    let one = "deploy flaky: notes";
+    let more = "deploy flaky deploy: notes";
+
+    let one_score = episodic::score(one, &terms);
+    let more_score = episodic::score(more, &terms);
+    assert_eq!(
+        one_score.proximity, more_score.proximity,
+        "precondition: the spans must TIE: {one_score:?} vs {more_score:?}"
+    );
+    assert!(
+        more_score.hits > one_score.hits,
+        "precondition: the second row must have more hits: {one_score:?} vs {more_score:?}"
     );
 
     let ranked = episodic::rank(
-        vec![leading.to_string(), many.to_string()],
+        vec![one.to_string(), more.to_string()],
         &terms,
         String::as_str,
     );
     assert_eq!(
         ranked.first().map(String::as_str),
-        Some(many.as_str()),
-        "a stronger lexical match must not be outranked by a positional one"
+        Some(more),
+        "at equal proximity the stronger lexical match must lead"
     );
 }
 
@@ -149,6 +262,7 @@ fn edge_cases_are_total() {
     assert_eq!(
         empty,
         episodic::Score {
+            proximity: NO_PROXIMITY,
             hits: 0,
             leading: 0,
             adjacency: 0
@@ -158,11 +272,14 @@ fn edge_cases_are_total() {
     let terms = episodic::query_terms("deploy");
     assert_eq!(terms, vec!["deploy".to_string()]);
 
-    // A single token: adjacency can be at most 1, and only if it leads.
+    // A single token: adjacency can be at most 1, and only if it leads. Its
+    // span is 0 — one term has nothing to be far from — so the proximity term
+    // is constant across the pool and `hits` decides, exactly as before #941.
     let single = episodic::score("deploy now", &terms);
     assert_eq!(single.hits, 1);
     assert_eq!(single.leading, 1);
     assert_eq!(single.adjacency, 1);
+    assert_eq!(single.proximity, Reverse(0));
 
     // No break character anywhere: the zone is the character budget, not the
     // end of the string. A token past the budget must NOT count as leading.
@@ -173,10 +290,13 @@ fn edge_cases_are_total() {
     // A row shorter than the budget is entirely opening zone.
     assert_eq!(episodic::score("deploy", &terms).leading, 1);
 
-    // Empty content and a query that matches nothing are both zero, not a panic.
+    // Empty content and a query that matches nothing are both zero, not a panic
+    // — and the missing term takes the explicit no-span value rather than a
+    // tight `0`.
     assert_eq!(
         episodic::score("", &terms),
         episodic::Score {
+            proximity: NO_PROXIMITY,
             hits: 0,
             leading: 0,
             adjacency: 0
@@ -348,13 +468,32 @@ async fn runtime_and_eval_paths_return_the_same_order() {
     );
 
     // The drift that #911 names would have produced a different order, so the
-    // test above is not vacuous: assert the discriminating row really is
-    // ordered by the summed count.
+    // test above is not vacuous: assert the shared ranker really reorders, and
+    // that it reorders on the signal that now leads (#941 — proximity).
+    //
+    // `deploy/flaky: rollback notes` puts both terms seven characters apart;
+    // the two lead-in rows separate them by a whole clause, and the longer of
+    // the two by more still. So the tight row leads, and the order is NOT the
+    // recency order the input arrived in.
     assert_eq!(
         expected.first().map(String::as_str),
-        Some(seeded[1].id.as_str()),
-        "the row with the most token occurrences must lead — a distinct-count \
-         ranker would put it last"
+        Some(seeded[2].id.as_str()),
+        "the row whose query terms sit closest together must lead — that is \
+         the #941 primary signal, and it is what makes this test non-vacuous"
+    );
+    assert_eq!(
+        expected,
+        vec![
+            seeded[2].id.clone(),
+            seeded[0].id.clone(),
+            seeded[1].id.clone()
+        ],
+        "tightest span first, then the nearer of the two scattered rows"
+    );
+    assert_ne!(
+        expected,
+        seeded.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+        "the ranker returned the input (recency) order unchanged"
     );
 }
 
@@ -380,7 +519,7 @@ fn the_published_ranker_label_names_the_shared_scorer() {
         label.contains("relevance::episodic::rank"),
         "the label must name the shared scorer the leg calls; got {label:?}"
     );
-    for signal in ["hits", "leading", "adjacency"] {
+    for signal in ["proximity", "hits", "leading", "adjacency"] {
         assert!(
             label.contains(signal),
             "the label must name the `{signal}` signal it grades; got {label:?}"

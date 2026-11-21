@@ -472,9 +472,10 @@ impl MessageRepository {
     /// whitespace-separated token must appear somewhere in the content (AND
     /// of substring matches) instead of one contiguous substring. Fetches a
     /// recency-ordered pool (5x the limit, capped at 200), then re-ranks it
-    /// through [`crate::relevance::episodic::rank`] — total token hits first,
-    /// then a token's opening-position signal, then query-order adjacency,
-    /// with SQL recency kept inside a full tie (#911).
+    /// through [`crate::relevance::episodic::rank`] — query-term proximity
+    /// span first (#941), then total token hits, then a token's
+    /// opening-position signal, then query-order adjacency, with SQL recency
+    /// kept inside a full tie (#911).
     pub async fn search_by_content_tokenized(
         &self,
         session_ids: Option<&[Uuid]>,
@@ -550,10 +551,11 @@ impl MessageRepository {
             .context("Failed to search messages by content (tokenized)")?;
 
         // ONE ranking rule, shared with the Track A harness (#911):
-        // `relevance::episodic::rank` scores by total token hits, then by the
-        // row's opening position, then by query-order adjacency, and keeps the
-        // SQL recency order inside a full tie. The harness calls the same
-        // function, so the eval leg measures the ranker this path ships.
+        // `relevance::episodic::rank` scores by query-term proximity span,
+        // then by total token hits, then by the row's opening position, then
+        // by query-order adjacency, and keeps the SQL recency order inside a
+        // full tie. The harness calls the same function, so the eval leg
+        // measures the ranker this path ships.
         Ok(
             crate::relevance::episodic::rank(rows, &terms, |m| m.content.as_str())
                 .into_iter()

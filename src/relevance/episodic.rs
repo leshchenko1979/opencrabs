@@ -13,14 +13,38 @@
 //!
 //! # The signals
 //!
-//! The shipped rule has ONE relevance signal: [`Score::hits`], the total
-//! number of times the query's tokens occur in the row. Every tie then falls
-//! back to the order SQL returned — recency — so a row that ties with a dozen
-//! newer neighbours is unreachable at `k` however well it matches.
+//! The rule used to have ONE relevance signal: [`Score::hits`], the total
+//! number of times the query's tokens occur in the row. Every tie then fell
+//! back to the order SQL returned — recency — so a row that tied with a dozen
+//! newer neighbours was unreachable at `k` however well it matched.
 //!
-//! Two cheap, query-derived signals now rank BELOW `hits`, so they can only
-//! ever break a tie and a better lexical match is never outranked by a
-//! positional one:
+//! #941 measured what that costs, and the measurement is the reason
+//! [`Score::proximity`] now ranks ABOVE `hits` rather than below it: on the
+//! live store, ranking by `(hits, leading, adjacency)` with an UNLIMITED
+//! budget scored the same recall@10 as the shipped, budgeted ranker (0.053
+//! both). A ranker that cannot beat itself given every row is not
+//! under-tuned — its feature set is exhausted. Median 10 rows tied with the
+//! gold, worst case 1,532, and in 19 of 38 cases the ties alone buried it past
+//! `k = 10`. No reweighting of those three signals can help; a new signal is
+//! required.
+//!
+//! [`Score::proximity`] is that signal: the character span from the first to
+//! the last query term's first occurrence. A row where the query words sit
+//! together is ABOUT them; one where they are three thousand characters apart
+//! merely contains both. Occurrence counts are identical in the two cases, so
+//! `hits` cannot see the difference — measured recall@10 goes 0.097 → 0.516
+//! on the same 40 cases and the same 500-row pool. Length-normalised variants
+//! were measured too and are WORSE (0.258 for `span/len`, 0.290 for
+//! `span/sqrt(len)`): dividing by length over-rewards long messages, so the
+//! raw span is the right form.
+//!
+//! Three cheaper hypotheses are recorded here so nobody re-runs them: the
+//! recency pool truncating the target away (50 vs 5,000 fetched: 0.100 →
+//! 0.100), BM25 (→ 0.150), and dropping the query's low-idf terms (→ 0.125).
+//! All three were falsified by measurement.
+//!
+//! The two older signals still rank below `hits`, where they cost nothing and
+//! still break its remaining ties:
 //!
 //! * [`Score::leading`] — how many query tokens have their FIRST occurrence
 //!   inside the row's opening zone (the prefix before the first `:`, `.`,
@@ -31,14 +55,20 @@
 //!   also consecutive in the query's own order. Adjacent query words are a
 //!   phrase; scattered ones are a bag of words.
 //!
+//! Proximity was tried as a TIEBREAK first and changed nothing (0.097 → 0.097),
+//! because `hits` already separates the rows it would have reordered. It is
+//! primary or it is dead weight.
+//!
 //! # What this deliberately does NOT do
 //!
-//! It does not widen `k` and it does not change WHICH rows match — only the
-//! order of rows that match equally well, and only where the row text says
-//! something beyond "contains both words". On a corpus where every matching
-//! row is lexically identical to the query (the Track A fixture's clustered
+//! It does not widen `k` and it does not change WHICH rows match — only how
+//! rows that already match are ordered. On a corpus where every matching row
+//! is lexically identical to the query (the Track A fixture's clustered
 //! vocabulary, #899), every signal here is constant across the pool and the
-//! order is unchanged by construction — see `src/eval/results/track-a-episodic-v3.md`.
+//! order is unchanged by construction — see
+//! `src/eval/results/track-a-episodic-v4.md`.
+
+use std::cmp::Reverse;
 
 /// How many characters of a row count as its opening ("subject") zone.
 pub const LEADING_ZONE: usize = 60;
@@ -85,14 +115,29 @@ pub fn query_terms(query: &str) -> Vec<String> {
     terms
 }
 
-/// The relevance of one row to one query. Ordered: the higher, the more
-/// relevant, with the fields compared in declaration order — so `hits` is the
-/// primary signal, `leading` breaks its ties, and `adjacency` breaks theirs.
+/// The relevance of one row to one query.
+///
+/// **Field order IS the ranking.** The type derives `PartialOrd`/`Ord`, which
+/// compares fields in declaration order, and [`rank`] sorts by `Reverse<Score>`
+/// — so the FIRST field below is the primary signal and each later field only
+/// breaks the tie the ones before it left. Reordering these fields silently
+/// reorders every search result; that is why the order is stated here rather
+/// than left to be inferred from the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Score {
-    /// Total occurrences of every query token, summed. The signal the shipped
-    /// ranker has always used, kept primary so the new terms can never
-    /// override a stronger lexical match.
+    /// How tightly the query's terms cluster: the character span from the
+    /// first term's first occurrence to the last one's, INVERTED (via
+    /// [`Reverse`]) so that a tighter cluster compares GREATER and the derived
+    /// ascending `Ord` puts it first. [`NO_PROXIMITY`] when a term is missing.
+    ///
+    /// Primary since #941: `hits` cannot tell "both words are here, next to
+    /// each other" from "both words are here, three thousand characters
+    /// apart", and on a corpus with shared vocabulary that distinction is the
+    /// only one that survives.
+    pub proximity: Reverse<usize>,
+    /// Total occurrences of every query token, summed. Demoted from primary to
+    /// proximity's tiebreak in #941, where it was measured to be incapable of
+    /// discriminating: 1,532 rows could tie on it.
     pub hits: usize,
     /// Query tokens whose FIRST occurrence sits in the row's opening zone.
     pub leading: usize,
@@ -100,6 +145,16 @@ pub struct Score {
     /// in the query's token list.
     pub adjacency: usize,
 }
+
+/// The value of [`Score::proximity`] when the span is UNDEFINED — because a
+/// query term is missing from the row (or there are no terms at all).
+///
+/// `Reverse(usize::MAX)` is the smallest possible `proximity`, so it sorts
+/// last. That is the explicit guard behind the rule "a row missing a term must
+/// never outrank one that contains all of them": a partial match has no span,
+/// and calling that `0` — the tightest possible cluster — would put every
+/// half-match at the top of the list.
+pub const NO_PROXIMITY: Reverse<usize> = Reverse(usize::MAX);
 
 /// Score one row against `terms`, which may be in any case.
 #[must_use]
@@ -118,7 +173,7 @@ pub fn score(content: &str, terms: &[String]) -> Score {
 /// one reader-facing home — a leg that calls this module quotes this string.
 pub const RANKER_LABEL: &str = "shipped: contiguous LIKE (SQL recency order); a multi-word \
      miss falls back to tokenized AND re-ranked by relevance::episodic::rank — \
-     (hits, leading, adjacency), ties to SQL recency";
+     (proximity span, hits, leading, adjacency), ties to SQL recency";
 
 /// Order `rows` (already in the caller's fallback order — SQL recency) by
 /// relevance, best first. The sort is STABLE, so rows that tie on every signal
@@ -147,10 +202,44 @@ fn score_lower(content: &str, terms: &[String]) -> Score {
         .map(|t| lower.matches(t.as_str()).count())
         .sum();
     Score {
+        proximity: proximity_span(&lower, terms),
         hits,
         leading: leading_hits(&lower, terms),
         adjacency: adjacency_run(&lower, terms),
     }
+}
+
+/// How tightly the query's terms cluster: the character span from the first
+/// term's first occurrence to the last one's, INVERTED so a tighter cluster
+/// compares GREATER (#941).
+///
+/// "First occurrence" is deliberate. A row that mentions `deploy` twice, the
+/// second time next to `flaky`, is not about the pair any more than one that
+/// mentions it once — the span is where the query's words FIRST come together
+/// or it is nothing. Using the closest pair of occurrences instead was not
+/// measured and is not what this returns.
+///
+/// [`NO_PROXIMITY`] when a non-empty term is missing: a partial match has no
+/// span, and scoring it `0` would hand the tightest possible value to every
+/// row that matches only half the query. That guard is what keeps "contains
+/// all the words, far apart" ahead of "contains one word, often".
+///
+/// A single term (or no terms) has no span to measure and ties at
+/// `Reverse(0)` / [`NO_PROXIMITY`] respectively, so single-word queries fall
+/// through to `hits` exactly as they always did.
+fn proximity_span(lower: &str, terms: &[String]) -> Reverse<usize> {
+    let mut lo = usize::MAX;
+    let mut hi = 0usize;
+    let mut seen = false;
+    for term in terms.iter().filter(|t| !t.is_empty()) {
+        let Some(pos) = lower.find(term.as_str()) else {
+            return NO_PROXIMITY;
+        };
+        seen = true;
+        lo = lo.min(pos);
+        hi = hi.max(pos);
+    }
+    if seen { Reverse(hi - lo) } else { NO_PROXIMITY }
 }
 
 /// Byte offset at which a row's opening zone ends: the first sentence break,

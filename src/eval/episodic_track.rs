@@ -17,12 +17,11 @@
 //! # Why MRR is published as the zero it is
 //!
 //! `search_by_content` orders by `created_at DESC` — recency, not relevance —
-//! and the tokenized fallback ranks by word-hit count then recency. There is
-//! no ranker to reward, so a known-item query with more than one matching
-//! message lands wherever recency puts it. #855 is the issue that would give
-//! this leg a ranked message search; until it ships, MRR measures that
-//! absence. It is not a quality regression to chase, and it must not be
-//! reported as one.
+//! and the tokenized fallback ranks by query-term proximity span, then word-hit
+//! count, then recency. Proximity is the only signal with any discriminating
+//! power here (#941); before it, a known-item query with more than one matching
+//! message landed wherever recency put it. MRR still measures how much of that
+//! ordering the fallback can recover.
 //!
 //! # Why the dataset is GENERATED, not committed
 //!
