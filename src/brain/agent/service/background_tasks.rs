@@ -2060,8 +2060,10 @@ pub(crate) fn completion_message(
     // capture line states the byte counts and both paths on every completion;
     // the tail is appended only when it has something to say.
     // PROOF BRANCH: the pre-fix body — an empty tail renders as nothing.
-    let _ = (out, err);
-    let capture = String::new();
+    // `capture_line` is still CALLED so the branch compiles without a dead-code
+    // error; on this branch it returns "" (see its body), which is the pre-fix
+    // rendering.
+    let capture = capture_line(out, err);
     let tail_block = format!("Output (last 50 lines):\n{tail}\n");
     let context = format!(
         "[System: the background task you started has finished.\n\

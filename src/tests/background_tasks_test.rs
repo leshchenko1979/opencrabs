@@ -669,6 +669,12 @@ fn a_mirrored_task_counts_as_detached_and_has_a_label() {
 /// (Python block-buffers to a file) and "the run died before flushing" apart.
 /// Byte counts are what discriminate them, so the line states both counts and
 /// both paths, verbatim.
+///
+/// PROOF BRANCH ONLY: this test's pre-fix failure is already recorded in gate
+/// run 44953244149 (assertion `left == right` at this file's assert_eq, line
+/// 680). It is ignored on THIS branch so nextest's fail-fast does not stop at
+/// the first three failures and the two SURFACE tests below are reached.
+#[ignore = "PROOF BRANCH: pre-fix failure already captured in run 44953244149"]
 #[test]
 fn capture_line_states_both_byte_counts_and_both_paths() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -691,6 +697,9 @@ fn capture_line_states_both_byte_counts_and_both_paths() {
 /// Two files that exist and hold nothing is the one case where "no output" is
 /// a measurement rather than a guess — so it gets its own sentence instead of
 /// a zero-byte count that reads like a measurement of nothing.
+///
+/// PROOF BRANCH ONLY: pre-fix failure already captured in run 44953244149.
+#[ignore = "PROOF BRANCH: pre-fix failure already captured in run 44953244149"]
 #[test]
 fn capture_line_says_no_output_when_both_captures_are_empty() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -713,6 +722,9 @@ fn capture_line_says_no_output_when_both_captures_are_empty() {
 /// A capture path that does not exist is NOT an empty capture: the run may
 /// never have created it, or it may have been swept. Rendering it as `0 bytes`
 /// would state a measurement nobody took, so it says `capture missing`.
+///
+/// PROOF BRANCH ONLY: pre-fix failure already captured in run 44953244149.
+#[ignore = "PROOF BRANCH: pre-fix failure already captured in run 44953244149"]
 #[test]
 fn capture_line_marks_a_missing_capture_instead_of_calling_it_empty() {
     let dir = tempfile::tempdir().expect("tempdir");
