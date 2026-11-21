@@ -110,7 +110,7 @@ pub(crate) fn run(
         render(
             &outcome,
             baseline.as_ref(),
-            prompts.fingerprint(),
+            &prompts.fingerprint(),
             prompts.source(),
         );
     }

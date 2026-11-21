@@ -83,7 +83,7 @@ async fn judge_path_grades_summary_offline_via_replay() {
 // ---- #929: the prompt/eval contract gate -------------------------------------
 
 use crate::eval::baseline::Baseline;
-use crate::eval::compaction_gate::{self, DIMENSION_SECTIONS, REFERENCE_SUMMARY};
+use crate::eval::compaction_gate::{self, DIMENSION_SECTIONS, GateOutcome, REFERENCE_SUMMARY};
 
 /// A prompt body carrying every heading the contract maps. Deliberately a
 /// FIXTURE, not the production prompt: the control must read a stable
@@ -95,6 +95,19 @@ fn full_prompt_body() -> String {
         .map(|(_, heading)| *heading)
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// The failing dimension names, OWNED.
+///
+/// [`GateOutcome::failures`] builds a fresh `Vec` on every call, so mapping it
+/// to `&str` in one expression borrows a temporary that dies at the semicolon —
+/// the assertions then hold a dangling slice. Owning the names keeps the
+/// assertion readable and the borrow checker quiet.
+fn failing_dimensions(out: &GateOutcome) -> Vec<String> {
+    out.failures()
+        .into_iter()
+        .map(|(dimension, _)| dimension)
+        .collect()
 }
 
 #[test]
@@ -122,9 +135,9 @@ fn dropping_a_prompt_section_fails_the_gate_and_names_the_dimension() {
     assert!(!out.holds(), "a weakened prompt MUST fail the gate");
     assert_eq!(out.structural.per_dimension["pending_tasks"].passed, 0);
 
-    let named: Vec<&str> = out.failures().iter().map(|(d, _)| d.as_str()).collect();
+    let named = failing_dimensions(&out);
     assert!(
-        named.contains(&"pending_tasks"),
+        named.iter().any(|d| d == "pending_tasks"),
         "the failing dimension must be named, got {named:?}"
     );
 
@@ -164,8 +177,11 @@ fn a_probed_dimension_with_no_contract_row_is_reported_not_skipped() {
     let out = compaction_gate::run(&ds, &full_prompt_body(), "hello");
 
     assert!(!out.holds(), "an unmapped dimension must not pass silently");
-    let named: Vec<&str> = out.failures().iter().map(|(d, _)| d.as_str()).collect();
-    assert!(named.contains(&"brand_new_dimension"), "got {named:?}");
+    let named = failing_dimensions(&out);
+    assert!(
+        named.iter().any(|d| d == "brand_new_dimension"),
+        "got {named:?}"
+    );
 }
 
 #[test]
