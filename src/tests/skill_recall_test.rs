@@ -214,26 +214,41 @@ fn every_skill_remains_in_the_full_index() {
     }
 }
 
-/// The shortlist is the SCORECARD's order, not the floor-filtered order.
+/// The shortlist is the ADMISSION rule, NOT the scorecard's floor-`0.0` order.
 ///
 /// `score()` orders the whole index at floor `0.0` and counts C1@5 from that.
-/// If the shipped selector built its list at `RECALL_MIN_SCORE` instead, a gold
-/// skill ranked third could be dropped for not clearing the floor, and C1@5
-/// would stop being a statement about the product. The floor decides only
-/// whether a shortlist is emitted at all.
+/// That ordering answers "in what order", and its predicate is `score >= 0.0`
+/// — which admits every entry sharing one stemmed term. It is the right
+/// predicate for a ranking metric and the WRONG one for a shortlist: read as a
+/// selection it fills all five slots with skills the message is not about,
+/// which is the defect #939 measured.
+///
+/// So this test pins the opposite of what it used to: the shipped selector
+/// applies [`Ranked::admitted_indices`], and the two paths are ALLOWED to
+/// disagree. A regression to the floor-`0.0` predicate would restore the
+/// five-of-five list while every other test in this file still passed — the
+/// fixture is small enough that a full list is not obviously wrong.
 #[test]
-fn the_shortlist_order_matches_the_ordering_the_scorecard_counts() {
+fn the_shortlist_is_the_admission_rule_not_the_floor_zero_order() {
+    use crate::brain::memory_recall::{
+        SKILL_RECALL_MIN_SUMMED_IDF, SKILL_RECALL_MIN_TERMS, SKILL_RECALL_RATIO,
+    };
     use crate::brain::section_rank::Ranked;
 
     let md = index();
     let msg = "deploy grafana dashboards and fix the panel SQL";
+    let ranked = Ranked::build(&md);
 
-    // What the scorecard would order: the whole index, floor 0.0.
-    let expected: Vec<String> = Ranked::build(&md)
-        .find_relevant(msg, SKILL_RECALL_MAX, usize::MAX, 0.0)
-        .sections
+    let expected: Vec<String> = ranked
+        .admitted_indices(
+            msg,
+            SKILL_RECALL_MAX,
+            SKILL_RECALL_MIN_TERMS,
+            SKILL_RECALL_MIN_SUMMED_IDF,
+            SKILL_RECALL_RATIO,
+        )
         .iter()
-        .map(|s| s.heading.trim().trim_start_matches('#').trim().to_string())
+        .map(|&i| ranked.heading(i))
         .collect();
 
     let out = recall_skills_from(&md, msg).expect("this message matches an entry");
@@ -244,8 +259,158 @@ fn the_shortlist_order_matches_the_ordering_the_scorecard_counts() {
 
     assert_eq!(
         got, expected,
-        "the shipped shortlist must be the order C1@5 counts, or the measured \
-         number describes the harness instead of the product"
+        "the shipped shortlist must be exactly the admission rule's output, \
+         got {got:?} want {expected:?}"
+    );
+
+    // And the two paths must actually differ here, or the assertion above
+    // would be satisfied by the very predicate #939 removed.
+    let ordering = ranked.find_relevant(msg, SKILL_RECALL_MAX, usize::MAX, 0.0);
+    assert!(
+        ordering.sections.len() > got.len(),
+        "this message must be one where floor-0.0 ordering fills more slots \
+         than admission does ({} vs {}), otherwise the test cannot see the \
+         regression it exists for",
+        ordering.sections.len(),
+        got.len()
+    );
+}
+
+/// A message sharing only COMMON words with the index does not fill the list
+/// (#939 acceptance).
+///
+/// Every one of "the", "skill", "is", "not", "to", "we", "will", "also",
+/// "fix", "it" is a real word the index contains, so a predicate that admits
+/// on one shared term names five skills for a message that is about nothing.
+/// Admission requires agreement on more than one term, weighted by idf, so
+/// filler words — which carry an idf near zero in the corpus being ranked —
+/// cannot carry an entry onto the list. The bound is deliberately "no more
+/// than two", not "none": a two-word coincidence is still possible, and
+/// pinning silence exactly would make this test a hostage to the fixture's
+/// vocabulary rather than to the rule.
+#[test]
+fn a_message_sharing_only_common_terms_does_not_fill_five_slots() {
+    let out = recall_skills_from(
+        &index(),
+        "the skill is not relevant to the task, we will also fix it",
+    );
+
+    let names: Vec<&str> = match &out {
+        Some(text) => listed(text)
+            .split(", ")
+            .filter(|s| !s.trim().is_empty())
+            .collect(),
+        None => Vec::new(),
+    };
+
+    assert!(
+        names.len() <= 2,
+        "a message with no subject must not fill the shortlist; got {} \
+         entries {names:?}\n{out:?}",
+        names.len()
+    );
+    assert!(
+        names.len() < SKILL_RECALL_MAX,
+        "the five-of-five list is exactly the symptom #939 reports"
+    );
+}
+
+/// The #939 acceptance case: the message that raised the issue must not name
+/// skills it is not about.
+///
+/// The live index is not available in CI, so this fixture reproduces the shape
+/// that made the defect visible — an index where a couple of entries share
+/// incidental vocabulary with a long message about something else entirely.
+/// The BEFORE half asserts the fixture still exhibits the defect under the old
+/// predicate (five of five, noise included), so the AFTER half is a statement
+/// about the fix rather than about a fixture that was never broken.
+#[test]
+fn the_issue_message_does_not_name_skills_it_is_not_about() {
+    use crate::brain::section_rank::Ranked;
+
+    const ISSUE_ENTRIES: &[(&str, &str)] = &[
+        (
+            "opencrabs-dev",
+            "OpenCrabs source procedure — fork issues, per-task worktrees, the CI gate, \
+             signed commits, deploy ship",
+        ),
+        (
+            "md-index",
+            "Surface every .md and .mdc file with its title and description from \
+             frontmatter. Use when the user asks to index or list a document tree",
+        ),
+        (
+            "avito-realty-bot",
+            "Process law for the Avito realty bot — the agent that runs Vadim's Avito \
+             messenger dialogues and the reply queue",
+        ),
+        (
+            "ogre-contribute",
+            "RETIRED — ogre is no longer installed or used on this host; the deck \
+             pipeline runs on html-render",
+        ),
+        (
+            "gatus-recovery",
+            "Gatus alert recovery runbook — endpoint failure alerts, SSH host mapping, \
+             disk cleanup",
+        ),
+        (
+            "copywriting",
+            "Direct response copywriting frameworks, headline formulas, campaign templates",
+        ),
+    ];
+
+    // The message quoted in the issue, verbatim.
+    const MSG: &str = "I think we are wrong to index the skill bodies - we will get a \
+                       lot of false positives. We have descriptions specially written to \
+                       decide if the skill is relevant. Also fix the ranker";
+
+    let md = index_markdown(ISSUE_ENTRIES.iter().copied());
+    let ranked = Ranked::build(&md);
+
+    // BEFORE — the floor-0.0 ordering the selector used to take. This is the
+    // symptom, and asserting it here keeps the fix honest: if the fixture ever
+    // stops reproducing the defect, the test says so instead of passing
+    // vacuously.
+    let ordering: Vec<String> = ranked
+        .find_relevant(MSG, SKILL_RECALL_MAX, usize::MAX, 0.0)
+        .sections
+        .iter()
+        .map(|s| s.heading.trim().trim_start_matches('#').trim().to_string())
+        .collect();
+    assert_eq!(
+        ordering.len(),
+        SKILL_RECALL_MAX,
+        "the old predicate must fill all {SKILL_RECALL_MAX} slots on this \
+         fixture, or it no longer reproduces #939: {ordering:?}"
+    );
+    assert!(
+        ordering.iter().any(|n| n == "avito-realty-bot"),
+        "the old predicate must put the noise entry on the list: {ordering:?}"
+    );
+
+    // AFTER — the shipped selector.
+    let out = recall_skills_from(&md, MSG).expect("this message matches an entry");
+    let names: Vec<String> = listed(&out)
+        .split(", ")
+        .map(|s| s.trim_start_matches('/').to_string())
+        .collect();
+
+    for noise in ["avito-realty-bot", "ogre-contribute"] {
+        assert!(
+            !names.iter().any(|n| n == noise),
+            "{noise} shares no subject with the message and must not be named, \
+             got {names:?}\n{out}"
+        );
+    }
+    assert!(
+        names.len() < SKILL_RECALL_MAX,
+        "the shortlist must not fill every slot for this message, got \
+         {names:?}\n{out}"
+    );
+    assert!(
+        names.iter().any(|n| n == "md-index"),
+        "the entry the message IS about must survive the cut, got {names:?}\n{out}"
     );
 }
 
