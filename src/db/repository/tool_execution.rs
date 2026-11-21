@@ -331,12 +331,20 @@ impl ToolExecutionRepository {
 /// * `error` — no process outcome (`exit_code` NULL) and the tool reported
 ///   failure. Non-shell behaviour, unchanged since before #763.
 ///
-/// Cutover: from the instant this predicate ships, new rows read `nonzero`
-/// where they previously read `success` beside a non-zero code. Rows written
-/// before it keep their old value — `tool_executions` is append-only and no
-/// backfill is performed (rewriting an append-only record would be a worse
-/// defect than the mis-bin being fixed). A series counting `success` steps
-/// down once, at the cutover, and is honest after it.
+/// Cutover: **2026-11-21 (UTC)**, the date this predicate first ships. New
+/// rows read `nonzero` from that point where they previously read `success`
+/// beside a non-zero code. Rows written before it keep their old value —
+/// `tool_executions` is append-only and no backfill is performed (rewriting an
+/// append-only record would be a worse defect than the mis-bin being fixed).
+/// A series counting `success` steps down once, at that date, and is honest
+/// after it; a consumer that wants the corrected classification for history
+/// reads `exit_code <> 0` rather than the stored status.
+///
+/// The date lives here rather than in a migration on purpose: a comment-only
+/// migration would be an empty statement list (rusqlite_migration builds one
+/// statement set per entry), and it would move `MIGRATION_COUNT` for a change
+/// that alters no schema. This doc ships WITH the behaviour it describes, so
+/// the two cannot drift apart.
 pub fn tool_outcome_status(success: bool, exit_code: Option<i32>) -> &'static str {
     match exit_code {
         Some(0) => "success",
