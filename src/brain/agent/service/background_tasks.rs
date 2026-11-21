@@ -1985,23 +1985,12 @@ pub(crate) fn tail_lines(text: &str, n: usize) -> String {
 /// BOTH files exist and both are empty. "0 bytes" about a file that is not
 /// there would be a measurement nobody took.
 pub(crate) fn capture_line(out: &Path, err: &Path) -> String {
-    let out_len = capture_len(out);
-    let err_len = capture_len(err);
-    let captures = format!(
-        "captures: {} {}",
-        capture_ref(out, out_len),
-        capture_ref(err, err_len)
-    );
-    match (out_len, err_len) {
-        (Some(0), Some(0)) => {
-            format!("no output on either stream (0 bytes) \u{00b7} {captures}")
-        }
-        _ => format!(
-            "output: {} bytes stdout \u{00b7} {} bytes stderr \u{00b7} {captures}",
-            out_len.unwrap_or(0),
-            err_len.unwrap_or(0)
-        ),
-    }
+    // PROOF BRANCH: the pre-fix rendering of a capture with no tail — nothing
+    // at all. Both helpers stay referenced so the branch builds without
+    // dead-code noise; only the SENTENCE is gone, which is the change under
+    // test.
+    let _ = (out, err, capture_len, capture_ref);
+    String::new()
 }
 
 /// Byte count of one capture file, or `None` when there is no file to count
@@ -2070,12 +2059,10 @@ pub(crate) fn completion_message(
     // nothing", "not flushed yet" and "died before flushing" one blank. The
     // capture line states the byte counts and both paths on every completion;
     // the tail is appended only when it has something to say.
-    let capture = capture_line(out, err);
-    let tail_block = if tail.trim().is_empty() {
-        String::new()
-    } else {
-        format!("Last 50 lines of output:\n{tail}\n")
-    };
+    // PROOF BRANCH: the pre-fix body — an empty tail renders as nothing.
+    let _ = (out, err);
+    let capture = String::new();
+    let tail_block = format!("Output (last 50 lines):\n{tail}\n");
     let context = format!(
         "[System: the background task you started has finished.\n\
          Task: {label}\n\

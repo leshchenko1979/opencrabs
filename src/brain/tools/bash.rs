@@ -362,8 +362,8 @@ pub(crate) fn handover_notice(
 ) -> String {
     let out_tail = capture_tail(output_out);
     let err_tail = capture_tail(output_err);
-    let capture =
-        crate::brain::agent::service::background_tasks::capture_line(output_out, output_err);
+    // PROOF BRANCH: the pre-fix handover omitted the capture section entirely.
+    let capture = String::new();
     let out_block = if out_tail.trim().is_empty() {
         String::new()
     } else {
