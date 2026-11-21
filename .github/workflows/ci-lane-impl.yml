@@ -2,6 +2,22 @@ name: CI lane impl
 
 # CI lane impl — the SINGLE `workflow_call` body behind BOTH carrier lanes.
 #
+# NO SCCACHE (2026-11-21, cache-budget measurement). `mozilla-actions/
+# sccache-action` was removed from BOTH jobs that had it (build, pr-gates).
+# Why, measured on this repo's own cache inventory: 2394 sccache entries held
+# 1194 MB of a 8801 MB budget (85.9% of the 10240 MB repo cap) while 2209 of
+# them (92.3%) were ZERO bytes — 99.7% of all cache ENTRIES for 13.6% of the
+# size. Each 0-byte entry is a cache slot spent on a key that never produced an
+# object, and near the cap GitHub evicts by LRU across the whole repo, so the
+# multi-GB rust-cache entries (nextest 4437 MB, pr-gates 2369 MB, build 801 MB)
+# were competing with 2394 husks. The compile legs already restore a
+# `Swatinem/rust-cache` target directory, which is what actually makes a
+# re-run cheap; sccache was a second, thinner cache over the same work.
+# Removed: the two action steps, both `RUSTC_WRAPPER: "sccache"` envs, and the
+# `sccache --show-stats` lines in both `diagnose` probes (they would print
+# "(sccache not on PATH)" forever). pr-gates-nextest never had it — see the
+# note on that job.
+#
 # This file carries no `on: workflow_dispatch`. It is called by two thin shells
 # that keep their own names, triggers and inputs:
 #   * quick-build-linux.yml — sends `mode: build` (ORDER gates -> Linux amd64)
@@ -128,7 +144,7 @@ on:
         default: false
         type: boolean
       diagnose:
-        description: "true = print the runner's real resource envelope (cpu/ram/disk/cgroup/sccache) after the lint/compile legs; diagnostic only, never fails the run"
+        description: "true = print the runner's real resource envelope (cpu/ram/disk/cgroup) after the lint/compile legs; diagnostic only, never fails the run"
         required: false
         default: false
         type: boolean
@@ -280,9 +296,6 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Run sccache-action
-        uses: mozilla-actions/sccache-action@v0.0.11
-
       - name: Build ([profile.ci], no tests)
         # Sized against THIS step, never the job wall: six consecutive green
         # runs measured 7.0/8.5/18.8/9.4/15.8/7.2 min (max 18.8m), so 35m is
@@ -291,8 +304,6 @@ jobs:
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-          SCCACHE_GHA_ENABLED: "true"
-          RUSTC_WRAPPER: "sccache"
           # Compile-time identity (#865). Empty is handled in src/lib.rs as
           # "unset", so a gate call (fork_version default "") still builds the
           # plain upstream version.
@@ -395,16 +406,11 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         # Fix mode builds a patch, not a verdict — restoring a multi-GB cache
-        # to do it is pure setup cost. Matches the sccache-action predicate
-        # below, which has never run in fix mode either.
+        # to do it is pure setup cost.
         if: ${{ !inputs.fix }}
         with:
           cache-on-failure: true
           save-if: true # pre-PR branches re-run on fix-forward; warm cache turns the second dispatch into minutes
-
-      - name: Run sccache-action
-        if: ${{ !inputs.fix && !inputs.lockregen && !inputs.lockupdate }}
-        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Install system deps (pkg-config, ALSA dev, clang)
         if: ${{ !inputs.fix && !inputs.lockregen && !inputs.lockupdate }}
@@ -440,9 +446,6 @@ jobs:
         # 2.4/2.0/6.1/2.4/9.4/10.9 min (max 10.9m), so 25m is 2.29x the max.
         timeout-minutes: 25
         if: ${{ !inputs.fix && !inputs.lockregen && !inputs.lockupdate }}
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-          RUSTC_WRAPPER: "sccache"
         # `--benches` (2026-11-21, factory #125): the tree declares two
         # `harness = false` bench targets (src/benches/{database,memory}.rs) and
         # NOTHING else on this gate compiles them -- nextest runs libtest
@@ -592,7 +595,9 @@ jobs:
   # it does not run, nothing runs.
   #
   # Deliberately NO sccache: RUSTC_WRAPPER=sccache on a test leg is the
-  # 2026-09-17 SIGTERM storm (3/3 killed vs 0/5-0/6 without).
+  # 2026-09-17 SIGTERM storm (3/3 killed vs 0/5-0/6 without). The action was
+  # removed from the WHOLE gate on 2026-11-21 (cache-budget note, file top);
+  # this job never had it and still must not.
   #
   # COST: one full compile + test per gate dispatch, on its own rust-cache key.
   # That cost is not avoidable by gating: this job IS the verdict, so it is not
@@ -730,10 +735,7 @@ jobs:
           done
           echo "--- cache sizes ---"
           du -sh target 2>/dev/null || true
-          du -sh "$HOME/.cache/sccache" 2>/dev/null || true
           du -sh "$HOME/.cargo/registry" 2>/dev/null || true
-          echo "--- sccache stats ---"
-          sccache --show-stats 2>/dev/null || echo "(sccache not on PATH)"
           echo "===== DIAG pre-test END ====="
 
       - name: Run tests under nextest (shipped feature set, BLOCKING verdict)
@@ -1175,9 +1177,6 @@ jobs:
           done
           echo "--- cache sizes ---"
           du -sh target 2>/dev/null || true
-          du -sh "$HOME/.cache/sccache" 2>/dev/null || true
-          echo "--- sccache stats ---"
-          sccache --show-stats 2>/dev/null || echo "(sccache not on PATH)"
           echo "===== DIAG post-test END ====="
 
       - name: Doctests (nextest does not run them)

@@ -100,7 +100,7 @@ on:
         default: false
         type: boolean
       diagnose:
-        description: "true = print the runner's real resource envelope (cpu/ram/disk/cgroup/sccache) TWICE in pr-gates-nextest: immediately before the test leg and again after it. Both reads are required — memory.peak taken before compilation is the peak of whatever ran earlier in that cgroup, so a pre-only probe cannot show what the compile-and-test leg actually reached. Diagnostic only, never fails the run."
+        description: "true = print the runner's real resource envelope (cpu/ram/disk/cgroup) TWICE in pr-gates-nextest: immediately before the test leg and again after it. Both reads are required — memory.peak taken before compilation is the peak of whatever ran earlier in that cgroup, so a pre-only probe cannot show what the compile-and-test leg actually reached. Diagnostic only, never fails the run."
         required: false
         default: false
         type: boolean
@@ -127,7 +127,7 @@ on:
 # memory ceiling) and H4 (thin-LTO link memory cliff) were argued against the
 # published 16 GB / 4 vCPU spec, not against a reading. `diagnose=true` prints
 # nproc, free -m, df -h, cgroup v2 memory.max/current/peak (v1 fallback),
-# cache sizes and `sccache --show-stats` BOTH before and after the test leg,
+# cache sizes BOTH before and after the test leg,
 # so a future kill can be attributed from the run's own log. Diagnostics are
 # `|| true`-guarded: a probe that fails the gate it is measuring is worthless.
 #
