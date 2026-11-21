@@ -380,9 +380,14 @@ fn a_capture_with_bytes_is_named_by_its_count_and_path() {
     let msg = interrupted_message(&row_for(id));
 
     assert!(
-        msg.context_text
-            .contains("produced 17 bytes before the restart"),
+        msg.context_text.contains("holds 17 bytes"),
         "the byte count is the measurement the row cannot otherwise carry: {}",
+        msg.context_text
+    );
+    assert!(
+        !msg.context_text.contains("before the restart"),
+        "a detached run may have written these bytes after the restart, so the report \
+         must not date them: {}",
         msg.context_text
     );
     assert!(

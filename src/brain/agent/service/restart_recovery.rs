@@ -603,9 +603,14 @@ impl RunEvidence {
     /// says it does not know: an absent file is not an absent result, since a
     /// detached run writes its own captures and may still be writing them
     /// (#936).
+    ///
+    /// No WHEN is stated: the count is what the file holds at report time, and
+    /// a detached run outlives the restart, so bytes present now may have been
+    /// written after it. "produced N bytes before the restart" would be one
+    /// more claim this path did not take (#936).
     fn result_clause(&self) -> String {
         if let Some((path, bytes)) = self.captured_output() {
-            return format!("produced {bytes} bytes before the restart; read them at {path}");
+            return format!("its capture at {path} holds {bytes} bytes; read them there");
         }
         match self.empty_capture() {
             Some(path) => format!("produced no result — its capture at {path} is empty"),
@@ -731,10 +736,10 @@ pub(crate) fn referenced_subjects(command: &str) -> Vec<String> {
             }
             w => {
                 // `systemd-run ... --unit=<name>`, wherever it appears.
-                if let Some(name) = w.strip_prefix("--unit=") {
-                    if !name.is_empty() {
-                        note_subject(&mut subjects, format!("unit {name}"));
-                    }
+                if let Some(name) = w.strip_prefix("--unit=")
+                    && !name.is_empty()
+                {
+                    note_subject(&mut subjects, format!("unit {name}"));
                 } else if w == "--unit"
                     && let Some(name) = words.get(i + 1)
                 {
