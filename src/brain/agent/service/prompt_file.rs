@@ -910,4 +910,66 @@ mod tests {
             "an incomplete override must fall back, not panic"
         );
     }
+
+    #[test]
+    fn load_falls_back_on_a_toml_parse_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("prompts")).expect("mkdir");
+        std::fs::write(
+            dir.path().join("prompts/compaction.toml"),
+            "this is not TOML at all {{{\n",
+        )
+        .expect("write");
+
+        let prompts = CompactionPrompts::load(dir.path());
+        assert_eq!(
+            prompts.source(),
+            "default",
+            "an unparseable override must fall back, not panic"
+        );
+        assert_eq!(
+            prompts.fingerprint(),
+            CompactionPrompts::compiled_default().fingerprint()
+        );
+    }
+
+    #[test]
+    fn load_falls_back_when_the_override_cannot_be_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A DIRECTORY where the file belongs: `read_to_string` fails with an IO
+        // error that is neither NotFound nor a parse error, which is the third
+        // distinct failure arm. Permissions cannot be used for this — the test
+        // suite may run as root, where an unreadable file is still readable.
+        std::fs::create_dir_all(dir.path().join("prompts/compaction.toml")).expect("mkdir");
+
+        let prompts = CompactionPrompts::load(dir.path());
+        assert_eq!(
+            prompts.source(),
+            "default",
+            "an unreadable override must fall back, not panic"
+        );
+    }
+
+    #[test]
+    fn fingerprint_is_stable_and_sensitive() {
+        let a = CompactionPrompts::compiled_default();
+        let b = CompactionPrompts::compiled_default();
+        assert_eq!(a.fingerprint(), b.fingerprint(), "same text, same hash");
+
+        // One character, in a field the hash must cover. A fingerprint that
+        // misses a field cannot tell two prompts apart, and every stored
+        // summary would then claim to come from whichever text it liked.
+        let mut c = CompactionPrompts::compiled_default();
+        c.summariser.system.push('x');
+        assert_ne!(a.fingerprint(), c.fingerprint(), "one char, new hash");
+
+        let mut d = CompactionPrompts::compiled_default();
+        d.continuation.regular.fun.push('x');
+        assert_ne!(
+            a.fingerprint(),
+            d.fingerprint(),
+            "continuation text is prompt text too"
+        );
+        assert_ne!(a.stamp(), d.stamp(), "the stamp must follow the hash");
+    }
 }

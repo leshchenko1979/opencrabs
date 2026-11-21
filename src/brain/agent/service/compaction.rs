@@ -15,6 +15,7 @@
 
 use super::builder::AgentService;
 use super::compaction_notice::CompactionNotifier;
+use super::prompt_file::CompactionPrompts;
 use super::types::{ProgressCallback, ProgressEvent, ToolSize};
 use crate::brain::agent::context::{AgentContext, CompactionScope};
 use uuid::Uuid;
@@ -838,6 +839,37 @@ impl AgentService {
             session_id,
             AgentContext::estimate_tokens(summary),
             compaction_reduced(before_pct, after_pct),
+        );
+        // #929: which prompt text produced this summary. The marker row cannot
+        // carry it — the persisted row IS the live context (#1928), so a byte
+        // added here is a byte every subsequent request pays for — and the
+        // feedback ledger is the durable per-session record of compactions, so
+        // the stamp goes there: `SELECT metadata FROM feedback_ledger WHERE
+        // session_id = ? AND event_type = 'context_compaction'` answers "which
+        // prompt wrote this" instead of leaving it to archaeology.
+        //
+        // Loaded here rather than threaded from the produce site: one small
+        // file read per compaction, and the produce site's own load already
+        // logged the same fingerprint at INFO (`compaction prompt: source=…
+        // fingerprint=…`), so a mid-compaction file swap is visible in the log
+        // as two differing lines rather than silently mis-attributed.
+        let prompt_stamp =
+            CompactionPrompts::load(&crate::config::profile::resolve_profile_home()).stamp();
+        self.record_provider_feedback(
+            session_id,
+            "context_compaction",
+            "summary",
+            Some(
+                &serde_json::json!({
+                    "prompt": prompt_stamp,
+                    "scope": scope.label(),
+                    "before_tokens": before_tokens,
+                    "after_tokens": context.token_count,
+                    "input_tokens": input_tokens,
+                    "elapsed_ms": elapsed.as_millis() as u64,
+                })
+                .to_string(),
+            ),
         );
         if let Some(cb) = progress_callback {
             // The same basis the gate measures on and the meter logs at
