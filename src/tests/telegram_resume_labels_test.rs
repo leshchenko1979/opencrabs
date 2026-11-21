@@ -176,8 +176,14 @@ fn queued_preview_skips_the_session_notify_envelope() {
     let display = "📨 notify from 8b1e2c3d:\nthe build broke";
     let preview = queued_preview(display, &PushOrigin::SessionNotify);
     assert_eq!(preview, "the build broke");
-    assert!(!preview.contains("notify from"), "envelope header must not leak");
-    assert!(!preview.contains("8b1e2c3d"), "raw session id must not leak");
+    assert!(
+        !preview.contains("notify from"),
+        "envelope header must not leak"
+    );
+    assert!(
+        !preview.contains("8b1e2c3d"),
+        "raw session id must not leak"
+    );
 }
 
 /// Control: the skip is gated on the ORIGIN, never on text shape alone — a
@@ -218,7 +224,10 @@ fn queued_preview_truncates_multibyte_on_char_boundary() {
     let long_multibyte = "Ж".repeat(40);
     let preview = queued_preview(&long_multibyte, &PushOrigin::SessionNotify);
     assert_eq!(preview.chars().count(), QUEUED_PREVIEW_MAX + 1);
-    assert!(preview.ends_with('…'), "over the cap earns exactly one ellipsis");
+    assert!(
+        preview.ends_with('…'),
+        "over the cap earns exactly one ellipsis"
+    );
     assert_eq!(
         preview.chars().take(QUEUED_PREVIEW_MAX).collect::<String>(),
         "Ж".repeat(30),

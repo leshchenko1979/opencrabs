@@ -186,6 +186,15 @@ pub(crate) fn log_request(
 ) {
     tracing::info!(
         "{}",
-        request_line(origin, origin_detail, session, kind, path, chat_id, thread_id, msg_id)
+        request_line(
+            origin,
+            origin_detail,
+            session,
+            kind,
+            path,
+            chat_id,
+            thread_id,
+            msg_id
+        )
     );
 }

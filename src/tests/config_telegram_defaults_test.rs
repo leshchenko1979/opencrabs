@@ -139,7 +139,10 @@ fn test_config_partial_override_preserves_other_defaults() {
 #[test]
 fn test_config_mermaid_theme_and_bg_default_to_auto() {
     let d = TelegramConfig::default();
-    assert_eq!(d.mermaid_theme, "auto", "mermaid_theme must default to auto");
+    assert_eq!(
+        d.mermaid_theme, "auto",
+        "mermaid_theme must default to auto"
+    );
     assert_eq!(d.mermaid_bg, "auto", "mermaid_bg must default to auto");
 
     // [channels] omitted entirely.
@@ -171,10 +174,9 @@ fn test_config_mermaid_theme_and_bg_default_to_auto() {
 
 #[test]
 fn test_config_mermaid_theme_and_bg_explicit_values_respected() {
-    let cfg: Config = toml::from_str(
-        "[channels.telegram]\nmermaid_theme = \"forest\"\nmermaid_bg = \"none\"\n",
-    )
-    .expect("config must parse with explicit mermaid styling");
+    let cfg: Config =
+        toml::from_str("[channels.telegram]\nmermaid_theme = \"forest\"\nmermaid_bg = \"none\"\n")
+            .expect("config must parse with explicit mermaid styling");
     let tg = cfg.channels.telegram;
     assert_eq!(
         tg.mermaid_theme, "forest",

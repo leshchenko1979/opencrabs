@@ -210,7 +210,10 @@ async fn bounded_sweep_acts_only_on_a_gone_verdict() {
         0,
         "an inconclusive probe must not write a closure fact"
     );
-    assert_eq!(report.inconclusive, 2, "Live and Inconclusive both decide nothing");
+    assert_eq!(
+        report.inconclusive, 2,
+        "Live and Inconclusive both decide nothing"
+    );
 }
 
 /// The classification the production probe relies on: the shared gone-vocabulary

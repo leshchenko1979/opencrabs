@@ -110,7 +110,10 @@ fn document_order_is_insertion_order_and_reread_is_idempotent() {
     mark_document_read(sid, &a);
     mark_document_read(sid, &b);
     mark_document_read(sid, &c);
-    assert_eq!(documents_for_session(sid), vec![a.clone(), b.clone(), c.clone()]);
+    assert_eq!(
+        documents_for_session(sid),
+        vec![a.clone(), b.clone(), c.clone()]
+    );
 
     // Re-reading the oldest must not duplicate it or move it to the tail.
     mark_document_read(sid, &a);

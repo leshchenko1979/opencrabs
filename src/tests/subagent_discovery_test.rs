@@ -31,9 +31,10 @@ use crate::brain::tools::subagent::{SpawnAgentTool, SubAgentManager, WaitAgentTo
 fn registry_with_subagent_tools() -> ToolRegistry {
     let manager = Arc::new(SubAgentManager::new());
     let reg = ToolRegistry::new();
-    reg.register(Arc::new(SpawnAgentTool::new(manager.clone(), Arc::new(
-        ToolRegistry::new(),
-    ))));
+    reg.register(Arc::new(SpawnAgentTool::new(
+        manager.clone(),
+        Arc::new(ToolRegistry::new()),
+    )));
     reg.register(Arc::new(WaitAgentTool::new(manager)));
     reg
 }
@@ -129,7 +130,9 @@ fn spawn_agent_description_names_trigger_counter_trigger_and_read_back_order() {
 
     // Hard rule 26 in one assertion: the completion wake is the normal read-back,
     // and `wait_agent` is the exception named last.
-    let wake = desc.find("wake").expect("description must name the completion wake");
+    let wake = desc
+        .find("wake")
+        .expect("description must name the completion wake");
     let wait = desc
         .find("wait_agent")
         .expect("description must name wait_agent so the exception is explicit");

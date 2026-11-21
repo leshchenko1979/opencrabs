@@ -208,11 +208,17 @@ fn empty_caption_string_is_treated_as_present() {
 /// `telegram_resume_test.rs` (`markdown_to_html_bold` and siblings).
 #[test]
 fn caption_renders_markdown_like_a_message_body() {
-    assert!(crate::channels::telegram::send::caption_html("**Bold** title").contains("<b>Bold</b>"));
-    assert!(crate::channels::telegram::send::caption_html("Use `foo()` here")
-        .contains("<code>foo()</code>"));
-    assert!(crate::channels::telegram::send::caption_html("Click [here](https://example.com)")
-        .contains("<a href=\"https://example.com\">here</a>"));
+    assert!(
+        crate::channels::telegram::send::caption_html("**Bold** title").contains("<b>Bold</b>")
+    );
+    assert!(
+        crate::channels::telegram::send::caption_html("Use `foo()` here")
+            .contains("<code>foo()</code>")
+    );
+    assert!(
+        crate::channels::telegram::send::caption_html("Click [here](https://example.com)")
+            .contains("<a href=\"https://example.com\">here</a>")
+    );
 }
 
 /// Model-written text must reach Telegram escaped, never as markup.
@@ -233,7 +239,10 @@ fn caption_escapes_html_entities() {
 fn caption_carries_no_paragraph_or_break_tag() {
     for input in ["first para\n\nsecond para", "a soft\nbreak", "# Heading"] {
         let html = crate::channels::telegram::send::caption_html(input);
-        assert!(!html.contains("<p>"), "<p> in caption for {input:?}: {html}");
+        assert!(
+            !html.contains("<p>"),
+            "<p> in caption for {input:?}: {html}"
+        );
         assert!(
             !html.contains("<br"),
             "<br> in caption for {input:?}: {html}"

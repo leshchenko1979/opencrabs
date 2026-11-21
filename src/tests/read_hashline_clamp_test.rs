@@ -200,7 +200,9 @@ async fn a_hashline_read_of_an_empty_file_still_announces_itself() {
 
     assert!(result.success);
     assert!(
-        result.output.contains("(file exists and is empty, 0 bytes)"),
+        result
+            .output
+            .contains("(file exists and is empty, 0 bytes)"),
         "an empty hashline read must still announce itself, got: {:?}",
         result.output
     );

@@ -368,9 +368,10 @@ pub fn db_integrity_problem(detail: Option<&str>) -> Option<ConfigProblem> {
             detail: detail.to_string(),
         },
         severity: Severity::Error,
-        remediation: "Back up the database file, then recreate it (run `/doctor` for diagnostics). \
+        remediation:
+            "Back up the database file, then recreate it (run `/doctor` for diagnostics). \
                       SQLite reported this during the startup integrity check."
-            .into(),
+                .into(),
     })
 }
 
@@ -566,7 +567,11 @@ pub async fn run_proactive_config_audit(
         db_integrity_problem(state.db_integrity_detail().await.as_deref())
             .into_iter()
             .collect();
-    problems.extend(audit_config_problems(config, &raw_config, raw_keys.as_deref()));
+    problems.extend(audit_config_problems(
+        config,
+        &raw_config,
+        raw_keys.as_deref(),
+    ));
     let alert_state = state.config_alert_state();
 
     if !alert_state.should_alert(&problems) {

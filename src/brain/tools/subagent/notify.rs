@@ -298,7 +298,7 @@ impl Tool for SessionNotifyTool {
         use crate::brain::agent::service::notify_receipts;
         use crate::brain::agent::service::quiet_delivery;
         use crate::brain::agent::service::session_routes::{
-            deliver_to_session, session_route, Delivery,
+            Delivery, deliver_to_session, session_route,
         };
 
         let caller_str = from.to_string();
@@ -345,7 +345,10 @@ impl Tool for SessionNotifyTool {
                     // path, so no durable queue row is ever written for a
                     // target that cannot consume it. The bound-but-unclaimed
                     // park is untouched (see the `Delivery::Parked` arm).
-                    match SessionBindingRepository::new(pool).by_session(&target_str).await {
+                    match SessionBindingRepository::new(pool)
+                        .by_session(&target_str)
+                        .await
+                    {
                         Ok(Some(_)) => {}
                         // #574: no durable binding means no channel can claim
                         // this session ACROSS A RESTART. A channel may still
@@ -464,7 +467,10 @@ impl Tool for SessionNotifyTool {
                     // path, so no durable queue row is ever written for a
                     // target that cannot consume it. The bound-but-unclaimed
                     // park is untouched (see the `Delivery::Parked` arm).
-                    match SessionBindingRepository::new(pool).by_session(&target_str).await {
+                    match SessionBindingRepository::new(pool)
+                        .by_session(&target_str)
+                        .await
+                    {
                         Ok(Some(_)) => {}
                         // #574: no durable binding means no channel can claim
                         // this session ACROSS A RESTART. A channel may still

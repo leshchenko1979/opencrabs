@@ -272,7 +272,8 @@ fn split_summary_sections(summary: &str) -> Vec<SummarySection> {
             _ => {}
         }
 
-        if !in_fence_before && fence.is_none()
+        if !in_fence_before
+            && fence.is_none()
             && let Some(n) = parse_section_number(line)
         {
             if !cur.is_empty() {
@@ -377,7 +378,6 @@ fn remove_largest_fenced_block(text: &str) -> Option<String> {
 fn has_obligation_status(summary: &str) -> bool {
     summary.to_lowercase().contains("obligation status")
 }
-
 
 impl AgentService {
     /// The per-turn plan reminder pinned at the end of the prompt, keyed to
@@ -499,11 +499,8 @@ impl AgentService {
         let message_service = MessageService::new(self.context.clone());
         // #854: the compaction boundary is pushed into SQL, so a session that has
         // already been compacted loads its tail instead of its whole history.
-        let mut db_messages = Self::load_messages_since_last_compaction(
-            self.context.pool(),
-            session_id,
-        )
-        .await?;
+        let mut db_messages =
+            Self::load_messages_since_last_compaction(self.context.pool(), session_id).await?;
 
         let model_name = model.unwrap_or_else(|| {
             self.provider_for_session(session_id)
@@ -526,9 +523,7 @@ impl AgentService {
         // `thinking` column instead of dropped (#654), and a CLI provider gets
         // no hoist at all, because another model's chain of thought must never
         // reach its prompt (#1522).
-        let preserve_thinking = !self
-            .provider_for_session(session_id)
-            .cli_handles_tools()
+        let preserve_thinking = !self.provider_for_session(session_id).cli_handles_tools()
             && crate::brain::provider::custom_openai_compatible::preserves_thinking(
                 self.provider_for_session(session_id).base_url(),
                 &model_name,
@@ -1160,7 +1155,10 @@ impl AgentService {
         )
         .await?;
 
-        if !Self::extract_text_from_response(&response).trim().is_empty() {
+        if !Self::extract_text_from_response(&response)
+            .trim()
+            .is_empty()
+        {
             return Ok(response);
         }
 

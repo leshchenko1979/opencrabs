@@ -30,9 +30,9 @@ use crate::services::{ServiceContext, SessionService};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
+use teloxide::payloads::SendChatActionSetters;
 use teloxide::prelude::Requester;
 use teloxide::types::{ChatAction, ChatId, MessageId, ThreadId};
-use teloxide::payloads::SendChatActionSetters;
 
 /// Probes issued per boot. A boot task must not turn a restart into a sweep of
 /// every binding the bot ever wrote.
@@ -119,7 +119,9 @@ where
     for fact in facts {
         let (Ok(chat), Some(thread)) = (
             fact.channel_chat_id.parse::<i64>(),
-            fact.thread_id.as_deref().and_then(|t| t.parse::<i32>().ok()),
+            fact.thread_id
+                .as_deref()
+                .and_then(|t| t.parse::<i32>().ok()),
         ) else {
             continue;
         };

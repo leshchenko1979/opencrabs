@@ -187,17 +187,20 @@ fn references_inside_a_fence_or_a_code_span_are_byte_identical_in_both_forms() {
     let rw = rewrite_local_videos(&text, None, PREFIX, &[]);
 
     assert!(
-        rw.rich.contains(&format!("```\n![fenced]({})", clip.display())),
+        rw.rich
+            .contains(&format!("```\n![fenced]({})", clip.display())),
         "a fenced markdown reference stays verbatim in the rich form: {}",
         rw.rich
     );
     assert!(
-        rw.rich.contains(&format!("`![spanned]({})`", clip.display())),
+        rw.rich
+            .contains(&format!("`![spanned]({})`", clip.display())),
         "a backticked markdown reference stays verbatim in the rich form: {}",
         rw.rich
     );
     assert!(
-        rw.stripped.contains(&format!("![fenced]({})", clip.display())),
+        rw.stripped
+            .contains(&format!("![fenced]({})", clip.display())),
         "and in the strip twin: {}",
         rw.stripped
     );

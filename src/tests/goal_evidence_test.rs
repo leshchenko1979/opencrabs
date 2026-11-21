@@ -210,7 +210,9 @@ fn with_budget_attaches_the_turn_count() {
 async fn no_manager_and_no_plan_yields_an_empty_pack() {
     in_temp_home(async {
         let sid = Uuid::new_v4();
-        let evidence = build_goal_evidence(None, sid, Vec::new(), Vec::new()).await.with_budget(2, 20);
+        let evidence = build_goal_evidence(None, sid, Vec::new(), Vec::new())
+            .await
+            .with_budget(2, 20);
         assert!(evidence.running_tasks.is_empty());
         assert!(evidence.unresolved_tasks.is_empty());
         assert_eq!(evidence.turns_used, 2);

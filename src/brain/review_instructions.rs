@@ -169,7 +169,10 @@ fn probe_file_case_insensitive(dir: &Path, filename: &str) -> Option<(PathBuf, S
         let path = entry.path();
         if path.is_file() {
             let file_name = entry.file_name();
-            if let Some(name_str) = file_name.to_str().filter(|s| s.to_lowercase() == target_lower) {
+            if let Some(name_str) = file_name
+                .to_str()
+                .filter(|s| s.to_lowercase() == target_lower)
+            {
                 return Some((path, name_str.to_string()));
             }
         }
@@ -336,11 +339,13 @@ Verify no unhandled unwrap() calls exist.
             plan_res.source,
             ReviewSource::ProjectFile("REVIEW.md".to_string())
         );
-        assert!(plan_res
-            .content
-            .as_ref()
-            .unwrap()
-            .contains("Verify all acceptance criteria"));
+        assert!(
+            plan_res
+                .content
+                .as_ref()
+                .unwrap()
+                .contains("Verify all acceptance criteria")
+        );
         assert!(!plan_res.content.as_ref().unwrap().contains("unwrap()"));
 
         let code_res =
@@ -349,16 +354,20 @@ Verify no unhandled unwrap() calls exist.
             code_res.source,
             ReviewSource::ProjectFile("REVIEW.md".to_string())
         );
-        assert!(code_res
-            .content
-            .as_ref()
-            .unwrap()
-            .contains("Verify no unhandled unwrap()"));
-        assert!(!code_res
-            .content
-            .as_ref()
-            .unwrap()
-            .contains("acceptance criteria"));
+        assert!(
+            code_res
+                .content
+                .as_ref()
+                .unwrap()
+                .contains("Verify no unhandled unwrap()")
+        );
+        assert!(
+            !code_res
+                .content
+                .as_ref()
+                .unwrap()
+                .contains("acceptance criteria")
+        );
     }
 
     #[test]
@@ -378,11 +387,12 @@ Verify no unhandled unwrap() calls exist.
             res.source,
             ReviewSource::ProfileBrain("CODE.md".to_string())
         );
-        assert!(res
-            .content
-            .as_ref()
-            .unwrap()
-            .contains("All tests must pass"));
+        assert!(
+            res.content
+                .as_ref()
+                .unwrap()
+                .contains("All tests must pass")
+        );
         assert_eq!(res.source.display_label(), "profile/CODE.md");
     }
 
@@ -403,11 +413,12 @@ Verify no unhandled unwrap() calls exist.
             res.source,
             ReviewSource::ProfileBrain("AGENTS.md".to_string())
         );
-        assert!(res
-            .content
-            .as_ref()
-            .unwrap()
-            .contains("Never schedule multi-step refactors"));
+        assert!(
+            res.content
+                .as_ref()
+                .unwrap()
+                .contains("Never schedule multi-step refactors")
+        );
         assert_eq!(res.source.display_label(), "profile/AGENTS.md");
     }
 }

@@ -3,7 +3,7 @@
 use std::fs;
 use tempfile::tempdir;
 
-use crate::brain::review_instructions::{resolve_review_instructions, ReviewKind, ReviewSource};
+use crate::brain::review_instructions::{ReviewKind, ReviewSource, resolve_review_instructions};
 
 #[test]
 fn test_plan_review_precedence_in_project_workspace() {

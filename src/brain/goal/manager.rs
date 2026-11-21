@@ -632,11 +632,7 @@ impl GoalManager {
     async fn record_deferral_await(&self, session_id: Uuid, wake_ref: &str) {
         let repo = SessionBindingRepository::new(self.ctx.pool());
         match repo
-            .set_await(
-                &session_id.to_string(),
-                DEFERRED_AWAIT_KIND,
-                Some(wake_ref),
-            )
+            .set_await(&session_id.to_string(), DEFERRED_AWAIT_KIND, Some(wake_ref))
             .await
         {
             Ok(0) => tracing::warn!(

@@ -154,10 +154,7 @@ fn an_assignment_that_runs_something_is_kept() {
 
 #[test]
 fn an_assignment_after_the_command_is_preserved() {
-    assert_eq!(
-        command_label("cargo test FOO=bar"),
-        "cargo test FOO=bar"
-    );
+    assert_eq!(command_label("cargo test FOO=bar"), "cargo test FOO=bar");
     assert_eq!(
         command_label("cd /srv && MODE=fast pytest -q"),
         "MODE=fast pytest -q"

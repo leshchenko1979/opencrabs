@@ -1988,7 +1988,8 @@ impl Tool for PlanTool {
                     // (never `Auto`, never `User`) so the unattended activation
                     // is auditable and, unlike `Auto`, is NOT demoted on resume
                     // (demoting would re-strand the session on the next load).
-                    let auto_active = (context.auto_approve && !require_approval) || context.headless;
+                    let auto_active =
+                        (context.auto_approve && !require_approval) || context.headless;
                     if auto_active {
                         imported.approve(if context.headless {
                             ApprovalSource::Headless
@@ -2172,8 +2173,8 @@ impl Tool for PlanTool {
                     // strands it. Stamped `Headless` so the unattended
                     // activation is auditable and survives the resume demotion
                     // that correctly reclaims `Auto`. See the import path above.
-                    let auto_active =
-                        !design && ((context.auto_approve && !require_approval) || context.headless);
+                    let auto_active = !design
+                        && ((context.auto_approve && !require_approval) || context.headless);
                     if auto_active {
                         new_plan.approve(if context.headless {
                             ApprovalSource::Headless

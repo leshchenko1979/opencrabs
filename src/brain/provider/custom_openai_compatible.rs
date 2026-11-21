@@ -3713,7 +3713,12 @@ impl Provider for OpenAIProvider {
                     || async {
                         let body = self.encode_body(&openai_request)?;
                         let response = self
-                            .send_bounded(&self.client, &self.send_url(), self.headers_for(session)?, &body)
+                            .send_bounded(
+                                &self.client,
+                                &self.send_url(),
+                                self.headers_for(session)?,
+                                &body,
+                            )
                             .await?;
                         if !response.status().is_success() {
                             return Err(self.handle_error(response).await);
@@ -3835,7 +3840,12 @@ impl Provider for OpenAIProvider {
             || async {
                 let body = self.encode_body(&openai_request)?;
                 let response = self
-                    .send_bounded(&self.stream_client, &self.send_url(), self.headers_for(session)?, &body)
+                    .send_bounded(
+                        &self.stream_client,
+                        &self.send_url(),
+                        self.headers_for(session)?,
+                        &body,
+                    )
                     .await?;
 
                 tracing::debug!("OpenAI response status: {}", response.status());
@@ -3875,7 +3885,12 @@ impl Provider for OpenAIProvider {
                 || async {
                     let body = self.encode_body(&openai_request)?;
                     let r = self
-                        .send_bounded(&self.stream_client, &self.send_url(), self.headers_for(session)?, &body)
+                        .send_bounded(
+                            &self.stream_client,
+                            &self.send_url(),
+                            self.headers_for(session)?,
+                            &body,
+                        )
                         .await?;
                     if !r.status().is_success() {
                         return Err(self.handle_error(r).await);
@@ -3902,7 +3917,12 @@ impl Provider for OpenAIProvider {
                         || async {
                             let body = self.encode_body(&openai_request)?;
                             let r = self
-                                .send_bounded(&self.stream_client, &self.send_url(), self.headers_for(session)?, &body)
+                                .send_bounded(
+                                    &self.stream_client,
+                                    &self.send_url(),
+                                    self.headers_for(session)?,
+                                    &body,
+                                )
                                 .await?;
                             if !r.status().is_success() {
                                 return Err(self.handle_error(r).await);
@@ -5835,7 +5855,10 @@ mod tests {
         let chunk: OpenAIStreamChunk =
             serde_json::from_str(raw).expect("usage-only frame must deserialize");
         assert!(chunk.id.is_empty(), "missing id must default to empty");
-        assert!(chunk.choices.is_empty(), "usage-only frame carries no choices");
+        assert!(
+            chunk.choices.is_empty(),
+            "usage-only frame carries no choices"
+        );
         assert!(chunk.usage.is_some(), "usage must still be parsed");
     }
 

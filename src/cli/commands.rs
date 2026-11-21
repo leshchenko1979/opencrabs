@@ -1429,13 +1429,8 @@ async fn apply_fixes(config: &crate::config::Config, pool: &crate::db::Pool) {
     // conservative — only rows past the age backstop, or all of them when no
     // live instance owns this profile.
     let policy = crate::cli::doctor_fix::ClearPolicy::Conservative;
-    match crate::cli::doctor_fix::run_all(
-        pool,
-        &roots,
-        &crate::config::opencrabs_home(),
-        policy,
-    )
-    .await
+    match crate::cli::doctor_fix::run_all(pool, &roots, &crate::config::opencrabs_home(), policy)
+        .await
     {
         Ok(reports) if reports.is_empty() => println!("    ✅ Nothing to repair"),
         Ok(reports) => {

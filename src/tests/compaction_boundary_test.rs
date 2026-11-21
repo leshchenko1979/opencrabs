@@ -157,7 +157,9 @@ async fn a_reused_sequence_before_the_boundary_is_not_swept_into_the_tail() {
         "the window must start AT the boundary row, not at the start of its sequence"
     );
     assert!(
-        !tail.iter().any(|m| m.content.contains("before the boundary")),
+        !tail
+            .iter()
+            .any(|m| m.content.contains("before the boundary")),
         "a row that sorts before the boundary was swept into the tail — the keyset \
          degraded to a bare `sequence >=`"
     );

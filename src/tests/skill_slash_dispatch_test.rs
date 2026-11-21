@@ -9,7 +9,7 @@
 
 use crate::brain::commands::UserCommand;
 use crate::brain::skills::{Skill, SkillSource};
-use crate::channels::commands::{match_user_command_inner, ChannelCommand};
+use crate::channels::commands::{ChannelCommand, match_user_command_inner};
 
 fn skill(name: &str, body: &str) -> Skill {
     Skill {

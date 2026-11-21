@@ -311,7 +311,10 @@ fn hex_of_formats_rgb_as_lowercase_six_hex() {
         theme::hex_of(Color::Rgb(40, 45, 55)).as_deref(),
         Some("#282d37")
     );
-    assert_eq!(theme::hex_of(Color::Rgb(0, 0, 0)).as_deref(), Some("#000000"));
+    assert_eq!(
+        theme::hex_of(Color::Rgb(0, 0, 0)).as_deref(),
+        Some("#000000")
+    );
     assert_eq!(
         theme::hex_of(Color::Rgb(255, 255, 255)).as_deref(),
         Some("#ffffff")
@@ -378,7 +381,10 @@ fn palette_line_colour_is_one_of_the_two_designed_values() {
     // LESS visible. The style overrides that to pure white on a dark surface
     // (11.28:1 connector-only rows, 13.81:1 stroke) and near-black on a light
     // one. Anything else is the regression returning.
-    let line = MermaidStyle::from_values("dark", "#282d37").palette.line.clone();
+    let line = MermaidStyle::from_values("dark", "#282d37")
+        .palette
+        .line
+        .clone();
     assert!(
         line == "#ffffff" || line == "#333333",
         "connector colour {line} is neither of the two designed values"
@@ -398,7 +404,11 @@ fn palette_fills_are_valid_lowercase_hex_and_are_not_the_same_fill() {
             value[1..].chars().all(|c| c.is_ascii_hexdigit()),
             "{label} must be hex, got {value}"
         );
-        assert_eq!(*value, value.to_ascii_lowercase(), "{label} must be lowercase");
+        assert_eq!(
+            *value,
+            value.to_ascii_lowercase(),
+            "{label} must be lowercase"
+        );
     }
     // The node and subgraph offsets differ, so the two fills differ for every
     // surface a theme can actually resolve to: colliding needs all channels
@@ -667,7 +677,10 @@ fn a_style_statement_without_a_fill_is_left_alone() {
 #[test]
 fn classdef_fills_are_normalised_too() {
     let style = MermaidStyle::from_values("dark", "#282d37");
-    let code = rewritten(&style, "graph TD;\n    classDef warn fill:#fff2cc,stroke:#d6b656");
+    let code = rewritten(
+        &style,
+        "graph TD;\n    classDef warn fill:#fff2cc,stroke:#d6b656",
+    );
     assert!(
         code.ends_with("classDef warn fill:#fff2cc,stroke:#d6b656,color:#000000"),
         "a classDef fill reaches the same nodes as an inline style, got {code}"

@@ -39,10 +39,9 @@ fn day_cutoff_of_zero_days_is_now() {
 #[test]
 fn iso_day_cutoff_matches_the_ledger_column_format() {
     let cutoff = iso_day_cutoff(90);
-    let parsed =
-        NaiveDateTime::parse_from_str(&cutoff, "%Y-%m-%dT%H:%M:%SZ").unwrap_or_else(|e| {
-            panic!("iso_day_cutoff produced {cutoff:?}, not the column format: {e}")
-        });
+    let parsed = NaiveDateTime::parse_from_str(&cutoff, "%Y-%m-%dT%H:%M:%SZ").unwrap_or_else(|e| {
+        panic!("iso_day_cutoff produced {cutoff:?}, not the column format: {e}")
+    });
     let age = Utc::now().naive_utc() - parsed;
     assert!(
         (age.num_seconds() - 90 * SECS_PER_DAY).abs() <= 5,

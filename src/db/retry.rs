@@ -317,8 +317,10 @@ where
             let op = Arc::clone(&op);
             async move {
                 let object = pool.get().await.context("Failed to get connection")?;
-                let res: rusqlite::Result<T> =
-                    object.interact(move |conn| op(conn)).await.map_err(interact_err)?;
+                let res: rusqlite::Result<T> = object
+                    .interact(move |conn| op(conn))
+                    .await
+                    .map_err(interact_err)?;
                 res.map_err(anyhow::Error::from)
             }
         },

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::brain::agent::QueuedUserMessage;
-use crate::channels::image_reentry::{enqueue_image_reentry, ImageReentryLatch};
+use crate::channels::image_reentry::{ImageReentryLatch, enqueue_image_reentry};
 use crate::utils::image::{LocalImageFailure, LocalImageFailureReason};
 
 /// A failed image send the way a channel handler reports it: the reference as
@@ -196,12 +196,9 @@ fn a_failed_dispatch_still_spends_the_exchange() {
     let failures = [delivery_failure("chart.png")];
 
     // An unwired surface: `enqueue_session_message` answers false.
-    assert!(enqueue_image_reentry(
-        &latch,
-        session,
-        &failures,
-        |_msg| false
-    ));
+    assert!(enqueue_image_reentry(&latch, session, &failures, |_msg| {
+        false
+    }));
     assert!(
         !latch.try_spend(session),
         "the latch is spent before the dispatch, so a failed dispatch cannot chain turns"

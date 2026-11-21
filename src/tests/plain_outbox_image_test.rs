@@ -108,7 +108,11 @@ async fn the_fallback_leg_ships_a_local_image_and_strips_the_reference() {
         .await
         .expect("the fallback leg must deliver the message");
 
-    assert_eq!(outbox.sent.len(), 2, "one text chunk plus one image message");
+    assert_eq!(
+        outbox.sent.len(),
+        2,
+        "one text chunk plus one image message"
+    );
     assert!(
         !outbox.sent[0].1.contains("![chart]"),
         "the reference must not survive as dead text: {}",
@@ -350,7 +354,11 @@ async fn the_fallback_leg_fetches_a_remote_reference_and_attaches_it() {
         .await
         .expect("the fallback leg must deliver the message");
 
-    assert_eq!(outbox.sent.len(), 2, "one text chunk plus one fetched image");
+    assert_eq!(
+        outbox.sent.len(),
+        2,
+        "one text chunk plus one fetched image"
+    );
     assert!(
         !outbox.sent[0].1.contains("![chart]"),
         "a remote reference must not survive as dead text: {}",
@@ -428,12 +436,19 @@ async fn a_caption_reaches_the_wire_rendered_and_with_a_parse_mode() {
     let bot = test_bot(&server);
     // The title is the caption, and it carries markdown so the assertion cannot
     // be satisfied by the raw string.
-    let body = format!("see ![chart]({} \"**Caption**\") for details", png.display());
+    let body = format!(
+        "see ![chart]({} \"**Caption**\") for details",
+        png.display()
+    );
     let outbox = send_markdown_outbox(&bot, ChatId(CHAT), None, &body, "tool", "send", None)
         .await
         .expect("the fallback leg must deliver the message");
 
-    assert_eq!(outbox.sent.len(), 2, "one text chunk plus one image message");
+    assert_eq!(
+        outbox.sent.len(),
+        2,
+        "one text chunk plus one image message"
+    );
 
     text_mock.assert_async().await;
     photo_mock.assert_async().await;

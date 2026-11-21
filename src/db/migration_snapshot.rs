@@ -18,7 +18,7 @@
 //! (#716), so a message, a script or a panicked user can always point at
 //! exactly one name.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OpenFlags};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -542,9 +542,9 @@ pub fn integrity_preflight(path: &str, dir: &Path, mode: PreflightMode) -> Resul
                     // as a row that says so (verified 2026-09-28), so `Err` is a
                     // verdict here and must refuse rather than escape as if the
                     // plumbing broke.
-                    match conn.pragma_query_value(None, "integrity_check", |row| {
-                        row.get::<_, String>(0)
-                    }) {
+                    match conn
+                        .pragma_query_value(None, "integrity_check", |row| row.get::<_, String>(0))
+                    {
                         Ok(report) if report == "ok" => None,
                         Ok(report) => Some(format!("integrity_check reported {report:?}")),
                         Err(e) => Some(format!("integrity_check could not run ({e})")),

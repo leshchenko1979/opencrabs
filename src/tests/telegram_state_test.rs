@@ -234,9 +234,15 @@ fn queued_items_count_lifecycle() {
     // One drain takes the WHOLE burst (#1837): the tool loop calls the queue
     // callback once per round-end, so a pop-one drain would have split these
     // two into two turns. Both come out joined, and the count falls to zero.
-    let drained = state.drain_reaction(sid).expect("the burst drains in one call");
+    let drained = state
+        .drain_reaction(sid)
+        .expect("the burst drains in one call");
     assert_eq!(drained.context_text, "first message\nsecond message");
-    assert_eq!(state.queued_items_count(sid), 0, "one drain empties the burst");
+    assert_eq!(
+        state.queued_items_count(sid),
+        0,
+        "one drain empties the burst"
+    );
 
     // Whatever lands AFTER the drain is what the end-of-turn flush sees.
     state.enqueue_reaction(

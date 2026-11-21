@@ -1022,7 +1022,10 @@ pub enum InstanceOwner {
 /// Same lock file as [`instance_running`], read for identity rather than
 /// existence. No lock acquisition, no writes, no signals.
 pub fn instance_owner(profile: &str) -> InstanceOwner {
-    instance_owner_in(&base_opencrabs_dir().join("locks").join("instance"), profile)
+    instance_owner_in(
+        &base_opencrabs_dir().join("locks").join("instance"),
+        profile,
+    )
 }
 
 /// Dir-injectable core of [`instance_owner`] — the same split as

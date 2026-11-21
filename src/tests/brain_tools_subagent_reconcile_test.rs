@@ -68,7 +68,8 @@ fn a_parked_agent_becomes_interrupted() {
     // existed such a file read `Running` and was swept by the same rule, and
     // the new variant must not slip through it.
     isolate("parked");
-    let mut s = WorkStatus::new_agent("agent-4", "audit", "sess-d", "do things", None, None).unwrap();
+    let mut s =
+        WorkStatus::new_agent("agent-4", "audit", "sess-d", "do things", None, None).unwrap();
     s.mark_running().unwrap();
     s.mark_awaiting_input().unwrap();
 
@@ -86,19 +87,14 @@ fn interrupted_carries_a_reason_and_a_completion_stamp() {
     // stamp lets the file age out on the same schedule as any other
     // terminal state.
     isolate("reason");
-    let mut s = WorkStatus::new_agent("agent-3", "test", "sess-c", "do things", None, None).unwrap();
+    let mut s =
+        WorkStatus::new_agent("agent-3", "test", "sess-c", "do things", None, None).unwrap();
     s.mark_running().unwrap();
 
     let orphans = reconcile_with(test_windows());
 
     let finish = orphans[0].finish.as_ref().expect("finish stamped");
-    assert!(
-        finish
-            .error
-            .as_deref()
-            .unwrap_or("")
-            .contains("restarted")
-    );
+    assert!(finish.error.as_deref().unwrap_or("").contains("restarted"));
     assert!(!finish.completed_at.is_empty());
 }
 
@@ -182,7 +178,14 @@ fn unparseable_files_do_not_abort_the_pass() {
 #[test]
 fn commands_are_not_reconciled_by_agent_pass() {
     isolate("commands");
-    WorkStatus::new_command("cmd-1", "test cmd", "sess-c", "cargo test", CommandPaths::none()).unwrap();
+    WorkStatus::new_command(
+        "cmd-1",
+        "test cmd",
+        "sess-c",
+        "cargo test",
+        CommandPaths::none(),
+    )
+    .unwrap();
     assert!(reconcile_with(test_windows()).is_empty());
 }
 
@@ -199,11 +202,7 @@ fn legacy_subagent_files_are_migrated_and_reconciled() {
         "started_at": "2026-09-01T00:00:00Z",
         "state": "Running"
     });
-    fs::write(
-        legacy_dir.join("legacy-agent-1.json"),
-        old_json.to_string(),
-    )
-    .unwrap();
+    fs::write(legacy_dir.join("legacy-agent-1.json"), old_json.to_string()).unwrap();
 
     let migrated = work_status::migrate_legacy_dir(&legacy_dir);
     assert_eq!(migrated, 1);
@@ -422,8 +421,8 @@ fn an_agent_spawned_during_the_pass_is_not_interrupted() {
     // and a live agent's file, so it gets a fixture of its own.
     isolate("spawned_during_pass");
 
-    let mut live = WorkStatus::new_agent("live-1", "started mid-pass", "sess-l", "p", None, None)
-        .unwrap();
+    let mut live =
+        WorkStatus::new_agent("live-1", "started mid-pass", "sess-l", "p", None, None).unwrap();
     live.mark_running().unwrap();
 
     // The file's own spawn stamp is what the guard reads, so age the field, not

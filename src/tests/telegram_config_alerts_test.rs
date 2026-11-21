@@ -1,7 +1,6 @@
 use crate::channels::telegram::config_alerts::{
     ConfigAlertState, ConfigProblem, ConfigProblemKind, Severity, audit_config_problems,
-    db_integrity_problem, format_config_alert, format_config_recovery,
-    resolve_recipient_chat_ids,
+    db_integrity_problem, format_config_alert, format_config_recovery, resolve_recipient_chat_ids,
 };
 use crate::config::{Config, EmbeddingConfig};
 

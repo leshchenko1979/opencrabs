@@ -454,7 +454,10 @@ mod local_file_links {
     fn a_local_file_link_resolves_and_leaves_the_text() {
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3.pdf", PDF_BYTES);
-        let scan = extract_local_files(&format!("before [Q3 report]({}) after", pdf.display()), None);
+        let scan = extract_local_files(
+            &format!("before [Q3 report]({}) after", pdf.display()),
+            None,
+        );
         assert_eq!(
             scan.text, "before 📎 Q3 report after",
             "the reference leaves a visible marker where the link was"
@@ -486,7 +489,10 @@ mod local_file_links {
         let dir = tempfile::tempdir().expect("tempdir");
         let a = write_file(dir.path(), "a.pdf", PDF_BYTES);
         let b = write_file(dir.path(), "b.pdf", PDF_BYTES);
-        let scan = extract_local_files(&format!("[A]({}) then [B]({})", a.display(), b.display()), None);
+        let scan = extract_local_files(
+            &format!("[A]({}) then [B]({})", a.display(), b.display()),
+            None,
+        );
         assert_eq!(paths(&scan), vec![a, b]);
         assert_eq!(scan.text, "📎 A then 📎 B");
     }
@@ -599,10 +605,8 @@ mod local_file_links {
         // caption rather than path debris.
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "Q3 final report.pdf", PDF_BYTES);
-        let scan = extract_local_files(
-            &format!("[report]({} \"Q3 numbers\")", pdf.display()),
-            None,
-        );
+        let scan =
+            extract_local_files(&format!("[report]({} \"Q3 numbers\")", pdf.display()), None);
         assert_eq!(scan.text, "📎 report");
         assert_eq!(paths(&scan), vec![pdf], "the title is not part of the path");
         assert!(scan.failures.is_empty());
@@ -744,11 +748,7 @@ mod local_file_links {
             Some(dir.path()),
         );
 
-        assert_eq!(
-            paths(&scan),
-            vec![a, b],
-            "only the two live files attach"
-        );
+        assert_eq!(paths(&scan), vec![a, b], "only the two live files attach");
         assert_eq!(scan.failures.len(), 1, "the missing file is reported");
         assert_eq!(
             scan.attachments.len(),
@@ -950,7 +950,10 @@ mod local_file_links {
         assert_eq!(scan.failures.len(), 1);
         assert_eq!(scan.failures[0].reason, LocalImageFailureReason::NotFound);
         assert_eq!(scan.failures[0].raw, raw);
-        assert_eq!(scan.failures[0].resolved.as_deref(), Some(missing.as_path()));
+        assert_eq!(
+            scan.failures[0].resolved.as_deref(),
+            Some(missing.as_path())
+        );
     }
 
     #[test]
@@ -1005,8 +1008,8 @@ mod local_file_links {
 
     #[test]
     fn a_file_notice_names_the_reference_and_the_reason() {
-        let notice = file_failure_notice(&[failure("[Q3 report](/root/reports/q3.pdf)")])
-            .expect("notice");
+        let notice =
+            file_failure_notice(&[failure("[Q3 report](/root/reports/q3.pdf)")]).expect("notice");
         assert!(notice.contains("File not attached"), "{notice}");
         assert!(notice.contains("a file"), "{notice}");
         assert!(
@@ -1125,7 +1128,8 @@ mod local_file_links {
         assert_eq!(scan.failures.len(), 1, "reported, so the nudge can fire");
         assert_eq!(scan.failures[0].reason, LocalImageFailureReason::NotFound);
         assert!(
-            scan.text.contains("profiles/ops/projects/nowhere/report.md"),
+            scan.text
+                .contains("profiles/ops/projects/nowhere/report.md"),
             "the reference keeps its clue in the text: {}",
             scan.text
         );
@@ -1141,7 +1145,11 @@ mod local_file_links {
         let dir = tempfile::tempdir().expect("tempdir");
         let base = dir.path().join("profiles").join("ops");
         std::fs::create_dir_all(base.join("projects/shots")).expect("fixture tree");
-        let png = write_file(&base.join("projects/shots"), "shot.png", b"\x89PNG\r\n\x1a\n");
+        let png = write_file(
+            &base.join("projects/shots"),
+            "shot.png",
+            b"\x89PNG\r\n\x1a\n",
+        );
 
         let target = classify_image_target("profiles/ops/projects/shots/shot.png", Some(&base));
 
@@ -1176,7 +1184,8 @@ mod local_file_links {
         );
 
         let files = extract_local_files(&missing, Some(dir.path()));
-        let notice = file_failure_notice(&files.failures).expect("the file family reports the miss");
+        let notice =
+            file_failure_notice(&files.failures).expect("the file family reports the miss");
         assert!(notice.contains("File not attached"), "{notice}");
         assert!(!notice.contains("Image not attached"), "{notice}");
         assert!(notice.contains("gone.md"), "{notice}");
@@ -1298,7 +1307,8 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("before [Q3 report]({}) after", pdf.display()),
             Some(dir.path()),
-            &[]);
+            &[],
+        );
         assert_eq!(
             rw.rich, "before ![Q3 report](tg://document?id=doc0) after",
             "the reference is replaced AT its position by the link, never stripped"
@@ -1323,7 +1333,8 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("see [Q3]({}) here", pdf.display()),
             Some(dir.path()),
-            &[]);
+            &[],
+        );
         assert_eq!(rw.rich, "see ![Q3](tg://document?id=doc0) here");
         assert_eq!(rw.entries.len(), 1);
     }
@@ -1340,7 +1351,8 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("[Q3]({}) and [Q4]({})", q3.display(), q4.display()),
             Some(dir.path()),
-            &[]);
+            &[],
+        );
         assert_eq!(
             rw.rich,
             "![Q3](tg://document?id=doc0) and ![Q4](tg://document?id=doc1)"
@@ -1400,7 +1412,8 @@ mod local_file_rewrite {
             "the picture is not one of the document family's entries"
         );
         assert!(
-            rw.rich.contains(&format!("[{}]({})", png.display(), png.display())),
+            rw.rich
+                .contains(&format!("[{}]({})", png.display(), png.display())),
             "the picture's reference is left EXACTLY as written, for the image \
              walk to claim: {:?}",
             rw.rich
@@ -1416,10 +1429,7 @@ mod local_file_rewrite {
     fn an_empty_label_falls_back_to_the_files_own_name_in_the_alt() {
         let dir = tempfile::tempdir().expect("tempdir");
         let pdf = write_file(dir.path(), "q3-report.pdf", PDF_BYTES);
-        let rw = rewrite_local_files(
-            &format!("[]({})", pdf.display()),
-            Some(dir.path()),
-            &[]);
+        let rw = rewrite_local_files(&format!("[]({})", pdf.display()), Some(dir.path()), &[]);
         assert_eq!(
             rw.rich, "![q3-report.pdf](tg://document?id=doc0)",
             "the reader always has something to anchor on — the file's own name"
@@ -1441,7 +1451,8 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("[Q3 (final) report]({})", pdf.display()),
             Some(dir.path()),
-            &[]);
+            &[],
+        );
         assert_eq!(
             rw.rich, "![Q3 final report](tg://document?id=doc0)",
             "parens are folded out of the alt and the runs they leave collapse"
@@ -1462,7 +1473,8 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("before [state]({}) after", md.display()),
             Some(dir.path()),
-            &[]);
+            &[],
+        );
         assert_eq!(
             rw.rich, "before ![state](tg://document?id=doc0) after",
             "markdown is not special: no toggle, no branch, no exception"
@@ -1493,7 +1505,8 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("before [1918-fix-state.md]({}) after", md.display()),
             Some(dir.path()),
-            std::slice::from_ref(&md));
+            std::slice::from_ref(&md),
+        );
         assert_eq!(rw.rich, "before  after", "the reference is consumed");
         assert!(
             !rw.rich.contains('📎'),
@@ -1553,7 +1566,8 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("before [Q3]({}) after", pdf.display()),
             Some(dir.path()),
-            std::slice::from_ref(&pdf));
+            std::slice::from_ref(&pdf),
+        );
         assert_eq!(rw.rich, "before  after");
         assert!(rw.entries.is_empty());
     }
@@ -1567,7 +1581,8 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("before 📎 [Q3 report]({}) after", pdf.display()),
             Some(dir.path()),
-            &[]);
+            &[],
+        );
         assert_eq!(
             rw.rich, "before ![Q3 report](tg://document?id=doc0) after",
             "the model's own 📎 is consumed, not left beside the reference"
@@ -1587,7 +1602,8 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("![Q3 report]({})", pdf.display()),
             Some(dir.path()),
-            &[]);
+            &[],
+        );
         assert_eq!(
             rw.rich, "![Q3 report](tg://document?id=doc0)",
             "an embed-syntax document is claimed, not passed through as an image ref"
@@ -1602,7 +1618,8 @@ mod local_file_rewrite {
         let rw = rewrite_local_files(
             &format!("\n\n  before [Q3]({})", pdf.display()),
             Some(dir.path()),
-            &[]);
+            &[],
+        );
         assert_eq!(rw.rich, "before ![Q3](tg://document?id=doc0)");
     }
 }

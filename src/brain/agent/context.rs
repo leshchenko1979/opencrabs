@@ -380,8 +380,7 @@ impl AgentContext {
         let segments = self.segments_token_count();
         let delta = self.delta_token_count();
         let floor_after_delta = segments.saturating_add(expected);
-        let headroom_target =
-            (self.max_tokens as f64 * Self::CONSOLIDATION_FLOOR_RATIO) as usize;
+        let headroom_target = (self.max_tokens as f64 * Self::CONSOLIDATION_FLOOR_RATIO) as usize;
 
         let (scope, reason) = if escalate {
             (

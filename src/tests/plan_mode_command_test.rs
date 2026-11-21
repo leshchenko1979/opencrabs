@@ -343,7 +343,10 @@ async fn discard_records_itself_in_history() {
         // NoPlan: nothing changed, so nothing may be written.
         let _ = discard(sid, &ctx).await;
         assert!(
-            msgs.list_messages_for_session(sid).await.unwrap().is_empty(),
+            msgs.list_messages_for_session(sid)
+                .await
+                .unwrap()
+                .is_empty(),
             "a NoPlan discard changes nothing and must record nothing"
         );
 
@@ -368,7 +371,8 @@ async fn discard_records_itself_in_history() {
             row.content
         );
         assert!(
-            row.content.contains("do not re-ask anything it already settled"),
+            row.content
+                .contains("do not re-ask anything it already settled"),
             "the directive is the point of the row: {}",
             row.content
         );

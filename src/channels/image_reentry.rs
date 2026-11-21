@@ -107,8 +107,7 @@ pub fn enqueue_image_reentry(
         "{} image attachment(s) could not be delivered",
         failures.len()
     );
-    let nudge =
-        crate::brain::agent::service::nudge::local_image_delivery_failure_nudge(failures);
+    let nudge = crate::brain::agent::service::nudge::local_image_delivery_failure_nudge(failures);
     let queued = dispatch(QueuedUserMessage::system(
         nudge,
         format!("🖼️ {alert} — asking the model to report them"),

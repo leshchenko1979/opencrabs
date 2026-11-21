@@ -53,12 +53,12 @@ impl BackgroundTaskRepository {
         let (id, session_id) = (id.to_string(), session_id.to_string());
         let (label, command, cwd) = (label.to_string(), command.to_string(), cwd.to_string());
         write_with_retry(&self.pool, &write_retry_config(), move |conn| {
-                conn.execute(
-                    "INSERT INTO background_tasks \
+            conn.execute(
+                "INSERT INTO background_tasks \
                      (id, session_id, label, command, cwd, started_at) \
                      VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s','now'))",
-                    params![id, session_id, label, command, cwd],
-                )
+                params![id, session_id, label, command, cwd],
+            )
         })
         .await
         .context("Failed to record background task")?;
@@ -69,7 +69,7 @@ impl BackgroundTaskRepository {
     pub async fn clear(&self, id: Uuid) -> Result<()> {
         let id = id.to_string();
         write_with_retry(&self.pool, &write_retry_config(), move |conn| {
-                conn.execute("DELETE FROM background_tasks WHERE id = ?1", params![id])
+            conn.execute("DELETE FROM background_tasks WHERE id = ?1", params![id])
         })
         .await
         .context("Failed to clear background task")?;

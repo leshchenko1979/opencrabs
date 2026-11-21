@@ -11,8 +11,8 @@
 //! a vision model. This tool is the on-demand escape hatch for that case.
 
 use super::error::{Result, ToolError};
-use crate::utils::pdf_vision::RenderBound;
 use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
+use crate::utils::pdf_vision::RenderBound;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;

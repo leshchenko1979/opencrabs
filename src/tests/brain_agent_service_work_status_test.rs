@@ -132,7 +132,14 @@ fn command_spawns_running_and_carries_its_kind() {
     // #1160 mid-run visibility: the file exists from spawn, in the shared
     // dir, reading as live work of the Command kind.
     isolate("command_spawn");
-    let s = WorkStatus::new_command("task-1", "sess-1", "cargo test", "cargo test --lib", CommandPaths::none()).unwrap();
+    let s = WorkStatus::new_command(
+        "task-1",
+        "sess-1",
+        "cargo test",
+        "cargo test --lib",
+        CommandPaths::none(),
+    )
+    .unwrap();
     assert_eq!(s.state, WorkState::Running);
     assert_eq!(s.kind, WorkKind::Command);
     assert!(s.finish.is_none(), "mid-run must be unfinished");
@@ -145,7 +152,14 @@ fn command_spawns_running_and_carries_its_kind() {
 #[test]
 fn command_finish_success_stamps_exit_info() {
     isolate("command_finish_ok");
-    WorkStatus::new_command("task-2", "sess-1", "cargo test", "cargo test --lib", CommandPaths::none()).unwrap();
+    WorkStatus::new_command(
+        "task-2",
+        "sess-1",
+        "cargo test",
+        "cargo test --lib",
+        CommandPaths::none(),
+    )
+    .unwrap();
     WorkStatus::finish_command(
         "task-2",
         "sess-1",
@@ -226,7 +240,8 @@ fn interrupted_error_text_is_kind_aware() {
     isolate("interrupted_text");
     let mut agent = WorkStatus::new_agent("agt-i", "a", "sess-1", "p", None, None).unwrap();
     agent.mark_interrupted().unwrap();
-    let mut command = WorkStatus::new_command("cmd-i", "sess-1", "c", "sleep 9", CommandPaths::none()).unwrap();
+    let mut command =
+        WorkStatus::new_command("cmd-i", "sess-1", "c", "sleep 9", CommandPaths::none()).unwrap();
     command.mark_interrupted().unwrap();
 
     assert_eq!(
@@ -259,7 +274,8 @@ fn cleanup_removes_old_files() {
     raw = serde_json::to_string_pretty(&parsed).unwrap();
     fs::write(status_path("old-1"), raw).unwrap();
 
-    let cleanup_result = cleanup_stale(StaleWindows::uniform(Duration::from_secs(7 * 86400))).unwrap();
+    let cleanup_result =
+        cleanup_stale(StaleWindows::uniform(Duration::from_secs(7 * 86400))).unwrap();
     assert!(cleanup_result.1 >= 1, "should have removed at least 1 file");
     assert!(WorkStatus::read("old-1").is_none());
 }
@@ -576,8 +592,8 @@ fn finished_command(id: &str, age: Duration) {
 
 /// A finished SUB-AGENT, stamped `age` ago.
 fn finished_agent(id: &str, age: Duration) {
-    let mut status = WorkStatus::new_agent(id, "review", "sess-agent", "do things", None, None)
-        .unwrap();
+    let mut status =
+        WorkStatus::new_agent(id, "review", "sess-agent", "do things", None, None).unwrap();
     status.mark_running().unwrap();
     status.mark_completed("done".to_string()).unwrap();
     backdate_finish(id, age);
@@ -676,7 +692,8 @@ fn cleanup_stale_leaves_the_runs_leg_to_its_owner() {
     write_capture("dedup1.out", OLD);
     write_capture("dedup1.err", OLD);
 
-    let (_, removed) = cleanup_stale(StaleWindows::uniform(Duration::from_secs(7 * 86400))).unwrap();
+    let (_, removed) =
+        cleanup_stale(StaleWindows::uniform(Duration::from_secs(7 * 86400))).unwrap();
 
     assert_eq!(
         removed, 0,

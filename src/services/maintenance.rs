@@ -67,7 +67,6 @@ pub const SWEEP_WARMUP: Duration = Duration::from_secs(1800);
 /// between them.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(86_400);
 
-
 /// Extra delay the reclaim ticker adds to [`SWEEP_WARMUP`] before its first
 /// tick (#840).
 ///
@@ -375,10 +374,7 @@ impl MaintenanceService {
     /// one place that states which representation a column needs — and the
     /// DELETE's range walks `idx_feedback_ledger_created` instead of scanning
     /// the table.
-    pub(crate) async fn prune_expired_feedback_ledger(
-        &self,
-        retention_days: u32,
-    ) -> Result<usize> {
+    pub(crate) async fn prune_expired_feedback_ledger(&self, retention_days: u32) -> Result<usize> {
         if retention_days == 0 {
             return Ok(0);
         }
@@ -595,12 +591,8 @@ impl MaintenanceService {
                         // it is failing on.
                         tracing::warn!(
                             consecutive_failures = consecutive_failures,
-                            retry_secs = next_sweep_delay(
-                                outcome,
-                                consecutive_failures,
-                                &timing
-                            )
-                            .as_secs(),
+                            retry_secs =
+                                next_sweep_delay(outcome, consecutive_failures, &timing).as_secs(),
                             "Maintenance sweep failed — retrying"
                         );
                     }

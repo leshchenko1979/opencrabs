@@ -405,7 +405,8 @@ async fn tasks_is_owner_only_and_says_so() {
 async fn tasks_renders_for_the_owner_and_accepts_a_count() {
     // Hermetic: an empty status dir, so the test never reads this box's
     // 25k-file tmp/detached and never depends on what ran here.
-    let dir = std::env::temp_dir().join(format!("oc-tasks-cmd-{}", uuid::Uuid::new_v4().as_simple()));
+    let dir =
+        std::env::temp_dir().join(format!("oc-tasks-cmd-{}", uuid::Uuid::new_v4().as_simple()));
     std::fs::create_dir_all(&dir).expect("scratch dir");
     crate::brain::agent::service::work_status::test_override::set(dir.clone());
 

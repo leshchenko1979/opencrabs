@@ -11,8 +11,8 @@ fn cron_config_defaults_to_two_concurrent_turns() {
 
 #[test]
 fn cron_config_accepts_explicit_admission_cap() {
-    let config: CronConfig = toml::from_str("max_concurrent_turns = 7")
-        .expect("cron admission cap should parse");
+    let config: CronConfig =
+        toml::from_str("max_concurrent_turns = 7").expect("cron admission cap should parse");
     assert_eq!(config.max_concurrent_turns, 7);
 }
 
@@ -48,7 +48,10 @@ async fn admission_serializes_the_second_turn_until_release() {
     });
 
     tokio::task::yield_now().await;
-    assert!(!waiter.is_finished(), "second turn bypassed the admission cap");
+    assert!(
+        !waiter.is_finished(),
+        "second turn bypassed the admission cap"
+    );
 
     drop(first);
     assert!(waiter.await.expect("waiter task should complete"));

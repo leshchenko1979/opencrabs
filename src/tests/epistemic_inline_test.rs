@@ -476,7 +476,10 @@ fn test_decay_chain_walks_to_expired_and_stops() {
         Confidence::Expired
     );
     assert_eq!(
-        store.get_belief("test:chain:contradicted").unwrap().confidence,
+        store
+            .get_belief("test:chain:contradicted")
+            .unwrap()
+            .confidence,
         Confidence::Contradicted
     );
     assert_eq!(
@@ -503,7 +506,9 @@ fn test_decay_chain_walks_to_expired_and_stops() {
 fn test_decay_never_produces_contradictions() {
     let mut store = EpistemicStore::new();
     let belief = stale_belief("MEMORY.md##Old Rule", Confidence::Inferred);
-    store.beliefs.insert("MEMORY.md##Old Rule".to_string(), belief);
+    store
+        .beliefs
+        .insert("MEMORY.md##Old Rule".to_string(), belief);
 
     // Age it out entirely.
     store.apply_decay(30);

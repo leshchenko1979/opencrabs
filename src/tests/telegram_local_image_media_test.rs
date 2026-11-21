@@ -17,9 +17,7 @@
 //!   the bytes, so a JPEG does not ship mislabelled as PNG.
 
 use crate::channels::telegram::delivery_dedup::content_key;
-use crate::channels::telegram::rich::api::{
-    build_body_markdown_media_target, media_part_identity,
-};
+use crate::channels::telegram::rich::api::{build_body_markdown_media_target, media_part_identity};
 use crate::channels::telegram::rich::detect::rich_required;
 use crate::channels::telegram::rich::mermaid::{MediaEntry, MediaKind};
 
@@ -50,7 +48,10 @@ fn media_forces_the_rich_plane_where_structure_alone_would_not() {
         "resolved media is itself a reason to ride the rich plane — it is the \
          only plane with a media array"
     );
-    assert!(rich_required(true, false), "structure still promotes on its own");
+    assert!(
+        rich_required(true, false),
+        "structure still promotes on its own"
+    );
     assert!(rich_required(true, true));
     assert!(
         !rich_required(false, false),

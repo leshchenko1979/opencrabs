@@ -724,9 +724,8 @@ pub fn validate_slice_name(raw: &str) -> Result<(), String> {
 
 /// Memoised probe results, keyed by the `systemd-run` binary. A refused wrapper
 /// stays refused for the life of the process.
-static PROBE: std::sync::Mutex<
-    std::collections::BTreeMap<std::ffi::OsString, bool>,
-> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+static PROBE: std::sync::Mutex<std::collections::BTreeMap<std::ffi::OsString, bool>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// Non-Unix hosts have no `systemd-run --scope`, so the module degrades to
 /// "never wrap" — exactly the pre-#776 behaviour, and no probe to pay for.

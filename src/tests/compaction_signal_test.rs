@@ -352,7 +352,10 @@ fn compacting_icon_beats_the_editing_pen() {
     };
     let line = standalone_telemetry_line(&parts, Some(&telem), HeaderMarkup::Markdown);
     assert_eq!(line, "⏳ • 0:30 ⏱️");
-    assert!(!line.contains("✍️"), "editing pen must not win while compacting");
+    assert!(
+        !line.contains("✍️"),
+        "editing pen must not win while compacting"
+    );
 }
 
 /// #398: a settled card is terminal text, so the outcome icon outranks a

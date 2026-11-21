@@ -170,10 +170,15 @@ fn colon_form_takes_bare_strings() {
 
 #[test]
 fn colon_form_caps_at_max_options() {
-    let quoted: Vec<String> = (0..MAX_OPTIONS + 5).map(|i| format!("\"opt{i}\"")).collect();
+    let quoted: Vec<String> = (0..MAX_OPTIONS + 5)
+        .map(|i| format!("\"opt{i}\""))
+        .collect();
     let text = format!("<<suggest_options:[{}]>>", quoted.join(","));
     let (_, items) = extract_leaked_suggestions(&text);
-    assert_eq!(items.expect("oversized array still recovers").len(), MAX_OPTIONS);
+    assert_eq!(
+        items.expect("oversized array still recovers").len(),
+        MAX_OPTIONS
+    );
 }
 
 #[test]

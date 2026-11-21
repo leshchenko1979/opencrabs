@@ -20,8 +20,8 @@ use crate::brain::agent::service::AgentService;
 use crate::brain::agent::service::compaction::compaction_loop_guard;
 use crate::brain::provider::Provider;
 use crate::brain::skills::{
-    retained_set_budget_tokens, retained_set_tokens, shed_order, AuxiliaryFile,
-    RETAINED_SET_BUDGET_RATIO, Skill, SkillSource,
+    AuxiliaryFile, RETAINED_SET_BUDGET_RATIO, Skill, SkillSource, retained_set_budget_tokens,
+    retained_set_tokens, shed_order,
 };
 use crate::db::Database;
 use crate::services::ServiceContext;
@@ -226,7 +226,10 @@ fn shed_order_fires_only_above_the_budget_it_was_given() {
     let active = active(&["alpha"]);
     let aux = aux_map(&[("alpha", "procedure.md")]);
     let measured = retained_set_tokens(&active, &skills, &aux);
-    assert!(measured > 0, "test setup: the retained set must cost something");
+    assert!(
+        measured > 0,
+        "test setup: the retained set must cost something"
+    );
 
     assert!(
         shed_order(&active, &skills, &aux, measured).is_empty(),

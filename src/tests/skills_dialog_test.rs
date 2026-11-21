@@ -5,8 +5,8 @@
 //! — no full `App` needed.
 
 use crate::brain::skills::{Skill, SkillSource};
-use crate::tui::app::skills_dialog::input::{decide, KeyOutcome};
-use crate::tui::app::skills_dialog::{matching, SkillsDialogState};
+use crate::tui::app::skills_dialog::input::{KeyOutcome, decide};
+use crate::tui::app::skills_dialog::{SkillsDialogState, matching};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 fn skill(name: &str, description: &str, body: &str, source: SkillSource) -> Skill {

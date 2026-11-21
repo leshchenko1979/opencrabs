@@ -1276,10 +1276,7 @@ fn format_breakdown_share(tokens: usize, ctx_max: u32) -> String {
     if ctx_max == 0 {
         return "—".to_string();
     }
-    format!(
-        "{:.1}%",
-        (tokens as f64 / ctx_max as f64) * 100.0
-    )
+    format!("{:.1}%", (tokens as f64 / ctx_max as f64) * 100.0)
 }
 
 /// Table row plus a name-only row beneath it for one manifest list.
@@ -1300,7 +1297,11 @@ fn breakdown_group(
     let resolved = entries.iter().filter(|e| e.tokens.is_some()).count();
     let total_tokens: usize = entries.iter().filter_map(|e| e.tokens).sum();
     let total_bytes: usize = entries.iter().filter_map(|e| e.bytes).sum();
-    let noun = if entries.len() == 1 { "entry" } else { "entries" };
+    let noun = if entries.len() == 1 {
+        "entry"
+    } else {
+        "entries"
+    };
     // `discard_skills` carries TOOL names in practice (measured on session
     // 2fbfb2f8: five tool names, all inert at `unregister_active_skill`), so
     // the row states how many entries actually resolve rather than calling
@@ -1415,11 +1416,7 @@ fn breakdown_documents(
         }
     }
     let head = if documents.is_empty() {
-        format!(
-            "0 of {} retained · {}",
-            refusals.len(),
-            causes.join(" · ")
-        )
+        format!("0 of {} retained · {}", refusals.len(), causes.join(" · "))
     } else {
         format!("{} not retained · {}", refusals.len(), causes.join(" · "))
     };
@@ -1600,8 +1597,20 @@ pub(crate) fn compaction_breakdown(b: &CompactionBreakdown<'_>) -> String {
         // phone (grid width <= NARROW_TABLE_WIDTH) is drawn as an aligned
         // `<pre>` grid instead, header and separator included; either way no
         // cell is ever fabricated.
-        breakdown_group("kept", &kept, b.ctx_max, "none resolve to a skill", &mut lines);
-        breakdown_group("dropped", &dropped, b.ctx_max, "none resolve to a skill", &mut lines);
+        breakdown_group(
+            "kept",
+            &kept,
+            b.ctx_max,
+            "none resolve to a skill",
+            &mut lines,
+        );
+        breakdown_group(
+            "dropped",
+            &dropped,
+            b.ctx_max,
+            "none resolve to a skill",
+            &mut lines,
+        );
     }
 
     // #846: the documents the window now carries, beside the skills it keeps.
@@ -2030,7 +2039,6 @@ pub(crate) fn tool_entry_icon(tool_name: &str, completed: Option<bool>) -> &'sta
     }
 }
 
-
 /// #808 cue 2, clearing side: drop the marker from every row whose run is no
 /// longer live.
 ///
@@ -2448,7 +2456,9 @@ pub(crate) async fn refresh_flow_html(
                 Some(chat.0),
             )
             .await;
-            if matches!(outcome, super::rate_limit::WaitOutcome::Deferred) { return; }
+            if matches!(outcome, super::rate_limit::WaitOutcome::Deferred) {
+                return;
+            }
             let retry_html = {
                 let s = streaming.lock().unwrap_or_else(|e| e.into_inner());
                 if s.open_group_msg_id != Some(mid) {

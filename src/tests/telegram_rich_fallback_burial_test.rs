@@ -185,7 +185,10 @@ fn a_media_intermediate_that_carries_the_final_body_suppresses_the_resend() {
     // superseded, so the fallback must still run and replace it: suppressing
     // here would leave the reader with the stale copy and no final.
     let html = bubble(final_body, &[7]);
-    assert!(!fallback_would_duplicate(std::slice::from_ref(&html), final_body));
+    assert!(!fallback_would_duplicate(
+        std::slice::from_ref(&html),
+        final_body
+    ));
     assert_eq!(
         superseded_ids(std::slice::from_ref(&html), final_body),
         ids_of(&[7])

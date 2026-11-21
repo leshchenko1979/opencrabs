@@ -9,7 +9,7 @@ use teloxide::types::{ChatAction, ChatId, ThreadId};
 
 use super::flow::{
     COMPACTING_HEADER_TEXT, CompactionBreakdown, DisplayItem, StreamingState, ToolMsg,
-    compaction_breakdown, compacting_flow_line, detach_flow_for_followup, echoes_as_system_line,
+    compacting_flow_line, compaction_breakdown, detach_flow_for_followup, echoes_as_system_line,
     queued_preview,
 };
 use super::handler::tool_context;

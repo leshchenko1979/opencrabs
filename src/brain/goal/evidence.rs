@@ -100,7 +100,12 @@ impl GoalEvidence {
         out.push_str("OPEN PLAN TASKS:\n");
         push_lines(&mut out, &self.unresolved_tasks);
         out.push_str("TOOL RECEIPTS:\n");
-        push_capped_lines(&mut out, &self.tool_receipts, MAX_TOOL_RECEIPTS, "receipt(s)");
+        push_capped_lines(
+            &mut out,
+            &self.tool_receipts,
+            MAX_TOOL_RECEIPTS,
+            "receipt(s)",
+        );
         out.push_str("FILES TOUCHED:\n");
         push_capped_lines(&mut out, &self.files_touched, MAX_FILES_TOUCHED, "file(s)");
         out.push_str(&format!(

@@ -42,7 +42,7 @@ pub mod tools;
 pub use commands::{CommandLoader, UserCommand};
 pub use prompt_builder::BrainLoader;
 pub use review_instructions::{
-    resolve_review_instructions, ResolvedReviewInstructions, ReviewKind, ReviewSource,
+    ResolvedReviewInstructions, ReviewKind, ReviewSource, resolve_review_instructions,
 };
 pub use self_update::SelfUpdater;
 

@@ -160,7 +160,11 @@ fn a_picture_reference_is_left_to_the_image_family() {
         video_scan.attachments.is_empty(),
         "a picture is not video by content, whatever the name says"
     );
-    assert_eq!(image_scan.attachments.len(), 1, "the image family claims it");
+    assert_eq!(
+        image_scan.attachments.len(),
+        1,
+        "the image family claims it"
+    );
     assert_eq!(image_scan.attachments[0].path, picture);
 }
 

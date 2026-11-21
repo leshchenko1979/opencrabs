@@ -254,7 +254,13 @@ fn a_plane_that_is_not_sending_owns_nothing() {
     // When the rich send is not happening at all, BOTH floors must run — an
     // ownership flag that stayed set would drop the media silently.
     let own = rich_media_ownership(false, &[entry("vid0", MediaKind::Video, MP4_BYTES)]);
-    assert!(!own.images, "nothing is owned when the rich plane is not used");
-    assert!(!own.videos, "a floor must never be suppressed for a send that did not happen");
+    assert!(
+        !own.images,
+        "nothing is owned when the rich plane is not used"
+    );
+    assert!(
+        !own.videos,
+        "a floor must never be suppressed for a send that did not happen"
+    );
     assert!(!own.any());
 }

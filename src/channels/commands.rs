@@ -1017,10 +1017,7 @@ pub(crate) fn format_help() -> String {
         ("/restart", "Restart OpenCrabs"),
         ("/rtk", "Show RTK token savings statistics"),
         ("/show-plan", "Show the current plan state"),
-        (
-            "/tasks",
-            "Detached runs in this session (`/tasks [N]`)",
-        ),
+        ("/tasks", "Detached runs in this session (`/tasks [N]`)"),
         (
             "/usage",
             "Token & cost stats (`provider [name]` / `model <name>` / `7d`)",
@@ -2826,7 +2823,13 @@ fn task_row(status: &crate::brain::agent::service::work_status::WorkStatus) -> T
 fn clip_task_label(label: &str) -> String {
     let flattened: String = label
         .chars()
-        .map(|c| if c == '`' || c == '\n' || c == '\r' { ' ' } else { c })
+        .map(|c| {
+            if c == '`' || c == '\n' || c == '\r' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     let trimmed = flattened.trim();
     if trimmed.chars().count() <= 60 {

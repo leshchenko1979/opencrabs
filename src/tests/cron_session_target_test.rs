@@ -148,7 +148,11 @@ async fn job_target_resolves_archived_session_by_prefix() {
     // Preconditions — without these the test would also pass against the OLD
     // live-only listing and prove nothing.
     assert!(
-        repo.list_archived().await.unwrap().iter().any(|s| s.id == id),
+        repo.list_archived()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == id),
         "precondition: the row must really be archived"
     );
     assert!(
@@ -201,7 +205,10 @@ async fn job_target_rejects_non_session_grammar() {
         resolve_job_session_target(&pool, "telegram:123456:78").await,
         None
     );
-    assert_eq!(resolve_job_session_target(&pool, "oc://telegram/123/78").await, None);
+    assert_eq!(
+        resolve_job_session_target(&pool, "oc://telegram/123/78").await,
+        None
+    );
 }
 
 /// A prefix matching no session is `None` (the caller owns the loud failure).

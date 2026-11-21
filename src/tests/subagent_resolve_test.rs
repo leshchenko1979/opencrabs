@@ -42,7 +42,6 @@ fn on_disk(id: &str, parent: Uuid, child: Uuid, grant: Option<AgentGrant>) -> Wo
     .expect("write status")
 }
 
-
 /// Set a record's state the way the real writers do.
 ///
 /// `WorkStatus::write` is private, so the test cannot mutate the handle it
@@ -83,7 +82,12 @@ fn an_agent_that_outlived_the_process_resolves_from_disk() {
     isolate("rehydrate");
     let child = Uuid::new_v4();
     let parent = Uuid::new_v4();
-    on_disk("gone-1", parent, child, Some(AgentGrant::new(false, false, true)));
+    on_disk(
+        "gone-1",
+        parent,
+        child,
+        Some(AgentGrant::new(false, false, true)),
+    );
 
     // A fresh manager: this is the post-restart state, where nothing is in
     // the map but the status file is still there.
@@ -96,7 +100,10 @@ fn an_agent_that_outlived_the_process_resolves_from_disk() {
     let view = manager
         .resolve("gone-1", parent)
         .expect("an agent with a status file must resolve");
-    assert_eq!(view.session_id, child, "the recorded session is the identity");
+    assert_eq!(
+        view.session_id, child,
+        "the recorded session is the identity"
+    );
     assert_eq!(
         manager.get_session_id("gone-1"),
         Some(child),
@@ -113,7 +120,12 @@ fn a_read_only_agent_is_rehydrated_read_only() {
     isolate("grant_preserved");
     let child = Uuid::new_v4();
     let parent = Uuid::new_v4();
-    on_disk("ro-1", parent, child, Some(AgentGrant::new(true, true, false)));
+    on_disk(
+        "ro-1",
+        parent,
+        child,
+        Some(AgentGrant::new(true, true, false)),
+    );
 
     let manager = SubAgentManager::new();
     manager.resolve("ro-1", parent).expect("resolve");
@@ -286,7 +298,10 @@ fn a_stale_non_terminal_record_never_rehydrates_as_running() {
     isolate("stale_running");
     let parent = Uuid::new_v4();
 
-    for (id, state) in [("stale-running-1", "Running"), ("stale-pending-1", "Pending")] {
+    for (id, state) in [
+        ("stale-running-1", "Running"),
+        ("stale-pending-1", "Pending"),
+    ] {
         let child = Uuid::new_v4();
         on_disk(id, parent, child, Some(AgentGrant::legacy()));
         set_state(id, state);

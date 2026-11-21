@@ -32,11 +32,11 @@ use teloxide::prelude::*;
 use teloxide::types::MessageId;
 use uuid::Uuid;
 
+use super::TelegramState;
 use super::delivery::{bg_count_for, subagent_counts_for};
 use super::flow::{FlowOutcome, StreamingState, refresh_flow};
 use super::flow_chrome::refresh_sections;
 use super::governor::EditClass;
-use super::TelegramState;
 use crate::brain::agent::AgentService;
 
 /// Stamp the settled outcome on the turn's flow block and re-render it once.

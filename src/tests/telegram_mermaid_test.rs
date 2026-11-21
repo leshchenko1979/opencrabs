@@ -12,17 +12,17 @@ use crate::channels::telegram::rich::api::{
     build_body_markdown_media_edit, build_body_markdown_media_target, multipart_scalar_fields,
 };
 use crate::channels::telegram::rich::ast::{Block, Inline, MermaidResult};
-use crate::channels::telegram::rich::{markdown_to_html_mermaid, markdown_to_html_mermaid_p};
 use crate::channels::telegram::rich::mermaid::{
-    MediaEntry, MediaKind, MermaidStyle, PREVALIDATE_CONNECT_TIMEOUT_SECS, PREVALIDATE_TIMEOUT_SECS, base64url,
-    cache_get, cache_put, classify_render_failure, error_note, failure_html, find_mermaid_fences,
-    has_mermaid_fence, image_html, ink_url, ink_url_svg, is_diagram_capped, is_image_response,
-    looks_like_mermaid_source, markdown_failure_block,
-    markdown_failure_block_with_link,
-    neutralize_orphan_photo_refs, neutralize_prose_media_html, replacement_for, resolve_blocks,
-    resolve_markdown_media, svg_link_md, unresolved_media_refs, unresolved_media_refs_by,
+    MediaEntry, MediaKind, MermaidStyle, PREVALIDATE_CONNECT_TIMEOUT_SECS,
+    PREVALIDATE_TIMEOUT_SECS, base64url, cache_get, cache_put, classify_render_failure, error_note,
+    failure_html, find_mermaid_fences, has_mermaid_fence, image_html, ink_url, ink_url_svg,
+    is_diagram_capped, is_image_response, looks_like_mermaid_source, markdown_failure_block,
+    markdown_failure_block_with_link, neutralize_orphan_photo_refs, neutralize_prose_media_html,
+    replacement_for, resolve_blocks, resolve_markdown_media, svg_link_md, unresolved_media_refs,
+    unresolved_media_refs_by,
 };
 use crate::channels::telegram::rich::normalize_rich_markdown_with_media;
+use crate::channels::telegram::rich::{markdown_to_html_mermaid, markdown_to_html_mermaid_p};
 
 /// The render style every test in this module threads through the mermaid
 /// URL and cache builders. `auto`/`auto` resolves against the ACTIVE theme,
@@ -206,7 +206,10 @@ fn error_note_markup_with_a_blank_title_falls_back_to_the_status_line() {
 #[test]
 fn error_note_matches_the_title_tag_case_insensitively() {
     assert_eq!(
-        error_note(503, "<HTML><HEAD><TITLE>Upstream boom</TITLE></HEAD></HTML>"),
+        error_note(
+            503,
+            "<HTML><HEAD><TITLE>Upstream boom</TITLE></HEAD></HTML>"
+        ),
         "Upstream boom"
     );
     assert_eq!(
@@ -248,7 +251,10 @@ fn error_note_handles_non_ascii_without_panicking() {
         "Ошибка"
     );
     assert_eq!(
-        error_note(503, "<html><body>ошибка</body><title>🔍 boom</title></html>"),
+        error_note(
+            503,
+            "<html><body>ошибка</body><title>🔍 boom</title></html>"
+        ),
         "🔍 boom"
     );
     // A body with no title at all still degrades to the status line.
@@ -530,7 +536,10 @@ fn render_cache_hit_returns_cached_outcome() {
 
 #[test]
 fn render_cache_miss_on_unknown_source() {
-    assert_eq!(cache_get(&style(), "graph TD\n    NeverCachedProbe --> Z"), None);
+    assert_eq!(
+        cache_get(&style(), "graph TD\n    NeverCachedProbe --> Z"),
+        None
+    );
 }
 
 #[test]

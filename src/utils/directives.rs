@@ -24,7 +24,7 @@
 //! variant is a new arm in one place, never a second delimiter branch bolted
 //! beside the first.
 
-use crate::brain::tools::suggest_options::{RawSuggestionItem, SuggestionItem, MAX_OPTIONS};
+use crate::brain::tools::suggest_options::{MAX_OPTIONS, RawSuggestionItem, SuggestionItem};
 
 /// Marker stem shared by both grammars: the pair form opens with
 /// `<<suggest_options>>` and the colon form with `<<suggest_options:`.
@@ -154,7 +154,12 @@ fn scan_leaked_blocks(text: &str) -> Vec<LeakedBlock<'_>> {
                 .filter(|rel| *rel <= ALIEN_DELIMITER_WINDOW)
                 .map(|rel| after_open + rel + CLOSE.len())
                 .unwrap_or(after_open);
-            blocks.push(LeakedBlock { start, end, payload: "", terminated: false });
+            blocks.push(LeakedBlock {
+                start,
+                end,
+                payload: "",
+                terminated: false,
+            });
             cursor = end;
         }
     }

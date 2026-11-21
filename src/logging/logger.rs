@@ -219,10 +219,7 @@ impl ResilientFileWriter {
     pub(crate) fn appender_lock_for_test(
         &self,
     ) -> Result<
-        std::sync::MutexGuard<
-            '_,
-            HashMap<PathBuf, tracing_appender::rolling::RollingFileAppender>,
-        >,
+        std::sync::MutexGuard<'_, HashMap<PathBuf, tracing_appender::rolling::RollingFileAppender>>,
         std::sync::TryLockError<()>,
     > {
         self.appenders
@@ -293,10 +290,7 @@ pub(crate) struct ResilientFileGuard<'a> {
     parent: &'a ResilientFileWriter,
     target_log_dir: PathBuf,
     appenders: Option<
-        std::sync::MutexGuard<
-            'a,
-            HashMap<PathBuf, tracing_appender::rolling::RollingFileAppender>,
-        >,
+        std::sync::MutexGuard<'a, HashMap<PathBuf, tracing_appender::rolling::RollingFileAppender>>,
     >,
 }
 

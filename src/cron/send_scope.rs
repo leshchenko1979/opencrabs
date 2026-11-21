@@ -151,7 +151,10 @@ pub enum SendPermission {
 /// read, so a turn's permission and the reason given for refusing it can never
 /// come from two different views of the same task local.
 pub fn scope() -> Option<SendScope> {
-    CRON_PERMITTED_TARGETS.try_with(|scope| scope.clone()).ok().flatten()
+    CRON_PERMITTED_TARGETS
+        .try_with(|scope| scope.clone())
+        .ok()
+        .flatten()
 }
 
 /// The permission in force for the current task.
@@ -384,9 +387,9 @@ pub fn refusal_for(channel: &str, target_id: &str) -> String {
         // Unreachable through the send guards, which only call this once
         // `may_send` has already refused — and an unscoped turn permits
         // everything. Kept truthful rather than a panic in a tool result.
-        None => format!(
-            "Refused: no destination is in scope for this turn (attempted {attempted})."
-        ),
+        None => {
+            format!("Refused: no destination is in scope for this turn (attempted {attempted}).")
+        }
     }
 }
 

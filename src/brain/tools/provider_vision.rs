@@ -6,8 +6,8 @@
 //! (#430). Registered as `analyze_image` whenever any candidate exists.
 
 use super::analyze_image::{AnalyzeImageTool, base64_encode, detect_mime_type};
-use crate::brain::provider::factory::VisionCandidate;
 use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
+use crate::brain::provider::factory::VisionCandidate;
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -64,9 +64,7 @@ impl ProviderVisionTool {
 
     /// Candidates for THIS request: current provider, then the configured
     /// chain, read from config now so an edit needs no restart (#1318).
-    fn candidates_for(
-        session_provider: Option<&str>,
-    ) -> Vec<VisionCandidate> {
+    fn candidates_for(session_provider: Option<&str>) -> Vec<VisionCandidate> {
         crate::brain::provider::factory::vision_candidates_for(
             &crate::config::Config::current(),
             session_provider,
@@ -194,7 +192,8 @@ impl Tool for ProviderVisionTool {
         if candidates.is_empty() && self.gemini_fallback.is_none() {
             return Ok(ToolResult::error(VISION_SETUP_HINT.to_string()));
         }
-        for (idx, (api_key, base_url, vision_model, timeout_secs)) in candidates.iter().enumerate() {
+        for (idx, (api_key, base_url, vision_model, timeout_secs)) in candidates.iter().enumerate()
+        {
             match try_vision_candidate(
                 &client,
                 api_key,

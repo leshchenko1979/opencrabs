@@ -94,8 +94,14 @@ fn lookup_skips_commands_and_terminal_agents() {
     let child = Uuid::new_v4();
 
     // A detached command sharing the session id must not look like an agent.
-    WorkStatus::new_command("cmd-1", &child.to_string(), "a command", "ls", CommandPaths::none())
-        .expect("write command status");
+    WorkStatus::new_command(
+        "cmd-1",
+        &child.to_string(),
+        "a command",
+        "ls",
+        CommandPaths::none(),
+    )
+    .expect("write command status");
     assert!(WorkStatus::find_agent_by_session(&child.to_string()).is_none());
 
     // A terminal agent must not look revivable.
@@ -199,4 +205,3 @@ fn a_resumed_session_resolves_its_run_without_a_second_directory_walk() {
 
     drop_status_dir(dir);
 }
-

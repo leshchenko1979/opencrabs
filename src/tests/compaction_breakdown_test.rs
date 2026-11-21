@@ -480,7 +480,11 @@ fn every_row_occupies_its_own_line() {
     // that shares a line with its neighbour is the bug, whatever the plane.
     let out = card(mixed_manifest());
     let lines: Vec<&str> = out.lines().collect();
-    assert!(lines.len() >= 6, "a row per line, got {}: {out}", lines.len());
+    assert!(
+        lines.len() >= 6,
+        "a row per line, got {}: {out}",
+        lines.len()
+    );
 
     for label in ["tokens", "fill", "took", "scope", "summary", "tools"] {
         // The label sits in the table's FIRST cell, so the row reads
@@ -592,11 +596,7 @@ fn doc(path: &str, tokens: usize, bytes: u64, lines: usize) -> DocEntry {
     }
 }
 
-fn card_with_docs(
-    documents: &[DocEntry],
-    refusals: &[String],
-    summary: &str,
-) -> String {
+fn card_with_docs(documents: &[DocEntry], refusals: &[String], summary: &str) -> String {
     let sizes = tool_sizes();
     compaction_breakdown(&CompactionBreakdown {
         before_tokens: 130_600,
@@ -683,9 +683,8 @@ fn every_refused_path_still_prints_a_row() {
 #[test]
 fn a_partial_refusal_prints_both_the_rows_and_the_reason() {
     let docs = vec![doc("/root/proj/AGENTS.md", 4_000, 20_480, 312)];
-    let refusals = vec![
-        "not registered: /root/proj/CLAUDE.md (not read in this process)".to_string(),
-    ];
+    let refusals =
+        vec!["not registered: /root/proj/CLAUDE.md (not read in this process)".to_string()];
     let out = card_with_docs(&docs, &refusals, no_manifest());
     assert!(
         out.lines().any(|l| l.starts_with("| docs |")),

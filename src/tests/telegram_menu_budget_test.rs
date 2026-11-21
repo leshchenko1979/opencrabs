@@ -9,11 +9,8 @@
 //! then dropping tail commands.
 
 use crate::channels::telegram::agent::{
-    budget_command_catalog,
-    clean_menu_description,
-    collect_command_catalog,
-    trim_catalog_to_budget,
-    truncate_description,
+    budget_command_catalog, clean_menu_description, collect_command_catalog,
+    trim_catalog_to_budget, truncate_description,
 };
 use teloxide::types::BotCommand;
 

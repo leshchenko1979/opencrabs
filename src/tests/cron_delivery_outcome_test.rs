@@ -407,7 +407,10 @@ async fn unresolvable_session_target_records_delivery_failed() {
         Some(run_id.clone()),
     )
     .await;
-    assert!(out.is_none(), "the session arm never hands back a task handle");
+    assert!(
+        out.is_none(),
+        "the session arm never hands back a task handle"
+    );
 
     let run_id_owned = run_id.clone();
     let (status, error) = pool
@@ -475,7 +478,10 @@ async fn session_target_with_no_route_records_delivery_failed() {
         Some(run_id.clone()),
     )
     .await;
-    assert!(out.is_none(), "the session arm never hands back a task handle");
+    assert!(
+        out.is_none(),
+        "the session arm never hands back a task handle"
+    );
 
     let run_id_owned = run_id.clone();
     let (status, error) = pool

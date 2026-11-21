@@ -211,8 +211,7 @@ impl Tool for WriteTool {
 
         // Write the file. The pre-image outcome is kept so a snapshot skipped
         // under the home can be reported instead of passing silently (#539).
-        let pre_image =
-            super::fs_util::atomic_write_file(&path, input.content.as_bytes()).await?;
+        let pre_image = super::fs_util::atomic_write_file(&path, input.content.as_bytes()).await?;
         drop(write_lock);
 
         // The session now knows the file as what it just wrote, so its next

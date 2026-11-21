@@ -129,8 +129,21 @@ pub(crate) fn ensure_blank_line_before_tables(text: &str) -> String {
 /// are deliberately absent: after a quote they remain inline content, and
 /// splitting them off would change rendering the message never asked for.
 const BLOCK_HTML_OPENERS: &[&str] = &[
-    "details", "summary", "table", "blockquote", "pre", "ul", "ol", "li", "h1", "h2", "h3", "h4",
-    "h5", "h6", "p",
+    "details",
+    "summary",
+    "table",
+    "blockquote",
+    "pre",
+    "ul",
+    "ol",
+    "li",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "p",
 ];
 
 /// The element name a line's leading `<…>` opener carries, or `None` when the
@@ -188,7 +201,9 @@ pub(crate) fn ensure_blank_line_before_block_html(text: &str) -> String {
         }
         if !in_fence
             && is_block_html_opener(line)
-            && out.last().is_some_and(|prev| prev.trim_start().starts_with('>'))
+            && out
+                .last()
+                .is_some_and(|prev| prev.trim_start().starts_with('>'))
         {
             out.push(String::new());
         }
@@ -1173,7 +1188,11 @@ fn telegram_media_id(url: &str) -> Option<&str> {
     // title is not part of the id. Reading it in made every titled reference look
     // like an orphan, so the shield escaped its `!` and the image rendered as
     // literal text (measured 2026-09-27, before this split).
-    Some(id.split(|c: char| c == '&' || c.is_whitespace()).next().unwrap_or(id))
+    Some(
+        id.split(|c: char| c == '&' || c.is_whitespace())
+            .next()
+            .unwrap_or(id),
+    )
 }
 
 /// The entry `id` names in this request's media array, or `None`.

@@ -193,9 +193,7 @@ impl tokio::io::AsyncRead for PtyMaster {
 /// The slaves are *moved* into the command, so the parent holds no slave fd —
 /// which is what lets the master reach EOF/`EIO` when the child exits. A parent
 /// copy left open would stream forever.
-pub fn install_pty(
-    cmd: &mut tokio::process::Command,
-) -> io::Result<(PtyMaster, PtyMaster)> {
+pub fn install_pty(cmd: &mut tokio::process::Command) -> io::Result<(PtyMaster, PtyMaster)> {
     let (master_out, slave_out) = open_pty_pair()?;
     let (master_err, slave_err) = open_pty_pair()?;
 

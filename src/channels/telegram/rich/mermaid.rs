@@ -1192,7 +1192,10 @@ pub(crate) fn replacement_for(
         MermaidResult::Image(url) => {
             let id = format!("diag{index}");
             // URL path does not carry byte dimensions locally; always provide vector link for URL-based delivery
-            let md = format!("![diagram](tg://photo?id={id}){}", svg_link_md(style, source));
+            let md = format!(
+                "![diagram](tg://photo?id={id}){}",
+                svg_link_md(style, source)
+            );
             (
                 md,
                 Some(MediaEntry {
@@ -1210,7 +1213,10 @@ pub(crate) fn replacement_for(
                 .map(|(w, h)| is_diagram_capped(w, h))
                 .unwrap_or(false);
             let md = if capped {
-                format!("![diagram](tg://photo?id={id}){}", svg_link_md(style, source))
+                format!(
+                    "![diagram](tg://photo?id={id}){}",
+                    svg_link_md(style, source)
+                )
             } else {
                 format!("![diagram](tg://photo?id={id})")
             };

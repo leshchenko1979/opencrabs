@@ -1142,8 +1142,7 @@ mod agent_type {
             ),
         ));
 
-        let registry =
-            crate::brain::tools::subagent::build_child_registry(&parent, &subagent_mgr);
+        let registry = crate::brain::tools::subagent::build_child_registry(&parent, &subagent_mgr);
         let tools = registry.list_tools();
         assert!(!tools.contains(&"team_create".to_string()));
         assert!(!tools.contains(&"team_delete".to_string()));
