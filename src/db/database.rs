@@ -216,13 +216,6 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // list invariant; no `MIGRATION_EFFECTS` declaration is owed (that window
     // is contiguous and ends far below this entry).
     include_str!("../migrations/20261120000001_add_tool_executions_session_created_indexes.sql"),
-    // #938: `status = 'nonzero'` cutover — the instant, recorded in the
-    // migration stream because a code comment cannot be dated. Writes NO data:
-    // `tool_executions` is append-only and the old `success`-beside-non-zero
-    // rows are deliberately left as they are. Appended last per the list
-    // invariant; no `MIGRATION_EFFECTS` declaration is owed (that window is
-    // contiguous and ends far below this entry).
-    include_str!("../migrations/20261121000001_document_tool_status_nonzero.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
