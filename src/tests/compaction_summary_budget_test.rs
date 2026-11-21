@@ -457,10 +457,17 @@ async fn finalize_bounds_the_decorated_document() {
         crate::brain::agent::service::request_budget::compaction_summary_output_tokens() as usize;
 
     // Enough decoration to matter: each document contributes a path line.
+    // Enough decoration to matter: each document contributes a path line. The
+    // count is BOUNDED, because the documents block is must-keep (#831) and the
+    // guard cannot trim it away — with enough documents the must-keep floor
+    // alone exceeds the budget and the guard correctly refuses, warning
+    // "must-keep sections alone are N tokens". That is a real limitation, not a
+    // defect, so this fixture must keep decoration small enough to fit inside
+    // the headroom the trim is expected to recover.
     let dir = std::env::temp_dir().join(format!("oc934-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let sid = uuid::Uuid::new_v4();
-    for i in 0..40 {
+    for i in 0..8 {
         let path = dir.join(format!(
             "document-with-a-long-name-{i:02}-for-budget-pressure.md"
         ));
@@ -526,12 +533,21 @@ fn both_compaction_paths_bound_the_decorated_document() {
     let context_src = include_str!("../brain/agent/service/context.rs");
     let background_src = include_str!("../brain/agent/service/compaction.rs");
 
+    // Whitespace-insensitive, because rustfmt breaks the call across lines as
+    // soon as the argument list grows — and a literal needle then reports "not
+    // called" for a call site that is plainly there. Measured: this test went
+    // RED on its own commit `5a843faa5` for exactly that reason, while
+    // `context.rs:803` held the call in multi-line form.
+    fn squeeze(s: &str) -> String {
+        s.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
     assert!(
-        context_src.contains("Self::finalize_continuation_document(summary, session_id"),
+        squeeze(context_src).contains("Self::finalize_continuation_document(summary,session_id"),
         "the synchronous `/compact` path must finalise through the budget guard (#934)"
     );
     assert!(
-        background_src.contains("Self::finalize_continuation_document(summary, session_id"),
+        squeeze(background_src).contains("Self::finalize_continuation_document(summary,session_id"),
         "the background compaction path must finalise through the budget guard (#934)"
     );
     // The guard must live in finalize, not merely exist somewhere.
