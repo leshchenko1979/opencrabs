@@ -116,6 +116,48 @@ pub(crate) fn resolve_recall_min_score() -> f64 {
 /// must stay silent.
 pub(crate) const SKILL_RECALL_RAW_FLOOR: f64 = 1.5;
 
+/// At least this many DISTINCT query terms must agree on an entry before it
+/// may be named in the skill shortlist (#939).
+///
+/// One shared word is a coincidence, not a match: a 15-word message shares some
+/// stemmed term with most of a 44-entry skill index, and that is precisely how
+/// the list used to fill all five slots. Two is the smallest number that
+/// requires agreement rather than a single coincidence.
+pub(crate) const SKILL_RECALL_MIN_TERMS: usize = 2;
+
+/// How much information, summed over the distinct matched terms, an entry must
+/// carry to be named (#939).
+///
+/// This is the weighting answer to `query_terms` having no stopword handling,
+/// and it deliberately is NOT a wordlist: idf is measured against the corpus
+/// being ranked, so a word that is filler HERE (`the`, `skill`, `fix` — idf
+/// 0.19, 0.49, 0.75 on the live index) contributes almost nothing, while a term
+/// carried by one entry contributes its full weight (1.0). `1.5` therefore
+/// means "two terms, at least one of them specific", which is what separates a
+/// message about a skill from a message that merely contains words the index
+/// also contains.
+pub(crate) const SKILL_RECALL_MIN_SUMMED_IDF: f64 = 1.5;
+
+/// How close to the best admitted entry's score another entry must be to be
+/// named alongside it (#939).
+///
+/// Absolute floors cannot do this job: scores are normalized by query length
+/// and are not comparable across messages, so a floor that trims a five-entry
+/// list on one turn silences a genuine match on another. A share of the best
+/// score is query-relative by construction.
+///
+/// Measured on the live 44-entry index (`opencrabs eval skills` reports 44
+/// entries, C1@5 0.657) for the message in #939: at `0.5` two entries survive
+/// and the second matches only `the`/`skill`/`get`; at `0.7` exactly one
+/// survives — the entry that shares the message's rare term — and the mean
+/// list length over the 35 labelled Track C positives drops from 5.00 to 1.40.
+/// The cost is real: the shortlist's own gold-recall moves 0.657 → 0.514
+/// (C1@5 as the scorecard computes it does not move, because `score()` still
+/// ranks at floor `0.0`), while false selection on the 12 negatives moves
+/// 1.000 → 0.083. Both figures, and the sweep that shows they trade against
+/// each other, are recorded in `src/eval/results/skill-shortlist-floor-939.md`.
+pub(crate) const SKILL_RECALL_RATIO: f64 = 0.7;
+
 /// Recall relevant to `user_message`, formatted for context, or `None`.
 ///
 /// Pure: takes the file content, so the decision is testable without a home
@@ -575,15 +617,22 @@ static SKILLS_CACHE: std::sync::RwLock<Option<CachedSkills>> = std::sync::RwLock
 ///
 /// Two decisions, kept separate on purpose:
 ///
-/// 1. **ORDER** — the whole index at floor `0.0`, exactly as the scorecard's
-///    C1@5 orders it. If this path used the shipped floor to build the list, a
-///    gold skill ranked third could vanish because nothing cleared the floor,
-///    and C1@5 would then be a number about the harness rather than about the
-///    product.
+/// 1. **ADMISSION** — which entries are allowed on the list at all, decided by
+///    [`Ranked::admitted_indices`] at the constants below (#939). This is
+///    deliberately NOT the scorecard's floor-`0.0` ordering: that ordering
+///    admits every entry sharing one stemmed term, so with a cap of
+///    [`SKILL_RECALL_MAX`] the list filled all five slots on almost every turn
+///    and named skills the message had nothing to do with.
 /// 2. **SILENCE** — whether to say anything at all, decided by the resolved
 ///    floor (#912: `[memory].recall_min_score`, defaulting to
 ///    [`RECALL_MIN_SCORE`]). A shortlist invented from a weak match is noise
 ///    paid on every turn, which is the same trade the memory recall makes.
+///
+/// The two used to disagree about what "matched" meant — the silence door
+/// accepted one rare term while the ordering door accepted anything at all —
+/// and that gap is what #939 measured. They still answer different questions
+/// (may I speak / what may I name), but the naming side is now a selection,
+/// not an ordering.
 pub fn recall_skills_from(index_md: &str, user_message: &str, floor: f64) -> Option<String> {
     skill_shortlist_names(index_md, user_message, floor).map(|names| render_skill_shortlist(&names))
 }
@@ -609,13 +658,20 @@ fn skill_shortlist_names(index_md: &str, user_message: &str, floor: f64) -> Opti
         return None;
     }
 
-    // `usize::MAX` chars: the shortlist is about ORDER, and truncating it by a
-    // character budget would drop entries by length rather than by score.
-    let ordered = ranked.find_relevant(user_message, SKILL_RECALL_MAX, usize::MAX, 0.0);
-    let names: Vec<String> = ordered
-        .sections
+    // ADMISSION, not ordering (#939). The character budget is irrelevant here:
+    // the list is capped by `SKILL_RECALL_MAX` entries and every admitted
+    // entry has already earned its place on content, so a length cut would
+    // drop entries by size rather than by evidence.
+    let admitted = ranked.admitted_indices(
+        user_message,
+        SKILL_RECALL_MAX,
+        SKILL_RECALL_MIN_TERMS,
+        SKILL_RECALL_MIN_SUMMED_IDF,
+        SKILL_RECALL_RATIO,
+    );
+    let names: Vec<String> = admitted
         .iter()
-        .map(|s| s.heading.trim().trim_start_matches('#').trim().to_string())
+        .map(|&i| ranked.heading(i))
         .filter(|n| !n.is_empty())
         .collect();
     if names.is_empty() {
