@@ -378,6 +378,13 @@ pub struct ToolExecution {
     pub arguments: String,
     /// JSON
     pub result: Option<String>,
+    /// The tool-level outcome, derived by
+    /// [`tool_outcome_status`](crate::db::repository::tool_outcome_status):
+    /// `"success"` (ran clean, or no process and the tool succeeded),
+    /// `"nonzero"` (ran and returned a non-zero code, #938), or `"error"` (no
+    /// process outcome and the tool failed). Rows written before the #938
+    /// cutover may still read `"success"` beside a non-zero `exit_code` — they
+    /// are append-only and deliberately not backfilled.
     pub status: String,
     pub approved_at: Option<DateTime<Utc>>,
     pub executed_at: Option<DateTime<Utc>>,

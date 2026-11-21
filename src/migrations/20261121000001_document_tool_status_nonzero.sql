@@ -1,0 +1,31 @@
+-- #938: `status = 'nonzero'` for a run that returned a non-zero exit code.
+--
+-- Cutover: the instant this migration is applied (migration version
+-- 20261121000001). From then on `tool_outcome_status` derives the value from
+-- the code — `Some(0)` -> `success`, `Some(rc != 0)` -> `nonzero`,
+-- NULL + tool success -> `success`, NULL + tool failure -> `error`.
+--
+-- This migration writes NO data. `tool_executions` is append-only and no
+-- backfill is performed: rewriting an append-only record would be a worse
+-- defect than the mis-bin being fixed. Rows written before the cutover keep
+-- `status = 'success'` beside a non-zero `exit_code` — the defect #938
+-- describes, measured at 926 rows in a 24 h window (7.45 % of success rows).
+-- Their `exit_code` column is intact, so any consumer that wants the corrected
+-- classification for history can read the CODE rather than the stored status:
+--
+--   SELECT COUNT(*) FROM tool_executions
+--    WHERE exit_code IS NOT NULL AND exit_code <> 0;   -- the `nonzero` class
+--
+-- What changes for aggregates: a series counting `status = 'success'` steps
+-- down once, at this version, and is honest after it. `status = 'error'`
+-- keeps meaning "the tool itself failed" (#763) and is unaffected — `nonzero`
+-- is a new value, not a relabel of `error`, so no existing error total moves.
+--
+-- Consumers that branch on the string handle `nonzero` as a WARNING:
+-- `render_audit_rows` in `src/channels/commands.rs` renders it as `(warn)`
+-- and `level_from_status` in `src/brain/mission_control/activity_service.rs`
+-- maps it to `McActivityLevel::Warn`.
+--
+-- The vocabulary stays closed at three values. No `blocked`, no per-code
+-- strings: `tool_outcome_status` cannot produce them, and inventing one would
+-- silently mis-bin every consumer that matches on the string.

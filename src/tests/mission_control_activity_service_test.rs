@@ -122,3 +122,40 @@ fn malformed_header_without_brackets_still_parses_title() {
     assert_eq!(parsed.len(), 1);
     assert!(parsed[0].detail.starts_with("Plain title"));
 }
+
+/// #938: a tool execution that returned a non-zero code is a WARNING in the
+/// activity feed — not a success (the defect) and not an error (#763).
+///
+/// Fails pre-fix: `level_from_status` had no `nonzero` arm, so the value fell
+/// through to `Info` and the warning never surfaced.
+#[test]
+fn nonzero_status_maps_to_warn() {
+    use crate::brain::mission_control::activity_service::level_from_status;
+    assert_eq!(
+        level_from_status(Some("nonzero"), ""),
+        McActivityLevel::Warn,
+        "a non-zero exit is a warning"
+    );
+    assert_ne!(
+        level_from_status(Some("nonzero"), ""),
+        McActivityLevel::Success,
+        "a non-zero exit is not a success (#938)"
+    );
+    assert_ne!(
+        level_from_status(Some("nonzero"), ""),
+        McActivityLevel::Error,
+        "a non-zero exit is not a tool failure (#763)"
+    );
+    // The neighbours keep their mapping: the new arm must not swallow them.
+    assert_eq!(
+        level_from_status(Some("success"), ""),
+        McActivityLevel::Success
+    );
+    assert_eq!(level_from_status(Some("error"), ""), McActivityLevel::Error);
+    // A header-carried status takes the same path.
+    assert_eq!(
+        level_from_status(None, "nonzero"),
+        McActivityLevel::Warn,
+        "the header status is consulted when no field is present"
+    );
+}

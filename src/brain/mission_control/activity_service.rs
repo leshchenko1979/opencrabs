@@ -198,7 +198,10 @@ fn parse_date(s: &str) -> Option<DateTime<Utc>> {
         .and_then(|naive| Utc.from_local_datetime(&naive).single())
 }
 
-fn level_from_status(status_field: Option<&str>, header_status: &str) -> McActivityLevel {
+pub(crate) fn level_from_status(
+    status_field: Option<&str>,
+    header_status: &str,
+) -> McActivityLevel {
     let status = status_field.unwrap_or(header_status).to_lowercase();
     match status.as_str() {
         "applied" | "success" => McActivityLevel::Success,
