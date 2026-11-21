@@ -14,7 +14,7 @@
 use crate::brain::agent::service::work_status::{
     self, CommandExit, CommandPaths, RunCause, WorkFinish, WorkKind, WorkState, WorkStatus,
 };
-use crate::channels::commands::{render_tasks_rows, TaskRow};
+use crate::channels::commands::{TaskRow, render_tasks_rows};
 
 /// A scratch status dir bound to this test's thread. `status_dir()` reads the
 /// override, so `new_command`/`finish_command` write here and nowhere else.
@@ -140,8 +140,24 @@ fn a_finished_row_names_why_it_ended_not_just_the_code() {
 #[test]
 fn another_sessions_runs_are_never_listed() {
     let _scratch = Scratch::new("scope");
-    finished("run-mine", "session-a", "cargo build", true, 0, RunCause::Ordinary, 4.0);
-    finished("run-theirs", "session-b", "rm -rf /tmp/x", true, 0, RunCause::Ordinary, 4.0);
+    finished(
+        "run-mine",
+        "session-a",
+        "cargo build",
+        true,
+        0,
+        RunCause::Ordinary,
+        4.0,
+    );
+    finished(
+        "run-theirs",
+        "session-b",
+        "rm -rf /tmp/x",
+        true,
+        0,
+        RunCause::Ordinary,
+        4.0,
+    );
 
     let out = render_tasks_rows("", "session-a", &[]);
     assert!(out.contains("cargo build"), "got: {out}");
@@ -155,7 +171,15 @@ fn another_sessions_runs_are_never_listed() {
 #[test]
 fn a_live_run_is_listed_once_even_though_it_is_also_on_disk() {
     let _scratch = Scratch::new("live");
-    finished("run-live", "session-a", "sleep 30", true, 0, RunCause::Ordinary, 1.0);
+    finished(
+        "run-live",
+        "session-a",
+        "sleep 30",
+        true,
+        0,
+        RunCause::Ordinary,
+        1.0,
+    );
     let live = vec![(
         "run-live".to_string(),
         TaskRow {
@@ -167,7 +191,10 @@ fn a_live_run_is_listed_once_even_though_it_is_also_on_disk() {
 
     let out = render_tasks_rows("", "session-a", &live);
     // The live row is the one shown, and the disk arm skips the same id.
-    assert!(out.contains("| `sleep 30` | 12s | \u{25b6}\u{fe0f} running |"), "got: {out}");
+    assert!(
+        out.contains("| `sleep 30` | 12s | \u{25b6}\u{fe0f} running |"),
+        "got: {out}"
+    );
     assert!(out.starts_with("## Detached runs (1)"), "got: {out}");
 }
 

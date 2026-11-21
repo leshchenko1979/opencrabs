@@ -13,7 +13,7 @@
 //! The inversion test is `documented_manifest_spelling_selects_the_skill_body`
 //! — it fails against the pre-fix matcher, which is the whole point.
 
-use crate::brain::skills::{active_skill_bodies, normalize_skill_slug, Skill, SkillSource};
+use crate::brain::skills::{Skill, SkillSource, active_skill_bodies, normalize_skill_slug};
 use std::collections::HashSet;
 
 /// Minimal valid `SKILL.md` blob for `name`.

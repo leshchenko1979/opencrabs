@@ -464,7 +464,11 @@ fn label_value_is_present_reads_the_value_across_its_lines() {
     // An embellished label name terminates the previous field: it is a sibling
     // bullet, and unindented, so it is not a continuation.
     let embellished = ["- **Target state:**", "- **Intent (JTBD):** asked"];
-    assert!(!label_value_is_present(&embellished, 0, "**Target state:**"));
+    assert!(!label_value_is_present(
+        &embellished,
+        0,
+        "**Target state:**"
+    ));
 
     // Indentation is the discriminator, not the bullet: a label whose value is
     // an indented sub-bullet counts as filled.

@@ -1276,7 +1276,9 @@ impl Rewriter<'_> {
                     let id = format!("{}{}", self.id_prefix, self.out.entries.len());
                     let alt = if alt.trim().is_empty() { "image" } else { alt };
                     let title = rich_title(caption.as_deref());
-                    self.out.rich.push_str(&format!("![{alt}](tg://photo?id={id}{title})"));
+                    self.out
+                        .rich
+                        .push_str(&format!("![{alt}](tg://photo?id={id}{title})"));
                     self.out.entries.push(ResolvedImageRef {
                         id,
                         image: LocalImage { path, caption },
@@ -1689,8 +1691,8 @@ fn is_supported_video_head(head: &[u8]) -> bool {
     // this replaced.
     let mut off = 0usize;
     while off + 8 <= head.len() {
-        let size = u32::from_be_bytes([head[off], head[off + 1], head[off + 2], head[off + 3]])
-            as usize;
+        let size =
+            u32::from_be_bytes([head[off], head[off + 1], head[off + 2], head[off + 3]]) as usize;
         let box_type = &head[off + 4..off + 8];
         if box_type == b"ftyp" {
             return match head.get(off + 8..off + 12) {

@@ -8,8 +8,8 @@
 //! check: the function entry-point contract.
 
 use crate::utils::pdf_vision::{
-    effective_dpi, parse_page_size_line, pixel_box, render_pdf_pages, scale_to_box, DEFAULT_DPI,
-    MAX_DPI, MAX_PIXELS_PER_PAGE, MIN_DPI,
+    DEFAULT_DPI, MAX_DPI, MAX_PIXELS_PER_PAGE, MIN_DPI, effective_dpi, parse_page_size_line,
+    pixel_box, render_pdf_pages, scale_to_box,
 };
 use std::fs;
 
@@ -17,7 +17,12 @@ use std::fs;
 fn missing_pdf_returns_error_with_path() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp.path().join("pages");
-    let result = render_pdf_pages("/no/such/file.pdf", 10, out_dir.to_str().unwrap(), DEFAULT_DPI);
+    let result = render_pdf_pages(
+        "/no/such/file.pdf",
+        10,
+        out_dir.to_str().unwrap(),
+        DEFAULT_DPI,
+    );
     let err = result.expect_err("missing pdf must error");
     assert!(err.contains("/no/such/file.pdf"));
 }
@@ -45,7 +50,12 @@ fn unrenderable_pdf_returns_err_not_empty_ok() {
     let pdf = tmp.path().join("not-really-a-pdf.pdf");
     fs::write(&pdf, b"this is not a pdf").expect("write fake");
     let out = tmp.path().join("out");
-    let result = render_pdf_pages(pdf.to_str().unwrap(), 100, out.to_str().unwrap(), DEFAULT_DPI);
+    let result = render_pdf_pages(
+        pdf.to_str().unwrap(),
+        100,
+        out.to_str().unwrap(),
+        DEFAULT_DPI,
+    );
     // Either an Err (pdftoppm rejected the input) or an Ok with zero
     // pages — both are acceptable contracts; an Ok with no pages would
     // be the bug we explicitly want to avoid.
@@ -249,6 +259,9 @@ fn pixel_box_stays_inside_the_budget_and_only_fires_when_no_dpi_fits() {
     // so the box is the only bound left.
     let enormous = 1.0e8;
     let fitted = effective_dpi(enormous, 200);
-    assert_eq!(fitted, MIN_DPI, "the floor must hold before the box is used");
+    assert_eq!(
+        fitted, MIN_DPI,
+        "the floor must hold before the box is used"
+    );
     assert_eq!(scale_to_box(enormous, fitted), Some(b));
 }

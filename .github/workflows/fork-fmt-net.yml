@@ -1,0 +1,59 @@
+name: Fork fmt net
+
+# Post-merge net for the fork's `main` (factory #82 ask 2, landed with #123).
+#
+# WHY THIS EXISTS. Every fork gate lives on the `ci/quick-build-linux` carrier
+# and is dispatch-driven, so nothing ran when a commit reached main. Measured
+# 2026-11-21: pushing 50c820772 to main created ZERO runs, and the one workflow
+# on main that does carry `on: push` (upstream's `ci.yml`) is
+# `disabled_manually` at the repo level — every ACTIVE workflow in
+# /actions/workflows is workflow_dispatch or workflow_call. That left main with
+# no post-merge net at all, which is how 520 hunks across 206 files accumulated
+# invisibly until a human dispatched a run (factory #123).
+#
+# WHAT THIS IS NOT. It is not the carrier gate and does not replace it: the
+# PR-lane gates, Clippy, nextest and the build matrix all stay on the carrier,
+# dispatch-driven. This is ONE job, ONE step, seconds of runner time, no matrix,
+# nothing else to cancel. It exists so that "main is fmt-clean" is a checked
+# claim rather than a remembered one.
+#
+# TOOLCHAIN. Pinned to 1.100.0 and installed in the
+# `dtolnay/rust-toolchain@master` + explicit `toolchain:` form, exactly as
+# `ci-lane-impl.yml` does. This is not cosmetic: rustfmt output differs between
+# releases, so a net on a floating toolchain would report drift the gate does
+# not have, or miss drift it does. Advancing the pin means bumping BOTH files in
+# the same change.
+#
+# DELIBERATELY NARROW. It checks formatting and nothing else. A second job here
+# would duplicate the carrier and rot: the carrier gate is the authority for
+# lint, test and build, and this file must stay cheap enough that nobody is
+# tempted to disable it.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-fmt-net-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: main is fmt-clean
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (pinned, matches ci-lane-impl.yml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.100.0
+          components: rustfmt
+
+      - name: cargo fmt --all -- --check
+        run: cargo fmt --all -- --check

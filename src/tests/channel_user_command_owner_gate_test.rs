@@ -20,7 +20,7 @@
 
 use crate::brain::commands::UserCommand;
 use crate::brain::skills::{Skill, SkillSource};
-use crate::channels::commands::{gate_user_command, match_user_command_inner, ChannelCommand};
+use crate::channels::commands::{ChannelCommand, gate_user_command, match_user_command_inner};
 
 fn deploy_command() -> UserCommand {
     UserCommand {

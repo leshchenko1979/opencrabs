@@ -131,23 +131,15 @@ fn the_chokepoint_honours_the_opt_out() {
         crate::config::profile::with_home_override(home.path().to_path_buf(), || {
             let db = tempfile::tempdir().unwrap();
             let store = Store::open(&db.path().join("memory.db")).expect("test store opens");
-            let dated = index_file_sync_keyed(
-                &store,
-                COLLECTION_MEMORY,
-                "2026-11-17.md",
-                "## summary",
-            )
-            .expect("indexing a dated note must not error");
+            let dated =
+                index_file_sync_keyed(&store, COLLECTION_MEMORY, "2026-11-17.md", "## summary")
+                    .expect("indexing a dated note must not error");
             let hand_written =
                 index_file_sync_keyed(&store, COLLECTION_MEMORY, "incident-x.md", "a note")
                     .expect("indexing a hand-written note must not error");
-            let archive = index_file_sync_keyed(
-                &store,
-                COLLECTION_MEMORY,
-                "archive/2026-09.md",
-                "old",
-            )
-            .expect("indexing an archive key must not error");
+            let archive =
+                index_file_sync_keyed(&store, COLLECTION_MEMORY, "archive/2026-09.md", "old")
+                    .expect("indexing an archive key must not error");
             (dated, hand_written, archive)
         })
     };
@@ -158,7 +150,10 @@ fn the_chokepoint_honours_the_opt_out() {
         hand_written,
         "a hand-written note in memory/ must stay indexed"
     );
-    assert!(archive, "archive keys are MEMORY.md sections, not daily notes");
+    assert!(
+        archive,
+        "archive keys are MEMORY.md sections, not daily notes"
+    );
 
     let (dated, _, _) = run("[memory]\nindex_daily_notes = true\n");
     assert!(

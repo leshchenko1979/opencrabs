@@ -21,9 +21,7 @@ use crate::channels::telegram::intermediates::{
     is_compaction_card, is_deliverable_rich_report, promoted_bubble_is_burial_evidence,
     should_promote_intermediate,
 };
-use crate::utils::image::{
-    LocalImageFailureReason, rewrite_local_images, strip_image_references,
-};
+use crate::utils::image::{LocalImageFailureReason, rewrite_local_images, strip_image_references};
 use std::path::{Path, PathBuf};
 
 /// Minimal byte string that passes the magic-byte sniff for PNG.
@@ -95,7 +93,8 @@ fn the_three_existing_arms_still_promote() {
     // `line_count >= 2` AND `>= 50` chars — the first draft of this fixture was
     // 43 chars and legitimately failed the predicate. Same shape the existing
     // status-report corpus uses.
-    let status = "### Status Update: Issue #502\nCarrier build dispatched.\nWaiting on the CI gate.";
+    let status =
+        "### Status Update: Issue #502\nCarrier build dispatched.\nWaiting on the CI gate.";
     assert!(
         should_promote_intermediate(status, 0),
         "a status report still promotes on its own"
@@ -111,7 +110,10 @@ fn a_resolvable_reference_is_embedded_in_place_and_stripped_from_the_twin() {
     let dir = tempfile::tempdir().expect("tempdir");
     let png = write_fixture(dir.path(), "chart.png", PNG_BYTES);
 
-    let text = format!("Here is the chart:\n\n![revenue]({})\n\nDone.", png.display());
+    let text = format!(
+        "Here is the chart:\n\n![revenue]({})\n\nDone.",
+        png.display()
+    );
     let rw = rewrite_local_images(&text, Some(dir.path()), "img", &[]);
 
     assert_eq!(ids(&rw), vec!["img0".to_string()]);
@@ -167,8 +169,7 @@ fn a_markdown_title_survives_as_the_rich_caption_channel() {
     let rw = rewrite_local_images(&text, Some(dir.path()), "img", &[]);
 
     assert_eq!(
-        rw.rich,
-        "![alt](tg://photo?id=img0 \"Quarterly revenue\")",
+        rw.rich, "![alt](tg://photo?id=img0 \"Quarterly revenue\")",
         "the title is rewritten onto the reference, space-separated as markdown requires"
     );
     assert_eq!(
@@ -231,11 +232,13 @@ fn a_multiline_caption_folds_to_one_line() {
     let dir = tempfile::tempdir().expect("tempdir");
     let png = write_fixture(dir.path(), "chart.png", PNG_BYTES);
 
-    let text = format!("![alt]({png} \"quarterly\n  revenue\")", png = png.display());
+    let text = format!(
+        "![alt]({png} \"quarterly\n  revenue\")",
+        png = png.display()
+    );
     let rw = rewrite_local_images(&text, Some(dir.path()), "img", &[]);
     assert_eq!(
-        rw.rich,
-        "![alt](tg://photo?id=img0 \"quarterly revenue\")",
+        rw.rich, "![alt](tg://photo?id=img0 \"quarterly revenue\")",
         "interior whitespace folds to a single space"
     );
 }
@@ -263,7 +266,10 @@ fn an_already_delivered_image_is_consumed_without_a_second_entry_or_failure() {
     // below compares against.
     let rw = rewrite_local_images(&text, Some(dir.path()), "img", std::slice::from_ref(&png));
 
-    assert!(rw.entries.is_empty(), "no second entry for a delivered picture");
+    assert!(
+        rw.entries.is_empty(),
+        "no second entry for a delivered picture"
+    );
     assert!(
         rw.failures.is_empty(),
         "a delivered picture is not a lost one — it must not be reported"
@@ -298,7 +304,10 @@ fn references_inside_a_fence_or_a_code_span_are_byte_identical_in_both_forms() {
 
     let fenced = format!("```mermaid\n{reference}\n```");
     let rw = rewrite_local_images(&fenced, Some(dir.path()), "img", &[]);
-    assert!(rw.entries.is_empty(), "a fence body is not a live reference");
+    assert!(
+        rw.entries.is_empty(),
+        "a fence body is not a live reference"
+    );
     assert_eq!(rw.rich, fenced.trim());
     assert_eq!(rw.stripped, fenced.trim());
 

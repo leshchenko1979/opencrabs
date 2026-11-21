@@ -484,7 +484,9 @@ fn test_owner_label_with_ampersand_survives_the_rich_funnel() {
     // the emitter approved ships through the funnel untouched.
     let label = "Acknowledge & stamp gap closed";
     let raw_units = label.chars().count();
-    let escaped_units = crate::channels::telegram::markdown::escape_html(label).chars().count();
+    let escaped_units = crate::channels::telegram::markdown::escape_html(label)
+        .chars()
+        .count();
     assert_eq!(raw_units, 30, "the solo budget is 30 display units");
     assert_eq!(
         escaped_units, 34,

@@ -357,3 +357,49 @@ async fn runtime_and_eval_paths_return_the_same_order() {
          ranker would put it last"
     );
 }
+
+// ─── the published label ────────────────────────────────────────────────────
+
+/// The CLI source, embedded at compile time so the guard below cannot be
+/// skipped by a missing file and costs nothing at runtime.
+const EVAL_CMD_SRC: &str = include_str!("../cli/eval_cmd.rs");
+
+/// #927: the label a leg publishes must name the ranker the leg actually runs.
+///
+/// This is a DIFFERENT claim from "the ranker is shared" (the test above). A
+/// leg can call [`episodic::rank`] and still tell every reader of its JSON
+/// that no ranker exists — which is exactly what Track A did between #911 and
+/// #927, because the label lived in the command and the ranker lived in the
+/// module. Both halves are pinned here: the text names the shared scorer, and
+/// the command QUOTES it rather than carrying a copy that can drift again.
+#[test]
+fn the_published_ranker_label_names_the_shared_scorer() {
+    let label = episodic::RANKER_LABEL;
+
+    assert!(
+        label.contains("relevance::episodic::rank"),
+        "the label must name the shared scorer the leg calls; got {label:?}"
+    );
+    for signal in ["hits", "leading", "adjacency"] {
+        assert!(
+            label.contains(signal),
+            "the label must name the `{signal}` signal it grades; got {label:?}"
+        );
+    }
+    assert!(
+        !label.contains("no message ranker exists"),
+        "the label must not claim no ranker exists — #911 added one (#927); got {label:?}"
+    );
+
+    // The command must not own a second copy of the sentence. Without this,
+    // re-inlining a literal in the CLI would leave the const above correct and
+    // the emitted label false — the exact split-brain #927 was filed for.
+    assert!(
+        EVAL_CMD_SRC.contains("episodic::RANKER_LABEL"),
+        "src/cli/eval_cmd.rs must quote episodic::RANKER_LABEL instead of its own copy"
+    );
+    assert!(
+        !EVAL_CMD_SRC.contains("no message ranker exists"),
+        "src/cli/eval_cmd.rs must not carry the ranker-less claim (#927)"
+    );
+}

@@ -160,12 +160,17 @@ impl Tool for TaskWaitTool {
             Some(p) => match Regex::new(p) {
                 Ok(re) => Some(re),
                 Err(e) => {
-                    return Ok(ToolResult::error(format!("Invalid regex in 'pattern': {e}")));
+                    return Ok(ToolResult::error(format!(
+                        "Invalid regex in 'pattern': {e}"
+                    )));
                 }
             },
         };
 
-        let stream_raw = input.get("stream").and_then(Value::as_str).unwrap_or("both");
+        let stream_raw = input
+            .get("stream")
+            .and_then(Value::as_str)
+            .unwrap_or("both");
         if !Stream::accepts(stream_raw) {
             return Ok(ToolResult::error(format!(
                 "Unknown 'stream' {stream_raw:?}; expected one of both, out, err."
@@ -181,8 +186,7 @@ impl Tool for TaskWaitTool {
             )));
         };
 
-        let deadline = tokio::time::Instant::now()
-            + tokio::time::Duration::from_secs(timeout_secs);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
         let (mut out_off, mut err_off) = (0u64, 0u64);
         let mut last_tail = String::new();
         let mut skipped: u64 = 0;
@@ -390,8 +394,14 @@ fn resolve(context: &ToolExecutionContext, run_id: &str) -> Option<RunPaths> {
     }
     let status = WorkStatus::read(run_id)?;
     Some(RunPaths {
-        out: status.output_out.filter(|p| !p.is_empty()).map(PathBuf::from),
-        err: status.output_err.filter(|p| !p.is_empty()).map(PathBuf::from),
+        out: status
+            .output_out
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from),
+        err: status
+            .output_err
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from),
         label: status.label,
     })
 }
@@ -417,7 +427,10 @@ mod tests {
         for alias in ["both", "stdout", "stderr", "out", "err"] {
             assert!(Stream::accepts(alias), "alias {alias:?} must still parse");
         }
-        assert!(!Stream::accepts("stdin"), "an unknown stream is still refused");
+        assert!(
+            !Stream::accepts("stdin"),
+            "an unknown stream is still refused"
+        );
     }
 
     #[test]

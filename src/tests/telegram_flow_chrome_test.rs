@@ -538,8 +538,9 @@ async fn partially_filled_design_scaffold_keeps_only_real_content() {
 async fn continuation_form_design_is_mirrored_and_renders() {
     use crate::channels::telegram::flow_chrome::load_plan_prose;
     use crate::config::profile::{home_for_profile, with_profile_home_async};
-    use crate::utils::plan_files::{create_design_md, load_plan, plan_md_path, save_plan,
-        sync_md_to_json};
+    use crate::utils::plan_files::{
+        create_design_md, load_plan, plan_md_path, save_plan, sync_md_to_json,
+    };
     use uuid::Uuid;
 
     let profile = format!("flow-chrome-test-{}", Uuid::new_v4());
@@ -560,7 +561,9 @@ async fn continuation_form_design_is_mirrored_and_renders() {
                     1. Widen the predicate\n";
         std::fs::write(plan_md_path(sid).await, body).unwrap();
 
-        sync_md_to_json(sid).await.expect("complete design is accepted");
+        sync_md_to_json(sid)
+            .await
+            .expect("complete design is accepted");
         assert_eq!(
             load_plan(sid).await.unwrap().description,
             body,
@@ -617,7 +620,10 @@ fn header_only_html_leads_with_chrome_then_footer() {
     );
     // Chrome leads (always visible): title then one line per checklist task; a
     // blank line separates it from the plain footer clock.
-    assert_eq!(out, "📋 <b>Ship it</b>\n☐ wire it\n☐ test it\n\n⚙️ • 0:00 ⏱️");
+    assert_eq!(
+        out,
+        "📋 <b>Ship it</b>\n☐ wire it\n☐ test it\n\n⚙️ • 0:00 ⏱️"
+    );
 }
 
 #[test]
@@ -1401,7 +1407,10 @@ fn prose_sections_keep_a_label_whose_value_follows() {
     assert_eq!(sections.len(), 1);
     let body = &sections[0].body;
     assert!(body.contains("**Problem:**"), "label kept: {body}");
-    assert!(body.contains("the gate refuses a ready plan"), "value kept: {body}");
+    assert!(
+        body.contains("the gate refuses a ready plan"),
+        "value kept: {body}"
+    );
 
     // A truly empty placeholder is still dropped, and with it the section.
     let empty = "# Design\n\n## Context\n- **Problem:** \n- **Target state:** \n";

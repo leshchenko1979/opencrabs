@@ -352,12 +352,9 @@ async fn settle_runs_when_delivery_returns_false() {
     // `Ok(false)` is the reaction-only / cleanup-only delivery shape — the
     // exact case the old `if !delivered { return }` gate swallowed.
     let settled = AtomicBool::new(false);
-    let delivered = run_tail(
-        async { Ok::<bool, String>(false) },
-        async {
-            settled.store(true, Ordering::SeqCst);
-        },
-    )
+    let delivered = run_tail(async { Ok::<bool, String>(false) }, async {
+        settled.store(true, Ordering::SeqCst);
+    })
     .await;
 
     assert!(

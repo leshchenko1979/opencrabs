@@ -79,8 +79,7 @@ fn ordering_is_preserved_on_both_halves() {
 #[test]
 fn two_senders_keep_their_own_labels_and_forward_tags() {
     let alice = "\u{0410}\u{043b}\u{0438}\u{0441}\u{0430} (@alice): deploy is broken";
-    let bob =
-        "\u{0411}\u{043e}\u{0431} (@bob): [Forwarded from \"Carol Smith\"]:\nstaging is down";
+    let bob = "\u{0411}\u{043e}\u{0431} (@bob): [Forwarded from \"Carol Smith\"]:\nstaging is down";
 
     let queued = vec![
         build_midturn_queued_message(None, alice, alice),
@@ -203,7 +202,9 @@ fn a_command_mid_burst_keeps_its_own_wrapper() {
     let joined = join_midturn_batch(queued).expect("mixed burst joins");
 
     assert!(
-        joined.context_text.contains("[The /drop_release command was invoked"),
+        joined
+            .context_text
+            .contains("[The /drop_release command was invoked"),
         "the command keeps its own directive framing: {}",
         joined.context_text
     );

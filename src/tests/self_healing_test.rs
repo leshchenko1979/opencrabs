@@ -176,9 +176,9 @@ async fn corrupt_db_never_reports_a_clean_pass() {
         f.sync_all().unwrap();
     }
 
-    let db = Database::connect(&path)
-        .await
-        .expect("the pool must open a corrupt file: connect is lazy and apply_pragmas only reads page 1");
+    let db = Database::connect(&path).await.expect(
+        "the pool must open a corrupt file: connect is lazy and apply_pragmas only reads page 1",
+    );
     let result = db.run_integrity_check().await;
     assert!(
         !matches!(result, Ok(None)),

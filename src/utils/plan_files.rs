@@ -476,7 +476,8 @@ struct PlanSessionLocks {
 }
 
 fn session_locks() -> &'static std::sync::Mutex<HashMap<Uuid, Arc<PlanSessionLocks>>> {
-    static LOCKS: OnceLock<std::sync::Mutex<HashMap<Uuid, Arc<PlanSessionLocks>>>> = OnceLock::new();
+    static LOCKS: OnceLock<std::sync::Mutex<HashMap<Uuid, Arc<PlanSessionLocks>>>> =
+        OnceLock::new();
     LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 

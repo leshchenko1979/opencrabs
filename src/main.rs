@@ -83,10 +83,8 @@ async fn main() -> Result<()> {
                 (0, 0)
             }
         };
-    let removed = logging::cleanup_old_temp_files(
-        u64::from(retention_days),
-        u64::from(command_run_days),
-    );
+    let removed =
+        logging::cleanup_old_temp_files(u64::from(retention_days), u64::from(command_run_days));
     if removed > 0 {
         tracing::info!("🧹 Cleaned up {} orphaned temp file(s)", removed);
     }

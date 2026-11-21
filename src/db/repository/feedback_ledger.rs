@@ -9,8 +9,8 @@
 
 use crate::db::Pool;
 use crate::db::database::interact_err;
-use crate::db::retry::{write_retry_config, write_with_retry};
 use crate::db::models::FeedbackEntry;
+use crate::db::retry::{write_retry_config, write_with_retry};
 use anyhow::{Context, Result};
 use rusqlite::params;
 

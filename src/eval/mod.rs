@@ -8,6 +8,7 @@
 pub mod baseline;
 pub mod before_after;
 pub mod compaction;
+pub mod compaction_gate;
 pub mod episodic_track;
 pub mod inflation;
 pub mod live;

@@ -20,8 +20,8 @@
 
 use std::time::{Duration, Instant};
 
-use teloxide::types::{ChatId, MessageId};
 use teloxide::Bot;
+use teloxide::types::{ChatId, MessageId};
 
 use crate::channels::telegram::governor;
 use crate::channels::telegram::governor::test_support as ts;
@@ -1184,7 +1184,10 @@ async fn pace_rich_drops_cosmetic_and_holds_final() {
         governor::RichAdmission::Dropped(governor::EditClass::Clock)
     ));
     let snap = ts::snapshot(CHAT).unwrap();
-    assert_eq!(snap.dropped_rich, 1, "a G4 drop is counted at the rich gate");
+    assert_eq!(
+        snap.dropped_rich, 1,
+        "a G4 drop is counted at the rich gate"
+    );
     assert_eq!(snap.admitted_rich, 1, "a dropped tick must not be admitted");
 
     // Dry bucket + final -> holds for the refill and lands (30/min = one token
@@ -1213,13 +1216,33 @@ fn recent_ring_counts_surfaces_windows_and_gaps() {
     r.push(t0 + Duration::from_millis(900), governor::SURFACE_RICH);
 
     let now = t0 + Duration::from_millis(900);
-    assert_eq!(r.count_within(now, Duration::from_secs(1)), 3, "all three in 1s");
-    assert_eq!(r.count_within(now, Duration::from_millis(100)), 1, "only newest");
+    assert_eq!(
+        r.count_within(now, Duration::from_secs(1)),
+        3,
+        "all three in 1s"
+    );
+    assert_eq!(
+        r.count_within(now, Duration::from_millis(100)),
+        1,
+        "only newest"
+    );
 
-    assert_eq!(r.count_surface(now, Duration::from_secs(60), governor::SURFACE_TYPING), 1);
-    assert_eq!(r.count_surface(now, Duration::from_secs(60), governor::SURFACE_EDITS), 1);
-    assert_eq!(r.count_surface(now, Duration::from_secs(60), governor::SURFACE_RICH), 1);
-    assert_eq!(r.count_surface(now, Duration::from_secs(60), governor::SURFACE_SENDS), 0);
+    assert_eq!(
+        r.count_surface(now, Duration::from_secs(60), governor::SURFACE_TYPING),
+        1
+    );
+    assert_eq!(
+        r.count_surface(now, Duration::from_secs(60), governor::SURFACE_EDITS),
+        1
+    );
+    assert_eq!(
+        r.count_surface(now, Duration::from_secs(60), governor::SURFACE_RICH),
+        1
+    );
+    assert_eq!(
+        r.count_surface(now, Duration::from_secs(60), governor::SURFACE_SENDS),
+        0
+    );
 
     // The gap is measured to the NEWEST admission, so each push resets it.
     assert_eq!(r.gap_ms(now), Some(0));
@@ -1236,7 +1259,10 @@ fn recent_ring_evicts_oldest_past_capacity() {
         r.push(t0 + Duration::from_millis(i), governor::SURFACE_RICH);
     }
     let now = t0 + Duration::from_millis(governor::RECENT_CAP as u64 + 9);
-    assert_eq!(r.count_within(now, Duration::from_secs(60)), governor::RECENT_CAP);
+    assert_eq!(
+        r.count_within(now, Duration::from_secs(60)),
+        governor::RECENT_CAP
+    );
     // The OLDEST went, not the newest — the newest is still 0ms old.
     assert_eq!(r.gap_ms(now), Some(0), "newest entry survived eviction");
 }
@@ -1265,11 +1291,20 @@ async fn recent_profile_reports_admissions_including_typing() {
     let chat = ChatId(-1005800000001);
     ts::mark_forum(chat);
 
-    assert!(governor::admit_chat_action(chat, Some(7)).await, "first refresh");
+    assert!(
+        governor::admit_chat_action(chat, Some(7)).await,
+        "first refresh"
+    );
 
     let first = governor::recent_profile(Some(chat.0));
-    assert!(first.contains("by_surface{typing=1,"), "typing visible: {first}");
-    assert!(!first.contains("gap_ms=-"), "populated ring has a gap: {first}");
+    assert!(
+        first.contains("by_surface{typing=1,"),
+        "typing visible: {first}"
+    );
+    assert!(
+        !first.contains("gap_ms=-"),
+        "populated ring has a gap: {first}"
+    );
 
     // Two seconds on, the first admission has left the 1s window and is still
     // inside the 5s one — which is the whole point of a sliding ring.
@@ -1277,8 +1312,14 @@ async fn recent_profile_reports_admissions_including_typing() {
     assert!(governor::admit_chat_action(chat, Some(7)).await);
 
     let second = governor::recent_profile(Some(chat.0));
-    assert!(second.contains("by_surface{typing=2,"), "both admissions: {second}");
-    assert!(second.contains("window{1s=1,"), "only newest in 1s: {second}");
+    assert!(
+        second.contains("by_surface{typing=2,"),
+        "both admissions: {second}"
+    );
+    assert!(
+        second.contains("window{1s=1,"),
+        "only newest in 1s: {second}"
+    );
     assert!(second.contains("5s=2,"), "both are in 5s: {second}");
     // `60s` is the LAST field of the window group, so the source format string
     // (`window{{1s={},5s={},60s={}}}`) closes it with `}` — not a comma. Built
@@ -1384,7 +1425,10 @@ async fn spacing_floor_blocks_inside_the_interval_and_clears_after() {
         snap.dropped_spacing, 1,
         "the refusal is counted on the spacing gate"
     );
-    assert_eq!(snap.admitted_rich, 1, "the blocked tick must not be admitted");
+    assert_eq!(
+        snap.admitted_rich, 1,
+        "the blocked tick must not be admitted"
+    );
 
     // Past the floor: admitted again.
     ts::advance(900);
@@ -1440,7 +1484,10 @@ async fn spacing_floor_drops_cosmetic_but_never_classic_content() {
         "a cosmetic edit inside the floor must not be admitted"
     );
     let snap = ts::snapshot(chat).expect("peer exists");
-    assert_eq!(snap.dropped_spacing, 1, "the cosmetic drop is spacing-attributed");
+    assert_eq!(
+        snap.dropped_spacing, 1,
+        "the cosmetic drop is spacing-attributed"
+    );
     assert_eq!(
         snap.dropped_clock, 0,
         "the ladder counters must NOT absorb the spacing gate's drops"

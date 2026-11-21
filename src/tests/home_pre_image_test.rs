@@ -261,5 +261,8 @@ async fn hashline_edit_under_the_home_leaves_a_pre_image() {
         1,
         "hashline_edit writes through the shared chokepoint, so it leaves one too: {backups:?}"
     );
-    assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), "alpha\nbeta\n");
+    assert_eq!(
+        std::fs::read_to_string(&backups[0]).unwrap(),
+        "alpha\nbeta\n"
+    );
 }

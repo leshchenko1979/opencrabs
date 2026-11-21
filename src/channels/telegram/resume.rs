@@ -303,17 +303,20 @@ pub(crate) fn build_enqueue_callback(
                                         "[bg-resume] echo deferred by long 429 window chat={chat_id}"
                                     );
                                 } else {
-                                let mut retry = bot
-                                    .send_message(teloxide::types::ChatId(chat_id), classic_html)
-                                    .parse_mode(teloxide::types::ParseMode::Html);
-                                if let Some(tid) = thread_id {
-                                    retry = retry.message_thread_id(tid);
-                                }
-                                if let Err(e) = retry.await {
-                                    tracing::warn!(
-                                        "[bg-resume] #1221 echo bubble failed on 429 retry: {e}"
-                                    );
-                                }
+                                    let mut retry = bot
+                                        .send_message(
+                                            teloxide::types::ChatId(chat_id),
+                                            classic_html,
+                                        )
+                                        .parse_mode(teloxide::types::ParseMode::Html);
+                                    if let Some(tid) = thread_id {
+                                        retry = retry.message_thread_id(tid);
+                                    }
+                                    if let Err(e) = retry.await {
+                                        tracing::warn!(
+                                            "[bg-resume] #1221 echo bubble failed on 429 retry: {e}"
+                                        );
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -357,9 +360,8 @@ pub(crate) fn build_enqueue_callback(
                 // it — a row re-offered at boot, an item re-queued after a lost
                 // turn race — must not accumulate a second wrapper. The literal
                 // and its inverse live together in `notify_queue`.
-                msg.context_text = crate::brain::agent::service::notify_queue::wrap_busy_once(
-                    &msg.context_text,
-                );
+                msg.context_text =
+                    crate::brain::agent::service::notify_queue::wrap_busy_once(&msg.context_text);
                 state.enqueue_detached_result(session_id, msg);
                 return;
             };
@@ -1267,10 +1269,7 @@ pub(crate) async fn resume_session_inner(
                 result,
             )
             .await;
-            delivered_ok.store(
-                matches!(r, Ok(true)),
-                std::sync::atomic::Ordering::SeqCst,
-            );
+            delivered_ok.store(matches!(r, Ok(true)), std::sync::atomic::Ordering::SeqCst);
             r
         },
         async {
@@ -1481,15 +1480,17 @@ pub(crate) fn build_bg_echo_bubble(body: &str, title: &str) -> (BubbleWire, Stri
     // #490: keep BOTH ends. The head-only cut dropped the tail, which is where
     // a reader's own blocks live; the marker it leaves names the character
     // count that went, so the ending is visibly missing rather than silently.
-    let (body, dropped) = crate::utils::string::truncate_chars_tail_preserving(
-        body,
-        ECHO_BODY_CAP_CHARS,
-    );
+    let (body, dropped) =
+        crate::utils::string::truncate_chars_tail_preserving(body, ECHO_BODY_CAP_CHARS);
     // Plain suffix, deliberately WITHOUT the count: the body already carries
     // `… (truncated N chars) …` at the cut itself, and repeating N here would
     // re-create the double-reporting #490 exists to remove. The count lives
     // once, adjacent to the material it describes; this is the headline nudge.
-    let suffix = if dropped > 0 { " (truncated)".to_string() } else { String::new() };
+    let suffix = if dropped > 0 {
+        " (truncated)".to_string()
+    } else {
+        String::new()
+    };
     let markdown = format!("{title}{suffix}\n\n{body}");
     // The title is dynamic (sender label / task display line): escape it for
     // the HTML dialect so a `<` in a label can't corrupt the wrapper.
@@ -1662,9 +1663,7 @@ pub(crate) fn build_bg_receipt_card(
     let cause_html = cause_text
         .as_deref()
         .map(|t| format!("<i>{}</i>\n", super::markdown::escape_html(t)));
-    let cause_md = cause_text
-        .as_deref()
-        .map(|t| format!("_{t}_\n"));
+    let cause_md = cause_text.as_deref().map(|t| format!("_{t}_\n"));
     let rich_html = format!(
         "<details><summary><sub>{icon} <code>{}</code> 🕒 {duration}</sub></summary>\n\
          {}<pre>{}</pre>\n</details>",
@@ -1737,11 +1736,13 @@ pub(crate) async fn build_notify_receipt_card(
     // The classic fallback is built by `build_bg_echo_bubble`, which applies
     // the classic budget itself — that call is handed the body UNCAPPED so
     // each leg gets exactly one cut, on the leg that needs it.
-    let (rich_body, rich_dropped) = crate::utils::string::truncate_chars_tail_preserving(
-        body,
-        ECHO_BODY_CAP_CHARS_RICH,
-    );
-    let rich_suffix = if rich_dropped > 0 { " (truncated)".to_string() } else { String::new() };
+    let (rich_body, rich_dropped) =
+        crate::utils::string::truncate_chars_tail_preserving(body, ECHO_BODY_CAP_CHARS_RICH);
+    let rich_suffix = if rich_dropped > 0 {
+        " (truncated)".to_string()
+    } else {
+        String::new()
+    };
     // Body rendered from markdown with <p> wrapping — the rich HTML dialect
     // chrome surfaces use (#1142); mermaid fences resolve exactly like the
     // final-reply path, gated so a fence-less body costs no HTTP.

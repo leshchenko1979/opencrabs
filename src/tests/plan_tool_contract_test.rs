@@ -1076,7 +1076,10 @@ async fn one_task_checklist_init_is_refused() {
             }),
         )
         .await;
-        assert!(!ok, "single-task checklist init must be refused, got: {msg}");
+        assert!(
+            !ok,
+            "single-task checklist init must be refused, got: {msg}"
+        );
         assert!(msg.contains(ONE_TASK_REFUSAL), "got: {msg}");
 
         // Nothing was persisted: the refusal is a birth-door check, not a
@@ -1143,7 +1146,10 @@ async fn one_task_seed_on_empty_plan_is_refused() {
             json!({ "operation": "add_tasks", "tasks": [{ "title": "only", "description": "d" }] }),
         )
         .await;
-        assert!(!ok, "seeding one task onto an empty plan must be refused, got: {msg}");
+        assert!(
+            !ok,
+            "seeding one task onto an empty plan must be refused, got: {msg}"
+        );
         assert!(msg.contains(ONE_TASK_REFUSAL), "got: {msg}");
 
         let (ok, msg) = run(
@@ -1186,10 +1192,20 @@ async fn two_task_plan_is_still_allowed() {
             }),
         )
         .await;
-        assert!(ok, "a two-task plan is a plan and must be allowed, got: {out}");
-        assert_eq!(plan_mode_state(ctx.session_id).await, PlanModeState::PostInitEditing);
+        assert!(
+            ok,
+            "a two-task plan is a plan and must be allowed, got: {out}"
+        );
         assert_eq!(
-            load_plan(ctx.session_id).await.expect("plan live").tasks.len(),
+            plan_mode_state(ctx.session_id).await,
+            PlanModeState::PostInitEditing
+        );
+        assert_eq!(
+            load_plan(ctx.session_id)
+                .await
+                .expect("plan live")
+                .tasks
+                .len(),
             2
         );
 
@@ -1202,9 +1218,16 @@ async fn two_task_plan_is_still_allowed() {
             json!({ "operation": "add_task", "title": "three", "description": "d3" }),
         )
         .await;
-        assert!(ok, "growing a live checklist by one task must stay legal, got: {out}");
+        assert!(
+            ok,
+            "growing a live checklist by one task must stay legal, got: {out}"
+        );
         assert_eq!(
-            load_plan(ctx.session_id).await.expect("plan live").tasks.len(),
+            load_plan(ctx.session_id)
+                .await
+                .expect("plan live")
+                .tasks
+                .len(),
             3
         );
     })

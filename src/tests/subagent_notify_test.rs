@@ -51,10 +51,7 @@ fn resolve_mode_defaults_and_alias() {
     use DeliveryMode::*;
     // #373: the default queues for the target's next tool-loop boundary. It
     // used to refuse while streaming (the retired `now` mode).
-    assert!(matches!(
-        resolve_mode(None, None, None).unwrap(),
-        TurnEnd
-    ));
+    assert!(matches!(resolve_mode(None, None, None).unwrap(), TurnEnd));
     // The legacy `interrupt` argument is the alias for the urgent tier
     // (#393): `true` still must NOT restore the retired refusal, but it does
     // select the urgent tier.
@@ -80,7 +77,10 @@ fn resolve_mode_retired_now_is_rejected() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("retired"), "got: {err}");
-    assert!(err.contains("'quiet'"), "error must name a live alternative: {err}");
+    assert!(
+        err.contains("'quiet'"),
+        "error must name a live alternative: {err}"
+    );
     // It must not be silently mapped back onto the old behaviour, and the
     // legacy alias must not resurrect it.
     assert!(resolve_mode(Some("now"), Some(false), None).is_err());

@@ -510,7 +510,9 @@ mod exec_row_id_tests {
     #[test]
     fn a_detached_result_keys_its_row_by_the_run_id() {
         let mut result = ToolResult::success("Started in the background: make".to_string());
-        result.metadata.insert("run_id".to_string(), "3f2b".to_string());
+        result
+            .metadata
+            .insert("run_id".to_string(), "3f2b".to_string());
         assert_eq!(result.exec_row_id(), "3f2b");
     }
 

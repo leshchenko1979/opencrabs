@@ -44,7 +44,10 @@ fn a_partial_section_keeps_the_other_fields_at_their_defaults() {
     let parsed = parse("[agent.background]\nscope = false\n");
     let defaults = BackgroundConfig::default();
 
-    assert!(!parsed.scope, "the one field the document names is honoured");
+    assert!(
+        !parsed.scope,
+        "the one field the document names is honoured"
+    );
     assert_eq!(parsed.scope_memory_max, defaults.scope_memory_max);
     assert_eq!(parsed.scope_swap_max, defaults.scope_swap_max);
     assert_eq!(parsed.scope_tasks_max, defaults.scope_tasks_max);
@@ -99,7 +102,10 @@ fn parse_memory_max_accepts_the_systemd_sizes() {
 fn parse_memory_max_refuses_what_cannot_be_a_bound() {
     // systemd accepts this spelling but treats it as an error for our purpose:
     // it is a fraction of whatever cgroup the scope lands in.
-    assert!(parse_memory_max("50%").is_err(), "a percentage is not a bound");
+    assert!(
+        parse_memory_max("50%").is_err(),
+        "a percentage is not a bound"
+    );
     // A zero-byte cap cannot start a process at all.
     assert!(parse_memory_max("0").is_err(), "zero bytes cannot start");
     assert!(parse_memory_max("max").is_err(), "`max` is not a size");
@@ -110,7 +116,10 @@ fn parse_memory_max_refuses_what_cannot_be_a_bound() {
 fn slice_names_are_validated_before_argv() {
     assert!(validate_slice_name("oc-tasks.slice").is_ok());
     assert!(validate_slice_name("bad/name").is_err());
-    assert!(validate_slice_name("oc-tasks").is_err(), "must end in .slice");
+    assert!(
+        validate_slice_name("oc-tasks").is_err(),
+        "must end in .slice"
+    );
     assert!(validate_slice_name("").is_err());
 }
 
@@ -169,10 +178,7 @@ fn fake_systemctl(dir: &std::path::Path) -> std::path::PathBuf {
 
 #[cfg(unix)]
 fn scratch_dir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "oc-scope-test-{tag}-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("oc-scope-test-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -453,11 +459,7 @@ fn an_unbounded_run_omits_the_memory_cap() {
         memory_max: None,
         ..ScopeSpec::default()
     };
-    let argv = crate::utils::scope::wrapped_argv(
-        &spec,
-        std::ffi::OsStr::new("/bin/true"),
-        &[],
-    );
+    let argv = crate::utils::scope::wrapped_argv(&spec, std::ffi::OsStr::new("/bin/true"), &[]);
     let got: Vec<String> = argv
         .iter()
         .map(|a| a.to_string_lossy().into_owned())
@@ -586,7 +588,10 @@ fn an_unscopable_host_never_consults_systemctl() {
     std::fs::set_permissions(&run, perms).expect("the fake run is executable");
 
     let spec = ScopeSpec::default();
-    assert!(spec.enabled, "the guard must not pass because scoping is off");
+    assert!(
+        spec.enabled,
+        "the guard must not pass because scoping is off"
+    );
 
     crate::utils::scope::settle_pool_with(&spec, run.as_os_str(), ctl.as_os_str());
 

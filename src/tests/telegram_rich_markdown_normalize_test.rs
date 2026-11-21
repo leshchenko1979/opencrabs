@@ -247,7 +247,10 @@ fn test_shield_keeps_video_embed_and_demotes_documents() {
         name: Some("s.md".into()),
     };
     assert_eq!(
-        shield_unresolvable_markdown_images("![s.md](tg://document?id=doc0)", std::slice::from_ref(&document)),
+        shield_unresolvable_markdown_images(
+            "![s.md](tg://document?id=doc0)",
+            std::slice::from_ref(&document)
+        ),
         "![s.md](tg://document?id=doc0)",
         "a document embed is the form that binds (§4.3 A/B) — kept as written"
     );
@@ -270,7 +273,10 @@ fn test_shield_keeps_video_embed_and_demotes_documents() {
     // A reference naming NOTHING has no entry to demote to — it is escaped, which is
     // the pre-existing orphan contract, unchanged by #800.
     assert_eq!(
-        shield_unresolvable_markdown_images("![q](tg://video?id=absent)", std::slice::from_ref(&video)),
+        shield_unresolvable_markdown_images(
+            "![q](tg://video?id=absent)",
+            std::slice::from_ref(&video)
+        ),
         "\\![q](tg://video?id=absent)",
         "an orphan reference is escaped, never demoted"
     );

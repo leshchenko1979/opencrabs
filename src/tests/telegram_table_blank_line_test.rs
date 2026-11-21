@@ -76,7 +76,8 @@ fn blockquote_then_details_gets_blank_line_inserted() {
     // The issue's minimal repro, verbatim: a blockquote run with no blank line
     // after it, directly followed by a <details> block. This exact shape made
     // Telegram reject the whole card (#552, measured 409 rejections on 09-24).
-    let input = "> quoted line here\n<details><summary><b>Context</b></summary>\n\nbody text\n\n</details>";
+    let input =
+        "> quoted line here\n<details><summary><b>Context</b></summary>\n\nbody text\n\n</details>";
     let expected = "> quoted line here\n\n<details><summary><b>Context</b></summary>\n\nbody text\n\n</details>";
     assert_eq!(ensure_blank_line_before_block_html(input), expected);
 }

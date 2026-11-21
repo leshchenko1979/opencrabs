@@ -171,7 +171,10 @@ fn test_unescape_html_leaves_foreign_entities_verbatim() {
         unescape_html("&#65; &quot;q&quot; &apos;a&apos;"),
         "&#65; &quot;q&quot; &apos;a&apos;"
     );
-    assert_eq!(unescape_html("&rarr; &bull; &mdash;"), "&rarr; &bull; &mdash;");
+    assert_eq!(
+        unescape_html("&rarr; &bull; &mdash;"),
+        "&rarr; &bull; &mdash;"
+    );
     assert_eq!(unescape_html("&unknown; &"), "&unknown; &");
 }
 

@@ -937,7 +937,7 @@ impl WorkStatus {
             return (matches!(status.kind, WorkKind::Agent)
                 && status.session_id == session_id
                 && !matches!(status.state, WorkState::Completed | WorkState::Failed))
-                .then_some(status);
+            .then_some(status);
         }
         let ids = Self::list_all().ok()?;
         ids.into_iter().filter_map(|id| Self::read(&id)).find(|s| {
@@ -1348,10 +1348,7 @@ pub fn sweep_stale_runs(windows: StaleWindows) -> std::io::Result<(usize, usize)
         // other three legs of that sweep already warn per file.
         match fs::remove_file(&path) {
             Ok(()) => removed += 1,
-            Err(e) => tracing::warn!(
-                "Failed to remove stale run capture {}: {e}",
-                path.display()
-            ),
+            Err(e) => tracing::warn!("Failed to remove stale run capture {}: {e}", path.display()),
         }
     }
 

@@ -129,9 +129,7 @@ async fn small_windows_are_waited_in_full() {
 
 #[test]
 fn inline_bound_defers_only_windows_over_sixty_seconds() {
-    use crate::channels::telegram::rate_limit::{
-        exceeds_inline_bound, MAX_INLINE_RATE_LIMIT_WAIT,
-    };
+    use crate::channels::telegram::rate_limit::{MAX_INLINE_RATE_LIMIT_WAIT, exceeds_inline_bound};
 
     assert_eq!(MAX_INLINE_RATE_LIMIT_WAIT, Duration::from_secs(60));
     assert!(!exceeds_inline_bound(Duration::from_secs(60)));

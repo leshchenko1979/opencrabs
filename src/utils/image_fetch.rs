@@ -72,7 +72,10 @@ pub async fn resolve_remote_images(mut scan: LocalImageScan) -> LocalImageScan {
             // list of URLs), and the rich plane captions a remote reference
             // server-side anyway (CAP-2). Local files are the leg that needs the
             // carried title.
-            Ok(path) => scan.attachments.push(LocalImage { path, caption: None }),
+            Ok(path) => scan.attachments.push(LocalImage {
+                path,
+                caption: None,
+            }),
             Err(reason) => scan.failures.push(remote_failure(url, reason)),
         }
     }

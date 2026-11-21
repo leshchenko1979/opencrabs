@@ -144,12 +144,7 @@ pub fn family_preset(name: &str, base_url: &str, model: &str) -> RetryConfig {
 
 /// Full resolution for one request: family preset, then the operator's
 /// overrides on top.
-pub fn resolve(
-    name: &str,
-    base_url: &str,
-    model: &str,
-    overrides: &RetryOverrides,
-) -> RetryConfig {
+pub fn resolve(name: &str, base_url: &str, model: &str, overrides: &RetryOverrides) -> RetryConfig {
     let mut config = family_preset(name, base_url, model);
     overrides.apply_to(&mut config);
     config

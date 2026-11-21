@@ -456,12 +456,14 @@ fn test_format_context_inventory_without_documents_is_unchanged() {
 // ---------------------------------------------------------------------
 
 /// The section-0 spec is prose handed to the summariser model — there is
-/// no Rust generator to call, so the production artifact IS the spec text
-/// in `context.rs`. Asserting against a fixture this file builds would be
-/// a control arm that cannot fail (it would only restate its own input),
-/// so the status requirements are pinned on the real spec, house-style
-/// string sentinels: the wording may drift, the requirement may not.
-const CONTEXT_SRC: &str = include_str!("../brain/agent/service/context.rs");
+/// no Rust generator to call, so the production artifact IS the spec text.
+/// Since #929 that text lives in `prompts/compaction.default.toml` (the
+/// compiled-in prompt set), not in `context.rs`. Asserting against a fixture
+/// this file builds would be a control arm that cannot fail (it would only
+/// restate its own input), so the status requirements are pinned on the real
+/// spec, house-style string sentinels: the wording may drift, the requirement
+/// may not.
+const PROMPT_SPEC: &str = include_str!("../../prompts/compaction.default.toml");
 
 /// Section 0 must demand an explicit status on its FIRST LINE, naming all
 /// three tokens. A token the spec never names is a status the summariser
@@ -469,12 +471,12 @@ const CONTEXT_SRC: &str = include_str!("../brain/agent/service/context.rs");
 #[test]
 fn section_0_spec_requires_the_status_on_its_first_line() {
     assert!(
-        CONTEXT_SRC.contains("FIRST LINE OF THIS SECTION"),
+        PROMPT_SPEC.contains("FIRST LINE OF THIS SECTION"),
         "section 0 must place the status on its first line"
     );
     for status in ["OPEN", "DONE", "UNKNOWN"] {
         assert!(
-            CONTEXT_SRC.contains(&format!("**Obligation status: {status}**")),
+            PROMPT_SPEC.contains(&format!("**Obligation status: {status}**")),
             "the spec must name the {status} token or the summariser cannot emit it"
         );
     }
@@ -485,7 +487,7 @@ fn section_0_spec_requires_the_status_on_its_first_line() {
 /// format must therefore be scoped to OPEN, never offered unconditionally.
 #[test]
 fn done_branch_forbids_restating_the_obligation_as_a_directive() {
-    let spec = CONTEXT_SRC;
+    let spec = PROMPT_SPEC;
     let open_at = spec.find("- OPEN ").expect("the OPEN branch must exist");
     let done_at = spec.find("- DONE ").expect("the DONE branch must exist");
     let unknown_at = spec
@@ -529,11 +531,11 @@ fn done_branch_forbids_restating_the_obligation_as_a_directive() {
 #[test]
 fn status_must_be_derived_not_carried_forward() {
     assert!(
-        CONTEXT_SRC.contains("do NOT carry a status forward from an earlier summary"),
+        PROMPT_SPEC.contains("do NOT carry a status forward from an earlier summary"),
         "the status must be re-derived every compaction, never inherited"
     );
     assert!(
-        CONTEXT_SRC.contains("completion evidence you record in section 1"),
+        PROMPT_SPEC.contains("completion evidence you record in section 1"),
         "the status must key off section 1's own completion field"
     );
 }
@@ -545,7 +547,7 @@ fn status_must_be_derived_not_carried_forward() {
 #[test]
 fn side_effecting_next_step_must_carry_its_carrier_state() {
     assert!(
-        CONTEXT_SRC.contains("A next step with a SIDE EFFECT"),
+        PROMPT_SPEC.contains("A next step with a SIDE EFFECT"),
         "#886: the spec must name the side-effecting step class explicitly"
     );
     for marker in [
@@ -554,17 +556,17 @@ fn side_effecting_next_step_must_carry_its_carrier_state() {
         "state: UNKNOWN — check [store] first",
     ] {
         assert!(
-            CONTEXT_SRC.contains(marker),
+            PROMPT_SPEC.contains(marker),
             "#886: the carrier rule must carry `{marker}` — a step whose carrier \
              state cannot be established is UNKNOWN, never a bare imperative"
         );
     }
-    let rule_at = CONTEXT_SRC
+    let rule_at = PROMPT_SPEC
         .find("A next step with a SIDE EFFECT")
         .expect("the carrier rule must exist");
     // Bound the slice on a FIND, never a byte offset: the rule carries em
     // dashes, so an arbitrary index can land mid-codepoint and panic.
-    let rule_tail = &CONTEXT_SRC[rule_at..];
+    let rule_tail = &PROMPT_SPEC[rule_at..];
     let rule_end = rule_tail
         .find("This is the MOST IMPORTANT section")
         .expect("the carrier rule must precede the section-0 closer");
@@ -581,11 +583,11 @@ fn side_effecting_next_step_must_carry_its_carrier_state() {
 #[test]
 fn status_without_a_cited_command_is_unknown() {
     assert!(
-        CONTEXT_SRC.contains("A status MUST"),
+        PROMPT_SPEC.contains("A status MUST"),
         "#886: the spec must require the status to cite its evidence"
     );
     assert!(
-        CONTEXT_SRC.contains("A status with no such citation is UNKNOWN, never"),
+        PROMPT_SPEC.contains("A status with no such citation is UNKNOWN, never"),
         "#886: an unevidenced status must default to UNKNOWN, never OPEN"
     );
 }
@@ -596,11 +598,11 @@ fn status_without_a_cited_command_is_unknown() {
 #[test]
 fn section_1_records_a_receipt_and_defaults_to_unverified() {
     assert!(
-        CONTEXT_SRC.contains("- RECEIPT:"),
+        PROMPT_SPEC.contains("- RECEIPT:"),
         "#886: section 1 must carry a receipt slot"
     );
     assert!(
-        CONTEXT_SRC.contains("and section 0 must say so"),
+        PROMPT_SPEC.contains("and section 0 must say so"),
         "#886: a task with no receipt must not default to pending"
     );
 }
@@ -753,14 +755,16 @@ async fn documents_block_survives_a_degraded_summary() {
 /// source level instead. Deleting the rule or the YAML example reddens this.
 #[test]
 fn manifest_spec_documents_the_retained_documents_key() {
-    const SRC: &str = include_str!("../brain/agent/service/context.rs");
+    // #929: the spec text moved to the compiled-in prompt set. The needle is
+    // the TOML's own text, not a Rust escape sequence.
+    const SRC: &str = include_str!("../../prompts/compaction.default.toml");
 
     assert!(
         SRC.contains("`retained_documents`: absolute paths"),
         "the manifest rules must document the retained_documents key"
     );
     assert!(
-        SRC.contains("retained_documents:\\n\\\n               - /abs/path/to/CLAUDE.md"),
+        SRC.contains("retained_documents:\n- /abs/path/to/CLAUDE.md"),
         "the manifest YAML example must show the retained_documents key"
     );
 }

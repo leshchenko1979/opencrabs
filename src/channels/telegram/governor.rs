@@ -49,9 +49,9 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use teloxide::Bot;
 use teloxide::prelude::Requester;
 use teloxide::types::{ChatId, MessageId, ParseMode};
-use teloxide::Bot;
 
 use crate::config::{Config, RateLimiterConfig};
 
@@ -166,8 +166,7 @@ pub(crate) async fn acquire_global_permit() -> GlobalPermit {
     // 1. First, respect any active global 429 cooldown lock. Bounded (#556):
     //    sleeping the full deadline here is the #1064 regression by another
     //    door, so a cooldown that outlasts the bound fails closed instead.
-    if !super::rate_limit::wait_global_cooldown(super::rate_limit::MAX_INLINE_RATE_LIMIT_WAIT)
-        .await
+    if !super::rate_limit::wait_global_cooldown(super::rate_limit::MAX_INLINE_RATE_LIMIT_WAIT).await
     {
         // #635 — the cause is named, not collapsed into a bare `false`. One
         // line per refused call, so a ban is attributable in the log rather
@@ -370,7 +369,6 @@ pub(crate) enum PaceOutcome {
     /// payload is the remainder the gate could not buy — telemetry, not a wait.
     FailOpen(Duration),
 }
-
 
 /// One row of the governor policy matrix — the frozen contract for #635.
 ///
@@ -1154,9 +1152,9 @@ fn peers_guard() -> std::sync::MutexGuard<'static, HashMap<i64, Peer>> {
 /// per-chat window it would otherwise report is bounded by `MAX_429_PAUSE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // `Chat`'s deadline is REPORTED, not yet obeyed: the
-                    // cosmetic fast-paths obey the process-wide scope alone
-                    // (owner ruling 2026-09-08 — the per-chat window is armed
-                    // on the offending arm, whose own bucket enforces it).
+// cosmetic fast-paths obey the process-wide scope alone
+// (owner ruling 2026-09-08 — the per-chat window is armed
+// on the offending arm, whose own bucket enforces it).
 pub(crate) enum Cooldown {
     /// Nothing holds this chat back.
     None,
@@ -1548,10 +1546,18 @@ pub(crate) fn note_429_pause(chat: ChatId, wait: Duration) {
     // clock-pure bucket), and this is production code. This is the same field
     // assignment the pre-#580 loop used.
     let until = now + pause;
-    ensure_bucket(&mut peer.rich, lim.rich_burst_cap(), lim.rich_rate_per_sec()).pause_until =
-        Some(until);
-    ensure_bucket(&mut peer.edits, lim.edit_burst_cap(), lim.edit_rate_per_sec()).pause_until =
-        Some(until);
+    ensure_bucket(
+        &mut peer.rich,
+        lim.rich_burst_cap(),
+        lim.rich_rate_per_sec(),
+    )
+    .pause_until = Some(until);
+    ensure_bucket(
+        &mut peer.edits,
+        lim.edit_burst_cap(),
+        lim.edit_rate_per_sec(),
+    )
+    .pause_until = Some(until);
     peer.counters.pause_armed_429 += 1;
     tracing::info!(
         "Governor: 429 pause {pause:?} armed on rich+edits for chat={chat_id} (step 2, per-chat scope)"
@@ -1612,17 +1618,18 @@ pub(crate) async fn edit_admission(
                 peer.counters.note_spacing_drop(class);
                 return PaceOutcome::Drop(DropReason::SpacingFloor);
             }
-            let bucket =
-                ensure_bucket(&mut peer.edits, lim.edit_burst_cap(), lim.edit_rate_per_sec());
+            let bucket = ensure_bucket(
+                &mut peer.edits,
+                lim.edit_burst_cap(),
+                lim.edit_rate_per_sec(),
+            );
             bucket.set_reserve(INTERACTIVE_RESERVE);
             // #117: Interactive spends the FLOOR preferentially (take_any) — a tap
             // must not have to compete with bulk for the reserve-protected tokens.
             // Falls through to bulk take only when even the floor is dry.
             let is_interactive = class == EditClass::Interactive;
             let interactive_direct = is_interactive && bucket.take_any(now).is_ok();
-            let verdict = if interactive_direct
-                || (!is_interactive && bucket.take(now).is_ok())
-            {
+            let verdict = if interactive_direct || (!is_interactive && bucket.take(now).is_ok()) {
                 if is_interactive {
                     peer.counters.admitted_interactive += 1;
                 } else {
@@ -1719,7 +1726,11 @@ fn take_due_final(chat_id: i64, lim: &RateLimiterConfig) -> Option<(i32, Pending
         peer.draining = false;
         return None;
     }
-    let bucket = ensure_bucket(&mut peer.edits, lim.edit_burst_cap(), lim.edit_rate_per_sec());
+    let bucket = ensure_bucket(
+        &mut peer.edits,
+        lim.edit_burst_cap(),
+        lim.edit_rate_per_sec(),
+    );
     if bucket.take(gate_now()).is_err() {
         return None;
     }
@@ -2115,10 +2126,8 @@ pub(crate) async fn pace_rich(
         // a cooldown that outlasts the bound refuses instead of being slept.
         // This re-check stays in the caller on purpose — it must run on EVERY
         // pass, including the ones this loop spends asleep.
-        if !super::rate_limit::wait_global_cooldown(
-            super::rate_limit::MAX_INLINE_RATE_LIMIT_WAIT,
-        )
-        .await
+        if !super::rate_limit::wait_global_cooldown(super::rate_limit::MAX_INLINE_RATE_LIMIT_WAIT)
+            .await
         {
             return refuse_rich(chat_id, class);
         }
@@ -2153,8 +2162,11 @@ pub(crate) async fn pace_rich(
                 } else {
                     Duration::ZERO
                 };
-                let bucket =
-                    ensure_bucket(&mut peer.rich, lim.rich_burst_cap(), lim.rich_rate_per_sec());
+                let bucket = ensure_bucket(
+                    &mut peer.rich,
+                    lim.rich_burst_cap(),
+                    lim.rich_rate_per_sec(),
+                );
                 let need = bucket.next_token_in_for(now, 0.0).max(floor_hold);
                 if need.is_zero() {
                     // #580: `take` is the ONLY enforcement point for the per-chat
@@ -2284,7 +2296,11 @@ pub(crate) mod test_support {
         let lim = limits();
         let mut map = peers_guard();
         let peer = map.entry(chat.0).or_default();
-        let bucket = ensure_bucket(&mut peer.rich, lim.rich_burst_cap(), lim.rich_rate_per_sec());
+        let bucket = ensure_bucket(
+            &mut peer.rich,
+            lim.rich_burst_cap(),
+            lim.rich_rate_per_sec(),
+        );
         bucket.pause_arm(gate_now() + wait);
     }
 

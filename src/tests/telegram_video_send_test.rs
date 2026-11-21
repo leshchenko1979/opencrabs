@@ -171,8 +171,14 @@ fn a_truncated_or_empty_head_errs_towards_document() {
     // arrives as an un-previewable document rather than as a video that
     // Telegram's clients refuse to play.
     assert_eq!(sniff_video_format(b""), VideoFormat::Other);
-    assert_eq!(sniff_video_format(b"\x00\x00\x00\x18ftyp"), VideoFormat::Other);
-    assert_eq!(sniff_video_format(b"\x00\x00\x00\x18fty"), VideoFormat::Other);
+    assert_eq!(
+        sniff_video_format(b"\x00\x00\x00\x18ftyp"),
+        VideoFormat::Other
+    );
+    assert_eq!(
+        sniff_video_format(b"\x00\x00\x00\x18fty"),
+        VideoFormat::Other
+    );
 }
 
 /// Classify a file the way the delivery floor does: read the bytes, slice the

@@ -13,7 +13,7 @@
 
 use crate::channels::telegram::resume::classify_recently_active;
 use crate::config::profile::{home_for_profile, with_profile_home_async};
-use crate::db::models::{ChannelMessage, Session, BOT_SENDER_ID};
+use crate::db::models::{BOT_SENDER_ID, ChannelMessage, Session};
 use crate::db::{ChannelMessageRepository, Database, SessionBindingRepository, SessionRepository};
 use crate::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus, TaskType};
 use crate::utils::plan_files::save_plan;

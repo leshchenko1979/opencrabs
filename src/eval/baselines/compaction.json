@@ -1,0 +1,10 @@
+{
+  "label": "compaction-gate-seed",
+  "overall": 1.0,
+  "dimensions": {
+    "errors": 1.0,
+    "files_modified": 1.0,
+    "pending_tasks": 1.0,
+    "user_prefs": 1.0
+  }
+}

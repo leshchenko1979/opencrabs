@@ -1,4 +1,5 @@
 use super::builder::AgentService;
+use super::prompt_file::{BodyValues, CompactionPrompts};
 use crate::brain::agent::context::{AgentContext, CompactionScope};
 use crate::brain::agent::error::{AgentError, Result};
 use crate::brain::provider::{ContentBlock, LLMRequest, Message, Provider};
@@ -7,58 +8,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-
-/// #817 — section 7 of the continuation-document prompt: the recovery plan.
-///
-/// The plan written here IS the plan the next agent follows, so it must not be able to
-/// describe a turn that changes nothing. The pre-#817 example was `git status` -> `git diff`
-/// -> `read_file` -> `session_search`: four reads and no action, terminating in nothing. A
-/// summariser copying it faithfully produced plans that could never complete — measured
-/// 2026-11-10 on one lane: ten consecutive compactions, eight rounds of re-reading the same
-/// two source files, zero commits in 4h28m while the edit itself was ~40 minutes of work.
-/// Every individual check passed, which is exactly why nothing ever stopped.
-pub(crate) const RECOVERY_PLAYBOOK_GUIDANCE: &str = "Write a SPECIFIC recovery plan: which \
-             tools to call with which arguments to get back up to speed. Be concrete — include \
-             actual file paths, search queries, and commands.\n\
-             HARD RULE for every step you list: it must produce something THIS DOCUMENT DOES \
-             NOT ALREADY CONTAIN. A call that re-reads a file, re-runs `git status`/`git diff`, \
-             or repeats a `session_search` to confirm state recorded above is NOT a step — it \
-             returns the same answer, this document records it again, and the next compaction \
-             reproduces the same plan forever. Never open the playbook with a state check; open \
-             it with the action named in section 8.\n\
-             CORRECT step: \"edit `src/brain/tools/provider_vision.rs:57` — change \
-             `with_candidates` to take the 4-tuple\". WRONG step: \"run `git status` to see \
-             whether the edit landed\".\n\
-             And never name a step the project's own rules forbid (a build command whose law \
-             makes CI the only compile gate, a write outside the worktree): a plan that names \
-             an unlawful action is worse than no plan.";
-
-/// #817 — section 8 of the continuation-document prompt: the next step.
-///
-/// "State the single most important thing" accepted a state check, and a state check is
-/// always satisfiable — so it was re-run indefinitely and never looked wrong.
-pub(crate) const NEXT_STEP_GUIDANCE: &str = "State the single most important thing the agent \
-             should do when it wakes up, as ONE concrete call carrying its exact value: the \
-             file and line to edit (with the change), the command to run (with its arguments), \
-             the URL to read. If the task is clear, continue immediately. If ambiguous, ask the \
-             user ONE focused follow-up question.\n\
-             NEVER phrase this as a state check — \"confirm the tree is clean\", \"verify X is \
-             still there\", \"check whether the build passed\": section 0 has already stated that \
-             state, so re-reading it cannot advance the work. A state check is always \
-             satisfiable, so it is never done.";
-
-/// #817 — section 0 of the continuation-document prompt: the progress stamp.
-///
-/// `Obligation status: OPEN` in section 0 plus `Files Modified: NONE` in section 2 read as
-/// *mid-flight*; on one line they read as *recon paid, work not started*. Two facts in two
-/// sections is what made a clean tree misreadable as "not started at all".
-pub(crate) const PROGRESS_STAMP_GUIDANCE: &str = "SECOND LINE OF THIS SECTION, always: a \
-             PROGRESS stamp, one line, no prose:\n\
-             \"PROGRESS: <what is ALREADY landed — commits and shas, files written, commands \
-             that ran> · next: <the one call from section 8>\".\n\
-             Never write \"nothing done yet\" or \"files untouched\" on its own: a clean tree is \
-             not evidence that no work happened, and this line is what lets the next agent tell \
-             \"recon paid, work not started\" apart from \"not started at all\".";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ContextManifest {
@@ -272,7 +221,8 @@ fn split_summary_sections(summary: &str) -> Vec<SummarySection> {
             _ => {}
         }
 
-        if !in_fence_before && fence.is_none()
+        if !in_fence_before
+            && fence.is_none()
             && let Some(n) = parse_section_number(line)
         {
             if !cur.is_empty() {
@@ -377,7 +327,6 @@ fn remove_largest_fenced_block(text: &str) -> Option<String> {
 fn has_obligation_status(summary: &str) -> bool {
     summary.to_lowercase().contains("obligation status")
 }
-
 
 impl AgentService {
     /// The per-turn plan reminder pinned at the end of the prompt, keyed to
@@ -499,11 +448,8 @@ impl AgentService {
         let message_service = MessageService::new(self.context.clone());
         // #854: the compaction boundary is pushed into SQL, so a session that has
         // already been compacted loads its tail instead of its whole history.
-        let mut db_messages = Self::load_messages_since_last_compaction(
-            self.context.pool(),
-            session_id,
-        )
-        .await?;
+        let mut db_messages =
+            Self::load_messages_since_last_compaction(self.context.pool(), session_id).await?;
 
         let model_name = model.unwrap_or_else(|| {
             self.provider_for_session(session_id)
@@ -526,9 +472,7 @@ impl AgentService {
         // `thinking` column instead of dropped (#654), and a CLI provider gets
         // no hoist at all, because another model's chain of thought must never
         // reach its prompt (#1522).
-        let preserve_thinking = !self
-            .provider_for_session(session_id)
-            .cli_handles_tools()
+        let preserve_thinking = !self.provider_for_session(session_id).cli_handles_tools()
             && crate::brain::provider::custom_openai_compatible::preserves_thinking(
                 self.provider_for_session(session_id).base_url(),
                 &model_name,
@@ -1160,7 +1104,10 @@ impl AgentService {
         )
         .await?;
 
-        if !Self::extract_text_from_response(&response).trim().is_empty() {
+        if !Self::extract_text_from_response(&response)
+            .trim()
+            .is_empty()
+        {
             return Ok(response);
         }
 
@@ -1186,16 +1133,13 @@ impl AgentService {
     /// #1930: the summariser's system prompt. Dense knowledge transfer under a
     /// hard budget — the document is trimmed mechanically if it overruns, so
     /// the instruction is completeness of FACTS, not volume of prose.
+    ///
+    /// #929: the text lives in the prompt file now; this reads the compiled-in
+    /// default, which is what the source-pinned budget test asserts against.
+    #[allow(dead_code)]
     pub(crate) fn compaction_system_prompt() -> String {
-        "You are a continuation document generator. Your job is to create a dense, \
-         complete knowledge transfer document from a conversation so that a fresh AI agent can \
-         continue the work seamlessly. You must capture every file path, command, identifier, \
-         user preference, error and pending task. The agent reading your output will have ZERO \
-         prior context — your document is its entire memory. \
-         The document has a hard budget, stated in the user message, and is trimmed \
-         mechanically when it overruns — so write densely: every load-bearing fact, no filler, \
-         and name files and line numbers instead of pasting long code blocks. \
-         Missing a single fact could cause the agent to repeat mistakes or violate user preferences."
+        CompactionPrompts::compiled_default()
+            .system_prompt()
             .to_string()
     }
 
@@ -1209,22 +1153,12 @@ impl AgentService {
     /// status, the `context-manifest` fence, the next step, the Recovery
     /// Playbook) are named MUST, and the cheapest content to drop (long
     /// snippets, long quotes) is named FIRST TO GO.
+    ///
+    /// #929: the text lives in the prompt file now; this reads the compiled-in
+    /// default, which is what the source-pinned budget test asserts against.
+    #[allow(dead_code)]
     pub(crate) fn compaction_budget_directive(summary_budget_tokens: u32) -> String {
-        format!(
-            "BUDGET: the whole document MUST fit ~{summary_budget_tokens} tokens. A document \
-             that overruns is trimmed mechanically and loses whatever was written last, so spend \
-             the budget deliberately, in this order:\n\
-             1. MUST be complete — section 0 (obligation status + next action), the \
-             `context-manifest` fence in section 10, section 8 (next step), section 7 (recovery \
-             playbook).\n\
-             2. THEN exact paths, commands, identifiers and error strings — cheap and load-bearing.\n\
-             3. THEN sections 1-6 compressed to the shortest form that still carries the facts.\n\
-             4. FIRST TO GO when the budget is tight — long code snippets (name the file and line \
-             instead of pasting the block) and long quotes (keep only the decisive phrase).\n\
-             This is not a summary — it is a complete knowledge transfer, and the fresh agent has \
-             ZERO context beyond what you write here. Completeness means every load-bearing FACT \
-             survives, not every sentence."
-        )
+        CompactionPrompts::compiled_default().budget_directive(summary_budget_tokens)
     }
 
     /// #1649: the scope header prepended to the summariser prompt. Empty for
@@ -1232,28 +1166,12 @@ impl AgentService {
     /// classic one (the parity probe pins this). Delta and consolidation get
     /// a short prelude that re-aims the same exhaustive body at their
     /// narrower input instead of duplicating the whole prompt per scope.
+    ///
+    /// #929: the text lives in the prompt file now; this reads the compiled-in
+    /// default, which is what the scope-prelude test asserts against.
+    #[allow(dead_code)]
     pub(crate) fn compaction_scope_prelude(scope: CompactionScope) -> String {
-        match scope {
-            CompactionScope::FullWindow => String::new(),
-            CompactionScope::DeltaSinceMarker => concat!(
-                "SCOPE: The messages below are ONLY the conversation since the last ",
-                "compaction marker. Earlier history is already preserved in frozen ",
-                "summary segments that are NOT part of this input — do not restate, ",
-                "re-derive, or merge them; document only what is present below.\n\n"
-            )
-            .to_string(),
-            CompactionScope::SegmentConsolidation => concat!(
-                "SCOPE: The input below is a set of prior compaction segment summaries ",
-                "separated by --- markers. Merge them into ONE comprehensive continuation ",
-                "document that supersedes them all. RE-DERIVE section 0 (IMMEDIATE TASK) ",
-                "from the evidence in these segments — never copy it forward verbatim ",
-                "from the most recent one. Set its obligation status to OPEN, DONE or ",
-                "UNKNOWN according to whether the work it names is still owed at wake-up; ",
-                "an obligation already completed must NOT be presented as the live task. ",
-                "Do not invent content that is not in the segments.\n\n"
-            )
-            .to_string(),
-        }
+        CompactionPrompts::compiled_default().scope_prelude(scope)
     }
 
     /// Size cell for the inventory table. `None` means "we could not weigh this
@@ -1566,186 +1484,26 @@ impl AgentService {
 
         let mut summary_messages: Vec<Message> = msgs_to_include.into_iter().cloned().collect();
 
-        let base_prompt = format!(
-            "CRITICAL: The context window is at {:.0}% capacity ({} / {} tokens, {} tokens remaining). \
-             The conversation must be compacted NOW.\n\n\
-             You are creating a COMPREHENSIVE CONTINUATION DOCUMENT. After compaction, a fresh agent \
-             instance will wake up with ONLY this summary as context. It must be able to continue \
-             working immediately without asking the user what to do.\n\n\
-             Analyze the ENTIRE conversation chronologically and produce the following.\n\n\
-             OUTPUT ORDER — CRITICAL: write the sections below in THIS order, NOT in numeric \
-             order. The document can be CUT at the tail (the summariser may hit its output \
-             limit) and a cut removes whatever was written LAST — so the load-bearing blocks \
-             go FIRST: section 0 (obligation) -> the section 10 `context-manifest` fence -> \
-             section 7 (recovery playbook) -> section 8 (next step) -> sections 1-6 (the prose, \
-             compressed) -> section 9 (continuation message) LAST. Never place the manifest \
-             fence below the prose.\n\n\
-             ## 0. IMMEDIATE TASK (CRITICAL — MOST IMPORTANT SECTION)\n\
-             Look at the LAST 6-8 message pairs in the conversation. Extract EXACTLY:\n\
-             - What was the user's LAST instruction or request? (quote their exact words)\n\
-             - What was the agent doing in response? (exact tool calls, file edits, investigations in progress)\n\
-             - What is the EXACT next action the agent should take?\n\n\
-             FIRST LINE OF THIS SECTION, always, before any prose:\n\
-             **Obligation status: OPEN** or **Obligation status: DONE** or **Obligation status: UNKNOWN**\n\
-             Determine it from the completion evidence you record in section 1 below \
-             (\"Whether it was completed, committed, pushed, or still pending\") — do NOT \
-             guess, and do NOT carry a status forward from an earlier summary. A status MUST \
-             cite the command and the output that establishes it — a `git log` line, a store \
-             read, a message id, a run id. A status with no such citation is UNKNOWN, never \
-             OPEN: UNKNOWN is the honest answer, not a failure:\n\
-             - OPEN — the work is still owed. Write the DIRECTIVE exactly as specified below.\n\
-             - DONE — the work is already complete. Say so in one line and name the NEXT \
-             actual work instead. Do NOT restate the completed obligation as a directive.\n\
-             - UNKNOWN — you cannot tell from the conversation. State what must be checked \
-             before acting. Do NOT phrase it as a directive to continue.\n\n\
-             Write this as a DIRECTIVE, not a description. Use this format:\n\
-             \"CONTINUE THIS TASK: The user asked you to [exact instruction]. \
-             You were [exact action in progress — e.g. 'editing file X at line Y', 'running command Z']. \
-             Your next step is [specific next action]. \
-             Do NOT deviate to any other topic.\"\n\n\
-             A next step with a SIDE EFFECT — a send, a comment, a close, a push, a merge, \
-             a deploy, a file write — MUST carry its carrier state and the store that decides \
-             it, never a bare imperative:\n\
-             \"Your next step is [action]. state at [snapshot time]: not sent / not filed / \
-             not pushed (unverified) — read [the store that decides it: the target's message \
-             store, the issue's comments, `git rev-parse origin/main`, the run id] before \
-             re-executing. If it already landed, report that and do NOT repeat it.\"\n\
-             A side-effecting step whose carrier state you cannot establish is written \
-             \"state: UNKNOWN — check [store] first\". The resumed agent executes a bare \
-             imperative, so an unverified \"not yet done\" duplicates a real side effect.\n\n\
-             This is the MOST IMPORTANT section. If nothing else survives compaction, this must. \
-             The fresh agent will read this section FIRST and act on it IMMEDIATELY.\n\n\
-             {progress_guidance}\n\n\
-             ## 10. Context Manifest (MANDATORY MACHINE-READABLE BLOCK)\n\
-             Write this block EARLY — immediately after section 0, ahead of all prose — NOT at the end: \
-             the document can be CUT at the tail, so this block must survive any cut. You MUST \
-             include a fenced YAML block labeled \
-             ` ```context-manifest `.\n\
-             This manifest directly instructs the harness which skills to keep active vs discard, \
-             and which lazy tools to pre-activate for turn 1.\n\n\
-             ### Current Context Inventory & Budgets:\n\
-             {}\n\n\
-             ### Manifest Rules:\n\
-             - `active_skills`: Skills that MUST remain active for pending work / ongoing tasks. \
-             You may specify the bare `<skill-slug>` (e.g. `opencrabs-dev`) or a specific in-skill document \
-             `<skill-slug>/<file.md>` (e.g. `opencrabs-dev/editor.md`, `opencrabs-dev/fleet-directives.md`) \
-             if only specific auxiliary procedures are needed.\n\
-             - Names MUST be copied verbatim from a row of the inventory above. A row marked \
-             `(unknown skill)` or `(unknown tool)` resolves to nothing on this box: do NOT carry it \
-             forward — name the real skill it was meant to be, or drop it.\n\
-             - `discard_skills`: Skills or specific auxiliary documents whose tasks are complete and should be pruned to save budget.\n\
-             - `required_tools`: Extended lazy tools (e.g. telegram_send, browser_navigate, cron_manage, pg_query) \
-             that the agent will need immediately on turn 1.\n\
-             - `retained_documents`: absolute paths of the `Document` rows in the inventory above that the \
-             PENDING work depends on. Bodies are re-injected on wake and count against the SAME retained-set \
-             budget as skill bodies, so name only what the next turn genuinely needs — a path competes with the \
-             skills and can be shed. Only documents this session read whole are eligible; any other path is \
-             rejected. Omit the key entirely when nothing qualifies.\n\
-             - BUDGET: the retained set you list must fit {budget} tokens — {ratio:.0}% of the \
-             {window}-token context window. The harness MEASURES the rendered set once this compaction \
-             lands and, if it is still over budget, sheds it mechanically: auxiliary documents first, \
-             then whole skills, largest first, and never the last remaining entry. Shedding is what \
-             happens when this budget is ignored, so list only what the next turn actually needs.\n\n\
-             Format as YAML:\n\
-             ```context-manifest\n\
-             active_skills:\n\
-               - <skill-slug>\n\
-               - <skill-slug>/<file.md>\n\
-             discard_skills:\n\
-               - <skill-slug>\n\
-             required_tools:\n\
-               - <tool-name>\n\
-             retained_documents:\n\
-               - /abs/path/to/CLAUDE.md\n\
-             ```\n\n\
-             ## 7. Recovery Playbook\n\
-             The fresh agent has these tools available to recover any missing context:\n\
-             - `session_search` — search past conversation messages in this session by keyword\n\
-             - `memory_search` — search daily memory logs and indexed knowledge\n\
-             - `load_brain_file` — reload brain files (SOUL.md, TOOLS.md, USER.md, etc.) for identity/preferences\n\
-             - `read_file` / `glob` / `grep` — read any file, search by pattern, search file contents\n\
-             - `bash` — run shell commands (git status, git log, git diff, etc.)\n\
-             - `ls` — list directory contents\n\
-             - `gh` — GitHub CLI for ALL GitHub operations (repos, releases, issues, PRs). \
-             NEVER use HTTP requests to GitHub — always use `gh` CLI.\n\n\
-             {recovery_guidance}\n\n\
-             ## 8. Next Step\n\
-             {next_step_guidance}\n\n\
-             ## 1. Chronological Analysis\n\
-             Walk through every task the user requested, in order. For each task include:\n\
-             - What was requested\n\
-             - What was done (with exact file paths and line numbers where relevant)\n\
-             - Exact code snippets for any changes made (show before/after when applicable)\n\
-             - Whether it was completed, committed, pushed, or still pending\n\
-             - RECEIPT: the message id, comment id, sha, run id or file state that proves it, \
-             and the command that produced that reading. A task with no receipt is NOT \
-             \"pending\" by default — it is \"unverified\", and section 0 must say so.\n\n\
-             ## 2. Files Modified\n\
-             List EVERY file that was created, edited, read, or discussed. For each file include:\n\
-             - Full file path\n\
-             - What was changed and why\n\
-             - Key code snippets showing the current state of changes\n\
-             - Whether the change is committed or uncommitted\n\n\
-             ## 3. User Preferences & Constraints\n\
-             List EVERY preference, constraint, or strong reaction from the user. Include:\n\
-             - Things the user explicitly said to NEVER do (with their exact words if they were emphatic)\n\
-             - Workflow preferences (commit style, release process, tool choices)\n\
-             - Technical constraints or architectural decisions\n\
-             - Any corrections the user made to your work\n\n\
-             ## 4. Errors & Corrections\n\
-             Every error encountered, every mistake made, and how each was resolved. Include:\n\
-             - Exact error messages when available\n\
-             - What caused the error\n\
-             - The fix applied\n\
-             - User reactions to mistakes (so the agent avoids repeating them)\n\n\
-             ## 5. All User Messages\n\
-             Summarize every user message in order, capturing their intent and exact wording \
-             for important instructions. This is critical for understanding the user's communication \
-             style and expectations.\n\n\
-             ## 6. Pending Tasks\n\
-             List everything that is NOT yet done:\n\
-             - Uncommitted changes\n\
-             - Tasks mentioned but not started\n\
-             - Investigations in progress\n\
-             - Next steps the user expects\n\n\
-             ## 9. Continuation Message\n\
-             Write a SHORT, punchy message (2-4 sentences) that the agent will say to the user \
-             right after waking up from compaction. This message MUST:\n\
-             - Reference SPECIFIC things from the conversation (file names, user quotes, inside jokes, \
-             frustrations, wins) — prove the agent remembers everything\n\
-             - Mention what was just accomplished and what's next in a way that feels alive and engaged\n\
-             - Match the user's energy and communication style from the conversation\n\
-             - Be creative, surprising, maybe funny — make the user think \"holy shit it remembers\"\n\
-             - End with a clear action: what the agent is about to do next or a specific question\n\
-             DO NOT be generic. DO NOT say \"I'm ready to continue.\" Reference actual conversation details \
-             that only someone who was there would know.\n\n\
-             Tool approval status: {}\n\n\
-             {budget_directive}",
+        // #929: the continuation-document prompt is data now — one load per
+        // compaction (not per message), then explicit `{name}` substitution.
+        // `format!` cannot take a runtime string, so `body()` renders the
+        // template against `BODY_PLACEHOLDERS`, which validation pins.
+        let prompts = CompactionPrompts::load(&crate::config::profile::resolve_profile_home());
+        let base_prompt = prompts.body(&BodyValues {
             snapshot_usage_pct,
             snapshot_token_count,
             snapshot_max_tokens,
             remaining_budget,
-            context_inventory,
-            if auto_approve_tools {
-                "AUTO-APPROVE ON (tools run freely)"
-            } else {
-                "AUTO-APPROVE OFF — tool approval is REQUIRED for every tool call"
-            },
-            budget_directive = Self::compaction_budget_directive(
-                super::request_budget::COMPACTION_SUMMARY_MAX_TOKENS,
-            ),
-            budget = crate::brain::skills::retained_set_budget_tokens(snapshot_max_tokens),
-            ratio = crate::brain::skills::RETAINED_SET_BUDGET_RATIO * 100.0,
-            window = snapshot_max_tokens,
-            progress_guidance = PROGRESS_STAMP_GUIDANCE,
-            recovery_guidance = RECOVERY_PLAYBOOK_GUIDANCE,
-            next_step_guidance = NEXT_STEP_GUIDANCE,
-        );
+            context_inventory: context_inventory.as_str(),
+            auto_approve_tools,
+            summary_budget_tokens: super::request_budget::COMPACTION_SUMMARY_MAX_TOKENS,
+        });
 
         // #1649: the scope prelude rides in front of the unchanged body;
         // FullWindow gets an empty prelude, so the first-compaction prompt is
         // byte-identical to the classic one.
-        let compaction_prompt = format!("{}{}", Self::compaction_scope_prelude(scope), base_prompt);
+        let mut compaction_prompt = prompts.scope_prelude(scope);
+        compaction_prompt.push_str(&base_prompt);
         summary_messages.push(Message::user(compaction_prompt));
 
         // Never send a {provider, model} pair the user didn't configure.
@@ -1772,7 +1530,7 @@ impl AgentService {
         let mut request = LLMRequest::new(effective_model, summary_messages)
             .with_max_tokens(max_output_tokens)
             .with_reasoning_disabled()
-            .with_system(Self::compaction_system_prompt());
+            .with_system(prompts.system_prompt().to_string());
         request.working_directory = Some(working_directory.to_string_lossy().to_string());
         request.session_id = Some(session_id);
 
@@ -1803,7 +1561,9 @@ impl AgentService {
 
         let summary = Self::extract_text_from_response(&response);
 
-        if let Err(e) = Self::save_compaction_summary_to_memory(&summary).await {
+        // #929: stamp the summary with the prompt that produced it. `prompts` is
+        // the set this request was built from — the same load, not a fresh one.
+        if let Err(e) = Self::save_compaction_summary_to_memory(&summary, &prompts.stamp()).await {
             tracing::warn!("Failed to save compaction summary to daily log: {}", e);
         }
 
@@ -2225,8 +1985,17 @@ impl AgentService {
     ///
     /// Multiple compactions per day append to the same file. The brain workspace's
     /// `MEMORY.md` is left untouched — it stays as user-curated durable memory.
+    ///
+    /// `prompt_stamp` (`source:sha256-prefix`, from
+    /// [`CompactionPrompts::stamp`]) rides in the header, so a summary on disk
+    /// can be matched to the prompt text that produced it. #929 exists because
+    /// nobody could answer "which prompt wrote this summary?"; the stamp is the
+    /// cheap half of that answer. It is passed in rather than re-loaded here on
+    /// purpose — a second `load()` could read a different file than the one that
+    /// built the request, which is the misattribution the stamp prevents.
     pub(super) async fn save_compaction_summary_to_memory(
         summary: &str,
+        prompt_stamp: &str,
     ) -> std::result::Result<(), String> {
         let memory_dir = crate::config::opencrabs_home().join("memory");
 
@@ -2241,9 +2010,10 @@ impl AgentService {
 
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         let new_content = format!(
-            "{}\n\n---\n\n## Auto-Compaction Summary ({})\n\n{}\n",
+            "{}\n\n---\n\n## Auto-Compaction Summary ({}) [prompt {}]\n\n{}\n",
             existing.trim(),
             timestamp,
+            prompt_stamp,
             summary
         );
 

@@ -58,6 +58,23 @@ pub(crate) fn cmd_eval(cmd: EvalCommands) -> Result<()> {
             json,
             floor,
         } => run_skills(&dataset, k, json, floor),
+        EvalCommands::Compaction {
+            dataset,
+            summary,
+            mode,
+            baseline,
+            gate,
+            update_baseline,
+            json,
+        } => super::eval_compaction::run(
+            dataset.as_deref(),
+            summary.as_deref(),
+            &mode,
+            baseline.as_deref(),
+            gate,
+            update_baseline,
+            json,
+        ),
     }
 }
 
@@ -182,7 +199,7 @@ fn run_episodic(k: Option<usize>, json: bool, slice_days: u32) -> Result<()> {
     if json {
         let obj = serde_json::json!({
             "track": "A",
-            "ranker": "shipped: LIKE recency order + tokenized AND fallback (no message ranker exists — #855)",
+            "ranker": crate::relevance::episodic::RANKER_LABEL,
             "k": report.k,
             "slice_days": report.slice_days,
             "slice_messages": report.slice_messages,

@@ -2,10 +2,10 @@
 // and any skill-body consumption (read or slug-load) marks the skill SEEN so
 // the post-compaction inventory stamp (#125) lists it.
 
-use crate::brain::tools::load_brain_file::*;
-use crate::brain::tools::seen_skills;
 use crate::brain::tools::Tool;
 use crate::brain::tools::ToolExecutionContext;
+use crate::brain::tools::load_brain_file::*;
+use crate::brain::tools::seen_skills;
 use uuid::Uuid;
 
 fn ctx() -> ToolExecutionContext {
@@ -362,8 +362,8 @@ async fn filename_form_traversal_still_refused() {
 
 mod persistence {
     use crate::brain::tools::seen_skills;
-    use crate::db::repository::SessionSkillsRepository;
     use crate::db::Database;
+    use crate::db::repository::SessionSkillsRepository;
     use uuid::Uuid;
 
     async fn repo() -> (Database, SessionSkillsRepository) {
@@ -600,7 +600,10 @@ fn manifest_parses_retained_documents() {
     let inline = "retained_documents: [/root/a.md, /root/b.md]\n";
     let manifest =
         crate::brain::agent::service::context::parse_manifest_text(inline).expect("parses");
-    assert_eq!(manifest.retained_documents, vec!["/root/a.md", "/root/b.md"]);
+    assert_eq!(
+        manifest.retained_documents,
+        vec!["/root/a.md", "/root/b.md"]
+    );
 }
 
 /// A manifest that names no documents leaves the field empty — the pre-#831

@@ -62,6 +62,21 @@ pub const POSITIVES: usize = 40;
 /// Negatives wanted per run: half near-misses, half genuine absences.
 pub const NEGATIVES: usize = 20;
 
+/// Document-frequency ceiling for a word to be paired into an ABSENT negative.
+/// Two words that each appear in more sampled messages than this almost always
+/// meet somewhere in a large slice, which is how the absent class starved
+/// (#926).
+const RARE_DF_CEILING: usize = 3;
+
+/// How many verified-present rare words the absent sampler keeps to pair from.
+/// Bounds the presence probe to one LIKE per candidate word.
+const RARE_POOL_CAP: usize = 150;
+
+/// Upper bound on `cooccur` probes spent building the absent half, so a slice
+/// too dense to yield an absence fails in seconds with a precise message
+/// rather than grinding through a quadratic search.
+const ABSENT_PROBE_BUDGET: usize = 1_500;
+
 /// The fixture corpus's topical clusters: a topic word, ten subject nouns and
 /// eight action words each. Every word is distinct and no word is a substring
 /// of another, because the shipped search matches on `LIKE '%word%'` — an
@@ -403,6 +418,19 @@ fn cooccur(conn: &Connection, since: i64, a: &str, b: &str) -> Result<usize> {
     )
 }
 
+/// How many messages in the slice contain `word` on its own. One `LIKE` rather
+/// than [`cooccur`]'s two, because the absent sampler needs presence per word:
+/// a word that appears nowhere makes silence trivial and measures nothing.
+fn present(conn: &Connection, since: i64, word: &str) -> Result<usize> {
+    let pat = format!("%{word}%");
+    count(
+        conn,
+        "SELECT COUNT(*) FROM messages WHERE created_at >= ?1 \
+         AND content LIKE ?2 ESCAPE '\\' COLLATE NOCASE",
+        &[&since, &pat],
+    )
+}
+
 /// Run the SHIPPED retrieval semantics over the slice.
 ///
 /// Mirrors `MessageRepository::search_by_content` (contiguous `LIKE`, recency
@@ -633,9 +661,8 @@ pub fn sample(conn: &Connection, slice_days: u32) -> Result<EpisodicDataset> {
     //  * ABSENT — a pair that co-occurs nowhere in the slice. Silence here is a
     //    real result rather than a construction artefact.
     //
-    // Both draw from the same candidate pool, so they are built from the
-    // corpus's own vocabulary — a negative made of nonsense words would be
-    // trivially silent and measure nothing.
+    // Both draw from the corpus's own vocabulary — a negative made of nonsense
+    // words would be trivially silent and measure nothing.
     let pool: Vec<String> = candidates
         .iter()
         .flat_map(|(_, _, c)| content_tokens(c))
@@ -661,7 +688,10 @@ pub fn sample(conn: &Connection, slice_days: u32) -> Result<EpisodicDataset> {
         half
     );
 
-    // Absent: a pair drawn from different messages, proved to co-occur nowhere.
+    // Absent, attempt 1 — the frequency-ordered pool. This is what the leg has
+    // always done, and it is CORRECT on a corpus with a small, uniform
+    // vocabulary (the committed fixture): there, two pool tokens from different
+    // topical clusters genuinely never meet.
     let mut j = 0usize;
     while negatives.len() < NEGATIVES && j + 7 < pool.len() {
         let (a, b) = (&pool[j], &pool[j + 7]);
@@ -670,11 +700,83 @@ pub fn sample(conn: &Connection, slice_days: u32) -> Result<EpisodicDataset> {
         }
         j += 1;
     }
+
+    // Absent, attempt 2 — the RARE tail of the vocabulary (#926). Attempt 1
+    // starves on a real store: `pool` is the first 400 tokens of the candidate
+    // set, which on tens of thousands of messages is precisely the
+    // high-frequency vocabulary, so any two of them meet somewhere in the slice
+    // and no pair can be proved absent. Worse, widening `--slice-days` grows the
+    // slice and makes the class HARDER, which inverted the old error message's
+    // own advice to widen.
+    //
+    // Correctness still does not rest on the frequency estimate: `cooccur`
+    // proves every pair absent over the whole slice. Rarity only decides where
+    // to look, so a poor estimate costs probes, never a false negative — and if
+    // the corpus is uniform (every token above the ceiling) this pass simply
+    // finds nothing and attempt 1's result stands.
+    //
+    // Each word must ALSO occur in the slice on its own: a word that appears
+    // nowhere makes silence trivial, which would measure the construction
+    // rather than the retrieval — the same tautology #899 removed from the
+    // positive half.
+    let mut rare: Vec<(&String, usize)> = counts
+        .iter()
+        .filter(|(_, n)| **n <= RARE_DF_CEILING)
+        .map(|(t, n)| (t, *n))
+        .collect();
+    // LEAST rare first within the band, and the token as a final tie-break.
+    //
+    // Ascending order would put df==1 tokens at the front, and on a real store
+    // those are overwhelmingly unique machine identifiers — hex addresses, bare
+    // numbers, uuids (measured on the host's own store: the first absent pairs a
+    // df-ascending pass produced were all `25e83b5c`-style junk). Such a pair is
+    // silent for a reason that has nothing to do with retrieval quality, so it
+    // measures almost nothing. Preferring df==ceiling keeps the words real
+    // vocabulary while still being provably absent.
+    //
+    // The token tie-break matters independently: `counts` is a HashMap, so
+    // without a total order the dataset would vary run to run and the leg would
+    // stop being reproducible.
+    rare.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+    let mut rare_present: Vec<&String> = Vec::new();
+    for (tok, _) in rare {
+        if rare_present.len() == RARE_POOL_CAP {
+            break;
+        }
+        if present(conn, since, tok)? > 0 {
+            rare_present.push(tok);
+        }
+    }
+
+    let mut probes = 0usize;
+    'absent: for (i, a) in rare_present.iter().enumerate() {
+        for b in rare_present.iter().skip(i + 1) {
+            if negatives.len() == NEGATIVES || probes == ABSENT_PROBE_BUDGET {
+                break 'absent;
+            }
+            let (a, b) = (a.as_str(), b.as_str());
+            let pair = format!("{a} {b}");
+            if negatives.contains(&pair) {
+                continue;
+            }
+            probes += 1;
+            if cooccur(conn, since, a, b)? == 0 {
+                negatives.push(pair);
+                break;
+            }
+        }
+    }
+
     anyhow::ensure!(
         negatives.len() == NEGATIVES,
-        "track A: found only {} negatives, wanted {}",
+        "track A: found only {} negatives, wanted {} — {} rare words available, {} probes spent. \
+         The slice's vocabulary is too dense to build an absence, so NARROW --slice-days \
+         (widening it makes this class harder, not easier)",
         negatives.len(),
-        NEGATIVES
+        NEGATIVES,
+        rare_present.len(),
+        probes
     );
 
     Ok(EpisodicDataset {

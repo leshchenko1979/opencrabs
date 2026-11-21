@@ -1218,10 +1218,7 @@ fn builtin_vision_candidate(
 /// Candidate for a custom provider: customs carry their own `base_url`
 /// (skipped when missing — never guessed) and may be keyless local
 /// endpoints (Ollama, llama.cpp, LM Studio).
-fn custom_vision_candidate(
-    cfg: &ProviderConfig,
-    vision_model: &str,
-) -> Option<VisionCandidate> {
+fn custom_vision_candidate(cfg: &ProviderConfig, vision_model: &str) -> Option<VisionCandidate> {
     let base_url = normalize_vision_url(cfg.base_url.clone()?);
     Some((
         cfg.api_key.clone().unwrap_or_default(),

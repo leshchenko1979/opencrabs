@@ -6,13 +6,13 @@
 //! the two halves of the fix: the snapshot happens BEFORE any write, and a
 //! snapshot that cannot be taken STOPS the migration.
 
-use crate::config::profile::with_home_override_async;
 use crate::config::PreflightMode;
-use crate::db::migration_snapshot::{
-    integrity_preflight, newest_snapshot, newest_snapshot_note, refusal_message, rotate,
-    snapshot_before_migrations, LATEST, PREFIX, RETENTION,
-};
+use crate::config::profile::with_home_override_async;
 use crate::db::Database;
+use crate::db::migration_snapshot::{
+    LATEST, PREFIX, RETENTION, integrity_preflight, newest_snapshot, newest_snapshot_note,
+    refusal_message, rotate, snapshot_before_migrations,
+};
 use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
 
@@ -453,9 +453,8 @@ fn preflight_accepts_damage_deeper_than_page_one() {
     bytes[2 * 4096..3 * 4096].fill(0);
     std::fs::write(&path, &bytes).unwrap();
 
-    integrity_preflight(&path.to_string_lossy(), &dir, PreflightMode::Header).expect(
-        "a later-page corruption must reach VACUUM INTO, which is the real page walk",
-    );
+    integrity_preflight(&path.to_string_lossy(), &dir, PreflightMode::Header)
+        .expect("a later-page corruption must reach VACUUM INTO, which is the real page walk");
 }
 
 #[test]

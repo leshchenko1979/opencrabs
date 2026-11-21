@@ -11,11 +11,11 @@
 //! of the feature is that the line survives the turn that wrote it.
 
 use crate::brain::agent::service::work_status::test_override;
-use crate::brain::tools::r#trait::{Tool, ToolExecutionContext};
 use crate::brain::tools::subagent::ledger::{self, LedgerKind};
 use crate::brain::tools::subagent::{
     AgentProgressTool, ReportProgressTool, SubAgent, SubAgentManager,
 };
+use crate::brain::tools::r#trait::{Tool, ToolExecutionContext};
 use serde_json::json;
 use std::fs;
 use std::sync::Arc;
@@ -38,12 +38,7 @@ fn one_child(id: &str) -> (Arc<SubAgentManager>, Uuid, Uuid) {
     let manager = Arc::new(SubAgentManager::new());
     let child_session = Uuid::new_v4();
     let parent_session = Uuid::new_v4();
-    manager.insert(SubAgent::new(
-        id,
-        "worker",
-        child_session,
-        parent_session,
-    ));
+    manager.insert(SubAgent::new(id, "worker", child_session, parent_session));
     (manager, child_session, parent_session)
 }
 
@@ -66,7 +61,8 @@ async fn a_root_session_is_refused_rather_than_writing_an_orphan_ledger() {
         .await
         .expect_err("a root session must be refused, not silently accepted");
     assert!(
-        err.to_string().contains("only available to a sub-agent session"),
+        err.to_string()
+            .contains("only available to a sub-agent session"),
         "the refusal must name the actual reason, got: {err}"
     );
 }
@@ -318,8 +314,8 @@ async fn the_limit_is_clamped_at_both_ends() {
 
 #[test]
 fn a_child_registry_carries_report_progress_but_not_the_parent_reader() {
-    use crate::brain::tools::subagent::build_child_registry;
     use crate::brain::tools::ToolRegistry;
+    use crate::brain::tools::subagent::build_child_registry;
 
     // An empty parent: everything the child has, it has by design, not by
     // inheritance. This is the assertion that keeps the two halves from
@@ -342,8 +338,8 @@ fn a_child_registry_carries_report_progress_but_not_the_parent_reader() {
 
 #[test]
 fn a_read_only_child_keeps_report_progress() {
-    use crate::brain::tools::subagent::build_child_registry;
     use crate::brain::tools::ToolRegistry;
+    use crate::brain::tools::subagent::build_child_registry;
 
     let parent = ToolRegistry::new();
     let manager = Arc::new(SubAgentManager::new());

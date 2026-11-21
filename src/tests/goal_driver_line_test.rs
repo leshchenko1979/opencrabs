@@ -8,7 +8,13 @@ use chrono::{Duration, Utc};
 /// A goal row in the shape the defect was reported on: `active`, never
 /// evaluated, so `updated_at` still equals `created_at`.
 fn armed_never_evaluated() -> GoalState {
-    let mut goal = GoalState::new(uuid::Uuid::new_v4(), "test goal".into(), None, None, Some(20));
+    let mut goal = GoalState::new(
+        uuid::Uuid::new_v4(),
+        "test goal".into(),
+        None,
+        None,
+        Some(20),
+    );
     goal.state = "active".into();
     goal.turns_used = 0;
     goal
@@ -81,7 +87,10 @@ fn unparseable_timestamp_omits_the_age_rather_than_guessing() {
     goal.updated_at = "not-a-timestamp".into();
     let line = driver_line(&goal);
     assert!(line.contains("Turns: 2/20"), "counter preserved: {line}");
-    assert!(!line.contains("ago"), "no confident age from a bad stamp: {line}");
+    assert!(
+        !line.contains("ago"),
+        "no confident age from a bad stamp: {line}"
+    );
 }
 
 #[test]

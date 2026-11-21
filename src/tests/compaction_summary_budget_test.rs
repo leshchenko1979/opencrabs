@@ -12,13 +12,13 @@
 //! (#1933). This test is the drift guard: it fails if either side re-acquires a
 //! literal, which is the one edit that silently restores the 4.44x disagreement.
 
+use crate::brain::agent::service::AgentService;
 use crate::brain::agent::service::context::{parse_context_manifest, resolve_context_manifest};
 use crate::brain::agent::service::request_budget::{
+    COMPACTION_SUMMARY_MAX_TOKENS, COMPACTION_SUMMARY_REASONING_HEADROOM_TOKENS,
     compaction_summary_input_reserve, compaction_summary_output_tokens,
-    compaction_summary_request_allowance, COMPACTION_SUMMARY_MAX_TOKENS,
-    COMPACTION_SUMMARY_REASONING_HEADROOM_TOKENS,
+    compaction_summary_request_allowance,
 };
-use crate::brain::agent::service::AgentService;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -144,6 +144,13 @@ fn the_prompt_no_longer_orders_maximum_verbosity() {
         !context_src.contains("BE EXHAUSTIVE"),
         "the continuation-document prompt must not order maximum size (#1930)"
     );
+    // #929: the prompt body moved to the compiled-in prompt set — check it
+    // there too, or this assertion stops measuring the prompt at all.
+    let prompt_src = include_str!("../../prompts/compaction.default.toml");
+    assert!(
+        !prompt_src.contains("BE EXHAUSTIVE"),
+        "the continuation-document prompt must not order maximum size (#1930)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -254,8 +261,14 @@ fn a_document_within_budget_is_returned_unchanged() {
     let doc = "## 0. IMMEDIATE TASK\n**Obligation status: OPEN**\n\n\
                ## 10. Context Manifest\n```context-manifest\n\
                active_skills:\n  - opencrabs-dev\n```\n";
-    let out = AgentService::enforce_summary_budget(doc.to_string(), COMPACTION_SUMMARY_MAX_TOKENS as usize);
-    assert_eq!(out, doc, "an under-budget document must pass through untouched");
+    let out = AgentService::enforce_summary_budget(
+        doc.to_string(),
+        COMPACTION_SUMMARY_MAX_TOKENS as usize,
+    );
+    assert_eq!(
+        out, doc,
+        "an under-budget document must pass through untouched"
+    );
 }
 
 /// The guard ships an over-budget document rather than cut the obligation out.
@@ -323,19 +336,21 @@ fn the_guard_runs_before_the_artifact_correction() {
 /// the machine-readable fence the harness needs, and `extract_manifest_block`
 /// cannot re-attach a fence the source never carried.
 ///
-/// The ordering lives inside the `base_prompt` format string, built in an
+/// The ordering lives inside the continuation-document body, built in an
 /// async fn that needs a provider — so, like the guard-order test above, this
-/// reads the source text.
+/// reads the text. Since #929 that text is the compiled-in prompt set
+/// (`prompts/compaction.default.toml`), which is exactly what the summariser
+/// is handed when no profile override is present.
 #[test]
 fn the_prompt_emits_the_must_keep_blocks_before_the_prose() {
-    let src = include_str!("../brain/agent/service/context.rs");
+    let src = include_str!("../../prompts/compaction.default.toml");
     let start = src
-        .find("let base_prompt = format!(")
-        .expect("the summariser prompt must be built in one format string");
+        .find("body = \"\"\"")
+        .expect("the summariser prompt must carry a body template");
     let end = start
         + src[start..]
-            .find("\n        );")
-            .expect("the prompt format string must close");
+            .find("\nbudget_directive = ")
+            .expect("the body template must close before budget_directive");
     let prompt = &src[start..end];
 
     let pos = |needle: &str| {
@@ -731,8 +746,7 @@ fn resolve_context_manifest_warns_and_defaults_on_a_missing_fence() {
 
     let capture = EventCapture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
-    let manifest =
-        tracing::subscriber::with_default(subscriber, || resolve_context_manifest(doc));
+    let manifest = tracing::subscriber::with_default(subscriber, || resolve_context_manifest(doc));
 
     assert!(
         manifest.active_skills.is_empty() && manifest.discard_skills.is_empty(),
@@ -773,10 +787,7 @@ fn a_cut_document_surfaces_the_truncation_warn_and_keeps_its_fence() {
             Some(crate::brain::provider::StopReason::MaxTokens),
             &usage,
         );
-        AgentService::enforce_summary_budget(
-            cut.clone(),
-            COMPACTION_SUMMARY_MAX_TOKENS as usize,
-        )
+        AgentService::enforce_summary_budget(cut.clone(), COMPACTION_SUMMARY_MAX_TOKENS as usize)
     });
 
     let warns = capture.warns();

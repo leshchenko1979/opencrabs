@@ -12,6 +12,8 @@
 //! negative firing — because a leg that publishes 1.000/1.000/0.000 is
 //! measuring its own construction, not the search.
 
+use rusqlite::{Connection, params};
+
 use crate::eval::episodic_track::{
     NEGATIVES, POSITIVES, committed_report, sample, score, search_slice, seeded_store,
 };
@@ -213,4 +215,115 @@ fn slice_bound_excludes_older_messages() {
     let dataset = sample(&conn, 14).expect("sample");
     assert_eq!(dataset.corpus_messages, 90, "corpus is the whole table");
     assert_eq!(dataset.slice_messages, 80, "slice excludes the aged rows");
+}
+
+/// #926: on a store whose vocabulary is dense, the absent class must still be
+/// buildable.
+///
+/// This fixture reproduces the real store's failure mode rather than the
+/// symptom: the first 400 content tokens of the candidate set are ALL
+/// high-frequency words, drawn from twenty messages that share one identical
+/// vocabulary. Every pair of them therefore co-occurs somewhere in the slice,
+/// so the frequency-ordered pool cannot prove a single absence — exactly what
+/// happens on the host's own 43,963-message store, where that path found 10 of
+/// the 20 it needs and widening the window made it worse.
+///
+/// The rare words live outside that pool, one message each. The fix must find
+/// them by their rarity, and — the tautology guard from #899 — every word it
+/// uses must be PRESENT in the slice, or silence would be trivial and measure
+/// nothing.
+///
+/// Fails on the pre-#926 sampler: the pool yields zero absent pairs there.
+#[test]
+fn absent_negatives_survive_a_dense_vocabulary() {
+    let conn = Connection::open_in_memory().expect("in-memory store");
+    conn.execute_batch(
+        "CREATE TABLE messages (
+            id TEXT PRIMARY KEY NOT NULL,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );",
+    )
+    .expect("schema");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64;
+
+    // Twenty dense messages sharing one 25-word vocabulary: every pair of these
+    // words co-occurs, so the pool they fill cannot build an absence.
+    let dense: Vec<String> = (0..25).map(|k| format!("common{k:02}")).collect();
+    let dense_content = format!("{} and then the same list again", dense.join(" "));
+    assert!(dense_content.len() >= 160, "dense messages clear the floor");
+    for i in 0..20 {
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, created_at) \
+             VALUES (?1, 'dense', 'user', ?2, ?3)",
+            params![format!("d{i}"), dense_content, now - 1_000 + i as i64],
+        )
+        .expect("insert dense");
+    }
+
+    // Sixty sparse messages: a broad word present everywhere, a `spec` word
+    // shared by exactly two messages (so it is a usable narrow query word), and
+    // two words that appear in this message and nowhere else.
+    for i in 0..60usize {
+        let content = format!(
+            "common00 spec{:02} rare{:02}a rare{:02}b common{:02} \
+             and the rest of this line is padding so the message clears the floor \
+             because every sampled message must exceed the required length threshold \
+             before the sampler will consider it a candidate for this leg",
+            i / 2,
+            i,
+            i,
+            i % 24,
+        );
+        assert!(content.len() >= 160, "sparse messages clear the floor");
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, created_at) \
+             VALUES (?1, 'sparse', 'user', ?2, ?3)",
+            params![format!("s{i}"), content, now - 500 + i as i64],
+        )
+        .expect("insert sparse");
+    }
+
+    let dataset = sample(&conn, 14).expect("dense-vocabulary store must still sample");
+    assert_eq!(dataset.negatives.len(), NEGATIVES, "full negative set");
+
+    // The ABSENT half — everything after the near-miss half — must come from the
+    // rarity pass, not from the frequency-ordered pool. That pool is entirely
+    // `commonNN` here and those words co-occur by construction, so a pool-built
+    // absence is impossible: if any absent pair still names a `commonNN` word,
+    // attempt 2 did not run and this test would be passing for the wrong reason.
+    let half = NEGATIVES / 2;
+    let absent = &dataset.negatives[half..];
+    let from_pool = absent.iter().filter(|n| n.contains("common")).count();
+    assert_eq!(
+        from_pool, 0,
+        "the absent half drew {from_pool} pairs from the dense pool — the rarity \
+         pass did not supply them: {absent:?}"
+    );
+
+    // Anti-tautology (#899): every word in every negative must occur in the
+    // slice on its own, or its silence measures the construction rather than
+    // the retrieval.
+    let since = now - 14 * 86_400;
+    for negative in &dataset.negatives {
+        for word in negative.split(' ') {
+            let hits: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE created_at >= ?1 \
+                     AND content LIKE ?2 COLLATE NOCASE",
+                    params![since, format!("%{word}%")],
+                    |r| r.get(0),
+                )
+                .expect("presence probe");
+            assert!(
+                hits > 0,
+                "negative word {word:?} occurs nowhere in the slice — silence would be trivial"
+            );
+        }
+    }
 }

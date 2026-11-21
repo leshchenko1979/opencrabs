@@ -69,7 +69,10 @@ fn assert_is_builtin_default(c: &RetryConfig) {
     assert_eq!(c.max_attempts, d.max_attempts, "max_attempts");
     assert_eq!(c.initial_delay, d.initial_delay, "initial_delay");
     assert_eq!(c.max_delay, d.max_delay, "max_delay");
-    assert_eq!(c.backoff_multiplier, d.backoff_multiplier, "backoff_multiplier");
+    assert_eq!(
+        c.backoff_multiplier, d.backoff_multiplier,
+        "backoff_multiplier"
+    );
     assert_eq!(c.jitter, d.jitter, "jitter");
 }
 
@@ -130,7 +133,10 @@ fn an_empty_retry_section_parses_to_defaults() {
     let section: RetrySection = toml::from_str("").expect("empty [retry] must parse");
     let config = parse(LEGACY);
     let overrides = RetryOverrides::from_config(openai_section(&config), &section);
-    assert!(overrides.is_empty(), "a present-but-empty [retry] changes nothing");
+    assert!(
+        overrides.is_empty(),
+        "a present-but-empty [retry] changes nothing"
+    );
 }
 
 // ── the global section ──────────────────────────────────────────────
@@ -193,8 +199,12 @@ fn an_explicit_value_beats_the_qwen_family_preset() {
         max_attempts: Some(9),
         ..Default::default()
     };
-    let resolved =
-        retry_policy::resolve("qwen", "https://dashscope.aliyuncs.com", "qwen-max", &overrides);
+    let resolved = retry_policy::resolve(
+        "qwen",
+        "https://dashscope.aliyuncs.com",
+        "qwen-max",
+        &overrides,
+    );
 
     assert_eq!(resolved.max_attempts, 9, "the explicit value must win");
     assert_eq!(
@@ -203,8 +213,7 @@ fn an_explicit_value_beats_the_qwen_family_preset() {
         "a field the operator did not set must keep the preset value"
     );
     assert_eq!(
-        resolved.jitter,
-        0.2,
+        resolved.jitter, 0.2,
         "the preset is a default, not a lock — untouched fields survive"
     );
 }
@@ -248,7 +257,10 @@ fn the_quota_opt_in_is_false_unless_explicitly_set() {
         toml::from_str("retry_quota_exhausted = true").expect("provider section must parse");
     assert_eq!(opted_in.retry_quota_exhausted, Some(true));
     let overrides = RetryOverrides::from_config(&opted_in, &config.retry);
-    assert!(overrides.quota_exhausted, "the opt-in must survive resolution");
+    assert!(
+        overrides.quota_exhausted,
+        "the opt-in must survive resolution"
+    );
     assert!(
         !overrides.is_empty(),
         "an opt-in alone is a real override, not an empty one"

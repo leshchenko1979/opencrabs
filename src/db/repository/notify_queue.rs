@@ -82,12 +82,12 @@ impl NotifyQueueRepository {
             .map(|m| serde_json::to_string(m).context("encode notify bg_meta"))
             .transpose()?;
         write_with_retry(&self.pool, &write_retry_config(), move |conn| {
-                conn.execute(
-                    "INSERT INTO notify_queue \
+            conn.execute(
+                "INSERT INTO notify_queue \
                      (id, session_id, context_text, display_text, origin, bg_meta, created_at) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now'))",
-                    params![id, session_id, context_text, display_text, origin, bg_meta],
-                )
+                params![id, session_id, context_text, display_text, origin, bg_meta],
+            )
         })
         .await
         .context("Failed to record notify queue row")?;

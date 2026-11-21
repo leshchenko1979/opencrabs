@@ -23,8 +23,8 @@
 //! ref verbatim, so running it first cannot starve the image family.
 
 use crate::channels::telegram::delivery::intermediate_failures;
-use crate::utils::image::{LocalImageFailureReason, rewrite_local_images, rewrite_local_videos};
 use crate::utils::VID_ID_PREFIX;
+use crate::utils::image::{LocalImageFailureReason, rewrite_local_images, rewrite_local_videos};
 use std::path::{Path, PathBuf};
 
 /// An ISO base-media header whose major brand is MPEG-4 — the bytes an
@@ -93,7 +93,8 @@ fn an_intermediate_carrying_a_marker_yields_a_video_and_no_marker_text() {
     // The rich form embeds the reference AT ITS OWN OFFSET, so the clip lands
     // where the model wrote it rather than as a detached bubble.
     assert!(
-        vw.rich.contains(&format!("![video](tg://video?id={VID_ID_PREFIX}0)")),
+        vw.rich
+            .contains(&format!("![video](tg://video?id={VID_ID_PREFIX}0)")),
         "the rich form must embed the reference in place: {:?}",
         vw.rich
     );
@@ -131,7 +132,11 @@ fn the_two_families_keep_separate_id_namespaces_in_one_media_array() {
         dir.path(),
     );
 
-    assert_eq!(rw_rich.entries.len(), 1, "the picture is the image family's");
+    assert_eq!(
+        rw_rich.entries.len(),
+        1,
+        "the picture is the image family's"
+    );
     assert_eq!(vw.entries.len(), 1, "the clip is the video family's");
     assert_eq!(rw_rich.entries[0].id, "img0");
     assert_eq!(vw.entries[0].id, format!("{VID_ID_PREFIX}0"));
@@ -236,7 +241,9 @@ fn the_intermediate_path_walks_the_video_family_first() {
         .expect("the intermediate path must run the image walk on the video family's rich form");
     let image_stripped = DELIVERY_SRC
         .find("rewrite_local_images(&vw.stripped, Some(cwd), \"img\", &delivered)")
-        .expect("the intermediate path must run the image walk on the video family's stripped form");
+        .expect(
+            "the intermediate path must run the image walk on the video family's stripped form",
+        );
 
     assert!(
         video < image_rich && video < image_stripped,
@@ -381,7 +388,11 @@ fn the_rich_body_keeps_the_clip_reference_the_stripped_body_drops() {
          array to answer one: {:?}",
         rw_stripped.stripped
     );
-    assert_eq!(vw.entries.len(), 1, "and the clip is still the video family's");
+    assert_eq!(
+        vw.entries.len(),
+        1,
+        "and the clip is still the video family's"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -410,7 +421,11 @@ fn the_intermediate_file_pass_marks_a_link_in_both_planes() {
     );
 
     // The picture is the image family's: it rides the rich media array...
-    assert_eq!(rw_rich.entries.len(), 1, "the picture rides the media array");
+    assert_eq!(
+        rw_rich.entries.len(),
+        1,
+        "the picture rides the media array"
+    );
     assert!(
         rw_rich.rich.contains("![pic](tg://photo?id=img0)"),
         "the rich body answers the media array: {:?}",

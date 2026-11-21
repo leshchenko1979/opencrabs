@@ -420,6 +420,56 @@ pub enum EvalCommands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Score COMPACTION-FIDELITY against a dataset, and gate the prompt/eval
+    /// contract (#929)
+    ///
+    /// Two offline legs, both deterministic:
+    /// - structural — every fact dimension the dataset probes must still be
+    ///   served by a section of the LIVE compaction prompt, so a prompt edit
+    ///   that drops a section fails with that dimension named
+    /// - discrimination — a committed faithful summary must still score full
+    ///   marks, which is the guard against the scorer rotting under the gate
+    ///
+    /// Neither leg measures prompt quality: the bundled seed is four probes and
+    /// is a smoke gate. `--mode judge` grades real model output and never runs
+    /// in CI.
+    Compaction {
+        /// Dataset JSON path (default: the bundled seed, so a bare
+        /// `eval compaction` works with no flags)
+        #[arg(long)]
+        dataset: Option<String>,
+
+        /// Grade this summary instead of the committed reference summary.
+        /// `-` reads stdin, for piping a real summary out of a session.
+        #[arg(long)]
+        summary: Option<String>,
+
+        /// Scoring mode: `keyword` (default, offline, deterministic — the only
+        /// mode CI runs) or `judge` (a live provider; prints which one, and
+        /// never gates a merge)
+        #[arg(long, default_value = "keyword")]
+        mode: String,
+
+        /// Baseline JSON to gate against (default:
+        /// `src/eval/baselines/compaction.json`, compiled in)
+        #[arg(long)]
+        baseline: Option<String>,
+
+        /// Exit non-zero when the run regresses against the baseline. Off by
+        /// default so a bare invocation is a report, not a gate.
+        #[arg(long)]
+        gate: bool,
+
+        /// Rewrite the baseline from this run. A separate explicit act, so it
+        /// always shows up in a diff.
+        #[arg(long)]
+        update_baseline: bool,
+
+        /// Emit the scorecard as JSON instead of the rendered summary
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

@@ -12,8 +12,8 @@
 
 use crate::brain::agent::service::work_status::test_override;
 use crate::brain::agent::service::work_status::{AgentGrant, WorkStatus};
-use crate::brain::tools::r#trait::{Tool, ToolExecutionContext};
 use crate::brain::tools::subagent::{SubAgentManager, SubAgentState};
+use crate::brain::tools::r#trait::{Tool, ToolExecutionContext};
 use serde_json::json;
 use std::fs;
 use std::sync::Arc;
@@ -50,7 +50,12 @@ fn resume_reaches_an_agent_the_restart_orphaned() {
     isolate("reach");
     let child = Uuid::new_v4();
     let parent = Uuid::new_v4();
-    let manager = restart_left("orphan-1", parent, child, AgentGrant::new(true, false, true));
+    let manager = restart_left(
+        "orphan-1",
+        parent,
+        child,
+        AgentGrant::new(true, false, true),
+    );
 
     // Before: this is the exact call `resume_agent` makes first, and it is
     // what used to produce "No sub-agent found with id: orphan-1".
@@ -103,7 +108,12 @@ fn the_resumed_child_is_rebuilt_from_the_frozen_grant() {
     let child = Uuid::new_v4();
     let parent = Uuid::new_v4();
     // Read-only AND no nesting: the two flags a widening bug would lose.
-    let manager = restart_left("ro-orphan", parent, child, AgentGrant::new(true, false, false));
+    let manager = restart_left(
+        "ro-orphan",
+        parent,
+        child,
+        AgentGrant::new(true, false, false),
+    );
 
     manager.resolve("ro-orphan", parent).expect("resolve");
 
@@ -211,8 +221,8 @@ fn a_progress_ledger_written_before_the_restart_is_readable_after_it() {
 #[tokio::test]
 async fn the_resume_tool_reaches_a_rehydrated_agent_and_still_refuses_a_stranger() {
     isolate("tool_gate");
-    use crate::brain::tools::subagent::ResumeAgentTool;
     use crate::brain::tools::ToolRegistry;
+    use crate::brain::tools::subagent::ResumeAgentTool;
 
     let child = Uuid::new_v4();
     let parent = Uuid::new_v4();
@@ -223,10 +233,16 @@ async fn the_resume_tool_reaches_a_rehydrated_agent_and_still_refuses_a_stranger
     // (a) a stranger: refused, with the wording that names the scope.
     let stranger = ToolExecutionContext::new(Uuid::new_v4());
     let refused = tool
-        .execute(json!({"agent_id": "tool-1", "prompt": "continue"}), &stranger)
+        .execute(
+            json!({"agent_id": "tool-1", "prompt": "continue"}),
+            &stranger,
+        )
         .await
         .expect("a refusal is an answer, not a transport failure");
-    assert!(!refused.success, "a foreign caller must not resume the agent");
+    assert!(
+        !refused.success,
+        "a foreign caller must not resume the agent"
+    );
     assert!(
         refused
             .error

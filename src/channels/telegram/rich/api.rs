@@ -327,6 +327,142 @@ pub(crate) fn rich_body_offenders(body: &serde_json::Value) -> Option<Vec<String
     (!refs.is_empty()).then_some(refs)
 }
 
+// ── The response's own account of what it bound (#923) ──────────────────────
+//
+// `sendRichMessage` answering `200 {"ok":true}` proves the REQUEST was
+// accepted, never that every entry in it was attached. A document reference the
+// server cannot use is discarded silently: the delivered message comes back with
+// `rich_message.documents: []`, no error field, and nothing behind the
+// reference (measured — ADR-0001 §4.3 A/B, msgs 96654/96655, and the #923
+// incident, msg 103595). So the response's `rich_message` is the only statement
+// about what landed, and everything below reduces it to the one question the
+// delivery legs ask: was THIS document bound?
+//
+// The distinction between ABSENT and EMPTY is the whole point:
+//
+// | response                                  | reading                          |
+// |-------------------------------------------|----------------------------------|
+// | no `rich_message` object at all            | the server echoed no media state — UNCONFIRMED |
+// | `rich_message.documents: []`               | nothing bound — the incident's shape |
+// | `rich_message.documents: [{file_name, …}]` | those entries bound, and only those |
+
+/// What a `sendRichMessage` response says the server actually BOUND (#923).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RichMediaReceipt {
+    /// `None` = the response carried no `rich_message` object, so the server
+    /// never echoed media state. Nothing can be confirmed, and callers keep the
+    /// pre-#923 behaviour (assume bound) rather than re-sending every document
+    /// on a response shape we do not understand.
+    documents: Option<Vec<BoundDocument>>,
+}
+
+/// One document the response says it attached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BoundDocument {
+    /// The name the reader sees — the multipart part name echoed back. `None`
+    /// when the response omitted it, which makes that entry unmatchable; the
+    /// receipt then declines to judge rather than manufacture a loss.
+    pub(crate) file_name: Option<String>,
+}
+
+impl RichMediaReceipt {
+    /// A receipt for a send that carried NO media array at all — the plain
+    /// markdown path and the HTML dialect fallback. It is not "unconfirmed":
+    /// neither plane has media entries, so no document is attached, and the
+    /// receipt says exactly that.
+    pub(crate) fn no_media_array() -> Self {
+        Self {
+            documents: Some(Vec::new()),
+        }
+    }
+
+    /// Read the media state off a successful `sendRichMessage` `result`.
+    ///
+    /// `requested_documents` feeds the one diagnostic line: a response that
+    /// echoes no `rich_message` while documents were asked for is a shape we
+    /// cannot read, and the gap must be visible in the log rather than assumed
+    /// either way.
+    ///
+    /// The match key is the document's `file_name`, because that is the part
+    /// name the bytes travelled under (`build_multipart_form` sets it from the
+    /// entry's `name`) and the server echoes it back. The response's
+    /// `file_size` is deliberately NOT a key: a name is what the reader is
+    /// shown, and a size alone cannot say WHICH of two same-size documents
+    /// bound.
+    pub(crate) fn from_response(result: &serde_json::Value, requested_documents: usize) -> Self {
+        let Some(rich) = result.get("rich_message") else {
+            if requested_documents > 0 {
+                tracing::debug!(
+                    "Telegram: sendRichMessage response carried no rich_message object \
+                     ({requested_documents} document entr{} requested) — delivery of them is \
+                     UNCONFIRMED, keeping the pre-send assumption",
+                    if requested_documents == 1 { "y" } else { "ies" }
+                );
+            }
+            return Self::default();
+        };
+        let documents = rich
+            .get("documents")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .map(|d| BoundDocument {
+                        file_name: d
+                            .get("file_name")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            documents: Some(documents),
+        }
+    }
+
+    /// Whether the response CONFIRMS this document is attached.
+    ///
+    /// Three answers, and only the last one is a loss:
+    ///
+    /// - the receipt is UNCONFIRMED (no `rich_message` at all) → `true`. The
+    ///   pre-#923 assumption is kept, so a response shape we cannot read never
+    ///   turns into a duplicate bubble on every turn.
+    /// - a bound document carries this name → `true`.
+    /// - no name matches, and every bound document carried a name → `false`:
+    ///   the server echoed media state and this document is not in it. That is
+    ///   the incident's shape (`documents: []` with a document requested).
+    ///
+    /// A bound document that omitted its `file_name` makes the response
+    /// unmatchable, so the receipt answers `true` for every name rather than
+    /// read a loss into an entry it was never given a name for.
+    pub(crate) fn document_bound(&self, name: &str) -> bool {
+        let Some(documents) = &self.documents else {
+            return true;
+        };
+        if documents.iter().any(|d| {
+            d.file_name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        }) {
+            return true;
+        }
+        // An empty `documents` array reaches here too: nothing matched, and
+        // nothing was listed without a name, so nothing bound.
+        documents.iter().any(|d| d.file_name.is_none())
+    }
+
+    /// Whether the response echoed media state at all. Callers log this once
+    /// per send so a shape change is visible without re-sending anything.
+    pub(crate) fn is_unconfirmed(&self) -> bool {
+        self.documents.is_none()
+    }
+
+    /// How many documents the response says it bound. `None` when unconfirmed.
+    pub(crate) fn bound_documents(&self) -> Option<usize> {
+        self.documents.as_ref().map(Vec::len)
+    }
+}
+
 async fn post_rich(
     url: &str,
     body: &serde_json::Value,
@@ -592,6 +728,42 @@ pub(crate) async fn send_rich_markdown_media_target_id(
     origin: &str,
     origin_detail: &str,
 ) -> anyhow::Result<i32> {
+    send_rich_markdown_media_target_receipt(
+        api_url,
+        token,
+        chat_id,
+        thread_id,
+        reply_to,
+        markdown,
+        media,
+        reply_markup,
+        origin,
+        origin_detail,
+    )
+    .await
+    .map(|(id, _receipt)| id)
+}
+
+/// [`send_rich_markdown_media_target_id`] with the response's own account of
+/// what it bound (#923).
+///
+/// The receipt is read off the SAME `result` the id comes from, and against the
+/// media list this call actually sent — which is the only list the response can
+/// be talking about. `None` when the response carried no `rich_message`: see
+/// [`RichMediaReceipt`] for why that is "unconfirmed", never "delivered".
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_rich_markdown_media_target_receipt(
+    api_url: &str,
+    token: &str,
+    chat_id: i64,
+    thread_id: Option<ThreadId>,
+    reply_to: Option<i32>,
+    markdown: &str,
+    media: &[super::mermaid::MediaEntry],
+    reply_markup: Option<&serde_json::Value>,
+    origin: &str,
+    origin_detail: &str,
+) -> anyhow::Result<(i32, RichMediaReceipt)> {
     let url = format!("{}/bot{token}/sendRichMessage", api_base(api_url));
     let body = build_body_markdown_media_target(
         chat_id,
@@ -610,11 +782,17 @@ pub(crate) async fn send_rich_markdown_media_target_id(
         post_rich(&url, &body, origin, origin_detail, EditClass::Final).await?
     };
 
-    result
+    let requested_documents = media
+        .iter()
+        .filter(|m| m.kind == super::mermaid::MediaKind::Document)
+        .count();
+    let receipt = RichMediaReceipt::from_response(&result, requested_documents);
+    let id = result
         .get("message_id")
         .and_then(serde_json::Value::as_i64)
         .map(|id| id as i32)
-        .ok_or_else(|| anyhow::anyhow!("sendRichMessage ok but response carried no message_id"))
+        .ok_or_else(|| anyhow::anyhow!("sendRichMessage ok but response carried no message_id"))?;
+    Ok((id, receipt))
 }
 
 /// Scalar string form parts for a rich multipart request: the JSON body's
@@ -1031,6 +1209,10 @@ pub(crate) async fn send_rich_with_mermaid_target_id(
         origin_detail,
     )
     .await
+    // This form carries no media array of the caller's, so its receipt is the
+    // "nothing to bind" one and the two-element shape stays as it was. The legs
+    // that need the receipt (#923) call `send_rich_with_media_target_id`.
+    .map(|(id, sacrificed, _receipt)| (id, sacrificed))
 }
 
 /// Rejection names that indict ONE media entry rather than the message body.
@@ -1210,7 +1392,7 @@ async fn retry_rich_media_around_offender(
     origin: &str,
     origin_detail: &str,
     err: &str,
-) -> anyhow::Result<(i32, Vec<SacrificedEntry>)> {
+) -> anyhow::Result<(i32, Vec<SacrificedEntry>, RichMediaReceipt)> {
     use super::mermaid::neutralize_orphan_photo_refs;
 
     if err.contains("IMAGE_PROCESS_FAILED") {
@@ -1218,7 +1400,7 @@ async fn retry_rich_media_around_offender(
             "rich media send refused ({err}) — retrying the identical request once \
              before sacrificing any entry (hedge: the refusal may be transient)"
         );
-        if let Ok(id) = send_rich_markdown_media_target_id(
+        if let Ok((id, receipt)) = send_rich_markdown_media_target_receipt(
             api_url,
             token,
             chat_id,
@@ -1233,7 +1415,7 @@ async fn retry_rich_media_around_offender(
         .await
         {
             // The hedge sacrifices nothing — the identical body landed whole.
-            return Ok((id, Vec::new()));
+            return Ok((id, Vec::new(), receipt));
         }
     }
 
@@ -1285,7 +1467,7 @@ async fn retry_rich_media_around_offender(
         // The reference for a dropped entry is now unanswered by the array, so
         // it is rewritten into its inert form before the retry goes out (§3.3).
         let body = neutralize_orphan_photo_refs(markdown, &kept);
-        let retried = if kept.is_empty() {
+        let retried: anyhow::Result<(i32, RichMediaReceipt)> = if kept.is_empty() {
             send_rich_markdown_target_id(
                 api_url,
                 token,
@@ -1297,8 +1479,12 @@ async fn retry_rich_media_around_offender(
                 origin_detail,
             )
             .await
+            // Nothing is left to bind, so the reduced send's own account is the
+            // one that matters — and it is read off THIS response, not the
+            // refusal that preceded it (#923).
+            .map(|id| (id, RichMediaReceipt::no_media_array()))
         } else {
-            send_rich_markdown_media_target_id(
+            send_rich_markdown_media_target_receipt(
                 api_url,
                 token,
                 chat_id,
@@ -1312,8 +1498,8 @@ async fn retry_rich_media_around_offender(
             )
             .await
         };
-        if let Ok(id) = retried {
-            return Ok((id, sacrificed));
+        if let Ok((id, receipt)) = retried {
+            return Ok((id, sacrificed, receipt));
         }
     }
 
@@ -1352,6 +1538,11 @@ async fn retry_rich_media_around_offender(
 /// to sacrifice to get the message out (#897). A clean send answers with an
 /// empty list; a send that lost an attachment answers with it named, so the
 /// caller can report the loss rather than record a plain success.
+///
+/// #923: the third element is the response's own account of which documents it
+/// BOUND. `sacrificed` covers entries this ladder REMOVED after a refusal; the
+/// receipt covers the other half — an entry the server discarded silently while
+/// answering 200, which nothing could see before.
 pub(crate) async fn send_rich_with_media_target_id(
     api_url: &str,
     token: &str,
@@ -1362,7 +1553,7 @@ pub(crate) async fn send_rich_with_media_target_id(
     local_media: &[super::mermaid::MediaEntry],
     origin: &str,
     origin_detail: &str,
-) -> anyhow::Result<(i32, Vec<SacrificedEntry>)> {
+) -> anyhow::Result<(i32, Vec<SacrificedEntry>, RichMediaReceipt)> {
     // Resolve every fence once: valid diagrams become markdown media
     // references, broken ones become legible failure blocks. Non-fence text
     // is left byte-identical. Runs ONLY when a fence is present, exactly as
@@ -1380,6 +1571,8 @@ pub(crate) async fn send_rich_with_media_target_id(
     // Nothing to embed at all (no fence, no local media, or every fence failed)
     // → send it as plain rich markdown with no `media` field.
     if media.is_empty() {
+        // No media array at all: nothing could bind, and the receipt says so
+        // rather than leaving a caller to guess (#923).
         return send_rich_markdown_target_id(
             api_url,
             token,
@@ -1391,11 +1584,11 @@ pub(crate) async fn send_rich_with_media_target_id(
             origin_detail,
         )
         .await
-        .map(|id| (id, Vec::new()));
+        .map(|id| (id, Vec::new(), RichMediaReceipt::no_media_array()));
     }
 
     // Primary: markdown dialect + media array keeps pipe tables native.
-    match send_rich_markdown_media_target_id(
+    match send_rich_markdown_media_target_receipt(
         api_url,
         token,
         chat_id,
@@ -1409,7 +1602,7 @@ pub(crate) async fn send_rich_with_media_target_id(
     )
     .await
     {
-        Ok(id) => Ok((id, Vec::new())),
+        Ok((id, receipt)) => Ok((id, Vec::new(), receipt)),
         Err(e) => {
             // #826 AC-3: a media entry Telegram refuses to process is not a
             // verdict on the message. Before #826 every error here — a single
@@ -1432,7 +1625,7 @@ pub(crate) async fn send_rich_with_media_target_id(
                 )
                 .await
                 {
-                    Ok((id, sacrificed)) => return Ok((id, sacrificed)),
+                    Ok((id, sacrificed, receipt)) => return Ok((id, sacrificed, receipt)),
                     Err(retry_err) => {
                         tracing::warn!(
                             "rich media retry did not recover ({retry_err}); \
@@ -1467,7 +1660,12 @@ pub(crate) async fn send_rich_with_media_target_id(
                 origin_detail,
             )
             .await
-            .map(|id| (id, Vec::new()))
+            // The HTML plane has no media array, so NOTHING is attached and
+            // the receipt says so. Before #923 this path returned a bare
+            // success, and the caller's floor had already subtracted the
+            // documents against the REQUEST — so a fallback that carried no
+            // entry dropped them silently, one plane over from the incident.
+            .map(|id| (id, Vec::new(), RichMediaReceipt::no_media_array()))
         }
     }
 }

@@ -133,7 +133,11 @@ fn collapse_frames(raw: &str) -> (String, usize) {
             continue;
         }
         let frames: Vec<&str> = line.split('\r').collect();
-        let tail = frames.iter().rfind(|f| !f.trim().is_empty()).copied().unwrap_or("");
+        let tail = frames
+            .iter()
+            .rfind(|f| !f.trim().is_empty())
+            .copied()
+            .unwrap_or("");
         collapsed += frames.len().saturating_sub(1);
         out.push_str(tail);
     }
@@ -151,13 +155,7 @@ impl TaskOutputTool {
 }
 
 /// Render one stream's block. Pure, so tests pin the shape without a live run.
-fn render_stream(
-    name: &str,
-    tail: &Tail,
-    path: &Path,
-    lines: Option<usize>,
-    out: &mut String,
-) {
+fn render_stream(name: &str, tail: &Tail, path: &Path, lines: Option<usize>, out: &mut String) {
     out.push_str(&format!(
         "\n\n{name} ({} bytes at {}):",
         tail.size,
@@ -395,7 +393,10 @@ impl Tool for TaskOutputTool {
         } else if handle.is_some() {
             out.push_str(&format!(
                 "\n  elapsed: {}s",
-                handle.as_ref().map(|h| h.started.elapsed().as_secs()).unwrap_or(0)
+                handle
+                    .as_ref()
+                    .map(|h| h.started.elapsed().as_secs())
+                    .unwrap_or(0)
             ));
         }
 
@@ -540,7 +541,13 @@ mod tests {
             partial_first_line: false,
             truncation: None,
         };
-        render_stream("stdout", &tail, std::path::Path::new("/tmp/x"), Some(2), &mut out);
+        render_stream(
+            "stdout",
+            &tail,
+            std::path::Path::new("/tmp/x"),
+            Some(2),
+            &mut out,
+        );
         assert!(out.contains("last 2 of"), "got {out:?}");
         assert!(out.contains("l3") && out.contains("l4"), "got {out:?}");
         assert!(!out.contains("  l1"), "the hidden lines must be dropped");

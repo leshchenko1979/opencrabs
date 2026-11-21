@@ -162,7 +162,7 @@ fn render_pdf_pages_inner(
             return Ok(RenderedPages {
                 pages,
                 bound: RenderBound::TargetWidth(PDFIUM_TARGET_WIDTH),
-            })
+            });
         }
         Err(e) => tracing::debug!("pdfium-render unavailable or failed: {}", e),
     }
