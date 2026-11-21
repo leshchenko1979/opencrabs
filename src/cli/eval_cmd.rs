@@ -58,6 +58,23 @@ pub(crate) fn cmd_eval(cmd: EvalCommands) -> Result<()> {
             json,
             floor,
         } => run_skills(&dataset, k, json, floor),
+        EvalCommands::Compaction {
+            dataset,
+            summary,
+            mode,
+            baseline,
+            gate,
+            update_baseline,
+            json,
+        } => super::eval_compaction::run(
+            dataset.as_deref(),
+            summary.as_deref(),
+            &mode,
+            baseline.as_deref(),
+            gate,
+            update_baseline,
+            json,
+        ),
     }
 }
 

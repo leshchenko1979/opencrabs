@@ -5,29 +5,46 @@
 //! to compact a conversation into a continuation document, then the compaction
 //! dataset's probes grade what survived.
 //!
-//! The continuation-document instruction mirrors the SECTION STRUCTURE of the
-//! production compaction prompt (agent/service/context.rs) — immediate task,
-//! files modified, user preferences, errors, pending tasks — without its live
-//! token-budget preamble, which is meaningless for a fixed dataset. Kept
-//! self-contained here so the production compaction path is untouched; sharing
-//! the exact prompt is a possible later refinement.
+//! The continuation-document prompt is NOT defined here. #929: this module used
+//! to carry a self-contained 5-section shadow prompt while the compaction path
+//! served a 10-section one, so every score the eval reported graded a prompt no
+//! user ever ran. [`produce_compaction_summary`] now builds its request from
+//! [`CompactionPrompts`] — the same loader production uses — so the text is
+//! shared by construction and cannot drift again.
 
+use crate::brain::agent::context::CompactionScope;
+use crate::brain::agent::service::prompt_file::{BodyValues, CompactionPrompts};
+use crate::brain::agent::service::request_budget::COMPACTION_SUMMARY_MAX_TOKENS;
 use crate::brain::provider::{ContentBlock, LLMRequest, Message, Provider, Tool};
 
 use super::compaction::CompactionDataset;
 use super::scorer::{Judge, Scorecard};
 
-/// Instruction appended to a conversation asking the model to compact it into a
-/// fact-preserving continuation document.
-pub const CONTINUATION_INSTRUCTION: &str = "The conversation must be compacted now. Produce a \
-     COMPREHENSIVE CONTINUATION DOCUMENT so a fresh agent can resume with only this summary. \
-     Analyze the entire conversation and preserve, with exact detail:\n\
-     ## Immediate task — the user's last instruction and the exact next action.\n\
-     ## Files modified — every file created/edited/read, with paths and what changed.\n\
-     ## User preferences & constraints — everything the user said to do or never do.\n\
-     ## Errors & corrections — every error message and how it was resolved.\n\
-     ## Pending tasks — everything not yet done.\n\
-     Preserve exact identifiers (file paths, error codes, commands) verbatim.";
+/// The nominal context window the eval's budget preamble states.
+///
+/// A dataset has no window of its own; production substitutes the live model's.
+/// The value only shapes how the prompt describes pressure — it never changes
+/// which facts the probes ask for — so a fixed, documented number keeps the
+/// eval reproducible instead of inheriting whatever box ran it.
+const EVAL_NOMINAL_WINDOW: usize = 200_000;
+
+/// Stands in for the live context inventory table.
+///
+/// Production substitutes the real skill/tool/brain inventory. An eval has no
+/// session, and inventing a table would put fabricated skill names in front of
+/// the model, so the section states its own emptiness instead.
+const EVAL_CONTEXT_INVENTORY: &str = "_No live session: this eval substitutes an empty inventory._";
+
+/// A crude token estimate for the budget preamble: ~4 bytes per token.
+///
+/// The eval has no tokenizer. The estimate feeds the prompt's runtime values,
+/// never its words, so approximation is honest here and is documented rather
+/// than presented as a measurement.
+fn approximate_tokens(conversation: &[Message]) -> usize {
+    serde_json::to_string(conversation)
+        .map(|json| json.len() / 4)
+        .unwrap_or(0)
+}
 
 /// A representative tool set for behavioral evals — the config tooling a
 /// self-aware agent should reach for (config_manager, tool_search,
@@ -130,22 +147,62 @@ pub async fn produce_response(
     }
 }
 
-/// Ask a live provider to compact a conversation into a continuation document.
-/// When `system` is set it is attached (e.g. the real system brain). A provider
-/// error returns a marked failure string (never a silent empty), so the grader
-/// scores it as full fact loss rather than a spurious pass.
+/// Ask a live provider to compact a conversation into a continuation document,
+/// using the SAME prompt text the compaction path serves.
+///
+/// #929: the text comes from [`CompactionPrompts`], so the eval cannot grade a
+/// prompt production never sends. What it does NOT reproduce is the runtime
+/// substitution VALUES — there is no live session behind a fixed dataset, so the
+/// window figures are approximated from the conversation and the inventory is
+/// empty. That is a difference in the prompt's inputs, never in its words.
+///
+/// The scope prelude is [`CompactionScope::FullWindow`], which is empty: a
+/// dataset is one whole conversation, so the classic first-compaction prompt is
+/// the honest analogue. It is still requested through the accessor rather than
+/// assumed empty, so a future non-empty full-window prelude reaches the eval.
+///
+/// `system` overrides the summariser system prompt when set (e.g. to attach the
+/// real system brain); otherwise the shipped one is used. A provider error
+/// returns a marked failure string (never a silent empty), so the grader scores
+/// it as full fact loss rather than a spurious pass.
 pub async fn produce_compaction_summary(
     provider: &dyn Provider,
     model: &str,
     conversation: &[Message],
     system: Option<&str>,
 ) -> String {
+    // The compiled default, never `load()`: an eval that gated on the operator's
+    // profile override would score differently on every box, and CI must gate
+    // the prompt the binary ships. A profile's override is its own experiment.
+    let prompts = CompactionPrompts::compiled_default();
+
+    let snapshot_token_count = approximate_tokens(conversation);
+    let mut prompt = prompts.scope_prelude(CompactionScope::FullWindow);
+    prompt.push_str(&prompts.body(&BodyValues {
+        snapshot_usage_pct: (snapshot_token_count as f64 / EVAL_NOMINAL_WINDOW as f64) * 100.0,
+        snapshot_token_count,
+        snapshot_max_tokens: EVAL_NOMINAL_WINDOW,
+        remaining_budget: EVAL_NOMINAL_WINDOW.saturating_sub(snapshot_token_count),
+        context_inventory: EVAL_CONTEXT_INVENTORY,
+        // Production passes the session's own flag. The eval has no session; ON
+        // is the configuration the overwhelming majority of runs use, and the
+        // sentence it selects is the shorter of the two.
+        auto_approve_tools: true,
+        summary_budget_tokens: COMPACTION_SUMMARY_MAX_TOKENS,
+    }));
+
     let mut messages = conversation.to_vec();
-    messages.push(Message::user(CONTINUATION_INSTRUCTION.to_string()));
-    let mut request = LLMRequest::new(model.to_string(), messages);
-    if let Some(sys) = system {
-        request = request.with_system(sys);
-    }
+    messages.push(Message::user(prompt));
+    // Same output allowance and reasoning posture as production (#778: reasoning
+    // tokens are charged to the document's budget, so the summariser must not
+    // think).
+    let mut request = LLMRequest::new(model.to_string(), messages)
+        .with_max_tokens(COMPACTION_SUMMARY_MAX_TOKENS)
+        .with_reasoning_disabled();
+    request = request.with_system(match system {
+        Some(sys) => sys.to_string(),
+        None => prompts.system_prompt().to_string(),
+    });
     match provider.complete(request).await {
         Ok(resp) => response_text(&resp.content),
         Err(e) => format!("[compaction failed: {e}]"),

@@ -10,6 +10,8 @@ pub(crate) mod daemon_health;
 pub(crate) mod doctor_fix;
 #[cfg(any(test, feature = "eval"))]
 pub(crate) mod eval_cmd;
+#[cfg(any(test, feature = "eval"))]
+pub(crate) mod eval_compaction;
 pub(crate) mod headless_callbacks;
 pub(crate) mod migrate;
 pub(crate) mod session_notify;
