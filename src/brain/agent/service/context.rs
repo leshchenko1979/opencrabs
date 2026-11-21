@@ -183,10 +183,21 @@ struct SummarySection {
 }
 
 /// The sections a trimmed document must never lose: the obligation (0), the
-/// recovery playbook (7), the next step (8) and the manifest (10) — plus the
-/// preamble before the first heading, kept rather than guessed at.
+/// recovery playbook (7), the next step (8), the continuation message (9) and
+/// the manifest (10) — plus the preamble before the first heading, kept rather
+/// than guessed at.
+///
+/// Section 9 is here for the reason the trimmer's size ordering makes concrete
+/// (#934): it is the SHORTEST load-bearing block, so sorting trimmable sections
+/// by size descending reached it second, right after §1 — the guard destroyed
+/// the wake-up message before it ever touched the prose the sessions ranked
+/// least important. The prompt writes §9 before the prose as well, so a
+/// `MaxTokens` cut cannot reach it either: two doors, both shut.
 fn is_must_keep_section(number: Option<u32>) -> bool {
-    matches!(number, None | Some(0) | Some(7) | Some(8) | Some(10))
+    matches!(
+        number,
+        None | Some(0) | Some(7) | Some(8) | Some(9) | Some(10)
+    )
 }
 
 /// Split a continuation document at its `## N.` headings. Lossless: the
@@ -789,9 +800,12 @@ impl AgentService {
         )
         .await?;
 
-        let summary =
-            Self::decorate_compaction_summary(summary, session_id, self.subagent_manager.clone())
-                .await;
+        let summary = Self::finalize_continuation_document(
+            summary,
+            session_id,
+            self.subagent_manager.clone(),
+        )
+        .await;
 
         let applied_marker = Self::apply_compaction_summary(context, &summary);
         Ok((summary, applied_marker))
@@ -867,6 +881,36 @@ impl AgentService {
             Some(block) => format!("{summary}\n\n{block}"),
             None => summary,
         }
+    }
+
+    /// Decorate, then bound the WHOLE document (#934).
+    ///
+    /// `compute_compaction_summary` enforces the budget on the model's own
+    /// output, because the #482 artifact correction must run against a trimmed
+    /// document. But decoration is appended by the caller, AFTER that guard has
+    /// already returned — so on 2026-11-21 the persisted document was
+    /// budget-compliant in its generated half and over budget in total, by
+    /// however much the plan block, the live sub-agent roster and the documents
+    /// list happened to weigh. The overrun grew with the roster.
+    ///
+    /// Enforcement therefore runs a second time here, on the finished document.
+    /// It is safe to trim at this point: every decoration block is an
+    /// UNNUMBERED `##` heading, so `parse_section_number` yields `None` and
+    /// `is_must_keep_section` already protects it — the trimmer cannot reach
+    /// decoration, and the cut lands on the prose (§1, then §3, §5, §6) where
+    /// the sessions ranked it. When decoration ALONE exceeds the budget the
+    /// guard WARNs and ships it, which is the honest outcome: the roster is not
+    /// something a woken agent can recover from the document.
+    pub(crate) async fn finalize_continuation_document(
+        summary: String,
+        session_id: Uuid,
+        subagents: Option<Arc<crate::brain::tools::subagent::SubAgentManager>>,
+    ) -> String {
+        let decorated = Self::decorate_compaction_summary(summary, session_id, subagents).await;
+        Self::enforce_summary_budget(
+            decorated,
+            super::request_budget::compaction_summary_output_tokens() as usize,
+        )
     }
 
     /// Send the summariser request, walking `[providers.fallback]` when the
@@ -1631,9 +1675,10 @@ impl AgentService {
     /// its cost compounds with the session's own length.
     ///
     /// Trimming is at SECTION granularity and never inside a fence: a fenced
-    /// block is dropped whole or not at all. Four blocks are never candidates,
+    /// block is dropped whole or not at all. Five blocks are never candidates,
     /// because a woken agent cannot recover them from the document alone —
-    /// section 0 (the obligation), section 7 (recovery), section 8 (next step)
+    /// section 0 (the obligation), section 7 (recovery), section 8 (next step),
+    /// section 9 (the continuation message the user reads first on wake, #934)
     /// and the `context-manifest` fence — and the preamble before the first
     /// heading is kept rather than guessed at. If the must-keep set alone
     /// exceeds the budget the guard WARNs and ships it: that is a prompt

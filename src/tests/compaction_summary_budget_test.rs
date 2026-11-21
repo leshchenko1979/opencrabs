@@ -363,14 +363,30 @@ fn the_prompt_emits_the_must_keep_blocks_before_the_prose() {
     let manifest = pos("## 10. Context Manifest");
     let s7 = pos("## 7. Recovery Playbook");
     let s8 = pos("## 8. Next Step");
-    let s1 = pos("## 1. Chronological Analysis");
-    let s6 = pos("## 6. Pending Tasks");
     let s9 = pos("## 9. Continuation Message");
+    let s2 = pos("## 2. Files Modified");
+    let s3 = pos("## 3. User Preferences");
+    let s4 = pos("## 4. Errors");
+    let s5 = pos("## 5. All User Messages");
+    let s6 = pos("## 6. Pending Tasks");
+    let s1 = pos("## 1. Chronological Analysis");
 
     assert!(s0 < manifest, "§0 (the obligation) must be emitted first");
     assert!(
         manifest < s7 && s7 < s8,
         "the must-keep blocks must be emitted 0 -> manifest -> §7 -> §8 (#1933)"
+    );
+    // #934: §9 is the message the USER reads on wake, so it belongs with the
+    // load-bearing blocks — above the prose, not below it. Written last, it was
+    // the first thing a `MaxTokens` cut destroyed.
+    assert!(
+        s8 < s9,
+        "§9 (the continuation message) must be emitted above the prose: written last, \
+         it is the first casualty of a tail cut (#934)"
+    );
+    assert!(
+        s9 < s1 && s9 < s2 && s9 < s3 && s9 < s5 && s9 < s6,
+        "§9 must precede every prose section (§1-§6), so a tail cut removes only prose (#934)"
     );
     assert!(
         s8 < s1,
@@ -381,11 +397,152 @@ fn the_prompt_emits_the_must_keep_blocks_before_the_prose() {
         "the `context-manifest` fence must be emitted AHEAD of the prose (§1-§6): \
          a tail cut of any size must not be able to remove it (#1933)"
     );
-    assert!(s6 < s9, "§9 (the continuation message) stays last");
+    // #934: the prose is ordered most-expendable-LAST, so the cut eats §1 first
+    // — the section the 2026-11-21 session poll ranked least important per byte.
+    assert!(
+        s2 < s4 && s4 < s6 && s6 < s5 && s5 < s3 && s3 < s1,
+        "the prose must be ordered most-expendable-LAST (§2 -> §4 -> §6 -> §5 -> §3 -> §1), \
+         so a cut eats §1 Chronological Analysis first (#934)"
+    );
     assert!(
         !prompt.contains("At the very end"),
         "§10 must no longer send the manifest to the very end of the document: \
          that is the placement the MaxTokens cut removed (#1933)"
+    );
+}
+
+/// #934: §9 must survive BOTH doors — the `MaxTokens` cut (by being written
+/// above the prose, asserted above) and the structural trimmer (by being in the
+/// must-keep set). Without the second, the trimmer's size-descending order
+/// reached §9 second, right after §1, and destroyed the wake-up message while
+/// the prose the sessions ranked least important survived.
+#[test]
+fn the_continuation_message_is_never_trimmed() {
+    let doc = concat!(
+        "**Obligation status: OPEN**\n\n",
+        "## 0. IMMEDIATE TASK\nDo the thing.\n\n",
+        "## 7. Recovery Playbook\nUse session_search.\n\n",
+        "## 8. Next Step\nRead the file.\n\n",
+        "## 9. Continuation Message\n**Beep!** I remember the phantom slugs.\n\n",
+        "## 1. Chronological Analysis\n",
+    )
+    .to_string()
+        + &"We walked through a great many tasks in order. ".repeat(400);
+
+    let out = AgentService::enforce_summary_budget(doc, 500);
+
+    assert!(
+        out.contains("## 9. Continuation Message") && out.contains("I remember the phantom slugs"),
+        "§9 must survive the trim intact: it is the message the user reads first \
+         on wake (#934). Got: {out}"
+    );
+    assert!(
+        !out.contains("We walked through a great many tasks"),
+        "§1 Chronological Analysis must be the section the cut consumes (#934)"
+    );
+}
+
+/// #934: the budget must bound the WHOLE document, decoration included.
+///
+/// `compute_compaction_summary` enforces the budget on the model's output, but
+/// the plan block, the live sub-agent roster and the documents list are
+/// appended by the CALLER, after that guard has already returned. So a
+/// summary that fits the budget became an over-budget document the moment it
+/// was decorated, and the overrun grew with the roster. This pins the fix: a
+/// near-budget summary plus decoration lands back under the budget, and the
+/// decoration itself survives because it is must-keep.
+#[tokio::test]
+async fn finalize_bounds_the_decorated_document() {
+    let budget =
+        crate::brain::agent::service::request_budget::compaction_summary_output_tokens() as usize;
+
+    // Enough decoration to matter: each document contributes a path line.
+    let dir = std::env::temp_dir().join(format!("oc934-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sid = uuid::Uuid::new_v4();
+    for i in 0..40 {
+        let path = dir.join(format!(
+            "document-with-a-long-name-{i:02}-for-budget-pressure.md"
+        ));
+        std::fs::write(&path, "line\n".repeat(5)).unwrap();
+        crate::brain::tools::read_state::mark_document_read(sid, &path);
+    }
+
+    // A summary that fits on its own, with a fat trimmable §1. The body is
+    // grown against the REAL tokenizer so the fixture lands just under the
+    // budget without guessing at chars-per-token.
+    let base = concat!(
+        "**Obligation status: OPEN**\n\n",
+        "## 0. IMMEDIATE TASK\nDo the thing.\n\n",
+        "## 7. Recovery Playbook\nUse session_search.\n\n",
+        "## 8. Next Step\nRead the file.\n\n",
+        "## 9. Continuation Message\n**Beep!** Still here.\n\n",
+        "## 1. Chronological Analysis\n",
+    )
+    .to_string();
+    let mut summary = base;
+    while crate::brain::tokenizer::count_tokens(&summary) < budget - 120 {
+        summary.push_str("A great many tasks were walked through in order. ");
+    }
+
+    let undecorated = crate::brain::tokenizer::count_tokens(&summary);
+    assert!(
+        undecorated <= budget,
+        "the fixture must FIT the budget before decoration, else it proves nothing: {undecorated} > {budget}"
+    );
+
+    let decorated = AgentService::decorate_compaction_summary(summary.clone(), sid, None).await;
+    let decorated_tokens = crate::brain::tokenizer::count_tokens(&decorated);
+    assert!(
+        decorated_tokens > budget,
+        "the fixture must be pushed OVER budget by decoration, else it proves nothing: \
+         {decorated_tokens} <= {budget}"
+    );
+
+    let out = AgentService::finalize_continuation_document(summary, sid, None).await;
+    let final_tokens = crate::brain::tokenizer::count_tokens(&out);
+
+    assert!(
+        final_tokens <= budget,
+        "the decorated document must land back under the budget (#934): {final_tokens} > {budget}"
+    );
+    assert!(
+        out.contains("## Documents read pre-compaction"),
+        "decoration is must-keep and must survive the trim (#934). Got: {out}"
+    );
+    assert!(
+        out.contains("Still here"),
+        "§9 must survive the trim (#934). Got: {out}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// #934: both compaction paths must decorate THROUGH the budget guard. A call
+/// site that goes back to bare `decorate_compaction_summary` silently restores
+/// the unbudgeted overrun, and no runtime test of the guard would notice.
+#[test]
+fn both_compaction_paths_bound_the_decorated_document() {
+    let context_src = include_str!("../brain/agent/service/context.rs");
+    let background_src = include_str!("../brain/agent/service/compaction.rs");
+
+    assert!(
+        context_src.contains("Self::finalize_continuation_document(summary, session_id"),
+        "the synchronous `/compact` path must finalise through the budget guard (#934)"
+    );
+    assert!(
+        background_src.contains("Self::finalize_continuation_document(summary, session_id"),
+        "the background compaction path must finalise through the budget guard (#934)"
+    );
+    // The guard must live in finalize, not merely exist somewhere.
+    let finalize_at = context_src
+        .find("pub(crate) async fn finalize_continuation_document(")
+        .expect("finalize_continuation_document must exist (#934)");
+    let after = &context_src[finalize_at..];
+    let body_end = after.find("\n    }\n").expect("finalize must have a body");
+    assert!(
+        after[..body_end].contains("enforce_summary_budget("),
+        "finalize must call enforce_summary_budget on the DECORATED document (#934)"
     );
 }
 

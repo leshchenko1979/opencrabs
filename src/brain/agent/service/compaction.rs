@@ -1159,7 +1159,7 @@ impl AgentService {
                 context_inventory,
             )
             .await?;
-            Ok(Self::decorate_compaction_summary(summary, session_id, subagents).await)
+            Ok(Self::finalize_continuation_document(summary, session_id, subagents).await)
         });
 
         if let Ok(mut map) = self.pending_compactions.lock() {
