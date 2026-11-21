@@ -594,24 +594,11 @@ jobs:
     # the loss was invisible (#331). The step timeouts stay the primary guard;
     # the job cap is now only the backstop above their sum.
     timeout-minutes: 60
-    # JOB-level, deliberately: this job runs cargo twice (nextest, then the
-    # doctest `cargo test`), and a step-level variable would make the two
-    # disagree on the profile and force a second full rebuild of the same units.
-    # Scope is this job only — the SHIPPED artifact keeps `strip = true` from
-    # `[profile.release]`, so the gate tests with symbols while the binary we
-    # ship stays stripped.
-    env:
-      CARGO_PROFILE_CI_STRIP: "false"
-      # 3, not the runner's 4 vCPU (2026-11-20, #331). Peak memory is roughly
-      # JOBS x per-rustc footprint, so one fewer concurrent rustc is a ~25%
-      # cut in the concurrent-allocator peak — the quantity that reached 97.1%
-      # of RAM on #311's kill. Affordable now that [profile.ci] builds at
-      # opt-level 1 without LTO: the per-unit cost that made 4-wide worth it
-      # is gone, so the lost parallelism buys memory instead of costing wall
-      # clock. MEASURE IT, do not assume it: dispatch with `-f diagnose=true`
-      # and read the POST-test `memory.peak`, which is the only read taken
-      # after the compile that actually sets the peak.
-      CARGO_BUILD_JOBS: "3"
+    # These tuning variables are step-scoped on both cargo invocations below.
+    # rust-cache hashes job-level CARGO_* values into its key; keeping them out
+    # of the job environment prevents every tuning change from minting another
+    # full target-cache variant. Both cargo steps still receive identical values,
+    # so they share the same profile and build-parallelism settings.
     steps:
       - uses: actions/checkout@v5
         with:
@@ -775,6 +762,9 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           # Moved out of the run block on purpose -- see NO `${{ }}` above.
           FEATURES: ${{ inputs.features }}
+          # Keep these step-scoped: rust-cache hashes job-level CARGO_* values.
+          CARGO_PROFILE_CI_STRIP: "false"
+          CARGO_BUILD_JOBS: "3"
           STALLWATCH_SECS: "480"
           STALLWATCH_PROGRESS_SECS: "780"
           STALLWATCH_SILENCE_SECS: "900"
@@ -1176,6 +1166,8 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           FEATURES: ${{ inputs.features }}
+          CARGO_PROFILE_CI_STRIP: "false"
+          CARGO_BUILD_JOBS: "3"
         run: |
           cargo test --locked --profile ci \
             --no-default-features --features "$FEATURES" --doc
