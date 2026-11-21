@@ -416,14 +416,24 @@ jobs:
         # that is not visible from this file.
         run: sudo apt-get update -qq && sudo apt-get install -y pkg-config libasound2-dev clang
 
-      # The fmt gate was DELETED 2026-11-20 (finding 16). It ran with a
-      # soft-fail flag under an upstream-mirroring rationale, so a genuinely
-      # broken gate reported `success` — worse than no gate. The
-      # 206-file / 520-hunk drift it was hiding is tracked in its own factory
-      # issue (leshchenko1979/opencrabs-dev-factory#123); a hard
-      # `cargo fmt --all -- --check` returns once that sweep lands.
-      # `Apply cargo fmt (fix mode)` + `Upload fmt-fix patch` below are the
-      # sanctioned way to produce the sweep patch without local cargo.
+      - name: Check formatting
+        # RE-ARMED 2026-11-21 (factory #123). The step that used to live here
+        # ran with `continue-on-error: true` under an upstream-mirroring
+        # rationale, so it reported `success` on 520 hunks across 206 files —
+        # a gate that hid its own breakage, worse than no gate at all. That is
+        # why it was deleted on 2026-11-20 rather than trusted.
+        #
+        # The re-arm condition it named is now met: the sweep landed on main as
+        # 50c820772 (203 files, 2211+/1311-), produced by this workflow's own
+        # `fix` mode rather than a local toolchain (box law), and the PR-lane
+        # gates AND the blocking nextest verdict were green on the swept tree
+        # (run 44868067092). A `fix: true` dispatch against main afterwards
+        # returns a 0-byte patch — the drift is gone, not merely hidden.
+        #
+        # NO `continue-on-error`. This step MUST be able to fail the run; that
+        # is the entire point of re-arming it.
+        if: ${{ !inputs.fix && !inputs.lockregen && !inputs.lockupdate }}
+        run: cargo fmt --all -- --check
 
       - name: Clippy
         # Sized against THIS step: six consecutive green runs measured
