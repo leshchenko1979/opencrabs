@@ -591,7 +591,7 @@ impl RunEvidence {
         candidates
             .into_iter()
             .flatten()
-            .find(|path| std::fs::metadata(path).is_ok_and(|m| m.len() == 0))
+            .find(|path| std::fs::metadata(*path).is_ok_and(|m| m.len() == 0))
     }
 
     /// What the run left in its capture, phrased as a clause the report states.
