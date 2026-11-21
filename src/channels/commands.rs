@@ -2890,10 +2890,13 @@ pub(crate) fn render_audit_rows(
     out.push_str("TURN|ACTION|READ|OUTCOME\n");
     for r in rows {
         let turn = r.message_id.chars().take(8).collect::<String>();
-        let action = if r.status == "success" {
-            r.tool_name.clone()
-        } else {
-            format!("{} (err)", r.tool_name)
+        // #938: three arms, not two. `nonzero` is a run that returned non-zero
+        // — it did its job (#763) but is not clean, so the viewer marks it as a
+        // warning rather than hiding it as a success or calling it an error.
+        let action = match r.status.as_str() {
+            "success" => r.tool_name.clone(),
+            "nonzero" => format!("{} (warn)", r.tool_name),
+            _ => format!("{} (err)", r.tool_name),
         };
         let read = if r.read_count > 0 {
             match &r.last_read {
