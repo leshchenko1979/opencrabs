@@ -442,6 +442,44 @@ fn the_continuation_message_is_never_trimmed() {
     );
 }
 
+/// #934: harness decoration must survive the trimmer even when it is appended
+/// AFTER a trimmable section.
+///
+/// The plan block, the live roster and the documents list are all UNNUMBERED
+/// `##` headings. Splitting the document only on `## N.` absorbed them into the
+/// span of whichever numbered section preceded them, so stubbing that section
+/// destroyed them — the trimmer reaching exactly what its own contract calls
+/// unreachable. Production masked the bug because its last numbered section is
+/// the manifest (§10, must-keep); this fixture ends on a trimmable §1.
+#[test]
+fn harness_decoration_survives_a_trim_that_ends_on_a_trimmable_section() {
+    let doc = concat!(
+        "**Obligation status: OPEN**\n\n",
+        "## 0. IMMEDIATE TASK\nDo the thing.\n\n",
+        "## 9. Continuation Message\n**Beep!** Still here.\n\n",
+        "## 1. Chronological Analysis\n",
+    )
+    .to_string()
+        + &"We walked through a great many tasks in order. ".repeat(400)
+        + "\n## PLAN STATE (harness)\nSTATUS: ACTIVE\n\n\
+           ## Documents read pre-compaction\n- /tmp/law.md (12 lines)\n";
+
+    let out = AgentService::enforce_summary_budget(doc, 500);
+
+    assert!(
+        !out.contains("We walked through a great many tasks"),
+        "the trimmable §1 must be the section the cut consumes (#934). Got: {out}"
+    );
+    assert!(
+        out.contains("## PLAN STATE (harness)") && out.contains("STATUS: ACTIVE"),
+        "the plan block is harness decoration and must never be trimmed (#934). Got: {out}"
+    );
+    assert!(
+        out.contains("## Documents read pre-compaction") && out.contains("/tmp/law.md"),
+        "the documents list is harness decoration and must never be trimmed (#934). Got: {out}"
+    );
+}
+
 /// #934: the budget must bound the WHOLE document, decoration included.
 ///
 /// `compute_compaction_summary` enforces the budget on the model's output, but

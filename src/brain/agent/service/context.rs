@@ -184,8 +184,11 @@ struct SummarySection {
 
 /// The sections a trimmed document must never lose: the obligation (0), the
 /// recovery playbook (7), the next step (8), the continuation message (9) and
-/// the manifest (10) — plus the preamble before the first heading, kept rather
-/// than guessed at.
+/// the manifest (10) — plus every UNNUMBERED section, which is the preamble
+/// before the first heading and, more importantly, all three harness decoration
+/// blocks (`## PLAN STATE (harness)`, `## Running Sub-Agents`, `## Documents
+/// read pre-compaction`). Those carry state a woken agent cannot recover from
+/// the document, so they are kept rather than guessed at.
 ///
 /// Section 9 is here for the reason the trimmer's size ordering makes concrete
 /// (#934): it is the SHORTEST load-bearing block, so sorting trimmable sections
@@ -200,9 +203,10 @@ fn is_must_keep_section(number: Option<u32>) -> bool {
     )
 }
 
-/// Split a continuation document at its `## N.` headings. Lossless: the
-/// concatenation of the returned sections is the input, byte for byte.
-/// Fence-aware — a `##` line inside a code block is content, not a heading.
+/// Split a continuation document at its level-2 (`## `) headings, numbered or
+/// not. Lossless: the concatenation of the returned sections is the input, byte
+/// for byte. Fence-aware — a `##` line inside a code block is content, not a
+/// heading.
 fn split_summary_sections(summary: &str) -> Vec<SummarySection> {
     let mut sections: Vec<SummarySection> = Vec::new();
     let mut heading = String::new();
@@ -232,10 +236,7 @@ fn split_summary_sections(summary: &str) -> Vec<SummarySection> {
             _ => {}
         }
 
-        if !in_fence_before
-            && fence.is_none()
-            && let Some(n) = parse_section_number(line)
-        {
+        if !in_fence_before && fence.is_none() && is_section_heading(line) {
             if !cur.is_empty() {
                 sections.push(SummarySection {
                     heading: std::mem::take(&mut heading),
@@ -243,7 +244,7 @@ fn split_summary_sections(summary: &str) -> Vec<SummarySection> {
                     must_keep: is_must_keep_section(number),
                 });
             }
-            number = Some(n);
+            number = parse_section_number(line);
             heading = line.trim_end().to_string();
         }
         cur.push_str(line);
@@ -256,6 +257,22 @@ fn split_summary_sections(summary: &str) -> Vec<SummarySection> {
         });
     }
     sections
+}
+
+/// Any level-2 heading line, numbered or not.
+///
+/// The trimmer has to treat UNNUMBERED headings as section boundaries too,
+/// because the harness appends its own blocks that way: `## PLAN STATE
+/// (harness)`, `## Running Sub-Agents` and `## Documents read pre-compaction`.
+/// Splitting on `## N.` alone absorbed those blocks into the span of the
+/// preceding numbered section, so stubbing that section destroyed decoration
+/// the trimmer is documented never to reach. Measured on the #934 gate: a
+/// fixture whose last section was a trimmable §1 lost its entire documents
+/// list, while production masked the bug because its last section (§10) happens
+/// to be must-keep. `### ` is excluded — a sub-heading is content, not a
+/// boundary.
+fn is_section_heading(line: &str) -> bool {
+    line.starts_with("## ") && !line.starts_with("### ")
 }
 
 /// `## 3. Title` → `Some(3)`. Any other line, `### 3.` included, is `None`.
@@ -895,12 +912,20 @@ impl AgentService {
     ///
     /// Enforcement therefore runs a second time here, on the finished document.
     /// It is safe to trim at this point: every decoration block is an
-    /// UNNUMBERED `##` heading, so `parse_section_number` yields `None` and
-    /// `is_must_keep_section` already protects it — the trimmer cannot reach
+    /// UNNUMBERED `##` heading, and `split_summary_sections` breaks on those
+    /// too, so each becomes its own section whose `number` is `None` and which
+    /// `is_must_keep_section` therefore protects — the trimmer cannot reach
     /// decoration, and the cut lands on the prose (§1, then §3, §5, §6) where
     /// the sessions ranked it. When decoration ALONE exceeds the budget the
     /// guard WARNs and ships it, which is the honest outcome: the roster is not
     /// something a woken agent can recover from the document.
+    ///
+    /// That boundary is load-bearing rather than incidental (#934): splitting
+    /// on `## N.` alone absorbed the decoration into the span of whichever
+    /// numbered section preceded it, so a document ending on a TRIMMABLE
+    /// section lost its plan block, roster and documents list when that section
+    /// was stubbed. Production masked it because the last numbered section is
+    /// the manifest (§10, must-keep); a fixture ending at §1 did not.
     pub(crate) async fn finalize_continuation_document(
         summary: String,
         session_id: Uuid,
