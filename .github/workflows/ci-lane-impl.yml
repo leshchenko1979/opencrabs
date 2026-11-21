@@ -433,7 +433,14 @@ jobs:
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"
-        run: cargo clippy --locked --lib --bins --tests --all-features -- -D warnings
+        # `--benches` (2026-11-21, factory #125): the tree declares two
+        # `harness = false` bench targets (src/benches/{database,memory}.rs) and
+        # NOTHING else on this gate compiles them -- nextest runs libtest
+        # binaries only and doctests are rustdoc's. Unselected, they rot green.
+        # `--all-targets` would also cover them but widens the selector to
+        # examples, which this gate does not lint; `--benches` is the minimal
+        # truthful fix. Two more compile units: watch the first run's wall.
+        run: cargo clippy --locked --lib --bins --tests --benches --all-features -- -D warnings
 
 
       - name: Apply cargo fmt (fix mode)
