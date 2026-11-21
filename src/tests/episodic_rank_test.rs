@@ -197,7 +197,7 @@ fn a_row_missing_a_query_term_never_outranks_a_full_match() {
     let terms = episodic::query_terms("deploy flaky");
 
     // Ten occurrences of "deploy", none of "flaky": a big hit count, no span.
-    let partial = format!("{LONG_LEAD_IN}deploy ".repeat(10));
+    let partial = format!("{LONG_LEAD_IN}{}", "deploy ".repeat(10));
     // Both terms, once each, 3,000 characters apart: the worst FULL span.
     let full = format!("{LONG_LEAD_IN}deploy{}flaky", " ".repeat(3_000));
 
