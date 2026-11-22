@@ -22,6 +22,21 @@ fn tool() -> LoadBrainFileTool {
     LoadBrainFileTool
 }
 
+/// Plant a skill in the profile home's `skills/` overlay.
+///
+/// Built-in bodies are a sidecar beside the executable (#946), and a test
+/// binary's exe dir has none — so a test that wants a skill to RESOLVE has to
+/// put one on disk. This is the same tier an install reads, just seeded here.
+fn seed_skill(home: &std::path::Path, name: &str, description: &str) {
+    let dir = home.join("skills").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {description}\n---\n\nBody.\n"),
+    )
+    .unwrap();
+}
+
 // ── metadata ─────────────────────────────────────────────────────────────────
 
 #[test]
@@ -276,6 +291,8 @@ async fn filename_form_yields_to_a_real_brain_file_of_the_same_name() {
         "# My own notes\n\nHAND_WRITTEN_MARKER\n",
     )
     .unwrap();
+    // The skill must exist for the shadowing to mean anything.
+    seed_skill(&home, "cost-estimate", "Estimate build cost");
 
     let result = with_home_override_async(home, async {
         tool()
@@ -304,6 +321,7 @@ async fn filename_form_yields_to_a_real_brain_file_of_the_same_name() {
 async fn filename_form_still_resolves_the_skill_when_nothing_shadows_it() {
     use crate::config::profile::with_home_override_async;
     let dir = TempDir::new().unwrap();
+    seed_skill(dir.path(), "cost-estimate", "Estimate build cost");
 
     let result = with_home_override_async(dir.path().to_path_buf(), async {
         tool()
@@ -313,10 +331,7 @@ async fn filename_form_still_resolves_the_skill_when_nothing_shadows_it() {
     })
     .await;
 
-    assert!(
-        result.success,
-        "filename form of a built-in skill must succeed"
-    );
+    assert!(result.success, "filename form of a skill must succeed");
     assert!(
         result.output.contains("--- skill: cost-estimate ---"),
         "with no home file of that name the skill still resolves, got: {}",
