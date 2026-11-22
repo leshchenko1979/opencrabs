@@ -1625,7 +1625,7 @@ async fn cmd_chat_inner(
                                         };
                                         // #481: one home for the wording, plus the
                                         // loss clause the hand-off owes the agent.
-                                        let prompt = crate::brain::agent::service::restart_recovery::resumed_turn_prompt(session_id);
+                                        let prompt = crate::brain::agent::service::restart_recovery::resumed_turn_prompt(session_id).await;
                                         // Wait up to READY_WAIT_SECS for the bot to authenticate.
                                         // #1242: this used to give up silently — the pending rows
                                         // were already cleared above, so that was permanent loss.
@@ -1736,7 +1736,7 @@ async fn cmd_chat_inner(
 
                                     // #481: same builder as the Telegram arm — one home
                                     // for the wording, plus the loss clause.
-                                    let prompt = crate::brain::agent::service::restart_recovery::resumed_turn_prompt(session_id);
+                                    let prompt = crate::brain::agent::service::restart_recovery::resumed_turn_prompt(session_id).await;
                                     // #481: TRACKED. `send_message_with_tools_and_callback` is
                                     // positionally identical to `resume_interrupted_turn` over the
                                     // first eight arguments and differs only in that it passes

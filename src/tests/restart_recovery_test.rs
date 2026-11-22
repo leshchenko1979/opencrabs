@@ -14,11 +14,14 @@ use crate::brain::agent::QueuedUserMessage;
 use crate::brain::agent::service::MessageEnqueueCallback;
 use crate::brain::agent::service::restart_recovery::{
     RESUME_CONTINUATION_BASE, deliver_or_park, flush_parked, interrupted_message, parked_count,
-    referenced_subjects, resumed_turn_prompt, subagent_interrupted_message, test_guard,
+    referenced_subjects, resumed_turn_prompt, resumed_turn_prompt_with,
+    subagent_interrupted_message, test_guard,
 };
 use crate::brain::agent::service::session_routes::register_session_route;
 use crate::brain::agent::service::work_status::{CommandPaths, WorkStatus, test_override};
 use crate::db::BackgroundTaskRow;
+use crate::db::Database;
+use crate::db::repository::{STATUS_STARTED, STATUS_UNKNOWN};
 
 /// What a recording callback saw: (session, display text) per delivery.
 type Seen = Arc<Mutex<Vec<(Uuid, String)>>>;
@@ -136,10 +139,10 @@ fn flushing_with_nothing_parked_is_a_no_op() {
 /// The base continuation is a user-facing contract, and the clause a hand-off
 /// appends is the only place the agent is told the transcript may be lying about
 /// what finished.
-#[test]
-fn resumed_turn_prompt_keeps_the_base_and_states_the_loss() {
+#[tokio::test]
+async fn resumed_turn_prompt_keeps_the_base_and_states_the_loss() {
     let session = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
-    let prompt = resumed_turn_prompt(session);
+    let prompt = resumed_turn_prompt(session).await;
 
     // The base survives verbatim as a prefix. This is what stops a swap from
     // announcing itself: without it the user sees a restart notice every time.
@@ -167,8 +170,119 @@ fn resumed_turn_prompt_keeps_the_base_and_states_the_loss() {
         prompt.contains(short),
         "expected short id {short} in: {prompt}"
     );
-    assert_eq!(prompt, resumed_turn_prompt(session));
-    assert_ne!(prompt, resumed_turn_prompt(Uuid::from_u128(1)));
+    assert_eq!(prompt, resumed_turn_prompt(session).await);
+    assert_ne!(prompt, resumed_turn_prompt(Uuid::from_u128(1)).await);
+}
+
+/// The digest test's harness: an in-memory DB whose journal is handed to the
+/// prompt builder through the test seam. The `Database` comes back too and
+/// must stay bound for the whole test — dropping it could let the pool
+/// recycle connections away from the in-memory schema.
+async fn digest_db() -> (Database, crate::db::repository::ToolExecutionRepository) {
+    let db = Database::connect_in_memory().await.unwrap();
+    db.run_migrations().await.unwrap();
+    let repo = crate::db::repository::ToolExecutionRepository::new(db.pool().clone());
+    (db, repo)
+}
+
+/// The resume digest names EXACTLY the interrupted calls: an `unknown` row and
+/// a `started` row (both are "effect unobserved") appear; a `completed` row,
+/// which has an answer, is omitted (#974).
+#[tokio::test]
+async fn resume_digest_names_unknown_rows_and_omits_completed() {
+    let session = Uuid::from_u128(0x974_974_974_974_974_974_974_974);
+    let (_db, repo) = digest_db().await;
+    let sid = session.to_string();
+    // One interrupted mid-flight (stamped unknown), one still unreported
+    // (started: the reconciler may not have reached it), one finished.
+    repo.record(
+        "a",
+        "m",
+        &sid,
+        "bash",
+        STATUS_STARTED,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.record(
+        "b",
+        "m",
+        &sid,
+        "edit_file",
+        STATUS_UNKNOWN,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.record(
+        "c",
+        "m",
+        &sid,
+        "read_file",
+        "completed",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let prompt = resumed_turn_prompt_with(session, Some(&repo)).await;
+    assert!(prompt.contains("Interrupted tool calls"), "{prompt}");
+    assert!(prompt.contains("`bash`"), "must name bash: {prompt}");
+    assert!(
+        prompt.contains("`edit_file`"),
+        "must name edit_file: {prompt}"
+    );
+    assert!(
+        !prompt.contains("`read_file`"),
+        "a completed call has an answer and must be omitted: {prompt}"
+    );
+    assert!(
+        prompt.contains("check the world before repeating it"),
+        "the digest must land on the verify-before-repeat check: {prompt}"
+    );
+    // The base contract survives as a prefix of the digest variant too.
+    assert!(prompt.starts_with(RESUME_CONTINUATION_BASE), "{prompt}");
+}
+
+/// With nothing interrupted (or no journal at all), the prompt is the
+/// pre-#974 string BYTE FOR BYTE — the digest appends only when it has
+/// something to say (#974).
+#[tokio::test]
+async fn resume_prompt_with_empty_journal_is_byte_for_byte() {
+    let session = Uuid::from_u128(0x974_000_000_000_000_000_000_000);
+    let (_db, repo) = digest_db().await;
+    let sid = session.to_string();
+    // The only completed call must not summon the digest.
+    repo.record("a", "m", &sid, "bash", "completed", None, None, None, None)
+        .await
+        .unwrap();
+
+    let expected = format!(
+        "{} The previous attempt (session {}) was killed mid-turn and did NOT finish; part of the \
+work may already have been completed. Before repeating a side-effecting step — a send, a write, \
+an install, a commit — verify from the world whether it already landed.",
+        RESUME_CONTINUATION_BASE,
+        &session.simple().to_string()[..8],
+    );
+    // Empty journal: byte for byte.
+    assert_eq!(
+        resumed_turn_prompt_with(session, Some(&repo)).await,
+        expected
+    );
+    // No journal to consult: the same bytes.
+    assert_eq!(resumed_turn_prompt_with(session, None).await, expected);
+    // A failed read falls back to the same bytes (repo dropped mid-read is
+    // exercised by the None arm; the Err arm shares the early return).
 }
 
 // ---- #913: a boot report may only claim what it measured -------------------

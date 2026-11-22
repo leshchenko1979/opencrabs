@@ -482,23 +482,82 @@ context and continue where you left off naturally. Do not mention the restart or
 interruption — just pick up seamlessly.]";
 
 /// Frame a boot-resumed `user` turn: the base continuation, then the one fact the
-/// agent cannot read off a transcript that looks complete (#481).
+/// agent cannot read off a transcript that looks complete (#481), then the
+/// interrupted-call digest (#974).
 ///
 /// A turn killed mid-flight leaves a transcript whose last entry is frequently a
 /// finished tool call, so nothing in it separates *"the work completed"* from
 /// *"the process died between the work and the report"*. The appended clause
 /// states that ambiguity and puts the check on the side-effecting steps, where
-/// repeating one is expensive or destructive.
-pub(crate) fn resumed_turn_prompt(session_id: Uuid) -> String {
-    format!(
+/// repeating one is expensive or destructive. The digest names the interrupted
+/// calls so the check has targets, not just a principle.
+pub(crate) async fn resumed_turn_prompt(session_id: Uuid) -> String {
+    // Resolved per call through the global pool, same as the tombstone repo:
+    // recovery runs before sessions exist, so nothing threads a pool.
+    let journal = crate::db::global_pool()
+        .map(|p| crate::db::repository::ToolExecutionRepository::new(p.clone()));
+    resumed_turn_prompt_with(session_id, journal.as_ref()).await
+}
+
+/// The prompt with the journal injected — the seam the digest tests use,
+/// because `global_pool()` is `None` in unit tests by design. `None` means
+/// no journal to consult, and the prompt is the pre-#974 string byte for byte.
+pub(crate) async fn resumed_turn_prompt_with(
+    session_id: Uuid,
+    journal: Option<&crate::db::repository::ToolExecutionRepository>,
+) -> String {
+    let base = format!(
         "{} The previous attempt (session {}) was killed mid-turn and did NOT finish; part of the \
 work may already have been completed. Before repeating a side-effecting step — a send, a write, \
 an install, a commit — verify from the world whether it already landed.",
         RESUME_CONTINUATION_BASE,
         &session_id.simple().to_string()[..8],
+    );
+
+    let Some(journal) = journal else {
+        return base;
+    };
+    let unknown = match journal.unknown_for_session(&session_id.to_string()).await {
+        Ok(calls) => calls,
+        Err(e) => {
+            tracing::warn!(
+                target: "background_task",
+                "Could not read the interrupted-call digest for the resumed prompt: {e:#}"
+            );
+            return base;
+        }
+    };
+    if unknown.is_empty() {
+        return base;
+    }
+
+    // Name exactly the interrupted calls, grouped per tool in first-attempted
+    // order (the read is `created_at ASC`): the resumed agent gets the checks
+    // it must run, not a wall of per-call rows. Arguments are deliberately
+    // omitted — a prompt digest names WHAT to verify, never its content.
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for call in &unknown {
+        match counts.last_mut() {
+            Some((name, n)) if *name == call.tool_name => *n += 1,
+            _ => counts.push((call.tool_name.clone(), 1)),
+        }
+    }
+    let list = counts
+        .iter()
+        .map(|(name, n)| {
+            if *n == 1 {
+                format!("`{name}`")
+            } else {
+                format!("`{name}` ×{n}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{base} Interrupted tool calls with no recorded outcome in that attempt: {list}. \
+Each may or may not have taken effect — check the world before repeating it."
     )
 }
-
 /// What survives a restart about one detached run, read from the surfaces that
 /// actually recorded it (#913).
 ///
