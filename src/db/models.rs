@@ -549,6 +549,22 @@ pub struct CronJob {
     /// `enabled = 0`, so a spent one-shot reads disabled instead of staying
     /// armed until the same date next year.
     pub run_once: bool,
+    /// Whether the harness posts this job's turn output to `deliver_to` (#969).
+    ///
+    /// Two values, and they mean different things from "may this turn send?":
+    ///
+    /// - `"always"` (default) — the scheduler posts the turn's final text (and
+    ///   an agent error) to every `deliver_to` target, wrapped in the
+    ///   `⏰ **Cron: <name>**` envelope.
+    /// - `"silent"` — the scheduler posts NOTHING on its own. The turn still
+    ///   holds the `deliver_to` send permission (a `silent` job may call
+    ///   `telegram_send` itself), so `silent` is not the same as a job with no
+    ///   `deliver_to`: it splits send permission from harness auto-delivery
+    ///   instead of removing both.
+    ///
+    /// Every pre-#969 row and every caller that does not set it reads
+    /// `"always"`, so behaviour is unchanged by default.
+    pub deliver_mode: String,
 }
 
 impl CronJob {
@@ -588,7 +604,23 @@ impl CronJob {
                 .unwrap_or(None)
                 .unwrap_or(0)
                 != 0,
+            // #969 — same defensive shape as `run_once` / `set_goal` above: a
+            // row read before the heal has added the column must not hard-fail
+            // the whole list query, and an absent value means `always`.
+            deliver_mode: row
+                .get::<_, Option<String>>("deliver_mode")
+                .unwrap_or(None)
+                .unwrap_or_else(|| "always".to_string()),
         })
+    }
+
+    /// Whether the harness posts this job's turn output itself (#969).
+    ///
+    /// The ONE predicate the three scheduler delivery arms share. A `silent`
+    /// job keeps its `deliver_to` send scope — it simply does not get the
+    /// envelope-wrapped auto-post on top of whatever it chose to send.
+    pub fn delivers_result(&self) -> bool {
+        self.deliver_mode != "silent"
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -671,6 +703,10 @@ impl CronJob {
             // run_once is set by the caller after construction, the same way
             // cron_manage sets next_run_at (#544), so this ctor keeps its arity.
             run_once: false,
+            // #969: like run_once, not a constructor param — callers that want
+            // a silent job set it after construction. `always` is the default so
+            // every existing caller keeps posting exactly as it did.
+            deliver_mode: "always".to_string(),
         }
     }
 }

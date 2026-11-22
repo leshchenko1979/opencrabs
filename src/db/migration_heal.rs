@@ -13,12 +13,12 @@
 //! `to_latest` on every boot, so a healed database stays healed and a
 //! correct one is untouched.
 //!
-//! # The reconciliation pass and the five post-pass heals
+//! # The reconciliation pass and the six post-pass heals
 //!
-//! [`reconcile_before_migrations`] runs BEFORE `to_latest`; the five heals at
+//! [`reconcile_before_migrations`] runs BEFORE `to_latest`; the six heals at
 //! the foot of this module (`heal_pending_requests_origin`, `heal_notify_queue`,
 //! `heal_project_repo_remote`, `heal_session_seen_skills_loaded_mtime`,
-//! `heal_tool_executions_exit_code`) still run
+//! `heal_tool_executions_exit_code`, `heal_cron_deliver_mode`) still run
 //! AFTER it, from `Database::run_migrations`. They are kept because their
 //! migrations are NOT all declared above, and a reader who deletes one as
 //! "covered by the table" would remove the only cover its migration has:
@@ -51,6 +51,12 @@
 //!   a database stamped against the pre-merge list then skips it in silence —
 //!   the #1401 class in the direction `to_latest` cannot see. This heal is its
 //!   only repair.
+//! - `heal_cron_deliver_mode` (migration 64, `cron_jobs.deliver_mode`, #969) —
+//!   **NOT overlapped, and must not be.** Same shape as the exit-code heal: the
+//!   migration is appended LAST, above the declared window, and the window's
+//!   contiguity test forbids declaring it there. A database stamped past this
+//!   index by a pre-merge list would otherwise skip the column in silence. This
+//!   heal is its only repair.
 
 /// The schema object a migration's effect creates.
 ///
@@ -746,6 +752,11 @@ pub(crate) fn heals_would_write(
     if has_table(conn, "tool_executions")? && !has_column(conn, "tool_executions", "exit_code")? {
         return Ok(true);
     }
+    // #969 — parity with `heal_cron_deliver_mode`: a boot that will add the
+    // column is a boot that rewrites the schema, so it is worth a snapshot.
+    if has_table(conn, "cron_jobs")? && !has_column(conn, "cron_jobs", "deliver_mode")? {
+        return Ok(true);
+    }
     Ok(false)
 }
 
@@ -822,6 +833,24 @@ pub(crate) fn heal_tool_executions_exit_code(
     tracing::warn!(
         "Healed tool_executions: the exit_code column of migration 60 was missing although the \
          schema was stamped past it (#763)."
+    );
+    Ok(true)
+}
+
+/// Add `cron_jobs.deliver_mode` if the stamp skipped it (#969).
+///
+/// `always` is the DEFAULT so every pre-existing row keeps posting exactly as
+/// it did; a healed database is byte-identical to one that ran the migration.
+pub(crate) fn heal_cron_deliver_mode(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    if !has_table(conn, "cron_jobs")? || has_column(conn, "cron_jobs", "deliver_mode")? {
+        return Ok(false);
+    }
+    conn.execute_batch(
+        "ALTER TABLE cron_jobs ADD COLUMN deliver_mode TEXT NOT NULL DEFAULT 'always';",
+    )?;
+    tracing::warn!(
+        "Healed cron_jobs: the deliver_mode column of migration 64 was missing although the \
+         schema was stamped past it (#969)."
     );
     Ok(true)
 }

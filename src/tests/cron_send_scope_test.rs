@@ -214,6 +214,7 @@ async fn test_resolve_cron_session_scope() {
         set_goal: false,
         goal_template: None,
         run_once: false,
+        deliver_mode: "always".to_string(),
     };
     cron_repo.insert(&job).await.unwrap();
 
@@ -303,6 +304,7 @@ async fn test_resolve_cron_session_scope_targetless_job_is_nowhere() {
         set_goal: false,
         goal_template: None,
         run_once: false,
+        deliver_mode: "always".to_string(),
     };
     crate::db::CronJobRepository::new(pool.clone())
         .insert(&job)
@@ -618,6 +620,7 @@ async fn resolve_cron_session_scope_is_binding_aware() {
         set_goal: false,
         goal_template: None,
         run_once: false,
+        deliver_mode: "always".to_string(),
     };
     crate::db::CronJobRepository::new(pool.clone())
         .insert(&job)
