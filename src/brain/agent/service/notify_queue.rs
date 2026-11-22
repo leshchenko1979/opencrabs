@@ -22,6 +22,7 @@
 
 use super::types::QueuedUserMessage;
 use crate::db::NotifyQueueRepository;
+use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
 /// One day, the unit the reap ceiling is expressed in. Age is a schema-free
@@ -31,11 +32,61 @@ const STALE_ROW_SECS: i64 = 24 * 60 * 60;
 
 /// How long a row may survive in `notify_queue` before it is reaped.
 ///
-/// Three days of boots is long past the point where a route is coming back:
-/// each boot re-offers the row, so a row this old has been declined by every
-/// start since it was parked. Only [`reap_stale_after_redelivery`] reads it,
-/// and only after the current boot has made its own offer.
+/// Three days of passes is long past the point where a route is coming back:
+/// each pass re-offers the row, so a row this old has been declined by every
+/// pass since it was parked. Only [`reap_stale_after_redelivery`] reads it,
+/// and only after the current pass has made its own offer.
 pub(crate) const MAX_ROW_AGE_SECS: i64 = 3 * STALE_ROW_SECS; // 72h (259,200s)
+
+/// How often the whole redelivery pass runs on a live process (#931).
+///
+/// The ceiling above is enforced by exactly one place — the reap at the end of
+/// [`redeliver_persisted`] — and until #931 that pass ran once per boot. A
+/// daemon that stayed up for days therefore never reaped anything: measured
+/// live, rows 6.78h past the 72h ceiling on a host whose daemon had been up
+/// 11.59h, with `NRestarts=0`. This is the cadence that closes the gap.
+///
+/// The constant lives HERE, beside [`MAX_ROW_AGE_SECS`], so the ceiling and
+/// the cadence that enforces it are read together and cannot drift apart.
+/// Hourly because age is expressed in hours; a tighter period only buys
+/// wakeups.
+pub(crate) const NOTIFY_REAP_INTERVAL_SECS: u64 = 3600;
+
+/// Set while a periodic redelivery pass is in flight (#931).
+///
+/// Two overlapping passes are a duplicate-delivery path, not merely wasted
+/// work: both read the same rows, both offer them, and both `clear_batch`
+/// ids the other may already have delivered. A spawned tick makes overlap
+/// reachable whenever one pass outlives the interval, so the tick that loses
+/// the race skips instead.
+static PERIODIC_PASS_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// RAII single-flight permit: dropping it releases the flag.
+///
+/// A manual `store(false)` at the end of the pass would strand the guard on
+/// every early `return` and on a panic — turning one transient overlap into a
+/// permanently dead ticker, which looks exactly like the bug #931 fixes. `Drop`
+/// runs on all of those paths.
+pub(crate) struct PassGuard<'a> {
+    flag: &'a AtomicBool,
+}
+
+impl Drop for PassGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
+/// Take the single-flight permit, or `None` when a pass already holds it.
+///
+/// The flag is a parameter rather than a bare static so the guard is testable
+/// in isolation; production passes [`PERIODIC_PASS_RUNNING`].
+pub(crate) fn try_enter_pass(flag: &AtomicBool) -> Option<PassGuard<'_>> {
+    if flag.swap(true, Ordering::AcqRel) {
+        return None;
+    }
+    Some(PassGuard { flag })
+}
 
 /// The busy-lane framing prepended to a push that lands while its target is
 /// mid-turn (fork #13). It lives here, beside the durable-queue text
@@ -160,16 +211,39 @@ pub(crate) fn persist(session_id: Uuid, msg: &QueuedUserMessage) {
 /// Re-offer every persisted push from a previous process (#111).
 ///
 /// Runs from [`super::restart_recovery::recover`] alongside the tombstone
-/// redelivery. Rows whose session no longer exists are reaped first (Part B —
-/// nothing can ever claim them), then each surviving row's push is offered to
-/// its session: one that lands on a live route is cleared, one that parks
-/// again keeps its row and keeps surviving restarts until the park is
-/// genuinely delivered (the consume sites clear it). Returns how many rows
-/// were re-offered.
+/// redelivery, and then once per [`NOTIFY_REAP_INTERVAL_SECS`] for as long as
+/// the process lives (#931). The second cadence matters because the age reap
+/// at the end of the pass is the ONLY enforcement of [`MAX_ROW_AGE_SECS`]: a
+/// boot-only pass left the ceiling unenforced for the whole uptime of a
+/// long-lived daemon.
+///
+/// Rows whose session no longer exists are reaped first (Part B — nothing can
+/// ever claim them), then each surviving row's push is offered to its
+/// session: one that lands on a live route is cleared, one that parks again
+/// keeps its row and keeps surviving restarts until the park is genuinely
+/// delivered (the consume sites clear it). Returns how many rows were
+/// re-offered.
 pub(crate) async fn redeliver_persisted() -> usize {
-    let Some(repo) = repo() else {
-        return 0;
-    };
+    match repo() {
+        Some(repo) => redeliver_pass_with(&repo, super::restart_recovery::deliver_or_park).await,
+        None => 0,
+    }
+}
+
+/// The redelivery pass itself, against an explicit repository and offer.
+///
+/// Split out of [`redeliver_persisted`] for two load-bearing reasons.
+/// `redeliver_persisted` resolves its pool through the process-global
+/// `global_pool()` `OnceLock`, which only a real `Database::connect` sets, so
+/// nothing can drive the pass from a test. And the ordering contract — "the
+/// reap runs only after every row has been offered" — can be proven only by
+/// watching the offers happen, which a repository-level assertion cannot do.
+/// `offer` is [`super::restart_recovery::deliver_or_park`] in production and
+/// returns `true` when the push reached a live route.
+pub(crate) async fn redeliver_pass_with<F>(repo: &NotifyQueueRepository, offer: F) -> usize
+where
+    F: Fn(Uuid, QueuedUserMessage) -> bool,
+{
     // Reap rows whose session no longer exists FIRST (#111 follow-up, Part B):
     // no channel can ever claim them, so no consume site can ever clear them,
     // and re-offering them would only re-park a push nobody can receive.
@@ -177,7 +251,7 @@ pub(crate) async fn redeliver_persisted() -> usize {
         Ok(reaped) if !reaped.is_empty() => {
             tracing::info!(
                 target: "background_task",
-                "Boot notify queue: reaped={} row(s) whose session no longer exists",
+                "Notify queue: reaped={} row(s) whose session no longer exists",
                 reaped.len()
             );
             for row in reaped {
@@ -228,7 +302,7 @@ pub(crate) async fn redeliver_persisted() -> usize {
             origin: row.origin,
             bg_meta: row.bg_meta.clone(),
         };
-        if super::restart_recovery::deliver_or_park(row.session_id, msg) {
+        if offer(row.session_id, msg) {
             delivered_ids.push(row.id);
         } else {
             // Parked again (#111 follow-up, Part C): a row that keeps
@@ -239,8 +313,8 @@ pub(crate) async fn redeliver_persisted() -> usize {
                 tracing::warn!(
                     target: "background_task",
                     "Persisted push {} for session {} has survived {}h with no clear path \
-                     (parked again at boot); it keeps being re-offered until its session \
-                     claims a route or it is reaped",
+                     (parked again by the redelivery pass); it keeps being re-offered until its \
+                     session claims a route or it is reaped",
                     row.id,
                     row.session_id,
                     age_secs / 3600
@@ -266,9 +340,39 @@ pub(crate) async fn redeliver_persisted() -> usize {
     // before the offer would delete pushes for perfectly live sessions after
     // any long downtime (a sleeping laptop, a machine off over a holiday),
     // which is the one outcome this module's contract forbids.
-    reap_stale_after_redelivery(&repo).await;
+    reap_stale_after_redelivery(repo).await;
 
     count
+}
+
+/// One periodic tick: run the WHOLE redelivery pass (#931).
+///
+/// Deliberately NOT a call to [`reap_stale_after_redelivery`]. That function is
+/// correct only as the tail of [`redeliver_persisted`], where every row it sees
+/// has just been offered and re-parked; driven from a timer it would delete
+/// pushes for perfectly live sessions after any long downtime — a sleeping
+/// laptop, a machine off over a holiday — the one outcome this module's
+/// contract forbids. So the tick runs the pass, and the pass keeps its order.
+///
+/// Single-flight: a pass that outlives [`NOTIFY_REAP_INTERVAL_SECS`] would
+/// otherwise overlap the next tick, and two concurrent passes deliver the same
+/// rows twice. The losing tick skips and logs.
+pub(crate) async fn run_periodic_pass() {
+    let Some(_gate) = try_enter_pass(&PERIODIC_PASS_RUNNING) else {
+        tracing::warn!(
+            target: "background_task",
+            "Notify queue: skipped a periodic redelivery pass, the previous one is still \
+             running (two concurrent passes would deliver the same rows twice)"
+        );
+        return;
+    };
+    let redelivered = redeliver_persisted().await;
+    if redelivered > 0 {
+        tracing::info!(
+            target: "background_task",
+            "Notify queue: periodic redelivery pass redelivered={redelivered}"
+        );
+    }
 }
 
 /// Drop rows that survived the redelivery pass and are past the ceiling age.
@@ -288,7 +392,7 @@ async fn reap_stale_after_redelivery(repo: &NotifyQueueRepository) {
         Ok(reaped) if !reaped.is_empty() => {
             tracing::info!(
                 target: "background_task",
-                "Boot notify queue: reaped {} stale unclaimed push(es) older than {}h",
+                "Notify queue: reaped {} stale unclaimed push(es) older than {}h",
                 reaped.len(),
                 max_age_hours
             );

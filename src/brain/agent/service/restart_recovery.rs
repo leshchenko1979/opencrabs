@@ -1021,6 +1021,29 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
         );
     }
 
+    // ...and keep doing it (#931). The pass above is the only thing that
+    // enforces `MAX_ROW_AGE_SECS`, and it used to run exactly once per
+    // process, so a daemon that stayed up for days reaped nothing: measured
+    // live, rows 6.78h past the 72h ceiling on a host up 11.59h.
+    //
+    // The tick runs the WHOLE pass, never the bare age reap on its own. The
+    // reap is correct only as the pass's tail, where every row it sees has
+    // just been offered and re-parked; on a timer it would delete pushes for
+    // perfectly live sessions after any long downtime — the one outcome this
+    // module forbids. `run_periodic_pass` carries the single-flight guard so a
+    // slow pass cannot overlap the next tick.
+    let _periodic_notify_reap = tokio::spawn(async move {
+        loop {
+            // One full interval before the first tick: `recover` ran a pass
+            // microseconds ago, so an immediate one would only repeat it.
+            tokio::time::sleep(std::time::Duration::from_secs(
+                super::notify_queue::NOTIFY_REAP_INTERVAL_SECS,
+            ))
+            .await;
+            super::notify_queue::run_periodic_pass().await;
+        }
+    });
+
     if reported > 0 {
         tracing::info!(
             target: "background_task",
