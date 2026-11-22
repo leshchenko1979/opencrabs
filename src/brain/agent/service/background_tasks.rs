@@ -2064,12 +2064,9 @@ fn capped_stream_note(command: &str, out_len: Option<u64>, err_len: Option<u64>)
     if out_len.unwrap_or(0) == 0 && err_len.unwrap_or(0) == 0 {
         return String::new();
     }
-    match terminal_stage(command) {
-        Some(stage) => format!(
-            " (pipeline ends in `{stage}`: this is that stage's output, not the full stream)"
-        ),
-        None => String::new(),
-    }
+    // NEGATIVE CONTROL (#959): the clause removed, everything else intact.
+    let _ = (command, terminal_stage(command));
+    String::new()
 }
 
 /// Byte count of one capture file, or `None` when there is no file to count
