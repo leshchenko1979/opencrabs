@@ -1240,24 +1240,90 @@ fn clear_persisted_tombstones(session_id: Uuid) {
     }
 }
 
-/// What the parent agent is told about a sub-agent a restart killed.
+/// What the parent agent is told about a sub-agent a restart interrupted.
 ///
-/// Mirrors the framing used for detached commands: state plainly that it did
-/// not finish and hand the decision back, rather than letting the agent read
-/// an absent result as either success or failure.
-fn subagent_interrupted_message(status: &super::work_status::WorkStatus) -> QueuedUserMessage {
-    let context_text = format!(
-        "[SUB-AGENT INTERRUPTED] The sub-agent `{}` (id {}) was still running when OpenCrabs \
-         restarted, so it was killed and produced no result. Its task was:\n\n```\n{}\n```\n\nIt \
-         did NOT complete. Decide whether to spawn it again based on what you were doing; do not \
-         assume it succeeded or failed.",
+/// #963: this used to assert BOTH halves of a verdict it never observed — that
+/// the sub-agent was killed, and that it produced no result — the same two
+/// claims #936 removed from the detached-command surface, left standing on its
+/// sibling. The boot-time
+/// reconciliation has observed ONE thing: the harness restarted. It did not
+/// observe the sub-agent's death, and it cannot know whether the sub-agent ran,
+/// how far it got, or whether its work is on disk. A sub-agent's work survives a
+/// restart far more readily than a command's: its status file persists by
+/// design, `resume_agent` continues it across a restart (#852), and if it wrote
+/// code that code sits in a worktree and branch nothing about the restart
+/// removed. Telling the parent it "produced no result" pushes it toward
+/// re-spawning work that is already there.
+///
+/// So the report states the observation, states what is unknown, names where the
+/// work may be, and hands the decision back — the same shape as the
+/// detached-command report, in the same vocabulary.
+pub(crate) fn subagent_interrupted_message(
+    status: &super::work_status::WorkStatus,
+) -> QueuedUserMessage {
+    let mut context_text = format!(
+        "[SUB-AGENT INTERRUPTED] OpenCrabs restarted while the sub-agent `{}` (id {}) was \
+         running, so this report comes from the boot-time reconciliation — not from the \
+         sub-agent. Its task was:\n\n```\n{}\n```\n\n\
+         Whether it ran, how far it got and whether it finished are NOT KNOWN: the restart \
+         recorded no result for it, and nothing here was checked for liveness.",
         status.label, status.id, status.task
+    );
+    // Its own record is the first thing a reader can look at, and naming it
+    // costs one path — the reader may never have been told the id's layout.
+    let record = super::work_status::status_path(&status.id);
+    if record.exists() {
+        context_text.push_str(&format!(
+            "\n\nIts status file is at {} — it carries the last progress the sub-agent reported \
+             before the restart.",
+            record.display()
+        ));
+    }
+    if let Some(line) = subagent_capture_evidence(status) {
+        context_text.push_str(&format!("\n\n{line}"));
+    }
+    context_text.push_str(
+        "\n\nIts work may have survived on disk: `resume_agent` with this id continues it, and if \
+         it wrote code, the worktree and branch named when it was spawned may hold that work. \
+         Decide whether to resume it or to check what it produced, based on what you were doing; \
+         do not assume it succeeded or failed, and do not re-run work that may already be done.",
     );
     QueuedUserMessage {
         context_text,
         display_text: format!("⚠️ Sub-agent interrupted by restart: {}", status.label),
         origin: PushOrigin::Recovery,
         bg_meta: None,
+    }
+}
+
+/// What a sub-agent's captures hold, measured from the FILES (#963).
+///
+/// `WorkStatus::output_out`/`output_err` are recorded PATHS, and a recorded path
+/// is not a file: the capture may never have been created, or may have been
+/// swept. `RunEvidence::is_empty()` answers whether a path was recorded, not
+/// whether the file holds bytes, so this stats instead and says nothing about a
+/// capture it could not open — a byte count about a file nobody read is a
+/// measurement nobody took.
+fn subagent_capture_evidence(status: &super::work_status::WorkStatus) -> Option<String> {
+    let mut parts = Vec::new();
+    for (name, recorded) in [
+        ("stdout", status.output_out.as_deref()),
+        ("stderr", status.output_err.as_deref()),
+    ] {
+        let Some(path) = recorded.filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        if let Ok(meta) = std::fs::metadata(path) {
+            parts.push(format!("{name} {path} ({} bytes)", meta.len()));
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Its captures, measured now: {} — read them there.",
+            parts.join(", ")
+        ))
     }
 }
 
