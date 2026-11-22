@@ -871,8 +871,8 @@ impl BackgroundTaskManager {
             let task_id = id.clone();
             tokio::spawn(async move {
                 continue_detached(
-                    this, run_uuid, task_id, session_id, label, command, started, child,
-                    out_reader, err_reader, wake, hook,
+                    this, task_id, session_id, label, command, started, child, out_reader,
+                    err_reader, wake, hook,
                 )
                 .await;
             });
@@ -933,8 +933,8 @@ impl BackgroundTaskManager {
                 let task_id = id.clone();
                 tokio::spawn(async move {
                     continue_detached(
-                        this, run_uuid, task_id, session_id, label, command, started, child,
-                        out_reader, err_reader, wake, hook,
+                        this, task_id, session_id, label, command, started, child, out_reader,
+                        err_reader, wake, hook,
                     )
                     .await;
                 });
@@ -1357,7 +1357,11 @@ fn tail_chars(s: &str, n: usize) -> String {
 /// stderr is kept separate on disk because interleaving is lossy and cannot be
 /// undone; a consumer wanting the historical merged shape concatenates at read
 /// time, which is what this does.
-fn cmd_result_from(output: &std::process::Output) -> CmdResult {
+///
+/// `pub(crate)` so the #964 test can drive a REAL process through the same
+/// derivation the completion path uses, rather than hand-writing the result it
+/// then asserts on.
+pub(crate) fn cmd_result_from(output: &std::process::Output) -> CmdResult {
     // A process that exited on its own is `Ordinary` even when it failed: the
     // command's own code IS the cause. Only a signal is a different event, and
     // it is the one `exit_code` used to discard.
@@ -1455,6 +1459,9 @@ fn write_finish(
     // place every terminal transition passes through, so the row cannot be left
     // describing the spawn.
     write_outcome_row(id, result);
+    // #964: the run's own `background_tasks` row is stamped beside this, not
+    // here — only a HANDED-OVER run keeps that row, and the caller that knows
+    // it was handed over (`continue_detached`) is the one that writes it.
 }
 
 /// Write a detached run's REAL outcome onto its `tool_executions` row (#787).
@@ -1506,7 +1513,92 @@ fn write_outcome_row(id: &str, result: &CmdResult) {
     });
 }
 
-/// Drop a finished run's restart-accounting row, loud on failure.
+/// The outcome a completed detached run records on its `background_tasks` row
+/// (#964).
+///
+/// Pure derivation, so the mapping from a run's result to the row's five
+/// columns can be pinned without a database: the row's `exit_code` is the
+/// COMMAND's own code, and it is `NULL` whenever `code` carries a harness
+/// number instead — a signalled death, the lifetime ceiling's SIGKILL, or a
+/// child that was never awaited. Recording `137` there as an exit code would be
+/// the #938 lie in a new column.
+///
+/// Both capture paths are derived from the run id through the same resolver
+/// every writer persists through, so the row locates the output even when the
+/// status JSON is gone.
+pub(crate) fn task_outcome_record(
+    id: &str,
+    result: &CmdResult,
+) -> crate::db::BackgroundTaskOutcome {
+    let exit_code = match result.cause {
+        crate::brain::agent::service::work_status::RunCause::Ordinary => Some(result.code as i64),
+        _ => None,
+    };
+    crate::db::BackgroundTaskOutcome {
+        status: Some(if result.success { "success" } else { "failed" }.to_string()),
+        exit_code,
+        // Stamped by the store (`strftime('%s','now')`) at the write, so a
+        // caller with a skewed clock cannot backdate the transition.
+        completed_at: None,
+        stdout_path: Some(
+            crate::brain::agent::service::work_status::command_output_path(id, false)
+                .display()
+                .to_string(),
+        ),
+        stderr_path: Some(
+            crate::brain::agent::service::work_status::command_output_path(id, true)
+                .display()
+                .to_string(),
+        ),
+    }
+}
+
+/// Stamp a finished detached run's outcome onto its row and KEEP the row
+/// (#964).
+///
+/// Replaces the DELETE the detached completion path used to do. The row is the
+/// one record that names the run; deleting it at the moment it acquired an
+/// answer left only the status JSON, whose file name a reader had to already
+/// know. A zero-row update is warned about but never fatal: the status file is
+/// still a record, and a completion must not fail because bookkeeping lost a
+/// race with a startup clear.
+///
+/// Only the DETACHED path keeps its row. An inline run (finished inside its
+/// grace window) was never a background task in the durable sense — it is
+/// already recorded in `tool_executions`, and keeping a row for every bash call
+/// would turn this restart-accounting table into an execution log.
+async fn finish_task_row(id: &str, label: &str, result: &CmdResult) {
+    let Some(repo) = task_repo() else {
+        return;
+    };
+    let Ok(run_uuid) = Uuid::parse_str(id) else {
+        tracing::warn!(
+            target: "background_task",
+            "Run '{label}' finished with an id that is not a uuid; its row keeps no outcome: {id}"
+        );
+        return;
+    };
+    match repo.finish(run_uuid, task_outcome_record(id, result)).await {
+        Ok(0) => tracing::warn!(
+            target: "background_task",
+            "Run '{label}' finished but its background_tasks row was already gone; \
+             the status file remains the record"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::error!(
+            target: "background_task",
+            "Failed to record background run '{label}' outcome on its row: {e:#}"
+        ),
+    }
+}
+
+/// Drop an INLINE run's restart-accounting row, loud on failure.
+///
+/// The row existed so a crash mid-call could be reported at the next boot; the
+/// call finished inside its grace window, so there is nothing left to account
+/// for. Unlike the detached path (#964) this row is not kept: an inline run is
+/// already recorded in `tool_executions`, and one row per bash call would turn
+/// this restart-accounting table into an execution log.
 async fn clear_row(run_uuid: Uuid, label: &str) {
     if let Some(repo) = task_repo()
         && let Err(e) = repo.clear(run_uuid).await
@@ -1726,7 +1818,6 @@ fn deliver_completion(
 #[allow(clippy::too_many_arguments)]
 async fn continue_detached(
     this: std::sync::Arc<BackgroundTaskManager>,
-    run_uuid: Uuid,
     id: String,
     session_id: Uuid,
     label: String,
@@ -1832,7 +1923,10 @@ async fn continue_detached(
         elapsed_secs
     );
     write_finish(&id, &session_id, &label, &command, elapsed_secs, &result);
-    clear_row(run_uuid, &label).await;
+    // #964: the row SURVIVES this run — stamped with its outcome and both
+    // capture paths instead of being deleted. The status JSON above and this
+    // row are written from the same `result`, so they cannot disagree.
+    finish_task_row(&id, &label, &result).await;
     // Clear the indicator BEFORE delivering, not after: the work is over the
     // moment the process exits, so a badge that outlived it would show the
     // agent reporting a finished task as still running.

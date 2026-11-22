@@ -64,13 +64,14 @@ pub(crate) fn subagent_status_file(id: &str) -> String {
 pub(crate) struct DetachedRow {
     pub id: String,
     pub label: String,
-    /// What the run's OWN status file says it is doing (#752).
+    /// What the run's OWN record says it is doing (#752, #964).
     ///
-    /// Read from disk rather than inferred from the handle being present in the
-    /// in-memory registry: the file is the run's own declaration, written by
-    /// the manager that owns it, so a row reading `running` reports a fact
-    /// instead of an assumption. `unknown` means no file was readable, which is
-    /// itself worth seeing for a live handle — every run writes one at spawn
+    /// Resolved by [`resolve_state`]: the run's `background_tasks` ROW first,
+    /// because it outlives the status JSON, then the JSON for a pre-migration
+    /// row. Read rather than inferred from the handle being present in the
+    /// in-memory registry, so a row reading `running` reports a fact instead of
+    /// an assumption. `unknown` means neither record was readable, which is
+    /// itself worth seeing for a live handle — every run writes both at spawn
     /// (persist-before-wait, #763), and a run whose record has gone is exactly
     /// the case a caller must not read as healthy.
     pub state: String,
@@ -135,6 +136,35 @@ pub(crate) fn render_tasks(subagents: &[SubagentRow], detached: &[DetachedRow]) 
         }
     }
     out
+}
+
+/// Resolve the state to render for a live detached run (#964).
+///
+/// The ROW is preferred: it is written at the same terminal transition as the
+/// status JSON and it OUTLIVES the JSON, so a run whose `tmp/runs/<id>.json`
+/// has been swept still reports how it ended. The JSON is the fallback for a
+/// row that predates the outcome columns (all five `NULL`) — the one case where
+/// it is the only record left.
+///
+/// A row with no terminal status and no JSON at all is `unknown`, never
+/// `running` and never `success`: the state must be a fact this code read, not
+/// an inference about a run nobody can describe (#752, #964).
+pub(crate) fn resolve_state(
+    row: Option<&crate::db::BackgroundTaskOutcome>,
+    json_state: Option<&str>,
+) -> String {
+    if let Some(label) = row.and_then(crate::db::BackgroundTaskOutcome::terminal_label) {
+        return label.to_string();
+    }
+    if let Some(state) = json_state {
+        return state.to_string();
+    }
+    // Nothing terminal recorded. The row's own `running` is still a statement
+    // the writer made; its absence is not.
+    match row {
+        Some(outcome) if outcome.state_label() == "running" => "running".to_string(),
+        _ => "unknown".to_string(),
+    }
 }
 
 fn state_label(state: &super::subagent::manager::SubAgentState) -> &'static str {
@@ -228,19 +258,30 @@ impl Tool for TasksListTool {
 
         let mut detached = Vec::new();
         if let Some(bm) = context.background_manager.as_ref() {
+            // #964: the run's outcome lives on its `background_tasks` row now,
+            // so that row is what this reads. Resolved through the global pool
+            // like every other row read (`global_pool()` is `None` before the
+            // DB is initialized, which simply means "no row to prefer").
+            let task_rows = crate::db::global_pool()
+                .map(|p| crate::db::BackgroundTaskRepository::new(p.clone()));
             // Read the HANDLES, not the label-only roster: the id and the two
             // capture paths are the whole point of the row (#692), and
             // `running_tasks` predates them.
             for h in bm.handles_for(context.session_id) {
-                // The state comes from the run's OWN status file rather than
-                // from the handle merely existing: the file is what the manager
-                // persisted, so reading it makes this row a report instead of an
-                // inference. A live handle whose record cannot be read says
-                // `unknown` — never `running`, which would assert liveness this
-                // code has not checked (#752).
-                let state = crate::brain::agent::service::work_status::WorkStatus::read(&h.id)
-                    .map(|s| s.state.label().to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
+                // The state comes from the run's OWN records rather than from
+                // the handle merely existing: the row is the durable record and
+                // the status file the fallback for a row written before the
+                // outcome columns existed, so reading them makes this row a
+                // report instead of an inference. A live handle whose records
+                // cannot be read says `unknown` — never `running`, which would
+                // assert liveness this code has not checked (#752).
+                let row_outcome = match task_rows.as_ref() {
+                    Some(repo) => repo.outcome(&h.id).await.ok().flatten(),
+                    None => None,
+                };
+                let json_state = crate::brain::agent::service::work_status::WorkStatus::read(&h.id)
+                    .map(|s| s.state.label().to_string());
+                let state = resolve_state(row_outcome.as_ref(), json_state.as_deref());
                 detached.push(DetachedRow {
                     id: h.id.clone(),
                     label: h.label,
