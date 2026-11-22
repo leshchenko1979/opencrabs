@@ -1551,12 +1551,29 @@ pub(crate) fn task_outcome_record(
     id: &str,
     result: &CmdResult,
 ) -> crate::db::BackgroundTaskOutcome {
+    use crate::brain::agent::service::work_status::RunCause;
+
     let exit_code = match result.cause {
-        crate::brain::agent::service::work_status::RunCause::Ordinary => Some(result.code as i64),
+        RunCause::Ordinary => Some(result.code as i64),
         _ => None,
     };
+    // #966: a signalled death and a ceiling kill are NOT the command failing —
+    // something stopped it. Recording them as `failed` would put the exact
+    // misreading #966 exists to remove into a durable column, so they get their
+    // own label. `NotAwaited` keeps `failed`: nothing ran, and the row must not
+    // read as a completed success.
+    let status = match result.cause {
+        RunCause::Ceiling { .. } | RunCause::Signalled { .. } => "killed",
+        RunCause::Ordinary | RunCause::NotAwaited => {
+            if result.success {
+                "success"
+            } else {
+                "failed"
+            }
+        }
+    };
     crate::db::BackgroundTaskOutcome {
-        status: Some(if result.success { "success" } else { "failed" }.to_string()),
+        status: Some(status.to_string()),
         exit_code,
         // Stamped by the store (`strftime('%s','now')`) at the write, so a
         // caller with a skewed clock cannot backdate the transition.

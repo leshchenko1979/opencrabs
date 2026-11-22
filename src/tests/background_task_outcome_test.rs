@@ -251,8 +251,36 @@ async fn a_signalled_death_records_no_exit_code_of_its_own() {
             outcome.exit_code, None,
             "a harness code must not be recorded as an exit code; was: {outcome:?}"
         );
-        assert_eq!(outcome.status.as_deref(), Some("failed"));
     }
+
+    // #966 says a signalled death and a ceiling kill are not the command
+    // failing. If this recorded `failed`, the row would carry the exact
+    // misreading that issue removed from the rendered text.
+    assert_eq!(
+        outcomes[0].status.as_deref(),
+        Some("killed"),
+        "ceiling kill"
+    );
+    assert_eq!(
+        outcomes[1].status.as_deref(),
+        Some("killed"),
+        "signalled death"
+    );
+    // Nothing ran here, so it is not a success — but it is not a kill either.
+    assert_eq!(
+        outcomes[2].status.as_deref(),
+        Some("failed"),
+        "never awaited"
+    );
+
+    // The label must survive the reader, not just the writer: `killed` is
+    // terminal, so a row that was stopped reports how it ended.
+    assert_eq!(outcomes[1].state_label(), "killed");
+    assert_eq!(
+        outcomes[1].terminal_label(),
+        Some("killed"),
+        "a stopped run is a terminal state, or the reader falls through to unknown"
+    );
 }
 
 /// (c) A pre-migration row (all five `NULL`) renders `unknown`, never `success`.

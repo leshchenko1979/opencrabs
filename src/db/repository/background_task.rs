@@ -41,8 +41,11 @@ pub struct BackgroundTaskRow {
 /// was that a defaulted success is a lie.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BackgroundTaskOutcome {
-    /// `running` / `success` / `failed` / `interrupted`, or `None` when the
-    /// row predates the outcome columns.
+    /// `running` / `success` / `failed` / `killed` / `interrupted`, or `None`
+    /// when the row predates the outcome columns.
+    ///
+    /// `killed` is a run something STOPPED — a signalled death or the lifetime
+    /// ceiling — which is not the command failing (#966).
     pub status: Option<String>,
     /// The COMMAND's own exit code. `None` when the number in `code` belonged
     /// to the harness instead (signalled, ceiling-killed, never awaited), and
@@ -67,6 +70,7 @@ impl BackgroundTaskOutcome {
             Some("running") => "running",
             Some("success") => "success",
             Some("failed") => "failed",
+            Some("killed") => "killed",
             Some("interrupted") => "interrupted",
             _ => "unknown",
         }
@@ -80,6 +84,7 @@ impl BackgroundTaskOutcome {
         match self.state_label() {
             "success" => Some("success"),
             "failed" => Some("failed"),
+            "killed" => Some("killed"),
             "interrupted" => Some("interrupted"),
             _ => None,
         }
