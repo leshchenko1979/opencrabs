@@ -406,6 +406,7 @@ pub mod menu_refresh_test;
 pub mod mermaid_test;
 #[cfg(feature = "discord")]
 pub mod message_split_markup_test;
+pub mod messages_fts_test;
 pub mod mimo_tool_call_hint_test;
 pub mod mission_control_command_test;
 pub mod mission_control_report_test;

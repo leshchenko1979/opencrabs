@@ -463,15 +463,39 @@ pub fn search_slice(conn: &Connection, since: i64, query: &str, k: usize) -> Res
     let phrase = format!("%{}%", escaped(query));
     let patterns: Vec<String> = tokens.iter().map(|t| format!("%{}%", escaped(t))).collect();
 
+    // The #855 prefilter, spliced with the SAME constant the repository uses.
+    // Both legs ask `FtsPrefilter` independently — the phrase leg from the raw
+    // query, the tokenized leg from the raw tokens — because that is exactly
+    // what `contiguous_rows` and `tokenized_rows` do. If either leg built its
+    // own clause text, the harness could measure a plan the binary never runs,
+    // which is the #911 divergence this file exists to prevent.
+    let arm = |prefilter: &Option<crate::db::messages_fts::FtsPrefilter>| {
+        if prefilter.is_some() {
+            format!("{} ", crate::db::messages_fts::PREFILTER_CLAUSE)
+        } else {
+            String::new()
+        }
+    };
+
     // The phrase arm. `content` is carried through so the merged pool can be
     // scored with the same function the shipped arm scores with (#911).
     let contiguous = {
-        let mut stmt = conn.prepare(
+        let prefilter = crate::db::messages_fts::FtsPrefilter::for_phrase(conn, query);
+        let fts_arm = arm(&prefilter);
+        let sql = format!(
             "SELECT id, session_id, content FROM messages \
-             WHERE created_at >= ?1 AND content LIKE ?2 ESCAPE '\\' COLLATE NOCASE \
-             ORDER BY created_at DESC LIMIT ?3",
-        )?;
-        let rows = stmt.query_map(params![since, phrase, cap], |r| {
+             WHERE created_at >= ? {fts_arm}AND content LIKE ? ESCAPE '\\' COLLATE NOCASE \
+             ORDER BY created_at DESC LIMIT ?"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut bind: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(4);
+        bind.push(&since);
+        if let Some(p) = &prefilter {
+            bind.push(&p.match_expr);
+        }
+        bind.push(&phrase);
+        bind.push(&cap);
+        let rows = stmt.query_map(bind.as_slice(), |r| {
             Ok((
                 Ranked {
                     message_id: r.get(0)?,
@@ -488,16 +512,21 @@ pub fn search_slice(conn: &Connection, since: i64, query: &str, k: usize) -> Res
     let tokenized = if patterns.len() < 2 {
         Vec::new()
     } else {
+        let prefilter = crate::db::messages_fts::FtsPrefilter::for_tokens(conn, &tokens);
+        let fts_arm = arm(&prefilter);
         let like_arms =
             vec!["content LIKE ? ESCAPE '\\' COLLATE NOCASE"; patterns.len()].join(" AND ");
         let sql = format!(
             "SELECT id, session_id, content FROM messages \
-             WHERE created_at >= ? AND {like_arms} \
+             WHERE created_at >= ? {fts_arm}AND {like_arms} \
              ORDER BY created_at DESC LIMIT ?"
         );
         let mut stmt = conn.prepare(&sql)?;
-        let mut bind: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(patterns.len() + 2);
+        let mut bind: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(patterns.len() + 3);
         bind.push(&since);
+        if let Some(p) = &prefilter {
+            bind.push(&p.match_expr);
+        }
         for p in &patterns {
             bind.push(p);
         }

@@ -3,6 +3,9 @@
 //! Provides database connection management, models, and repositories.
 
 pub(crate) mod database;
+/// #855: the `messages` full-text index — readiness gate, query prefilter and
+/// the off-path backfill.
+pub mod messages_fts;
 pub(crate) mod migration_heal;
 pub(crate) mod migration_snapshot;
 pub mod models;

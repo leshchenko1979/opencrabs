@@ -216,6 +216,15 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // list invariant; no `MIGRATION_EFFECTS` declaration is owed (that window
     // is contiguous and ends far below this entry).
     include_str!("../migrations/20261120000001_add_tool_executions_session_created_indexes.sql"),
+    // #855: the trigram FTS index over `messages.content`. The content arms of
+    // `session_search` were unscoped `LIKE '%x%'` scans of 43,756 rows /
+    // 607,204,493 content bytes (~75 s per query, measured in #855). This
+    // migration only creates the structure — an empty FTS table, its state row
+    // and the three sync triggers; the 607 MB index is built by the background
+    // backfill (`crate::db::messages_fts`), never on the startup path.
+    // Appended last per the list invariant; no `MIGRATION_EFFECTS` declaration
+    // is owed (that window is contiguous and ends far below this entry).
+    include_str!("../migrations/20261122000001_add_messages_fts.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
@@ -707,10 +716,22 @@ pub fn execute_safe_maintenance(
 
     // 3. One-time conversion to incremental auto-vacuum, so the reclaim
     //    below is bounded instead of proportional to the whole file.
-    ensure_incremental_autovacuum(conn, db_name)?;
+    let converted = ensure_incremental_autovacuum(conn, db_name)?;
 
     // 4. Conditional reclaim
     let vacuumed = vacuum_if_fragmented(conn, db_name, knobs)?;
+
+    // 4b. #855: BOTH steps above can run a `VACUUM`, and `VACUUM` may renumber
+    //     the rowids of a table whose primary key is not `INTEGER` — which is
+    //     `messages` (`id` is TEXT). `messages.rowid` is the key of the FTS
+    //     index, so a renumbering would leave the index answering for rows that
+    //     no longer exist and silently MISS rows that do. Measured here the
+    //     rowids survived, but a silent drop is the exact failure class this
+    //     index exists to remove, so the index is marked stale whenever a
+    //     VACUUM ran and the next boot's backfill rebuilds it.
+    if converted || vacuumed {
+        crate::db::messages_fts::invalidate(conn);
+    }
 
     // 5. Reclaim the WAL sidecar. Runs on every sweep regardless of whether
     //    VACUUM ran: a WAL can reach its high-water mark without one, and the
@@ -872,6 +893,14 @@ impl Database {
             })
             .await
             .map_err(|e| anyhow::anyhow!("vacuum_database interact error: {e}"))??;
+
+        // #855: `execute_safe_maintenance` marks the `messages` FTS index stale
+        // when it vacuums (a VACUUM can renumber the rowids the index is keyed
+        // by). The rebuild belongs off this path, and `spawn_backfill` is a
+        // detached no-op — one state read — when the index is already complete.
+        if let Some(path) = self.db_path.as_deref() {
+            crate::db::messages_fts::spawn_backfill(self.pool.clone(), path);
+        }
         Ok(vacuumed)
     }
 
@@ -1052,6 +1081,22 @@ impl Database {
         // The capability is retained, not deleted: `Database::run_integrity_check()`
         // (below) returns the verdict as a value, and the #1779 preflight still
         // runs, gated on a pending write, ahead of the migrations above.
+
+        // #855: build the `messages` FTS index OFF the startup path.
+        //
+        // Not here, and not awaited: the live store is 43,756 rows / 607 MB of
+        // content and the index measures ~1.07 GB, so an inline build would add
+        // minutes to every boot. `spawn_backfill` detaches, waits for boot to
+        // settle, then copies the table in bounded chunks; until it finishes —
+        // and forever, on a store that never finishes — `FtsPrefilter` returns
+        // `None` and every search runs the pre-#855 LIKE scan unchanged. A
+        // store whose index is already complete costs one state read.
+        //
+        // File-backed only: an in-memory database is a test fixture that builds
+        // its own `messages` table, and it has no index to build.
+        if let Some(path) = self.db_path.as_deref() {
+            crate::db::messages_fts::spawn_backfill(self.pool.clone(), path);
+        }
 
         Ok(())
     }

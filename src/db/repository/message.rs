@@ -4,6 +4,7 @@
 
 use crate::db::Pool;
 use crate::db::database::interact_err;
+use crate::db::messages_fts::{FtsPrefilter, PREFILTER_CLAUSE};
 use crate::db::models::Message;
 use crate::db::retry::{write_retry_config, write_with_retry};
 use anyhow::{Context, Result};
@@ -422,6 +423,7 @@ impl MessageRepository {
         limit: usize,
     ) -> Result<Vec<Message>> {
         let phrase = format!("%{}%", escape_like(query));
+        let raw_query = query.to_string();
         let cap = limit as i64;
         let id_strs: Option<Vec<String>> =
             session_ids.map(|ids| ids.iter().map(|i| i.to_string()).collect());
@@ -430,7 +432,9 @@ impl MessageRepository {
             .get()
             .await
             .context("Failed to get connection")?
-            .interact(move |conn| contiguous_rows(conn, id_strs.as_deref(), phrase, cap))
+            .interact(move |conn| {
+                contiguous_rows(conn, id_strs.as_deref(), phrase, &raw_query, cap)
+            })
             .await
             .map_err(interact_err)?
             .context("Failed to search messages by content")
@@ -485,7 +489,9 @@ impl MessageRepository {
             .get()
             .await
             .context("Failed to get connection")?
-            .interact(move |conn| tokenized_rows(conn, id_strs.as_deref(), &patterns, fetch_cap))
+            .interact(move |conn| {
+                tokenized_rows(conn, id_strs.as_deref(), &tokens, &patterns, fetch_cap)
+            })
             .await
             .map_err(interact_err)?
             .context("Failed to search messages by content (tokenized)")?;
@@ -549,6 +555,7 @@ impl MessageRepository {
         let terms = query_terms(query);
         let cap = tokenized_fetch_cap(limit);
         let phrase = format!("%{}%", escape_like(query));
+        let raw_query = query.to_string();
         let patterns: Vec<String> = tokens
             .iter()
             .map(|t| format!("%{}%", escape_like(t)))
@@ -562,13 +569,14 @@ impl MessageRepository {
             .await
             .context("Failed to get connection")?
             .interact(move |conn| {
-                let contiguous = contiguous_rows(conn, id_strs.as_deref(), phrase, cap)?;
+                let contiguous =
+                    contiguous_rows(conn, id_strs.as_deref(), phrase, &raw_query, cap)?;
                 // One token: the AND clause IS the phrase arm's substring, so a
                 // second scan can only return rows the first one already has.
                 let tokenized = if patterns.len() < 2 {
                     Vec::new()
                 } else {
-                    tokenized_rows(conn, id_strs.as_deref(), &patterns, cap)?
+                    tokenized_rows(conn, id_strs.as_deref(), &tokens, &patterns, cap)?
                 };
                 Ok::<(Vec<Message>, Vec<Message>), rusqlite::Error>((contiguous, tokenized))
             })
@@ -744,12 +752,26 @@ fn escape_like(raw: &str) -> String {
 /// ONE SQL string for every caller in this file. The shipped search and the
 /// union path must not grow two spellings of "contains the query" — a fetch
 /// that drifts from the other is the #911 defect one layer down.
+///
+/// `raw_query` is the query BEFORE `LIKE` escaping: it is what the FTS
+/// prefilter is built from ([`FtsPrefilter::for_phrase`]). The prefilter is
+/// spliced in as [`PREFILTER_CLAUSE`] — an extra `rowid IN (SELECT rowid FROM
+/// messages_fts WHERE messages_fts MATCH ?)` term — and the `LIKE` arm stays
+/// the authority on which rows match. The prefilter can only ever be a
+/// SUPERSET of the `LIKE` arm (the trigram tokenizer folds more case than
+/// `COLLATE NOCASE` does, and a quoted FTS5 phrase is a contiguous character
+/// match), so splicing it changes the query PLAN and never the result set.
+/// When the index is absent, incomplete, or a term is shorter than one
+/// trigram, `fts_arm` is empty and this is the pre-#855 scan unchanged.
 fn contiguous_rows(
     conn: &rusqlite::Connection,
     id_strs: Option<&[String]>,
     phrase: String,
+    raw_query: &str,
     cap: i64,
 ) -> rusqlite::Result<Vec<Message>> {
+    let prefilter = FtsPrefilter::for_phrase(conn, raw_query);
+    let fts_arm = fts_clause(&prefilter);
     match id_strs {
         // An explicit but empty session filter selects nothing — this is NOT
         // the same as `None`, which means "no filter" and scans every session.
@@ -758,38 +780,74 @@ fn contiguous_rows(
             let placeholders = vec!["?"; ids.len()].join(",");
             let sql = format!(
                 "SELECT * FROM messages \
-                 WHERE session_id IN ({placeholders}) AND content LIKE ? ESCAPE '\\' \
+                 WHERE session_id IN ({placeholders}) {fts_arm}AND content LIKE ? ESCAPE '\\' \
                  COLLATE NOCASE \
                  ORDER BY created_at DESC LIMIT ?"
             );
             let mut stmt = conn.prepare(&sql)?;
-            let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(ids.len() + 2);
+            let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(ids.len() + 3);
             for id in ids {
                 params_vec.push(id);
             }
+            push_prefilter(&mut params_vec, &prefilter);
             params_vec.push(&phrase);
             params_vec.push(&cap);
             let rows = stmt.query_map(params_vec.as_slice(), Message::from_row)?;
             rows.collect()
         }
         None => {
-            let mut stmt = conn.prepare_cached(
+            let sql = format!(
                 "SELECT * FROM messages \
-                 WHERE content LIKE ?1 ESCAPE '\\' COLLATE NOCASE \
-                 ORDER BY created_at DESC LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![phrase, cap], Message::from_row)?;
+                 WHERE 1 = 1 {fts_arm}AND content LIKE ? ESCAPE '\\' COLLATE NOCASE \
+                 ORDER BY created_at DESC LIMIT ?"
+            );
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(3);
+            push_prefilter(&mut params_vec, &prefilter);
+            params_vec.push(&phrase);
+            params_vec.push(&cap);
+            let rows = stmt.query_map(params_vec.as_slice(), Message::from_row)?;
             rows.collect()
         }
     }
 }
 
+/// The clause to splice, plus the trailing space its own `AND` needs. Empty
+/// when the index cannot answer this query.
+///
+/// Every caller writes `... {fts_arm}AND <rest>`, so an empty arm leaves one
+/// space between the preceding term and `AND` — which is why this returns no
+/// leading space: `{placeholders} AND ...` must not become `{placeholders}AND`
+/// (SQLite reads that as an unrecognized token).
+fn fts_clause(prefilter: &Option<FtsPrefilter>) -> String {
+    if prefilter.is_some() {
+        format!("{PREFILTER_CLAUSE} ")
+    } else {
+        String::new()
+    }
+}
+
+/// Bind the `MATCH` expression in the position the spliced clause occupies —
+/// which is always immediately before the `LIKE` arms, in every caller.
+fn push_prefilter<'a>(
+    params_vec: &mut Vec<&'a dyn rusqlite::ToSql>,
+    prefilter: &'a Option<FtsPrefilter>,
+) {
+    if let Some(p) = prefilter {
+        params_vec.push(&p.match_expr);
+    }
+}
+
 /// The tokenized arm: rows containing EVERY `patterns` entry (AND of substring
 /// matches), newest first, at most `cap` rows — the recency pool the ranker
-/// then reorders. Same one-SQL-string rule as [`contiguous_rows`].
+/// then reorders. Same one-SQL-string rule as [`contiguous_rows`], and the same
+/// #855 prefilter: `tokens` are the UNESCAPED terms `patterns` were built from,
+/// and [`FtsPrefilter::for_tokens`] turns them into an AND of quoted phrases
+/// that is a superset of the AND of `LIKE` arms below it.
 fn tokenized_rows(
     conn: &rusqlite::Connection,
     id_strs: Option<&[String]>,
+    tokens: &[String],
     patterns: &[String],
     cap: i64,
 ) -> rusqlite::Result<Vec<Message>> {
@@ -797,6 +855,8 @@ fn tokenized_rows(
         return Ok(Vec::new());
     }
     let like_arms = vec!["content LIKE ? ESCAPE '\\' COLLATE NOCASE"; patterns.len()].join(" AND ");
+    let prefilter = FtsPrefilter::for_tokens(conn, tokens);
+    let fts_arm = fts_clause(&prefilter);
     match id_strs {
         // An explicit but empty session filter selects nothing — this is NOT
         // the same as `None`, which means "no filter" and scans every session.
@@ -805,15 +865,16 @@ fn tokenized_rows(
             let placeholders = vec!["?"; ids.len()].join(",");
             let sql = format!(
                 "SELECT * FROM messages \
-                 WHERE session_id IN ({placeholders}) AND {like_arms} \
+                 WHERE session_id IN ({placeholders}) {fts_arm}AND {like_arms} \
                  ORDER BY created_at DESC LIMIT ?"
             );
             let mut stmt = conn.prepare(&sql)?;
             let mut params_vec: Vec<&dyn rusqlite::ToSql> =
-                Vec::with_capacity(ids.len() + patterns.len() + 1);
+                Vec::with_capacity(ids.len() + patterns.len() + 2);
             for id in ids {
                 params_vec.push(id);
             }
+            push_prefilter(&mut params_vec, &prefilter);
             for p in patterns {
                 params_vec.push(p);
             }
@@ -824,11 +885,12 @@ fn tokenized_rows(
         None => {
             let sql = format!(
                 "SELECT * FROM messages \
-                 WHERE {like_arms} \
+                 WHERE 1 = 1 {fts_arm}AND {like_arms} \
                  ORDER BY created_at DESC LIMIT ?"
             );
             let mut stmt = conn.prepare(&sql)?;
-            let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(patterns.len() + 1);
+            let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(patterns.len() + 2);
+            push_prefilter(&mut params_vec, &prefilter);
             for p in patterns {
                 params_vec.push(p);
             }
