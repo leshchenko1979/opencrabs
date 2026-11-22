@@ -83,9 +83,19 @@ fn register_rejects_skill_and_confidential_paths() {
 
     assert!(registered.is_empty(), "neither path is a project document");
     assert_eq!(rejected.len(), 2);
-    for line in &rejected {
-        assert!(line.contains("(not a project document)"), "got: {line}");
-    }
+    // #952: each refusal names its own cause. A skill body is refused by
+    // construction — skills are their own retention class — and the brain file
+    // lives under the profile home; neither is a scope bug.
+    assert!(
+        rejected[0].contains("(a skill body — skills are retained by slug, not as documents)"),
+        "got: {}",
+        rejected[0]
+    );
+    assert!(
+        rejected[1].contains("(under the profile home)"),
+        "got: {}",
+        rejected[1]
+    );
 }
 
 #[test]
@@ -559,4 +569,132 @@ fn a_session_with_no_registered_documents_is_unchanged_by_the_floor() {
         render(sid, budget).is_none(),
         "the floor must not conjure a block for a session that registered nothing"
     );
+}
+
+// ─── #952 · the refusal names its cause ────────────────────────────────────
+
+/// Each predicate failure puts its OWN cause in the refusal. Before this, all
+/// four arrived as `not a project document`, so a skill body — refused by
+/// construction — read as a scope bug and cost a hunt through the predicate.
+#[test]
+fn register_names_the_cause_that_refused_each_path() {
+    let sid = Uuid::new_v4();
+    let dir = tmp_dir("reject_causes");
+    let home = crate::config::profile::resolve_profile_home();
+
+    let log = dir.join("marker.log");
+    std::fs::write(&log, "x\n").unwrap();
+    let skill = home.join("skills/opencrabs-dev/SKILL.md");
+    let brain = home.join("MEMORY.md");
+    let secret = dir.join("client_secret_notes.md");
+    std::fs::write(&secret, "x\n").unwrap();
+
+    let requested = vec![
+        log.display().to_string(),
+        skill.display().to_string(),
+        brain.display().to_string(),
+        secret.display().to_string(),
+    ];
+    let (registered, rejected) = register(sid, &requested);
+
+    assert!(registered.is_empty(), "none of the four is a document");
+    assert_eq!(rejected.len(), 4, "got: {rejected:?}");
+    // The card parses this shape, so the prefix and the closing paren are exact.
+    for line in &rejected {
+        assert!(line.starts_with("not registered: "), "prefix: {line}");
+        assert!(line.ends_with(')'), "closing paren: {line}");
+    }
+    assert!(
+        rejected[0].contains("(not .md)"),
+        "a non-markdown path: {}",
+        rejected[0]
+    );
+    assert!(
+        rejected[1].contains("(a skill body — skills are retained by slug, not as documents)"),
+        "a skill body must name the skill class: {}",
+        rejected[1]
+    );
+    assert!(
+        rejected[2].contains("(under the profile home)"),
+        "a profile-home path must name that cause: {}",
+        rejected[2]
+    );
+    assert!(
+        rejected[3].contains("(confidential)"),
+        "a denylisted path must name that cause: {}",
+        rejected[3]
+    );
+
+    // Four DISTINCT causes: collapsing any two puts the reader back where
+    // #952 started.
+    let mut causes: Vec<&str> = rejected
+        .iter()
+        .map(|r| r.rsplit_once('(').expect("a cause paren").1)
+        .collect();
+    causes.sort_unstable();
+    causes.dedup();
+    assert_eq!(causes.len(), 4, "each cause names itself: {rejected:?}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The `not read in this process` refusal must be actionable: a path read whole
+/// through `bash` never reached the tracker, and the block has to say that only
+/// `read_file` counts — otherwise the model concludes the path is invalid and
+/// never re-reads it.
+#[test]
+fn the_not_retained_preamble_names_read_file() {
+    let sid = Uuid::new_v4();
+    let dir = tmp_dir("preamble");
+    let unread = dir.join("architecture.md");
+    std::fs::write(&unread, "# architecture\n").unwrap();
+    register(sid, &[unread.display().to_string()]);
+
+    let block = render(sid, 1_000_000).expect("a refusal is rendered, not swallowed");
+    assert!(
+        block.contains("read_file"),
+        "the preamble must name the tool that registers a read: {block}"
+    );
+    assert!(
+        block.contains("through `bash` does not count"),
+        "the preamble must say a shell read does not count: {block}"
+    );
+
+    // The hint lives in the preamble, NOT on the per-path line: the compaction
+    // card prints those reasons and must stay short.
+    let path_line = block
+        .lines()
+        .find(|l| l.contains("architecture.md"))
+        .expect("the refused path is named");
+    assert!(
+        path_line.contains("(not read in this process)"),
+        "the per-path reason is unchanged: {path_line}"
+    );
+    assert!(
+        !path_line.contains("read_file"),
+        "the per-path reason must stay short: {path_line}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// No regression: a genuine repo `.md` read via `mark_document_read` still
+/// registers and still renders its body.
+#[test]
+fn a_valid_repo_document_read_still_registers() {
+    let sid = Uuid::new_v4();
+    let dir = tmp_dir("still_registers");
+    let path = write_document(sid, &dir, "AGENTS.md", "# agents\nOBEY-MARKER\n");
+
+    let (registered, rejected) = register(sid, std::slice::from_ref(&path));
+    assert!(rejected.is_empty(), "rejected: {rejected:?}");
+    assert_eq!(registered.len(), 1, "a valid document is carried");
+
+    let block = render(sid, 1_000_000).expect("a registered document renders");
+    assert!(
+        block.contains("OBEY-MARKER"),
+        "the body is what was retained: {block}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }

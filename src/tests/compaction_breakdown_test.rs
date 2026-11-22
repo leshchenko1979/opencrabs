@@ -661,11 +661,11 @@ fn a_manifest_that_named_no_documents_adds_no_row() {
 #[test]
 fn every_refused_path_still_prints_a_row() {
     // The failure this exists for: the summariser names two documents, both
-    // are refused (a `/tmp` log is not a project document; an unread path was
-    // never opened), and a card that prints nothing reads as "the model asked
-    // for nothing" — the opposite of what happened.
+    // are refused (a `/tmp` log is not `.md`; an unread path was never
+    // opened), and a card that prints nothing reads as "the model asked for
+    // nothing" — the opposite of what happened.
     let refusals = vec![
-        "not registered: /tmp/w831-marker.log (not a project document)".to_string(),
+        "not registered: /tmp/w831-marker.log (not .md)".to_string(),
         "not registered: /root/proj/GEMINI.md (not read in this process)".to_string(),
     ];
     let out = card_with_docs(&[], &refusals, no_manifest());
@@ -674,10 +674,10 @@ fn every_refused_path_still_prints_a_row() {
         .find(|l| l.starts_with("| refused |"))
         .expect("a refused row");
     assert!(row.contains("0 of 2 retained"), "count: {row}");
-    assert!(row.contains("not a project document"), "cause: {row}");
+    assert!(row.contains("not .md"), "cause: {row}");
     assert!(row.contains("not read in this process"), "cause: {row}");
     // Distinct causes only: two paths refused for the same reason say it once.
-    assert_eq!(row.matches("not a project document").count(), 1, "{row}");
+    assert_eq!(row.matches("not .md").count(), 1, "{row}");
 }
 
 #[test]

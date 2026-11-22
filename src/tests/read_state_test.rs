@@ -191,6 +191,59 @@ fn skill_and_home_paths_are_not_documents() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// #952: the predicate names WHICH cause refused a path, and the boolean it
+/// backs delegates to that cause — so the two can never disagree.
+#[test]
+fn document_rejection_names_each_cause() {
+    let dir = tmp_dir("reject_causes");
+
+    // The commonest refusal, and the only one about the file rather than the
+    // class it belongs to.
+    let log = dir.join("marker.log");
+    std::fs::write(&log, "x\n").unwrap();
+    assert_eq!(document_rejection(&log), Some(DocReject::NotMarkdown));
+
+    // A skill body: refused by construction, not out of scope.
+    let skill = dir.join("skills").join("opencrabs-dev").join("SKILL.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::write(&skill, "# skill\n").unwrap();
+    assert_eq!(document_rejection(&skill), Some(DocReject::SkillBody));
+
+    // The agent's own home.
+    let brain = crate::config::profile::resolve_profile_home().join("MEMORY.md");
+    assert_eq!(document_rejection(&brain), Some(DocReject::ProfileHome));
+
+    // The OC-08 denylist.
+    let secret = dir.join("client_secret_notes.md");
+    std::fs::write(&secret, "x\n").unwrap();
+    assert_eq!(document_rejection(&secret), Some(DocReject::Confidential));
+
+    // A plain project `.md` is a candidate, and the delegation agrees.
+    let law = dir.join("CLAUDE.md");
+    std::fs::write(&law, "# law\n").unwrap();
+    assert_eq!(document_rejection(&law), None);
+    assert!(is_document_candidate(&law));
+
+    // Four distinct descriptions, and the skill cause names the skill class.
+    let causes = [
+        DocReject::NotMarkdown,
+        DocReject::SkillBody,
+        DocReject::ProfileHome,
+        DocReject::Confidential,
+    ];
+    let mut described: Vec<&str> = causes.iter().map(|c| c.describe()).collect();
+    described.sort_unstable();
+    described.dedup();
+    assert_eq!(described.len(), 4, "each cause names itself: {described:?}");
+    assert!(
+        DocReject::SkillBody.describe().contains("skill"),
+        "a skill body must name the skill class: {}",
+        DocReject::SkillBody.describe()
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A written file was not read: `write_file` feeds the #1168 set, never this one.
 #[tokio::test]
 async fn write_file_does_not_register_a_document() {

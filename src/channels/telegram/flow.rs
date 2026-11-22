@@ -1405,7 +1405,11 @@ fn breakdown_documents(
     }
     // The reasons are long (`not registered: <path> (not read in this
     // process)`), so the row states the count and the DISTINCT causes: a
-    // per-path dump would triple the card's height to say one thing.
+    // per-path dump would triple the card's height to say one thing. Since
+    // #952 the cause is the actual failed predicate — the longest being a
+    // skill body (`a skill body — skills are retained by slug, not as
+    // documents`) — and it is still the trailing parenthesised phrase, so the
+    // extraction below is unchanged.
     let mut causes: Vec<&str> = Vec::new();
     for reason in refusals {
         let cause = reason
