@@ -5,7 +5,10 @@
 use super::super::error::Result;
 use super::super::r#trait::ToolResult;
 use super::EvolveTool;
-use super::archive::{extract_from_tar_gz, extract_from_zip};
+use super::archive::{
+    extract_from_tar_gz, extract_from_zip, extract_tree_from_tar_gz, extract_tree_from_zip,
+    install_tree,
+};
 use super::binary_health::{get_binary_migration_count, health_check_binary};
 use super::restart_status::RestartStatus;
 use super::systemd::{
@@ -524,6 +527,74 @@ impl EvolveTool {
             }
         }
 
+        // Install the built-in skills sidecar from the same archive (#946).
+        //
+        // The eight built-in skill bodies are DATA beside the executable now,
+        // so the archive that carries the new binary also carries
+        // `skills/<name>/SKILL.md`. Skipping this leg would leave the tree
+        // exactly as it was — and on a fresh host that is nothing, so the very
+        // upgrade meant to install the built-ins is the one that empties them,
+        // silently, for every profile on the host.
+        //
+        // Best-effort like the RTK leg, with one difference in reporting: an
+        // OLD release with no `skills/` is expected and stays at debug, while a
+        // tree that IS in the archive and fails to land is a real feature loss
+        // and is named in the tool result.
+        let mut skills_note: Option<String> = None;
+        if let Some(skills_dir) = exe_path.parent().map(|dir| dir.join("skills")) {
+            let tree = if is_windows {
+                extract_tree_from_zip(&archive_bytes, "skills")
+            } else {
+                extract_tree_from_tar_gz(&archive_bytes, "skills")
+            };
+            match tree {
+                Ok(entries) if entries.is_empty() => tracing::debug!(
+                    target: "evolve",
+                    skills_dir = %skills_dir.display(),
+                    session_id = %sid,
+                    "evolve: release archive carries no skills/ sidecar (pre-#946 release) — \
+                     leaving the installed skills dir untouched"
+                ),
+                Ok(entries) => match install_tree(&skills_dir, &entries) {
+                    Ok(files) => tracing::info!(
+                        target: "evolve",
+                        skills_dir = %skills_dir.display(),
+                        files,
+                        session_id = %sid,
+                        "evolve: installed the built-in skills sidecar beside the binary"
+                    ),
+                    Err(e) => {
+                        tracing::error!(
+                            target: "evolve",
+                            skills_dir = %skills_dir.display(),
+                            error = %e,
+                            session_id = %sid,
+                            "evolve: FAILED to install the built-in skills sidecar — the new \
+                             binary is in place but its built-in skills are not on disk"
+                        );
+                        skills_note = Some(format!(
+                            "WARNING: the new binary is installed but its built-in skills could \
+                             not be written to {} ({e}). Restore the skill dir before restarting \
+                             (a later `/evolve` or `oc-deploy` will retry it).",
+                            skills_dir.display()
+                        ));
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        target: "evolve",
+                        error = %e,
+                        session_id = %sid,
+                        "evolve: could not read the skills sidecar out of the release archive"
+                    );
+                    skills_note = Some(format!(
+                        "WARNING: the built-in skills sidecar could not be read from the release \
+                         archive ({e}); the installed skill dir was left untouched."
+                    ));
+                }
+            }
+        }
+
         // Schedule a delayed daemon restart for systemd-managed services.
         // This runs 3 seconds after the tool returns, giving the current
         // response enough time to be delivered before the daemon exits.
@@ -688,8 +759,11 @@ impl EvolveTool {
             );
         }
 
-        Ok(ToolResult::success(
-            restart_status.user_message(current_version, latest_version),
-        ))
+        let mut message = restart_status.user_message(current_version, latest_version);
+        if let Some(note) = skills_note {
+            message.push_str("\n\n");
+            message.push_str(&note);
+        }
+        Ok(ToolResult::success(message))
     }
 }

@@ -18,7 +18,7 @@
 //! This file is declarations only — no function definitions live here
 //! (CONTRIBUTING.md).
 
-mod archive;
+pub(crate) mod archive;
 mod binary_health;
 pub(crate) mod bounded_child;
 pub(crate) mod homebrew;
