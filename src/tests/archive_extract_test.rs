@@ -45,7 +45,7 @@ fn zip_with(members: &[(&str, &[u8])]) -> Vec<u8> {
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     for (path, contents) in members {
         writer.start_file(*path, options).expect("start zip member");
-        writer.write_all(*contents).expect("write zip member");
+        writer.write_all(contents).expect("write zip member");
     }
     writer.finish().expect("finish zip").into_inner()
 }
