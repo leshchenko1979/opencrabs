@@ -545,6 +545,7 @@ fn the_two_token_lists_differ_in_the_way_adjacency_needs() {
 
 /// Rows seeded into BOTH stores. The order they are returned in is
 /// `created_at DESC`, so `newest` comes first and `oldest` last.
+#[derive(Clone)]
 struct Row {
     id: String,
     content: String,
@@ -587,8 +588,9 @@ fn rows() -> Vec<Row> {
 /// Two independent stores are seeded with byte-identical rows — a real
 /// `Database` behind `MessageRepository`, and a bare `rusqlite` connection
 /// behind `search_slice` — so neither path can borrow the other's state. The
-/// query never appears contiguously in any row, which keeps `search_slice` on
-/// its tokenized arm (its contiguous arm is un-ranked recency).
+/// query never appears contiguously in any row, so both legs reach the answer
+/// through the tokenized arm of the union; the union path itself (both arms
+/// populated) is pinned by the two tests below.
 #[tokio::test]
 async fn runtime_and_eval_paths_return_the_same_order() {
     const QUERY: &str = "deploy flaky";
@@ -620,11 +622,11 @@ async fn runtime_and_eval_paths_return_the_same_order() {
     }
 
     let shipped: Vec<String> = message_repo
-        .search_by_content_tokenized(None, QUERY, K)
+        .search_by_content_union(None, QUERY, K)
         .await
-        .expect("tokenized search")
+        .expect("union search")
         .into_iter()
-        .map(|m| m.id.to_string())
+        .map(|candidate| candidate.row.id.to_string())
         .collect();
 
     // ── the eval harness, on its own store ──
@@ -803,4 +805,260 @@ fn the_tokenized_pool_is_sized_by_one_shared_rule() {
             "{name} must not carry its own pool multiplier — that is the drift this pins"
         );
     }
+}
+
+// ─── the union of the two arms (#941) ──────────────────────────────────────
+
+/// Seed a runtime `Database` and an independent harness `Connection` with the
+/// same rows, so a test can compare the two legs on identical input.
+///
+/// Returns the `Database` (the caller must keep it alive for the pool), the
+/// repository, the bare harness connection and the harness `since` bound.
+async fn seeded_pair(seeded: &[Row]) -> (Database, MessageRepository, Connection, i64) {
+    let db = Database::connect_in_memory()
+        .await
+        .expect("in-memory database");
+    db.run_migrations().await.expect("migrations");
+    let session_repo = SessionRepository::new(db.pool().clone());
+    let message_repo = MessageRepository::new(db.pool().clone());
+
+    let session = Session::new(Some("union".to_string()), None, None);
+    session_repo.create(&session).await.expect("session");
+
+    for (i, row) in seeded.iter().enumerate() {
+        let mut message = Message::new(
+            session.id,
+            "user".to_string(),
+            row.content.clone(),
+            i as i32,
+        );
+        message.id = Uuid::parse_str(&row.id).expect("uuid");
+        message.created_at =
+            chrono::DateTime::from_timestamp(row.created_at, 0).expect("timestamp");
+        message_repo.create(&message).await.expect("message");
+    }
+
+    let conn = Connection::open_in_memory().expect("harness store");
+    conn.execute_batch(
+        "CREATE TABLE messages (
+            id TEXT PRIMARY KEY NOT NULL,
+            session_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );",
+    )
+    .expect("schema");
+    for row in seeded {
+        conn.execute(
+            "INSERT INTO messages (id, session_id, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![row.id, "session-1", row.content, row.created_at],
+        )
+        .expect("harness insert");
+    }
+    let since = chrono::Utc::now().timestamp() - 3_600;
+    (db, message_repo, conn, since)
+}
+
+/// The defect #941 names, pinned: a gold row that does NOT contain the query
+/// phrase must still reach the ranker when some OTHER row does.
+///
+/// The phrase row is the NEWEST and the gold is older, so the old
+/// short-circuit — "the phrase arm returned rows, stop" — returned the phrase
+/// row and dropped the gold from the candidate set entirely. On that code
+/// shape this test fails with the gold absent from both legs; under the union
+/// the gold is a token-only candidate and the phrase row still leads.
+#[tokio::test]
+async fn the_union_reaches_gold_when_another_row_holds_the_phrase() {
+    const QUERY: &str = "deploy flaky";
+    const K: usize = 10;
+    let now = chrono::Utc::now().timestamp();
+
+    let gold = Row {
+        id: Uuid::new_v4().to_string(),
+        // Both tokens, NOT adjacent: a tokenized-only match.
+        content: "deploy came back clean while a flaky retry ran".to_string(),
+        created_at: now - 20,
+    };
+    let phrase_row = Row {
+        id: Uuid::new_v4().to_string(),
+        // The query verbatim, and NEWER than the gold.
+        content: "notes: the deploy flaky dance happened again in staging".to_string(),
+        created_at: now - 10,
+    };
+    let partial = Row {
+        id: Uuid::new_v4().to_string(),
+        // Only ONE of the two tokens: neither arm may return it.
+        content: "deploy only, no second word here".to_string(),
+        created_at: now - 5,
+    };
+    let seeded = vec![gold.clone(), phrase_row.clone(), partial.clone()];
+
+    let (_db, message_repo, conn, since) = seeded_pair(&seeded).await;
+
+    let shipped = message_repo
+        .search_by_content_union(None, QUERY, K)
+        .await
+        .expect("union search");
+    let shipped_ids: Vec<String> = shipped
+        .iter()
+        .map(|candidate| candidate.row.id.to_string())
+        .collect();
+
+    assert!(
+        shipped_ids.contains(&gold.id),
+        "the gold contains both query words but not the phrase and must still be a \
+         candidate — dropping it is exactly the short-circuit #941 removes; got {shipped_ids:?}"
+    );
+    assert_eq!(
+        shipped_ids.first().map(String::as_str),
+        Some(phrase_row.id.as_str()),
+        "the verbatim-phrase row is the tightest match and must lead; got {shipped_ids:?}"
+    );
+    assert!(
+        !shipped_ids.contains(&partial.id),
+        "a row holding only ONE query token matches neither arm and must not appear: \
+         {shipped_ids:?}"
+    );
+
+    // The arm that found each row is carried through, so the caller can label a
+    // token-only row honestly instead of claiming a contiguous match.
+    let contiguous_of = |id: &str| {
+        shipped
+            .iter()
+            .find(|candidate| candidate.row.id.to_string() == id)
+            .map(|candidate| candidate.contiguous)
+    };
+    assert_eq!(
+        contiguous_of(&phrase_row.id),
+        Some(true),
+        "the phrase row must be flagged as a contiguous hit"
+    );
+    assert_eq!(
+        contiguous_of(&gold.id),
+        Some(false),
+        "the gold row must be flagged as a token-only hit"
+    );
+
+    // The harness must reach the same answer through the same functions (#911).
+    let harness: Vec<String> = search_slice(&conn, since, QUERY, K)
+        .expect("search_slice")
+        .into_iter()
+        .map(|ranked| ranked.message_id)
+        .collect();
+    assert_eq!(
+        shipped_ids, harness,
+        "the shipped union and the harness union must agree on the same input"
+    );
+}
+
+/// An exact-phrase row must still LEAD when it genuinely is the tightest
+/// match — even though it is the OLDEST row, so only the ranker can put it
+/// there. Merging the arms must not cost the phrase arm its identity.
+#[tokio::test]
+async fn an_exact_phrase_row_leads_when_it_is_the_tightest_match() {
+    const QUERY: &str = "deploy flaky";
+    const K: usize = 10;
+    let now = chrono::Utc::now().timestamp();
+
+    let loose = Row {
+        id: Uuid::new_v4().to_string(),
+        content: format!("{LONG_LEAD_IN}deploy came back clean while a flaky retry ran"),
+        created_at: now - 10, // newest: recency alone would put it first
+    };
+    let phrase = Row {
+        id: Uuid::new_v4().to_string(),
+        content: "deploy flaky: rollback notes".to_string(),
+        created_at: now - 30, // oldest: only the ranker can promote it
+    };
+    let seeded = vec![loose.clone(), phrase.clone()];
+
+    let (_db, message_repo, conn, since) = seeded_pair(&seeded).await;
+
+    let shipped = message_repo
+        .search_by_content_union(None, QUERY, K)
+        .await
+        .expect("union search");
+    assert_eq!(
+        shipped
+            .first()
+            .map(|candidate| candidate.row.id.to_string()),
+        Some(phrase.id.clone()),
+        "the tightest (verbatim-phrase) row must lead even though it is the oldest"
+    );
+    assert!(
+        shipped
+            .first()
+            .is_some_and(|candidate| candidate.contiguous),
+        "the row that leads must be the one the phrase arm found"
+    );
+
+    let harness: Vec<String> = search_slice(&conn, since, QUERY, K)
+        .expect("search_slice")
+        .into_iter()
+        .map(|ranked| ranked.message_id)
+        .collect();
+    assert_eq!(
+        harness.first(),
+        Some(&phrase.id),
+        "the harness must promote the phrase row too"
+    );
+}
+
+/// Neither leg may short-circuit on "the phrase arm returned rows", and the
+/// user-facing label must not claim what the union made false (#941).
+///
+/// The label used to say "~ token match — no contiguous match for '<query>'",
+/// which was true only while the two arms were exclusive. Once both arms run,
+/// a result set can hold BOTH kinds of row, so that sentence is a lie the
+/// moment one phrase row exists — and a user reading it would be told the
+/// search found no verbatim match while it was showing one.
+#[test]
+fn neither_leg_short_circuits_and_the_label_tells_the_truth() {
+    const SESSION_SEARCH_SRC: &str = include_str!("../brain/tools/session_search.rs");
+    const TRACK_SRC: &str = include_str!("../eval/episodic_track.rs");
+    const MESSAGE_REPO_SRC: &str = include_str!("../db/repository/message.rs");
+
+    // The shipped tool goes through the union, not the phrase arm alone.
+    assert!(
+        SESSION_SEARCH_SRC.contains("search_by_content_union"),
+        "session_search must call the union path"
+    );
+    // The single-arm calls are what the short-circuit was built on: the tool
+    // fetched the phrase arm, then conditionally fetched the tokenized one.
+    // Neither call may survive in the tool.
+    assert!(
+        !SESSION_SEARCH_SRC.contains(".search_by_content("),
+        "session_search must not call the phrase-only arm"
+    );
+    assert!(
+        !SESSION_SEARCH_SRC.contains(".search_by_content_tokenized("),
+        "session_search must not call the tokenized arm as a fallback"
+    );
+    assert!(
+        !SESSION_SEARCH_SRC.contains("no contiguous match for"),
+        "the label must not claim there is no contiguous match — the union can return one"
+    );
+    assert!(
+        SESSION_SEARCH_SRC.contains("verbatim"),
+        "the label must say which rows hold the phrase verbatim"
+    );
+
+    // Both legs join the arms in ONE place and rank the joined pool.
+    for (name, src) in [
+        ("src/eval/episodic_track.rs", TRACK_SRC),
+        ("src/db/repository/message.rs", MESSAGE_REPO_SRC),
+    ] {
+        assert!(
+            src.contains("merge_arms"),
+            "{name} must merge the two arms through episodic::merge_arms"
+        );
+    }
+    assert!(
+        !TRACK_SRC.contains("if !contiguous.is_empty()"),
+        "the harness must not short-circuit on a non-empty phrase arm"
+    );
+    assert!(
+        MESSAGE_REPO_SRC.contains("pub async fn search_by_content_union"),
+        "the repository must expose the union path the tool ships"
+    );
 }

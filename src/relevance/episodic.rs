@@ -2,7 +2,7 @@
 //!
 //! # Why this module exists
 //!
-//! The shipped search (`MessageRepository::search_by_content_tokenized`) and
+//! The shipped search (`MessageRepository::search_by_content_union`) and
 //! the Track A harness (`eval::episodic_track::search_slice`) each carried
 //! their OWN copy of the scoring rule, and the copies had drifted: the
 //! repository summed every occurrence of every query token, the harness
@@ -10,6 +10,33 @@
 //! row, two different numbers — so the harness was measuring a ranker the
 //! binary does not ship (#911). Both now call [`rank`], so the only way the
 //! two can disagree is if one of them stops calling it.
+//!
+//! # The two SQL arms are a UNION, not a fallback
+//!
+//! The shipped search fetches TWO arms: the query as ONE contiguous substring,
+//! and every query token SOMEWHERE in the row (the AND arm). They used to run
+//! in sequence — the tokenized arm only when the phrase arm came back empty —
+//! and that short-circuit was itself a #941 defect: one unrelated message
+//! holding the query phrase verbatim discarded the whole tokenized candidate
+//! set, including the row the query was actually about. The harness mirrored
+//! the branch faithfully, so the eval leg measured the same loss.
+//!
+//! [`merge_arms`] is now the one place the two arms are joined, and the joined
+//! pool is ranked by [`rank`] like any other. Both legs call it — the
+//! repository through `MessageRepository::search_by_content_union`, the
+//! harness through `eval::episodic_track::search_slice` — so neither can
+//! quietly reintroduce the short-circuit: there is no branch on "the phrase
+//! arm returned rows" left in either.
+//!
+//! REPLICA measurement, same 40 positives and 14-day slice as the figures
+//! below: 16 of the 40 hit the short-circuit, and in those the tokenized arm
+//! holds the gold in its pool for 10 and inside its own top 10 for 2. Running
+//! both arms and ranking the union takes recall@10 from 0.150 (6/40) to
+//! **0.200 (8/40)** — exactly the two cases the branch discarded. This is a
+//! REPLICA, not a shipped-leg number (the box cannot build), and it does NOT
+//! reach the 0.40 bar: the remaining distance is ordering inside the fetched
+//! pool, not the fetch. `src/eval/results/track-a-episodic-v6.md` has the
+//! detail.
 //!
 //! # The signals
 //!
@@ -107,12 +134,14 @@
 //!
 //! # What this deliberately does NOT do
 //!
-//! It does not widen `k` and it does not change WHICH rows match — only how
-//! rows that already match are ordered. The pool that feeds the ranker is
-//! sized separately by [`tokenized_fetch_cap`] and is NOT `k`. On a corpus
-//! where every matching row is lexically identical to the query (the Track A
-//! fixture's clustered vocabulary, #899), every signal here is constant across
-//! the pool and the order is unchanged by construction — see
+//! It does not widen `k` and it does not relax the matching rule: a row must
+//! still contain the query as a phrase or contain every query token. The union
+//! decides which of the MATCHING rows are candidates (both arms' rows, instead
+//! of the phrase arm's alone) and how those candidates are ordered. The pool
+//! that feeds the ranker is sized separately by [`tokenized_fetch_cap`] and is
+//! NOT `k`. On a corpus where every matching row is lexically identical to the
+//! query (the Track A fixture's clustered vocabulary, #899), every signal here
+//! is constant across the pool and the order is unchanged by construction — see
 //! `src/eval/results/track-a-episodic-v4.md`.
 
 use std::cmp::Reverse;
@@ -263,9 +292,9 @@ pub fn score(content: &str, terms: &[String]) -> Score {
 /// caller's label asserting "no message ranker exists — #855": the same
 /// two-ranker-under-one-name defect, one surface over (#927). One constant,
 /// one reader-facing home — a leg that calls this module quotes this string.
-pub const RANKER_LABEL: &str = "shipped: contiguous LIKE (SQL recency order); a multi-word \
-     miss falls back to tokenized AND re-ranked by relevance::episodic::rank — \
-     (proximity span, hits, leading, adjacency), ties to SQL recency";
+pub const RANKER_LABEL: &str = "shipped: contiguous LIKE and tokenized AND are ONE candidate \
+     pool, ranked together by relevance::episodic::rank — (proximity span, hits, leading, \
+     adjacency), ties to SQL recency";
 
 /// Order `rows` (already in the caller's fallback order — SQL recency) by
 /// relevance, best first. The sort is STABLE, so rows that tie on every signal
@@ -284,6 +313,66 @@ where
         .collect();
     scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
     scored.into_iter().map(|(_, row)| row).collect()
+}
+
+/// One row in the merged candidate pool, carrying the arm that found it.
+///
+/// `contiguous` is what keeps the caller's label HONEST: a row found by the
+/// phrase arm really does contain the query verbatim, a row found only by the
+/// tokenized arm really does not, and the rendered result must not claim
+/// otherwise (#941).
+#[derive(Debug, Clone)]
+pub struct Candidate<T> {
+    /// The row itself.
+    pub row: T,
+    /// `true` when the contiguous (verbatim phrase) arm returned it.
+    pub contiguous: bool,
+}
+
+/// Merge the two SQL arms into ONE candidate pool and rank it with [`rank`].
+///
+/// This is the union rule #941 ships. The two arms are NOT a fallback chain:
+/// the tokenized arm does not wait for the phrase arm to come back empty,
+/// because "some other message contains the query phrase" says nothing about
+/// whether a message that contains all the words exists. Both arms are
+/// fetched, the phrase arm's rows lead the input (they arrived in SQL recency
+/// order, as do the tokenized ones), duplicates are dropped by `key`, and the
+/// whole pool is ordered by the single scorer. Rows that tie on every signal
+/// keep that input order, so a full tie still resolves to recency.
+///
+/// A row returned by BOTH arms is marked `contiguous` — the phrase arm is the
+/// stronger evidence, and it is the one the caller's label may name.
+pub fn merge_arms<T, K, F>(
+    contiguous: Vec<T>,
+    tokenized: Vec<T>,
+    terms: &[String],
+    key: K,
+    content: F,
+) -> Vec<Candidate<T>>
+where
+    K: Fn(&T) -> String,
+    F: Fn(&T) -> &str,
+{
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut pool: Vec<Candidate<T>> = Vec::with_capacity(contiguous.len() + tokenized.len());
+    for row in contiguous {
+        seen.insert(key(&row));
+        pool.push(Candidate {
+            row,
+            contiguous: true,
+        });
+    }
+    for row in tokenized {
+        if seen.insert(key(&row)) {
+            pool.push(Candidate {
+                row,
+                contiguous: false,
+            });
+        }
+    }
+    rank(pool, terms, |candidate: &Candidate<T>| {
+        content(&candidate.row)
+    })
 }
 
 fn score_lower(content: &str, terms: &[String]) -> Score {
