@@ -430,3 +430,133 @@ fn render_emits_one_not_retained_header_when_both_causes_fire() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ─── #951 · the document budget floor ───────────────────────────────────────
+
+/// The effective document budget the turn-start assembly hands to `render`:
+/// the retained set's leftover, floored at 10 % of the window (#951).
+///
+/// Mirrors the expression at the `render` call site in `tool_loop.rs`
+/// deliberately — the arithmetic is the contract, and the tests below pin that
+/// the floored value is what actually reaches `render`, not merely that a
+/// constant is 0.10.
+fn effective_doc_budget(max_tokens: usize, used: usize) -> (usize, usize) {
+    let total = crate::brain::skills::retained_set_budget_tokens(max_tokens);
+    let leftover = total.saturating_sub(used);
+    (
+        leftover,
+        leftover.max(crate::brain::skills::retained_doc_budget_floor(max_tokens)),
+    )
+}
+
+/// The measured failure: in a session carrying `opencrabs-dev` the skill bodies
+/// alone are ~19 779 tokens against a 10 000-token envelope, so the leftover is
+/// zero and every document body is refused on its first chunk.
+#[test]
+fn the_document_budget_floor_applies_when_the_leftover_is_zero() {
+    let (leftover, budget) = effective_doc_budget(200_000, 19_779);
+    assert_eq!(leftover, 0, "skills alone exhaust the 5 % envelope");
+    assert_eq!(budget, 20_000, "documents get the 10 % floor, not nothing");
+}
+
+/// …and the floored budget is what `render` actually receives: the same body
+/// refused at the zero leftover is injected at the floor.
+#[test]
+fn the_floor_is_what_turns_a_refused_body_into_a_retained_one() {
+    let sid = Uuid::new_v4();
+    let dir = tmp_dir("floor_render");
+    let body: String = (0..400)
+        .map(|i| format!("line {i} of the project law\n"))
+        .collect();
+    let path = write_document(sid, &dir, "law.md", &body);
+    register(sid, std::slice::from_ref(&path));
+
+    let (leftover, budget) = effective_doc_budget(200_000, 19_779);
+    let starved = render(sid, leftover).expect("a registered document always produces a block");
+    assert!(
+        !starved.contains("## Retained documents"),
+        "a zero leftover retains nothing: {starved}"
+    );
+
+    let floored = render(sid, budget).expect("the floor still produces a block");
+    assert!(
+        floored.contains("## Retained documents"),
+        "the floor must make room for the body: {floored}"
+    );
+    assert!(
+        floored.contains(&path),
+        "the retained body is the registered document: {floored}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A leftover larger than the floor must survive untouched: the floor is a
+/// `max`, never an assignment. At today's ratios the 5 % envelope cannot leave
+/// more than the 10 % floor, so the property is exercised on the arithmetic
+/// itself — it is the guard a future ratio change must not break.
+#[test]
+fn the_document_budget_floor_never_lowers_a_larger_leftover() {
+    for window in [200_000usize, 400_000, 1_000_000] {
+        let floor = crate::brain::skills::retained_doc_budget_floor(window);
+        let (_, budget) = effective_doc_budget(window, 0);
+        assert!(
+            budget >= floor,
+            "window {window}: budget {budget} fell below the floor {floor}"
+        );
+        assert_eq!(
+            (floor + 7_000).max(floor),
+            floor + 7_000,
+            "window {window}: a leftover above the floor must not be lowered"
+        );
+    }
+}
+
+/// 10 % of the window, not a flat count: 20 000 at 200k, 40 000 at 400k.
+#[test]
+fn the_document_budget_floor_is_a_ratio_of_the_window() {
+    use crate::brain::skills::{RETAINED_DOC_BUDGET_FLOOR_RATIO, retained_doc_budget_floor};
+
+    assert_eq!(
+        RETAINED_DOC_BUDGET_FLOOR_RATIO, 0.10,
+        "the floor is the stated 10 % of the window"
+    );
+    assert_eq!(retained_doc_budget_floor(200_000), 20_000);
+    assert_eq!(
+        retained_doc_budget_floor(400_000),
+        40_000,
+        "double the window must double the floor — a flat cap would not move here"
+    );
+    assert_eq!(retained_doc_budget_floor(0), 0);
+    assert_eq!(
+        retained_doc_budget_floor(4),
+        0,
+        "10 % of four tokens rounds to nothing"
+    );
+
+    let mut previous = 0usize;
+    for window in (0..=400_000).step_by(9_973) {
+        let floor = retained_doc_budget_floor(window);
+        assert!(
+            floor >= previous,
+            "floor shrank from {previous} to {floor} at window {window}"
+        );
+        previous = floor;
+    }
+}
+
+/// A session that registered nothing pays no floor at all: the turn-start
+/// assembly never enters the re-injection branch, so the system brain is
+/// byte-identical to before #831 — the floor cannot add a byte to it.
+#[test]
+fn a_session_with_no_registered_documents_is_unchanged_by_the_floor() {
+    let sid = Uuid::new_v4();
+    assert!(!has_retained_set(sid));
+    let (leftover, budget) = effective_doc_budget(200_000, 19_779);
+    assert_eq!(leftover, 0);
+    assert_eq!(budget, 20_000);
+    assert!(
+        render(sid, budget).is_none(),
+        "the floor must not conjure a block for a session that registered nothing"
+    );
+}

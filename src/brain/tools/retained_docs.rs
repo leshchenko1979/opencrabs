@@ -5,8 +5,9 @@
 //! compaction, because the retention machinery knows only `skills/<slug>/`.
 //! This module is the retention half of the fix: it lists the candidates for
 //! the summariser and, once the summariser names them, renders their bodies
-//! back into the injected brain inside the same 5% retained-set budget that
-//! governs skills.
+//! back into the injected brain inside the retained-set budget that governs
+//! skills — floored at 10 % of the window, because the skills' charge otherwise
+//! leaves documents no room at all (#951).
 //!
 //! The tracking half lives in `read_state` (`mark_document_read` and friends);
 //! nothing here discovers paths on its own.
@@ -233,12 +234,15 @@ pub fn has_retained_set(session_id: Uuid) -> bool {
         .is_some_and(|(entries, refusals)| !entries.is_empty() || !refusals.is_empty())
 }
 
-/// Re-inject the registered bodies, inside whatever budget the skills left.
+/// Re-inject the registered bodies, inside the budget the turn-start assembly
+/// computed.
 ///
-/// `budget_tokens` is the LEFTOVER of the retained-set budget, not a second
-/// allowance: skills and documents share one 5 % envelope, so a session that
-/// carries heavy skills gets proportionally less room for documents and no
-/// constant in this module can drift from that.
+/// `budget_tokens` is the LEFTOVER of the retained-set envelope, floored at
+/// [`crate::brain::skills::retained_doc_budget_floor`] (#951): skills and
+/// documents share one envelope, so a session carrying heavy skills would
+/// otherwise leave documents no room at all. The floor is the caller's
+/// arithmetic, not a second allowance, and no constant in this module can
+/// drift from it.
 ///
 /// Newest-read first, and the first document that does not fit STOPS the walk
 /// rather than being skipped over: the order is by recency, so a body that
