@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use tokio::sync::OnceCell;
 
+use crate::utils::archive::{extract_member_tar_gz, extract_member_zip};
+
 /// RTK release pinned for auto-download. Keep in sync with the version bundled
 /// by `.github/workflows/release.yml` so a source build auto-installs the same
 /// RTK that prebuilt releases ship.
@@ -289,16 +291,20 @@ async fn download_and_install_rtk() -> Option<String> {
 
     let bin = rtk_bin_filename();
     let extracted = if asset.ends_with(".zip") {
-        extract_zip_member(&bytes, bin)
+        extract_member_zip(&bytes, bin)
     } else {
-        extract_tar_gz_member(&bytes, bin)
+        extract_member_tar_gz(&bytes, bin)
     };
-    let Some(data) = extracted else {
-        tracing::warn!(
-            asset = asset,
-            "RTK auto-download: binary not found inside archive"
-        );
-        return None;
+    let data = match extracted {
+        Ok(data) => data,
+        Err(e) => {
+            tracing::warn!(
+                asset = asset,
+                error = %e,
+                "RTK auto-download: could not extract binary from archive"
+            );
+            return None;
+        }
     };
 
     for dest in rtk_install_targets() {
@@ -328,39 +334,6 @@ async fn download_and_install_rtk() -> Option<String> {
     }
 
     tracing::warn!("RTK auto-download: no writable install location found");
-    None
-}
-
-/// Extract a named member from an in-memory `.tar.gz` archive (matches on the
-/// entry's file name, so a leading directory in the archive is fine).
-fn extract_tar_gz_member(data: &[u8], file_name: &str) -> Option<Vec<u8>> {
-    use std::io::Read;
-    let decoder = flate2::read::GzDecoder::new(data);
-    let mut archive = tar::Archive::new(decoder);
-    for entry in archive.entries().ok()? {
-        let mut entry = entry.ok()?;
-        let path = entry.path().ok()?.to_path_buf();
-        if path.file_name().and_then(|n| n.to_str()) == Some(file_name) {
-            let mut buf = Vec::new();
-            entry.read_to_end(&mut buf).ok()?;
-            return Some(buf);
-        }
-    }
-    None
-}
-
-/// Extract a named member from an in-memory `.zip` archive.
-fn extract_zip_member(data: &[u8], file_name: &str) -> Option<Vec<u8>> {
-    use std::io::Read;
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(data)).ok()?;
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i).ok()?;
-        if file.name().ends_with(file_name) {
-            let mut buf = Vec::new();
-            file.read_to_end(&mut buf).ok()?;
-            return Some(buf);
-        }
-    }
     None
 }
 
