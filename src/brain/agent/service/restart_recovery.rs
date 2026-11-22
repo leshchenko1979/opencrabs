@@ -374,6 +374,12 @@ pub enum RowOutcome {
     /// the only evidence that session was ever interrupted, and erasing a row no
     /// boot can resume would hide the one fact worth keeping.
     NotDispatched,
+    /// The turn holds a DESTRUCTIVE call with no recorded outcome (#974):
+    /// replay is refused and the notice went to the owner. The row is LEFT IN
+    /// PLACE — like `NotDispatched`, it is the evidence the session was
+    /// interrupted, but here the reason is the turn's CONTENT, and the owner
+    /// decides when it resumes.
+    Parked,
 }
 
 impl RowOutcome {
@@ -383,6 +389,7 @@ impl RowOutcome {
             Self::HandedOff => "handed_off",
             Self::Superseded => "superseded",
             Self::NotDispatched => "not_dispatched",
+            Self::Parked => "parked_destructive",
         }
     }
 }
@@ -422,6 +429,21 @@ pub async fn dispose_pending_row(
     row: &crate::db::repository::pending_request::PendingRequest,
     outcome: RowOutcome,
 ) -> bool {
+    if outcome == RowOutcome::Parked {
+        // The destructive arm (#974): replay is refused, the notice went to
+        // the owner, and the row is the record the turn never resumed. Left
+        // in place for the same reason `NotDispatched` is — erasing it would
+        // hide that the session is still waiting on a decision.
+        tracing::warn!(
+            target: "restart_recovery",
+            row_id = %log_field(&row.id),
+            session_id = %log_field(&row.session_id),
+            origin = %log_field(&row.origin),
+            outcome = outcome.as_str(),
+            "boot recovery parked a destructive turn for the owner — replay refused, row left in place (#974)"
+        );
+        return false;
+    }
     if outcome == RowOutcome::NotDispatched {
         // The never-resumable arm: no hand-off was possible, so the row is the
         // only record that this session was interrupted. Reported, not erased.
@@ -557,6 +579,61 @@ an install, a commit — verify from the world whether it already landed.",
         "{base} Interrupted tool calls with no recorded outcome in that attempt: {list}. \
 Each may or may not have taken effect — check the world before repeating it."
     )
+}
+
+/// The destructive-park gate for resumed user turns (#974).
+///
+/// Reads the session's `unknown` journal rows through [`classify_call`]: a
+/// turn whose interrupted calls include a DESTRUCTIVE one must not replay.
+/// The previous process died mid-call, so the effect may or may not have
+/// landed — and repeating it is the one outcome worse than waiting. The
+/// notice is the owner's complete decision input: which calls, which
+/// session, what the park means.
+///
+/// Returns the notice text when the turn must park, `None` when it may
+/// resume: read-only and mutating-only turns replay, and the digest already
+/// tells the resumed turn which mutating calls to verify from the world.
+/// A read failure is logged and resumes — recovery has never been able to
+/// vouch for the journal, and refusing every resume because the journal is
+/// unreadable would park the whole fleet on a bad migration.
+pub(crate) async fn destructive_park_notice(
+    session_id: Uuid,
+    repo: &crate::db::repository::ToolExecutionRepository,
+) -> Option<String> {
+    let rows = match repo.unknown_for_session(&session_id.to_string()).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                target: "background_task",
+                "Could not read the interrupted-call journal for the park gate — resuming \
+                 without a destructive check: {e:#}"
+            );
+            return None;
+        }
+    };
+    let mut destructive: Vec<String> = Vec::new();
+    for row in rows {
+        let args = row
+            .arguments
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or(serde_json::Value::Null);
+        if crate::brain::tools::classify::classify_call(&row.tool_name, &args)
+            == crate::brain::tools::classify::EffectClass::Destructive
+        {
+            destructive.push(row.tool_name);
+        }
+    }
+    if destructive.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "⛔ Startup replay parked: the interrupted turn includes destructive call(s) whose \
+         outcome is unknown ({}). The previous process died mid-call — repeating could \
+         double a side effect. Review, then send the turn again. (session {})",
+        destructive.join(", "),
+        &session_id.simple().to_string()[..8]
+    ))
 }
 /// What survives a restart about one detached run, read from the surfaces that
 /// actually recorded it (#913).

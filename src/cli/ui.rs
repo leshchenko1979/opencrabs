@@ -1504,6 +1504,38 @@ async fn cmd_chat_inner(
                             .await;
                             continue;
                         }
+                        // #974: a DESTRUCTIVE call with no recorded outcome parks
+                        // the turn instead of replaying it. The notice carries the
+                        // calls and the session; the row stays open until the
+                        // owner decides. Mutating-only turns replay and get the
+                        // digest instead — repeating a write whose receipt exists
+                        // is what the resumed prompt already covers.
+                        if let Some(notice) =
+                            crate::brain::agent::service::restart_recovery::destructive_park_notice(
+                                session_id,
+                                &crate::db::repository::ToolExecutionRepository::new(
+                                    db.pool().clone(),
+                                ),
+                            )
+                            .await
+                        {
+                            crate::brain::agent::service::restart_recovery::deliver_or_park(
+                                session_id,
+                                crate::brain::agent::QueuedUserMessage {
+                                    context_text: notice.clone(),
+                                    display_text: notice,
+                                    origin: crate::brain::agent::PushOrigin::Recovery,
+                                    bg_meta: None,
+                                },
+                            );
+                            crate::brain::agent::service::restart_recovery::dispose_pending_row(
+                                &pending_repo,
+                                &req,
+                                crate::brain::agent::service::restart_recovery::RowOutcome::Parked,
+                            )
+                            .await;
+                            continue;
+                        }
                         boot_report::record_resumed(session_id);
                         // Restore the session's saved working directory before
                         // resuming so the agent runs tools in the right CWD.
