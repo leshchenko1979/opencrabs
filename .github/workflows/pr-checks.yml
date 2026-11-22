@@ -36,7 +36,7 @@ name: PR-lane gates
 #
 # `test_threads` / `hangdump` are RETIRED (2026-11-20 — the libtest leg they configured is gone) and read by
 # nothing. They stay DECLARED, and are relayed NOWHERE, because a removed workflow_dispatch input is a hard
-# 422 for every caller that still passes it: `oc-prchecks --test-threads 2` was passed on 63 of the 240
+# 422 for every caller that still passes it: `oc-prchecks --test-threads 2` was passed on 64 of the 240
 # dispatches 2026-11-19..22 (latest run 44957812717) and `-f hangdump=true` on 4 (latest run 44738529406).
 # The no-op is load-bearing exactly at the dispatch boundary, which is why the declaration lives here and not
 # in ci-lane-impl.yml (deleted there 2026-11-22 — 0 references).
@@ -104,7 +104,7 @@ on:
       # to nothing — the callee's declarations of both were deleted 2026-11-22.
       # They stay declared HERE because this is the surface a dispatch names: a
       # removed workflow_dispatch input is a hard 422 for every caller that
-      # still passes it, and callers still do — `test_threads` on 63 of the 240
+      # still passes it, and callers still do — `test_threads` on 64 of the 240
       # dispatches 2026-11-19..22 (latest run 44957812717), `hangdump=true` on 4
       # (latest run 44738529406). An accepted no-op, not dead config.
       test_threads:

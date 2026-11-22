@@ -269,8 +269,8 @@ jobs:
   # it is parsed by external tools (oc-ship-audit, run_built_sha).
   # `shared-key: build` on the cache step keeps the rust-cache key
   # `v0-rust-build-<os>-…` that the old id produced, so the rename does not
-  # orphan the 801 MB warm entry the repo's 10 GB cache budget is measured
-  # against (inventory 2026-11-22: 9918 MB used).
+  # orphan the one 801 MB warm entry that key owns (cache inventory, measured
+  # 2026-11-22: 10 entries totalling 9744 MB against the 10240 MB repo cap).
   linux-amd64:
     if: ${{ inputs.mode == 'build' }}
     needs: order-gates
@@ -461,9 +461,9 @@ jobs:
           cache-on-failure: true
           save-if: true # pre-PR branches re-run on fix-forward; warm cache turns the second dispatch into minutes
           # Key stability across the `pr-gates` -> `lint` job-id rename: the
-          # action keys on the JOB ID, so without this the ~3.3 GB of warm
-          # `v0-rust-pr-gates-*` entries (inventory 2026-11-22) would be
-          # orphaned against a 10 GB repo cache budget already at 9918 MB.
+          # action keys on the JOB ID, so without this the 3934 MB held by the
+          # five warm `v0-rust-pr-gates-*` entries (cache inventory, measured
+          # 2026-11-22) would be orphaned and the next gate would compile cold.
           shared-key: pr-gates
 
       - name: Install system deps (pkg-config, ALSA dev, clang)
