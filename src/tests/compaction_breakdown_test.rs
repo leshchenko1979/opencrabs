@@ -11,8 +11,10 @@
 //! spans. An HTML tag emitted by the card would therefore render as literal
 //! text; a markdown span is the form that survives that pipeline.
 //!
-//! Pure: no agent, no locks, no network. `load_all_skills()` reads the local
-//! skill registry, which always contains the built-ins.
+//! Pure: no agent, no locks, no network. `load_all_skills()` reads the skill
+//! registry, whose built-in tier is a sidecar beside the executable (#946) —
+//! absent for a test binary — so `card()` seeds the one skill these tests
+//! resolve, in a temp home, rather than borrowing the developer's install.
 
 use std::time::Duration;
 
@@ -46,6 +48,20 @@ fn tool_sizes() -> Vec<ToolSize> {
 /// A card built from the live receipt the prototype used: session `2fbfb2f8`,
 /// 130,600 → 106,186 tokens (65% → 53%), 21.5 s.
 fn card(summary: &str) -> String {
+    // `cost-estimate` is the skill the manifest names; put it on disk so the
+    // resolution this card performs has something to find.
+    let home = tempfile::TempDir::new().unwrap();
+    let skill_dir = home.path().join("skills").join("cost-estimate");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: cost-estimate\ndescription: Estimate build cost\n---\n\nBody.\n",
+    )
+    .unwrap();
+    crate::config::profile::with_home_override(home.path().to_path_buf(), || card_in(summary))
+}
+
+fn card_in(summary: &str) -> String {
     let sizes = tool_sizes();
     compaction_breakdown(&CompactionBreakdown {
         before_tokens: 130_600,

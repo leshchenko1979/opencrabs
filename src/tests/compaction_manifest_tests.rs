@@ -3,6 +3,24 @@ use crate::brain::agent::service::context::{parse_context_manifest, resolve_cont
 use std::collections::HashSet;
 use uuid::Uuid;
 
+/// Run `f` with a profile home that carries the skill the inventory tests name.
+///
+/// The built-in tier is a sidecar beside the executable (#946), so a test
+/// binary resolves none of it and `cost-estimate` would render as
+/// `(unknown skill)` — the assertions below would then be pinning the miss
+/// rather than the row. Seed the one skill those tests are about.
+fn with_cost_estimate<T>(f: impl FnOnce() -> T) -> T {
+    let home = tempfile::TempDir::new().unwrap();
+    let dir = home.path().join("skills").join("cost-estimate");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: cost-estimate\ndescription: Estimate build cost\n---\n\nBody.\n",
+    )
+    .unwrap();
+    crate::config::profile::with_home_override(home.path().to_path_buf(), f)
+}
+
 #[test]
 fn test_parse_context_manifest_yaml() {
     let summary = r#"
@@ -203,15 +221,17 @@ fn test_format_context_inventory() {
     let mut active_tools = HashSet::new();
     active_tools.insert("telegram_send".to_string());
 
-    let table = AgentService::format_context_inventory(
-        200_000,
-        &active_skills,
-        &std::collections::HashMap::new(),
-        &active_tools,
-        None,
-        &[],
-        0,
-    );
+    let table = with_cost_estimate(|| {
+        AgentService::format_context_inventory(
+            200_000,
+            &active_skills,
+            &std::collections::HashMap::new(),
+            &active_tools,
+            None,
+            &[],
+            0,
+        )
+    });
     // The table must render the canonical bare slug. A slashed cell here would
     // contradict the `<skill-slug>` rule documented in the very same prompt —
     // that contradiction is #179 F2, so pin both directions.
@@ -237,15 +257,17 @@ fn test_format_context_inventory_with_auxiliary() {
 
     let active_tools = HashSet::new();
 
-    let table = AgentService::format_context_inventory(
-        200_000,
-        &active_skills,
-        &seen_aux,
-        &active_tools,
-        None,
-        &[],
-        0,
-    );
+    let table = with_cost_estimate(|| {
+        AgentService::format_context_inventory(
+            200_000,
+            &active_skills,
+            &seen_aux,
+            &active_tools,
+            None,
+            &[],
+            0,
+        )
+    });
     assert!(
         table.contains("| `cost-estimate` | Skill |"),
         "got: {table}"
@@ -277,15 +299,17 @@ fn test_phantom_skill_is_listed_but_not_billed() {
 
     let empty_tools = HashSet::new();
     let render = |skills: &HashSet<String>| {
-        AgentService::format_context_inventory(
-            200_000,
-            skills,
-            &std::collections::HashMap::new(),
-            &empty_tools,
-            None,
-            &[],
-            0,
-        )
+        with_cost_estimate(|| {
+            AgentService::format_context_inventory(
+                200_000,
+                skills,
+                &std::collections::HashMap::new(),
+                &empty_tools,
+                None,
+                &[],
+                0,
+            )
+        })
     };
 
     let baseline = render(&real_only);
