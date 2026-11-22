@@ -528,6 +528,13 @@ impl TelegramAgent {
                                     let agent_clone = agent.clone();
                                     let bot_clone = bot.clone();
                                     let state_clone = state.clone();
+                                    // #601: the ladder needs the session service,
+                                    // the shared-session slot and a config
+                                    // snapshot. Cloned here rather than moved so
+                                    // the sibling callback arms keep their own.
+                                    let session_svc_clone = session_svc.clone();
+                                    let shared_session_clone = shared_session.clone();
+                                    let config_rx_clone = config_rx.clone();
                                     // #180 Leg A: record the tap BEFORE the turn is
                                     // dispatched. The kill this guards against lands
                                     // between dispatch and the PROCESSING insert, so
@@ -787,6 +794,91 @@ impl TelegramAgent {
                                                     "Telegram followup tap: echo fallback also \
                                                      failed: {e}"
                                                 );
+                                            }
+                                        }
+                                        // #601: a follow-up label may BE a slash
+                                        // command. `/execute` is the natural label
+                                        // for a plan-approval button, and
+                                        // `suggest_options`'s contract is that a tap
+                                        // injects the suggestion as the user's next
+                                        // message. A TYPED message is parsed by the
+                                        // command ladder; a tapped label went
+                                        // straight to `resume_session_inner` as
+                                        // prose, so `/execute` from a button could
+                                        // never approve. Route the label through the
+                                        // SAME ladder the typed path uses.
+                                        let mut text = text;
+                                        if text.trim_start().starts_with('/') {
+                                            let tapped_user_id = query.from.id.0 as i64;
+                                            // Read + drop the config borrow before any
+                                            // await: `watch::Ref` is not Send.
+                                            let tapped_is_owner = config_rx_clone
+                                                .borrow()
+                                                .channels
+                                                .telegram
+                                                .is_owner(&tapped_user_id.to_string());
+                                            if let Some(regular) = query
+                                                .message
+                                                .as_ref()
+                                                .and_then(|m| m.regular_message())
+                                            {
+                                                let chat_title_tap = regular
+                                                    .chat
+                                                    .title()
+                                                    .map(|t| t.to_string())
+                                                    .unwrap_or_default();
+                                                let chat_id_str_tap = chat_id.0.to_string();
+                                                // The ladder only consults this when
+                                                // minting a NEW session; a tap resumes
+                                                // an existing one, so there is none.
+                                                let topic_name_tap: Option<String> = None;
+                                                match crate::channels::telegram::commands_tg::handle_channel_command(
+                                                    &bot_clone,
+                                                    regular,
+                                                    &agent_clone,
+                                                    &session_svc_clone,
+                                                    &state_clone,
+                                                    text.clone(),
+                                                    thread_id,
+                                                    chat_id.0 > 0,
+                                                    sid,
+                                                    chat_id.0,
+                                                    thread_id.map(|t| t.0.0),
+                                                    tapped_user_id,
+                                                    tapped_is_owner,
+                                                    &query.from,
+                                                    &chat_title_tap,
+                                                    &chat_id_str_tap,
+                                                    &topic_name_tap,
+                                                    false,
+                                                    &shared_session_clone,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(crate::channels::telegram::commands_tg::CommandOutcome::Handled) => {
+                                                        tracing::info!(
+                                                            "Telegram followup tap: label was a slash command and the \
+                                                             ladder handled it — no agent turn (#601)"
+                                                        );
+                                                        return;
+                                                    }
+                                                    Ok(crate::channels::telegram::commands_tg::CommandOutcome::Continue {
+                                                        text: rewritten,
+                                                        ..
+                                                    }) => {
+                                                        tracing::info!(
+                                                            "Telegram followup tap: slash command rewrote the label \
+                                                             — resuming with the ladder's text (#601)"
+                                                        );
+                                                        text = rewritten;
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!(
+                                                            "Telegram followup tap: command ladder failed for a \
+                                                             tapped label: {e} — resuming with it as prose (#601)"
+                                                        );
+                                                    }
+                                                }
                                             }
                                         }
                                         // #869: route through the full streaming pipeline
