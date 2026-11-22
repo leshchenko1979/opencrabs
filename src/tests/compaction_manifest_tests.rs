@@ -450,15 +450,17 @@ fn test_format_context_inventory_without_documents_is_unchanged() {
     let mut active_tools = HashSet::new();
     active_tools.insert("telegram_send".to_string());
 
-    let table = AgentService::format_context_inventory(
-        200_000,
-        &active_skills,
-        &std::collections::HashMap::new(),
-        &active_tools,
-        None,
-        &[],
-        0,
-    );
+    let table = with_cost_estimate(|| {
+        AgentService::format_context_inventory(
+            200_000,
+            &active_skills,
+            &std::collections::HashMap::new(),
+            &active_tools,
+            None,
+            &[],
+            0,
+        )
+    });
 
     assert!(!table.contains("| Document |"), "no document rows expected");
     assert!(
