@@ -473,8 +473,10 @@ impl AgentContext {
     pub(crate) fn compact_with_delta_summary(&mut self, summary: String) -> String {
         let Some(idx) = self.last_marker_index() else {
             // No prior marker: this is the session's first compaction —
-            // identical to the classic full-window swap.
-            return self.compact_with_summary(summary, 0);
+            // identical to the classic full-window swap, verbatim tail
+            // included (#943).
+            let tail = self.verbatim_tail_tokens();
+            return self.compact_with_verbatim_tail(summary, tail);
         };
         // Keep the frozen segments; drop the delta the summary covers.
         self.messages.truncate(idx + 1);
@@ -505,7 +507,10 @@ impl AgentContext {
     /// drops every superseded marker row on reload.
     pub(crate) fn consolidate_segments(&mut self, summary: String) -> String {
         let Some(first) = self.first_marker_index() else {
-            return self.compact_with_summary(summary, 0);
+            // Nothing to consolidate — behave like the classic swap, verbatim
+            // tail included (#943).
+            let tail = self.verbatim_tail_tokens();
+            return self.compact_with_verbatim_tail(summary, tail);
         };
         let last = self.last_marker_index().unwrap_or(first);
         let tail: Vec<Message> = self.messages.split_off(last + 1);
@@ -609,7 +614,12 @@ impl AgentContext {
     ///
     /// Keeps the most recent messages that fit within the token budget
     /// and prepends a summary of everything that was trimmed.
-    /// `keep_token_budget` is the max tokens for kept messages (excluding the summary).
+    /// `keep_token_budget` is the ceiling for the marker PLUS the kept
+    /// messages: `summary_tokens` is subtracted from it before the reverse
+    /// walk, so a caller that wants N tokens of raw history must pass
+    /// `N + summary_tokens`. Use [`Self::compact_with_verbatim_tail`] rather
+    /// than doing that arithmetic by hand (#943) — passing N alone leaves
+    /// nothing whenever the summary is larger than N, which it usually is.
     /// Returns the exact marker text it pushed into the context (banner +
     /// summary). A caller that persists a compaction row MUST write THIS
     /// string rather than rebuild a banner of its own: two construction sites
@@ -683,6 +693,38 @@ impl AgentContext {
         // with a stale delta (#211).
         self.provider_anchor = None;
         marker_text
+    }
+
+    /// #943: the verbatim tail budget for this context's window.
+    ///
+    /// The single place the tail arithmetic is resolved, so the full-window
+    /// arm, the delta arm and the two "no prior marker" fallbacks cannot drift
+    /// apart — they all used to pass `0` and keep nothing.
+    pub(crate) fn verbatim_tail_tokens(&self) -> usize {
+        crate::brain::agent::service::request_budget::compaction_verbatim_tail_tokens(
+            self.max_tokens,
+        )
+    }
+
+    /// #943: compact while keeping the most recent exchange(s) VERBATIM.
+    ///
+    /// [`Self::compact_with_summary`] charges its budget against the summary as
+    /// well as the kept messages (`available = budget - summary_tokens`), so a
+    /// caller that wants `tail_tokens` of raw history has to pass the summary's
+    /// own size ON TOP of it. Passing the tail budget alone silently collapses
+    /// the tail to zero whenever the summary is larger than it — which it
+    /// always is, because the summary budget is 3 000 tokens. That arithmetic
+    /// lives here, once, so no caller has to rediscover it.
+    ///
+    /// The `+ 50` mirrors the marker allowance inside
+    /// `compact_with_summary`.
+    pub(crate) fn compact_with_verbatim_tail(
+        &mut self,
+        summary: String,
+        tail_tokens: usize,
+    ) -> String {
+        let summary_tokens = Self::estimate_tokens(&summary) + 50;
+        self.compact_with_summary(summary, tail_tokens.saturating_add(summary_tokens))
     }
 }
 

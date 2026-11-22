@@ -64,6 +64,31 @@ pub(crate) fn compaction_summary_output_tokens() -> u32 {
     COMPACTION_SUMMARY_MAX_TOKENS
 }
 
+/// Tokens the post-compaction window reserves for keeping the most recent
+/// exchange(s) VERBATIM (#943).
+///
+/// The summary IS the conversation; this is only the immediate hand-off, so it
+/// is deliberately small — the comment that used to justify passing `0` here
+/// was right that a large raw tail duplicates half the window and defeats the
+/// point of compacting. What it missed is that the summariser's own quotation
+/// of the last 6-8 pairs (`prompts/compaction.default.toml`) is the ONLY other
+/// carrier of that exchange, and it competes for
+/// [`COMPACTION_SUMMARY_MAX_TOKENS`] with the rest of the document. So the
+/// exact words the user is continuing from are present only at the trimmer's
+/// pleasure: measured 2026-11-22, the largest block in a live
+/// `memory/YYYY-MM-DD.md` was 8 319 B against a 3 000-token budget.
+pub(crate) const COMPACTION_VERBATIM_TAIL_TOKENS: usize = 2_000;
+
+/// The verbatim tail budget for a window of `max_tokens`.
+///
+/// Capped proportionally as well as absolutely: a 32k window cannot afford the
+/// full constant, and a 1M window has no use for more of it. Two orders of
+/// magnitude below the window, so the tail can never be the thing that makes
+/// compaction pointless.
+pub(crate) fn compaction_verbatim_tail_tokens(max_tokens: usize) -> usize {
+    COMPACTION_VERBATIM_TAIL_TOKENS.min(max_tokens / 50)
+}
+
 /// The summariser REQUEST's output allowance, in tokens.
 ///
 /// The document budget PLUS a reasoning allowance: this is what is passed to

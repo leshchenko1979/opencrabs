@@ -116,15 +116,96 @@ fn the_summarised_prefix_does_not_survive_as_messages() {
         2,
     );
 
-    // Summary plus the one message the summariser never saw. The pair it did
-    // see survives only as prose quoted inside the summary, which is the
-    // whole point of compacting them.
-    assert_eq!(
-        context.messages.len(),
-        2,
-        "compaction kept what it just summarised as live messages"
+    // #943: the pair the summariser saw is no longer gone — the window keeps a
+    // bounded verbatim tail, so the exchange at the cut survives as messages.
+    // What must NOT survive is the whole summarised prefix.
+    let rendered: Vec<String> = context.messages.iter().map(text_of).collect();
+    assert!(
+        rendered[0].contains("SUMMARY BODY"),
+        "summary is not the anchor"
     );
-    assert_eq!(text_of(&context.messages[1]), "new question");
+    assert!(
+        rendered.iter().any(|t| t.contains("new question")),
+        "the post-snapshot message was dropped: {rendered:?}"
+    );
+}
+
+#[test]
+fn the_summarised_prefix_survives_only_up_to_the_verbatim_tail() {
+    // #943: the tail is bounded, not unlimited. Forty pre-snapshot messages of
+    // roughly 250 tokens each cannot all fit a 2 000-token tail (200 000 / 50),
+    // so the oldest go first and the exchange at the cut survives.
+    let filler = "x".repeat(1_000);
+    let mut messages: Vec<Message> = (0..40)
+        .map(|i| Message::user(format!("{i:02} {filler}")))
+        .collect();
+    messages.push(Message::assistant("last pre-snapshot answer"));
+    let mut context = ctx(messages);
+    let total_before = context.messages.len();
+
+    AgentService::apply_compaction_summary_after(
+        &mut context,
+        CompactionScope::FullWindow,
+        "SUMMARY BODY",
+        total_before,
+    );
+
+    let rendered: Vec<String> = context.messages.iter().map(text_of).collect();
+    assert!(
+        rendered[0].contains("SUMMARY BODY"),
+        "summary is not the anchor: {} messages",
+        rendered.len()
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|t| t.contains("last pre-snapshot answer")),
+        "the exchange at the cut was dropped: {} messages kept",
+        rendered.len()
+    );
+    assert!(
+        !rendered.iter().any(|t| t.starts_with("00 ")),
+        "the oldest pre-snapshot message survived, so the tail is unbounded: {} kept",
+        rendered.len()
+    );
+    assert!(
+        rendered.len() < total_before,
+        "the tail kept everything, so it is not bounded"
+    );
+}
+
+#[test]
+fn a_delta_larger_than_the_verbatim_tail_is_truncated_oldest_first() {
+    // #943: the carried delta used to have no token accounting at all — its
+    // size was whatever arrived while the summariser ran, so a busy lane could
+    // re-inflate the window the summary had just cleared.
+    let filler = "y".repeat(1_000);
+    let mut messages: Vec<Message> = vec![Message::user("old question")];
+    for i in 0..40 {
+        messages.push(Message::user(format!("{i:02} {filler}")));
+    }
+    messages.push(Message::assistant("the last answer"));
+    let mut context = ctx(messages);
+
+    // Everything after the first message arrived during the summariser call.
+    AgentService::apply_compaction_summary_after(
+        &mut context,
+        CompactionScope::FullWindow,
+        "SUMMARY BODY",
+        1,
+    );
+
+    let rendered: Vec<String> = context.messages.iter().map(text_of).collect();
+    assert!(
+        rendered.iter().any(|t| t.contains("the last answer")),
+        "the newest delta message was dropped instead of the oldest: {} kept",
+        rendered.len()
+    );
+    assert!(
+        !rendered.iter().any(|t| t.starts_with("00 ")),
+        "the delta was carried unbounded: {} messages",
+        rendered.len()
+    );
 }
 
 #[test]
@@ -158,7 +239,7 @@ fn a_delta_opening_on_tool_results_drops_the_orphans() {
 }
 
 #[test]
-fn an_all_orphan_delta_leaves_just_the_summary() {
+fn an_all_orphan_delta_contributes_nothing() {
     let mut context = ctx(vec![
         Message::user("question"),
         tool_use("tu_1"),
@@ -173,8 +254,22 @@ fn an_all_orphan_delta_leaves_just_the_summary() {
         2,
     );
 
-    assert_eq!(context.messages.len(), 1);
-    assert!(text_of(&context.messages[0]).contains("SUMMARY BODY"));
+    // #943: the pre-snapshot tail is kept, so the anchor is no longer the only
+    // message. What must hold is that the all-orphan DELTA contributed
+    // nothing, and that no orphan sits directly after the summary.
+    let rendered: Vec<String> = context.messages.iter().map(text_of).collect();
+    assert!(
+        rendered[0].contains("SUMMARY BODY"),
+        "summary is not the anchor"
+    );
+    assert!(
+        !AgentContext::is_orphaned_tool_result_msg(&context.messages[1]),
+        "an orphaned tool result was left directly after the summary: {rendered:?}"
+    );
+    assert!(
+        !rendered.iter().any(|t| t == "one" || t == "two"),
+        "an orphaned delta result survived the drain: {rendered:?}"
+    );
 }
 
 #[test]
@@ -192,8 +287,23 @@ fn no_delta_behaves_like_a_blocking_compaction() {
         len,
     );
 
-    assert_eq!(context.messages.len(), 1);
-    assert!(text_of(&context.messages[0]).contains("SUMMARY BODY"));
+    // #943: with no delta the window is summary + the bounded pre-snapshot
+    // tail, which is exactly what the blocking path produces. Nothing from a
+    // delta may appear because there was none.
+    let rendered: Vec<String> = context.messages.iter().map(text_of).collect();
+    assert!(
+        rendered[0].contains("SUMMARY BODY"),
+        "summary is not the anchor"
+    );
+    assert_eq!(
+        rendered.len(),
+        3,
+        "expected summary + the two pre-snapshot messages: {rendered:?}"
+    );
+    assert_eq!(
+        rendered[2], "answer",
+        "the newest pre-snapshot message was dropped"
+    );
 }
 
 #[test]
@@ -210,8 +320,19 @@ fn a_snapshot_that_outlived_its_context_still_applies() {
         99,
     );
 
-    assert_eq!(context.messages.len(), 1);
-    assert!(text_of(&context.messages[0]).contains("SUMMARY BODY"));
+    // #943: the single message is inside the verbatim tail, so it survives
+    // alongside the summary instead of being discarded with the delta.
+    let rendered: Vec<String> = context.messages.iter().map(text_of).collect();
+    assert!(
+        rendered[0].contains("SUMMARY BODY"),
+        "summary did not land: {rendered:?}"
+    );
+    assert_eq!(
+        rendered.len(),
+        2,
+        "expected summary + the pre-snapshot message: {rendered:?}"
+    );
+    assert_eq!(rendered[1], "only message");
 }
 
 #[test]

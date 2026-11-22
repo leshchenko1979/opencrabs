@@ -1976,6 +1976,34 @@ impl AgentService {
         // consolidation replaces the segment run, full window clears all.
         let applied_marker = Self::apply_scoped_compaction_summary(context, scope, summary);
 
+        // #943: the carried tail is bounded, oldest dropped first. It used to
+        // be unbounded — its size was whatever arrived while the summariser
+        // ran, so a busy lane (cron fires, sub-agent wakes) could re-inflate
+        // the window the summary had just cleared, with no token accounting
+        // anywhere in this function.
+        let tail_budget = context.verbatim_tail_tokens();
+        let mut carried = 0usize;
+        let mut keep_from = delta.len();
+        for msg in delta.iter().rev() {
+            let t = context.estimate_message_tokens(msg);
+            if carried.saturating_add(t) > tail_budget {
+                break;
+            }
+            carried += t;
+            keep_from -= 1;
+        }
+        if keep_from > 0 {
+            // WARN, not debug: these messages are work the summary was never
+            // computed against, so dropping them loses facts. It is still the
+            // right trade against an unbounded window, but it must be visible.
+            tracing::warn!(
+                "Compaction delta: dropping {keep_from} message(s) that arrived \
+                 during the summariser call and exceeded the {tail_budget}-token \
+                 verbatim tail — the summary predates them"
+            );
+            delta.drain(..keep_from);
+        }
+
         // The summary lands as a user message. A delta opening with tool
         // results has lost the assistant tool_use that authorised them, and
         // the provider rejects that shape outright.
@@ -2036,13 +2064,20 @@ impl AgentService {
             CompactionScope::FullWindow => {
                 // After compaction, the summary IS the conversation — it's
                 // prepended as a single user message and the agent picks up
-                // from there. We do NOT preserve a raw pre-compaction tail:
-                // the summary already embeds the recent-snapshot prose, so
-                // keeping the raw tail on top would just duplicate ~half the
-                // window and defeat the whole purpose of compacting. Pass 0
-                // so `compact_with_summary` clears everything and prepends
-                // just the summary.
-                context.compact_with_summary(marker_body, 0)
+                // from there. The pre-compaction tail is NOT preserved at
+                // full width: the summary already embeds the recent-snapshot
+                // prose, so keeping the whole raw tail on top would duplicate
+                // ~half the window and defeat the purpose of compacting.
+                //
+                // It is preserved at TAIL width (#943). This arm used to pass
+                // `0`, which keeps literally nothing (`available` saturates to
+                // zero, the reverse walk breaks on its first message, and the
+                // `max(2)` floor is gated on a non-zero budget). So the exact
+                // words the user is continuing from survived only as the
+                // summariser's prose quotation — and `enforce_summary_budget`
+                // then trims that quotation to the document budget.
+                let tail = context.verbatim_tail_tokens();
+                context.compact_with_verbatim_tail(marker_body, tail)
             }
             CompactionScope::DeltaSinceMarker => {
                 // The prior frozen segments stay in force verbatim; only the
