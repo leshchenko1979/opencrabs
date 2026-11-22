@@ -308,6 +308,12 @@ pub enum CronCommands {
         #[arg(long, alias = "deliver")]
         deliver_to: Option<String>,
 
+        /// How the harness posts this job's output to --deliver-to: 'always' (default, post the
+        /// turn's final text) or 'silent' (post nothing; the job keeps its send permission and
+        /// sends only what it chooses). 'silent' is NOT the same as omitting --deliver-to.
+        #[arg(long, value_name = "always|silent")]
+        deliver_mode: Option<String>,
+
         /// Optional pre-flight shell command to run before agent turn. When it fires, the job's
         /// prompt has {output}, {stdout}, {stderr} and {exit_code} substituted with the
         /// command's result; every fire logs the payload size as output_bytes.

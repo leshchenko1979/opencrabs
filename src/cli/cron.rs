@@ -27,6 +27,7 @@ pub(crate) async fn cmd_cron(
             thinking,
             auto_approve,
             deliver_to,
+            deliver_mode,
             trigger_cmd,
             trigger_on,
             set_goal,
@@ -43,6 +44,7 @@ pub(crate) async fn cmd_cron(
                 thinking,
                 auto_approve,
                 deliver_to,
+                deliver_mode,
                 trigger_cmd,
                 trigger_on,
                 set_goal,
@@ -70,6 +72,7 @@ async fn cmd_add(
     thinking: String,
     auto_approve: bool,
     deliver_to: Option<String>,
+    deliver_mode: Option<String>,
     trigger_cmd: Option<String>,
     trigger_on: Option<String>,
     set_goal: bool,
@@ -97,6 +100,12 @@ async fn cmd_add(
             "Unknown timezone '{tz}'. Use an IANA name like 'America/New_York', 'Europe/London', or 'UTC'."
         ),
     };
+
+    // #969: validate the delivery mode BEFORE the job is built. Absent means
+    // `always` (post the turn's output, today's behaviour); `silent` keeps the
+    // job's send permission but stops the harness auto-post. Anything else is
+    // a typo, not a mode — refuse rather than silently defaulting.
+    let deliver_mode = parse_deliver_mode(deliver_mode.as_deref())?;
 
     // Validate set_goal requires session delivery target
     if set_goal {
@@ -147,6 +156,8 @@ async fn cmd_add(
         // does not expose it, so the field keeps its `false` default.
     );
     job.next_run_at = crate::cron::next_run_utc(&cron, parsed_tz, chrono::Utc::now());
+    // #969: set after construction, like `run_once`, so the ctor keeps its arity.
+    job.deliver_mode = deliver_mode.clone();
 
     let id = job.id.to_string();
     repo.insert(&job).await?;
@@ -157,6 +168,7 @@ async fn cmd_add(
     println!("   Schedule: {cron} ({tz})");
     if let Some(ref d) = deliver_to {
         println!("   Deliver to: {d}");
+        println!("   Deliver mode: {deliver_mode}");
     }
     if let Some(ref cmd) = trigger_cmd {
         let cond = trigger_on.as_deref().unwrap_or("non_empty");
@@ -172,6 +184,24 @@ async fn cmd_add(
     );
     println!("\n💡 Verify the next runs above match what you intended.");
     Ok(())
+}
+
+/// Parse and validate `--deliver-mode` (#969).
+///
+/// Absent means `always`, which is what every pre-#969 job behaves as. The two
+/// accepted values are the whole grammar; anything else is refused loudly
+/// (a non-zero exit from `main`) rather than coerced to a default, because a
+/// typo'd mode silently choosing `always` would re-introduce the spam this flag
+/// exists to let the operator turn off.
+pub(crate) fn parse_deliver_mode(raw: Option<&str>) -> Result<String> {
+    match raw {
+        None => Ok("always".to_string()),
+        Some(mode) if mode == "always" || mode == "silent" => Ok(mode.to_string()),
+        Some(other) => anyhow::bail!(
+            "Invalid --deliver-mode '{other}'. Valid values: always (post the job's output, \
+             default), silent (post nothing; the job keeps its send permission)."
+        ),
+    }
 }
 
 async fn cmd_list(repo: &CronJobRepository) -> Result<()> {
@@ -214,7 +244,7 @@ async fn cmd_list(repo: &CronJobRepository) -> Result<()> {
         if job.run_once {
             println!("   Run once: true (retires itself on fire)");
         }
-        println!("   Deliver: {deliver}");
+        println!("   Deliver: {deliver} (mode: {})", job.deliver_mode);
         println!("   Last run: {last}");
         println!("   Next run: {next}");
         if !job.prompt.is_empty() {

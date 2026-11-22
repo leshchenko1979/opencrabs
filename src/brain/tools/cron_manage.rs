@@ -89,6 +89,11 @@ impl Tool for CronManageTool {
                     "type": "string",
                     "description": "Optional Bearer token for HTTP webhook delivery. Added as Authorization: Bearer <key> header when delivering to an HTTP(S) URL. On update, pass an empty string to clear it."
                 },
+                "deliver_mode": {
+                    "type": "string",
+                    "enum": ["always", "silent"],
+                    "description": "How the harness posts this job's output to deliver_to (#969). 'always' (default) posts the turn's final text (and an agent error) to every deliver_to target, wrapped in the cron envelope. 'silent' posts NOTHING on its own — the job keeps its deliver_to send permission and sends only what it chooses (e.g. via telegram_send), so it is NOT the same as omitting deliver_to. Use 'silent' for a job that decides for itself whether there is anything worth posting."
+                },
                 "job_id": {
                     "type": "string",
                     "description": "Job ID or name (required for delete/update/enable/disable)"
@@ -259,6 +264,18 @@ impl CronManageTool {
             .get("deliver_api_key")
             .and_then(|v| v.as_str())
             .map(String::from);
+        // #969: absent means `always` (post the turn's output). The two values
+        // are the whole grammar; a typo is refused rather than defaulted.
+        let deliver_mode = match input.get("deliver_mode").and_then(|v| v.as_str()) {
+            None => "always".to_string(),
+            Some(mode) if mode == "always" || mode == "silent" => mode.to_string(),
+            Some(other) => {
+                return Ok(ToolResult::error(format!(
+                    "Invalid deliver_mode '{other}'. Valid values: always (post the job's \
+                     output, default), silent (post nothing; the job keeps its send permission)."
+                )));
+            }
+        };
 
         // Bake `oc://` URLs / `here` to their CONCRETE form at create time
         // (#148): the row stores only `channel:chat[:thread]`, resolved once
@@ -342,6 +359,10 @@ impl CronManageTool {
             .get("run_once")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        // #969: like run_once, set after construction so the ctor keeps its
+        // arity. `silent` splits harness auto-delivery off from the job's
+        // deliver_to send scope; it does not remove the scope.
+        job.deliver_mode = deliver_mode.clone();
 
         let job_id = job.id.to_string();
 
@@ -361,8 +382,8 @@ impl CronManageTool {
         let next_runs = crate::cron::format_upcoming(cron_expr, parsed_tz, 3, chrono::Utc::now());
 
         Ok(ToolResult::success(format!(
-            "Cron job created:\n  ID: {job_id}\n  Name: {name}\n  Schedule: {cron_expr}\n  Timezone: {}\n  Deliver to: {delivery}\n  Enabled: true\n  Next runs:\n{next_runs}\n\nVerify the Next runs match what you intended (day-of-week is Sun-Sat, DST handled) before confirming to the user.",
-            job.timezone
+            "Cron job created:\n  ID: {job_id}\n  Name: {name}\n  Schedule: {cron_expr}\n  Timezone: {}\n  Deliver to: {delivery}\n  Deliver mode: {}\n  Enabled: true\n  Next runs:\n{next_runs}\n\nVerify the Next runs match what you intended (day-of-week is Sun-Sat, DST handled) before confirming to the user.",
+            job.timezone, job.deliver_mode
         )))
     }
 
@@ -596,6 +617,22 @@ impl CronManageTool {
             }
         }
 
+        // #969: delivery mode. Validated here (not by the schema alone) so a
+        // programmatic caller gets the same refusal as the CLI.
+        if let Some(mode) = input.get("deliver_mode").and_then(|v| v.as_str()) {
+            provided += 1;
+            if !matches!(mode, "always" | "silent") {
+                return Ok(ToolResult::error(format!(
+                    "Invalid deliver_mode '{mode}'. Valid values: always (post the job's \
+                     output, default), silent (post nothing; the job keeps its send permission)."
+                )));
+            }
+            if mode != job.deliver_mode {
+                patch.deliver_mode = Some(mode.to_string());
+                changed.push(format!("deliver_mode -> {mode}"));
+            }
+        }
+
         // Validate set_goal against effective deliver_to on update
         let effective_set_goal = patch.set_goal.unwrap_or(job.set_goal);
         if effective_set_goal {
@@ -630,7 +667,7 @@ impl CronManageTool {
             return Ok(ToolResult::error(
                 "Nothing to update: provide at least one field to change (name, cron, tz, prompt, \
                  provider, model, thinking, auto_approve, deliver_to, deliver_api_key, enabled, \
-                 trigger_cmd, trigger_on, set_goal, goal_template)."
+                 trigger_cmd, trigger_on, set_goal, goal_template, deliver_mode)."
                     .to_string(),
             ));
         }
@@ -733,13 +770,14 @@ impl CronManageTool {
                     .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
                     .unwrap_or_else(|| "none scheduled".to_string());
                 format!(
-                    "- [{}] {} (id={})\n    Schedule: {} ({})\n    Deliver: {}\n    Last run: {}\n    Next run: {}\n    Prompt: {}",
+                    "- [{}] {} (id={})\n    Schedule: {} ({})\n    Deliver: {} (mode: {})\n    Last run: {}\n    Next run: {}\n    Prompt: {}",
                     status,
                     j.name,
                     j.id,
                     j.cron_expr,
                     j.timezone,
                     deliver,
+                    j.deliver_mode,
                     last,
                     next,
                     truncate(&j.prompt, 80),
