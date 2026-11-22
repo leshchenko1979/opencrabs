@@ -354,6 +354,7 @@ fn capture_tail(path: &std::path::Path) -> String {
 /// rather than as the only thing that could carry it.
 pub(crate) fn handover_notice(
     label: &str,
+    command: &str,
     waited: &str,
     id: &str,
     pid: Option<u32>,
@@ -362,8 +363,9 @@ pub(crate) fn handover_notice(
 ) -> String {
     let out_tail = capture_tail(output_out);
     let err_tail = capture_tail(output_err);
-    let capture =
-        crate::brain::agent::service::background_tasks::capture_line(output_out, output_err, true);
+    let capture = crate::brain::agent::service::background_tasks::capture_line(
+        output_out, output_err, true, command,
+    );
     let out_block = if out_tail.trim().is_empty() {
         String::new()
     } else {
@@ -1091,6 +1093,7 @@ impl Tool for BashTool {
                         // spawning a process.
                         let mut handed_over = ToolResult::success(handover_notice(
                             &label,
+                            &input.command,
                             &waited,
                             &id,
                             pid,
