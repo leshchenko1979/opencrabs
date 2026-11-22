@@ -15,13 +15,23 @@
 //!
 //! Fixtures are synthetic and carry no user identifiers.
 
-use crate::brain::skills::load_all_skills;
+// Built-in skill bodies live on disk beside the executable (#946), so a test
+// binary's exe dir carries none and `load_all_skills()` would return only
+// whatever the developer happens to have installed — an empty set in CI, which
+// made these guards loop zero times and pass. Read the tree the release
+// archives ship instead.
+use crate::tests::skills_test::load_shipped_skills;
 
 #[test]
 fn skills_carry_the_slash_form_the_tool_matches_on() {
     // Resolution compares `slash_name`, so it must be the `/name` shape or the
     // lookup silently never matches.
-    for s in load_all_skills() {
+    let skills = load_shipped_skills();
+    assert!(
+        !skills.is_empty(),
+        "no shipped skills loaded — the guard would be vacuous"
+    );
+    for s in skills {
         assert!(
             s.slash_name.starts_with('/'),
             "skill {:?} has slash_name {:?}",
@@ -36,14 +46,17 @@ fn skills_carry_the_slash_form_the_tool_matches_on() {
 fn a_skill_lookup_by_slash_name_succeeds() {
     // The exact lookup the tool performs. Uses whichever skills exist rather
     // than hard-coding one, so the test does not depend on local install state.
-    let skills = load_all_skills();
-    if let Some(first) = skills.first() {
-        let found = skills.iter().find(|s| s.slash_name == first.slash_name);
-        assert!(
-            found.is_some(),
-            "a skill could not find itself by slash_name"
-        );
-    }
+    let skills = load_shipped_skills();
+    assert!(
+        !skills.is_empty(),
+        "no shipped skills loaded — the guard would be vacuous"
+    );
+    let first = &skills[0];
+    let found = skills.iter().find(|s| s.slash_name == first.slash_name);
+    assert!(
+        found.is_some(),
+        "a skill could not find itself by slash_name"
+    );
 }
 
 #[test]

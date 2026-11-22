@@ -31,7 +31,21 @@ fn core_brain_lists_user_commands_and_skills() {
         "commands.toml",
         "[[commands]]\nname = \"/deploy\"\ndescription = \"Build and ship to prod\"\nprompt = \"deploy now\"\n",
     );
-    let brain = loader(&dir).build_core_brain(None);
+    // Skills come off disk (#946): the built-in bodies are a sidecar beside the
+    // executable, so a test binary's exe dir has none. Seed the user overlay
+    // instead — this test is about the index being injected inline, not about
+    // where a skill was installed from.
+    let skill_dir = dir.path().join("skills").join("my-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: my-skill\ndescription: Does a thing on request\n---\n\nDo the thing.\n",
+    )
+    .unwrap();
+
+    let brain = crate::config::profile::with_home_override(dir.path().to_path_buf(), || {
+        loader(&dir).build_core_brain(None)
+    });
 
     // In lazy-tools mode this index is the only way the agent learns a
     // runtime-added command/skill exists — it must be injected inline.
@@ -48,9 +62,13 @@ fn core_brain_lists_user_commands_and_skills() {
         brain.contains("slash_command"),
         "index must tell the agent how to run a command"
     );
-    // Built-in skills are always available (embedded) and must be surfaced too,
-    // since their description is what the LLM reads to decide when to invoke.
+    // Every skill on disk must be surfaced too, since its description is what
+    // the LLM reads to decide when to invoke it.
     assert!(brain.contains("Skills —"), "skills section missing");
+    assert!(
+        brain.contains("/my-skill") && brain.contains("Does a thing on request"),
+        "skill + description must be listed: {brain}"
+    );
 }
 
 // ── core files are injected ───────────────────────────────────────────────────
