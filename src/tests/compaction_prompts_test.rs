@@ -195,6 +195,54 @@ fn session_recovery_hint_present_in_all_variants() {
 }
 
 #[test]
+fn recovery_hints_defer_to_a_live_read() {
+    // #967: the hint is built ONCE, when the compaction fires, and cannot
+    // see anything that happens after it — an approval, a /execute, a
+    // discard. Asserting that snapshot as fact put two contradictory
+    // directives in one context: "the plan is in Editing, do NOT call
+    // start" beside "[SYSTEM: PLAN APPROVED] ... call plan start in this
+    // same turn". So each hint must frame its state as a snapshot and
+    // name the live read that settles it.
+    let editing = build_continuation(CompactionKind::Regular, false, true, PlanRecovery::Editing);
+    assert!(
+        editing.contains("AS OF COMPACTION TIME"),
+        "Editing hint must frame the state as a snapshot, not live fact: {editing}"
+    );
+    assert!(
+        editing.contains("show_plan"),
+        "Editing hint must name the live read that resolves a stale snapshot: {editing}"
+    );
+    assert!(
+        editing.contains("supersedes"),
+        "Editing hint must say a later directive wins: {editing}"
+    );
+    // The exact phrasing that caused the collision must not come back.
+    assert!(
+        !editing.contains("Do NOT call `plan` with operation="),
+        "Editing hint must not forbid `start` unconditionally — an approval \
+         in the same turn lifts it: {editing}"
+    );
+    assert!(
+        editing.contains("until the plan is approved"),
+        "the no-start guard must be scoped to the approval, not absolute: {editing}"
+    );
+    assert!(
+        editing.contains("CODE.md"),
+        "Editing hint must keep the coding-standards hint: {editing}"
+    );
+
+    let active = build_continuation(CompactionKind::Regular, false, true, PlanRecovery::Active);
+    assert!(
+        active.contains("AS OF COMPACTION TIME"),
+        "Active hint must carry the same snapshot framing: {active}"
+    );
+    assert!(
+        active.contains("plan") && active.contains("start"),
+        "Active hint must still tell the agent to call plan with start: {active}"
+    );
+}
+
+#[test]
 fn manual_compaction_is_brief() {
     // Manual /compact uses a short sentence, not the full POST-COMPACTION
     // PROTOCOL with numbered steps. The user explicitly triggered it.
