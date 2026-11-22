@@ -1362,7 +1362,10 @@ fn cmd_result_from(output: &std::process::Output) -> CmdResult {
     // command's own code IS the cause. Only a signal is a different event, and
     // it is the one `exit_code` used to discard.
     let cause = match exit_signal(&output.status) {
-        Some(signal) => RunCause::Signalled { signal },
+        Some(signal) => RunCause::Signalled {
+            signal,
+            origin: crate::brain::agent::service::work_status::SignalOrigin::Unknown,
+        },
         None => RunCause::Ordinary,
     };
     CmdResult {

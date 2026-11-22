@@ -17,7 +17,7 @@
 //!   binary and `#[serde(default)]` is what lets them round-trip.
 
 use crate::brain::agent::BgTaskMeta;
-use crate::brain::agent::service::work_status::RunCause;
+use crate::brain::agent::service::work_status::{RunCause, SignalOrigin};
 use crate::channels::telegram::resume::{BubbleWire, build_bg_receipt_card};
 
 fn meta(cause: Option<RunCause>, exit_code: Option<i32>) -> BgTaskMeta {
@@ -45,7 +45,13 @@ fn rich_html(meta: &BgTaskMeta) -> String {
 /// tell a ceiling kill from a self-inflicted exit code, and `signal 9` can.
 #[test]
 fn card_body_opens_with_the_signal_cause() {
-    let html = rich_html(&meta(Some(RunCause::Signalled { signal: 9 }), Some(137)));
+    let html = rich_html(&meta(
+        Some(RunCause::Signalled {
+            signal: 9,
+            origin: SignalOrigin::Unknown,
+        }),
+        Some(137),
+    ));
     // First line after the summary: the italic cause, then the tail.
     let after_summary = html
         .split("</summary>")
@@ -58,7 +64,11 @@ fn card_body_opens_with_the_signal_cause() {
         .next()
         .unwrap_or_default()
         .to_string();
-    assert_eq!(first.trim(), "<i>signal 9 (killed)</i>", "got: {first:?}");
+    assert_eq!(
+        first.trim(),
+        "<i>signal 9 — sent from outside the harness</i>",
+        "got: {first:?}"
+    );
 }
 
 /// An ordinary success says `exit 0` — the same text the agent-facing surfaces
@@ -87,7 +97,13 @@ fn card_body_names_the_ceiling() {
 /// asserts the exact summary shape.
 #[test]
 fn summary_stays_byte_identical_to_p3f() {
-    let html = rich_html(&meta(Some(RunCause::Signalled { signal: 9 }), Some(137)));
+    let html = rich_html(&meta(
+        Some(RunCause::Signalled {
+            signal: 9,
+            origin: SignalOrigin::Unknown,
+        }),
+        Some(137),
+    ));
     let summary = html
         .split("<summary>")
         .nth(1)
@@ -121,7 +137,13 @@ fn legacy_meta_renders_no_cause_line() {
 /// silently lost, because there is no body to open.
 #[test]
 fn empty_tail_still_returns_the_flat_card() {
-    let mut m = meta(Some(RunCause::Signalled { signal: 9 }), Some(137));
+    let mut m = meta(
+        Some(RunCause::Signalled {
+            signal: 9,
+            origin: SignalOrigin::Unknown,
+        }),
+        Some(137),
+    );
     m.tail = "   \n".to_string();
     match build_bg_receipt_card(&m).0 {
         BubbleWire::Markdown(md) => {

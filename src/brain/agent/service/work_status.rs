@@ -370,9 +370,21 @@ pub enum RunCause {
     #[default]
     Ordinary,
     /// A signal ended it. `code` is the shell encoding (`128 + signal`).
+    ///
+    /// #966: the signal number alone left the reader to guess the SENDER, and
+    /// the rendering it produced — `signal 15 (killed)` — reads like a crash.
+    /// The one distinction the harness can actually make is whether IT sent the
+    /// signal, so that is what `origin` carries.
     Signalled {
         /// The signal number, kept rather than folded into the exit code.
         signal: i32,
+        /// Who sent it, as far as the harness can tell.
+        ///
+        /// Defaulted so every pre-change record and every site that does not
+        /// know reads as [`SignalOrigin::Unknown`] — a site that cannot
+        /// distinguish must not acquire a claim (#966).
+        #[serde(default)]
+        origin: SignalOrigin,
     },
     /// The operator's `agent.run_max_lifetime_secs` ceiling SIGKILLed the group.
     ///
@@ -386,6 +398,39 @@ pub enum RunCause {
     NotAwaited,
 }
 
+/// Who sent the signal that ended a run (#966).
+///
+/// **Why this is only two variants.** The complaint that filed #966 was that a
+/// lane's own housekeeping `kill -TERM -- -<pgid>` reads as a crash, and the
+/// first design proposed `Self_` / `Restart` / `External` / `Unknown`. Reading
+/// the kill sites showed that three of those four cannot be populated by this
+/// codebase:
+///
+/// * the harness's ONLY kill of a detached run group is
+///   `background_tasks::kill_run_group`, called from the ceiling path, and the
+///   ceiling has its own [`RunCause::Ceiling`] variant — so a harness kill is
+///   never a bare `Signalled`;
+/// * detached children are `setsid()`ed, so a daemon restart does NOT signal
+///   them: they survive it by design (`shutdown.rs` documents that SIGTERM has
+///   no handler and the process simply dies);
+/// * a lane's own kill is a shell command the lane runs, which the harness sees
+///   as an ordinary external signal — it cannot be told from an operator kill,
+///   an OOM killer, or anything else.
+///
+/// So the honest discrimination is the one below: `Harness` for a signal this
+/// process sent, `Unknown` for everything else, which renders as "sent from
+/// outside the harness" rather than "killed". Variants nobody can populate
+/// would be vocabulary with no speaker.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalOrigin {
+    /// Nothing in this process sent it, and who did is not recorded.
+    #[default]
+    Unknown,
+    /// This process sent it.
+    Harness,
+}
+
 impl RunCause {
     /// The one-line rendering both readers emit.
     ///
@@ -395,7 +440,12 @@ impl RunCause {
     pub fn describe(&self, code: i32) -> String {
         match self {
             Self::Ordinary => format!("exit {code}"),
-            Self::Signalled { signal } => format!("signal {signal} (killed)"),
+            Self::Signalled { signal, origin } => match origin {
+                SignalOrigin::Harness => format!("signal {signal} — killed by the harness"),
+                SignalOrigin::Unknown => {
+                    format!("signal {signal} — sent from outside the harness")
+                }
+            },
             Self::Ceiling { limit_secs } => format!("ceiling {limit_secs}s"),
             Self::NotAwaited => "not awaited (nothing ran)".to_string(),
         }
@@ -1478,11 +1528,15 @@ mod run_cause_tests {
     #[test]
     fn ceiling_oom_and_literal_137_are_three_distinct_renderings() {
         let ceiling = RunCause::Ceiling { limit_secs: 3600 }.describe(137);
-        let oom = RunCause::Signalled { signal: 9 }.describe(137);
+        let oom = RunCause::Signalled {
+            signal: 9,
+            origin: SignalOrigin::Unknown,
+        }
+        .describe(137);
         let literal = RunCause::Ordinary.describe(137);
 
         assert_eq!(ceiling, "ceiling 3600s");
-        assert_eq!(oom, "signal 9 (killed)");
+        assert_eq!(oom, "signal 9 — sent from outside the harness");
         assert_eq!(literal, "exit 137");
 
         // The assertion that would have caught the original defect.
@@ -1503,7 +1557,10 @@ mod run_cause_tests {
         assert_eq!(RunCause::Ordinary.describe(7), "exit 7");
         // A non-zero code must not leak into the other arms' text.
         for cause in [
-            RunCause::Signalled { signal: 15 },
+            RunCause::Signalled {
+                signal: 15,
+                origin: SignalOrigin::Unknown,
+            },
             RunCause::Ceiling { limit_secs: 60 },
             RunCause::NotAwaited,
         ] {
@@ -1537,13 +1594,64 @@ mod run_cause_tests {
         );
     }
 
+    /// #966 — the discrimination the harness can actually make. A signalled
+    /// death used to render `signal 15 (killed)` for every sender, which reads
+    /// like a crash and made a lane's own housekeeping `kill -TERM` look like a
+    /// fault. The two origins must not read alike, and the unknown arm must not
+    /// claim the harness did it.
+    #[test]
+    fn a_signal_names_whether_the_harness_sent_it() {
+        let external = RunCause::Signalled {
+            signal: 15,
+            origin: SignalOrigin::Unknown,
+        }
+        .describe(143);
+        let ours = RunCause::Signalled {
+            signal: 15,
+            origin: SignalOrigin::Harness,
+        }
+        .describe(143);
+
+        assert_eq!(external, "signal 15 — sent from outside the harness");
+        assert_eq!(ours, "signal 15 — killed by the harness");
+        assert_ne!(
+            external, ours,
+            "who sent the signal is the whole point of the field"
+        );
+        assert!(
+            !external.contains("killed"),
+            "a signal from outside is not evidence the run crashed: {external}"
+        );
+    }
+
+    /// A record written before #966 carries no `origin`, and #786's own
+    /// shipped records look exactly like this. It must read back as `Unknown`
+    /// — never as a harness kill, which would be a claim the record cannot
+    /// support.
+    #[test]
+    fn a_pre_change_signal_record_reads_as_unknown_origin() {
+        let legacy = r#"{"kind":"signalled","signal":9}"#;
+        let cause: RunCause = serde_json::from_str(legacy).expect("legacy signalled record parses");
+        assert_eq!(
+            cause,
+            RunCause::Signalled {
+                signal: 9,
+                origin: SignalOrigin::Unknown
+            },
+            "an absent origin is Unknown, not a harness kill"
+        );
+    }
+
     /// The enum round-trips through the status file, so a reader on a later
     /// binary sees the cause the finishing binary stamped.
     #[test]
     fn every_cause_round_trips_through_serde() {
         for cause in [
             RunCause::Ordinary,
-            RunCause::Signalled { signal: 9 },
+            RunCause::Signalled {
+                signal: 9,
+                origin: SignalOrigin::Unknown,
+            },
             RunCause::Ceiling { limit_secs: 3600 },
             RunCause::NotAwaited,
         ] {

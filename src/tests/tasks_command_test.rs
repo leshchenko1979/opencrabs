@@ -12,7 +12,8 @@
 //! never listed, and a record written before #786 still says something true.
 
 use crate::brain::agent::service::work_status::{
-    self, CommandExit, CommandPaths, RunCause, WorkFinish, WorkKind, WorkState, WorkStatus,
+    self, CommandExit, CommandPaths, RunCause, SignalOrigin, WorkFinish, WorkKind, WorkState,
+    WorkStatus,
 };
 use crate::channels::commands::{TaskRow, render_tasks_rows};
 
@@ -126,13 +127,19 @@ fn a_finished_row_names_why_it_ended_not_just_the_code() {
         "pytest -q",
         false,
         137,
-        RunCause::Signalled { signal: 9 },
+        RunCause::Signalled {
+            signal: 9,
+            origin: SignalOrigin::Unknown,
+        },
         2.0,
     );
 
     let out = render_tasks_rows("", "session-a", &[]);
     assert!(out.contains("ceiling 3600s"), "got: {out}");
-    assert!(out.contains("signal 9 (killed)"), "got: {out}");
+    assert!(
+        out.contains("signal 9 — sent from outside the harness"),
+        "got: {out}"
+    );
     // Two rows, and the header counts them.
     assert!(out.starts_with("## Detached runs (2)"), "got: {out}");
 }

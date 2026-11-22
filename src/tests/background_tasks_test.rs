@@ -11,7 +11,7 @@ use crate::brain::agent::service::background_tasks::{
 };
 use crate::brain::agent::service::restart_recovery;
 use crate::brain::agent::service::session_routes;
-use crate::brain::agent::service::work_status::RunCause;
+use crate::brain::agent::service::work_status::{RunCause, SignalOrigin};
 use crate::brain::tools::bash::handover_notice;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -136,7 +136,13 @@ fn completion_message_names_why_a_137_ended() {
     };
 
     let ceiling = make(RunCause::Ceiling { limit_secs: 3600 }, false);
-    let oom = make(RunCause::Signalled { signal: 9 }, false);
+    let oom = make(
+        RunCause::Signalled {
+            signal: 9,
+            origin: SignalOrigin::Unknown,
+        },
+        false,
+    );
     let literal = make(RunCause::Ordinary, false);
 
     // The ceiling kill: the one case where the command did nothing wrong.
@@ -159,7 +165,12 @@ fn completion_message_names_why_a_137_ended() {
 
     // A signal is a kill too, but not the harness's doing — and it says which
     // signal, which is how an OOM kill (9) is told from a cancellation (15).
-    assert!(oom.context_text.contains("signal 9 (killed)"));
+    assert!(
+        oom.context_text
+            .contains("signal 9 — sent from outside the harness"),
+        "got: {}",
+        oom.context_text
+    );
     assert!(!oom.context_text.contains("ceiling"));
 
     // And a command that simply exited 137 still reads as a failure.
