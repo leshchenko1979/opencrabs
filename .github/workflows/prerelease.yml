@@ -78,7 +78,12 @@ jobs:
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           ARCHIVE="opencrabs-v${VERSION}-pre-${SHA}-${{ matrix.asset_suffix }}"
           cd target/${{ matrix.target }}/release
-          tar czf "../../../${ARCHIVE}.tar.gz" opencrabs rtk
+          # Built-in skills are sidecar data: the loader resolves
+          # `<exe_dir>/skills/<name>/SKILL.md`, so the archive must carry the
+          # repo's templates tree at its root next to the binary.
+          rm -rf skills
+          cp -R "$GITHUB_WORKSPACE/src/docs/reference/templates/skills" skills
+          tar czf "../../../${ARCHIVE}.tar.gz" opencrabs rtk skills
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
@@ -140,7 +145,12 @@ jobs:
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           ARCHIVE="opencrabs-v${VERSION}-pre-${SHA}-${{ matrix.asset_suffix }}"
           cd target/${{ matrix.target }}/release
-          tar czf "../../../${ARCHIVE}.tar.gz" opencrabs rtk
+          # Built-in skills are sidecar data: the loader resolves
+          # `<exe_dir>/skills/<name>/SKILL.md`, so the archive must carry the
+          # repo's templates tree at its root next to the binary.
+          rm -rf skills
+          cp -R "$GITHUB_WORKSPACE/src/docs/reference/templates/skills" skills
+          tar czf "../../../${ARCHIVE}.tar.gz" opencrabs rtk skills
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
@@ -192,7 +202,12 @@ jobs:
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           ARCHIVE="opencrabs-v${VERSION}-pre-${SHA}-windows-amd64"
           cd target/x86_64-pc-windows-msvc/release
-          7z a "../../../${ARCHIVE}.zip" opencrabs.exe rtk.exe
+          # Built-in skills are sidecar data: the loader resolves
+          # `<exe_dir>/skills/<name>/SKILL.md`, so the archive must carry the
+          # repo's templates tree at its root next to the binary.
+          rm -rf skills
+          cp -R "$GITHUB_WORKSPACE/src/docs/reference/templates/skills" skills
+          7z a "../../../${ARCHIVE}.zip" opencrabs.exe rtk.exe skills
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6

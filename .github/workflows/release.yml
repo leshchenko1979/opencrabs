@@ -313,10 +313,20 @@ jobs:
         run: |
           ASSET_NAME="opencrabs-v${{ steps.version.outputs.version }}-${{ matrix.asset_suffix }}"
           cd target/${{ matrix.target }}/release
+          # Built-in skills ship as sidecar DATA, not as bytes compiled into the
+          # binary: the loader resolves `<exe_dir>/skills/<name>/SKILL.md`. The
+          # repo's source of truth stays src/docs/reference/templates/skills/;
+          # this step copies it into the archive root so an unpacked archive has
+          # `skills/` next to the binary. An archive that carries only the binary
+          # leaves every profile on the installing host with zero built-ins.
+          rm -rf skills
+          cp -R "$GITHUB_WORKSPACE/src/docs/reference/templates/skills" skills
+          test "$(find skills -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l)" -gt 0 \
+            || { echo "skills sidecar staging failed: no <name>/SKILL.md under skills/"; exit 1; }
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a ../../../${ASSET_NAME}.zip ${{ matrix.artifact_name }} rtk.exe
+            7z a ../../../${ASSET_NAME}.zip ${{ matrix.artifact_name }} rtk.exe skills
           else
-            tar czf ../../../${ASSET_NAME}.tar.gz ${{ matrix.artifact_name }} rtk
+            tar czf ../../../${ASSET_NAME}.tar.gz ${{ matrix.artifact_name }} rtk skills
           fi
 
       - name: Upload artifact
