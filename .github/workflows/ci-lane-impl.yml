@@ -489,7 +489,253 @@ jobs:
         # `--all-targets` would also cover them but widens the selector to
         # examples, which this gate does not lint; `--benches` is the minimal
         # truthful fix. Two more compile units: watch the first run's wall.
-        run: cargo clippy --locked --lib --bins --tests --benches --all-features -- -D warnings
+        env:
+          # Same env VOCABULARY as the nextest job's STALLWATCH (one name, one
+          # meaning); the thresholds differ because the calibration does.
+          STALLWATCH_SECS: "480"
+          STALLWATCH_SILENCE_SECS: "900"
+          STALLWATCH_LOG: /tmp/clippy-leg.log
+        run: |
+          STALLWATCH=""
+          if command -v python3 >/dev/null 2>&1; then
+          cat > /tmp/clippywatch.py <<'CLIPPYWATCH_PY'
+          #!/usr/bin/env python3
+          """Compile-phase stall watchdog for the LINT leg (fmt + clippy).
+
+          WHY THIS JOB HAS A SMALLER DETECTOR THAN pr-gates-nextest. That job runs tests,
+          so it carries three predicates. THIS job only COMPILES: `cargo clippy --lib
+          --bins --tests --benches --all-features` builds the whole tree and never
+          executes a test binary, so predicate B ("no test completing") has no signal to
+          read and is deliberately ABSENT. Copying it would add ~150 lines that can never
+          fire, and a detector that cannot fire on its own surface is worse than none: it
+          reads as coverage.
+
+          Predicate A -- FLAT CPU over this step's own process tree (STALLWATCH_SECS, 480).
+            A compiling rustc advances utime+stime on every sample, so healthy work cannot
+            accumulate flat time. This is the arm that catches a wedged rustc or a futex
+            hang, and it needs no output at all -- which matters because cargo buffers
+            heavily and a silent-but-working compile is normal.
+
+          Predicate C -- LOG SILENCE (STALLWATCH_SILENCE_SECS, 900).
+            The OUTPUT-based arm: a tree burning CPU while emitting nothing is exactly
+            what A cannot see. Armed only once the tee'd log is NON-EMPTY -- an absent log
+            is not silence, it is "cargo has not written its first byte yet".
+
+          CALIBRATION for C, measured 2026-11-22 from six cold/failing runs (283 intra-step
+          gaps): worst healthy compile silence 152.9 s, always the same `Checking
+          whatsapp-rust v0.7.0` dependency compile; p99 128.0 s, p50 0 s. 900 s is 5.9x the
+          worst gap. Every threshold is a multiple of the WORST gap, never of the median --
+          a false trip fails a healthy gate.
+          Do NOT recalibrate from `gh run view --log`: it truncates mid-compile and runs
+          straight into the NEXT step, so the "silence" it reports is an artifact of the
+          reader. Measured this turn: the same window read 438-580 s of "silence" that was
+          entirely the following step. Bound any read to the step's own output window.
+
+          Signal for A: sum(utime+stime) over every process descending from the step shell.
+          Tree scoping is load-bearing -- a comm-wide match picks up the opencrabs daemon
+          and resets the flat clock forever (measured on the test leg).
+
+          ON FIRE: dump wchan + /proc/<pid>/syscall + kernel stack + vmstat + the log tail,
+          THEN SIGTERM the tree. The dump runs BEFORE the kill, so even a wrong fire yields
+          evidence. This converts a 25-minute silent burn into ~8 minutes plus the stack
+          that names the mechanism. gdb is NOT installed in this job (it is a nextest-job
+          dependency), so user stacks are reported unavailable rather than silently absent;
+          the kernel side separates futex from read/fsync on its own.
+
+          FAIL-OPEN BUT VISIBLY SO: no python3, or an unparsable heredoc, emits a
+          `::warning::` and continues; arming emits a `::notice::`. Without those, "no stall
+          detected" and "the detector never ran" are the same green run.
+          Revert = delete this block and restore the plain `run: cargo clippy ...` line.
+          """
+          import os
+          import signal
+          import subprocess
+          import sys
+          import time
+
+          SELF = os.getpid()
+          FLAT_THRESHOLD = int(os.environ.get("STALLWATCH_SECS", "480"))
+          SILENCE_THRESHOLD = int(os.environ.get("STALLWATCH_SILENCE_SECS", "900"))
+          SAMPLE = int(os.environ.get("STALLWATCH_SAMPLE", "30"))
+          LOGFILE = os.environ.get("STALLWATCH_LOG", "/tmp/clippy-leg.log")
+
+
+          def _stat(pid):
+              """(comm, cpu_ticks, ppid, state) from /proc/<pid>/stat, or None."""
+              try:
+                  with open("/proc/%d/stat" % pid, "rb") as fh:
+                      raw = fh.read()
+              except OSError:
+                  return None
+              close = raw.rfind(b")")
+              if close < 0:
+                  return None
+              comm = raw[raw.find(b"(") + 1:close].decode("utf-8", "replace")
+              fields = raw[close + 2:].split()
+              try:
+                  state = fields[0]
+                  ppid, utime, stime = int(fields[1]), int(fields[11]), int(fields[12])
+              except (IndexError, ValueError):
+                  return None
+              return comm, utime + stime, ppid, state
+
+
+          def descendants(root):
+              """{pid: (comm, cpu_ticks)} for EVERY descendant of `root`, minus this watcher.
+
+              No comm filter, deliberately: a wedged rustc is `rustc`, but whatever wedges
+              it can be any child, and a build-tools filter is exactly what made the test-leg
+              detector report procs=1 and never name the stuck process. Zombies are excluded
+              -- a reaped-but-unwaited child burns no CPU and cannot stall anything, and
+              counting it keeps the tree non-empty after the work finishes.
+              """
+              table = {}
+              for entry in os.listdir("/proc"):
+                  if not entry.isdigit():
+                      continue
+                  rec = _stat(int(entry))
+                  if rec:
+                      table[int(entry)] = rec
+              procs = {}
+              for pid, (comm, ticks, _ppid, state) in table.items():
+                  if pid == SELF or state == b"Z":
+                      continue
+                  cur, hops = pid, 0
+                  while cur > 1 and hops < 64:
+                      rec = table.get(cur)
+                      if rec is None:
+                          break
+                      parent = rec[2]
+                      if parent == root:
+                          procs[pid] = (comm, ticks)
+                          break
+                      cur, hops = parent, hops + 1
+              return procs
+
+
+          def _log_tail(n=40):
+              try:
+                  with open(LOGFILE, "rb") as fh:
+                      fh.seek(0, os.SEEK_END)
+                      size = fh.tell()
+                      fh.seek(max(0, size - 64 * 1024))
+                      lines = fh.read().decode("utf-8", "replace").splitlines()
+              except OSError:
+                  return
+              print("----- clippy log tail (last %d lines) -----" % n)
+              for line in lines[-n:]:
+                  print("LOGTAIL: %s" % line[:300])
+
+
+          def dump(procs, stall_s, predicate):
+              stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+              print("===== STALLWATCH FIRE %s predicate=%s stall=%.0fs procs=%d ====="
+                    % (stamp, predicate, stall_s, len(procs)), flush=True)
+              for pid, (comm, ticks) in sorted(procs.items()):
+                  try:
+                      wchan = open("/proc/%d/wchan" % pid).read().strip()
+                  except OSError:
+                      wchan = "?"
+                  print("STALLWATCH: pid=%d comm=%s cpu_ticks=%d wchan=%s" % (pid, comm, ticks, wchan))
+              print("----- vmstat -----")
+              subprocess.run(["vmstat", "1", "3"], check=False)
+              _log_tail()
+              print("----- syscall + kernel stack -----")
+              for pid, (comm, _) in sorted(procs.items()):
+                  for label, argv in (
+                      ("syscall", ["cat", "/proc/%d/syscall" % pid]),
+                      ("kstack", ["sudo", "cat", "/proc/%d/stack" % pid]),
+                  ):
+                      try:
+                          res = subprocess.run(argv, check=False, stdout=subprocess.PIPE,
+                                               stderr=subprocess.STDOUT, timeout=20)
+                          out = res.stdout.decode("utf-8", "replace").strip()
+                      except (OSError, subprocess.TimeoutExpired) as exc:
+                          out = "unavailable: %r" % (exc,)
+                      print("STALLWATCH %s pid=%d: %s" % (label, pid, out[:2000]), flush=True)
+              print("STALLWATCH: user stacks not collected -- this job installs no gdb (a "
+                    "nextest-job dependency only). The kernel-side evidence above separates "
+                    "futex from read/fsync on its own.", flush=True)
+              print("===== STALLWATCH END =====", flush=True)
+
+
+          def terminate(procs, stall_s, predicate):
+              for pid in procs:
+                  try:
+                      os.kill(pid, signal.SIGTERM)
+                  except OSError:
+                      pass
+              print("STALLWATCH: SIGTERM sent to %d process(es) after %.0fs without progress (%s)"
+                    % (len(procs), stall_s, predicate), flush=True)
+
+
+          def main():
+              root = int(os.environ.get("STALLWATCH_ROOT") or os.getppid())
+              print("STALLWATCH: armed, root=%d flat=%ds silence=%ds sample=%ds log=%s"
+                    % (root, FLAT_THRESHOLD, SILENCE_THRESHOLD, SAMPLE, LOGFILE), flush=True)
+              prev = None
+              flat_since = None
+              log_size = None
+              silence_since = None   # None until the log is NON-EMPTY: absent is not silence
+              while True:
+                  procs = descendants(root)
+                  total = sum(t for _, t in procs.values())
+                  now = time.time()
+
+                  # Predicate A -- flat CPU. Catches a wedged rustc; needs no output at all.
+                  if not procs:
+                      prev, flat_since = None, None
+                  elif prev is None or total != prev:
+                      prev, flat_since = total, now
+                  else:
+                      flat = now - flat_since
+                      if flat >= FLAT_THRESHOLD:
+                          dump(procs, flat, "flat_cpu")
+                          terminate(procs, flat, "flat_cpu")
+                          return 0
+
+                  # Predicate C -- log silence. Armed only once the log is non-empty.
+                  try:
+                      size = os.path.getsize(LOGFILE)
+                  except OSError:
+                      size = None
+                  if size is None or size == 0 or not procs:
+                      silence_since = None
+                  elif log_size is None or size != log_size:
+                      silence_since = now
+                  else:
+                      silent = now - silence_since
+                      if silent >= SILENCE_THRESHOLD:
+                          dump(procs, silent, "silence")
+                          terminate(procs, silent, "silence")
+                          return 0
+                  log_size = size
+
+                  time.sleep(SAMPLE)
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          CLIPPYWATCH_PY
+            if python3 -c 'import ast; ast.parse(open("/tmp/clippywatch.py").read())' 2>/dev/null; then
+              python3 /tmp/clippywatch.py &
+              STALLWATCH=$!
+              echo "::notice::STALLWATCH armed (clippy leg) -- flat=${STALLWATCH_SECS}s silence=${STALLWATCH_SILENCE_SECS}s; a green run carrying this notice is evidence the detector RAN"
+            else
+              echo "::warning::STALLWATCH DISARMED (clippy leg) -- embedded script does not parse; NO stall detection this run"
+            fi
+          else
+            echo "::warning::STALLWATCH DISARMED (clippy leg) -- python3 not on PATH; NO stall detection this run"
+          fi
+          # tee so predicate C has a file to watch; PIPESTATUS[0], never $? --
+          # `| tee` makes $? TEE's status, so a failing clippy would report 0.
+          cargo clippy --locked --lib --bins --tests --benches --all-features -- -D warnings 2>&1 | tee "$STALLWATCH_LOG"
+          RC=${PIPESTATUS[0]}
+          if [ -n "$STALLWATCH" ]; then
+            kill "$STALLWATCH" 2>/dev/null || true
+            wait "$STALLWATCH" 2>/dev/null || true
+          fi
+          exit $RC
 
 
       - name: Apply cargo fmt (fix mode)
