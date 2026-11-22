@@ -23,7 +23,7 @@
 use crate::brain::agent::service::background_tasks::{
     CmdResult, cmd_result_from, task_outcome_record,
 };
-use crate::brain::agent::service::work_status::{self, RunCause};
+use crate::brain::agent::service::work_status::{self, RunCause, SignalOrigin};
 use crate::brain::tools::tasks_list::resolve_state;
 use crate::db::{BackgroundTaskOutcome, BackgroundTaskRepository, Database};
 use tempfile::TempDir;
@@ -223,7 +223,13 @@ async fn a_signalled_death_records_no_exit_code_of_its_own() {
     let signalled = CmdResult {
         success: false,
         code: 143,
-        cause: RunCause::Signalled { signal: 15 },
+        // #966 made `origin` a required field; this result is hand-built, so the
+        // honest origin is `Unknown` (nobody recorded the sender), not the
+        // `External` the live construction site stamps.
+        cause: RunCause::Signalled {
+            signal: 15,
+            origin: SignalOrigin::Unknown,
+        },
         output: String::new(),
     };
     let not_awaited = CmdResult {
