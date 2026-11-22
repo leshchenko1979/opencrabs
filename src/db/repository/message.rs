@@ -471,11 +471,14 @@ impl MessageRepository {
     /// Tokenized companion to `search_by_content` (#1626): every
     /// whitespace-separated token must appear somewhere in the content (AND
     /// of substring matches) instead of one contiguous substring. Fetches a
-    /// recency-ordered pool (5x the limit, capped at 200), then re-ranks it
-    /// through [`crate::relevance::episodic::rank`] — query-term proximity
-    /// span first (#941), then total token hits, then a token's
-    /// opening-position signal, then query-order adjacency, with SQL recency
-    /// kept inside a full tie (#911).
+    /// recency-ordered pool sized by
+    /// [`crate::relevance::episodic::tokenized_fetch_cap`] — wide enough that
+    /// the target is usually IN the pool (#941 measured the pool as a binding
+    /// constraint) — then re-ranks it through
+    /// [`crate::relevance::episodic::rank`] — query-term proximity span first
+    /// (#941), then total token hits, then a token's opening-position signal,
+    /// then query-order adjacency, with SQL recency kept inside a full tie
+    /// (#911).
     pub async fn search_by_content_tokenized(
         &self,
         session_ids: Option<&[Uuid]>,
@@ -493,7 +496,7 @@ impl MessageRepository {
             return Ok(Vec::new());
         }
 
-        let fetch_cap = (limit.saturating_mul(5)).clamp(1, 200) as i64;
+        let fetch_cap = crate::relevance::episodic::tokenized_fetch_cap(limit);
         let patterns: Vec<String> = tokens
             .iter()
             .map(|t| format!("%{}%", t.replace('%', "\\%").replace('_', "\\_")))

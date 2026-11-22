@@ -545,3 +545,55 @@ fn the_published_ranker_label_names_the_shared_scorer() {
         "src/cli/eval_cmd.rs must not carry the ranker-less claim (#927)"
     );
 }
+
+/// The recency pool is what the ranker can SEE, so it is a ranking input even
+/// though it is not a signal: a target outside the pool is unreachable however
+/// well it scores. #941 measured it as a binding constraint (recall@10 0.075 at
+/// the old `5 * k` pool, 0.150 at the cap) and it is pinned here for the same
+/// reason the label is — one constant, both legs, or the harness measures a
+/// ranker the binary does not ship (#911).
+#[test]
+fn the_tokenized_pool_is_sized_by_one_shared_rule() {
+    // `k = 10` is the shipped limit. At the old `5 * k` it fetched 50 rows;
+    // the sweep says the gain saturates at the cap, so the shipped request
+    // must actually reach it.
+    assert_eq!(
+        episodic::tokenized_fetch_cap(10),
+        episodic::TOKENIZED_FETCH_CAP as i64,
+        "the shipped k=10 request must fetch the full cap, not 5 * k"
+    );
+
+    // Saturating, never overflowing: a caller asking for a million rows still
+    // gets the documented bound, and no input returns 0 (which would make
+    // every tokenized search return nothing).
+    assert_eq!(
+        episodic::tokenized_fetch_cap(usize::MAX),
+        episodic::TOKENIZED_FETCH_CAP as i64,
+        "the pool must clamp at TOKENIZED_FETCH_CAP for any limit"
+    );
+    assert_eq!(
+        episodic::tokenized_fetch_cap(0),
+        1,
+        "a zero limit must not fetch zero rows"
+    );
+
+    // Neither caller may own a copy of the rule. A hardcoded multiplier in one
+    // leg and not the other is precisely the split-brain that made Track A
+    // measure the wrong ranker before #911, and it reads as a green gate
+    // because both halves compile.
+    const MESSAGE_REPO_SRC: &str = include_str!("../db/repository/message.rs");
+    const TRACK_SRC: &str = include_str!("../eval/episodic_track.rs");
+    for (name, src) in [
+        ("src/db/repository/message.rs", MESSAGE_REPO_SRC),
+        ("src/eval/episodic_track.rs", TRACK_SRC),
+    ] {
+        assert!(
+            src.contains("episodic::tokenized_fetch_cap"),
+            "{name} must size its pool with episodic::tokenized_fetch_cap"
+        );
+        assert!(
+            !src.contains("saturating_mul(5)"),
+            "{name} must not carry its own pool multiplier — that is the drift this pins"
+        );
+    }
+}

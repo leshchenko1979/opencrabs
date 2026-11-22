@@ -435,7 +435,10 @@ fn present(conn: &Connection, since: i64, word: &str) -> Result<usize> {
 /// Mirrors `MessageRepository::search_by_content` (contiguous `LIKE`, recency
 /// order) and, when that returns nothing for a multi-word query, its
 /// `search_by_content_tokenized` companion (#1626): every token must appear,
-/// the pool is `5 * k` capped at 200, and rows are re-ranked by
+/// the pool is sized by
+/// [`crate::relevance::episodic::tokenized_fetch_cap`] — the SAME function the
+/// shipped arm calls, so a pool change cannot land in one leg and not the
+/// other — and rows are re-ranked by
 /// [`crate::relevance::episodic::rank`] — the very function the shipped arm
 /// calls, so this leg cannot measure a ranker the binary does not run (#911).
 /// The only difference from the shipped path is the `created_at` bound, which
@@ -469,7 +472,7 @@ pub fn search_slice(conn: &Connection, since: i64, query: &str, k: usize) -> Res
     if tokens.len() < 2 {
         return Ok(Vec::new());
     }
-    let fetch_cap = (k.saturating_mul(5)).clamp(1, 200) as i64;
+    let fetch_cap = crate::relevance::episodic::tokenized_fetch_cap(k);
     let patterns: Vec<String> = tokens.iter().map(|t| format!("%{}%", escaped(t))).collect();
     let like_arms = vec!["content LIKE ? ESCAPE '\\' COLLATE NOCASE"; patterns.len()].join(" AND ");
     let sql = format!(

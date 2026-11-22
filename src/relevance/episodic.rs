@@ -32,16 +32,26 @@
 //! the last query term's first occurrence. A row where the query words sit
 //! together is ABOUT them; one where they are three thousand characters apart
 //! merely contains both. Occurrence counts are identical in the two cases, so
-//! `hits` cannot see the difference — measured recall@10 goes 0.097 → 0.516
-//! on the same 40 cases and the same 500-row pool. Length-normalised variants
-//! were measured too and are WORSE (0.258 for `span/len`, 0.290 for
-//! `span/sqrt(len)`): dividing by length over-rewards long messages, so the
-//! raw span is the right form.
+//! `hits` cannot see the difference.
 //!
-//! Three cheaper hypotheses are recorded here so nobody re-runs them: the
-//! recency pool truncating the target away (50 vs 5,000 fetched: 0.100 →
-//! 0.100), BM25 (→ 0.150), and dropping the query's low-idf terms (→ 0.125).
-//! All three were falsified by measurement.
+//! Measured through the SHIPPED semantics — same tokenizer, same 14-day slice,
+//! 18,231 messages, 40 positives / 20 negatives — proximity takes recall@10
+//! from 0.000 to 0.075 at the old `5 * k` pool and to 0.150 at the
+//! [`TOKENIZED_FETCH_CAP`] pool this module now sizes. So the signal is real
+//! AND the pool was a second binding constraint, which is why both moved.
+//!
+//! Two figures that circulated in this doc and on #941 are WITHDRAWN: a
+//! `0.097 → 0.516` proximity gain, and the pool falsification that rode with
+//! it (`50 vs 5,000 fetched: 0.100 → 0.100`). Both came from a probe carrying
+//! its own tokenizer (`len < 5` filter plus a hand-written stopword list), so
+//! they measured a ranker the binary does not ship — and the pool conclusion
+//! was flatly wrong, as the sweep above shows. Length-normalised forms were
+//! measured on that same probe and read worse (0.258 for `span/len`, 0.290 for
+//! `span/sqrt(len)`); the raw span is what ships, but treat those two numbers
+//! as indicative only for the same reason.
+//!
+//! BM25 and dropping the query's low-idf terms were also tried and did not
+//! beat the kept form. Unlike the pool, neither is a constraint worth moving.
 //!
 //! The two older signals still rank below `hits`, where they cost nothing and
 //! still break its remaining ties:
@@ -62,10 +72,11 @@
 //! # What this deliberately does NOT do
 //!
 //! It does not widen `k` and it does not change WHICH rows match — only how
-//! rows that already match are ordered. On a corpus where every matching row
-//! is lexically identical to the query (the Track A fixture's clustered
-//! vocabulary, #899), every signal here is constant across the pool and the
-//! order is unchanged by construction — see
+//! rows that already match are ordered. The pool that feeds the ranker is
+//! sized separately by [`tokenized_fetch_cap`] and is NOT `k`. On a corpus
+//! where every matching row is lexically identical to the query (the Track A
+//! fixture's clustered vocabulary, #899), every signal here is constant across
+//! the pool and the order is unchanged by construction — see
 //! `src/eval/results/track-a-episodic-v4.md`.
 
 use std::cmp::Reverse;
@@ -75,6 +86,32 @@ pub const LEADING_ZONE: usize = 60;
 
 /// How many distinct tokens a query is allowed to contribute.
 pub const MAX_QUERY_TOKENS: usize = 8;
+
+/// The largest recency pool the tokenized search will fetch to re-rank.
+///
+/// The pool is what the ranker can even SEE: `search_by_content_tokenized`
+/// fetches the newest `N` matching rows and orders those, so a target outside
+/// the pool is unreachable however well it scores. Measured on the live store
+/// (#941), recall@10 by pool size: 50 → 0.075, 100 → 0.125, **200 → 0.150**,
+/// unlimited → 0.150. It saturates at 200, and the median AND-arm pool is 171,
+/// so 200 covers the typical case outright rather than truncating it.
+///
+/// This lives here, not in either caller, because the shipped search and the
+/// Track A harness must fetch the SAME pool — a harness that sizes its own
+/// pool measures a ranker the binary does not ship, which is the #911 defect
+/// this module exists to prevent.
+pub const TOKENIZED_FETCH_CAP: usize = 200;
+
+/// The recency pool to fetch for a caller that wants `limit` ranked rows.
+///
+/// Wide on purpose: [`TOKENIZED_FETCH_CAP`] is where recall stops improving,
+/// so a `k`-row request fetches that many candidates and re-ranks them down.
+/// A caller asking for more than the cap gets the cap (a 200-row re-rank is
+/// the documented bound, not an accident).
+#[must_use]
+pub fn tokenized_fetch_cap(limit: usize) -> i64 {
+    limit.saturating_mul(20).clamp(1, TOKENIZED_FETCH_CAP) as i64
+}
 
 /// The tokens a query contributes to the SQL `LIKE` arms: lowercased, sorted,
 /// deduped, capped at [`MAX_QUERY_TOKENS`].

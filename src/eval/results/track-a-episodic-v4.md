@@ -13,6 +13,12 @@ budget scored exactly what the budgeted ranker scored. A ranker that cannot beat
 itself given every row is not under-tuned — its feature set is exhausted. This
 card publishes the replacement signal.
 
+**Two corpora, kept apart.** The CI fixture is the seeded in-memory store the
+gate asserts against; the live numbers in this card come from a replica over the
+`ops` store, because `opencrabs eval recall --track A` could not be executed
+against a branch (CI is the compile authority). Every table below says which one
+it is.
+
 Dataset: seeded in-memory store, `seeded_store(1000)`, sampled over 14 days
 Corpus: **1,000 messages drawn from 8 topical clusters**, synthetic
 Queries: 40 positives + 20 negatives
@@ -70,20 +76,34 @@ direction is not a budget artefact.
 
 An independent measurement relayed from the lane that filed #941 put the same
 comparison at 0.097 → 0.516 on its own 40 cases and a 500-row pool — a 5.3×
-improvement. That figure was **not verified here** and is not reproduced by this
-replica; it is recorded because it is the same ratio on a different sample, and
-because it is the reason the signal was adopted.
+improvement. **That figure is WITHDRAWN.** It came from a probe carrying its own
+tokenizer (`len(raw) < 5` filter plus a hand-written stopword list), so it
+measured a ranker the binary does not ship. Re-measured through the shipped
+tokenizer and the shipped SQL arms the gain is the one in the table above, and
+the `0.613` headline in #941 is withdrawn for the same reason. Recorded here
+because the number circulated: a reader who finds it elsewhere should find the
+retraction beside it.
 
 ### Pool truncation now binds
 
-Under the old rule, truncating the recency pool made no difference (50 vs 5,000
-fetched: 0.100 → 0.100) — which is why #941 falsified it as an explanation for
-the misses. Under proximity it **does** bind: the budgeted arm reads 0.150 while
-the same scorer with the whole pool reads 0.225. A signal that ranks by position
-can promote a row from deep in the pool, so the pool's size becomes a term in
-the result. `fetch_cap` is left at `5 * k` (clamped to 200) in this change; the
-gap is reported, not closed, because widening the fetch is a separate cost
-decision with its own measurement.
+The probe that produced the withdrawn figures also reported pool truncation as
+irrelevant (50 vs 5,000 fetched: 0.100 → 0.100), and #941 was filed partly on
+that. **It is wrong**, and it was wrong because the probe never exercised the
+shipped pool. Measured properly — shipped tokenizer, shipped AND-arm, 14-day
+slice — the pool is a **second binding constraint**:
+
+| pool | old `(hits, leading, adjacency)` | new `(proximity, hits, …)` |
+|---|---|---|
+| 50 (old `5 * k`) | 0.000 | 0.075 |
+| 100 | 0.000 | 0.125 |
+| **200 (cap)** | 0.000 | **0.150** |
+| unlimited | 0.000 | 0.150 |
+
+The gain saturates exactly at 200 and the median AND-arm pool is 171, so the
+cap is not a truncation point in the typical case — it is the point past which
+the ranker has nothing left to see. `fetch_cap` is therefore **widened in this
+change** from `5 * k` to `tokenized_fetch_cap()`, which fetches the cap for any
+`k ≤ 10`.
 
 ## What changed
 
@@ -113,21 +133,26 @@ fields silently reorders every search result.
   Scoring that `0` would hand the tightest possible cluster to every half-match.
   This is what keeps "contains all the words, far apart" ahead of "contains one
   word, often".
-- Length normalisation was measured and is **worse**: `span/len` → 0.258,
-  `span/sqrt(len)` → 0.290, against 0.516 for the raw span. Dividing by length
-  over-rewards long messages. Raw span is the right form.
+- Length normalisation was measured on the withdrawn probe and read worse
+  (`span/len` → 0.258, `span/sqrt(len)` → 0.290). Raw span is what ships, but
+  treat those two figures as indicative only — same probe, same caveat as the
+  `0.516` above.
 - Proximity as a **tiebreak** changed nothing (0.097 → 0.097) because `hits`
   already separates the rows it would have reordered. It is primary or it is
   dead weight.
 
-Three hypotheses are recorded so nobody re-runs them, all falsified by
-measurement on the live store: pool truncation under the old rule (0.100 →
-0.100), BM25 (→ 0.150), and dropping low-idf query terms (→ 0.125).
+Two hypotheses are recorded so nobody re-runs them: BM25 (→ 0.150) and dropping
+low-idf query terms (→ 0.125), neither of which beats the kept form. The third
+that used to sit here — pool truncation "falsified" at 0.100 → 0.100 — is
+withdrawn: the pool DOES bind, as measured above, and widening it is part of
+this change.
 
 **Both call sites still share one function.** `search_by_content_tokenized` and
-`search_slice` continue to call `relevance::episodic::rank`; the rule was not
-forked, which was #911's whole point. `RANKER_LABEL` was updated to name the new
-order so the eval leg's published label matches what it grades.
+`search_slice` continue to call `relevance::episodic::rank`, and both now size
+their pool with `relevance::episodic::tokenized_fetch_cap` — the pool is a
+ranking input, so it gets the same one-home treatment as the rule. `RANKER_LABEL`
+was updated to name the new order so the eval leg's published label matches what
+it grades.
 
 ## The tests that fail without the change
 
