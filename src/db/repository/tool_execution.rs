@@ -284,6 +284,89 @@ impl ToolExecutionRepository {
         .context("Failed to sweep stale turn-journal rows")
     }
 
+    /// Close a journal row opened by [`record_started`] with the call's outcome.
+    ///
+    /// This is the completion half of the pre-dispatch journal (#974). It is
+    /// an UPDATE for the same reason [`update_outcome`] is: the row already
+    /// exists, and a second INSERT would either be ignored (leaving the row
+    /// reading `started` forever, which the boot reconciler would then report
+    /// as an unknown side effect) or double the call.
+    ///
+    /// Unlike [`update_outcome`] it also writes the columns `record` fills in
+    /// for its analytics rows — `provider`, `model`, `duration_ms` — because
+    /// the journal row IS this call's analytics row. Without them the Core
+    /// Tools card would lose every mutating call the moment journaling shipped.
+    ///
+    /// Returns the number of rows touched. `0` means the row never landed
+    /// (the name guard refused it), and there is nothing to correct.
+    pub async fn complete_started(
+        &self,
+        id: &str,
+        status: &str,
+        exit_code: Option<i32>,
+        provider: Option<&str>,
+        model: Option<&str>,
+        duration_ms: Option<i64>,
+    ) -> Result<usize> {
+        let id = id.to_string();
+        let status = status.to_string();
+        let provider = provider.map(|s| s.to_string());
+        let model = model.map(|s| s.to_string());
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
+            conn.execute(
+                "UPDATE tool_executions \
+                 SET status = ?2, exit_code = ?3, provider = ?4, model = ?5, duration_ms = ?6 \
+                 WHERE id = ?1",
+                params![id, status, exit_code, provider, model, duration_ms],
+            )
+        })
+        .await
+        .context("Failed to close a journaled tool execution")
+    }
+
+    /// Drop a journal row whose call never reached a tool (#974).
+    ///
+    /// A pre-execution miss — an unknown tool name, arguments that fail
+    /// validation — is a model error, not a call, and the analytics path
+    /// deliberately records nothing for it (#687). A journal row opened
+    /// before dispatch must therefore be removed, or it would read `unknown`
+    /// at boot and tell a resumed turn that a side effect of unknown state was
+    /// attempted. Restricted to `started` so a row that did report an outcome
+    /// can never be erased by this path.
+    pub async fn discard_started(&self, id: &str) -> Result<usize> {
+        let id = id.to_string();
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
+            conn.execute(
+                "DELETE FROM tool_executions WHERE id = ?1 AND status = ?2",
+                params![id, STATUS_STARTED],
+            )
+        })
+        .await
+        .context("Failed to discard a journaled tool execution that never dispatched")
+    }
+
+    /// Flip every row still reading `started` to `unknown` (#974).
+    ///
+    /// Run once at boot, before any interrupted turn is considered for
+    /// replay. A row only reads `started` between [`record_started`] and its
+    /// completion, and both happen inside one process — so at boot any such
+    /// row belongs to the process that just died, and whether its effect
+    /// reached the world is unknowable. The row is kept, not deleted: the
+    /// whole point is that the resumed turn can see what it started.
+    ///
+    /// Idempotent: a second boot finds nothing to flip. Returns the number of
+    /// rows reconciled.
+    pub async fn reconcile_started_to_unknown(&self) -> Result<usize> {
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
+            conn.execute(
+                "UPDATE tool_executions SET status = ?2 WHERE status = ?1",
+                params![STATUS_STARTED, STATUS_UNKNOWN],
+            )
+        })
+        .await
+        .context("Failed to reconcile interrupted journal rows")
+    }
+
     /// Write a detached run's terminal outcome back onto its row (#787).
     ///
     /// Returns the number of rows touched, and `0` is a MEANINGFUL answer: the

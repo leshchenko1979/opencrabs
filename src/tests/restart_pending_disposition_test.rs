@@ -28,9 +28,18 @@ use crate::db::repository::pending_request::PendingRequest;
 /// Seed one in-flight row and return the id used for it.
 async fn seed(repo: &PendingRequestRepository, session_id: Uuid, body: &str) -> Uuid {
     let id = Uuid::new_v4();
-    repo.insert(id, session_id, body, "tui", None, None, "user")
-        .await
-        .expect("seed a pending row");
+    repo.insert(
+        id,
+        session_id,
+        body,
+        "tui",
+        None,
+        None,
+        "user",
+        uuid::Uuid::new_v4(),
+    )
+    .await
+    .expect("seed a pending row");
     id
 }
 

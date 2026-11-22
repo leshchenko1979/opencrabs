@@ -46,6 +46,7 @@ async fn thirty_minute_old_turn_is_still_resumed() {
         None,
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -76,6 +77,7 @@ async fn day_old_debris_is_purged() {
         None,
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -104,6 +106,7 @@ async fn touch_keeps_a_very_long_turn_alive() {
         None,
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -134,6 +137,7 @@ async fn channel_scoped_query_has_same_age_semantics() {
         Some("123"),
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -148,6 +152,7 @@ async fn channel_scoped_query_has_same_age_semantics() {
         Some("123"),
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();

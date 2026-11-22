@@ -50,6 +50,7 @@ pub(crate) mod shutdown;
 pub(crate) mod tool_loop;
 pub(crate) mod tool_repeat;
 pub(crate) mod truncation;
+pub(crate) mod turn_journal;
 mod types;
 
 pub use builder::{AgentService, BrainRebuild};

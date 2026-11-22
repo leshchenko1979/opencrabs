@@ -31,6 +31,11 @@ pub struct PendingRequest {
     /// LLM turn, because re-running an interrupted tool call can double-execute
     /// side effects.
     pub origin: String,
+    /// The id this turn's tool journal is keyed by (#974). Boot joins it to
+    /// `tool_executions.turn_id` to ask what the interrupted turn started and
+    /// never saw finish. `None` for rows written before the column existed and
+    /// for turns that journaled nothing (a read-only turn).
+    pub turn_id: Option<String>,
 }
 
 /// Repository for pending request operations
@@ -44,7 +49,14 @@ impl PendingRequestRepository {
         Self { pool }
     }
 
-    /// Insert a new in-flight request
+    /// Insert a new in-flight request.
+    ///
+    /// `turn_id` is minted once at the tool loop's turn boundary and is also
+    /// stamped on every journal row that turn opens (#974) — persisting it
+    /// HERE is what lets boot join the two after a restart. It is written in
+    /// the same INSERT, never a follow-up UPDATE: a crash in between would
+    /// leave the turn's journal unjoinable, which is the one case the column
+    /// exists for.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert(
         &self,
@@ -55,6 +67,7 @@ impl PendingRequestRepository {
         channel_chat_id: Option<&str>,
         channel_thread_id: Option<&str>,
         origin: &str,
+        turn_id: Uuid,
     ) -> Result<()> {
         let id_s = id.to_string();
         let sid = session_id.to_string();
@@ -63,15 +76,16 @@ impl PendingRequestRepository {
         let cid = channel_chat_id.map(|s| s.to_string());
         let tid = channel_thread_id.map(|s| s.to_string());
         let orig = origin.to_string();
+        let turn = turn_id.to_string();
         self.pool
             .get()
             .await
             .context("Failed to get connection")?
             .interact(move |conn| {
                 conn.execute(
-                    "INSERT INTO pending_requests (id, session_id, user_message, channel, channel_chat_id, channel_thread_id, origin, status) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'PROCESSING')",
-                    params![id_s, sid, msg, ch, cid, tid, orig],
+                    "INSERT INTO pending_requests (id, session_id, user_message, channel, channel_chat_id, channel_thread_id, origin, turn_id, status) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'PROCESSING')",
+                    params![id_s, sid, msg, ch, cid, tid, orig, turn],
                 )
             })
             .await
@@ -123,7 +137,7 @@ impl PendingRequestRepository {
             .context("Failed to get connection")?
             .interact(move |conn| {
                 conn.prepare(
-                    "SELECT id, session_id, user_message, channel, channel_chat_id, channel_thread_id, origin \
+                    "SELECT id, session_id, user_message, channel, channel_chat_id, channel_thread_id, origin, turn_id \
                      FROM pending_requests WHERE session_id = ?1 \
                      ORDER BY created_at DESC LIMIT 1",
                 )?
@@ -136,6 +150,7 @@ impl PendingRequestRepository {
                         channel_chat_id: row.get("channel_chat_id")?,
                         channel_thread_id: row.get("channel_thread_id")?,
                         origin: row.get("origin")?,
+                        turn_id: row.get("turn_id")?,
                     })
                 })
                 .map(Some)
@@ -231,7 +246,7 @@ impl PendingRequestRepository {
                     [],
                 );
                 let mut stmt = conn.prepare(
-                    "SELECT id, session_id, user_message, channel, channel_chat_id, channel_thread_id, origin \
+                    "SELECT id, session_id, user_message, channel, channel_chat_id, channel_thread_id, origin, turn_id \
                      FROM pending_requests \
                      ORDER BY created_at ASC",
                 )?;
@@ -244,6 +259,7 @@ impl PendingRequestRepository {
                         channel_chat_id: row.get("channel_chat_id")?,
                         channel_thread_id: row.get("channel_thread_id")?,
                         origin: row.get("origin")?,
+                        turn_id: row.get("turn_id")?,
                     })
                 })?;
                 rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -270,7 +286,7 @@ impl PendingRequestRepository {
                     params![ch],
                 );
                 let mut stmt = conn.prepare(
-                    "SELECT id, session_id, user_message, channel, channel_chat_id, channel_thread_id, origin \
+                    "SELECT id, session_id, user_message, channel, channel_chat_id, channel_thread_id, origin, turn_id \
                      FROM pending_requests WHERE channel = ?1 \
                      ORDER BY created_at ASC",
                 )?;
@@ -283,6 +299,7 @@ impl PendingRequestRepository {
                         channel_chat_id: row.get("channel_chat_id")?,
                         channel_thread_id: row.get("channel_thread_id")?,
                         origin: row.get("origin")?,
+                        turn_id: row.get("turn_id")?,
                     })
                 })?;
                 rows.collect::<std::result::Result<Vec<_>, _>>()

@@ -910,6 +910,30 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
         );
     }
 
+    // #974: reconcile the tool journal before anything is replayed. A row
+    // still reading `started` was opened BEFORE its call was dispatched by the
+    // process that just died, so whether the effect reached the world is
+    // unknowable — the row is kept and stamped `unknown`, which is exactly
+    // what a resumed turn must be told. Done first so no replay decision below
+    // can read a `started` row as if the call were still in flight.
+    if let Some(pool) = crate::db::global_pool() {
+        let journal = crate::db::repository::ToolExecutionRepository::new(pool);
+        match journal.reconcile_started_to_unknown().await {
+            Ok(0) => {}
+            Ok(n) => tracing::warn!(
+                target: "background_task",
+                count = n,
+                "Reconciled {n} interrupted tool call(s) to 'unknown' — their side effects \
+                 may or may not have landed (#974)"
+            ),
+            Err(e) => tracing::error!(
+                target: "background_task",
+                "Could not reconcile the tool journal, so interrupted calls keep reading as \
+                 in-flight: {e:#}"
+            ),
+        }
+    }
+
     // Sub-agents first: they die with the process but their status files do
     // not, so every file still mid-flight is an agent that no longer exists.
     //

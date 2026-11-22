@@ -137,6 +137,18 @@ pub struct ToolExecutionContext {
     /// tools read this to hard-error instead of parking a verdict no one will
     /// ever see. `false` by default (interactive).
     pub headless: bool,
+
+    /// The agent-turn this execution belongs to (#974).
+    ///
+    /// Minted ONCE per turn at the tool loop's turn boundary and stamped here
+    /// by the same site that builds the rest of the context, so every call a
+    /// turn dispatches groups under one id. The safe-auto-resume journal
+    /// writes it onto the `tool_executions` row it opens BEFORE dispatch, and
+    /// the turn's `pending_requests` row carries the same value — that pair is
+    /// how boot joins an interrupted turn to the calls it started and never
+    /// saw finish. A context built outside the loop (a test, a one-shot tool
+    /// invocation) gets a fresh id of its own; nothing is journaled there.
+    pub turn_id: Uuid,
 }
 
 impl std::fmt::Debug for ToolExecutionContext {
@@ -174,6 +186,7 @@ impl ToolExecutionContext {
             world: None,
             parent_tool_registry: None,
             headless: false,
+            turn_id: Uuid::new_v4(),
         }
     }
 

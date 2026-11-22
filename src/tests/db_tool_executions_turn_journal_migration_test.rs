@@ -1,6 +1,6 @@
 //! Migration coverage for the safe-auto-resume turn journal.
 //!
-//! `20261122000001_add_tool_executions_turn_journal.sql` adds the two columns
+//! `20261122000002_add_tool_executions_turn_journal.sql` adds the two columns
 //! the journal row needs (`turn_id`, `arguments`) and the `status` index the
 //! boot reconciler reads. The repository tests in `tool_execution_repo_test`
 //! prove the methods work; these tests prove the SCHEMA they run against is

@@ -807,6 +807,13 @@ impl AgentService {
         // side effects.
         let pending_repo = crate::db::PendingRequestRepository::new(self.context.pool());
         let request_id = Uuid::new_v4();
+        // #974: one id per agent-turn, minted at the turn boundary and shared
+        // by every journal row this turn opens plus the pending row above.
+        // Boot joins the two after a restart to learn what the killed turn
+        // started and never saw finish. Minted OUTSIDE the provider-rotation
+        // loop below on purpose: a loop-detector kill hands the same turn to
+        // the next provider, and both attempts are one turn's work.
+        let turn_id = Uuid::new_v4();
         if let Some(origin) = track_origin
             && let Err(e) = pending_repo
                 .insert(
@@ -817,6 +824,7 @@ impl AgentService {
                     channel_chat_id,
                     channel_thread_id,
                     origin.as_db_str(),
+                    turn_id,
                 )
                 .await
         {
@@ -881,6 +889,7 @@ impl AgentService {
             let attempt = self
                 .run_tool_loop_inner(
                     session_id,
+                    turn_id,
                     user_message.clone(),
                     display_text_override.clone(),
                     model.clone(),
@@ -1050,6 +1059,7 @@ impl AgentService {
     async fn run_tool_loop_inner(
         &self,
         session_id: Uuid,
+        turn_id: Uuid,
         user_message: String,
         display_text_override: Option<String>,
         model: Option<String>,
@@ -1851,6 +1861,10 @@ impl AgentService {
         // #129 belt-and-braces: interactive-only tools check this flag and
         // hard-error instead of parking a verdict nobody sees.
         tool_context.headless = self.headless;
+        // #974: the turn this context dispatches for. Stamped here, beside the
+        // rest of the per-turn state, so every call the loop makes carries the
+        // same id the pending row was written with.
+        tool_context.turn_id = turn_id;
 
         // Tool execution loop
         let mut iteration = 0;
@@ -7537,6 +7551,28 @@ impl AgentService {
                                 let mut approved_tool_context = tool_context.clone();
                                 approved_tool_context.auto_approve = true; // User approved this execution
 
+                                // #974: journal a side-effecting call BEFORE dispatch,
+                                // so a turn killed mid-call leaves a `started` row
+                                // behind instead of vanishing. Read-only calls write
+                                // nothing — re-reading cannot duplicate an effect.
+                                let exec_repo = crate::db::global_pool().map(|p| {
+                                    crate::db::repository::ToolExecutionRepository::new(p.clone())
+                                });
+                                let journal_row = match exec_repo.as_ref() {
+                                    Some(repo) => {
+                                        super::turn_journal::open_call(
+                                            repo,
+                                            assistant_db_msg.id,
+                                            session_id,
+                                            turn_id,
+                                            &tool_name,
+                                            &tool_input,
+                                        )
+                                        .await
+                                    }
+                                    None => None,
+                                };
+
                                 // Execute the tool with approved context, racing against cancel
                                 // #1178 M1: set inside the Ok arm below when the tool ends the turn
                                 let mut halt_turn_requested = false;
@@ -7632,8 +7668,46 @@ impl AgentService {
                                             if success { None } else { Some(&content) },
                                         );
 
-                                        // Record tool execution for usage dashboard
-                                        if let Some(pool) = crate::db::global_pool() {
+                                        // #974: a journaled call's row was opened
+                                        // BEFORE dispatch — close it with the outcome
+                                        // rather than inserting a second row. A
+                                        // DETACHED call is the exception: its real
+                                        // outcome lands on a run-keyed row (#787),
+                                        // so the journal row is dropped instead of
+                                        // reported twice.
+                                        if let (Some(row_id), Some(repo)) =
+                                            (journal_row.as_deref(), exec_repo.as_ref())
+                                        {
+                                            if detached.is_some() {
+                                                super::turn_journal::spawn_discard(
+                                                    repo.clone(),
+                                                    row_id.to_string(),
+                                                );
+                                            } else {
+                                                super::turn_journal::spawn_close(
+                                                    repo.clone(),
+                                                    row_id.to_string(),
+                                                    success,
+                                                    exit_code,
+                                                    Some(
+                                                        self.provider_name_for_session(session_id),
+                                                    ),
+                                                    Some(
+                                                        self.provider_model_for_session(session_id),
+                                                    ),
+                                                    None,
+                                                );
+                                            }
+                                        }
+
+                                        // Record tool execution for usage dashboard.
+                                        // Skipped for a journaled call (its row already
+                                        // exists) unless the work DETACHED: that run's
+                                        // real outcome lands on a run-keyed row (#787),
+                                        // which is still owed.
+                                        if (journal_row.is_none() || detached.is_some())
+                                            && let Some(pool) = crate::db::global_pool()
+                                        {
                                             let tool_repo =
                                                 crate::db::repository::ToolExecutionRepository::new(
                                                     pool.clone(),
@@ -7669,15 +7743,20 @@ impl AgentService {
                                                     );
                                                 }
                                             });
+                                        }
 
-                                            // Audit READ row (#1705): only when the
-                                            // operator enabled recording AND this tool
-                                            // actually pulls external content into
-                                            // context. Gated BEFORE any repo work, so a
-                                            // disabled flag costs a bool check per call.
-                                            if self.audit_recording
-                                                && let Some(kind) = crate::db::repository::turn_retrieval::retrieval_kind(&tool_name)
-                                            {
+                                        // Audit READ row (#1705): only when the
+                                        // operator enabled recording AND this tool
+                                        // actually pulls external content into
+                                        // context. Gated BEFORE any repo work, so a
+                                        // disabled flag costs a bool check per call.
+                                        // Independent of the journal above (#974):
+                                        // the audit names what a turn RETRIEVED,
+                                        // which is orthogonal to what it wrote.
+                                        if self.audit_recording
+                                            && let Some(pool) = crate::db::global_pool()
+                                            && let Some(kind) = crate::db::repository::turn_retrieval::retrieval_kind(&tool_name)
+                                        {
                                                 let repo = crate::db::repository::TurnRetrievalRepository::new(pool.clone());
                                                 let rid = uuid::Uuid::new_v4().to_string();
                                                 let sid = session_id.to_string();
@@ -7709,7 +7788,6 @@ impl AgentService {
                                                         );
                                                     }
                                                 });
-                                            }
                                         }
 
                                         let output_summary: String = strip_ansi_output(&content)
@@ -7775,10 +7853,40 @@ impl AgentService {
                                                 Some(&err_msg),
                                             );
                                         }
+                                        // #974: a journaled call that never reached
+                                        // a tool is discarded (no effect to report,
+                                        // #687); one that failed after dispatch is
+                                        // closed with its error outcome.
+                                        if let (Some(row_id), Some(repo)) =
+                                            (journal_row.as_deref(), exec_repo.as_ref())
+                                        {
+                                            if e.is_pre_execution_miss() {
+                                                super::turn_journal::spawn_discard(
+                                                    repo.clone(),
+                                                    row_id.to_string(),
+                                                );
+                                            } else {
+                                                super::turn_journal::spawn_close(
+                                                    repo.clone(),
+                                                    row_id.to_string(),
+                                                    false,
+                                                    None,
+                                                    Some(
+                                                        self.provider_name_for_session(session_id),
+                                                    ),
+                                                    Some(
+                                                        self.provider_model_for_session(session_id),
+                                                    ),
+                                                    None,
+                                                );
+                                            }
+                                        }
                                         // Record tool execution for usage dashboard.
                                         // #687: skip pre-execution misses (unknown tool /
                                         // bad args) so garbage names don't pollute stats.
-                                        if !e.is_pre_execution_miss()
+                                        // #974: a journaled call already has its row.
+                                        if journal_row.is_none()
+                                            && !e.is_pre_execution_miss()
                                             && let Some(pool) = crate::db::global_pool()
                                         {
                                             let tool_repo =
@@ -7913,6 +8021,26 @@ impl AgentService {
                     }
                 }
 
+                // #974: journal a side-effecting call BEFORE dispatch — the
+                // same seam as the approval path above. Read-only calls write
+                // nothing.
+                let exec_repo = crate::db::global_pool()
+                    .map(|p| crate::db::repository::ToolExecutionRepository::new(p.clone()));
+                let journal_row = match exec_repo.as_ref() {
+                    Some(repo) => {
+                        super::turn_journal::open_call(
+                            repo,
+                            assistant_db_msg.id,
+                            session_id,
+                            turn_id,
+                            &tool_name,
+                            &tool_input,
+                        )
+                        .await
+                    }
+                    None => None,
+                };
+
                 // Execute the tool (no approval needed — mark context as approved
                 // so the registry's own approval check doesn't block it)
                 let mut approved_context = tool_context.clone();
@@ -8008,8 +8136,38 @@ impl AgentService {
                             if success { None } else { Some(&content) },
                         );
 
-                        // Record tool execution for usage dashboard
-                        if let Some(pool) = crate::db::global_pool() {
+                        // #974: close the row opened before dispatch instead
+                        // of inserting a second one — unless the work DETACHED,
+                        // in which case the run-keyed row below owns its real
+                        // outcome (#787) and the journal row is dropped.
+                        if let (Some(row_id), Some(repo)) =
+                            (journal_row.as_deref(), exec_repo.as_ref())
+                        {
+                            if detached.is_some() {
+                                super::turn_journal::spawn_discard(
+                                    repo.clone(),
+                                    row_id.to_string(),
+                                );
+                            } else {
+                                super::turn_journal::spawn_close(
+                                    repo.clone(),
+                                    row_id.to_string(),
+                                    success,
+                                    exit_code,
+                                    Some(self.provider_name_for_session(session_id)),
+                                    Some(self.provider_model_for_session(session_id)),
+                                    Some(tool_start.elapsed().as_millis() as i64),
+                                );
+                            }
+                        }
+
+                        // Record tool execution for usage dashboard.
+                        // Skipped for a journaled call (its row already
+                        // exists) unless the work DETACHED — that run's real
+                        // outcome lands on a run-keyed row (#787).
+                        if (journal_row.is_none() || detached.is_some())
+                            && let Some(pool) = crate::db::global_pool()
+                        {
                             let tool_repo =
                                 crate::db::repository::ToolExecutionRepository::new(pool.clone());
                             let exec_id = exec_row_id;
@@ -8098,10 +8256,34 @@ impl AgentService {
                                 Some(&err_msg),
                             );
                         }
+                        // #974: discard the journal row for a call that never
+                        // reached a tool; close it with the error otherwise.
+                        if let (Some(row_id), Some(repo)) =
+                            (journal_row.as_deref(), exec_repo.as_ref())
+                        {
+                            if e.is_pre_execution_miss() {
+                                super::turn_journal::spawn_discard(
+                                    repo.clone(),
+                                    row_id.to_string(),
+                                );
+                            } else {
+                                super::turn_journal::spawn_close(
+                                    repo.clone(),
+                                    row_id.to_string(),
+                                    false,
+                                    None,
+                                    Some(self.provider_name_for_session(session_id)),
+                                    Some(self.provider_model_for_session(session_id)),
+                                    Some(tool_start.elapsed().as_millis() as i64),
+                                );
+                            }
+                        }
                         // Record tool execution for usage dashboard.
                         // #687: skip pre-execution misses (unknown tool /
                         // bad args) so garbage names don't pollute stats.
-                        if !e.is_pre_execution_miss()
+                        // #974: a journaled call already has its row.
+                        if journal_row.is_none()
+                            && !e.is_pre_execution_miss()
                             && let Some(pool) = crate::db::global_pool()
                         {
                             let tool_repo =

@@ -1,0 +1,17 @@
+-- Safe auto-resume (#974): the turn id on the pending row.
+--
+-- `20261122000002_add_tool_executions_turn_journal.sql` added `turn_id` to
+-- `tool_executions`, where it groups the calls one agent-turn dispatched.
+-- The join key lives HERE: boot reads the surviving `pending_requests` row
+-- (the turn that was in flight when the process died), takes its `turn_id`,
+-- and asks the journal what that turn started and never saw finish. Without
+-- this column the two tables cannot be joined at all — `session_id` is too
+-- coarse (a session runs many turns) and the row ids are unrelated.
+--
+-- Nullable on purpose: rows written before this migration have no turn id,
+-- and a turn that never journaled anything (a read-only turn) has nothing to
+-- join to. A NULL means "no journal for this turn", not "unknown turn".
+--
+-- Not indexed: the read is `WHERE id = ?` on a table that only ever holds
+-- the in-flight turns of one process, so a full scan is a handful of rows.
+ALTER TABLE pending_requests ADD COLUMN turn_id TEXT;

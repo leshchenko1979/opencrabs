@@ -52,6 +52,11 @@ struct ToolOutcome {
     /// Set when this call's work left the turn (#808), read off `result`
     /// before `images` moves it — same constraint as `exit_code`.
     detached: Option<DetachedHandover>,
+    /// The journal row opened BEFORE dispatch, when the call is
+    /// side-effecting (#974). `None` for a read-only call and for a surface
+    /// with no database. Carried back so the in-order bookkeeping can CLOSE
+    /// the row it opened instead of inserting a second one.
+    journal_row: Option<String>,
 }
 
 /// What the batch produced, in original order.
@@ -160,10 +165,15 @@ impl super::AgentService {
             self.max_concurrent
         );
 
+        // #974: the journal seam, shared with the sequential paths. `None`
+        // when no database is wired (a test, a headless surface with no pool).
+        let exec_repo = crate::db::global_pool()
+            .map(|p| crate::db::repository::ToolExecutionRepository::new(p.clone()));
         let mut stream = futures::stream::iter(tool_uses.into_iter().map(
             |(tool_id, tool_name, tool_input)| {
                 let ctx = approved_context.clone();
                 let cb = progress_callback.cloned();
+                let repo = exec_repo.clone();
                 async move {
                     if let Some(ref cb) = cb {
                         cb(
@@ -174,6 +184,23 @@ impl super::AgentService {
                             },
                         );
                     }
+                    // #974: open the row BEFORE dispatch, per call, inside
+                    // the concurrent region — the same ordering guarantee the
+                    // sequential path gives.
+                    let journal_row = match repo.as_ref() {
+                        Some(repo) => {
+                            super::turn_journal::open_call(
+                                repo,
+                                assistant_msg_id,
+                                session_id,
+                                ctx.turn_id,
+                                &tool_name,
+                                &tool_input,
+                            )
+                            .await
+                        }
+                        None => None,
+                    };
                     let exec = self
                         .tool_registry
                         .execute(&tool_name, tool_input.clone(), &ctx)
@@ -198,6 +225,7 @@ impl super::AgentService {
                             ),
                             images: result.images,
                             pre_execution_miss: false,
+                            journal_row,
                         },
                         Err(e) => ToolOutcome {
                             tool_id,
@@ -214,6 +242,9 @@ impl super::AgentService {
                             exec_row_id: Uuid::new_v4().to_string(),
                             // No result exists, so nothing detached (#808).
                             detached: None,
+                            // A miss still opened its row before dispatch; the
+                            // bookkeeping discards it.
+                            journal_row,
                         },
                     };
                     // Completion event fires as each tool finishes (real-time
@@ -318,10 +349,35 @@ impl super::AgentService {
                     if o.success { None } else { Some(&o.content) },
                 );
             }
+            // #974: close the row opened before dispatch. A call that never
+            // reached a tool (a pre-execution miss) has its row discarded
+            // instead — there is no effect to report (#687) — and so does a
+            // DETACHED call, whose real outcome lands on a run-keyed row
+            // (#787): keeping both would count the call twice.
+            let journaled = o.journal_row.is_some();
+            if let (Some(row_id), Some(repo)) = (o.journal_row.as_deref(), exec_repo.as_ref()) {
+                if o.pre_execution_miss || o.detached.is_some() {
+                    super::turn_journal::spawn_discard(repo.clone(), row_id.to_string());
+                } else {
+                    super::turn_journal::spawn_close(
+                        repo.clone(),
+                        row_id.to_string(),
+                        o.success,
+                        o.exit_code,
+                        Some(self.provider_name_for_session(session_id)),
+                        Some(self.provider_model_for_session(session_id)),
+                        None,
+                    );
+                }
+            }
+
             // Record tool execution for usage dashboard.
             // #687: skip pre-execution misses (unknown tool / bad args)
             // so garbage names don't pollute stats.
+            // #974: a journaled call already has its row, unless the work
+            // detached — that run's outcome lands on a run-keyed row (#787).
             if !o.pre_execution_miss
+                && (!journaled || o.detached.is_some())
                 && let Some(pool) = crate::db::global_pool()
             {
                 let tool_repo = crate::db::repository::ToolExecutionRepository::new(pool.clone());
@@ -356,49 +412,52 @@ impl super::AgentService {
                         tracing::error!("[TOOL_EXEC] Failed to record tool execution: {}", e);
                     }
                 });
+            }
 
-                // Audit READ row (#1705), parallel twin of the sequential
-                // site: same flag gate + read-class filter BEFORE any repo
-                // work, so an off flag costs a bool check per call.
-                if self.audit_recording
-                    && let Some(kind) =
-                        crate::db::repository::turn_retrieval::retrieval_kind(&o.tool_name)
-                {
-                    let repo = crate::db::repository::TurnRetrievalRepository::new(pool.clone());
-                    let rid = Uuid::new_v4().to_string();
-                    let sid = session_id.to_string();
-                    let mid = assistant_msg_id.to_string();
-                    let tname = o.tool_name.clone();
-                    let target = crate::db::repository::turn_retrieval::audit_target(
-                        &o.tool_name,
-                        &o.tool_input,
-                    )
-                    .unwrap_or_else(|| "unknown".to_string());
-                    let hash = {
-                        use sha2::{Digest, Sha256};
-                        let mut h = Sha256::new();
-                        h.update(o.content.as_bytes());
-                        format!("{:x}", h.finalize())
-                    };
-                    let preview: String = o.content.chars().take(128).collect();
-                    tokio::spawn(async move {
-                        if let Err(e) = repo
-                            .record_retrieval(
-                                &rid,
-                                &sid,
-                                &mid,
-                                &tname,
-                                kind,
-                                &target,
-                                Some(&hash),
-                                Some(&preview),
-                            )
-                            .await
-                        {
-                            tracing::error!("[AUDIT] Failed to record turn retrieval: {e}");
-                        }
-                    });
-                }
+            // Audit READ row (#1705), parallel twin of the sequential
+            // site: same flag gate + read-class filter BEFORE any repo
+            // work, so an off flag costs a bool check per call. Independent
+            // of the journal above (#974): the audit names what a turn
+            // RETRIEVED, which is orthogonal to what it wrote.
+            if self.audit_recording
+                && let Some(pool) = crate::db::global_pool()
+                && let Some(kind) =
+                    crate::db::repository::turn_retrieval::retrieval_kind(&o.tool_name)
+            {
+                let repo = crate::db::repository::TurnRetrievalRepository::new(pool.clone());
+                let rid = Uuid::new_v4().to_string();
+                let sid = session_id.to_string();
+                let mid = assistant_msg_id.to_string();
+                let tname = o.tool_name.clone();
+                let target = crate::db::repository::turn_retrieval::audit_target(
+                    &o.tool_name,
+                    &o.tool_input,
+                )
+                .unwrap_or_else(|| "unknown".to_string());
+                let hash = {
+                    use sha2::{Digest, Sha256};
+                    let mut h = Sha256::new();
+                    h.update(o.content.as_bytes());
+                    format!("{:x}", h.finalize())
+                };
+                let preview: String = o.content.chars().take(128).collect();
+                tokio::spawn(async move {
+                    if let Err(e) = repo
+                        .record_retrieval(
+                            &rid,
+                            &sid,
+                            &mid,
+                            &tname,
+                            kind,
+                            &target,
+                            Some(&hash),
+                            Some(&preview),
+                        )
+                        .await
+                    {
+                        tracing::error!("[AUDIT] Failed to record turn retrieval: {e}");
+                    }
+                });
             }
             let output_summary: String = strip_ansi_output(&o.content).chars().take(2000).collect();
             out.outputs.push((o.success, output_summary));

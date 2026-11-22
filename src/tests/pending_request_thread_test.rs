@@ -26,6 +26,7 @@ async fn pending_request_round_trips_origin_thread() {
         Some("-1004428873948"),
         Some("249"),
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -55,6 +56,7 @@ async fn legacy_row_without_thread_reads_back_none() {
         Some("7711740248"),
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -85,6 +87,7 @@ async fn thread_survives_in_interrupted_scan() {
         Some("-100"),
         Some("7198"),
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();

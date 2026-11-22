@@ -237,6 +237,10 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // carries would be read as ALREADY APPLIED on every box that has it. #964's
     // `…000001` keeps its slot; this appends after it.
     include_str!("../migrations/20261122000002_add_tool_executions_turn_journal.sql"),
+    // #974: the turn id on the pending row — the join key boot uses to ask
+    // the journal what an interrupted turn started and never saw finish.
+    // `…000003` for the same positional reason as the entry above.
+    include_str!("../migrations/20261122000003_add_pending_requests_turn_id.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

@@ -388,9 +388,18 @@ async fn pending_requests_created_and_cleared() {
     let session_id = uuid::Uuid::new_v4();
 
     // Create a pending request (simulates agent start)
-    repo.insert(id, session_id, "test message", "tui", None, None, "user")
-        .await
-        .unwrap();
+    repo.insert(
+        id,
+        session_id,
+        "test message",
+        "tui",
+        None,
+        None,
+        "user",
+        uuid::Uuid::new_v4(),
+    )
+    .await
+    .unwrap();
 
     // Should show up as interrupted
     let interrupted = repo.get_interrupted().await.unwrap();
@@ -424,6 +433,7 @@ async fn pending_requests_deduplicate_by_session() {
         None,
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -435,6 +445,7 @@ async fn pending_requests_deduplicate_by_session() {
         None,
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -468,6 +479,7 @@ async fn pending_request_stores_channel_and_chat_id() {
         Some("-100123456"),
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -498,6 +510,7 @@ async fn pending_request_channel_chat_id_is_optional() {
         None,
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -530,6 +543,7 @@ async fn pending_requests_multi_channel_coexistence() {
         None,
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -541,6 +555,7 @@ async fn pending_requests_multi_channel_coexistence() {
         Some("-100999"),
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -552,6 +567,7 @@ async fn pending_requests_multi_channel_coexistence() {
         Some("123456789"),
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -563,6 +579,7 @@ async fn pending_requests_multi_channel_coexistence() {
         Some("C01ABC"),
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -603,9 +620,18 @@ async fn pending_requests_delete_ids() {
     let id2 = uuid::Uuid::new_v4();
     let id3 = uuid::Uuid::new_v4();
 
-    repo.insert(id1, uuid::Uuid::new_v4(), "msg1", "tui", None, None, "user")
-        .await
-        .unwrap();
+    repo.insert(
+        id1,
+        uuid::Uuid::new_v4(),
+        "msg1",
+        "tui",
+        None,
+        None,
+        "user",
+        uuid::Uuid::new_v4(),
+    )
+    .await
+    .unwrap();
     repo.insert(
         id2,
         uuid::Uuid::new_v4(),
@@ -614,6 +640,7 @@ async fn pending_requests_delete_ids() {
         Some("123"),
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -625,6 +652,7 @@ async fn pending_requests_delete_ids() {
         Some("456"),
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -655,6 +683,7 @@ async fn pending_requests_delete_ids_empty_is_noop() {
         None,
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -685,6 +714,7 @@ async fn pending_request_delete_removes_single_request() {
         Some("111"),
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
@@ -696,6 +726,7 @@ async fn pending_request_delete_removes_single_request() {
         Some("222"),
         None,
         "user",
+        uuid::Uuid::new_v4(),
     )
     .await
     .unwrap();
