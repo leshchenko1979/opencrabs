@@ -136,7 +136,8 @@ fn proximity_orders_rows_at_equal_hits_leading_and_adjacency() {
 
     // Newest first, as `ORDER BY created_at DESC` delivers them: the WRONG row
     // leads the input, so only the ranker can fix it.
-    let far = format!("{LONG_LEAD_IN}deploy{}flaky", " ".repeat(3_000));
+    let wide_gap = " ".repeat(3_000);
+    let far = format!("{LONG_LEAD_IN}deploy{wide_gap}flaky");
     let near = format!("{LONG_LEAD_IN}deploy flaky");
     let rows = vec![far.clone(), near.clone()];
 
@@ -197,9 +198,11 @@ fn a_row_missing_a_query_term_never_outranks_a_full_match() {
     let terms = episodic::query_terms("deploy flaky");
 
     // Ten occurrences of "deploy", none of "flaky": a big hit count, no span.
-    let partial = format!("{LONG_LEAD_IN}{}", "deploy ".repeat(10));
+    let ten_deploys = "deploy ".repeat(10);
+    let partial = format!("{LONG_LEAD_IN}{ten_deploys}");
     // Both terms, once each, 3,000 characters apart: the worst FULL span.
-    let full = format!("{LONG_LEAD_IN}deploy{}flaky", " ".repeat(3_000));
+    let wide_gap = " ".repeat(3_000);
+    let full = format!("{LONG_LEAD_IN}deploy{wide_gap}flaky");
 
     let partial_score = episodic::score(&partial, &terms);
     let full_score = episodic::score(&full, &terms);
