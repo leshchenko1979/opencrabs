@@ -259,12 +259,19 @@ impl ToolExecutionRepository {
             .context("Failed to read a turn's unknown calls")
     }
 
-    /// The calls of a whole SESSION that were started and never reported an
-    /// outcome. Same two statuses as [`Self::unknown_for_turn`], keyed on
-    /// `session_id` instead: the resumed-turn prompt builder knows only the
-    /// session, and pre-#974 pending rows carry a NULL `turn_id` — a
-    /// turn-scoped digest would be blind to exactly the legacy rows this
-    /// feature exists to cover. Ordered as the turn read is.
+    /// The calls of a whole SESSION whose effect is UNKNOWN — the reconciler's
+    /// receipt, never a live `started` row. A row still reading `started` was
+    /// opened before its call was dispatched by the process that died, so only
+    /// the boot reconciler ([`Self::reconcile_started_to_unknown`], which runs
+    /// before any replay decision) may stamp it `unknown`: a resume decision
+    /// built here — the park gate and the resumed-turn digest — must not
+    /// assume an in-flight call is an interrupted one (the park-gate test's
+    /// `started` control pins this). Unlike [`Self::unknown_for_turn`], whose
+    /// mid-turn read DOES include started rows, this is keyed on `session_id`
+    /// because the prompt builder knows only the session, and pre-#974
+    /// pending rows carry a NULL `turn_id` — a turn-scoped digest would be
+    /// blind to exactly the legacy rows this feature exists to cover. Ordered
+    /// oldest first.
     pub async fn unknown_for_session(&self, session_id: &str) -> Result<Vec<UnknownToolCall>> {
         let session_id = session_id.to_string();
         self.pool
@@ -274,17 +281,16 @@ impl ToolExecutionRepository {
             .interact(move |conn| {
                 let mut stmt = conn.prepare_cached(
                     "SELECT id, tool_name, arguments FROM tool_executions \
-                     WHERE session_id = ?1 AND status IN (?2, ?3) \
+                     WHERE session_id = ?1 AND status = ?2 \
                      ORDER BY created_at ASC, id ASC",
                 )?;
-                let rows =
-                    stmt.query_map(params![session_id, STATUS_STARTED, STATUS_UNKNOWN], |r| {
-                        Ok(UnknownToolCall {
-                            id: r.get(0)?,
-                            tool_name: r.get(1)?,
-                            arguments: r.get(2)?,
-                        })
-                    })?;
+                let rows = stmt.query_map(params![session_id, STATUS_UNKNOWN], |r| {
+                    Ok(UnknownToolCall {
+                        id: r.get(0)?,
+                        tool_name: r.get(1)?,
+                        arguments: r.get(2)?,
+                    })
+                })?;
                 rows.collect::<std::result::Result<Vec<_>, _>>()
             })
             .await
