@@ -695,6 +695,21 @@ impl AgentService {
             // the resolver's WARN names what was substituted.
             let manifest =
                 crate::brain::agent::service::context::resolve_context_manifest(marker_text);
+            // #947: the marker just deleted every skill body this session had
+            // READ but never ACTIVATED, so re-injection (which reads ACTIVE
+            // only) had nothing to restore and the lane carried on without the
+            // instructions it believes it holds. Promote the read set FIRST,
+            // so the summariser's explicit decisions below still win: a
+            // `discard_skills` entry overrides the mechanical promotion.
+            let promoted = crate::brain::tools::seen_skills::promote_seen_to_active(session_id);
+            if !promoted.is_empty() {
+                tracing::info!(
+                    "compaction: promoted {} read skill(s) SEEN->ACTIVE so their bodies survive \
+                     the marker: {:?}",
+                    promoted.len(),
+                    promoted
+                );
+            }
             for discard_slug in manifest.discard_skills {
                 self.unregister_active_skill(session_id, &discard_slug);
             }

@@ -11,7 +11,8 @@
 //!   the filename form `<slug>.md` (#138), and slash invocation (#138).
 //! - **ACTIVE** — which skills the session currently holds active, i.e. the
 //!   set that drives per-turn body RE-INJECTION and feeds the same stamp.
-//!   Written by `register_active_skill` / `unregister_active_skill`.
+//!   Written by `register_active_skill` / `unregister_active_skill`, and by
+//!   [`promote_seen_to_active`] at the compaction boundary (#947).
 //!
 //! Persistence (#138): every mutation best-effort writes its
 //! `session_seen_skills` row — `record()` for the seen path, `set_active()`
@@ -27,6 +28,16 @@
 //! only, because a read-counted skill must not be re-injected on top of the
 //! read already present in conversation history. The compaction stamp is the
 //! UNION of both.
+//!
+//! **That reason has a boundary, and #947 is it.** It holds only while the
+//! read is still in the history. Compaction deletes the read — the exact
+//! moment re-injection becomes necessary — so the justification for keeping
+//! the body out of the prompt evaporates there. [`promote_seen_to_active`]
+//! is the repair: at the marker the session's SEEN set is promoted into
+//! ACTIVE, so a skill loaded with a plain `read_file` (which fires
+//! `mark_seen` and never `mark_active`) survives compaction instead of being
+//! replaced by the summariser's paraphrase of it. The registries stay
+//! separate in the steady state; the boundary is the one place they meet.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -524,6 +535,38 @@ pub fn active_for_session(session_id: Uuid) -> HashSet<String> {
         .get(&session_id)
         .cloned()
         .unwrap_or_default()
+}
+
+/// Promote everything this session has SEEN into the ACTIVE set (#947),
+/// returning the slugs that were actually newly promoted.
+///
+/// The SEEN/ACTIVE split exists so a read-counted skill is not re-injected
+/// on top of the read already sitting in conversation history. Compaction
+/// DELETES that read — the exact boundary at which re-injection becomes
+/// necessary — so the justification for keeping the body out of the prompt
+/// evaporates there. A lane that loads its role file with a plain `read_file`
+/// fires `mark_seen` and never `mark_active`, which made it invisible to
+/// re-injection by construction: after the marker it worked from the
+/// summariser's paraphrase of instructions it no longer held.
+///
+/// Deliberately SEEN-only. The auxiliary registry is excluded: reading a
+/// skill's auxiliary file alone does not mean the session ever held the
+/// BODY (the gate says as much), so promoting on it would inject tens of KB
+/// nobody asked for. `stamp_skills_for_session` still unions all three for
+/// the advisory stamp; promotion is narrower because it has a per-turn cost.
+///
+/// Generic by construction — it promotes whatever the session read, and
+/// knows no skill, role-file or factory name.
+pub fn promote_seen_to_active(session_id: Uuid) -> Vec<String> {
+    let already_active = active_for_session(session_id);
+    let promoted: Vec<String> = seen_for_session(session_id)
+        .into_iter()
+        .filter(|slug| !already_active.contains(slug))
+        .collect();
+    for slug in &promoted {
+        mark_active(session_id, slug);
+    }
+    promoted
 }
 
 /// The skill set for the compaction inventory stamp (#138 part 2): the

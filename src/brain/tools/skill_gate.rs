@@ -4,7 +4,7 @@
 //! Cursor-style opt-in enforcement for skills: a `SKILL.md` that declares
 //! a `globs:` frontmatter field guards its own topic. When the agent
 //! attempts a tool call that references a path matching one of those
-//! globs, and the skill body is NOT loaded (seen) in the current session
+//! globs, and the skill body is NOT loaded in the current session
 //! context — fresh sessions AND post-compaction (owner decision
 //! 2026-09-10) — the call is rejected with a bounded NOTICE
 //! (`gate_block_message`), not the body (#405). The notice names the
@@ -167,6 +167,13 @@ pub fn check(
     if skills.is_empty() {
         return GateVerdict::Pass;
     }
+    // #947: ACTIVE is now a second reason a body is in context. Compaction
+    // promotes the read set to ACTIVE and bumps the seen epoch, which makes
+    // `seen_since_compaction` false for exactly the skills whose bodies are
+    // being re-injected every turn — so a gate reading the epoch alone would
+    // block on a skill that is present in the prompt. Read the set once, not
+    // once per candidate.
+    let active = seen_skills::active_for_session(session_id);
     let candidates = harvest_candidates(tool_name, input, cwd);
     if candidates.is_empty() {
         return GateVerdict::Pass;
@@ -190,7 +197,12 @@ pub fn check(
             };
             for candidate in &candidates {
                 if pattern.matches_path_with(candidate, options) {
-                    if seen_skills::seen_since_compaction(session_id, &skill.name) {
+                    // #947: either registry entry means the body is available —
+                    // SEEN since the last marker, or ACTIVE (promoted at the
+                    // marker, re-injected every turn thereafter).
+                    if seen_skills::seen_since_compaction(session_id, &skill.name)
+                        || active.contains(&skill.name)
+                    {
                         return GateVerdict::Pass;
                     }
                     return GateVerdict::Block {

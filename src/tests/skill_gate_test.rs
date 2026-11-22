@@ -41,6 +41,10 @@ fn verdict_with_skills_opts(
     if !enabled || headless || skills.is_empty() || EXEMPT_TOOLS.contains(&tool) {
         return GateVerdict::Pass;
     }
+    // #947: the ACTIVE leg — a body promoted at the compaction boundary is
+    // re-injected every turn, so it is in context even though the seen epoch
+    // was bumped by the same marker. Keep this in step with `check`.
+    let active = seen_skills::active_for_session(session);
     let candidates = harvest_candidates(tool, &input, std::path::Path::new("/work"));
     for s in &skills {
         for g in &s.globs {
@@ -54,7 +58,9 @@ fn verdict_with_skills_opts(
             };
             for c in &candidates {
                 if pattern.matches_path_with(c, options) {
-                    if seen_skills::seen_since_compaction(session, &s.name) {
+                    if seen_skills::seen_since_compaction(session, &s.name)
+                        || active.contains(&s.name)
+                    {
                         return GateVerdict::Pass;
                     }
                     return GateVerdict::Block {
