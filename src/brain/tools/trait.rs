@@ -291,9 +291,10 @@ impl ToolResult {
     /// Anything other than an explicit `"true"` means no request, so a
     /// malformed or absent value can never force an unexpected compaction.
     pub fn requests_compaction(&self) -> bool {
-        self.metadata
-            .get("compact_requested")
-            .is_some_and(|v| v == "true")
+        matches!(
+            self.metadata.get("compact_requested").map(String::as_str),
+            Some("true")
+        )
     }
 
     /// The process exit code this result carries, when the tool ran one (#763).
