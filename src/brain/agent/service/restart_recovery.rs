@@ -976,7 +976,7 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
     // what a resumed turn must be told. Done first so no replay decision below
     // can read a `started` row as if the call were still in flight.
     if let Some(pool) = crate::db::global_pool() {
-        let journal = crate::db::repository::ToolExecutionRepository::new(pool);
+        let journal = crate::db::repository::ToolExecutionRepository::new(pool.clone());
         match journal.reconcile_started_to_unknown().await {
             Ok(0) => {}
             Ok(n) => tracing::warn!(
