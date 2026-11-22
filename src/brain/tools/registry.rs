@@ -413,8 +413,8 @@ impl ToolRegistry {
             // epoch, so the identical re-issued call passes.
             super::seen_skills::mark_seen(context.session_id, &skill);
             // Resolve the skill's own source file here and pass it IN: the
-            // formatter stays pure, and a built-in skill (`None`) is still
-            // covered by the `load_brain_file` route it names.
+            // formatter stays pure, and a skill with no file on disk (`None`)
+            // is still covered by the `load_brain_file` route it names.
             let source_path = crate::brain::skills::resolve_skill_path(&skill);
             let content = super::skill_gate::gate_block_message(
                 &skill,

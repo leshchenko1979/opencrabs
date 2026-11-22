@@ -26,9 +26,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::channels::telegram::state::TelegramState;
 use teloxide::Bot;
 
-/// Signature of every skill the command catalog can currently see. Builtins
-/// are embedded in the binary and cannot change at runtime, so only the
-/// on-disk overlays are hashed.
+/// Signature of every skill the command catalog can currently see. Built-ins
+/// live beside the executable and change only when an install replaces them —
+/// and an install bounces the daemon, which republishes the menu anyway — so
+/// only the per-profile on-disk overlays are hashed here.
 pub(crate) fn skills_signature() -> u64 {
     skills_signature_from(
         &crate::brain::skills::user_skills_dir(),

@@ -125,8 +125,9 @@ pub(crate) fn gate_block_message(
         ),
         None => format!(
             "Reload the complete body with load_brain_file '{}' (exempt from \
-             this gate; it also takes query= for a section-filtered reload). This \
-             skill is compiled in, so there is no file on disk to read.",
+             this gate; it also takes query= for a section-filtered reload). No \
+             file on disk was found for this skill, so it can only be reloaded \
+             through the loader.",
             skill
         ),
     };

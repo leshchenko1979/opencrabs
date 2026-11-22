@@ -87,10 +87,15 @@ These are NOT written to by RSI. If feedback relates to content in a user-create
 
 | Source | Location | Resolution order |
 |--------|----------|-----------------|
-| Built-in (7) | Embedded in binary at compile time | Loaded first |
-| User | `~/.opencrabs/skills/<name>/SKILL.md` | Overrides built-in of same name |
+| Built-in (8) | `skills/<name>/SKILL.md` beside the executable | Loaded first |
+| Project | `~/.opencrabs/projects/<project>/skills/<name>/SKILL.md` | Overrides built-in of same name |
+| User | `~/.opencrabs/skills/<name>/SKILL.md` | Overrides both |
 
-Built-in skills: `cost-estimate`, `security-audit`, `repo-audit`, `browser-cdp`, `a2a-gateway`, `dynamic-tools`.
+The built-in bodies are data, not compiled-in strings: the repo's source of truth is
+`src/docs/reference/templates/skills/`, the release archives and the deploy artifact carry that
+tree as `skills/` next to the binary, and the installer extracts it there. Resolution is relative
+to the executable, so one install serves every profile and an operator can read, diff or override
+a built-in without a rebuild.
 
 Format: YAML frontmatter (`name`, `description`, optional `review_gate: true`) + prompt body. The harness loads all skills and injects them into the system prompt as a skills section. A skill declaring `review_gate: true` gets a review-gate reminder prepended to its body on slash invocation: the agent presents the skill's output and waits for explicit user approval before any side effects, even under tool auto-approve — typing the slash is the user choosing to review first (natural-language requests that never touch the slash keep the usual flow). `/drop-release` is the first consumer.
 

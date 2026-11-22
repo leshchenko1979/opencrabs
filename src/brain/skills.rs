@@ -1,39 +1,48 @@
-//! Skill loader — embedded built-in skills with user-directory overlay.
+//! Skill loader — built-in skills shipped beside the executable, with
+//! user-directory overlays.
 //!
 //! Skills are workflow templates: a `name`, a `description` (read by the
 //! LLM to decide when to invoke), and a `body` (the actual instructions).
-//! Format follows the de-facto `SKILL.md` convention used by Claude Code,
+//! Format follows the de-facto `SKILL.md` convention used by [CC],
 //! Anthropic managed agents, and OpenClaw — YAML frontmatter at the top
 //! of the file, followed by the prompt body.
 //!
 //! Layout:
 //!
 //! ```text
-//! ~/.opencrabs/skills/
+//! <exe_dir>/skills/            ← built-ins, extracted by the installer
 //! └── <skill-name>/
-//!     └── SKILL.md          ← user-owned, overrides any built-in of the same name
+//!     └── SKILL.md
+//!
+//! ~/.opencrabs/skills/         ← user-owned, overrides any built-in of the same name
+//! └── <skill-name>/
+//!     └── SKILL.md
 //! ```
 //!
-//! The repo ships a curated set of built-ins under
-//! `src/docs/reference/templates/skills/<name>/SKILL.md`, embedded at
-//! compile time via `include_str!`. The user directory at
-//! `~/.opencrabs/skills/` is purely user-owned (per `TOOLS.md`); writes
-//! never come from the binary.
+//! The repo's source of truth for the built-in set is
+//! `src/docs/reference/templates/skills/<name>/SKILL.md`. The release archives
+//! and the deploy artifact carry that tree as `skills/` next to the binary, and
+//! the installer extracts it there — so the bodies are data on disk, not bytes
+//! compiled into the executable. An operator can read, diff and edit them
+//! without a rebuild, and they are visible to `ls` on the directory the docs
+//! point at. The directory is resolved from `std::env::current_exe()`, never a
+//! compiled-in path, so one install serves every profile.
 //!
 //! ## Resolution order
 //!
 //! 1. `~/.opencrabs/skills/<name>/SKILL.md` — user override
-//! 2. embedded built-in
+//! 2. `<exe_dir>/skills/<name>/SKILL.md` — built-in
 //!
-//! A user file with a malformed frontmatter falls back to the built-in
-//! (with a warning), so a broken local edit cannot brick the skill.
+//! A user file with a malformed frontmatter is skipped with a warning, so the
+//! built-in it was meant to override still loads: a broken local edit cannot
+//! brick the skill.
 //!
 //! ## Frontmatter
 //!
 //! ```markdown
 //! ---
-//! name: security-audit
-//! description: Comprehensive security and CVE audit. Triggers on ...
+//! name: example-skill
+//! description: One line the LLM reads to decide when to invoke this.
 //! ---
 //!
 //! Body of the skill...
@@ -44,51 +53,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-
-/// Compile-time table of built-in skills shipped with the binary.
-///
-/// To add a new built-in, drop a `SKILL.md` under
-/// `src/docs/reference/templates/skills/<name>/` and add a line here.
-const BUILTIN_SKILLS: &[(&str, &str)] = &[
-    (
-        "cost-estimate",
-        include_str!("../docs/reference/templates/skills/cost-estimate/SKILL.md"),
-    ),
-    (
-        "security-audit",
-        include_str!("../docs/reference/templates/skills/security-audit/SKILL.md"),
-    ),
-    (
-        "repo-audit",
-        include_str!("../docs/reference/templates/skills/repo-audit/SKILL.md"),
-    ),
-    (
-        "browser-cdp",
-        include_str!("../docs/reference/templates/skills/browser-cdp/SKILL.md"),
-    ),
-    (
-        "a2a-gateway",
-        include_str!("../docs/reference/templates/skills/a2a-gateway/SKILL.md"),
-    ),
-    (
-        "dynamic-tools",
-        include_str!("../docs/reference/templates/skills/dynamic-tools/SKILL.md"),
-    ),
-    (
-        "github",
-        include_str!("../docs/reference/templates/skills/github/SKILL.md"),
-    ),
-    (
-        "multi-agent",
-        include_str!("../docs/reference/templates/skills/multi-agent/SKILL.md"),
-    ),
-];
-
-/// The built-in table, exposed for tests (#990). Asserting through
-/// `load_all_skills` cannot do this job: it merges built-ins with the user's
-/// own `~/.opencrabs/skills/`, so a missing built-in is masked on any machine
-/// that happens to carry a user copy of the same name.
-pub const BUILTIN_SKILLS_FOR_TEST: &[(&str, &str)] = BUILTIN_SKILLS;
 
 /// Where this skill came from. Used by the TUI to badge built-ins
 /// differently from user-installed ones in the autocomplete dropdown.
@@ -507,27 +471,109 @@ where
     out
 }
 
+/// Directory the installer lays the built-in skills down in: `<exe_dir>/skills/`.
+///
+/// Resolved from `std::env::current_exe()` on purpose. A compiled-in path would
+/// bind the binary to the machine that built it, and a home-relative path would
+/// bind it to one profile; the executable's own directory is the one location
+/// that follows the install and serves every profile on the host.
+pub fn builtin_skills_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.join("skills"))
+}
+
+/// Warn once per process when the built-in sidecar is missing.
+///
+/// Once, not per call: `load_all_skills` runs on every turn that has an active
+/// skill, so a missing install would otherwise flood the log with the same
+/// line. A silent miss is the defect this loader exists to avoid, so the line
+/// must still appear.
+fn warn_builtin_skills_missing(dir: &Path) {
+    static WARNED: OnceLock<()> = OnceLock::new();
+    if WARNED.set(()).is_ok() {
+        tracing::warn!(
+            "skills: built-in skills dir {} not found — no built-in skills are available. \
+             Release archives and the deploy artifact carry `skills/`; the installer must \
+             extract it next to the binary.",
+            dir.display()
+        );
+    }
+}
+
+/// Read one root of `<root>/<name>/SKILL.md` skill directories into `into`.
+///
+/// The three tiers differ only in root and provenance, so they share this scan.
+fn scan_skill_root(
+    root: &Path,
+    source: SkillSource,
+    label: &str,
+    into: &mut std::collections::BTreeMap<String, Skill>,
+) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let skill_path = path.join("SKILL.md");
+        if !skill_path.exists() {
+            continue;
+        }
+        let raw = match std::fs::read_to_string(&skill_path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    "skills: failed to read {label} skill '{name}' at {}: {e}",
+                    skill_path.display()
+                );
+                continue;
+            }
+        };
+        match Skill::parse(name, &raw, source) {
+            Ok(mut skill) => {
+                skill.auxiliary_files = discover_aux_files(&path);
+                into.insert(skill.name.clone(), skill);
+            }
+            Err(e) => {
+                tracing::warn!("skills: {label} skill '{name}' has bad frontmatter: {e}");
+            }
+        }
+    }
+}
+
 /// Load every available skill (built-ins + project overlays + user overlays).
 ///
 /// Resolution order (last writer wins):
-/// 1. Built-in skills shipped with the binary
+/// 1. Built-in skills from `<exe_dir>/skills/` — see [`builtin_skills_dir`]
 /// 2. Project-specific skills from `~/.opencrabs/projects/*/skills/`
 /// 3. User profile overlay from `~/.opencrabs/skills/`
 ///
 /// Skills with broken frontmatter are skipped with a warning rather than
 /// aborting the load.
 pub fn load_all_skills() -> Vec<Skill> {
+    load_all_skills_from(builtin_skills_dir().as_deref())
+}
+
+/// [`load_all_skills`] with the built-in root passed in.
+///
+/// Production resolves it from the executable ([`builtin_skills_dir`]); tests
+/// point it at the repo's `src/docs/reference/templates/skills/` — the tree the
+/// release archives and the deploy artifact copy from — so they assert against
+/// the shipping mechanism instead of a constant table.
+pub fn load_all_skills_from(builtin_dir: Option<&Path>) -> Vec<Skill> {
     let mut by_name: std::collections::BTreeMap<String, Skill> = std::collections::BTreeMap::new();
 
-    // 1. Built-ins
-    for (name, raw) in BUILTIN_SKILLS {
-        match Skill::parse(name, raw, SkillSource::Builtin) {
-            Ok(skill) => {
-                by_name.insert(skill.name.clone(), skill);
-            }
-            Err(e) => {
-                tracing::error!("skills: built-in '{name}' failed to parse: {e}");
-            }
+    // 1. Built-ins: <exe_dir>/skills/<name>/SKILL.md
+    if let Some(dir) = builtin_dir {
+        if dir.is_dir() {
+            scan_skill_root(dir, SkillSource::Builtin, "built-in", &mut by_name);
+        } else {
+            warn_builtin_skills_missing(dir);
         }
     }
 
@@ -535,85 +581,17 @@ pub fn load_all_skills() -> Vec<Skill> {
     let projects_dir = crate::services::ProjectService::projects_dir();
     if let Ok(projects) = std::fs::read_dir(&projects_dir) {
         for project_entry in projects.flatten() {
-            let skills_dir = project_entry.path().join("skills");
-            if !skills_dir.is_dir() {
-                continue;
-            }
-            if let Ok(entries) = std::fs::read_dir(&skills_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if !path.is_dir() {
-                        continue;
-                    }
-                    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                        continue;
-                    };
-                    let skill_path = path.join("SKILL.md");
-                    if !skill_path.exists() {
-                        continue;
-                    }
-                    let raw = match std::fs::read_to_string(&skill_path) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::warn!(
-                                "skills: failed to read project skill '{name}' at {}: {e}",
-                                skill_path.display()
-                            );
-                            continue;
-                        }
-                    };
-                    match Skill::parse(name, &raw, SkillSource::User) {
-                        Ok(mut skill) => {
-                            skill.auxiliary_files = discover_aux_files(&path);
-                            by_name.insert(skill.name.clone(), skill);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "skills: project skill '{name}' has bad frontmatter: {e}"
-                            );
-                        }
-                    }
-                }
-            }
+            scan_skill_root(
+                &project_entry.path().join("skills"),
+                SkillSource::User,
+                "project",
+                &mut by_name,
+            );
         }
     }
 
     // 3. User profile overlay: ~/.opencrabs/skills/<name>/SKILL.md
-    let dir = user_skills_dir();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            let skill_path = path.join("SKILL.md");
-            if !skill_path.exists() {
-                continue;
-            }
-            let raw = match std::fs::read_to_string(&skill_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(
-                        "skills: failed to read user skill '{name}' at {}: {e}",
-                        skill_path.display()
-                    );
-                    continue;
-                }
-            };
-            match Skill::parse(name, &raw, SkillSource::User) {
-                Ok(mut skill) => {
-                    skill.auxiliary_files = discover_aux_files(&path);
-                    by_name.insert(skill.name.clone(), skill);
-                }
-                Err(e) => {
-                    tracing::warn!("skills: user skill '{name}' has bad frontmatter: {e}");
-                }
-            }
-        }
-    }
+    scan_skill_root(&user_skills_dir(), SkillSource::User, "user", &mut by_name);
 
     by_name.into_values().collect()
 }
@@ -624,9 +602,12 @@ pub fn resolve_skill(name: &str) -> Option<Skill> {
     load_all_skills().into_iter().find(|s| s.name == name)
 }
 
-/// Locate the on-disk file path for a skill (#210).
-/// User skills overlay takes precedence over project skills.
-/// Built-in skills return `None` (they are compiled into the binary).
+/// Locate the on-disk file path for a skill.
+///
+/// Same precedence as [`load_all_skills`]: the user overlay wins over a project
+/// overlay, which wins over the built-in sidecar beside the executable. Every
+/// tier is a real file now, so an operator can open whatever this returns —
+/// including a built-in.
 pub fn resolve_skill_path(slug: &str) -> Option<PathBuf> {
     let slug = normalize_skill_slug(slug);
 
@@ -651,11 +632,13 @@ pub fn resolve_skill_path(slug: &str) -> Option<PathBuf> {
         }
     }
 
-    None
+    // 3. Built-in sidecar beside the executable: <exe_dir>/skills/<name>/SKILL.md
+    let builtin_path = builtin_skills_dir()?.join(&slug).join("SKILL.md");
+    builtin_path.is_file().then_some(builtin_path)
 }
 
 /// Retrieve the filesystem modification timestamp (`mtime` as unix epoch seconds)
-/// for a skill's on-disk `SKILL.md` file (#210). Returns `None` for built-in or missing skills.
+/// for a skill's on-disk `SKILL.md` file. Returns `None` for a missing skill.
 pub fn skill_file_mtime(slug: &str) -> Option<u64> {
     let path = resolve_skill_path(slug)?;
     let metadata = std::fs::metadata(&path).ok()?;

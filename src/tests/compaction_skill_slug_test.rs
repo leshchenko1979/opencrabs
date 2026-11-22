@@ -79,15 +79,21 @@ fn normalize_skill_slug_handles_degenerate_input() {
 /// `slash_name` that normalises back to it. This is the invariant that makes
 /// the documented manifest spelling work — if `name` ever carried a sigil,
 /// the matcher would break again.
+///
+/// Reads the shipped `skills/` tree through the loader rather than a constant
+/// table: the built-in bodies are data beside the executable now, so the table
+/// would be asserting a mechanism that no longer reaches a user.
 #[test]
-fn builtin_skill_names_are_canonical_bare_slugs() {
-    let mut checked = 0usize;
-    for (raw_name, raw) in crate::brain::skills::BUILTIN_SKILLS_FOR_TEST {
-        // A built-in that fails to parse is skipped by `load_all_skills`
-        // (with an error log), so tolerate it here and assert on the rest.
-        let Ok(s) = Skill::parse(raw_name, raw, SkillSource::Builtin) else {
-            continue;
-        };
+fn shipped_skill_names_are_canonical_bare_slugs() {
+    let skills = crate::tests::skills_test::load_shipped_skills();
+    assert_eq!(
+        skills.len(),
+        8,
+        "the sidecar must ship all eight built-ins, got {:?}",
+        skills.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+    for s in skills {
+        assert_eq!(s.source, SkillSource::Builtin);
         assert!(
             !s.name.starts_with('/'),
             "skill name must be the bare slug, got {:?}",
@@ -100,9 +106,7 @@ fn builtin_skill_names_are_canonical_bare_slugs() {
             "slash_name must normalise back to name for {:?}",
             s.name
         );
-        checked += 1;
     }
-    assert!(checked > 0, "no built-in skills parsed — test is vacuous");
 }
 
 // --- the defect, inverted -------------------------------------------------

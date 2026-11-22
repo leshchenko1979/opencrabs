@@ -1,7 +1,26 @@
-//! Tests for the skill loader — frontmatter parsing, built-in registry,
+//! Tests for the skill loader — frontmatter parsing, the built-in sidecar,
 //! and user-directory overlay.
 
-use crate::brain::skills::{Skill, SkillSource, load_all_skills, resolve_skill};
+use crate::brain::skills::{
+    Skill, SkillSource, load_all_skills, load_all_skills_from, resolve_skill,
+};
+
+/// The repo's built-in skill source of truth: the tree the release archives and
+/// the deploy artifact copy into `skills/` beside the binary.
+///
+/// Tests read it directly because the built-in bodies are no longer compiled
+/// into the executable. Production resolves `<exe_dir>/skills/`; a test binary's
+/// exe dir is a cargo target directory, not an install, so pointing the loader
+/// at this tree is how a test exercises the same disk-read path an install does.
+pub(crate) fn shipped_skills_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/docs/reference/templates/skills")
+}
+
+/// Load every skill with the built-in tier pointed at the shipped tree, the way
+/// an install resolves it. Overlays still come from the active profile home.
+pub(crate) fn load_shipped_skills() -> Vec<Skill> {
+    load_all_skills_from(Some(shipped_skills_dir().as_path()))
+}
 
 #[test]
 fn parses_minimal_frontmatter() {
@@ -86,9 +105,12 @@ fn body_preserves_internal_blank_lines_and_markdown() {
 }
 
 #[test]
-fn builtin_security_audit_loads_via_resolver() {
-    // The compile-time embedded security-audit skill must always resolve.
-    let skill = resolve_skill("security-audit").expect("built-in 'security-audit' must exist");
+fn builtin_security_audit_loads_from_the_shipped_sidecar() {
+    // The sidecar's security-audit skill must always resolve, from disk.
+    let skill = load_shipped_skills()
+        .into_iter()
+        .find(|s| s.name == "security-audit")
+        .expect("built-in 'security-audit' must exist");
     assert_eq!(skill.source, SkillSource::Builtin);
     assert!(
         skill.description.to_lowercase().contains("security"),
@@ -98,8 +120,11 @@ fn builtin_security_audit_loads_via_resolver() {
 }
 
 #[test]
-fn builtin_cost_estimate_loads_via_resolver() {
-    let skill = resolve_skill("cost-estimate").expect("built-in 'cost-estimate' must exist");
+fn builtin_cost_estimate_loads_from_the_shipped_sidecar() {
+    let skill = load_shipped_skills()
+        .into_iter()
+        .find(|s| s.name == "cost-estimate")
+        .expect("built-in 'cost-estimate' must exist");
     assert_eq!(skill.source, SkillSource::Builtin);
     assert!(skill.description.to_lowercase().contains("cost"));
 }
@@ -184,7 +209,7 @@ fn parses_folded_strip_indicator_scalar_description() {
 
 #[test]
 fn load_all_includes_every_builtin() {
-    let skills = load_all_skills();
+    let skills = load_shipped_skills();
     let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains(&"security-audit"), "names: {:?}", names);
     assert!(names.contains(&"cost-estimate"), "names: {:?}", names);
@@ -251,50 +276,100 @@ async fn profile_skill_is_discovered_under_its_own_profile_only() {
     );
 }
 
-// --- Built-in registration guard (#990) ------------------------------------
+// --- Built-in sidecar guards -----------------------------------------------
 
-/// Every skill shipped under the templates directory is registered in
-/// `BUILTIN_SKILLS`, and therefore actually reaches users.
+/// Every directory under the templates tree is a skill the installer will
+/// publish, and every one of them must load.
 ///
-/// `multi-agent` sat in the templates directory for a full release cycle
-/// without a `BUILTIN_SKILLS` entry, so it shipped in the repo and loaded for
-/// nobody. The doc comment above that table already said to add a line when
-/// dropping in a `SKILL.md`; prose is not a gate, so this is the gate.
+/// The templates tree IS the built-in set now — the release archive and the
+/// deploy artifact copy it verbatim into `skills/`, and the loader reads
+/// whatever is there. So the failure this guards is a `SKILL.md` that is
+/// present but unparseable: it would ship in the archive and silently vanish
+/// from every profile on the host, which is exactly the "shipped but loads for
+/// nobody" shape the old name-list guard existed for.
 ///
-/// Note that `load_all_includes_every_builtin` above does not cover this
-/// despite its name: it asserts two skills by name, so a builtin nobody wrote
-/// an assertion for stays invisible.
-///
-/// Asserts against `BUILTIN_SKILLS` directly rather than `load_all_skills()`.
-/// The latter merges built-ins with the user's own `~/.opencrabs/skills/`, so
-/// a developer carrying a user copy of the same skill sees the test pass while
-/// the built-in is still missing. The first version of this test did exactly
-/// that and passed with the fix reverted.
+/// The name must also match the directory: the directory is what an operator
+/// sees, and a mismatch makes `/name` and the on-disk path disagree.
 #[test]
-fn every_shipped_skill_template_is_registered_as_a_builtin() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/docs/reference/templates/skills");
+fn every_shipped_skill_template_parses_and_names_its_own_dir() {
+    let dir = shipped_skills_dir();
     let entries = std::fs::read_dir(&dir).expect("templates skills dir reads");
 
-    let names: Vec<&str> = crate::brain::skills::BUILTIN_SKILLS_FOR_TEST
-        .iter()
-        .map(|(n, _)| *n)
-        .collect();
-
+    let mut checked = 0usize;
     for entry in entries.flatten() {
         if !entry.path().is_dir() {
             continue;
         }
-        if !entry.path().join("SKILL.md").exists() {
-            continue;
-        }
         let dir_name = entry.file_name().to_string_lossy().to_string();
-        assert!(
-            names.contains(&dir_name.as_str()),
-            "{dir_name} ships under templates/skills but is not in BUILTIN_SKILLS, \
-             so it reaches no user. BUILTIN_SKILLS: {names:?}"
+        let raw = std::fs::read_to_string(entry.path().join("SKILL.md"))
+            .unwrap_or_else(|e| panic!("{dir_name} has no readable SKILL.md: {e}"));
+        let skill = Skill::parse(&dir_name, &raw, SkillSource::Builtin)
+            .unwrap_or_else(|e| panic!("{dir_name}/SKILL.md does not parse: {e}"));
+        assert_eq!(
+            skill.name, dir_name,
+            "{dir_name}/SKILL.md declares name {:?} — the frontmatter name must match \
+             the directory, or the shipped slug and the on-disk path disagree",
+            skill.name
         );
+        assert!(
+            !skill.description.is_empty(),
+            "{dir_name} declares no description, so the LLM cannot decide when to invoke it"
+        );
+        assert!(!skill.body.is_empty(), "{dir_name} has an empty body");
+        checked += 1;
     }
+    assert!(
+        checked > 0,
+        "no skills under {} — test is vacuous",
+        dir.display()
+    );
+}
+
+/// A clean profile — no `~/.opencrabs/skills/`, no project overlays — still
+/// loads all eight built-ins, badged `Builtin`.
+///
+/// This is the install contract: the bodies live in `skills/` beside the
+/// executable, so a fresh profile that has never written a skill directory must
+/// still see the whole set, and the TUI badge must attribute them to the
+/// built-in tier rather than to the user overlay.
+#[tokio::test]
+async fn clean_profile_loads_all_eight_builtins_from_the_sidecar() {
+    use crate::config::profile::{home_for_profile, with_profile_home_async};
+
+    let profile = format!("test-builtins-{}", uuid::Uuid::new_v4());
+
+    let skills = with_profile_home_async(Some(&profile), async {
+        let home = crate::config::opencrabs_home();
+        assert!(
+            !home.join("skills").exists(),
+            "fixture is not clean: {} already exists",
+            home.join("skills").display()
+        );
+        load_shipped_skills()
+    })
+    .await;
+
+    let _ = std::fs::remove_dir_all(home_for_profile(Some(&profile)));
+
+    let builtins: Vec<&str> = skills
+        .iter()
+        .filter(|s| s.source == SkillSource::Builtin)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(
+        builtins,
+        vec![
+            "a2a-gateway",
+            "browser-cdp",
+            "cost-estimate",
+            "dynamic-tools",
+            "github",
+            "multi-agent",
+            "repo-audit",
+            "security-audit",
+        ],
+        "a clean profile must load exactly the eight shipped built-ins"
+    );
 }
 
 // --- globs frontmatter (issue #150) ---

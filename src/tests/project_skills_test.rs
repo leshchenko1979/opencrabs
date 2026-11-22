@@ -4,7 +4,7 @@
 //! `~/.opencrabs/projects/<slug>/skills/<name>/SKILL.md` in addition to
 //! the built-in and user profile layers.
 
-use crate::brain::skills::{SkillSource, load_all_skills, resolve_skill};
+use crate::brain::skills::{SkillSource, load_all_skills};
 use crate::config::profile::{home_for_profile, with_profile_home_async};
 use crate::services::ProjectService;
 use crate::services::file::slugify_project_name;
@@ -105,10 +105,17 @@ User-level deploy.
     );
 }
 
-/// Built-in skills still resolve when no project or user overlays exist.
+/// Built-in skills still load when no project or user overlays exist.
+///
+/// The built-ins are read from the `skills/` tree beside the executable, not
+/// from a compiled-in table, so the assertion goes through the same loader an
+/// install runs — pointed at the shipped tree, which is what the archive and
+/// the deploy artifact carry.
 #[test]
 fn builtins_still_resolve_without_overlays() {
-    let skill = resolve_skill("security-audit");
+    let skill = crate::tests::skills_test::load_shipped_skills()
+        .into_iter()
+        .find(|s| s.name == "security-audit");
     assert!(skill.is_some());
     assert_eq!(skill.unwrap().source, SkillSource::Builtin);
 }
