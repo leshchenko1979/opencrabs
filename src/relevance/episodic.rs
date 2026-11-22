@@ -34,24 +34,57 @@
 //! merely contains both. Occurrence counts are identical in the two cases, so
 //! `hits` cannot see the difference.
 //!
-//! Measured through the SHIPPED semantics — same tokenizer, same 14-day slice,
-//! 18,231 messages, 40 positives / 20 negatives — proximity takes recall@10
-//! from 0.000 to 0.075 at the old `5 * k` pool and to 0.150 at the
-//! [`TOKENIZED_FETCH_CAP`] pool this module now sizes. So the signal is real
-//! AND the pool was a second binding constraint, which is why both moved.
+//! Measured on a 14-day slice of the `ops` store (18,820 messages, 40
+//! positives, k = 10, [`TOKENIZED_FETCH_CAP`] pool) proximity takes recall@10
+//! from 0.000 to **0.150 (6/40)**, MRR 0.061. That figure is a REPLICA: the
+//! box cannot build, so it comes from a Python sweep over the same store with
+//! the same SQL arms, NOT from the shipped leg. The shipped leg has not
+//! re-measured since #941 landed, and the next card that publishes a live
+//! number should come from a build.
 //!
-//! Two figures that circulated in this doc and on #941 are WITHDRAWN: a
-//! `0.097 → 0.516` proximity gain, and the pool falsification that rode with
-//! it (`50 vs 5,000 fetched: 0.100 → 0.100`). Both came from a probe carrying
-//! its own tokenizer (`len < 5` filter plus a hand-written stopword list), so
-//! they measured a ranker the binary does not ship — and the pool conclusion
-//! was flatly wrong, as the sweep above shows. Length-normalised forms were
-//! measured on that same probe and read worse (0.258 for `span/len`, 0.290 for
-//! `span/sqrt(len)`); the raw span is what ships, but treat those two numbers
-//! as indicative only for the same reason.
+//! # Length normalisation: measured, and rejected
 //!
-//! BM25 and dropping the query's low-idf terms were also tried and did not
-//! beat the kept form. Unlike the pool, neither is a constraint worth moving.
+//! The obvious objection to a raw character span is length bias — a 4,000-char
+//! row can put its terms 4,000 chars apart, a 200-char row only 200. It is a
+//! real objection and it was measured rather than argued, over the same 40
+//! cases and the same fetched pools as the raw figure above:
+//!
+//! | span definition | recall@10 | MRR |
+//! |---|---|---|
+//! | raw, first occurrences (SHIPPED) | **0.150** (6/40) | **0.061** |
+//! | `span / content length` | 0.075 (3/40) | 0.020 |
+//! | `span / sqrt(content length)` | 0.125 (5/40) | 0.045 |
+//! | `span / word count` | 0.075 (3/40) | 0.013 |
+//! | inverse hits-per-word | 0.075 (3/40) | 0.010 |
+//!
+//! Every normalised form is WORSE, and the diagnostic says why: on this corpus
+//! the gold rows are **shorter** than the rows they compete with — mean 28,748
+//! characters against a pool mean of 115,595 over the 24 ranker-reachable
+//! cases. Dividing by length therefore penalises the gold twice: it already
+//! wins on absolute span, and the divisor then shrinks that win. The bias is
+//! real; the corpus has it pointed the other way, so the "correction" removes
+//! signal. `src/eval/results/track-a-episodic-v5.md` carries the full sweep.
+//!
+//! Other span SHAPES were measured in the same pass and all lost: closest pair
+//! of occurrences 0.025, the minimal window covering every term 0.050 (in
+//! words) / 0.025 (in characters), anchoring on the rarest term 0.050. One
+//! variant did beat the shipped form — requiring a WHOLE-WORD occurrence,
+//! 0.175 (7/40) — but it wins by a single case out of forty and it would make
+//! the ranker's notion of "contains the term" stricter than the `LIKE` arms
+//! that fetched the row, so a row matched only by substring would score
+//! [`NO_PROXIMITY`]. That is the fetch/rank drift this module exists to
+//! prevent, so the shipped span stays a substring match.
+//!
+//! Two figures that circulated in this doc and on #941 remain WITHDRAWN: a
+//! `0.097 → 0.516` proximity gain and the `0.613` headline. Both came from a
+//! probe carrying its own tokenizer (`len < 5` filter plus a hand-written
+//! stopword list), so they measured a ranker the binary does not ship. The
+//! pool "falsification" that rode with them (`50 vs 5,000 fetched: 0.100 →
+//! 0.100`) is also withdrawn: the pool DOES bind, as [`tokenized_fetch_cap`]
+//! documents.
+//!
+//! BM25 and dropping the query's low-idf terms were tried on that same probe
+//! and did not beat the kept form. Neither is a constraint worth moving.
 //!
 //! The two older signals still rank below `hits`, where they cost nothing and
 //! still break its remaining ties:
@@ -95,6 +128,18 @@ pub const MAX_QUERY_TOKENS: usize = 8;
 /// (#941), recall@10 by pool size: 50 → 0.075, 100 → 0.125, **200 → 0.150**,
 /// unlimited → 0.150. It saturates at 200, and the median AND-arm pool is 171,
 /// so 200 covers the typical case outright rather than truncating it.
+///
+/// A replica measurement on a later 14-day slice puts the same cap in a
+/// sharper light: of the 24 cases that reach the ranker, the gold sits inside
+/// the newest 200 rows in 17 and outside it in 7 (at positions 282, 355, 453,
+/// 550, 727, 873 and 1,247). So the cap is not a truncation point for the
+/// TYPICAL pool — it is one for the fat tail, and those 7 cases are unreachable
+/// through this path at any `k`. The resulting ceiling for this path is
+/// (0 short-circuit + 17)/40 = 0.425, against 0.600 if the pool were
+/// unlimited; see `track-a-episodic-v5.md`. The cap is left at 200 because
+/// widening it was measured to buy nothing on the average case and costs
+/// linear scan time, and because 0.425 is still above the 0.40 bar while the
+/// ranker's actual 0.150 is not — the gap is ordering, not fetching.
 ///
 /// This lives here, not in either caller, because the shipped search and the
 /// Track A harness must fetch the SAME pool — a harness that sizes its own
@@ -253,8 +298,20 @@ fn score_lower(content: &str, terms: &[String]) -> Score {
 /// "First occurrence" is deliberate. A row that mentions `deploy` twice, the
 /// second time next to `flaky`, is not about the pair any more than one that
 /// mentions it once — the span is where the query's words FIRST come together
-/// or it is nothing. Using the closest pair of occurrences instead was not
-/// measured and is not what this returns.
+/// or it is nothing. Using the closest pair of occurrences instead was
+/// measured and read far worse (recall@10 0.025 against 0.150), so it is not
+/// what this returns.
+///
+/// The span is ABSOLUTE, not divided by the row's length, and that is a
+/// measured choice rather than an oversight: every normalised form scored
+/// lower (see the module docs). The bias a divisor would correct exists, but
+/// on the corpus this was tuned against the gold rows are shorter than their
+/// competitors, so the divisor takes away more signal than bias it removes.
+///
+/// A row's length therefore enters only through the positions themselves: two
+/// rows whose query terms are equally far apart in absolute characters tie
+/// here however differently long they are. `span_ignores_row_length` and
+/// `length_bias_ranks_the_shorter_row_no_worse` pin that.
 ///
 /// [`NO_PROXIMITY`] when a non-empty term is missing: a partial match has no
 /// span, and scoring it `0` would hand the tightest possible value to every

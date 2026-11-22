@@ -258,8 +258,211 @@ fn hits_breaks_a_proximity_tie() {
     );
 }
 
-/// Edge cases that would otherwise panic or silently return a constant.
+/// The length-bias objection, pinned as a CHOICE rather than left implicit.
+///
+/// Two rows put their query terms the SAME absolute distance apart — one
+/// space, so the same 7-character span — but one is more than ten times longer
+/// than the other. The shipped span is absolute, so the two scores are
+/// IDENTICAL and the ranker keeps the order it was given. That equality IS the
+/// claim: a length divisor anywhere in `proximity` would separate these two
+/// rows and this test would fail.
+///
+/// The measured reason the divisor is not there is in the module docs — every
+/// normalised form scored worse (0.075 for `span/len`, 0.125 for
+/// `span/sqrt(len)`, against 0.150 for the raw span), because on the tuned
+/// corpus the gold rows are shorter than their neighbours, so dividing by
+/// length removes signal rather than bias.
 #[test]
+fn span_ignores_row_length() {
+    let terms = episodic::query_terms("deploy flaky");
+
+    // Same terms, same one-space gap, both outside the opening zone.
+    let short = format!("{LONG_LEAD_IN}deploy flaky");
+    // The SAME text with neutral filler appended AFTER the last term: the
+    // span, the hit count and the adjacency run are untouched; only length
+    // changes. Filler must not contain a query term or it moves `hits`.
+    let filler = "the rollback finished quietly and nothing else moved ".repeat(40);
+    let long = format!("{short}{filler}");
+
+    assert!(
+        long.len() > short.len() * 10,
+        "precondition: the second row must be an order of magnitude longer: {} vs {}",
+        long.len(),
+        short.len()
+    );
+
+    let short_score = episodic::score(&short, &terms);
+    let long_score = episodic::score(&long, &terms);
+    assert_eq!(
+        short_score, long_score,
+        "an absolute span must not see row length at all: {short_score:?} vs {long_score:?}"
+    );
+
+    // Non-vacuous, and it records WHICH WAY the declined correction would go:
+    // dividing by length would prefer the long row here by an order of
+    // magnitude, because the same absolute gap is a far smaller fraction of a
+    // long row. That is a real reordering, not a rounding difference.
+    let span = short_score.proximity.0;
+    let short_ratio = span as f64 / short.len() as f64;
+    let long_ratio = span as f64 / long.len() as f64;
+    assert!(
+        short_ratio > long_ratio * 10.0,
+        "a length divisor would reorder these rows ({short_ratio} vs {long_ratio}) — \
+         the shipped rule declines that correction deliberately"
+    );
+
+    // At a full tie the stable sort keeps the caller's recency order, which is
+    // the documented fallback: length buys neither row a position.
+    let rows = vec![long.clone(), short.clone()];
+    assert_eq!(
+        episodic::rank(rows.clone(), &terms, String::as_str),
+        rows,
+        "at equal absolute tightness neither row may be promoted by its length"
+    );
+}
+
+/// The ordering the shipped rule actually implements, stated so that changing
+/// it is a decision rather than an accident: at the SAME RELATIVE tightness —
+/// the span as a fraction of the row — the shorter row ranks NO WORSE. Under
+/// an absolute span it ranks strictly better, because the same fraction of a
+/// smaller row is a smaller number of characters.
+///
+/// The two rows are built so the ratios are EXACTLY equal (checked by integer
+/// cross-multiplication, no floats), so a length-normalised ranker would tie
+/// them and could not produce the order asserted here. Both rows contain each
+/// term once, neither term is in the opening zone, and the adjacency run is 2
+/// in both, so `hits`, `leading` and `adjacency` all tie and proximity is the
+/// only field that can order them.
+#[test]
+fn length_bias_ranks_the_shorter_row_no_worse() {
+    let terms = episodic::query_terms("deploy flaky");
+    let gap_short = 40usize;
+
+    let short = format!("{LONG_LEAD_IN}deploy{}{}", " ".repeat(gap_short), "flaky");
+    // span = len("deploy") + gap, so 20× the short span needs
+    // 20 * (6 + gap_short) - 6 characters of gap.
+    let span_short = "deploy".len() + gap_short;
+    let gap_long = 20 * span_short - "deploy".len();
+    let long_body = format!("{LONG_LEAD_IN}deploy{}{}", " ".repeat(gap_long), "flaky");
+    // Pad the tail so the long row is EXACTLY 20× the short one — that is what
+    // makes span/length identical for the two, so a divisor would tie them.
+    let target = 20 * short.len();
+    assert!(
+        target > long_body.len(),
+        "the long row must be padded, not truncated"
+    );
+    let long = format!("{long_body}{}", " ".repeat(target - long_body.len()));
+
+    let short_score = episodic::score(&short, &terms);
+    let long_score = episodic::score(&long, &terms);
+
+    assert_eq!(
+        (short_score.hits, short_score.leading, short_score.adjacency),
+        (long_score.hits, long_score.leading, long_score.adjacency),
+        "precondition: hits, leading and adjacency must TIE, or proximity is not \
+         what decided it: {short_score:?} vs {long_score:?}"
+    );
+
+    let span_long = span_short * 20;
+    assert_eq!(
+        short_score.proximity,
+        Reverse(span_short),
+        "{short_score:?}"
+    );
+    assert_eq!(long_score.proximity, Reverse(span_long), "{long_score:?}");
+
+    // Same relative tightness, exactly: span_short / len_short == span_long / len_long.
+    assert_eq!(
+        span_short * long.len(),
+        span_long * short.len(),
+        "precondition: the two rows must be equally TIGHT relative to their own \
+         length, so only an absolute span can separate them"
+    );
+
+    assert!(
+        short_score.proximity > long_score.proximity,
+        "the shorter row must rank NO WORSE — here strictly better: \
+         {short_score:?} vs {long_score:?}"
+    );
+
+    // Newest-first input, as SQL returns it: the wrong row leads, so a ranker
+    // that kept the input order would fail this.
+    let rows = vec![long.clone(), short.clone()];
+    let ranked = episodic::rank(rows.clone(), &terms, String::as_str);
+    assert_eq!(
+        ranked.first().map(String::as_str),
+        Some(short.as_str()),
+        "at equal relative tightness the shorter row must lead; got {ranked:?}"
+    );
+    assert_ne!(
+        ranked, rows,
+        "the output equals the input order — nothing fired"
+    );
+}
+
+/// [`NO_PROXIMITY`] is the SMALLEST value, so a row missing a term sorts last
+/// even when every tiebreak field is maximal. This is the pure-ordering form of
+/// the guard `a_row_missing_a_query_term_never_outranks_a_full_match` asserts
+/// at the rank level: no hit count, however large, can lift a partial match
+/// above a full one, because proximity is compared first and
+/// `Reverse(usize::MAX)` is the floor of the type.
+#[test]
+fn no_proximity_sorts_last_against_any_finite_span() {
+    assert_eq!(
+        NO_PROXIMITY,
+        Reverse(usize::MAX),
+        "the guard must be the extreme value, not a sentinel guess that a long \
+         enough row could reach"
+    );
+
+    let maximal_tiebreaks = episodic::Score {
+        proximity: NO_PROXIMITY,
+        hits: usize::MAX,
+        leading: usize::MAX,
+        adjacency: usize::MAX,
+    };
+    let worst_full_match = episodic::Score {
+        // One short of the extreme: the widest span a real row could produce
+        // without colliding with the sentinel.
+        proximity: Reverse(usize::MAX - 1),
+        hits: 0,
+        leading: 0,
+        adjacency: 0,
+    };
+    assert!(
+        maximal_tiebreaks < worst_full_match,
+        "a partial match must sort last even with maximal hits/leading/adjacency: \
+         {maximal_tiebreaks:?} vs {worst_full_match:?}"
+    );
+
+    // At the rank level, with a wider gap than the sibling test uses: fifty
+    // occurrences of one term still lose to a single full match whose terms sit
+    // 5,000 characters apart.
+    let terms = episodic::query_terms("deploy flaky");
+    let partial = format!("{LONG_LEAD_IN}{}", "deploy ".repeat(50));
+    let full = format!("{LONG_LEAD_IN}deploy{}flaky", " ".repeat(5_000));
+    let partial_score = episodic::score(&partial, &terms);
+    let full_score = episodic::score(&full, &terms);
+    assert_eq!(
+        partial_score.proximity, NO_PROXIMITY,
+        "a missing term has no span: {partial_score:?}"
+    );
+    assert!(
+        partial_score.hits > full_score.hits,
+        "precondition: the partial row must out-hit the full one: \
+         {partial_score:?} vs {full_score:?}"
+    );
+    assert_eq!(
+        episodic::rank(vec![partial, full.clone()], &terms, String::as_str)
+            .first()
+            .map(String::as_str),
+        Some(full.as_str()),
+        "the full match must lead despite a 5,000-character span"
+    );
+}
+
+#[test]
+/// Edge cases that would otherwise panic or silently return a constant.
 fn edge_cases_are_total() {
     let empty = episodic::score("anything at all", &[]);
     assert_eq!(
