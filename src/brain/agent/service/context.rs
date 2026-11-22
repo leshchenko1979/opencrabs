@@ -1475,7 +1475,7 @@ impl AgentService {
         ));
         if !documents.is_empty() {
             out.push_str(
-                "Documents re-injected on wake count against the same 5% retained-set budget.\n",
+                "Documents re-injected on wake take the retained-set leftover, with a floor of 10% of the context window.\n",
             );
         }
 
