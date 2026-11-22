@@ -368,12 +368,22 @@ fn gate_message_names_the_source_path_and_the_reload_route() {
 
 #[test]
 fn gate_message_builtin_arm_keeps_the_reload_route_without_a_file() {
-    // A compiled-in skill has no source file to name, so the message must
-    // drop the file route and keep the one that always works.
+    // `resolve_skill_path` returned `None`, so the message must drop the
+    // file route and keep the one that always works. Since #946 moved the
+    // built-ins to a sidecar, `None` no longer means "compiled in": it means
+    // the file could not be resolved — so the arm says that instead of
+    // claiming a compiled-in body, and this pin follows the wording.
     let no_globs: &[String] = &[];
     let msg = gate_block_message("guard-skill", "/work/guard/file.md", no_globs, None);
     assert!(msg.contains("load_brain_file 'guard-skill'"));
-    assert!(msg.contains("no file on disk to read"));
+    assert!(
+        msg.contains("No file on disk was found for this skill"),
+        "the arm must say why no path is named:\n{msg}"
+    );
+    assert!(
+        !msg.contains("compiled in"),
+        "nothing is compiled in any more (#946):\n{msg}"
+    );
     assert!(!msg.contains("read_file"));
     assert!(!msg.contains("The full skill body follows"));
     assert!(!msg.contains("is appended below"));
