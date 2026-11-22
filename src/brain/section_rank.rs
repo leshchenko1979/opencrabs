@@ -358,6 +358,14 @@ impl Ranked {
     ///
     /// - `min_terms` — one incidental word is not a match. It takes two terms
     ///   agreeing on the same section.
+    /// - `min_term_idf` — WHICH terms are allowed to count toward the two
+    ///   above. Presence alone is not evidence (#953): `the`, `and`, `you`,
+    ///   `file` and `skill` sit in enough descriptions to be matched by
+    ///   accident, and two of them satisfied `min_terms` on almost every turn,
+    ///   which is how the same long descriptions kept winning. A term has to
+    ///   be specific to a handful of entries before it counts at all, so
+    ///   filler can no longer pad the count. Measured on the live 39-entry
+    ///   index, `0.7` admits a term carried by at most three descriptions.
     /// - `min_summed_idf` — the same requirement measured by WEIGHT instead of
     ///   count, and the reason no stopword list is needed: on a skill index
     ///   `the` carries an idf near 0.2, so a section matching only filler
@@ -381,6 +389,7 @@ impl Ranked {
         query: &str,
         max_sections: usize,
         min_terms: usize,
+        min_term_idf: f64,
         min_summed_idf: f64,
         ratio: f64,
     ) -> Vec<usize> {
@@ -403,15 +412,23 @@ impl Ranked {
 
         let mut admitted: Vec<(f64, usize)> = Vec::new();
         for i in 0..self.sections.len() {
-            let matched: Vec<&String> = distinct
-                .iter()
-                .filter(|term| self.tf[i].contains_key(*term))
-                .collect();
-            if matched.len() < min_terms {
-                continue;
+            // Count CONTENT agreement only (#953). A term carried by much of
+            // the index is matched by accident, so it cannot stand in for the
+            // second term `min_terms` asks for — that substitution is what let
+            // `you` + `file` admit a skill about neither.
+            let mut content_terms = 0usize;
+            let mut summed_idf = 0.0_f64;
+            for term in &distinct {
+                if !self.tf[i].contains_key(term) {
+                    continue;
+                }
+                let idf = self.idf(term.as_str());
+                if idf >= min_term_idf {
+                    content_terms += 1;
+                    summed_idf += idf;
+                }
             }
-            let summed_idf: f64 = matched.iter().map(|term| self.idf(term.as_str())).sum();
-            if summed_idf < min_summed_idf {
+            if content_terms < min_terms || summed_idf < min_summed_idf {
                 continue;
             }
             admitted.push((self.score(&terms, i) / norm, i));

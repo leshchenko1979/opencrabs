@@ -231,7 +231,8 @@ fn every_skill_remains_in_the_full_index() {
 #[test]
 fn the_shortlist_is_the_admission_rule_not_the_floor_zero_order() {
     use crate::brain::memory_recall::{
-        SKILL_RECALL_MIN_SUMMED_IDF, SKILL_RECALL_MIN_TERMS, SKILL_RECALL_RATIO,
+        SKILL_RECALL_MIN_SUMMED_IDF, SKILL_RECALL_MIN_TERM_IDF, SKILL_RECALL_MIN_TERMS,
+        SKILL_RECALL_RATIO,
     };
     use crate::brain::section_rank::Ranked;
 
@@ -244,6 +245,7 @@ fn the_shortlist_is_the_admission_rule_not_the_floor_zero_order() {
             msg,
             SKILL_RECALL_MAX,
             SKILL_RECALL_MIN_TERMS,
+            SKILL_RECALL_MIN_TERM_IDF,
             SKILL_RECALL_MIN_SUMMED_IDF,
             SKILL_RECALL_RATIO,
         )
@@ -439,5 +441,130 @@ fn a_paraphrased_task_puts_its_skill_in_the_top_five() {
             .any(|s| s.trim_start_matches('/') == "gatus-recovery"),
         "gatus-recovery must be in the top five for a paraphrased endpoint \
          failure, got {top5:?}"
+    );
+}
+
+/// #953 — a term carried by much of the index is not evidence.
+///
+/// The report was that the same handful of skills came back on every turn and
+/// that they were irrelevant to the message. The cause was the admission
+/// predicate counting PRESENCE: `the`, `for`, `check` and `deploy` sit in
+/// enough descriptions that a message about none of them still agreed with
+/// several entries on two "terms", and `min_terms` was satisfied by filler
+/// alone. The same filler also cleared `min_summed_idf`, because the sum was
+/// over every matched term however generic.
+///
+/// The fix is a per-term idf floor: a term has to be specific to a handful of
+/// entries before it counts toward EITHER predicate.
+///
+/// The assertion is made at the predicate rather than through the shipped
+/// selector because on a fixture this small the ratio tail already drops the
+/// noise — `noise-check-*` scores about 0.23 against `gatus-recovery`'s 0.42,
+/// under `ratio * best` — so the end-to-end list is identical before and after
+/// and would pin nothing. `ratio = 0.0` switches that tail off and leaves
+/// exactly the two content predicates under test.
+///
+/// The BEFORE half asserts the fixture still exhibits the defect at the old
+/// floor, so a fixture that drifted into passing vacuously says so instead.
+#[test]
+fn a_message_matching_only_common_terms_is_not_admitted() {
+    use crate::brain::memory_recall::{
+        SKILL_RECALL_MIN_SUMMED_IDF, SKILL_RECALL_MIN_TERM_IDF, SKILL_RECALL_MIN_TERMS,
+    };
+    use crate::brain::section_rank::Ranked;
+
+    const ENTRIES_953: &[(&str, &str)] = &[
+        (
+            "gatus-recovery",
+            "Gatus alert recovery runbook — endpoint failure alerts, SSH host \
+             mapping, disk cleanup",
+        ),
+        ("noise-check-a", "Check for the deploy"),
+        ("noise-check-b", "Check for the deploy queue"),
+        ("noise-check-c", "Check for the deploy log"),
+        ("noise-check-d", "Check for the deploy notes"),
+        (
+            "grafana",
+            "Grafana ops — dashboards, panel errors, readonly-db, panel SQL",
+        ),
+        (
+            "pageplate",
+            "Project procedure for the pageplate repo — CI-only build gate, \
+             Python contract suite",
+        ),
+        (
+            "writing-clearly",
+            "Writing prose for humans — documentation, README, commit and PR \
+             descriptions",
+        ),
+        (
+            "toc-thinking",
+            "Facilitated Goldratt Theory of Constraints analysis — current \
+             reality tree",
+        ),
+        (
+            "security-audit",
+            "Run a comprehensive language-agnostic security and CVE audit, \
+             scored 0-100",
+        ),
+        (
+            "copywriting",
+            "Direct response copywriting frameworks, headline formulas, \
+             campaign templates",
+        ),
+        (
+            "vds-deploy",
+            "VDS deploy — direct commits to main, find and run deploy scripts, \
+             verify logs",
+        ),
+    ];
+
+    // A message that IS about the gatus runbook, and that mentions `check` and
+    // `deploy` the way any operator message does.
+    const MSG: &str = "which gatus cleanup runbook should I check for the deploy";
+
+    let md = index_markdown(ENTRIES_953.iter().copied());
+    let ranked = Ranked::build(&md);
+
+    let names_for = |min_term_idf: f64| -> Vec<String> {
+        ranked
+            .admitted_indices(
+                MSG,
+                usize::MAX,
+                SKILL_RECALL_MIN_TERMS,
+                min_term_idf,
+                SKILL_RECALL_MIN_SUMMED_IDF,
+                0.0,
+            )
+            .iter()
+            .map(|&i| ranked.heading(i))
+            .collect()
+    };
+
+    // BEFORE — presence-only admission. Each `noise-check-*` entry agrees with
+    // the message on `check`, `for`, `the` and `deploy`, which carry 1.609 of
+    // summed idf together, so the old floor admits all four.
+    let before = names_for(0.0);
+    for noise in [
+        "noise-check-a",
+        "noise-check-b",
+        "noise-check-c",
+        "noise-check-d",
+    ] {
+        assert!(
+            before.iter().any(|n| n == noise),
+            "the presence-only predicate must admit {noise}, or this fixture no \
+             longer reproduces #953: {before:?}"
+        );
+    }
+
+    // AFTER — the shipped floor. Filler is no longer evidence, so only the
+    // entry the message is about survives.
+    let after = names_for(SKILL_RECALL_MIN_TERM_IDF);
+    assert_eq!(
+        after,
+        vec!["gatus-recovery".to_string()],
+        "only the entry the message is about may survive the content floor, \
+         got {after:?}"
     );
 }
