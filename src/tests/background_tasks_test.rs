@@ -6,12 +6,12 @@ use crate::brain::agent::service::MessageEnqueueCallback;
 use crate::brain::agent::service::QueuedUserMessage;
 use crate::brain::agent::service::background_tasks::{
     BackgroundTaskManager, ClaudeTurnTasks, CmdResult, RunHandle, RunRequest, capture_line,
-    claude_completion_message, claude_needs_survival_delivery, claude_task_label,
+    claude_completion_message, claude_needs_survival_delivery, claude_task_label, cmd_result_from,
     completion_message, format_elapsed, short_label, tail_lines, wake_message,
 };
 use crate::brain::agent::service::restart_recovery;
 use crate::brain::agent::service::session_routes;
-use crate::brain::agent::service::work_status::RunCause;
+use crate::brain::agent::service::work_status::{RunCause, SignalOrigin};
 use crate::brain::tools::bash::handover_notice;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -136,7 +136,13 @@ fn completion_message_names_why_a_137_ended() {
     };
 
     let ceiling = make(RunCause::Ceiling { limit_secs: 3600 }, false);
-    let oom = make(RunCause::Signalled { signal: 9 }, false);
+    let oom = make(
+        RunCause::Signalled {
+            signal: 9,
+            origin: SignalOrigin::Unknown,
+        },
+        false,
+    );
     let literal = make(RunCause::Ordinary, false);
 
     // The ceiling kill: the one case where the command did nothing wrong.
@@ -157,9 +163,15 @@ fn completion_message_names_why_a_137_ended() {
     // first line (#808 cue 9). Asserting a word here would re-add it.
     assert_eq!(ceiling.display_text, "\u{274c} long build \u{1f552} 1h 0m");
 
-    // A signal is a kill too, but not the harness's doing — and it says which
-    // signal, which is how an OOM kill (9) is told from a cancellation (15).
-    assert!(oom.context_text.contains("signal 9 (killed)"));
+    // A signal is a kill too — and #966 left the Unknown arm rendering #786's
+    // text byte-for-byte, because this record does not say who sent it. The
+    // signal number is still what tells an OOM kill (9) from a cancellation
+    // (15).
+    assert!(
+        oom.context_text.contains("signal 9 (killed)"),
+        "got: {}",
+        oom.context_text
+    );
     assert!(!oom.context_text.contains("ceiling"));
 
     // And a command that simply exited 137 still reads as a failure.
@@ -955,5 +967,51 @@ fn handover_states_empty_captures_instead_of_omitting_them() {
     assert!(
         notice.contains("stdout so far (last 15 lines):\nstep 1"),
         "the tail is still shown when it has something to say, got: {notice}"
+    );
+}
+
+/// #966 — the one production construction site stamps the origin, and the
+/// origin it stamps is the only one this process can substantiate: a signal
+/// that reaches `cmd_result_from` was sent by something outside the harness
+/// (the harness's own sender, `kill_run_group`, is reached from the ceiling
+/// arm alone, which records `Ceiling` and never calls this function).
+///
+/// A real child signals itself, so this exercises the whole path — spawn,
+/// wait, read the wait status — rather than a hand-built `ExitStatus`, which
+/// the std API does not let a test construct portably.
+#[cfg(unix)]
+#[test]
+fn a_signalled_run_is_stamped_external_at_the_one_construction_site() {
+    // SIGKILL cannot be caught or ignored, so the wait status is guaranteed to
+    // carry a signal and no exit code.
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("kill -KILL $$")
+        .output()
+        .expect("spawn sh");
+    assert!(
+        output.status.code().is_none(),
+        "expected a signal death, got an exit code: {:?}",
+        output.status
+    );
+
+    let result = cmd_result_from(&output);
+    assert_eq!(
+        result.cause,
+        RunCause::Signalled {
+            signal: 9,
+            origin: SignalOrigin::External,
+        },
+        "a signal this process did not send must be stamped External, not guessed"
+    );
+    // The reader's text, end to end: the defect #966 filed was that this read
+    // like a crash.
+    assert!(
+        result
+            .cause
+            .describe(result.code)
+            .contains("signalled by external"),
+        "got: {}",
+        result.cause.describe(result.code)
     );
 }
