@@ -498,7 +498,6 @@ pub mod session_search_query_test;
 pub mod session_search_tail_test;
 pub mod session_search_tokenized_test;
 pub mod shutdown_recovery_row_test;
-pub mod skill_recall_test;
 pub mod sqlite_maintenance_test;
 #[cfg(feature = "telegram")]
 #[cfg(feature = "telegram")]

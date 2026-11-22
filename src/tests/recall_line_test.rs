@@ -22,9 +22,8 @@ fn source<S: AsRef<str>>(names: &[S], omitted: usize) -> RecallSource {
 #[test]
 fn the_line_names_every_source_that_fired() {
     // A line that named only MEMORY.md would be a half-truth: the aggregate
-    // injects four sources and the owner has to see which of them fired.
+    // injects three sources and the owner has to see which of them fired.
     let summary = RecallSummary {
-        skills: source(&["opencrabs-dev"], 0),
         memory: source(&["Cron", "Open Questions"], 2),
         active_skills: source(&["opencrabs-dev/editor.md"], 0),
         directives: source(&["AGENTS.md"], 0),
@@ -35,14 +34,14 @@ fn the_line_names_every_source_that_fired() {
         summary
             .render_line()
             .expect("recall fired, so there is a line"),
-        "🧠 recall · skills /opencrabs-dev · memory «Cron», «Open Questions» +2 · \
+        "🧠 recall · memory «Cron», «Open Questions» +2 · \
          active skills «opencrabs-dev/editor.md» · directives «AGENTS.md» · 1,140c"
     );
 }
 
 #[test]
 fn only_the_sources_that_fired_appear() {
-    // The failure this prevents: a fixed template printing `skills` or
+    // The failure this prevents: a fixed template printing `memory` or
     // `directives` labels for sources that injected nothing.
     let summary = RecallSummary {
         memory: source(&["Cron"], 0),
@@ -74,17 +73,17 @@ fn nothing_recalled_renders_no_line() {
 fn the_overflow_marker_counts_what_is_not_named() {
     // Cap each source at two names; the rest is a count, not more names.
     let summary = RecallSummary {
-        skills: source(&["a", "b", "c", "d", "e"], 0),
+        active_skills: source(&["a", "b", "c", "d", "e"], 0),
         memory: source(&["Cron"], 4),
         chars: 300,
         ..RecallSummary::default()
     };
 
-    let line = summary.render_line().expect("skills fired");
+    let line = summary.render_line().expect("active skills fired");
     assert_eq!(RECALL_LINE_NAMES, 2);
     assert_eq!(
         line,
-        "🧠 recall · skills /a, /b +3 · memory «Cron» +4 · 300c"
+        "🧠 recall · memory «Cron» +4 · active skills «a», «b» +3 · 300c"
     );
 }
 
@@ -130,11 +129,10 @@ fn a_long_heading_truncates_on_a_char_boundary() {
 
 #[test]
 fn the_line_never_exceeds_the_budget() {
-    // Four sources, each at its two-name cap, with names long enough to blow
+    // Three sources, each at its two-name cap, with names long enough to blow
     // the budget: the tail sources drop whole rather than cutting a name.
     let long = |tag: &str| format!("{tag}{}", "x".repeat(40));
     let summary = RecallSummary {
-        skills: source(&[&long("skill-a"), &long("skill-b")], 9),
         memory: source(&[&long("mem-a"), &long("mem-b")], 9),
         active_skills: source(&[&long("active-a"), &long("active-b")], 9),
         directives: source(&[&long("dir-a"), &long("dir-b")], 9),
@@ -147,7 +145,7 @@ fn the_line_never_exceeds_the_budget() {
         "{} chars: {line}",
         line.chars().count()
     );
-    assert!(line.starts_with("🧠 recall · skills "));
+    assert!(line.starts_with("🧠 recall · memory "));
     assert!(
         line.ends_with("c"),
         "the injected size survives the truncation: {line}"

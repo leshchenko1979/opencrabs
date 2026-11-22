@@ -211,8 +211,8 @@ pub enum ProgressEvent {
         reason: String,
     },
     /// Passive recall injected context this turn (#928): one chrome line naming
-    /// WHAT was recalled — the skill shortlist, MEMORY.md sections, active-skill
-    /// sections, project directives — so a flow roll can show recall firing
+    /// WHAT was recalled — MEMORY.md sections, active-skill sections, project
+    /// directives — so a flow roll can show recall firing
     /// without the owner reading the prompt.
     ///
     /// The line arrives RENDERED: the brain layer built it from the same

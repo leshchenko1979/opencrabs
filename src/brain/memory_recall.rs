@@ -61,8 +61,8 @@ pub(crate) const RECALL_MIN_SCORE: f64 = 0.38;
 
 /// Lower bound the configurable floor is clamped to (#912).
 ///
-/// Below this the shortlist stops filtering at all, and a `0.0` typo would put
-/// an unfiltered list on every turn — degradation with no error to notice. The
+/// Below this recall stops filtering at all, and a `0.0` typo would put an
+/// unfiltered block on every turn — degradation with no error to notice. The
 /// knob therefore cannot reach it.
 pub(crate) const RECALL_MIN_SCORE_MIN: f64 = 0.05;
 
@@ -98,91 +98,6 @@ pub(crate) fn clamp_recall_min_score(configured: Option<f64>) -> f64 {
 pub(crate) fn resolve_recall_min_score() -> f64 {
     clamp_recall_min_score(crate::config::Config::current().memory.recall_min_score)
 }
-
-/// Raw (length-unnormalized) BM25 score an entry must reach before a
-/// multi-topic message may summon the skill shortlist through the raw door.
-///
-/// [`RECALL_MIN_SCORE`] is divided by query length — right for ranking, and
-/// wrong as the only silence gate: a message naming eight topics scores
-/// every entry it genuinely matches at a fraction of what a focused message
-/// scores, so matching MORE skills reads as matching NONE. This door drops
-/// the normalization. With IDF normalized to at most 1.0, one shared term
-/// scores 1.0 raw at typical entry length (2.5 / (1 + K1), K1 = 1.5) and
-/// stays under ~1.3 short of pathological length ratios, so 1.5 sits above
-/// the single-coincidence shape and at or below where two distinct shared
-/// terms land (~2.0). Pinned by the battery:
-/// `the_shortlist_never_exceeds_the_cap` (the eight-topic shape) must stay
-/// loud, and `an_unmatched_message_produces_no_shortlist` (zero overlap)
-/// must stay silent.
-pub(crate) const SKILL_RECALL_RAW_FLOOR: f64 = 1.5;
-
-/// At least this many DISTINCT query terms must agree on an entry before it
-/// may be named in the skill shortlist (#939).
-///
-/// One shared word is a coincidence, not a match: a 15-word message shares some
-/// stemmed term with most of a 44-entry skill index, and that is precisely how
-/// the list used to fill all five slots. Two is the smallest number that
-/// requires agreement rather than a single coincidence.
-pub(crate) const SKILL_RECALL_MIN_TERMS: usize = 2;
-
-/// How specific a single matched term must be before it COUNTS toward
-/// [`SKILL_RECALL_MIN_TERMS`] at all (#953).
-///
-/// `min_terms` used to count raw presence, so any two words the index happened
-/// to contain satisfied it — and the words that satisfy it most reliably are
-/// the ones every description shares. Measured on the live 39-entry index, the
-/// owner's own messages were admitted on:
-///
-/// | message | matched stems | summed idf |
-/// |---|---|---|
-/// | `What are you going to file?` | `you`, `file` | 1.67 |
-/// | `Have you synchronized the skill files after renaming` | `you`, `the`, `file` | 1.85 |
-/// | `Why does the recall show the same set of skills always? …` | `the`, `set`, `skill`, `and` | 1.96 |
-///
-/// Two of the four matched stems in the last row are function words, which is
-/// why the named skills read as irrelevant. `0.7` is the smallest floor that
-/// rejects all three: on this index it corresponds to a term carried by at
-/// most three of 39 descriptions (idf `0.665` at df 4, `0.742` at df 3), so
-/// `file` (0.665) and `skill` (0.604) stop counting while genuinely topical
-/// terms keep their full weight.
-///
-/// The floor does NOT make short descriptions reachable — that was measured
-/// and is a separate question. A short description is unreachable because real
-/// messages do not contain its terms, not because of this gate.
-pub(crate) const SKILL_RECALL_MIN_TERM_IDF: f64 = 0.7;
-
-/// How much information, summed over the distinct matched terms, an entry must
-/// carry to be named (#939).
-///
-/// This is the weighting answer to `query_terms` having no stopword handling,
-/// and it deliberately is NOT a wordlist: idf is measured against the corpus
-/// being ranked, so a word that is filler HERE (`the`, `skill`, `fix` — idf
-/// 0.19, 0.49, 0.75 on the live index) contributes almost nothing, while a term
-/// carried by one entry contributes its full weight (1.0). `1.5` therefore
-/// means "two terms, at least one of them specific", which is what separates a
-/// message about a skill from a message that merely contains words the index
-/// also contains.
-pub(crate) const SKILL_RECALL_MIN_SUMMED_IDF: f64 = 1.5;
-
-/// How close to the best admitted entry's score another entry must be to be
-/// named alongside it (#939).
-///
-/// Absolute floors cannot do this job: scores are normalized by query length
-/// and are not comparable across messages, so a floor that trims a five-entry
-/// list on one turn silences a genuine match on another. A share of the best
-/// score is query-relative by construction.
-///
-/// Measured on the live 44-entry index (`opencrabs eval skills` reports 44
-/// entries, C1@5 0.657) for the message in #939: at `0.5` two entries survive
-/// and the second matches only `the`/`skill`/`get`; at `0.7` exactly one
-/// survives — the entry that shares the message's rare term — and the mean
-/// list length over the 35 labelled Track C positives drops from 5.00 to 1.40.
-/// The cost is real: the shortlist's own gold-recall moves 0.657 → 0.514
-/// (C1@5 as the scorecard computes it does not move, because `score()` still
-/// ranks at floor `0.0`), while false selection on the 12 negatives moves
-/// 1.000 → 0.083. Both figures, and the sweep that shows they trade against
-/// each other, are recorded in `src/eval/results/skill-shortlist-floor-939.md`.
-pub(crate) const SKILL_RECALL_RATIO: f64 = 0.7;
 
 /// Recall relevant to `user_message`, formatted for context, or `None`.
 ///
@@ -556,14 +471,6 @@ pub async fn recall_for_session(
     let mut parts: Vec<String> = Vec::new();
     let mut summary = RecallSummary::default();
 
-    // 0. Skill selection (#901) — "which skill applies" is the most actionable
-    //    hint of the three, so it leads. The full index is still in the system
-    //    prompt; this only ranks it against the message.
-    if let Some(names) = skill_shortlist_names(&skill_index_markdown(), user_message, floor) {
-        parts.push(render_skill_shortlist(&names));
-        summary.skills = RecallSource { names, omitted: 0 };
-    }
-
     // 1. MEMORY.md
     if let Some(matches) = memory_matches(user_message, floor).await
         && let Some(text) = render_memory(&matches)
@@ -605,155 +512,6 @@ pub async fn recall_for_session(
     Some(Recalled { text, summary })
 }
 
-// ── Skill SELECTION (#901) ────────────────────────────────────────────────
-//
-// `recall_from_active_skills` above ranks sections of skills that are ALREADY
-// active. Nothing selected which skill to activate: the system prompt emits
-// every index entry and leaves the choice to the model, which is why the
-// scorecard's C1@5 read 0.371 while no shipped code path consumed it.
-//
-// This ranks the SAME index the scorecard scores against the user's message and
-// rides the best few along with it. The full index stays in the system prompt:
-// it is stable there, so it stays cacheable, and a skill that misses the top
-// few remains reachable in that block. Only this HINT is volatile.
-
-/// At most this many skills ride along as a ranked shortlist.
-pub(crate) const SKILL_RECALL_MAX: usize = 5;
-
-/// How long the rendered index is reused before the skill files are re-read.
-///
-/// `load_all_skills()` parses every `SKILL.md`. The prompt builder already pays
-/// that once per turn; this path must not double it. A minute is short enough
-/// that a skill added at runtime still shows up promptly.
-const SKILLS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-
-struct CachedSkills {
-    at: std::time::Instant,
-    index_md: String,
-}
-
-static SKILLS_CACHE: std::sync::RwLock<Option<CachedSkills>> = std::sync::RwLock::new(None);
-
-/// Rank the skill index against `user_message` and render the shortlist.
-///
-/// Pure: takes the index markdown `index_markdown` produces, so the ranking is
-/// testable without a brain directory, and the corpus ranked here is the same
-/// one the Track C scorecard scores rather than a second rendering that can
-/// drift from it.
-///
-/// Two decisions, kept separate on purpose:
-///
-/// 1. **ADMISSION** — which entries are allowed on the list at all, decided by
-///    [`Ranked::admitted_indices`] at the constants below (#939). This is
-///    deliberately NOT the scorecard's floor-`0.0` ordering: that ordering
-///    admits every entry sharing one stemmed term, so with a cap of
-///    [`SKILL_RECALL_MAX`] the list filled all five slots on almost every turn
-///    and named skills the message had nothing to do with.
-/// 2. **SILENCE** — whether to say anything at all, decided by the resolved
-///    floor (#912: `[memory].recall_min_score`, defaulting to
-///    [`RECALL_MIN_SCORE`]). A shortlist invented from a weak match is noise
-///    paid on every turn, which is the same trade the memory recall makes.
-///
-/// The two used to disagree about what "matched" meant — the silence door
-/// accepted one rare term while the ordering door accepted anything at all —
-/// and that gap is what #939 measured. They still answer different questions
-/// (may I speak / what may I name), but the naming side is now a selection,
-/// not an ordering.
-pub fn recall_skills_from(index_md: &str, user_message: &str, floor: f64) -> Option<String> {
-    skill_shortlist_names(index_md, user_message, floor).map(|names| render_skill_shortlist(&names))
-}
-
-/// The ranked shortlist as NAMES, best first — the one ranking behind both the
-/// injected block and the recall line's `skills` segment (#928).
-fn skill_shortlist_names(index_md: &str, user_message: &str, floor: f64) -> Option<Vec<String>> {
-    if !worth_reading_for(user_message) {
-        return None;
-    }
-    let ranked = Ranked::build(index_md);
-
-    // Silence unless something genuinely matches. Two doors: the shipped
-    // length-normalized floor for focused messages, and — because that
-    // normalization makes a message naming many topics score each entry it
-    // genuinely matches at a fraction of a focused message's strength — a
-    // raw unnormalized floor ([`SKILL_RECALL_RAW_FLOOR`]) for multi-topic
-    // ones. Matching more skills must never read as matching none.
-    let any_clears = ranked.find_relevant(user_message, 1, usize::MAX, floor);
-    if any_clears.sections.is_empty()
-        && !ranked.any_clears_raw(user_message, SKILL_RECALL_RAW_FLOOR)
-    {
-        return None;
-    }
-
-    // ADMISSION, not ordering (#939). The character budget is irrelevant here:
-    // the list is capped by `SKILL_RECALL_MAX` entries and every admitted
-    // entry has already earned its place on content, so a length cut would
-    // drop entries by size rather than by evidence.
-    let admitted = ranked.admitted_indices(
-        user_message,
-        SKILL_RECALL_MAX,
-        SKILL_RECALL_MIN_TERMS,
-        SKILL_RECALL_MIN_TERM_IDF,
-        SKILL_RECALL_MIN_SUMMED_IDF,
-        SKILL_RECALL_RATIO,
-    );
-    let names: Vec<String> = admitted
-        .iter()
-        .map(|&i| ranked.heading(i))
-        .filter(|n| !n.is_empty())
-        .collect();
-    if names.is_empty() {
-        return None;
-    }
-    Some(names)
-}
-
-/// Render the shortlist block that rides along in the prompt.
-fn render_skill_shortlist(names: &[String]) -> String {
-    let listed = names
-        .iter()
-        .map(|n| format!("/{n}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "─── skills matching this task, best first ───\n{listed}\n\
-         [Ranked against your message; the full index is in the system prompt.]"
-    )
-}
-
-/// The live skill index, re-read at most once per [`SKILLS_CACHE_TTL`].
-fn skill_index_markdown() -> String {
-    if let Ok(cache) = SKILLS_CACHE.read()
-        && let Some(c) = cache.as_ref()
-        && c.at.elapsed() < SKILLS_CACHE_TTL
-    {
-        return c.index_md.clone();
-    }
-
-    let skills = crate::brain::skills::load_all_skills();
-    let index_md = crate::brain::skills::index_markdown(
-        skills
-            .iter()
-            .map(|s| (s.name.as_str(), s.description.as_str())),
-    );
-
-    if let Ok(mut cache) = SKILLS_CACHE.write() {
-        *cache = Some(CachedSkills {
-            at: std::time::Instant::now(),
-            index_md: index_md.clone(),
-        });
-    }
-    index_md
-}
-
-/// Load the live skill index and rank it against `user_message` (#901).
-pub fn recall_skills(user_message: &str, floor: f64) -> Option<String> {
-    // Cheap gate first: no query terms means no disk read at all.
-    if !worth_reading_for(user_message) {
-        return None;
-    }
-    recall_skills_from(&skill_index_markdown(), user_message, floor)
-}
-
 // ── Recall summary (#928) ─────────────────────────────────────────────────
 //
 // Recall runs on every turn and used to leave no trace anyone could see: the
@@ -789,7 +547,7 @@ impl RecallSource {
     }
 
     /// `label /a, /b +K`, or `None` when the source did not fire.
-    fn segment(&self, label: &str, slash: bool) -> Option<String> {
+    fn segment(&self, label: &str) -> Option<String> {
         if self.names.is_empty() {
             return None;
         }
@@ -797,13 +555,7 @@ impl RecallSource {
             .names
             .iter()
             .take(RECALL_LINE_NAMES)
-            .map(|n| {
-                if slash {
-                    format!("/{n}")
-                } else {
-                    format!("«{n}»")
-                }
-            })
+            .map(|n| format!("«{n}»"))
             .collect::<Vec<_>>()
             .join(", ");
         let mut segment = format!("{label} {shown}");
@@ -818,8 +570,6 @@ impl RecallSource {
 /// What a turn's passive recall injected (#928).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecallSummary {
-    /// Skills named by the index shortlist (#901), best first.
-    pub skills: RecallSource,
     /// MEMORY.md section headings, best first.
     pub memory: RecallSource,
     /// Sources of the active-skill sections that rode along.
@@ -833,10 +583,7 @@ pub struct RecallSummary {
 impl RecallSummary {
     /// Whether any source fired. An empty summary renders NO line at all.
     pub fn is_empty(&self) -> bool {
-        self.skills.is_empty()
-            && self.memory.is_empty()
-            && self.active_skills.is_empty()
-            && self.directives.is_empty()
+        self.memory.is_empty() && self.active_skills.is_empty() && self.directives.is_empty()
     }
 
     /// The turn-start receipt: WHAT was recalled, never what it said.
@@ -848,13 +595,12 @@ impl RecallSummary {
             return None;
         }
         let mut segments: Vec<String> = Vec::new();
-        for (label, source, slash) in [
-            ("skills", &self.skills, true),
-            ("memory", &self.memory, false),
-            ("active skills", &self.active_skills, false),
-            ("directives", &self.directives, false),
+        for (label, source) in [
+            ("memory", &self.memory),
+            ("active skills", &self.active_skills),
+            ("directives", &self.directives),
         ] {
-            if let Some(segment) = source.segment(label, slash) {
+            if let Some(segment) = source.segment(label) {
                 segments.push(segment);
             }
         }

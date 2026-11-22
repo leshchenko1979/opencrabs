@@ -212,8 +212,8 @@ impl Ranked {
 
     /// The NAME of section `i`: its heading with the `#` markers stripped.
     ///
-    /// The skill shortlist renders `/<name>`, so the stripping is part of what
-    /// a section is called rather than a formatting detail of one caller.
+    /// A section is named by its heading, so the stripping is part of what a
+    /// section IS rather than a formatting detail of one caller.
     pub fn heading(&self, i: usize) -> String {
         self.sections[i]
             .heading
@@ -324,132 +324,6 @@ impl Ranked {
         }
 
         (indices, total)
-    }
-
-    /// Whether any section's RAW BM25 score clears `min_score`.
-    ///
-    /// Raw means the length normalization [`Self::find_relevant`] applies is
-    /// left off, so a shared term counts at full weight however long the
-    /// query is. That normalization is what makes a fixed `min_score` mean
-    /// the same thing for a three-word question and a forty-word one — and
-    /// also what makes a forty-word message touching eight topics score
-    /// every entry it genuinely names at a fraction of a focused question's
-    /// strength. Callers that must not go silent on such messages use this
-    /// door beside the normalized one.
-    pub fn any_clears_raw(&self, query: &str, min_score: f64) -> bool {
-        let terms = query_terms(query);
-        if terms.is_empty() {
-            return false;
-        }
-        (0..self.sections.len()).any(|i| self.score(&terms, i) >= min_score)
-    }
-
-    /// Indices a SELECTION rule admits, best first: the entry must agree on at
-    /// least `min_terms` distinct query terms, those terms must carry at least
-    /// `min_summed_idf` between them, and the entry must score at least
-    /// `ratio` of the best admitted entry (#939).
-    ///
-    /// [`Self::ranked_indices`] at floor `0.0` answers a different question —
-    /// "in what order" — and admits every section sharing one stemmed term. A
-    /// caller that reads its output as a SHORTLIST therefore lists the top N
-    /// sections that share a word, which on a skill index with generic
-    /// descriptions means a full list on almost every turn. Three predicates
-    /// fix that, each aimed at one way the list fills with noise:
-    ///
-    /// - `min_terms` — one incidental word is not a match. It takes two terms
-    ///   agreeing on the same section.
-    /// - `min_term_idf` — WHICH terms are allowed to count toward the two
-    ///   above. Presence alone is not evidence (#953): `the`, `and`, `you`,
-    ///   `file` and `skill` sit in enough descriptions to be matched by
-    ///   accident, and two of them satisfied `min_terms` on almost every turn,
-    ///   which is how the same long descriptions kept winning. A term has to
-    ///   be specific to a handful of entries before it counts at all, so
-    ///   filler can no longer pad the count. Measured on the live 39-entry
-    ///   index, `0.7` admits a term carried by at most three descriptions.
-    /// - `min_summed_idf` — the same requirement measured by WEIGHT instead of
-    ///   count, and the reason no stopword list is needed: on a skill index
-    ///   `the` carries an idf near 0.2, so a section matching only filler
-    ///   words cannot reach the sum, while two content words clear it. A
-    ///   hardcoded wordlist would have to be maintained per language; an idf
-    ///   sum is measured off the corpus the query is ranked against.
-    /// - `ratio` — the tail. Scores are not comparable across queries, so no
-    ///   fixed floor can separate "the two entries this message is about" from
-    ///   "the five that share a word"; a share of the best admitted score is
-    ///   query-relative by construction, and with `ratio <= 1.0` the best
-    ///   admitted entry always survives.
-    ///
-    /// The reference for `ratio` is the best entry that passes the two content
-    /// predicates, never the best raw score, so a section with a high score but
-    /// no term agreement cannot empty a list that had a genuine match.
-    ///
-    /// Order is score order with file order breaking ties — the same order
-    /// [`Self::ranked_indices`] produces.
-    pub fn admitted_indices(
-        &self,
-        query: &str,
-        max_sections: usize,
-        min_terms: usize,
-        min_term_idf: f64,
-        min_summed_idf: f64,
-        ratio: f64,
-    ) -> Vec<usize> {
-        let terms = query_terms(query);
-        if terms.is_empty() || self.sections.is_empty() {
-            return Vec::new();
-        }
-        let norm = terms.len() as f64;
-
-        // Distinct STEMS. `query_terms` keeps duplicates, and counting
-        // agreement with them would let one repeated filler word ("the ... the
-        // ... the") read as three matching terms.
-        let mut distinct: Vec<String> = Vec::new();
-        for term in &terms {
-            let stemmed = stem(&fold_diacritics(term)).to_string();
-            if !distinct.contains(&stemmed) {
-                distinct.push(stemmed);
-            }
-        }
-
-        let mut admitted: Vec<(f64, usize)> = Vec::new();
-        for i in 0..self.sections.len() {
-            // Count CONTENT agreement only (#953). A term carried by much of
-            // the index is matched by accident, so it cannot stand in for the
-            // second term `min_terms` asks for — that substitution is what let
-            // `you` + `file` admit a skill about neither.
-            let mut content_terms = 0usize;
-            let mut summed_idf = 0.0_f64;
-            for term in &distinct {
-                if !self.tf[i].contains_key(term) {
-                    continue;
-                }
-                let idf = self.idf(term.as_str());
-                if idf >= min_term_idf {
-                    content_terms += 1;
-                    summed_idf += idf;
-                }
-            }
-            if content_terms < min_terms || summed_idf < min_summed_idf {
-                continue;
-            }
-            admitted.push((self.score(&terms, i) / norm, i));
-        }
-        if admitted.is_empty() {
-            return Vec::new();
-        }
-
-        admitted.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.1.cmp(&b.1))
-        });
-
-        let best = admitted[0].0;
-        admitted
-            .into_iter()
-            .filter(|(score, _)| *score >= ratio * best)
-            .take(max_sections)
-            .map(|(_, i)| i)
-            .collect()
     }
 
     /// Sections whose length-normalized BM25 score clears `min_score`, best

@@ -2649,7 +2649,7 @@ pub struct MemoryConfig {
     /// `None` means "use the compiled default" (`RECALL_MIN_SCORE` in
     /// `brain::memory_recall`), so an existing install is unchanged.
     /// Out-of-range values are clamped rather than honoured: a typo of `0.0`
-    /// would put an unfiltered shortlist on every turn, and `5.0` would silence
+    /// would put unfiltered recall on every turn, and `5.0` would silence
     /// recall entirely — both fail silently, so neither is left to the user.
     ///
     /// ```toml
