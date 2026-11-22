@@ -241,7 +241,9 @@ pub struct BackgroundTaskManager {
     runs: Mutex<HashMap<String, RunHandle>>,
 }
 
-use super::work_status::{CommandExit, CommandPaths, RunCause, TruncationMarker, WorkStatus};
+use super::work_status::{
+    CommandExit, CommandPaths, RunCause, SignalOrigin, TruncationMarker, WorkStatus,
+};
 
 impl BackgroundTaskManager {
     pub fn new() -> Self {
@@ -1357,14 +1359,30 @@ fn tail_chars(s: &str, n: usize) -> String {
 /// stderr is kept separate on disk because interleaving is lossy and cannot be
 /// undone; a consumer wanting the historical merged shape concatenates at read
 /// time, which is what this does.
-fn cmd_result_from(output: &std::process::Output) -> CmdResult {
+///
+/// **This is the only place a [`RunCause::Signalled`] is constructed** (#966),
+/// and it is where the origin is stamped. A signal reaching this function came
+/// from outside this process, and that is substantiable rather than assumed:
+///
+/// * the harness's only sender to a detached run's process group is
+///   [`kill_run_group`], and its only call site is the ceiling arm in
+///   [`continue_detached`] — which records [`RunCause::Ceiling`] and never
+///   reaches this function;
+/// * the other way this process can end a child, tokio's `kill_on_drop`, drops
+///   the `Child` with the future, so nobody is left to await it and no cause is
+///   recorded at all.
+///
+/// So `External` here claims exactly what is known: not us. It does NOT claim
+/// the sender was the operator, the kernel, or the lane itself — the harness
+/// cannot tell those apart (#966).
+pub(crate) fn cmd_result_from(output: &std::process::Output) -> CmdResult {
     // A process that exited on its own is `Ordinary` even when it failed: the
     // command's own code IS the cause. Only a signal is a different event, and
     // it is the one `exit_code` used to discard.
     let cause = match exit_signal(&output.status) {
         Some(signal) => RunCause::Signalled {
             signal,
-            origin: crate::brain::agent::service::work_status::SignalOrigin::Unknown,
+            origin: SignalOrigin::External,
         },
         None => RunCause::Ordinary,
     };

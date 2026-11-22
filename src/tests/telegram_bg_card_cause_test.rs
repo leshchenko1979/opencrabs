@@ -66,7 +66,35 @@ fn card_body_opens_with_the_signal_cause() {
         .to_string();
     assert_eq!(
         first.trim(),
-        "<i>signal 9 — sent from outside the harness</i>",
+        "<i>signal 9 (killed)</i>",
+        "an unknown origin keeps #786's wording byte-for-byte: {first:?}"
+    );
+}
+
+/// #966 — a signal the harness can attribute reaches the human surface with
+/// its sender named, so the card and the agent-facing text agree.
+#[test]
+fn card_body_names_the_sender_when_it_is_known() {
+    let html = rich_html(&meta(
+        Some(RunCause::Signalled {
+            signal: 15,
+            origin: SignalOrigin::External,
+        }),
+        Some(143),
+    ));
+    let first = html
+        .split("</summary>")
+        .nth(1)
+        .expect("card must carry a <summary>")
+        .trim_start_matches('>')
+        .trim_start()
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(
+        first.trim(),
+        "<i>signal 15 (SIGTERM) — signalled by external process</i>",
         "got: {first:?}"
     );
 }

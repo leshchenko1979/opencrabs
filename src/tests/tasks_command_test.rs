@@ -136,10 +136,8 @@ fn a_finished_row_names_why_it_ended_not_just_the_code() {
 
     let out = render_tasks_rows("", "session-a", &[]);
     assert!(out.contains("ceiling 3600s"), "got: {out}");
-    assert!(
-        out.contains("signal 9 — sent from outside the harness"),
-        "got: {out}"
-    );
+    // Unknown origin: #786's wording, unchanged (#966).
+    assert!(out.contains("signal 9 (killed)"), "got: {out}");
     // Two rows, and the header counts them.
     assert!(out.starts_with("## Detached runs (2)"), "got: {out}");
 }
