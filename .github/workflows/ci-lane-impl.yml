@@ -148,15 +148,9 @@ on:
         required: false
         default: false
         type: boolean
-      # NO `test_threads` / `hangdump` HERE (deleted 2026-11-22). Both were
-      # RETIRED 2026-11-20 when the legacy `cargo test` leg was replaced by
-      # nextest, and this CALLEE never read either one — 0 references in this
-      # file outside the declaration. They are still DECLARED by the
-      # pr-checks.yml shell, which is the surface a dispatch names, and are
-      # relayed nowhere: `oc-prchecks --test-threads 2` was passed on 63 of the
-      # 240 dispatches 2026-11-19..22 (latest run 44957812717), so deleting the
-      # shell's declaration would 422 every one of those. The no-op lives at
-      # the dispatch boundary, which is the only place it is load-bearing.
+      # NO `test_threads` / `hangdump` HERE (deleted 2026-11-22): 0 references
+      # in this file. They stay declared on the pr-checks.yml shell, the surface
+      # a dispatch names — see that file's header for the counts.
       source_repository:
         description: "Repository to check out (owner/name)"
         required: false
@@ -168,16 +162,11 @@ on:
         default: main
         type: string
       features:
-        description: "Cargo feature set passed to --features (comma-separated). EMPTY = resolve the shipped set from quick-build-linux.yml, which is its single source of truth."
+        description: "Cargo feature set passed to --features (comma-separated). EMPTY = resolve the shipped set from quick-build-linux.yml, its single source of truth."
         required: false
-        # DELIBERATELY EMPTY (2026-11-22). This used to carry a second copy of
-        # `telegram,code-graph,browser,eval`; a second copy is a second place to
-        # forget, and the gate silently tested a set nobody shipped if the two
-        # drifted. quick-build-linux.yml's dispatch default is now the ONLY
-        # copy: the build family forwards it, and the gate family resolves it
-        # from that file at run time (see the `Resolve shipped feature set`
-        # step in pr-gates-nextest). Change the set THERE and both families
-        # move together.
+        # DELIBERATELY EMPTY (2026-11-22): the default used to be a second copy
+        # of quick-build-linux.yml's set, and two copies drift. The gate
+        # resolves it from that file at run time instead. Change it THERE.
         default: ""
         type: string
       # BINARY IDENTITY (#865). The fork republishes on an UNCHANGED upstream
@@ -264,13 +253,10 @@ jobs:
           git log -1 --format=%B "${{ inputs.source_ref }}" | grep -Eq '^Session-Id:[[:space:]]*[0-9a-fA-F-]{36}' \
             || { echo "GATE SIGNATURE FAIL: no Session-Id trailer on ${{ inputs.source_ref }} (attribution mandatory)"; exit 1; }
 
-  # JOB ID `linux-amd64` (renamed 2026-11-22 from `build`, which said nothing the
-  # display name did not). The DISPLAY name below is untouched and must stay so:
-  # it is parsed by external tools (oc-ship-audit, run_built_sha).
-  # `shared-key: build` on the cache step keeps the rust-cache key
-  # `v0-rust-build-<os>-…` that the old id produced, so the rename does not
-  # orphan the one 801 MB warm entry that key owns (cache inventory, measured
-  # 2026-11-22: 10 entries totalling 9744 MB against the 10240 MB repo cap).
+  # JOB ID `linux-amd64` (2026-11-22, was `build`). The DISPLAY name below is
+  # untouched: external tools parse it. `shared-key: build` on the cache step
+  # keeps the `v0-rust-build-…` key, so the rename orphans no warm entry (the
+  # one it owns is 801 MB; inventory 2026-11-22: 10 entries / 9744 MB of 10240).
   linux-amd64:
     if: ${{ inputs.mode == 'build' }}
     needs: order-gates
@@ -309,9 +295,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          # Key stability across the `build` -> `linux-amd64` job-id rename: the
-          # action keys on the JOB ID, so without this the 801 MB warm entry
-          # would be orphaned and the next ship lane would compile cold.
+          # Pins the pre-rename job-id key: rust-cache keys on the JOB ID, so
+          # without this the 801 MB warm entry is orphaned and ship compiles cold.
           shared-key: build
 
       - name: "Guard: feature set is non-empty (single source: quick-build-linux.yml)"
@@ -408,10 +393,9 @@ jobs:
   # non-shipped channel now carry their own #[cfg(feature)] gates in
   # src/tests/mod.rs, so this leg can compile at all.
   # Revert = re-add an all-features job; do not restore --all-features HERE.
-  # JOB ID `lint` (renamed 2026-11-22 from `pr-gates`, which collided with the
-  # `pr-gates-nextest` prefix and read as a workflow rather than a job). The
-  # DISPLAY name below is untouched and MUST stay so — it embeds the gated ref
-  # and the mode suffix, and external tools parse it.
+  # JOB ID `lint` (2026-11-22, was `pr-gates`, which collided with the
+  # `pr-gates-nextest` prefix). The DISPLAY name below is untouched and MUST
+  # stay so: it embeds the gated ref and the mode suffix, and tools parse it.
   lint:
     if: ${{ inputs.mode == 'gate' }}
     name: PR-lane gates (${{ inputs.ref }}${{ inputs.fix && ' — FIX MODE' || inputs.lockregen && ' — LOCK REGEN' || inputs.lockupdate && ' — LOCK UPDATE' || inputs.swap && ' — SWAP MODE' || inputs.fast && ' — FAST' || '' }})
@@ -423,10 +407,9 @@ jobs:
           ref: ${{ inputs.ref }}
 
       - name: "Guard: lock_pins requires lockupdate"
-        # `lock_pins` is read ONLY inside the lock-update step, so a dispatch
-        # that passes pins without `-f lockupdate=true` runs some other mode and
-        # silently drops them — the pins you think you applied and did not. That
-        # is a false-green class, so it fails loudly instead. Cost: one line.
+        # `lock_pins` is read only inside the lock-update step, so pins passed in
+        # any other mode are silently dropped — the pins you think you applied
+        # and did not. False-green class; fail loudly instead.
         env:
           PINS: ${{ inputs.lock_pins }}
           LU: ${{ inputs.lockupdate }}
@@ -460,10 +443,9 @@ jobs:
         with:
           cache-on-failure: true
           save-if: true # pre-PR branches re-run on fix-forward; warm cache turns the second dispatch into minutes
-          # Key stability across the `pr-gates` -> `lint` job-id rename: the
-          # action keys on the JOB ID, so without this the 3934 MB held by the
-          # five warm `v0-rust-pr-gates-*` entries (cache inventory, measured
-          # 2026-11-22) would be orphaned and the next gate would compile cold.
+          # Pins the pre-rename job-id key (rust-cache keys on the JOB ID), so
+          # the five warm `v0-rust-pr-gates-*` entries holding 3934 MB are not
+          # orphaned. Inventory 2026-11-22.
           shared-key: pr-gates
 
       - name: Install system deps (pkg-config, ALSA dev, clang)
@@ -638,9 +620,8 @@ jobs:
   # `[profile.ci]` in .config/nextest.toml and find nothing; the cargo profile
   # is `--cargo-profile ci`. Do not "correct" this to match the leg above.
   #
-  # NO JUNIT ARTIFACT (deleted 2026-11-22): it was uploaded and never
-  # downloaded — 157 artifacts, zero download-artifact steps in the repo. The
-  # profile file this job writes is now only the slow-timeout above.
+  # NO JUNIT ARTIFACT (deleted 2026-11-22): 157 uploaded, zero download-artifact
+  # steps in the repo. The profile file below is now only the slow-timeout.
   #
   # COVERAGE NOTE: nextest runs libtest binaries; doctests are not part of its
   # run. That gap is closed by the explicit `Doctests` step below — NOT by
@@ -681,14 +662,11 @@ jobs:
 
       - name: "Resolve shipped feature set (single source: quick-build-linux.yml)"
         # THE VERDICT TESTS WHAT WE SHIP, FROM THE ONE PLACE THAT SAYS WHAT THAT
-        # IS (2026-11-22). This input used to be defaulted here as well, so the
-        # shipped set had two copies and the gate could keep testing yesterday's
-        # crates after a change in quick-build-linux.yml. An EMPTY `features`
-        # now resolves from that file's own dispatch default, read from THIS
-        # workflow's ref (the carrier branch), never from the gated checkout:
-        # the gated tree must not be able to change what it is gated against.
-        # Unparseable or absent => hard failure, because silently falling back
-        # to some remembered set is how the two copies drifted in the first place.
+        # IS (2026-11-22). An EMPTY `features` resolves from quick-build-linux.yml's
+        # dispatch default, read from THIS workflow's ref — never the gated
+        # checkout, so a gated tree cannot change what it is gated against.
+        # Unparseable or absent => hard failure; a silent fallback is how the
+        # two copies drifted in the first place.
         env:
           CARRIER_REF: ${{ github.ref_name }}
           EXPLICIT: ${{ inputs.features }}
@@ -766,10 +744,9 @@ jobs:
           tool: cargo-nextest@0.9.152
 
       - name: Configure nextest profile (slow-timeout)
-        # The `[profile.default.junit]` half of this file was deleted with the
-        # artifact it fed (see the note at the end of this job). Only the
-        # slow-timeout survives, and it is load-bearing: it is what turns a hung
-        # test into a NAMED 10-minute failure instead of a 45-minute silence.
+        # The `[profile.default.junit]` half went with the artifact it fed. The
+        # slow-timeout is load-bearing: it turns a hung test into a NAMED
+        # 10-minute failure instead of a 45-minute silence.
         run: |
           mkdir -p .config
           printf '%s\n' \
@@ -1278,17 +1255,14 @@ jobs:
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-          # From the `Resolve shipped feature set` step via $GITHUB_ENV (the
-          # same value the nextest step above used — one resolution per job).
+          # $GITHUB_ENV from the resolve step (one resolution per job).
           CARGO_PROFILE_CI_STRIP: "false"
           CARGO_BUILD_JOBS: "3"
         run: |
           cargo test --locked --profile ci \
             --no-default-features --features "$FEATURES" --doc
 
-      # NO JUNIT UPLOAD (deleted 2026-11-22). This job uploaded a per-test
-      # JUnit report and NOTHING ever downloaded it: 157 artifacts on record,
-      # zero download-artifact steps anywhere in the repo, zero references in
-      # the box-side tooling. Failure output is not lost with it — the nextest
-      # step tees the full `--verbose` run to $STALLWATCH_LOG and prints it in
-      # the step log, which is where a red gate was actually being read from.
+      # NO JUNIT UPLOAD (deleted 2026-11-22): nothing ever downloaded it — 157
+      # artifacts on record, zero download-artifact steps in the repo, zero
+      # box-side references. Failure output is not lost: the nextest step tees
+      # the full `--verbose` run to the step log, which is where it was read.
