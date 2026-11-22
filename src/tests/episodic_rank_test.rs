@@ -282,7 +282,11 @@ fn span_ignores_row_length() {
     // span, the hit count and the adjacency run are untouched; only length
     // changes. Filler must not contain a query term or it moves `hits`.
     let filler = "the rollback finished quietly and nothing else moved ".repeat(40);
-    let long = format!("{short}{filler}");
+    // The separator is load-bearing: without it `flaky` and the filler's first
+    // word glue into `flakythe`, which breaks the adjacency run (2 → 1) while
+    // leaving `hits` and the span untouched — the test then fails on a
+    // fixture bug rather than on the claim it exists to pin.
+    let long = format!("{short} {filler}");
 
     assert!(
         long.len() > short.len() * 10,
