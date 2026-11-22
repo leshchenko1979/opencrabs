@@ -280,6 +280,22 @@ impl ToolResult {
         self
     }
 
+    /// Whether this result asks the loop to compact the context (#955).
+    ///
+    /// `slash_command`'s `/compact` arm is the only producer. A tool handler
+    /// runs mid-loop holding no `&mut AgentContext`, so it cannot compact
+    /// itself — it can only ASK. The loop reads this at the tool-result
+    /// boundary, where the message list is a complete `tool_use`/
+    /// `tool_result` pair, and performs a real manual compaction there.
+    ///
+    /// Anything other than an explicit `"true"` means no request, so a
+    /// malformed or absent value can never force an unexpected compaction.
+    pub fn requests_compaction(&self) -> bool {
+        self.metadata
+            .get("compact_requested")
+            .is_some_and(|v| v == "true")
+    }
+
     /// The process exit code this result carries, when the tool ran one (#763).
     ///
     /// `bash` — and any tool that spawns a process — records the code under the

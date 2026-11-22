@@ -1848,6 +1848,13 @@ impl AgentService {
         // tier so a long turn is never nagged into noise.
         let mut spawned_this_turn = false;
         let mut delegation_nudge_tier_fired: u8 = 0;
+        // #955: the `slash_command` `/compact` arm cannot compact from inside
+        // its own call — a tool handler holds no `&mut AgentContext` — so it
+        // flags its result and the loop performs the compaction at the next
+        // tool-result boundary, where the message list is a complete
+        // `tool_use`/`tool_result` pair. Turn-scoped because the request and
+        // the boundary are separated by the rest of the tool batch.
+        let mut compact_requested_this_turn = false;
         // Every tool result this turn, for checking quoted evidence against
         // what the tools actually returned (#785). Turn-scoped because the
         // fabrication appears in a LATER iteration than the call it claims.
@@ -7536,6 +7543,11 @@ impl AgentService {
                                         // Read BEFORE `images` is moved out below — `exit_code()`
                                         // takes &self, so `result` must still be whole.
                                         let exit_code = result.exit_code();
+                                        // #955: `/compact` asks, the loop performs. Read before
+                                        // `images` is moved out, same reason as above.
+                                        if result.requests_compaction() {
+                                            compact_requested_this_turn = true;
+                                        }
                                         // #787: a detached run's row is keyed by its run id, so the
                                         // completion can write the run's real outcome back onto it.
                                         // Taken before `images` is moved out below.
@@ -7906,6 +7918,11 @@ impl AgentService {
                         // Read BEFORE `images` is moved out below — `exit_code()`
                         // takes &self, so `result` must still be whole.
                         let exit_code = result.exit_code();
+                        // #955: `/compact` asks, the loop performs. Read before
+                        // `images` is moved out, same reason as above.
+                        if result.requests_compaction() {
+                            compact_requested_this_turn = true;
+                        }
                         // #787: a detached run's row is keyed by its run id, so the
                         // completion can write the run's real outcome back onto it.
                         // Taken before `images` is moved out below.
@@ -8433,6 +8450,74 @@ impl AgentService {
                 tracing::info!("Injecting mid-turn time notice into context: {notice}");
                 context.add_message(Message::user(notice));
                 last_time_marker = updated_time;
+            }
+
+            // Agent-requested compaction (#955). Honoured HERE — after the tool
+            // results are in context and before the next assistant generation —
+            // because this is the boundary where the message list is a complete
+            // `tool_use`/`tool_result` pair, so rewriting it cannot corrupt an
+            // in-flight exchange.
+            //
+            // Forced, not budget-gated: an explicit request must not wait for
+            // the 65% threshold, so this calls `compact_context` directly
+            // instead of going through `enforce_context_budget`. It also
+            // ignores `cli_owns_context`, mirroring the turn-start `/compact`
+            // path — a CLI that manages its own window still needs OUR stored
+            // history summarised, and an explicit request outranks the
+            // optimisation.
+            //
+            // `CompactionKind::PostTool`, not `Manual`: the kind selects the
+            // recovery prompt, and `PostTool` describes this state exactly
+            // (fired after a tool call, model about to continue mid-turn).
+            // `Manual`'s short "resume from summary" hint belongs to the
+            // turn-start path, where the model is not mid-edit.
+            if compact_requested_this_turn {
+                compact_requested_this_turn = false;
+                let compacted = self
+                    .compact_context(
+                        session_id,
+                        &mut context,
+                        &model_name,
+                        cancel_token.as_ref(),
+                        CompactionNotifier::manual_from(session_id, progress_callback.as_ref()),
+                    )
+                    .await;
+                // Same reason as the turn-start path: the summariser's retried
+                // provider attempts are recorded but never drained until the
+                // next chat turn, so surface them here, success or failure.
+                emit_retry_notices(
+                    &self.provider_for_session(session_id),
+                    session_id,
+                    progress_callback.as_ref(),
+                );
+                match compacted {
+                    Ok((_summary, applied_marker)) => {
+                        self.apply_compaction_continuation(
+                            session_id,
+                            &message_service,
+                            &mut context,
+                            &CompactionOutcome::Summarised(applied_marker),
+                            CompactionKind::PostTool,
+                            "",
+                            true,
+                        )
+                        .await
+                        .unwrap_or_else(|e| {
+                            tracing::error!("mid-loop /compact persist failed: {e}")
+                        });
+                        if let Some(ref cb) = progress_callback {
+                            cb(session_id, ProgressEvent::TokenCount(context.token_count));
+                        }
+                        tracing::info!(
+                            "[COMPACT] agent-requested /compact honoured mid-loop: now at {} tokens",
+                            context.token_count
+                        );
+                    }
+                    // Leave the context untouched and let the turn continue: a
+                    // failed summariser must not abort work the user is waiting
+                    // on, and the budget check below still guards the window.
+                    Err(e) => tracing::error!("mid-loop /compact request failed: {e}"),
+                }
             }
 
             // Enforce 65% budget after tool results. Skip ONLY when the CLI
