@@ -678,13 +678,60 @@ fn capture_line_states_both_byte_counts_and_both_paths() {
     std::fs::write(&err, "oops\n").expect("write stderr"); // 5 bytes
 
     assert_eq!(
-        capture_line(&out, &err),
+        capture_line(&out, &err, false, "cargo test --lib"),
         format!(
             "output: 7 bytes stdout \u{00b7} 5 bytes stderr \u{00b7} captures: {} {}",
             out.display(),
             err.display()
         ),
         "the line must state both counts and both paths, in that shape"
+    );
+}
+
+/// #959 (second half): a byte count is a claim about WHOSE output it counts.
+///
+/// A lane read `19 bytes` as "the command produced 19 bytes" while the command
+/// had streamed 1,671 bytes across 40 filenames and `head` capped the capture.
+/// The number was right and the sentence was wrong. When the command ends in a
+/// stage that truncates its input, the line says so.
+#[test]
+fn capture_line_names_the_stage_that_capped_the_stream() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("capped.out");
+    let err = dir.path().join("capped.err");
+    std::fs::write(&out, "file-one\nfile-two\n").expect("write stdout"); // 19 bytes
+    std::fs::write(&err, "").expect("write stderr");
+
+    let capped = capture_line(&out, &err, false, "find . -name '*.rs' | head -20");
+    assert!(
+        capped.contains("pipeline ends in `head`"),
+        "a capped capture must name the stage that capped it, got: {capped}"
+    );
+    assert!(
+        capped.contains("not the full stream"),
+        "the clause must say what the count is NOT, got: {capped}"
+    );
+
+    // The same capture from a command with no pipeline is the stream's own
+    // total, and must not borrow the clause.
+    let uncapped = capture_line(&out, &err, false, "cargo test --lib");
+    assert!(
+        !uncapped.contains("pipeline ends in"),
+        "a command with no pipe has no capping stage to name, got: {uncapped}"
+    );
+    assert_eq!(
+        capped.lines().count(),
+        1,
+        "the clause rides on the same line, got: {capped}"
+    );
+
+    // A stage outside the truncating vocabulary is not claimed: `| tee log`
+    // passes the whole stream through, so naming it would be the same
+    // overstatement the fix exists to remove.
+    let pass_through = capture_line(&out, &err, false, "cargo test --lib | tee /tmp/log");
+    assert!(
+        !pass_through.contains("pipeline ends in"),
+        "a pass-through stage did not cap anything, got: {pass_through}"
     );
 }
 
@@ -700,7 +747,7 @@ fn capture_line_says_no_output_when_both_captures_are_empty() {
     std::fs::write(&err, "").expect("write stderr");
 
     assert_eq!(
-        capture_line(&out, &err),
+        capture_line(&out, &err, false, "cargo test --lib"),
         format!(
             "no output on either stream (0 bytes) \u{00b7} captures: {} {}",
             out.display(),
@@ -721,7 +768,7 @@ fn capture_line_marks_a_missing_capture_instead_of_calling_it_empty() {
     // Never created.
     let err = dir.path().join("never-created.err");
 
-    let line = capture_line(&out, &err);
+    let line = capture_line(&out, &err, false, "cargo test --lib");
     assert!(
         line.contains("capture missing"),
         "an absent capture must be named as absent, got: {line}"
@@ -804,6 +851,52 @@ fn completion_bodies_are_pairwise_distinguishable() {
     assert_ne!(empty, missing, "(b) and (c) must not read alike");
 }
 
+/// #959: the same empty pair of captures means two different things depending
+/// on WHEN the line is rendered, so the two surfaces must not print the same
+/// sentence.
+///
+/// `completion_message` renders after the run has ended — there, "no output on
+/// either stream" is a verdict the writer is entitled to. `handover_notice`
+/// renders while the run is still going, and the same words there read as a
+/// post-mortem: run `5f045946` was handed over at 0 bytes and finished with
+/// 242,401 bytes at 333 s, and the lane that read the notice as a death
+/// abandoned its scan and launched a duplicate.
+///
+/// This asserts the two states DIFFER for one identical pair of empty files.
+/// If `live` stops being consulted, the first assertion fails.
+#[test]
+fn capture_line_distinguishes_a_live_run_from_a_finished_one() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("same.out");
+    let err = dir.path().join("same.err");
+    std::fs::write(&out, "").expect("write stdout");
+    std::fs::write(&err, "").expect("write stderr");
+
+    let live = capture_line(&out, &err, true, "cargo test --lib");
+    let finished = capture_line(&out, &err, false, "cargo test --lib");
+
+    assert!(
+        live.contains("no output yet"),
+        "a run that is still going has produced nothing YET, got: {live}"
+    );
+    assert!(
+        !live.contains("no output on either stream"),
+        "a live run must not be described in the past tense, got: {live}"
+    );
+    assert!(
+        finished.contains("no output on either stream (0 bytes)"),
+        "a finished run with empty captures still states the verdict, got: {finished}"
+    );
+    assert!(
+        !finished.contains("no output yet"),
+        "a finished run has no 'yet' left to give, got: {finished}"
+    );
+    assert_ne!(
+        live, finished,
+        "the same empty pair must not read the same on a live and a terminal surface"
+    );
+}
+
 /// The handover notice is the FIRST thing a caller reads about a detached run.
 /// It used to omit the capture section entirely when both tails were empty, so
 /// "this run has printed nothing yet" was indistinguishable from a notice that
@@ -817,10 +910,22 @@ fn handover_states_empty_captures_instead_of_omitting_them() {
     std::fs::write(&out, "").expect("write stdout");
     std::fs::write(&err, "").expect("write stderr");
 
-    let notice = handover_notice("sleep 900", "after 600s", "run-935", Some(4242), &out, &err);
+    let notice = handover_notice(
+        "sleep 900",
+        "sleep 900",
+        "after 600s",
+        "run-935",
+        Some(4242),
+        &out,
+        &err,
+    );
     assert!(
-        notice.contains("no output on either stream (0 bytes)"),
-        "an empty handover must SAY it is empty, got: {notice}"
+        notice.contains("no output yet (0 bytes so far)"),
+        "an empty handover must SAY it is empty SO FAR, got: {notice}"
+    );
+    assert!(
+        !notice.contains("no output on either stream"),
+        "a handover is a snapshot of a live run, not a post-mortem (#959), got: {notice}"
     );
     assert!(
         !notice.contains("stdout so far"),
@@ -834,7 +939,15 @@ fn handover_states_empty_captures_instead_of_omitting_them() {
     // With bytes on the stream, the tail is still carried — the statement did
     // not replace the evidence, it precedes it.
     std::fs::write(&out, "step 1\n").expect("write stdout"); // 7 bytes
-    let notice = handover_notice("sleep 900", "after 600s", "run-935", Some(4242), &out, &err);
+    let notice = handover_notice(
+        "sleep 900",
+        "sleep 900",
+        "after 600s",
+        "run-935",
+        Some(4242),
+        &out,
+        &err,
+    );
     assert!(
         notice.contains("output: 7 bytes stdout"),
         "a live capture is counted at render time, got: {notice}"

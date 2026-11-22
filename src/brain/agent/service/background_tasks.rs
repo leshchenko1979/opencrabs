@@ -1984,7 +1984,22 @@ pub(crate) fn tail_lines(text: &str, n: usize) -> String {
 /// whole point of this line — so the no-output sentence is claimed only when
 /// BOTH files exist and both are empty. "0 bytes" about a file that is not
 /// there would be a measurement nobody took.
-pub(crate) fn capture_line(out: &Path, err: &Path) -> String {
+///
+/// #959: `live` says which surface is asking, because the same measurement
+/// means two different things depending on it. `completion_message` renders
+/// AFTER the run has ended, so an empty pair there is a verdict — the run
+/// produced nothing, full stop. `handover_notice` renders WHILE the run is
+/// still going (bash hands a run to the background manager at the inline
+/// ceiling and returns this notice immediately), so an empty pair there is a
+/// snapshot of a process that has not printed yet. Saying "no output on either
+/// stream" on that surface reads as a post-mortem, and a lane that believes it
+/// abandons a run that is still working: measured on 2026-11-22, run
+/// `5f045946` was handed over at 0 bytes and finished with 242,401 bytes at
+/// 333 s, and the lane that misread it spent 340 s to get one answer.
+///
+/// #959 (second half): `command` is what decides whether the byte count is the
+/// stream's total or one capping stage's output — see `terminal_stage`.
+pub(crate) fn capture_line(out: &Path, err: &Path, live: bool, command: &str) -> String {
     let out_len = capture_len(out);
     let err_len = capture_len(err);
     let captures = format!(
@@ -1993,14 +2008,67 @@ pub(crate) fn capture_line(out: &Path, err: &Path) -> String {
         capture_ref(err, err_len)
     );
     match (out_len, err_len) {
+        (Some(0), Some(0)) if live => {
+            format!("no output yet (0 bytes so far) \u{00b7} {captures}")
+        }
         (Some(0), Some(0)) => {
             format!("no output on either stream (0 bytes) \u{00b7} {captures}")
         }
-        _ => format!(
-            "output: {} bytes stdout \u{00b7} {} bytes stderr \u{00b7} {captures}",
-            out_len.unwrap_or(0),
-            err_len.unwrap_or(0)
+        _ => {
+            let capped = capped_stream_note(command, out_len, err_len);
+            format!(
+                "output: {} bytes stdout \u{00b7} {} bytes stderr \u{00b7} {captures}{capped}",
+                out_len.unwrap_or(0),
+                err_len.unwrap_or(0)
+            )
+        }
+    }
+}
+
+/// The pipeline stage that capped a capture, when the command ends in one
+/// (#959).
+///
+/// A run reported `19 bytes` while the command itself streamed 1,671 bytes
+/// across 40 filenames: the byte count was the LAST stage's output, not the
+/// stream's total, and nothing in the line said so. Naming the stage turns a
+/// number that reads as "the command produced 19 bytes" into the fact it is.
+///
+/// Deliberately bounded: pure string work over a fixed vocabulary of stages
+/// that truncate their input. A `|` inside a quoted argument can fool it, which
+/// costs a clause on a line that would not otherwise have one — never a claim
+/// about a run that was not capped by one of these.
+fn terminal_stage(command: &str) -> Option<&'static str> {
+    const STAGES: [&str; 9] = [
+        "head", "tail", "grep", "wc", "sort", "uniq", "cut", "awk", "sed",
+    ];
+    // No pipe, no pipeline: a bare `head -20 file` already says what it is.
+    if !command.contains('|') {
+        return None;
+    }
+    let last = command.rsplit('|').next()?;
+    // The pipeline ends where the next command begins.
+    let last = last
+        .split(';')
+        .next()
+        .unwrap_or(last)
+        .split("&&")
+        .next()
+        .unwrap_or(last);
+    let word = last.split_whitespace().next()?;
+    let bare = word.rsplit('/').next().unwrap_or(word);
+    STAGES.iter().copied().find(|stage| *stage == bare)
+}
+
+/// The clause appended to a non-empty capture line, or nothing (#959).
+fn capped_stream_note(command: &str, out_len: Option<u64>, err_len: Option<u64>) -> String {
+    if out_len.unwrap_or(0) == 0 && err_len.unwrap_or(0) == 0 {
+        return String::new();
+    }
+    match terminal_stage(command) {
+        Some(stage) => format!(
+            " (pipeline ends in `{stage}`: this is that stage's output, not the full stream)"
         ),
+        None => String::new(),
     }
 }
 
@@ -2070,7 +2138,7 @@ pub(crate) fn completion_message(
     // nothing", "not flushed yet" and "died before flushing" one blank. The
     // capture line states the byte counts and both paths on every completion;
     // the tail is appended only when it has something to say.
-    let capture = capture_line(out, err);
+    let capture = capture_line(out, err, false, command);
     let tail_block = if tail.trim().is_empty() {
         String::new()
     } else {
