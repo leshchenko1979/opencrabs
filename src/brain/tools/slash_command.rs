@@ -357,11 +357,20 @@ impl Tool for SlashCommandTool {
 
         match command {
             "/cd" => self.handle_cd(args, context),
+            // #955: this arm used to return a success string and nothing else,
+            // so the agent believed it had compacted when no compaction had
+            // even been requested. A tool handler holds no `&mut AgentContext`
+            // and runs mid-turn, so it cannot compact from inside its own call;
+            // the request travels as result metadata and the loop honours it at
+            // the next tool-result boundary, where the message list is a
+            // complete `tool_use`/`tool_result` pair
+            // (`ToolResult::requests_compaction`).
             "/compact" => Ok(ToolResult::success(
-                "Compaction requested. Summarize the current conversation for continuity, \
-                 then the system will trim context automatically."
+                "Compaction requested. The conversation will be summarised and the \
+                 context trimmed before the next model call."
                     .into(),
-            )),
+            )
+            .with_metadata("compact_requested".to_string(), "true".to_string())),
             "/evolve" => Ok(ToolResult::success(
                 "Use the `evolve` tool to check for and install the latest release. \
                  It downloads the pre-built binary from GitHub and hot-restarts."
