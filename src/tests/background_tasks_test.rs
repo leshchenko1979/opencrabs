@@ -678,7 +678,7 @@ fn capture_line_states_both_byte_counts_and_both_paths() {
     std::fs::write(&err, "oops\n").expect("write stderr"); // 5 bytes
 
     assert_eq!(
-        capture_line(&out, &err),
+        capture_line(&out, &err, false),
         format!(
             "output: 7 bytes stdout \u{00b7} 5 bytes stderr \u{00b7} captures: {} {}",
             out.display(),
@@ -700,7 +700,7 @@ fn capture_line_says_no_output_when_both_captures_are_empty() {
     std::fs::write(&err, "").expect("write stderr");
 
     assert_eq!(
-        capture_line(&out, &err),
+        capture_line(&out, &err, false),
         format!(
             "no output on either stream (0 bytes) \u{00b7} captures: {} {}",
             out.display(),
@@ -721,7 +721,7 @@ fn capture_line_marks_a_missing_capture_instead_of_calling_it_empty() {
     // Never created.
     let err = dir.path().join("never-created.err");
 
-    let line = capture_line(&out, &err);
+    let line = capture_line(&out, &err, false);
     assert!(
         line.contains("capture missing"),
         "an absent capture must be named as absent, got: {line}"
@@ -804,6 +804,52 @@ fn completion_bodies_are_pairwise_distinguishable() {
     assert_ne!(empty, missing, "(b) and (c) must not read alike");
 }
 
+/// #959: the same empty pair of captures means two different things depending
+/// on WHEN the line is rendered, so the two surfaces must not print the same
+/// sentence.
+///
+/// `completion_message` renders after the run has ended — there, "no output on
+/// either stream" is a verdict the writer is entitled to. `handover_notice`
+/// renders while the run is still going, and the same words there read as a
+/// post-mortem: run `5f045946` was handed over at 0 bytes and finished with
+/// 242,401 bytes at 333 s, and the lane that read the notice as a death
+/// abandoned its scan and launched a duplicate.
+///
+/// This asserts the two states DIFFER for one identical pair of empty files.
+/// If `live` stops being consulted, the first assertion fails.
+#[test]
+fn capture_line_distinguishes_a_live_run_from_a_finished_one() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("same.out");
+    let err = dir.path().join("same.err");
+    std::fs::write(&out, "").expect("write stdout");
+    std::fs::write(&err, "").expect("write stderr");
+
+    let live = capture_line(&out, &err, true);
+    let finished = capture_line(&out, &err, false);
+
+    assert!(
+        live.contains("no output yet"),
+        "a run that is still going has produced nothing YET, got: {live}"
+    );
+    assert!(
+        !live.contains("no output on either stream"),
+        "a live run must not be described in the past tense, got: {live}"
+    );
+    assert!(
+        finished.contains("no output on either stream (0 bytes)"),
+        "a finished run with empty captures still states the verdict, got: {finished}"
+    );
+    assert!(
+        !finished.contains("no output yet"),
+        "a finished run has no 'yet' left to give, got: {finished}"
+    );
+    assert_ne!(
+        live, finished,
+        "the same empty pair must not read the same on a live and a terminal surface"
+    );
+}
+
 /// The handover notice is the FIRST thing a caller reads about a detached run.
 /// It used to omit the capture section entirely when both tails were empty, so
 /// "this run has printed nothing yet" was indistinguishable from a notice that
@@ -819,8 +865,12 @@ fn handover_states_empty_captures_instead_of_omitting_them() {
 
     let notice = handover_notice("sleep 900", "after 600s", "run-935", Some(4242), &out, &err);
     assert!(
-        notice.contains("no output on either stream (0 bytes)"),
-        "an empty handover must SAY it is empty, got: {notice}"
+        notice.contains("no output yet (0 bytes so far)"),
+        "an empty handover must SAY it is empty SO FAR, got: {notice}"
+    );
+    assert!(
+        !notice.contains("no output on either stream"),
+        "a handover is a snapshot of a live run, not a post-mortem (#959), got: {notice}"
     );
     assert!(
         !notice.contains("stdout so far"),

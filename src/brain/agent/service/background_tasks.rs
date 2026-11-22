@@ -1984,7 +1984,19 @@ pub(crate) fn tail_lines(text: &str, n: usize) -> String {
 /// whole point of this line — so the no-output sentence is claimed only when
 /// BOTH files exist and both are empty. "0 bytes" about a file that is not
 /// there would be a measurement nobody took.
-pub(crate) fn capture_line(out: &Path, err: &Path) -> String {
+///
+/// #959: `live` says which surface is asking, because the same measurement
+/// means two different things depending on it. `completion_message` renders
+/// AFTER the run has ended, so an empty pair there is a verdict — the run
+/// produced nothing, full stop. `handover_notice` renders WHILE the run is
+/// still going (bash hands a run to the background manager at the inline
+/// ceiling and returns this notice immediately), so an empty pair there is a
+/// snapshot of a process that has not printed yet. Saying "no output on either
+/// stream" on that surface reads as a post-mortem, and a lane that believes it
+/// abandons a run that is still working: measured on 2026-11-22, run
+/// `5f045946` was handed over at 0 bytes and finished with 242,401 bytes at
+/// 333 s, and the lane that misread it spent 340 s to get one answer.
+pub(crate) fn capture_line(out: &Path, err: &Path, live: bool) -> String {
     let out_len = capture_len(out);
     let err_len = capture_len(err);
     let captures = format!(
@@ -1993,6 +2005,9 @@ pub(crate) fn capture_line(out: &Path, err: &Path) -> String {
         capture_ref(err, err_len)
     );
     match (out_len, err_len) {
+        (Some(0), Some(0)) if live => {
+            format!("no output yet (0 bytes so far) \u{00b7} {captures}")
+        }
         (Some(0), Some(0)) => {
             format!("no output on either stream (0 bytes) \u{00b7} {captures}")
         }
@@ -2070,7 +2085,7 @@ pub(crate) fn completion_message(
     // nothing", "not flushed yet" and "died before flushing" one blank. The
     // capture line states the byte counts and both paths on every completion;
     // the tail is appended only when it has something to say.
-    let capture = capture_line(out, err);
+    let capture = capture_line(out, err, false);
     let tail_block = if tail.trim().is_empty() {
         String::new()
     } else {
