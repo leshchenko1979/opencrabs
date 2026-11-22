@@ -23,13 +23,20 @@ pub(crate) fn extract_member_tar_gz(data: &[u8], file_name: &str) -> std::io::Re
 
 /// Extract a named member from an in-memory `.zip` archive.
 ///
-/// A missing member yields `ErrorKind::NotFound`.
+/// Matches on the entry's exact file name, exactly as the `.tar.gz` arm does,
+/// so a leading directory inside the archive is fine but a longer name that
+/// merely ends with the wanted one is not. A missing member yields
+/// `ErrorKind::NotFound`.
 pub(crate) fn extract_member_zip(data: &[u8], file_name: &str) -> std::io::Result<Vec<u8>> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(data))?;
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
-        if file.name().ends_with(file_name) {
+        // `file.name()` is the full in-archive path; compare its final
+        // component, never a suffix. Bind the bool first so the borrow of
+        // `file` ends before `read_to_end` takes it mutably.
+        let matches = basename_is(Path::new(file.name()), file_name);
+        if matches {
             let mut buf = Vec::new();
             file.read_to_end(&mut buf)?;
             return Ok(buf);

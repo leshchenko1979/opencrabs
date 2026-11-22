@@ -49,6 +49,7 @@ pub mod analytics_queries_test;
 pub mod analytics_render_test;
 pub mod analyze_video_fallback_test;
 pub mod approval_policy_resolution_test;
+pub mod archive_extract_test;
 pub mod atomic_write_test;
 pub mod attach_command_test;
 pub mod auto_title_e2e_test;
