@@ -593,6 +593,7 @@ pub mod daemon_health_test;
 pub mod doc_parser_page_range_test;
 pub mod dynamic_tool_coerce_test;
 pub mod dynamic_tool_parse_error_test;
+pub mod effect_classification_test;
 pub mod empty_answer_nudge_test;
 pub mod evolve_diagnose_test;
 pub mod evolve_homebrew_reporting_test;
