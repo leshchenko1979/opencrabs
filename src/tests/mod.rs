@@ -929,6 +929,7 @@ pub mod session_chat_id_lookup_test;
 pub mod session_provider_wrap_test;
 pub mod skill_slash_dispatch_test;
 pub mod skills_dialog_test;
+pub mod skills_sidecar_test;
 pub mod skills_test;
 #[cfg(feature = "slack")]
 pub mod slack_narration_fold_test;
