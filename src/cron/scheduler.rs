@@ -813,22 +813,22 @@ async fn execute_job(
 
             // Optionally deliver to configured channels too. Delivery
             // failures stamp status='delivery_failed' on this run (#107).
-            if let Some(ref deliver_to) = job.deliver_to {
-                for target in deliver_to
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    let _ = deliver_result(
-                        target,
-                        &job.name,
-                        &clean,
-                        job.deliver_api_key.as_deref(),
-                        Some(ctx.pool()),
-                        Some(run_id.clone()),
-                    )
-                    .await;
-                }
+            //
+            // #969: `auto_delivery_targets` is EMPTY for a `silent` job, so the
+            // harness auto-post is skipped while the run row above is still
+            // written and the turn keeps its `deliver_to` send scope — a silent
+            // job just does not get an extra envelope-wrapped copy of its own
+            // output.
+            for target in auto_delivery_targets(job) {
+                let _ = deliver_result(
+                    target,
+                    &job.name,
+                    &clean,
+                    job.deliver_api_key.as_deref(),
+                    Some(ctx.pool()),
+                    Some(run_id.clone()),
+                )
+                .await;
             }
 
             // Maybe dispatch goal to session
@@ -843,24 +843,24 @@ async fn execute_job(
                 tracing::error!("Failed to save cron run error to DB: {db_err}");
             }
 
-            // Optionally deliver error to configured channels too
-            if let Some(ref deliver_to) = job.deliver_to {
-                let msg = format!("Cron job '{}' failed: {e}", job.name);
-                for target in deliver_to
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    let _ = deliver_result(
-                        target,
-                        &job.name,
-                        &msg,
-                        job.deliver_api_key.as_deref(),
-                        Some(ctx.pool()),
-                        Some(run_id.clone()),
-                    )
-                    .await;
-                }
+            // Optionally deliver error to configured channels too.
+            //
+            // #969: `auto_delivery_targets` is EMPTY for a `silent` job. This
+            // arm matters most — it posts `Cron job '<name>' failed: <e>`, so
+            // leaving it ungated would leak harness diagnostics into a
+            // user-facing chat even for a job the operator deliberately made
+            // silent. The error is still recorded on the run row above.
+            let msg = format!("Cron job '{}' failed: {e}", job.name);
+            for target in auto_delivery_targets(job) {
+                let _ = deliver_result(
+                    target,
+                    &job.name,
+                    &msg,
+                    job.deliver_api_key.as_deref(),
+                    Some(ctx.pool()),
+                    Some(run_id.clone()),
+                )
+                .await;
             }
         }
     }
@@ -881,6 +881,34 @@ async fn execute_job(
     }
 
     Ok(())
+}
+
+/// The targets the harness itself posts this job's output to (#969).
+///
+/// Empty in two distinct cases, and the distinction lives in the job row:
+///
+/// - the job declared no `deliver_to` — nothing to post to;
+/// - the job's `deliver_mode` is `silent` — it keeps its `deliver_to` SEND
+///   SCOPE (the turn may still call `telegram_send` itself) but the harness
+///   posts nothing on top.
+///
+/// All three delivery arms (agent success, agent error, direct trigger) go
+/// through this one function, so no arm can drift back to posting for a silent
+/// job. The run-row bookkeeping stays in each arm; only the posting is gated.
+pub(crate) fn auto_delivery_targets(job: &CronJob) -> Vec<&str> {
+    if !job.delivers_result() {
+        return Vec::new();
+    }
+    job.deliver_to
+        .as_deref()
+        .map(|declared| {
+            declared
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Parse the Telegram target out of a `deliver_to` entry (fork #104).
@@ -1214,23 +1242,19 @@ async fn execute_direct_trigger_job(
         tracing::error!("Failed to save direct cron run result to DB: {e}");
     }
 
-    // Deliver to configured channels
-    if let Some(ref deliver_to) = job.deliver_to {
-        for target in deliver_to
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            let _ = deliver_result(
-                target,
-                &job.name,
-                &clean,
-                job.deliver_api_key.as_deref(),
-                Some(ctx.pool()),
-                Some(run_id.clone()),
-            )
-            .await;
-        }
+    // Deliver to configured channels. #969: `auto_delivery_targets` is EMPTY
+    // for a `silent` job, so the harness posts nothing while the run row above
+    // is still written.
+    for target in auto_delivery_targets(job) {
+        let _ = deliver_result(
+            target,
+            &job.name,
+            &clean,
+            job.deliver_api_key.as_deref(),
+            Some(ctx.pool()),
+            Some(run_id.clone()),
+        )
+        .await;
     }
 
     // Maybe dispatch goal to session
