@@ -125,6 +125,32 @@ pub(crate) const SKILL_RECALL_RAW_FLOOR: f64 = 1.5;
 /// requires agreement rather than a single coincidence.
 pub(crate) const SKILL_RECALL_MIN_TERMS: usize = 2;
 
+/// How specific a single matched term must be before it COUNTS toward
+/// [`SKILL_RECALL_MIN_TERMS`] at all (#953).
+///
+/// `min_terms` used to count raw presence, so any two words the index happened
+/// to contain satisfied it — and the words that satisfy it most reliably are
+/// the ones every description shares. Measured on the live 39-entry index, the
+/// owner's own messages were admitted on:
+///
+/// | message | matched stems | summed idf |
+/// |---|---|---|
+/// | `What are you going to file?` | `you`, `file` | 1.67 |
+/// | `Have you synchronized the skill files after renaming` | `you`, `the`, `file` | 1.85 |
+/// | `Why does the recall show the same set of skills always? …` | `the`, `set`, `skill`, `and` | 1.96 |
+///
+/// Two of the four matched stems in the last row are function words, which is
+/// why the named skills read as irrelevant. `0.7` is the smallest floor that
+/// rejects all three: on this index it corresponds to a term carried by at
+/// most three of 39 descriptions (idf `0.665` at df 4, `0.742` at df 3), so
+/// `file` (0.665) and `skill` (0.604) stop counting while genuinely topical
+/// terms keep their full weight.
+///
+/// The floor does NOT make short descriptions reachable — that was measured
+/// and is a separate question. A short description is unreachable because real
+/// messages do not contain its terms, not because of this gate.
+pub(crate) const SKILL_RECALL_MIN_TERM_IDF: f64 = 0.7;
+
 /// How much information, summed over the distinct matched terms, an entry must
 /// carry to be named (#939).
 ///
@@ -666,6 +692,7 @@ fn skill_shortlist_names(index_md: &str, user_message: &str, floor: f64) -> Opti
         user_message,
         SKILL_RECALL_MAX,
         SKILL_RECALL_MIN_TERMS,
+        SKILL_RECALL_MIN_TERM_IDF,
         SKILL_RECALL_MIN_SUMMED_IDF,
         SKILL_RECALL_RATIO,
     );
