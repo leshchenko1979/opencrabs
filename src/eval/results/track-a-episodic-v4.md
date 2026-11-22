@@ -71,8 +71,17 @@ digit: the published v3-era figure was 0.053, this run's control read 0.025.
 Both are 1–2 hits out of 40, and the sampler's 14-day window moves with the
 clock, so the case set differs run to run. **Absolute numbers here are
 sample-dependent and must not be compared across cards.** The ratio is the
-claim: **0.025 → 0.150, a 6× improvement**, with the oracle confirming the
-direction is not a budget artefact.
+claim: **0.025 → 0.150, a 6× improvement**.
+
+The oracle column is the weaker half of that table and is flagged as such: its
+`0.225` was read in a **different run** from the `0.150` beside it, and the live
+`ops` store grows between runs, so the pool each case ranks is not the same
+pool. Re-measured with both arms over the **same fetched pools in one pass**,
+the old rule reads `0.000` at every cap and the new rule reads
+`0.075 / 0.125 / 0.150 / 0.150` for `50 / 100 / 200 / unlimited` — see the pool
+table below, which is the controlled form of this comparison. A capped slice can
+even outrank the full set on ties, so "unlimited" is a different ranking, not an
+upper bound: it is not an oracle and the column should be read as a second arm.
 
 An independent measurement relayed from the lane that filed #941 put the same
 comparison at 0.097 → 0.516 on its own 40 cases and a 500-row pool — a 5.3×
@@ -104,6 +113,45 @@ cap is not a truncation point in the typical case — it is the point past which
 the ranker has nothing left to see. `fetch_cap` is therefore **widened in this
 change** from `5 * k` to `tokenized_fetch_cap()`, which fetches the cap for any
 `k ≤ 10`.
+
+### Where the remaining misses actually are: retrieval is not the limit
+
+The pool question above is about *fetching* the right candidates. A separate
+measurement asks whether the gold is even reachable — is it in the candidate set
+at all, at any rank? If it is not, no ranker can retrieve it and recall is
+capped by retrieval; if it is, the ceiling is ranking quality.
+
+Measured on the same 14-day slice, 40 positives, over the union of the
+contiguous arm (200) and the AND pool:
+
+| question | result |
+|---|---|
+| gold present in the contiguous arm | 0/40 = 0.000 |
+| gold present in the AND pool | 40/40 = 1.000 |
+| **gold present in the union** | **40/40 = 1.000 — the retrieval ceiling** |
+| median rank of the gold in the union | **69** |
+| max rank | 2,156 |
+
+**The gold is retrievable in every single case.** Retrieval is not what is
+losing the hits; ordering is. The rank of the gold against the full candidate
+set gives the ceiling at each `k`:
+
+| k | recall |
+|---|---|
+| 10 | 0.200 |
+| 20 | 0.300 |
+| 50 | 0.475 |
+| 100 | 0.600 |
+
+So `0.40` at `k = 10` is **not reachable on this corpus by any ordering of the
+current feature set** — the median gold sits at rank 69, and half the cases
+would have to move twenty positions to clear `k = 10`. The distance from `0.150`
+to `0.200` is the `fetch_cap` widening (the capped arm reads `0.150`, the
+uncapped union `0.200`). The remaining gap to `0.40` is a **ranking-quality**
+gap: the four signals do not separate the gold from its ~68 neighbours. Closing
+it needs a different signal, not a wider pool and not a reweighting — which is
+the same conclusion #941 reached about the pre-change feature set, now stated for
+the post-change one.
 
 ## What changed
 
