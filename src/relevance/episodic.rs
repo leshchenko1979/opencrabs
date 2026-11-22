@@ -34,8 +34,9 @@
 //! merely contains both. Occurrence counts are identical in the two cases, so
 //! `hits` cannot see the difference.
 //!
-//! Measured on a 14-day slice of the `ops` store (18,820 messages, 40
-//! positives, k = 10, [`TOKENIZED_FETCH_CAP`] pool) proximity takes recall@10
+//! Measured on a 14-day slice of the `ops` store (18,231 messages in the
+//! slice, 16,187 of them carrying a query token and therefore scored; 40
+//! positives; k = 10; [`TOKENIZED_FETCH_CAP`] pool) proximity takes recall@10
 //! from 0.000 to **0.150 (6/40)**, MRR 0.061. That figure is a REPLICA: the
 //! box cannot build, so it comes from a Python sweep over the same store with
 //! the same SQL arms, NOT from the shipped leg. The shipped leg has not
@@ -54,7 +55,7 @@
 //! | raw, first occurrences (SHIPPED) | **0.150** (6/40) | **0.061** |
 //! | `span / content length` | 0.075 (3/40) | 0.020 |
 //! | `span / sqrt(content length)` | 0.125 (5/40) | 0.045 |
-//! | `span / word count` | 0.075 (3/40) | 0.013 |
+//! | `span / word count` | 0.075 (3/40) | 0.019 |
 //! | inverse hits-per-word | 0.075 (3/40) | 0.010 |
 //!
 //! Every normalised form is WORSE, and the diagnostic says why: on this corpus
@@ -98,9 +99,11 @@
 //!   also consecutive in the query's own order. Adjacent query words are a
 //!   phrase; scattered ones are a bag of words.
 //!
-//! Proximity was tried as a TIEBREAK first and changed nothing (0.097 → 0.097),
-//! because `hits` already separates the rows it would have reordered. It is
-//! primary or it is dead weight.
+//! Proximity was tried as a TIEBREAK first and changed nothing, because `hits`
+//! already separates the rows it would have reordered — a ranker whose primary
+//! signal is saturated cannot be moved by a signal that only speaks when the
+//! primary ties. It is primary or it is dead weight. (The `0.097 → 0.097` that
+//! used to sit here was measured on the withdrawn probe and is not quoted.)
 //!
 //! # What this deliberately does NOT do
 //!
@@ -126,20 +129,27 @@ pub const MAX_QUERY_TOKENS: usize = 8;
 /// fetches the newest `N` matching rows and orders those, so a target outside
 /// the pool is unreachable however well it scores. Measured on the live store
 /// (#941), recall@10 by pool size: 50 → 0.075, 100 → 0.125, **200 → 0.150**,
-/// unlimited → 0.150. It saturates at 200, and the median AND-arm pool is 171,
-/// so 200 covers the typical case outright rather than truncating it.
+/// unlimited → 0.150. It saturates at 200: reading the whole AND pool returns
+/// the same six cases, so past this point the ranker has nothing left to see.
 ///
-/// A replica measurement on a later 14-day slice puts the same cap in a
-/// sharper light: of the 24 cases that reach the ranker, the gold sits inside
-/// the newest 200 rows in 17 and outside it in 7 (at positions 282, 355, 453,
-/// 550, 727, 873 and 1,247). So the cap is not a truncation point for the
-/// TYPICAL pool — it is one for the fat tail, and those 7 cases are unreachable
-/// through this path at any `k`. The resulting ceiling for this path is
-/// (0 short-circuit + 17)/40 = 0.425, against 0.600 if the pool were
-/// unlimited; see `track-a-episodic-v5.md`. The cap is left at 200 because
-/// widening it was measured to buy nothing on the average case and costs
-/// linear scan time, and because 0.425 is still above the 0.40 bar while the
-/// ranker's actual 0.150 is not — the gap is ordering, not fetching.
+/// The pool itself is heavy-tailed rather than typical-case-sized — over the 40
+/// positives of the measured slice the AND-arm pool has median 364 and max
+/// 3,352 (the 24 cases that reach the ranker at all: median 186). So the cap
+/// truncates MOST pools, and still costs nothing measurable: unlimited reads the
+/// same 0.150. The two facts are compatible because the 7 cases whose gold
+/// falls outside the newest 200 rows are cases the ranker fails even when it
+/// can see them — the cap is not what loses those hits, ordering is.
+///
+/// Where the cap does bite is the ceiling: of the 24 cases that reach the
+/// ranker, the gold sits inside the newest 200 rows in 17 and outside it in 7
+/// (at pool rank 283, 356, 454, 551, 728, 874 and 1,248). Those 7 are
+/// unreachable through this path at any `k`. The resulting ceiling is (0
+/// short-circuit + 17)/40 = 0.425, against 0.600 if the pool were unlimited
+/// (the gold never appears in the contiguous arm's top 10, so its 16 cases
+/// contribute 0 either way); see `track-a-episodic-v5.md`. The cap is left at
+/// 200 because widening it was measured to buy nothing and costs linear scan
+/// time, and because 0.425 is still above the 0.40 bar while the ranker's
+/// actual 0.150 is not — the gap is ordering, not fetching.
 ///
 /// This lives here, not in either caller, because the shipped search and the
 /// Track A harness must fetch the SAME pool — a harness that sizes its own

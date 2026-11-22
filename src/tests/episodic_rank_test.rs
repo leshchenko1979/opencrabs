@@ -465,8 +465,8 @@ fn no_proximity_sorts_last_against_any_finite_span() {
     );
 }
 
-#[test]
 /// Edge cases that would otherwise panic or silently return a constant.
+#[test]
 fn edge_cases_are_total() {
     let empty = episodic::score("anything at all", &[]);
     assert_eq!(
