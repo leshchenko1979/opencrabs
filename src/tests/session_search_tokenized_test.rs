@@ -159,47 +159,54 @@ async fn and_semantics_requires_every_token() {
     );
 }
 
+/// Ranking is proximity FIRST, then hit count — the #941 order. One output
+/// carries BOTH halves, and neither half is vacuous:
+///
+/// * `sparse` and `dense` are the pair that fails without the #941 change.
+///   `dense` repeats every term (7 hits against 3) but scatters them over 42
+///   characters while `sparse` keeps them inside 19, so proximity puts
+///   `sparse` first and a hit-count-first ranker returns the opposite.
+/// * `tied` and `sparse` have the SAME proximity span (19), the same
+///   opening-zone count and the same adjacency run; `tied` simply repeats
+///   `beta` once more, so it must lead on hit count alone.
+///
+/// Recency is pinned so the SQL order is the WRONG order — `dense` is the
+/// newest row — which is what makes this an assertion about ranking rather
+/// than about insertion order.
 #[tokio::test]
-async fn tokenized_rows_rank_by_hit_count_then_recency() {
+async fn tokenized_rows_rank_by_proximity_then_hit_count() {
     let (db, tool) = setup().await;
     let srepo = SessionRepository::new(db.pool().clone());
     let mrepo = MessageRepository::new(db.pool().clone());
+    let now = chrono::Utc::now();
 
-    // Sparse match (each token once) in the session pinned NEWER; dense
-    // repeats in one pinned OLDER. Both satisfy the AND-match, neither
-    // contains the contiguous phrase. Hit-count ranking must list the dense
-    // row first even though recency alone would order the other way.
-    let newer = Session::new(Some("sparse".to_string()), Some("m".to_string()), None);
-    srepo.create(&newer).await.unwrap();
-    mrepo
-        .create(&Message::new(
-            newer.id,
-            "user".into(),
-            "words: alpha once, beta once".to_string(),
-            1,
-        ))
-        .await
-        .unwrap();
+    // (title, body, created_at). `dense` is NEWEST, so recency alone would
+    // lead with it — the ranker must move it last.
+    let rows = [
+        (
+            "dense",
+            "alpha alpha beta beta and more alpha beta words",
+            now,
+        ),
+        (
+            "tied",
+            "words: alpha once, beta once, beta again",
+            now - chrono::Duration::minutes(30),
+        ),
+        (
+            "sparse",
+            "words: alpha once, beta once",
+            now - chrono::Duration::minutes(60),
+        ),
+    ];
 
-    let older = Session::new(Some("dense".to_string()), Some("m".to_string()), None);
-    srepo.create(&older).await.unwrap();
-    mrepo
-        .create(&Message::new(
-            older.id,
-            "user".into(),
-            "alpha alpha beta beta and more alpha beta words".to_string(),
-            1,
-        ))
-        .await
-        .unwrap();
-
-    // Pin recency: sparse strictly newer than dense.
-    let mut pinned_older = older.clone();
-    pinned_older.updated_at = chrono::Utc::now() - chrono::Duration::hours(1);
-    srepo.update(&pinned_older).await.unwrap();
-    let mut pinned_newer = newer.clone();
-    pinned_newer.updated_at = chrono::Utc::now();
-    srepo.update(&pinned_newer).await.unwrap();
+    for (title, body, created_at) in rows {
+        let session = Session::new(Some(title.to_string()), Some("m".to_string()), None);
+        srepo.create(&session).await.unwrap();
+        let mut message = Message::new(session.id, "user".into(), body.to_string(), 1);
+        message.created_at = created_at;
+        mrepo.create(&message).await.unwrap();
+    }
 
     let result = tool
         .execute(
@@ -214,11 +221,33 @@ async fn tokenized_rows_rank_by_hit_count_then_recency() {
         "fallback expected, got: {}",
         result.output
     );
-    let dense = result.output.find("dense").expect("dense row present");
-    let sparse = result.output.find("sparse").expect("sparse row present");
+
+    let pos = |name: &str| {
+        result
+            .output
+            .find(name)
+            .unwrap_or_else(|| panic!("{name} row must be present: {}", result.output))
+    };
+    let (dense, tied, sparse) = (pos("dense"), pos("tied"), pos("sparse"));
+
+    // Half 1 — proximity outranks hit count: `sparse` has 3 hits to `dense`'s
+    // 7, but its terms span 19 characters against `dense`'s 42.
     assert!(
-        dense < sparse,
-        "dense (more hits) must outrank sparse (newer): {}",
+        sparse < dense,
+        "proximity must outrank hit count: `sparse` (span 19, 3 hits) must \
+         precede `dense` (span 42, 7 hits); got:\n{}",
         result.output
     );
+
+    // Half 2 — at EQUAL span, hit count decides. `tied` and `sparse` differ
+    // only in that `tied` repeats `beta`.
+    assert!(
+        tied < sparse,
+        "at equal proximity the stronger lexical match must lead: `tied` \
+         (span 19, 4 hits) must precede `sparse` (span 19, 3 hits); got:\n{}",
+        result.output
+    );
+
+    // Together those two give `tied < sparse < dense`, which is NOT the
+    // recency order the store returned — `dense` was the newest row.
 }
