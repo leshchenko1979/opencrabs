@@ -415,6 +415,15 @@ impl ToolExecution {
 /// the bot already replied, log only.
 pub const BOT_SENDER_ID: &str = "bot:opencrabs";
 
+/// Ship-plane marker for a bot bubble delivered on the rich-MARKDOWN plane
+/// (#908): `sendRichMessage` with `rich_message.markdown`. It is the only
+/// plane whose stored content is the exact body a re-edit can re-send, which
+/// is what makes the row a legal cross-turn glue target (#91). Written by the
+/// Telegram delivery path at send time; read by
+/// `ChannelMessageRepository::last_bot_rich_md`. Both sides bind this constant
+/// so the literal cannot drift out of the lookup.
+pub const SHIP_PLANE_RICH_MD: &str = "rich-md";
+
 /// Channel message model — passive capture of messages from channel platforms
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {

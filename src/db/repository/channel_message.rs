@@ -592,6 +592,10 @@ impl ChannelMessageRepository {
         let cid = chat_id.to_string();
         let tid = thread_id.map(|s| s.to_string());
         let cutoff = Utc::now().timestamp() - max_age_secs;
+        // #908: the marker is a contract with the delivery path — bind the
+        // shared constant rather than repeating the literal, so the write site
+        // and this filter cannot drift apart.
+        let plane = crate::db::models::SHIP_PLANE_RICH_MD;
         self.pool
             .get()
             .await
@@ -602,10 +606,10 @@ impl ChannelMessageRepository {
                         "SELECT platform_message_id, content FROM channel_messages \
                          WHERE channel = ?1 AND channel_chat_id = ?2 AND thread_id = ?3 \
                          AND sender_id = 'bot:opencrabs' \
-                         AND platform_message_id IS NOT NULL AND ship_plane = 'rich-md' \
+                         AND platform_message_id IS NOT NULL AND ship_plane = ?5 \
                          AND created_at > ?4 \
                          ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                        params![ch, cid, tid, cutoff],
+                        params![ch, cid, tid, cutoff, plane],
                         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                     )
                     .optional(),
@@ -614,10 +618,10 @@ impl ChannelMessageRepository {
                         "SELECT platform_message_id, content FROM channel_messages \
                          WHERE channel = ?1 AND channel_chat_id = ?2 AND thread_id IS NULL \
                          AND sender_id = 'bot:opencrabs' \
-                         AND platform_message_id IS NOT NULL AND ship_plane = 'rich-md' \
+                         AND platform_message_id IS NOT NULL AND ship_plane = ?4 \
                          AND created_at > ?3 \
                          ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                        params![ch, cid, cutoff],
+                        params![ch, cid, cutoff, plane],
                         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                     )
                     .optional(),

@@ -1156,6 +1156,7 @@ pub mod telegram_send_input_file_test;
 pub mod telegram_send_origin_thread_echo_test;
 pub mod telegram_send_string_coercion_test;
 pub mod telegram_send_thread_id_override_test;
+pub mod telegram_ship_plane_test;
 pub mod telegram_split_message_test;
 pub mod telegram_state_test;
 pub mod telegram_status_message_test;
