@@ -295,12 +295,19 @@ pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
 /// Account for background tasks that were running when a previous process
 /// died, then clear them.
 ///
-/// Every surviving row belonged to a process that no longer exists, so there
-/// is no in-memory handle left to wait on. The CHILD is a different question:
-/// detached runs are `setsid()`ed and outlive the daemon by design, so each row
-/// is reported into its session with whatever the surviving surfaces can
-/// actually say about it — a measured interruption where a status file records
-/// the run, and an explicitly unknown outcome where nothing does (#763, #913).
+/// The rows considered are the ones a restart must report: `status = 'running'`
+/// (the process that owned the child is gone) and `status IS NULL` (a row
+/// written before the outcome columns existed, which never received a terminal
+/// write either). A row whose `status` is `completed` or `killed` records a
+/// terminal transition and is left alone — reporting it here would describe a
+/// finished run as one the restart killed (#964).
+///
+/// There is no in-memory handle left to wait on for a candidate row. The CHILD
+/// is a different question: detached runs are `setsid()`ed and outlive the
+/// daemon by design, so each row is reported into its session with whatever the
+/// surviving surfaces can actually say about it — a measured interruption where
+/// a status file records the run, and an explicitly unknown outcome where
+/// nothing does (#763, #913).
 ///
 /// Returns the run ids it accounted for — which is also the index the status
 /// FILE leg needs, since the row id and the file id are the same uuid
@@ -310,7 +317,7 @@ pub async fn report_interrupted() -> Vec<Uuid> {
     let Some(repo) = super::background_tasks::task_repo() else {
         return Vec::new();
     };
-    let rows = match repo.all().await {
+    let rows = match repo.interrupted_candidates().await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::error!(target: "background_task", "Failed to read background tasks: {e:#}");
@@ -502,12 +509,12 @@ an install, a commit — verify from the world whether it already landed.",
 /// What survives a restart about one detached run, read from the surfaces that
 /// actually recorded it (#913).
 ///
-/// The DB row this report is built from carries `id, session_id, label,
-/// command, started_at` — no pid, no capture path, no exit code — so the row
-/// alone cannot say what happened to the run. The status FILE written at spawn
-/// (`tmp/detached/<id>.json`) does: it carries `pid` and both capture paths,
-/// and its `finish.code` once the child was reaped. That file exists precisely
-/// so a reader can tell live from dead across a restart, and this is the reader.
+/// The status FILE written at spawn (`tmp/detached/<id>.json`) carries `pid`,
+/// both capture paths and, once the child was reaped, `finish.code`; it exists
+/// precisely so a reader can tell live from dead across a restart. The DB row
+/// carries the outcome columns #964 added — `stdout_path`, `stderr_path` and
+/// `exit_code` — and is the fallback when the file has been swept. The row has
+/// no pid: only the file records the spawned shell's.
 struct RunEvidence {
     /// The spawned shell's pid, when a surface recorded one.
     pid: Option<u32>,
@@ -522,7 +529,8 @@ struct RunEvidence {
 
 impl RunEvidence {
     /// Gather what the restart left behind for one run: the status file first,
-    /// then the captures, which are deterministic from the run id alone.
+    /// then the row's recorded outcome, then the captures, which are
+    /// deterministic from the run id alone.
     fn for_row(row: &crate::db::BackgroundTaskRow) -> Self {
         use super::work_status::{WorkStatus, command_output_path};
 
@@ -544,13 +552,16 @@ impl RunEvidence {
         Self {
             pid: status.as_ref().and_then(|s| s.pid),
             output_out: recorded(status.as_ref().and_then(|s| s.output_out.clone()))
+                .or_else(|| recorded(row.stdout_path.clone()))
                 .or_else(|| existing(false)),
             output_err: recorded(status.as_ref().and_then(|s| s.output_err.clone()))
+                .or_else(|| recorded(row.stderr_path.clone()))
                 .or_else(|| existing(true)),
             exit_code: status
                 .as_ref()
                 .and_then(|s| s.finish.as_ref())
-                .and_then(|f| f.code),
+                .and_then(|f| f.code)
+                .or(row.exit_code),
         }
     }
 

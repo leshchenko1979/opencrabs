@@ -216,6 +216,14 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // list invariant; no `MIGRATION_EFFECTS` declaration is owed (that window
     // is contiguous and ends far below this entry).
     include_str!("../migrations/20261120000001_add_tool_executions_session_created_indexes.sql"),
+    // #964: the outcome of a background run, on its own row. The row used to be
+    // DELETEd at completion, so the only record of how a run ended was the
+    // detached status JSON under the runs dir. Five nullable columns keep the
+    // row and carry the terminal write; NULL is a row written before they
+    // existed and is rendered as unknown, never as success. Appended last per
+    // the list invariant; no `MIGRATION_EFFECTS` declaration is owed (that
+    // window is contiguous and ends far below this entry).
+    include_str!("../migrations/20261122000001_add_background_tasks_outcome.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

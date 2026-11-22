@@ -69,10 +69,12 @@ pub(crate) struct DetachedRow {
     /// Read from disk rather than inferred from the handle being present in the
     /// in-memory registry: the file is the run's own declaration, written by
     /// the manager that owns it, so a row reading `running` reports a fact
-    /// instead of an assumption. `unknown` means no file was readable, which is
-    /// itself worth seeing for a live handle — every run writes one at spawn
-    /// (persist-before-wait, #763), and a run whose record has gone is exactly
-    /// the case a caller must not read as healthy.
+    /// instead of an assumption. When the file cannot be read the run's
+    /// `background_tasks` row is consulted (#964); `unknown` means neither
+    /// surface recorded a terminal state, which is itself worth seeing for a
+    /// live handle — every run writes a file at spawn (persist-before-wait,
+    /// #763), and a run whose record has gone is exactly the case a caller
+    /// must not read as healthy.
     pub state: String,
     pub elapsed_secs: u64,
     /// The run's process-GROUP id, when the platform gave us one. This is the
@@ -135,6 +137,23 @@ pub(crate) fn render_tasks(subagents: &[SubagentRow], detached: &[DetachedRow]) 
         }
     }
     out
+}
+
+/// The state a run's `background_tasks` row records, when its status file
+/// cannot be read (#964).
+///
+/// `None` covers no pool, no row, and a row whose `status` is NULL (it predates
+/// the outcome columns). Every one of those renders `unknown`, because none of
+/// them measured a terminal state.
+async fn recorded_state(id: &str) -> Option<String> {
+    let pool = crate::db::global_pool()?.clone();
+    let run_id = uuid::Uuid::parse_str(id).ok()?;
+    crate::db::BackgroundTaskRepository::new(pool)
+        .get(run_id)
+        .await
+        .ok()
+        .flatten()?
+        .status
 }
 
 fn state_label(state: &super::subagent::manager::SubAgentState) -> &'static str {
@@ -238,9 +257,16 @@ impl Tool for TasksListTool {
                 // inference. A live handle whose record cannot be read says
                 // `unknown` — never `running`, which would assert liveness this
                 // code has not checked (#752).
-                let state = crate::brain::agent::service::work_status::WorkStatus::read(&h.id)
-                    .map(|s| s.state.label().to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
+                let state = match crate::brain::agent::service::work_status::WorkStatus::read(&h.id)
+                {
+                    Some(s) => s.state.label().to_string(),
+                    // No status file: the row is what the run's writer left
+                    // behind (#964). A NULL status renders `unknown` — it
+                    // records no terminal state, so none is asserted.
+                    None => recorded_state(&h.id)
+                        .await
+                        .unwrap_or_else(|| "unknown".to_string()),
+                };
                 detached.push(DetachedRow {
                     id: h.id.clone(),
                     label: h.label,

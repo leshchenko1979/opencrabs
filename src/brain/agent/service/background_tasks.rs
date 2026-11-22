@@ -871,8 +871,8 @@ impl BackgroundTaskManager {
             let task_id = id.clone();
             tokio::spawn(async move {
                 continue_detached(
-                    this, run_uuid, task_id, session_id, label, command, started, child,
-                    out_reader, err_reader, wake, hook,
+                    this, task_id, session_id, label, command, started, child, out_reader,
+                    err_reader, wake, hook,
                 )
                 .await;
             });
@@ -902,9 +902,8 @@ impl BackgroundTaskManager {
                 };
                 let result = cmd_result_from(&output);
                 let elapsed_secs = started.elapsed().as_secs_f32();
-                write_finish(&id, &session_id, &label, &command, elapsed_secs, &result);
+                write_finish(&id, &session_id, &label, &command, elapsed_secs, &result).await;
                 self.finish_run(&id);
-                clear_row(run_uuid, &label).await;
                 if let Some(hook) = hook {
                     // A hook owns the outcome (#1748): the rebuild's hook
                     // exec-replaces the process, so the generic enqueue must
@@ -933,8 +932,8 @@ impl BackgroundTaskManager {
                 let task_id = id.clone();
                 tokio::spawn(async move {
                     continue_detached(
-                        this, run_uuid, task_id, session_id, label, command, started, child,
-                        out_reader, err_reader, wake, hook,
+                        this, task_id, session_id, label, command, started, child, out_reader,
+                        err_reader, wake, hook,
                     )
                     .await;
                 });
@@ -1425,7 +1424,12 @@ fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
 }
 
 /// Write a run's terminal status, best-effort.
-fn write_finish(
+///
+/// One terminal transition, three surfaces: the detached status JSON, the
+/// `tool_executions` row (#787) and the `background_tasks` row (#964). Every
+/// terminal arm passes through here, so no surface can be left describing the
+/// spawn.
+async fn write_finish(
     id: &str,
     session_id: &Uuid,
     label: &str,
@@ -1455,6 +1459,61 @@ fn write_finish(
     // place every terminal transition passes through, so the row cannot be left
     // describing the spawn.
     write_outcome_row(id, result);
+    // #964: the restart-accounting row is UPDATED rather than deleted. This
+    // write is awaited (unlike the `tool_executions` write above) because the
+    // row IS the run's outcome record, and a spawned write would race a
+    // process that exits immediately after the run.
+    write_run_outcome(id, result).await;
+}
+
+/// Write how a detached run ended onto its `background_tasks` row (#964).
+///
+/// `status` names what the finish path measured: `completed` when the child
+/// exited on its own (any code), `killed` when a signal or the lifetime
+/// ceiling ended it, and NULL when the child was never awaited — nothing
+/// measured the run, so the row records no terminal state and readers render
+/// NULL as unknown. `exit_code` is the value [`CmdResult::code`] carries, and
+/// both capture paths are the files the spawn path created for this id.
+async fn write_run_outcome(id: &str, result: &CmdResult) {
+    let Some(repo) = task_repo() else {
+        return;
+    };
+    let Ok(run_uuid) = Uuid::parse_str(id) else {
+        tracing::warn!(
+            target: "background_task",
+            "Run id '{id}' is not a uuid; its outcome cannot be written to its row"
+        );
+        return;
+    };
+    let (status, exit_code) = match result.cause {
+        RunCause::Ordinary => (Some("completed"), Some(result.code)),
+        RunCause::Ceiling { .. } | RunCause::Signalled { .. } => {
+            (Some("killed"), Some(result.code))
+        }
+        // Nothing was awaited, so no code is the command's: the row records no
+        // terminal state rather than a success or a zero it did not measure.
+        RunCause::NotAwaited => (None, None),
+    };
+    let stdout_path = crate::brain::agent::service::work_status::command_output_path(id, false);
+    let stderr_path = crate::brain::agent::service::work_status::command_output_path(id, true);
+    if let Err(e) = repo
+        .finish(
+            run_uuid,
+            status,
+            exit_code,
+            &stdout_path.display().to_string(),
+            &stderr_path.display().to_string(),
+        )
+        .await
+    {
+        // A row left at `running` makes the NEXT startup report this run as
+        // interrupted, which would describe a run that did reach its terminal
+        // write. Visible for that reason, even though the run itself ended.
+        tracing::error!(
+            target: "background_task",
+            "Failed to record how run '{id}' ended on its row: {e:#}"
+        );
+    }
 }
 
 /// Write a detached run's REAL outcome onto its `tool_executions` row (#787).
@@ -1504,20 +1563,6 @@ fn write_outcome_row(id: &str, result: &CmdResult) {
              the status file remains the record"
         );
     });
-}
-
-/// Drop a finished run's restart-accounting row, loud on failure.
-async fn clear_row(run_uuid: Uuid, label: &str) {
-    if let Some(repo) = task_repo()
-        && let Err(e) = repo.clear(run_uuid).await
-    {
-        // A stale row makes the NEXT startup report a phantom interruption, so
-        // this must be visible even though the command itself succeeded.
-        tracing::error!(
-            target: "background_task",
-            "Failed to clear background run '{label}' after completion: {e:#}"
-        );
-    }
 }
 
 /// How often the wake watcher polls a detached run's streams (#692).
@@ -1726,7 +1771,6 @@ fn deliver_completion(
 #[allow(clippy::too_many_arguments)]
 async fn continue_detached(
     this: std::sync::Arc<BackgroundTaskManager>,
-    run_uuid: Uuid,
     id: String,
     session_id: Uuid,
     label: String,
@@ -1831,8 +1875,7 @@ async fn continue_detached(
         result.code,
         elapsed_secs
     );
-    write_finish(&id, &session_id, &label, &command, elapsed_secs, &result);
-    clear_row(run_uuid, &label).await;
+    write_finish(&id, &session_id, &label, &command, elapsed_secs, &result).await;
     // Clear the indicator BEFORE delivering, not after: the work is over the
     // moment the process exits, so a badge that outlived it would show the
     // agent reporting a finished task as still running.

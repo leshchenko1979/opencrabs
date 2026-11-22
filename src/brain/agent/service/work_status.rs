@@ -993,12 +993,12 @@ impl WorkStatus {
     /// longer existed.
     ///
     /// `ids` is the index, and it is the reason this leg no longer reads the
-    /// whole status dir (~25k files on a long-lived host, #848). A
-    /// `background_tasks` row exists only while its command is believed to be
-    /// running, so the rows that survive a boot ARE the commands the restart
-    /// killed ([`crate::db::repository::background_task`]) — and the row id is
-    /// the status-file id, because `background_tasks.rs` derives the file id
-    /// from the same uuid it records.
+    /// whole status dir (~25k files on a long-lived host, #848). The ids are
+    /// the rows `report_interrupted` found still `running` or NULL — a
+    /// finished row now survives its run (#964) and is deliberately NOT in
+    /// that set — and the row id is the status-file id, because
+    /// `background_tasks.rs` derives the file id from the same uuid it
+    /// records.
     ///
     /// Two kinds of file are left alone by design: terminal files (nothing to
     /// fix), and a `Running` file whose row never landed. The spawn path logs

@@ -14,7 +14,8 @@
 use crate::brain::agent::service::work_status::{
     self, CommandExit, CommandPaths, RunCause, WorkFinish, WorkKind, WorkState, WorkStatus,
 };
-use crate::channels::commands::{TaskRow, render_tasks_rows};
+use crate::channels::commands::{TaskRow, render_tasks_rows, render_tasks_rows_with};
+use uuid::Uuid;
 
 /// A scratch status dir bound to this test's thread. `status_dir()` reads the
 /// override, so `new_command`/`finish_command` write here and nowhere else.
@@ -279,5 +280,47 @@ fn a_pipe_in_the_command_cannot_split_the_row() {
     assert!(
         row.contains('\u{2502}'),
         "the pipe survives as a bar rather than vanishing: {row:?}"
+    );
+}
+
+/// #964: a run whose status FILE is gone is rendered from its DB row. A row
+/// written before the outcome columns existed carries NULL in all five, and
+/// NULL means "no terminal state was ever recorded" — it must read `unknown`,
+/// never as a success and never as exit 0.
+///
+/// Fails if the feature is removed: with the row arm absent the renderer has
+/// no source for this run at all, so the output is `no detached runs in this
+/// session` and the `contains("unknown")` assertion fails. If a NULL `status`
+/// were defaulted to a success icon instead, the `!contains('\u{2705}')` and
+/// `!contains("exit 0")` assertions fail.
+#[test]
+fn a_pre_migration_row_renders_unknown_not_success() {
+    let _scratch = Scratch::new("row-null");
+    let session = Uuid::new_v4();
+    let row = crate::db::BackgroundTaskRow {
+        id: Uuid::new_v4(),
+        session_id: session,
+        label: "cargo build".to_string(),
+        command: "cargo build --release".to_string(),
+        started_at: 1_700_000_000,
+        status: None,
+        exit_code: None,
+        completed_at: None,
+        stdout_path: None,
+        stderr_path: None,
+    };
+
+    let out = render_tasks_rows_with("", &session.to_string(), &[], &[row]);
+    assert!(
+        out.contains("unknown"),
+        "a row with no recorded outcome says so: {out}"
+    );
+    assert!(
+        !out.contains('\u{2705}'),
+        "NULL must never render as a success tick: {out}"
+    );
+    assert!(
+        !out.contains("exit 0"),
+        "a missing code is not a zero: {out}"
     );
 }

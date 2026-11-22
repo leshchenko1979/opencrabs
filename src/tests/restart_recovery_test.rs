@@ -208,6 +208,11 @@ fn row_for(id: Uuid) -> BackgroundTaskRow {
         label: "oc-deploy ship".to_string(),
         command: "oc-deploy ship --wait".to_string(),
         started_at: 0,
+        status: None,
+        exit_code: None,
+        completed_at: None,
+        stdout_path: None,
+        stderr_path: None,
     }
 }
 
@@ -318,6 +323,11 @@ fn row_with(id: Uuid, command: &str) -> BackgroundTaskRow {
         label: "oc-ship chain wait".to_string(),
         command: command.to_string(),
         started_at: 0,
+        status: None,
+        exit_code: None,
+        completed_at: None,
+        stdout_path: None,
+        stderr_path: None,
     }
 }
 

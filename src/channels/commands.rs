@@ -656,7 +656,7 @@ pub async fn handle_command(
                 )
             } else {
                 let args = cmd.strip_prefix("/tasks").unwrap_or("").trim();
-                ChannelCommand::Tasks(run_tasks_channel(args, session_id, agent))
+                ChannelCommand::Tasks(run_tasks_channel(args, session_id, agent).await)
             }
         }
         "/profiles" => {
@@ -2656,21 +2656,22 @@ fn table_command(label: &str) -> String {
 
 /// `/tasks [N]` — the detached runs this session started (#808 cue 12).
 ///
-/// Two sources, because a run changes home when it ends: a LIVE run exists
-/// only in the in-memory manager (it has no terminal record yet), and a
-/// FINISHED one exists only on disk. Reading either alone reports half the
-/// truth — "no runs" for a session whose run just ended, or a run listed
-/// twice. A run leaves the manager the instant it finishes, so the two arms
-/// are disjoint by construction and the id check below is belt-and-braces.
+/// Three sources, because a run changes home as it ages: a LIVE run exists in
+/// the in-memory manager (no terminal record yet), a finished run whose status
+/// file survives is read from disk, and a finished run whose file has been
+/// swept is read from its `background_tasks` row (#964). Reading any one alone
+/// reports part of the truth — "no runs" for a session whose run just ended,
+/// or a run listed twice. The id set below is what keeps the arms disjoint.
 ///
 /// The disk side is deliberately bounded. [`status_dir`] holds every run AND
 /// every sub-agent this box has ever written (25,749 files / 105 MB when this
 /// was written), so `list_all()` + parse-everything is not viable on a
 /// command path: readdir, newest-first by mtime, a bounded lookahead, and a
-/// full parse of only the survivors keeps the cost flat.
+/// full parse of only the survivors keeps the cost flat. The row side is
+/// bounded by a LIMIT for the same reason.
 ///
 /// [`status_dir`]: crate::brain::agent::service::work_status::status_dir
-pub fn run_tasks_channel(args: &str, session_id: Uuid, agent: &AgentService) -> String {
+pub async fn run_tasks_channel(args: &str, session_id: Uuid, agent: &AgentService) -> String {
     let mut live: Vec<(String, TaskRow)> = Vec::new();
     if let Some(bm) = agent.background_manager() {
         for h in bm.handles_for(session_id) {
@@ -2684,7 +2685,25 @@ pub fn run_tasks_channel(args: &str, session_id: Uuid, agent: &AgentService) -> 
             ));
         }
     }
-    render_tasks_rows(args, &session_id.to_string(), &live)
+    let recorded = recorded_rows(session_id).await;
+    render_tasks_rows_with(args, &session_id.to_string(), &live, &recorded)
+}
+
+/// The session's rows as the database holds them, newest first (#964).
+///
+/// Bounded like the disk arm: `/tasks` is a command path, and a session with a
+/// long history has more rows than a roster should render. A read failure
+/// yields no rows rather than failing the command — the live and disk arms
+/// still render what they can.
+async fn recorded_rows(session_id: Uuid) -> Vec<crate::db::BackgroundTaskRow> {
+    const ROSTER_ROW_LIMIT: usize = 50;
+    let Some(pool) = crate::db::global_pool() else {
+        return Vec::new();
+    };
+    let repo = crate::db::BackgroundTaskRepository::new(pool.clone());
+    repo.recent_for_session(session_id, ROSTER_ROW_LIMIT)
+        .await
+        .unwrap_or_default()
 }
 
 /// Pure renderer behind `/tasks`, split from the manager lookup so tests can
@@ -2693,7 +2712,29 @@ pub fn run_tasks_channel(args: &str, session_id: Uuid, agent: &AgentService) -> 
 ///
 /// `live` pairs a run id with its already-built cells; the ids are what keep
 /// the disk arm from listing a live run twice.
+///
+/// Test-only since #964: the command path goes through
+/// [`render_tasks_rows_with`] so the DB row arm can supply runs whose status
+/// file is gone. Kept as the no-row arm the existing tests drive.
+#[cfg(test)]
 pub(crate) fn render_tasks_rows(args: &str, session: &str, live: &[(String, TaskRow)]) -> String {
+    render_tasks_rows_with(args, session, live, &[])
+}
+
+/// The full `/tasks` renderer: the live and disk arms plus the session's DB
+/// rows (#964).
+///
+/// `recorded` is the fallback for a run whose status FILE is gone — swept, or
+/// never written by the process that owned the child. Such a run is rendered
+/// from the outcome its row records instead of disappearing from the roster.
+/// A row already rendered from a live handle or a status file is skipped by
+/// id, so the three arms cannot list one run twice.
+pub(crate) fn render_tasks_rows_with(
+    args: &str,
+    session: &str,
+    live: &[(String, TaskRow)],
+    recorded: &[crate::db::BackgroundTaskRow],
+) -> String {
     use crate::brain::agent::service::work_status::{WorkKind, WorkStatus};
 
     let want = args
@@ -2704,6 +2745,8 @@ pub(crate) fn render_tasks_rows(args: &str, session: &str, live: &[(String, Task
         .clamp(1, 50);
 
     let mut rows: Vec<TaskRow> = live.iter().map(|(_, row)| row.clone()).collect();
+    let mut rendered: std::collections::HashSet<String> =
+        live.iter().map(|(id, _)| id.clone()).collect();
 
     let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(crate::brain::agent::service::work_status::status_dir()) {
@@ -2732,7 +2775,7 @@ pub(crate) fn render_tasks_rows(args: &str, session: &str, live: &[(String, Task
         if rows.len() >= want {
             break;
         }
-        if live.iter().any(|(live_id, _)| live_id == &id) {
+        if rendered.contains(&id) {
             continue;
         }
         let Some(status) = WorkStatus::read(&id) else {
@@ -2741,7 +2784,27 @@ pub(crate) fn render_tasks_rows(args: &str, session: &str, live: &[(String, Task
         if status.kind != WorkKind::Command || status.session_id != session {
             continue;
         }
+        rendered.insert(id);
         rows.push(task_row(&status));
+    }
+
+    // The row arm (#964): runs whose status file is gone. The live arm is the
+    // authority on a run this process still holds, so a `running` row with no
+    // live handle is not rendered from here — its liveness has not been
+    // checked, and this roster must not assert one.
+    for row in recorded {
+        if rows.len() >= want {
+            break;
+        }
+        let id = row.id.to_string();
+        if rendered.contains(&id) || row.session_id.to_string() != session {
+            continue;
+        }
+        if row.status.as_deref() == Some("running") {
+            continue;
+        }
+        rendered.insert(id);
+        rows.push(task_row_from_row(row));
     }
 
     if rows.is_empty() {
@@ -2758,6 +2821,43 @@ pub(crate) fn render_tasks_rows(args: &str, session: &str, live: &[(String, Task
         out.push_str(&format!("| {} | {} | {} |\n", r.command, r.time, r.outcome));
     }
     out
+}
+
+/// One finished-run row rendered from its DB row alone (#964).
+///
+/// The fallback for a run whose status file is gone. `status` is what the
+/// writer measured: `completed` or `killed`. NULL means the row never received
+/// a terminal write — it predates the outcome columns — and that renders
+/// `unknown`: it is not evidence of success, and a missing code is not a zero.
+fn task_row_from_row(row: &crate::db::BackgroundTaskRow) -> TaskRow {
+    let (icon, outcome) = match row.status.as_deref() {
+        Some("completed") => match row.exit_code {
+            Some(0) => ("\u{2705}", String::new()),
+            Some(code) => ("\u{274c}", format!("exit {code}")),
+            // The writer measured a completion but recorded no code: state the
+            // part that was measured and nothing more.
+            None => ("\u{2753}", "completed, exit not recorded".to_string()),
+        },
+        Some("killed") => (
+            "\u{274c}",
+            match row.exit_code {
+                Some(code) => format!("killed, code {code}"),
+                None => "killed".to_string(),
+            },
+        ),
+        _ => ("\u{23f3}", "unknown".to_string()),
+    };
+    TaskRow {
+        command: table_command(&row.label),
+        // Elapsed between the row's own two timestamps. A row with no terminal
+        // write has no end to measure from, and shows the same gap a status
+        // record with no duration does.
+        time: row
+            .completed_at
+            .map(|done| fmt_task_elapsed((done - row.started_at).max(0) as u64))
+            .unwrap_or_else(|| "\u{2014}".to_string()),
+        outcome: format!("{icon} {outcome}").trim_end().to_string(),
+    }
 }
 
 /// One finished-run row. The cause is the whole point of #786: `137` alone
