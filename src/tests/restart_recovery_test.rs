@@ -14,7 +14,7 @@ use crate::brain::agent::QueuedUserMessage;
 use crate::brain::agent::service::MessageEnqueueCallback;
 use crate::brain::agent::service::restart_recovery::{
     RESUME_CONTINUATION_BASE, deliver_or_park, flush_parked, interrupted_message, parked_count,
-    referenced_subjects, resumed_turn_prompt, test_guard,
+    referenced_subjects, resumed_turn_prompt, subagent_interrupted_message, test_guard,
 };
 use crate::brain::agent::service::session_routes::register_session_route;
 use crate::brain::agent::service::work_status::{CommandPaths, WorkStatus, test_override};
@@ -398,6 +398,85 @@ fn a_capture_with_bytes_is_named_by_its_count_and_path() {
     assert!(
         !msg.context_text.contains("produced no result"),
         "bytes on disk are a result: {}",
+        msg.context_text
+    );
+}
+
+// ---- #963: the sub-agent surface stops asserting a death it never observed --
+
+/// A sub-agent status for the test's choosing.
+fn agent_status(id: &str, label: &str, task: &str) -> WorkStatus {
+    WorkStatus::new_agent(id, label, "sess-1", task, None, None).expect("write agent status")
+}
+
+/// #963, the sibling #936 missed. The sub-agent report used to say it *"was
+/// killed and produced no result"* — two claims the boot-time reconciliation
+/// never observed, on a surface where the work very often DOES survive (the
+/// status file persists, `resume_agent` continues it, and any code it wrote is
+/// still in its worktree and branch). A parent that believes "produced no
+/// result" re-spawns work that is already done.
+#[test]
+fn an_interrupted_subagent_does_not_claim_a_kill_or_an_empty_result() {
+    let _dirs = TempRunDirs::new();
+    let msg = subagent_interrupted_message(&agent_status(
+        "agent-963",
+        "land-894",
+        "land the row-leak repair",
+    ));
+
+    assert!(
+        !msg.context_text.contains("produced no result"),
+        "nothing measured the result, so the report must not assert its absence: {}",
+        msg.context_text
+    );
+    assert!(
+        !msg.context_text.contains("was killed"),
+        "nothing observed a kill, so the report must not assert one: {}",
+        msg.context_text
+    );
+    // It states what IS known, and what the reader can do about it.
+    for needle in ["boot-time reconciliation", "NOT KNOWN", "resume_agent"] {
+        assert!(
+            msg.context_text.contains(needle),
+            "the interrupted report must name {needle:?}; got: {}",
+            msg.context_text
+        );
+    }
+    assert!(
+        msg.context_text.contains("land the row-leak repair"),
+        "the task the sub-agent was given is what the decision is made about: {}",
+        msg.context_text
+    );
+}
+
+/// The two arms must stay distinguishable (#963): the sub-agent arm has no
+/// measurement, so it may not borrow the vocabulary of the arm that DOES — a
+/// rewrite that flattened both into one "no result" sentence would pass the
+/// test above while deleting the only report backed by real evidence.
+#[test]
+fn a_measured_empty_capture_still_says_so_on_the_command_surface() {
+    let _dirs = TempRunDirs::new();
+    let id = Uuid::new_v4();
+    let dirs = tempfile::tempdir().expect("temp dir");
+    let out = dirs.path().join(format!("{id}.out"));
+    std::fs::write(&out, "").expect("write empty capture");
+    WorkStatus::new_command(
+        &id.to_string(),
+        "sess-1",
+        "oc-deploy ship",
+        "oc-deploy ship --wait",
+        CommandPaths {
+            output_out: out.display().to_string(),
+            ..CommandPaths::none()
+        },
+    )
+    .expect("write status file");
+
+    let msg = interrupted_message(&row_for(id));
+    assert!(
+        msg.context_text.contains("produced no result"),
+        "a capture that was READ and found empty is a measurement, and the command \
+         surface must still state it: {}",
         msg.context_text
     );
 }
