@@ -1,59 +1,54 @@
 name: PR-lane gates
 
-# PR-lane gates — the pre-merge gate for a PR-head branch: clippy over
-# `--all-features`, nextest over the SHIPPED feature set, plus doctests.
+# PR-lane gates — the pre-merge gate for a PR-head branch: fmt, clippy over
+# `--all-features`, nextest over the SHIPPED feature set, then doctests.
 #
-# Why this workflow exists: a PR-head branch (leshchenko1979/<slug>) has not yet
-# passed fork main, so the carrier gates job never sees it. This box cannot run
-# cargo, so this dispatch-triggered workflow is the only place the gates can run
-# BEFORE the branch merges.
+# WHY IT EXISTS: a PR-head branch has not passed fork main, so the carrier gates
+# job never sees it, and this box cannot run cargo. This dispatch-triggered
+# workflow is the only place the gates can run BEFORE the branch merges.
 #
-# Invocation (carrier-law shape, mirrors quick-build-linux.yml):
-#   gh workflow run pr-checks.yml --ref ci/quick-build-linux -f ref=<branch-or-sha>
-# Fix mode (fmt sweep helper, owner-approved 2026-08-27):
-#   gh workflow run pr-checks.yml --ref ci/quick-build-linux -f ref=<branch-or-sha> -f fix=true
-# runs `cargo fmt --all` with the exact gate toolchain and uploads the
-# resulting diff as the `fmt-fix` artifact — apply the sweep locally, no
-# cargo needed on the box. Fix mode skips the gate steps; the fidelity rule
-# below covers check mode only.
-# Lock-regen mode (compiler, 2026-08-28; owner-GO'd resvg-stack item 00:57Z,
-# mechanism per the fix-mode precedent above):
-#   gh workflow run pr-checks.yml --ref ci/quick-build-linux -f ref=<branch-with-Cargo.toml-edit> -f lockregen=true
-# runs `cargo metadata` with the EXISTING Cargo.lock present — a MINIMAL
-# re-resolve: every surviving package keeps its locked version, packages made
-# unreachable by the Cargo.toml edit are pruned, zero semver churn
-# (generate-lockfile / bare update would bump; deliberately not used) — and
-# uploads the regenerated lock as the `regen-lock` artifact for box-side
-# application (box law 2026-08-28: no cargo on the box). Lock-regen mode
-# skips the gate steps. Revert = delete the lockregen input + its steps.
-# Lock-update mode (2026-11-18):
-#   gh workflow run pr-checks.yml --ref ci/quick-build-linux -f ref=<branch> -f lockupdate=true
-# runs a real `cargo update` — every package to the newest version its Cargo.toml
-# REQUIREMENT still admits (patch+minor for 1.x+, patch only for 0.x), requirements
-# themselves untouched — and uploads the result as the `updated-lock` artifact.
-# Distinct from lock-regen, which deliberately keeps every locked version. Revert =
-# delete the lockupdate input + its steps.
-# Swap mode (owner 2026-09-03, fleet-directives 'Swap-head signature for
-# merge-derived binaries'):
-#   gh workflow run pr-checks.yml --ref ci/quick-build-linux -f ref=<swap-head-sha> -f swap=true
-# mirrors build-leg ORDER gate 4 (Session-Id trailer) on the gated ref
-# BEFORE the gates — a swap-mode GREEN means the head is swappable: the
-# quick-build leg has no remaining semantic failure mode (clippy+tests
-# subsume build success; the binary build itself stays quick-build's job,
-# no duplicate artifact per the 2026-08-31 de-dup ruling). Ordinary runs
-# are unchanged (input-gated). 2026-09-03 finding this prevents: bare
-# merge d02f4e08 passed this lane GREEN and died at the build leg.
-# The workflow yaml is read from this carrier branch (workflow_dispatch needs
-# the file on the dispatched ref); the job then checks out `inputs.ref`.
-# Keeping the yml here means PR-head branches carry zero infra commits, and fork
-# main stays clean of workflow files.
+# INVOCATION (the `--ref` is mandatory — this file is not on `main`):
+#   plain gate  gh workflow run pr-checks.yml --ref ci/quick-build-linux -f ref=<branch-or-sha>
+#   fix         ... -f fix=true         -> `fmt-fix` artifact (cargo fmt --all diff); gate steps skipped
+#   lockregen   ... -f lockregen=true   -> `regen-lock` artifact (cargo metadata minimal re-resolve:
+#                                          survivors keep their locked version, zero semver churn)
+#   lockupdate  ... -f lockupdate=true  -> `updated-lock` artifact (real `cargo update`; requirements untouched)
+#   lock_pins   ... -f lockupdate=true -f lock_pins='pkg@ver ...'  holds named crates back after the update
+#                                          (prerelease-caret trap: ^2.0.0-rc0 admits the release)
+#   swap        ... -f swap=true        -> mirrors build-leg gate 4 (Session-Id trailer) BEFORE the gates
+#   fast        ... -f fast=true        -> fmt + clippy only, no tests
+#   diagnose    ... -f diagnose=true    -> resource envelope before AND after the test leg; both reads are
+#                                          required (a pre-only memory.peak describes whatever ran earlier)
+#   no_cancel   ... -f no_cancel=true   -> never supersede an in-flight run on this ref (immutable 40-hex shas:
+#                                          a same-sha re-dispatch is a DUPLICATE, and cancelling it SIGTERMs a
+#                                          live suite — receipt run 35279942039)
 #
-# NO UPSTREAM-PARITY RULE (owner order 2026-11-20: "we are a standalone
-# telegram-oriented fork"). These gates are sized against THIS fork's tree and
-# its own history. They mirror no upstream workflow, a green run here predicts
-# nothing about another repo, and nothing here should be "corrected" to match
-# one. The lane exists for the exception case where the owner names a group to
-# file upstream; its gates must be honest for their own sake.
+# EVERY MODE ABOVE IS LIVE, MEASURED (2026-11-22, over the 3001 pr-checks runs on record since 2026-08-27):
+# fix 8, lockregen 2, lockupdate 3, swap 12, fast 265, diagnose 298 (runs whose probe step actually executed).
+# The three lock/fix counts are corroborated independently by their artifact inventory (8 fmt-fix, 2 regen-lock,
+# 3 updated-lock). NONE of them is zero-invocation: do not delete one on that claim without re-running the count.
+#
+# CONCURRENCY keys on inputs.ref, not github.ref_name: every dispatch lands on THIS carrier branch, so a
+# ref_name key put all lanes in one kill-group and each new dispatch cancelled the previous lane's gate
+# (2026-08-30, 22:06-23:20Z: 4 runs mutually cancelled, no gate could finish). cancel-in-progress is a
+# VARIABLE because supersede is right for a branch (head moved => old verdict worthless) and wrong for an
+# immutable sha (=> duplicate). Default false keeps every existing caller byte-for-byte unchanged.
+#
+# `test_threads` / `hangdump` are RETIRED (2026-11-20 — the libtest leg they configured is gone) and read by
+# nothing. They stay DECLARED, and are relayed NOWHERE, because a removed workflow_dispatch input is a hard
+# 422 for every caller that still passes it: `oc-prchecks --test-threads 2` was passed on 63 of the 240
+# dispatches 2026-11-19..22 (latest run 44957812717) and `-f hangdump=true` on 4 (latest run 44738529406).
+# The no-op is load-bearing exactly at the dispatch boundary, which is why the declaration lives here and not
+# in ci-lane-impl.yml (deleted there 2026-11-22 — 0 references).
+#
+# THE BODY IS NOT HERE: it lives in ci-lane-impl.yml (`workflow_call`); this file keeps the trigger, the
+# inputs and the concurrency group. The caller job's `name:` is pinned to the short token `gate` (not an
+# expression): under workflow_call every job renders "<caller> / <called>", and run_built_sha takes the FIRST
+# .jobs[].name that decodes to a 40-hex sha — a caller name carrying a run sha would shadow the real job name.
+#
+# NO UPSTREAM-PARITY RULE (owner order 2026-11-20: "we are a standalone telegram-oriented fork"). These gates
+# are sized against THIS fork's tree and its own history. They mirror no upstream workflow, a green run here
+# predicts nothing about another repo, and nothing here should be "corrected" to match one.
 #
 # Revert = delete this file.
 on:
@@ -104,11 +99,14 @@ on:
         required: false
         default: false
         type: boolean
-      # RETIRED 2026-11-20: the legacy `cargo test` leg these two inputs
-      # instrumented was deleted and `pr-gates-nextest` is the verdict now. Both
-      # stay DECLARED and accepted — a removed `workflow_call` input is a hard
-      # dispatch error for every existing caller, an ignored one is a no-op.
-      # Read by nothing; the wording matches the callee's own declaration.
+      # RETIRED 2026-11-20 (the legacy `cargo test` leg they configured is
+      # deleted; `pr-gates-nextest` is the verdict). READ BY NOTHING and relayed
+      # to nothing — the callee's declarations of both were deleted 2026-11-22.
+      # They stay declared HERE because this is the surface a dispatch names: a
+      # removed workflow_dispatch input is a hard 422 for every caller that
+      # still passes it, and callers still do — `test_threads` on 63 of the 240
+      # dispatches 2026-11-19..22 (latest run 44957812717), `hangdump=true` on 4
+      # (latest run 44738529406). An accepted no-op, not dead config.
       test_threads:
         description: "RETIRED 2026-11-20 (the libtest leg it configured is deleted; nextest is the verdict). Accepted and IGNORED — read by nothing. Kept declared so `oc-prchecks --test-threads N` keeps dispatching instead of erroring."
         required: false
@@ -120,69 +118,20 @@ on:
         default: false
         type: boolean
 
-# Owner GO 2026-09-18 01:2xZ (diagnose variable, CI-143 investigation): the
-# 2026-09-17 SIGTERM storm (16/17 `Run tests` runs, exit 143, post-steps
-# skipped => runner teardown) was resolved by removing RUSTC_WRAPPER=sccache
-# from THIS leg, but the ENVELOPE it exhausted was never measured — H3 (cgroup
-# memory ceiling) and H4 (thin-LTO link memory cliff) were argued against the
-# published 16 GB / 4 vCPU spec, not against a reading. `diagnose=true` prints
-# nproc, free -m, df -h, cgroup v2 memory.max/current/peak (v1 fallback),
-# cache sizes BOTH before and after the test leg,
-# so a future kill can be attributed from the run's own log. Diagnostics are
-# `|| true`-guarded: a probe that fails the gate it is measuring is worthless.
+# DIAGNOSE DEFAULT IS `false` (reverted 2026-11-16 after the 2026-10-03..11-16
+# armed monitoring window). The window did its job: the envelope WAS captured on
+# the single teardown in 295 dispatches — run 38793394953 (2026-10-15T19:22:40Z,
+# carrier c350d66c), `/system.slice` memory.peak 15.16 GiB = 97.1% of MemTotal,
+# memory.max = `max` at both levels (so the cgroup-ceiling hypothesis is
+# refuted), killed during compilation with ZERO tests run. A future capture
+# passes `-f diagnose=true` explicitly; the mechanism question stays OPEN on
+# #311 (issuecomment-5974242671, issuecomment-6912072844). Every probe in the
+# step is `|| true`: a measurement that can fail the gate it measures is worthless.
 #
-# ARMED 2026-10-03 (HQ; owner routed the #311 finding here): default flipped
-# false -> true for a bounded MONITORING WINDOW. The owner-GO'd "default false
-# => every existing caller is byte-for-byte unchanged" invariant is DELIBERATELY
-# relaxed for the window; the revert restores it. Rationale: the #311 premise is
-# falsified — 11 teardown kills in the post-removal era, so the 143 mode is NOT
-# fixed and no kill's envelope has ever been measured. See
-# https://github.com/leshchenko1979/opencrabs/issues/311#issuecomment-5974242671
-# The kills are intermittent and cluster (11 in five days, then a 2.5-day gap),
-# so a single armed dispatch is a lottery; arming the DEFAULT makes every organic
-# gate dispatch a sample. On a teardown only the BEFORE step runs (the AFTER step
-# is skipped — its absence is itself the signature), which is exactly the
-# pre-test headroom H3/H4 need. REVERT to false once a kill's envelope is
-# captured, or by 2026-10-17, whichever is first.
-#
-# REVERTED 2026-11-16 (HQ): both of the arming's own exit conditions had fired.
-# The envelope WAS captured — run 38793394953 (2026-10-15T19:22:40Z, carrier
-# c350d66c) is the single teardown in 295 dispatches 2026-10-04..2026-11-16
-# (48 Clippy + 23 genuine `Run tests` + 1 teardown = 72 failures), and it fired
-# `diagnose` on the kill: `/system.slice` memory.peak 15.16 GiB = 97.1% of
-# MemTotal (0.46 GiB headroom), memory.max = `max` at both levels so H3 is
-# refuted, kill during compilation with ZERO tests run. The window expired
-# 2026-10-17. It ran 43 days past its own deadline; default is now `false`,
-# restoring the owner-GO'd "every existing caller is byte-for-byte unchanged"
-# invariant. A future capture passes `-f diagnose=true` explicitly. The
-# mechanism question stays OPEN on #311 — see
-# https://github.com/leshchenko1979/opencrabs/issues/311#issuecomment-6912072844
-#
-# Owner-approved 2026-08-30 (fix batch, a87b66dc; group KEY corrected same
-# day, owner "Fix it" 02:32Z on the cancel-storm finding): every
-# workflow_dispatch lands on this carrier branch, so github.ref_name is
-# CONSTANT across lanes — the original ref_name key put ALL lanes into one
-# kill-group and each new dispatch cancelled the previous lane's gate
-# (08-30 22:06-23:20Z: 4 runs mutually cancelled, no gate could finish while
-# two lanes dispatched within the same window). The group now keys on
-# inputs.ref — the branch-or-sha each dispatch passes (oc-prchecks sends the
-# gated ref) — so distinct refs run in PARALLEL and only a re-dispatch of the
-# SAME ref (head moved) cancels its superseded run. cancel-in-progress keeps
-# that owner-mandated supersede behavior per-ref.
-#
-# Owner GO 2026-09-17 22:59Z (no_cancel variable): the group key is the gated
-# ref, which makes the supersede rule correct for a PR-lane BRANCH (the head
-# moved, so the old verdict is worthless) but WRONG for an IMMUTABLE 40-hex sha
-# (merge/sync cutover, swap mode) — there a same-ref re-dispatch is a DUPLICATE,
-# not a supersede, and cancelling it SIGTERMs an in-flight cargo test suite
-# (receipt: run 35279942039, Run tests step conclusion "cancelled", our own
-# same-sha re-dispatch of 48c6f14bb). So the supersede is now a VARIABLE:
-# oc-prchecks passes -f no_cancel=true when the resolved ref is a full sha.
-# Default false => every existing caller is byte-for-byte unchanged in behavior.
 # A second workflow was rejected: it would duplicate the whole gate body and
-# fork the cargo flags that every dispatch of this lane must carry identically.
-# No external document pins them — the gate body in ci-lane-impl.yml is the
-# authority, and the `ci/*` carrier namespace is owned by the HQ lane.
+# fork the cargo flags every dispatch of this lane must carry identically. No
+# external document pins them — ci-lane-impl.yml is the authority, and the
+# `ci/*` carrier namespace is owned by the HQ lane.
 concurrency:
   group: prchecks-${{ inputs.ref || github.ref_name }}
   cancel-in-progress: ${{ !inputs.no_cancel }}
@@ -209,5 +158,8 @@ jobs:
       swap: ${{ inputs.swap }}
       fast: ${{ inputs.fast }}
       diagnose: ${{ inputs.diagnose }}
-      test_threads: ${{ inputs.test_threads }}
-      hangdump: ${{ inputs.hangdump }}
+      # NO test_threads / hangdump relay (deleted 2026-11-22): the callee has no
+      # such inputs and nothing read them. They stay declared on THIS file only,
+      # as the dispatch-surface no-op described in the header.
+      # `features` is deliberately NOT passed: the gate resolves the shipped set
+      # from quick-build-linux.yml, its single source of truth.

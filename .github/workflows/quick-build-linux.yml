@@ -6,6 +6,14 @@ name: Quick Linux Build
 # not in any skill doc. Comma-separated sets are valid, e.g.
 # "telegram,browser". No tests, no matrix, no multi-platform.
 #
+# THAT DEFAULT IS NOW THE ONLY COPY (2026-11-22). ci-lane-impl.yml used to
+# carry a second `features` default with the same string, so the PR-lane gate
+# could keep testing a set nobody shipped once the two drifted. The callee's
+# default is now empty and the gate RESOLVES the set from this file's dispatch
+# default at run time (step `Resolve shipped feature set` in
+# pr-gates-nextest). Change the set HERE and both the ship lane and the gate
+# verdict move together; there is nothing else to update.
+#
 # v0.4.17 SPEED: builds use the tree's own [profile.ci] (thin LTO,
 # 16 codegen-units — wall-clock-tuned, ships in upstream Cargo.toml).
 # Fat-LTO [profile.release] stays reserved for real release artifacts.
