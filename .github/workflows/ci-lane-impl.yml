@@ -1286,10 +1286,9 @@ jobs:
           cargo test --locked --profile ci \
             --no-default-features --features "$FEATURES" --doc
 
-      # NO JUnit UPLOAD (deleted 2026-11-22). `nextest-junit` was uploaded by
-      # this job and downloaded by NOTHING: 157 artifacts on record, zero
-      # `download-artifact` steps in the whole repo (the repo has no
-      # download-artifact at all) and zero references in the box-side tooling.
-      # Failure output is not lost with it — the nextest step tees the full
-      # `--verbose` run to $STALLWATCH_LOG and prints it in the step log, which
-      # is where a red gate was actually being read from.
+      # NO JUNIT UPLOAD (deleted 2026-11-22). This job uploaded a per-test
+      # JUnit report and NOTHING ever downloaded it: 157 artifacts on record,
+      # zero download-artifact steps anywhere in the repo, zero references in
+      # the box-side tooling. Failure output is not lost with it — the nextest
+      # step tees the full `--verbose` run to $STALLWATCH_LOG and prints it in
+      # the step log, which is where a red gate was actually being read from.
