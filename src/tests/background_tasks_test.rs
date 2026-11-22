@@ -5,13 +5,14 @@ use crate::brain::agent::PushOrigin;
 use crate::brain::agent::service::MessageEnqueueCallback;
 use crate::brain::agent::service::QueuedUserMessage;
 use crate::brain::agent::service::background_tasks::{
-    BackgroundTaskManager, ClaudeTurnTasks, CmdResult, RunHandle, RunRequest,
+    BackgroundTaskManager, ClaudeTurnTasks, CmdResult, RunHandle, RunRequest, capture_line,
     claude_completion_message, claude_needs_survival_delivery, claude_task_label,
     completion_message, format_elapsed, short_label, tail_lines, wake_message,
 };
 use crate::brain::agent::service::restart_recovery;
 use crate::brain::agent::service::session_routes;
 use crate::brain::agent::service::work_status::RunCause;
+use crate::brain::tools::bash::handover_notice;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -29,6 +30,19 @@ fn tail_keeps_last_n_lines() {
 
 #[test]
 fn completion_message_reflects_success_and_failure() {
+    // #935: a completion states what its capture files hold, so the test gives
+    // it real ones. `ok` writes the bytes its tail reports; `fail` leaves both
+    // empty, which is the "produced nothing" case stated as a sentence.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ok_out = dir.path().join("ok.out");
+    let ok_err = dir.path().join("ok.err");
+    std::fs::write(&ok_out, "test result: ok. 5 passed\n").expect("write stdout");
+    std::fs::write(&ok_err, "").expect("write stderr");
+    let fail_out = dir.path().join("fail.out");
+    let fail_err = dir.path().join("fail.err");
+    std::fs::write(&fail_out, "error[E0001]\n").expect("write stdout");
+    std::fs::write(&fail_err, "").expect("write stderr");
+
     let ok = completion_message(
         "11111111-2222-3333-4444-555555555555",
         "cargo test",
@@ -39,6 +53,8 @@ fn completion_message_reflects_success_and_failure() {
             cause: RunCause::Ordinary,
             output: "test result: ok. 5 passed".into(),
         },
+        &ok_out,
+        &ok_err,
         12.0,
     );
     assert!(ok.context_text.contains("exit 0 (success)"));
@@ -73,6 +89,8 @@ fn completion_message_reflects_success_and_failure() {
             cause: RunCause::Ordinary,
             output: "error[E0001]".into(),
         },
+        &fail_out,
+        &fail_err,
         3.0,
     );
     assert!(fail.context_text.contains("exit 101 (failure)"));
@@ -93,6 +111,13 @@ fn completion_message_reflects_success_and_failure() {
 /// three different events and the message has to say which one happened.
 #[test]
 fn completion_message_names_why_a_137_ended() {
+    // #935: two empty capture FILES, so the body states "no output on either
+    // stream" rather than rendering nothing at all.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("killed.out");
+    let err = dir.path().join("killed.err");
+    std::fs::write(&out, "").expect("write stdout");
+    std::fs::write(&err, "").expect("write stderr");
     let make = |cause: RunCause, success: bool| {
         completion_message(
             "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -104,6 +129,8 @@ fn completion_message_names_why_a_137_ended() {
                 cause,
                 output: String::new(),
             },
+            &out,
+            &err,
             3600.0,
         )
     };
@@ -632,4 +659,188 @@ fn a_mirrored_task_counts_as_detached_and_has_a_label() {
     mgr.mirror_finished(sid, &label);
     assert_eq!(mgr.detached_count_for(sid), 0);
     assert!(mgr.mirror_labels_for(sid).is_empty());
+}
+
+// --- #935: an empty tail is a FACT, not an absence ---
+
+/// The completion notice carries an output tail, and an empty tail used to
+/// render as nothing at all — so a lane could not tell "the command produced
+/// nothing", "output exists but has not been flushed to the capture file yet"
+/// (Python block-buffers to a file) and "the run died before flushing" apart.
+/// Byte counts are what discriminate them, so the line states both counts and
+/// both paths, verbatim.
+#[test]
+fn capture_line_states_both_byte_counts_and_both_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("run.out");
+    let err = dir.path().join("run.err");
+    std::fs::write(&out, "hello!\n").expect("write stdout"); // 7 bytes
+    std::fs::write(&err, "oops\n").expect("write stderr"); // 5 bytes
+
+    assert_eq!(
+        capture_line(&out, &err),
+        format!(
+            "output: 7 bytes stdout \u{00b7} 5 bytes stderr \u{00b7} captures: {} {}",
+            out.display(),
+            err.display()
+        ),
+        "the line must state both counts and both paths, in that shape"
+    );
+}
+
+/// Two files that exist and hold nothing is the one case where "no output" is
+/// a measurement rather than a guess — so it gets its own sentence instead of
+/// a zero-byte count that reads like a measurement of nothing.
+#[test]
+fn capture_line_says_no_output_when_both_captures_are_empty() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("run.out");
+    let err = dir.path().join("run.err");
+    std::fs::write(&out, "").expect("write stdout");
+    std::fs::write(&err, "").expect("write stderr");
+
+    assert_eq!(
+        capture_line(&out, &err),
+        format!(
+            "no output on either stream (0 bytes) \u{00b7} captures: {} {}",
+            out.display(),
+            err.display()
+        ),
+        "both captures present and empty is stated as a sentence"
+    );
+}
+
+/// A capture path that does not exist is NOT an empty capture: the run may
+/// never have created it, or it may have been swept. Rendering it as `0 bytes`
+/// would state a measurement nobody took, so it says `capture missing`.
+#[test]
+fn capture_line_marks_a_missing_capture_instead_of_calling_it_empty() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("run.out");
+    std::fs::write(&out, "line\n").expect("write stdout"); // 5 bytes
+    // Never created.
+    let err = dir.path().join("never-created.err");
+
+    let line = capture_line(&out, &err);
+    assert!(
+        line.contains("capture missing"),
+        "an absent capture must be named as absent, got: {line}"
+    );
+    assert!(
+        !line.contains("no output on either stream"),
+        "a missing capture is not the same fact as a silent run, got: {line}"
+    );
+    assert!(
+        line.contains(&out.display().to_string()),
+        "the stream that DOES exist is still named by path, got: {line}"
+    );
+    assert!(
+        line.contains("output: 5 bytes stdout"),
+        "the present stream's count is still reported, got: {line}"
+    );
+}
+
+/// The whole point of #935: three completions that used to be one blank body
+/// must be three different bodies. (a) output was produced, (b) both captures
+/// exist and are empty, (c) the captures are not there at all.
+#[test]
+fn completion_bodies_are_pairwise_distinguishable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let make = |name: &str, output: &str, body: Option<&str>| {
+        let out = dir.path().join(format!("{name}.out"));
+        let err = dir.path().join(format!("{name}.err"));
+        if let Some(body) = body {
+            std::fs::write(&out, body).expect("write stdout");
+            std::fs::write(&err, "").expect("write stderr");
+        }
+        completion_message(
+            "93500000-0000-0000-0000-000000000000",
+            "python3 gen.py",
+            "python3 gen.py",
+            &CmdResult {
+                success: true,
+                code: 0,
+                cause: RunCause::Ordinary,
+                output: output.to_string(),
+            },
+            &out,
+            &err,
+            1.0,
+        )
+        .context_text
+    };
+
+    let body = "test result: ok. 5 passed\n";
+    let with_output = make("a", "test result: ok. 5 passed", Some(body));
+    let empty = make("b", "", Some(""));
+    // Never created: no `Some(..)`, so neither file exists.
+    let missing = make("c", "", None);
+
+    assert!(
+        with_output.contains(&format!("output: {} bytes stdout", body.len())),
+        "a run that produced output states how much, got: {with_output}"
+    );
+    assert!(
+        with_output.contains("Last 50 lines of output:\ntest result: ok. 5 passed"),
+        "the tail still rides along as evidence, got: {with_output}"
+    );
+
+    assert!(
+        empty.contains("no output on either stream (0 bytes)"),
+        "a run whose captures exist and are empty says so, got: {empty}"
+    );
+    assert!(
+        !empty.contains("Last 50 lines of output:"),
+        "an empty tail must not leave a dangling header, got: {empty}"
+    );
+
+    assert!(
+        missing.contains("capture missing"),
+        "a run whose captures are absent says that instead, got: {missing}"
+    );
+
+    assert_ne!(with_output, empty, "(a) and (b) must not read alike");
+    assert_ne!(with_output, missing, "(a) and (c) must not read alike");
+    assert_ne!(empty, missing, "(b) and (c) must not read alike");
+}
+
+/// The handover notice is the FIRST thing a caller reads about a detached run.
+/// It used to omit the capture section entirely when both tails were empty, so
+/// "this run has printed nothing yet" was indistinguishable from a notice that
+/// forgot to mention output. It now states the emptiness, and keeps the tails
+/// as evidence when there are any.
+#[test]
+fn handover_states_empty_captures_instead_of_omitting_them() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("handed.out");
+    let err = dir.path().join("handed.err");
+    std::fs::write(&out, "").expect("write stdout");
+    std::fs::write(&err, "").expect("write stderr");
+
+    let notice = handover_notice("sleep 900", "after 600s", "run-935", Some(4242), &out, &err);
+    assert!(
+        notice.contains("no output on either stream (0 bytes)"),
+        "an empty handover must SAY it is empty, got: {notice}"
+    );
+    assert!(
+        !notice.contains("stdout so far"),
+        "an empty capture has no tail to show, got: {notice}"
+    );
+    assert!(
+        notice.contains(&out.display().to_string()) && notice.contains(&err.display().to_string()),
+        "both capture paths are still named so the caller can look for itself, got: {notice}"
+    );
+
+    // With bytes on the stream, the tail is still carried — the statement did
+    // not replace the evidence, it precedes it.
+    std::fs::write(&out, "step 1\n").expect("write stdout"); // 7 bytes
+    let notice = handover_notice("sleep 900", "after 600s", "run-935", Some(4242), &out, &err);
+    assert!(
+        notice.contains("output: 7 bytes stdout"),
+        "a live capture is counted at render time, got: {notice}"
+    );
+    assert!(
+        notice.contains("stdout so far (last 15 lines):\nstep 1"),
+        "the tail is still shown when it has something to say, got: {notice}"
+    );
 }

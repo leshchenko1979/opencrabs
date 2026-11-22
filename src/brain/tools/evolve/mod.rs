@@ -14,11 +14,10 @@
 //! Layout: [`tool`] (the `Tool` impl and dispatch), [`release_check`]
 //! (GitHub release probe + version compare), [`binary_health`] (pre-swap
 //! probes), [`via_binary_download`] / [`via_cargo_install`] (the two
-//! strategies), [`restart_status`], [`archive`], [`systemd`], [`homebrew`].
+//! strategies), [`restart_status`], [`systemd`], [`homebrew`].
 //! This file is declarations only — no function definitions live here
 //! (CONTRIBUTING.md).
 
-mod archive;
 mod binary_health;
 pub(crate) mod bounded_child;
 pub(crate) mod homebrew;

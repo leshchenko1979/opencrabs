@@ -78,7 +78,9 @@ impl Tool for SessionSearchTool {
         "Search or list chat session history using direct case-insensitive substring \
          search against the messages table. Always up-to-date and exhaustive. \
          Use 'list' to show all sessions with titles, dates, and message counts. \
-         Use 'search' to find messages across sessions by substring query. \
+         Use 'search' to find messages across sessions by substring query: rows that \
+         contain the query verbatim AND rows that contain all of its words are ranked \
+         together by term proximity. \
          Use 'tail' to read the last N messages of one session (cheap on huge histories). \
          Use 'query' for machine-readable session discovery: JSON rows with full session ids, \
          titles, last-active timestamps and message counts - e.g. to find another session's id \
@@ -416,10 +418,17 @@ impl SessionSearchTool {
             Some(_) => Some(target_sessions.iter().map(|s| s.id).collect()),
         };
 
-        let messages = message_repo
-            .search_by_content(scope_ids.as_deref(), trimmed, n)
+        let candidates = message_repo
+            .search_by_content_union(scope_ids.as_deref(), trimmed, n)
             .await
             .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
+
+        if candidates.is_empty() {
+            return Ok(ToolResult::success(format!(
+                "No messages found matching '{}' in the selected session(s).",
+                trimmed
+            )));
+        }
 
         let title_map: std::collections::HashMap<uuid::Uuid, String> = all_sessions
             .iter()
@@ -446,47 +455,37 @@ impl SessionSearchTool {
             format!("**{}** [{} • {}]\n   {}\n\n", title, role, date, snippet)
         };
 
-        // #1626: zero contiguous-verbatim hits do not mean the content is
-        // absent — a natural-language query scatters its words across a
-        // sentence. Before reporting nothing, retry multi-word queries with
-        // a tokenized AND-match (every word present somewhere) and label the
-        // rows so the weaker semantics stay explicit.
-        if messages.is_empty() {
-            let no_match = || {
-                ToolResult::success(format!(
-                    "No messages found matching '{}' in the selected session(s).",
+        // #941: BOTH arms run always now, so one result set can MIX rows that
+        // contain the query verbatim with rows that contain all its words but
+        // not the phrase. The label must say which is which — the old banner
+        // asserted there was no verbatim hit at all, which became FALSE the
+        // moment the phrase arm could return rows alongside token-only ones.
+        let contiguous = candidates.iter().filter(|c| c.contiguous).count();
+        let token_only = candidates.len() - contiguous;
+        let mut output = String::new();
+        if token_only > 0 {
+            if contiguous == 0 {
+                output.push_str(&format!(
+                    "~ token match — no message contains '{}' verbatim; every row below \
+                     contains all of its words, ranked by term proximity.\n\n",
                     trimmed
-                ))
-            };
-            if trimmed.split_whitespace().count() < 2 {
-                // Single token: verbatim and tokenized are the same query;
-                // retrying would only duplicate the work.
-                return Ok(no_match());
+                ));
+            } else {
+                output.push_str(&format!(
+                    "~ ranked by term proximity: {} of {} rows contain '{}' verbatim, \
+                     the other {} contain all of its words but not the phrase.\n\n",
+                    contiguous,
+                    candidates.len(),
+                    trimmed,
+                    token_only
+                ));
             }
-            let tokenized = message_repo
-                .search_by_content_tokenized(scope_ids.as_deref(), trimmed, n)
-                .await
-                .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
-            if tokenized.is_empty() {
-                return Ok(no_match());
-            }
-            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-            let mut terms: Vec<&str> = vec![trimmed];
-            terms.extend(tokens.iter().copied());
-            let mut output = format!(
-                "~ token match — no contiguous match for '{}'; every row below \
-                 contains all of its words, ranked by word hits then recency.\n\n",
-                trimmed
-            );
-            for msg in &tokenized {
-                output.push_str(&render(msg, &terms));
-            }
-            return Ok(ToolResult::success(output));
         }
 
-        let mut output = String::new();
-        for msg in &messages {
-            output.push_str(&render(msg, std::slice::from_ref(&trimmed)));
+        let mut terms: Vec<&str> = vec![trimmed];
+        terms.extend(trimmed.split_whitespace());
+        for candidate in &candidates {
+            output.push_str(&render(&candidate.row, &terms));
         }
 
         Ok(ToolResult::success(output))

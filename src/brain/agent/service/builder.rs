@@ -1765,6 +1765,19 @@ impl AgentService {
     /// #438 S1: record that a compaction just completed for this session —
     /// raise the streak.
     ///
+    /// **Scope limit (#805): this counts compactions, not truncation attempts,
+    /// and its silence is not evidence that no loop is running.** The guard it
+    /// feeds fires on a run of compactions that produced no work, so a session
+    /// that keeps committing tool results between visits never accumulates a
+    /// streak — `reset_compaction_streak` clears it on every committed tool
+    /// result. A truncate-then-work loop (Tier 2 fires, the truncation frees
+    /// nothing or too little, the turn works, repeat) is therefore entirely
+    /// outside this guard's predicate: `359fe71b` logged 347 Tier 2 events in
+    /// one day, 118 of them dropping zero tokens, and the streak never reached
+    /// the threshold. Read the truncation report lines for that pathology; the
+    /// absence of a streak here says only that compactions have been producing
+    /// work.
+    ///
     /// Crate-visible rather than module-private: the shed tests in
     /// `src/tests/compaction_shed_test.rs` raise the streak through this same
     /// entry point the compaction path uses, so the gate they exercise is the

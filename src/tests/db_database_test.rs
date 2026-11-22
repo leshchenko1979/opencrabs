@@ -222,6 +222,21 @@ async fn tool_executions_carries_session_and_created_at_indexes() {
     }
 }
 
+/// The 1-based version of the migration that creates the `tool_executions`
+/// session/created_at indexes, found by its content.
+///
+/// Deriving this from `Database::MIGRATION_COUNT - 1` assumes the index
+/// migration is always LAST, which holds only until the next migration is
+/// appended — and then this test fails for a reason that has nothing to do
+/// with indexes.
+fn index_migration_version() -> usize {
+    let pos = crate::db::database::MIGRATION_SQL
+        .iter()
+        .position(|sql| sql.contains("idx_tool_executions_session_id"))
+        .expect("a migration creating idx_tool_executions_session_id must exist");
+    pos + 1
+}
+
 /// #916: an existing store gains the indexes on its next open. A database
 /// stamped at the version just below this migration carries neither of them
 /// (that is the live shape with the hand-built copies absent), and
@@ -230,13 +245,19 @@ async fn tool_executions_carries_session_and_created_at_indexes() {
 #[tokio::test]
 async fn existing_store_gains_tool_executions_indexes_on_next_open() {
     let db = Database::connect_in_memory().await.unwrap();
+    // Anchor on the migration's own CONTENT, not on `MIGRATION_COUNT - 1`.
+    // The count is the list's length, so appending any later migration moved
+    // the "one version below" target off this one and broke an unrelated
+    // test (#938's no-op comment migration did exactly that). The index
+    // name identifies the migration unambiguously.
+    let below = index_migration_version() - 1;
     db.pool()
         .get()
         .await
         .unwrap()
         .interact(move |conn| -> Result<(), String> {
             crate::db::database::build_migrations()
-                .to_version(conn, Database::MIGRATION_COUNT - 1)
+                .to_version(conn, below)
                 .map_err(|e| e.to_string())
         })
         .await

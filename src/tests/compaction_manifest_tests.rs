@@ -412,7 +412,7 @@ fn test_format_context_inventory_with_documents() {
     // The budget sentence appears only when there is something to budget for.
     assert!(
         table.contains(
-            "Documents re-injected on wake count against the same 5% retained-set budget."
+            "Documents re-injected on wake take the retained-set leftover, with a floor of 10% of the context window."
         )
     );
 }

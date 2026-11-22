@@ -6,23 +6,25 @@
 //!
 //! # Why the corpus is BOUNDED
 //!
-//! The shipped path (`session_search` → `MessageRepository::search_by_content`)
-//! is an unscoped `LIKE` with no full-text index. Measured on the ops profile
+//! The shipped path (`session_search` →
+//! `MessageRepository::search_by_content_union`) is an unscoped `LIKE` with no
+//! full-text index. Measured on the ops profile
 //! at 44,667 messages, ONE such query takes ~75 s (#855), so 60 queries would
 //! be 75 minutes. This leg therefore bounds the scan to the most recent
 //! `slice_days` of messages and REPORTS the slice beside the number. The bound
 //! changes the COST, never the SEMANTICS: the same `LIKE … ESCAPE '\' COLLATE
-//! NOCASE` pattern and the same tokenized fallback run against the slice.
+//! NOCASE` phrase arm, the same tokenized AND arm and the same union ranker run
+//! against the slice.
 //!
 //! # Why MRR is published as the zero it is
 //!
-//! `search_by_content` orders by `created_at DESC` — recency, not relevance —
-//! and the tokenized fallback ranks by word-hit count then recency. There is
-//! no ranker to reward, so a known-item query with more than one matching
-//! message lands wherever recency puts it. #855 is the issue that would give
-//! this leg a ranked message search; until it ships, MRR measures that
-//! absence. It is not a quality regression to chase, and it must not be
-//! reported as one.
+//! Since #941 the shipped search runs BOTH arms — the query as one contiguous
+//! phrase, and every query word somewhere — merges them into one pool and
+//! ranks that pool by query-term proximity span, then word-hit count, then
+//! recency. Proximity is the only signal with any discriminating power here
+//! (#941); before it, a known-item query with more than one matching message
+//! landed wherever recency put it. MRR still measures how much of that
+//! ordering the ranker can recover.
 //!
 //! # Why the dataset is GENERATED, not committed
 //!
@@ -433,80 +435,94 @@ fn present(conn: &Connection, since: i64, word: &str) -> Result<usize> {
 
 /// Run the SHIPPED retrieval semantics over the slice.
 ///
-/// Mirrors `MessageRepository::search_by_content` (contiguous `LIKE`, recency
-/// order) and, when that returns nothing for a multi-word query, its
-/// `search_by_content_tokenized` companion (#1626): every token must appear,
-/// the pool is `5 * k` capped at 200, and rows are re-ranked by
-/// [`crate::relevance::episodic::rank`] — the very function the shipped arm
+/// Mirrors `MessageRepository::search_by_content_union` — which is the shipped
+/// search since #941 — with the only difference being the `created_at` bound,
+/// the documented cost bound. Both arms run ALWAYS: the contiguous `LIKE`
+/// (the query as one phrase) and the tokenized AND (every query word
+/// somewhere), each fetching
+/// [`crate::relevance::episodic::tokenized_fetch_cap`] rows newest-first — the
+/// SAME function the shipped arm calls, so a pool change cannot land in one
+/// leg and not the other. The two sets are merged by
+/// [`crate::relevance::episodic::merge_arms`] and ordered by
+/// [`crate::relevance::episodic::rank`] — the very functions the shipped path
 /// calls, so this leg cannot measure a ranker the binary does not run (#911).
-/// The only difference from the shipped path is the `created_at` bound, which
-/// is the documented cost bound.
+///
+/// The short-circuit that used to live here — return as soon as the phrase arm
+/// came back non-empty — was the #941 defect, mirrored faithfully from
+/// production: one unrelated row holding the phrase verbatim discarded the
+/// whole tokenized candidate set. There is no branch on emptiness now, in
+/// either leg.
 pub fn search_slice(conn: &Connection, since: i64, query: &str, k: usize) -> Result<Vec<Ranked>> {
     let escaped = |s: &str| s.replace('%', "\\%").replace('_', "\\_");
-    let pattern = format!("%{}%", escaped(query));
-    let limit = k as i64;
+    let tokens = crate::relevance::episodic::query_tokens(query);
+    if tokens.is_empty() || k == 0 {
+        return Ok(Vec::new());
+    }
+    let terms = crate::relevance::episodic::query_terms(query);
+    let cap = crate::relevance::episodic::tokenized_fetch_cap(k);
+    let phrase = format!("%{}%", escaped(query));
+    let patterns: Vec<String> = tokens.iter().map(|t| format!("%{}%", escaped(t))).collect();
 
+    // The phrase arm. `content` is carried through so the merged pool can be
+    // scored with the same function the shipped arm scores with (#911).
     let contiguous = {
         let mut stmt = conn.prepare(
-            "SELECT id, session_id FROM messages \
+            "SELECT id, session_id, content FROM messages \
              WHERE created_at >= ?1 AND content LIKE ?2 ESCAPE '\\' COLLATE NOCASE \
              ORDER BY created_at DESC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![since, pattern, limit], |r| {
-            Ok(Ranked {
-                message_id: r.get(0)?,
-                session_id: r.get(1)?,
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()?
-    };
-    if !contiguous.is_empty() {
-        return Ok(contiguous);
-    }
-
-    // Tokenized fallback, mirroring the shipped arm.
-    let tokens = crate::relevance::episodic::query_tokens(query);
-    let terms = crate::relevance::episodic::query_terms(query);
-    if tokens.len() < 2 {
-        return Ok(Vec::new());
-    }
-    let fetch_cap = (k.saturating_mul(5)).clamp(1, 200) as i64;
-    let patterns: Vec<String> = tokens.iter().map(|t| format!("%{}%", escaped(t))).collect();
-    let like_arms = vec!["content LIKE ? ESCAPE '\\' COLLATE NOCASE"; patterns.len()].join(" AND ");
-    let sql = format!(
-        "SELECT id, session_id, content FROM messages \
-         WHERE created_at >= ? AND {like_arms} \
-         ORDER BY created_at DESC LIMIT ?"
-    );
-
-    let mut stmt = conn.prepare(&sql)?;
-    let mut bind: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(patterns.len() + 2);
-    bind.push(&since);
-    for p in &patterns {
-        bind.push(p);
-    }
-    bind.push(&fetch_cap);
-    // The pool carries the row text through to the shared scorer, so this leg
-    // and the shipped arm score the SAME string with the SAME function (#911).
-    // Before that, this leg counted distinct tokens while the shipped arm
-    // summed occurrences — two different rankers under one name.
-    let pool: Vec<(Ranked, String)> = stmt
-        .query_map(bind.as_slice(), |r| {
-            let content: String = r.get(2)?;
+        let rows = stmt.query_map(params![since, phrase, cap], |r| {
             Ok((
                 Ranked {
                     message_id: r.get(0)?,
                     session_id: r.get(1)?,
                 },
-                content,
+                r.get::<_, String>(2)?,
             ))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
 
-    // Exactly the shipped ranking rule, reached through the same function.
-    let ranked =
-        crate::relevance::episodic::rank(pool, &terms, |pair: &(Ranked, String)| pair.1.as_str());
-    Ok(ranked.into_iter().take(k).map(|(r, _)| r).collect())
+    // The tokenized arm. One token is the same substring as the phrase arm, so
+    // the second scan is skipped — exactly as the shipped path does.
+    let tokenized = if patterns.len() < 2 {
+        Vec::new()
+    } else {
+        let like_arms =
+            vec!["content LIKE ? ESCAPE '\\' COLLATE NOCASE"; patterns.len()].join(" AND ");
+        let sql = format!(
+            "SELECT id, session_id, content FROM messages \
+             WHERE created_at >= ? AND {like_arms} \
+             ORDER BY created_at DESC LIMIT ?"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut bind: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(patterns.len() + 2);
+        bind.push(&since);
+        for p in &patterns {
+            bind.push(p);
+        }
+        bind.push(&cap);
+        let rows = stmt.query_map(bind.as_slice(), |r| {
+            Ok((
+                Ranked {
+                    message_id: r.get(0)?,
+                    session_id: r.get(1)?,
+                },
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+
+    // ONE pool, ONE ranker: the shipped union rule, through the shipped code.
+    let merged = crate::relevance::episodic::merge_arms(
+        contiguous,
+        tokenized,
+        &terms,
+        |pair: &(Ranked, String)| pair.0.message_id.clone(),
+        |pair: &(Ranked, String)| pair.1.as_str(),
+    );
+    Ok(merged.into_iter().take(k).map(|c| c.row.0).collect())
 }
 
 /// Build a known-item case from one message, or `None` when it carries too

@@ -7,7 +7,7 @@
 //! working, or starting a fresh turn if it went idle.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use regex::Regex;
@@ -557,6 +557,12 @@ impl BackgroundTaskManager {
         // The spawned task names the run when it delivers the outcome, so it
         // takes its own copy: the caller gets the original back (#787).
         let delivery_id = run_id.clone();
+        // The inline arm reports the run too, and a completion states its
+        // capture files' byte counts (#935) — so the paths are taken here, for
+        // the same reason as the id: the reservation is about to be MOVED into
+        // the task below and would otherwise be gone by the time it reports.
+        let delivery_out = reserved.output_out.clone();
+        let delivery_err = reserved.output_err.clone();
         let this = std::sync::Arc::clone(&self);
         tokio::spawn(async move {
             match this
@@ -582,6 +588,8 @@ impl BackgroundTaskManager {
                             &label,
                             &command,
                             &cmd_result_from(&output),
+                            &delivery_out,
+                            &delivery_err,
                             0.0,
                         );
                     }
@@ -1656,15 +1664,24 @@ pub(crate) fn wake_message(
 ///
 /// `interrupt=true`: a completion is the origin's own awaited work, exactly like
 /// a sub-agent's; it must reach it even mid-turn (fork #13).
+///
+/// `out`/`err` are the run's two capture files (#935). They travel as
+/// parameters rather than on `CmdResult` because they are properties of the RUN,
+/// not of its outcome: the same result can be rendered from a live run's files
+/// or from a hook that has none. Passing them keeps the fabrication out — a
+/// result with invented paths would state byte counts nobody measured.
+#[allow(clippy::too_many_arguments)]
 fn deliver_completion(
     id: &str,
     session_id: Uuid,
     label: &str,
     command: &str,
     result: &CmdResult,
+    out: &Path,
+    err: &Path,
     elapsed_secs: f32,
 ) {
-    let msg = completion_message(id, label, command, result, elapsed_secs);
+    let msg = completion_message(id, label, command, result, out, err, elapsed_secs);
     match super::session_routes::deliver_to_session(session_id, msg, true) {
         super::session_routes::Delivery::Redirected { to } => {
             tracing::info!(
@@ -1834,7 +1851,19 @@ async fn continue_detached(
         })
         .await;
     } else {
-        deliver_completion(&id, session_id, &label, &command, &result, elapsed_secs);
+        // `out_path`/`err_path` are this run's real capture files — the same
+        // two the readers above have been filling, so the byte counts the
+        // completion states (#935) are measured on the bytes this run wrote.
+        deliver_completion(
+            &id,
+            session_id,
+            &label,
+            &command,
+            &result,
+            &out_path,
+            &err_path,
+            elapsed_secs,
+        );
     }
     // The run is over, so its watcher has nothing left to report. Aborted
     // rather than left to observe a terminal stream: a wake that arrived after
@@ -1937,6 +1966,58 @@ pub(crate) fn tail_lines(text: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
+/// One line stating what a run actually left in its two capture files (#935).
+///
+/// The tail alone cannot answer the question a lane asks when a notice looks
+/// blank: "did it produce nothing, or has it simply not written yet?" An empty
+/// tail renders as nothing at all, so three genuinely different states — a
+/// silent command, output still sitting in the child's libc buffer (Python
+/// block-buffers to a file, so a print can be invisible for minutes), and a run
+/// that died before flushing — are one indistinguishable absence. Byte counts
+/// discriminate them; the two paths let a lane look for itself.
+///
+/// The counts are read from the FILES at render time, never carried from an
+/// earlier read: the earlier read is exactly what may have raced the flush.
+///
+/// A capture path that does not exist renders `capture missing`, never `0
+/// bytes`. Absent and empty are different facts and telling them apart is the
+/// whole point of this line — so the no-output sentence is claimed only when
+/// BOTH files exist and both are empty. "0 bytes" about a file that is not
+/// there would be a measurement nobody took.
+pub(crate) fn capture_line(out: &Path, err: &Path) -> String {
+    let out_len = capture_len(out);
+    let err_len = capture_len(err);
+    let captures = format!(
+        "captures: {} {}",
+        capture_ref(out, out_len),
+        capture_ref(err, err_len)
+    );
+    match (out_len, err_len) {
+        (Some(0), Some(0)) => {
+            format!("no output on either stream (0 bytes) \u{00b7} {captures}")
+        }
+        _ => format!(
+            "output: {} bytes stdout \u{00b7} {} bytes stderr \u{00b7} {captures}",
+            out_len.unwrap_or(0),
+            err_len.unwrap_or(0)
+        ),
+    }
+}
+
+/// Byte count of one capture file, or `None` when there is no file to count
+/// (#935).
+fn capture_len(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).map(|m| m.len()).ok()
+}
+
+/// The capture's path, or the words that say it is not there (#935).
+fn capture_ref(path: &Path, len: Option<u64>) -> String {
+    match len {
+        Some(_) => path.display().to_string(),
+        None => "capture missing".to_string(),
+    }
+}
+
 /// Build the resume message from a finished background command (#722). Pure so
 /// the framing is unit-testable without spawning anything. `elapsed_secs` is
 /// the detached command's wall-clock runtime; it rides along in the typed
@@ -1951,11 +2032,20 @@ pub(crate) fn tail_lines(text: &str, n: usize) -> String {
 /// either. It stays out of `BgTaskMeta`: that payload is consumed by the
 /// channel echo, which renders a card rather than an addressable handle, and
 /// widening it would ripple through the six test files that build it.
+///
+/// `out`/`err` are the run's two capture files, and the body STATES what they
+/// hold (#935): a completion with an empty tail used to render as a header with
+/// nothing under it, so a lane could not tell a silent command from one whose
+/// output was still buffered, or from a run that died before flushing. The byte
+/// counts come from the files at render time and both paths are named, so the
+/// answer is in the message instead of in a guess.
 pub(crate) fn completion_message(
     id: &str,
     label: &str,
     command: &str,
     result: &CmdResult,
+    out: &Path,
+    err: &Path,
     elapsed_secs: f32,
 ) -> QueuedUserMessage {
     // #786 — the wake message is the FIRST surface a lane reads, and it used to
@@ -1975,13 +2065,25 @@ pub(crate) fn completion_message(
         _ => cause.describe(result.code),
     };
     let tail = tail_lines(&result.output, 50);
+    // #935: the tail is EVIDENCE, not a statement. An empty one used to render
+    // as `Output (last 50 lines):` followed by nothing, which made "produced
+    // nothing", "not flushed yet" and "died before flushing" one blank. The
+    // capture line states the byte counts and both paths on every completion;
+    // the tail is appended only when it has something to say.
+    let capture = capture_line(out, err);
+    let tail_block = if tail.trim().is_empty() {
+        String::new()
+    } else {
+        format!("Last 50 lines of output:\n{tail}\n")
+    };
     let context = format!(
         "[System: the background task you started has finished.\n\
          Task: {label}\n\
          Run id: {id}\n\
          Command: {command}\n\
          Status: {status}\n\
-         Output (last 50 lines):\n{tail}\n\n\
+         {capture}\n\
+         {tail_block}\n\
          Report the result to the user and continue anything that was waiting on it. \
          Do not re-run the command — this IS its result.]"
     );

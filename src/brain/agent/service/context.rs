@@ -183,15 +183,30 @@ struct SummarySection {
 }
 
 /// The sections a trimmed document must never lose: the obligation (0), the
-/// recovery playbook (7), the next step (8) and the manifest (10) — plus the
-/// preamble before the first heading, kept rather than guessed at.
+/// recovery playbook (7), the next step (8), the continuation message (9) and
+/// the manifest (10) — plus every UNNUMBERED section, which is the preamble
+/// before the first heading and, more importantly, all three harness decoration
+/// blocks (`## PLAN STATE (harness)`, `## Running Sub-Agents`, `## Documents
+/// read pre-compaction`). Those carry state a woken agent cannot recover from
+/// the document, so they are kept rather than guessed at.
+///
+/// Section 9 is here for the reason the trimmer's size ordering makes concrete
+/// (#934): it is the SHORTEST load-bearing block, so sorting trimmable sections
+/// by size descending reached it second, right after §1 — the guard destroyed
+/// the wake-up message before it ever touched the prose the sessions ranked
+/// least important. The prompt writes §9 before the prose as well, so a
+/// `MaxTokens` cut cannot reach it either: two doors, both shut.
 fn is_must_keep_section(number: Option<u32>) -> bool {
-    matches!(number, None | Some(0) | Some(7) | Some(8) | Some(10))
+    matches!(
+        number,
+        None | Some(0) | Some(7) | Some(8) | Some(9) | Some(10)
+    )
 }
 
-/// Split a continuation document at its `## N.` headings. Lossless: the
-/// concatenation of the returned sections is the input, byte for byte.
-/// Fence-aware — a `##` line inside a code block is content, not a heading.
+/// Split a continuation document at its level-2 (`## `) headings, numbered or
+/// not. Lossless: the concatenation of the returned sections is the input, byte
+/// for byte. Fence-aware — a `##` line inside a code block is content, not a
+/// heading.
 fn split_summary_sections(summary: &str) -> Vec<SummarySection> {
     let mut sections: Vec<SummarySection> = Vec::new();
     let mut heading = String::new();
@@ -221,10 +236,7 @@ fn split_summary_sections(summary: &str) -> Vec<SummarySection> {
             _ => {}
         }
 
-        if !in_fence_before
-            && fence.is_none()
-            && let Some(n) = parse_section_number(line)
-        {
+        if !in_fence_before && fence.is_none() && is_section_heading(line) {
             if !cur.is_empty() {
                 sections.push(SummarySection {
                     heading: std::mem::take(&mut heading),
@@ -232,7 +244,7 @@ fn split_summary_sections(summary: &str) -> Vec<SummarySection> {
                     must_keep: is_must_keep_section(number),
                 });
             }
-            number = Some(n);
+            number = parse_section_number(line);
             heading = line.trim_end().to_string();
         }
         cur.push_str(line);
@@ -245,6 +257,22 @@ fn split_summary_sections(summary: &str) -> Vec<SummarySection> {
         });
     }
     sections
+}
+
+/// Any level-2 heading line, numbered or not.
+///
+/// The trimmer has to treat UNNUMBERED headings as section boundaries too,
+/// because the harness appends its own blocks that way: `## PLAN STATE
+/// (harness)`, `## Running Sub-Agents` and `## Documents read pre-compaction`.
+/// Splitting on `## N.` alone absorbed those blocks into the span of the
+/// preceding numbered section, so stubbing that section destroyed decoration
+/// the trimmer is documented never to reach. Measured on the #934 gate: a
+/// fixture whose last section was a trimmable §1 lost its entire documents
+/// list, while production masked the bug because its last section (§10) happens
+/// to be must-keep. `### ` is excluded — a sub-heading is content, not a
+/// boundary.
+fn is_section_heading(line: &str) -> bool {
+    line.starts_with("## ") && !line.starts_with("### ")
 }
 
 /// `## 3. Title` → `Some(3)`. Any other line, `### 3.` included, is `None`.
@@ -351,12 +379,18 @@ impl AgentService {
     /// 1. Temporal grounding: inject [Current time: YYYY-MM-DD HH:MM:SS UTC (user: ...)] (#153).
     /// 2. Active plan reminder.
     /// 3. Memory & directive passive recall (#799, #285).
+    ///
+    /// Returns the augmented text PLUS what recall injected (#928). The summary
+    /// is `None` whenever recall fired nothing, so a caller that renders a
+    /// receipt can stay silent instead of printing an empty chrome row; this
+    /// layer stays channel-agnostic — it names sections, it never formats for a
+    /// channel.
     pub(crate) async fn augment_user_message(
         session_id: Uuid,
         user_message: &str,
         brain_dir: Option<&std::path::Path>,
         working_dir: Option<&std::path::Path>,
-    ) -> String {
+    ) -> (String, Option<crate::brain::memory_recall::RecallSummary>) {
         // Temporal grounding (#153): inject context-only time marker at turn start.
         let now = chrono::Utc::now();
         let tz_info = brain_dir
@@ -377,15 +411,20 @@ impl AgentService {
         }
 
         // Ride relevant memory, active skills, and project directives along with the message (#799, #285).
+        let mut recall_summary = None;
         if let Some(recall) =
             crate::brain::memory_recall::recall_for_session(session_id, working_dir, user_message)
                 .await
         {
-            tracing::info!("Recalled {} chars for session {session_id}", recall.len());
+            tracing::info!(
+                "Recalled {} chars for session {session_id}",
+                recall.summary.chars
+            );
             out.push_str("\n\n");
-            out.push_str(&recall);
+            out.push_str(&recall.text);
+            recall_summary = Some(recall.summary);
         }
-        out
+        (out, recall_summary)
     }
 
     pub(super) async fn active_plan_reminder(session_id: Uuid) -> Option<String> {
@@ -500,7 +539,10 @@ impl AgentService {
         // the DB only ever stores the clean user message, so it never piles up.
         let brain_dir = self.brain_workspace_path();
         let working_directory = self.get_working_directory_for_session(session_id);
-        let context_user_message = Self::augment_user_message(
+        // The recall summary is dropped here: this path has no progress
+        // callback, so there is no flow roll to name it in (#928). The recall
+        // text itself is unchanged.
+        let (context_user_message, _recall) = Self::augment_user_message(
             session_id,
             &user_message,
             brain_dir.as_deref(),
@@ -775,9 +817,12 @@ impl AgentService {
         )
         .await?;
 
-        let summary =
-            Self::decorate_compaction_summary(summary, session_id, self.subagent_manager.clone())
-                .await;
+        let summary = Self::finalize_continuation_document(
+            summary,
+            session_id,
+            self.subagent_manager.clone(),
+        )
+        .await;
 
         let applied_marker = Self::apply_compaction_summary(context, &summary);
         Ok((summary, applied_marker))
@@ -830,7 +875,7 @@ impl AgentService {
     /// - session plan artifacts, so the post-compaction agent resumes the plan
     ///   instead of rediscovering it;
     /// - live sub-agent IDs, so `wait_agent` / `send_input` / `resume_agent` /
-    ///   `close_agent` still have something to address (#936);
+    ///   `stop_agent` still have something to address (#936);
     /// - documents this session read whole, so project law it obeyed survives
     ///   the summary that dropped it (#831).
     ///
@@ -853,6 +898,44 @@ impl AgentService {
             Some(block) => format!("{summary}\n\n{block}"),
             None => summary,
         }
+    }
+
+    /// Decorate, then bound the WHOLE document (#934).
+    ///
+    /// `compute_compaction_summary` enforces the budget on the model's own
+    /// output, because the #482 artifact correction must run against a trimmed
+    /// document. But decoration is appended by the caller, AFTER that guard has
+    /// already returned — so on 2026-11-21 the persisted document was
+    /// budget-compliant in its generated half and over budget in total, by
+    /// however much the plan block, the live sub-agent roster and the documents
+    /// list happened to weigh. The overrun grew with the roster.
+    ///
+    /// Enforcement therefore runs a second time here, on the finished document.
+    /// It is safe to trim at this point: every decoration block is an
+    /// UNNUMBERED `##` heading, and `split_summary_sections` breaks on those
+    /// too, so each becomes its own section whose `number` is `None` and which
+    /// `is_must_keep_section` therefore protects — the trimmer cannot reach
+    /// decoration, and the cut lands on the prose (§1, then §3, §5, §6) where
+    /// the sessions ranked it. When decoration ALONE exceeds the budget the
+    /// guard WARNs and ships it, which is the honest outcome: the roster is not
+    /// something a woken agent can recover from the document.
+    ///
+    /// That boundary is load-bearing rather than incidental (#934): splitting
+    /// on `## N.` alone absorbed the decoration into the span of whichever
+    /// numbered section preceded it, so a document ending on a TRIMMABLE
+    /// section lost its plan block, roster and documents list when that section
+    /// was stubbed. Production masked it because the last numbered section is
+    /// the manifest (§10, must-keep); a fixture ending at §1 did not.
+    pub(crate) async fn finalize_continuation_document(
+        summary: String,
+        session_id: Uuid,
+        subagents: Option<Arc<crate::brain::tools::subagent::SubAgentManager>>,
+    ) -> String {
+        let decorated = Self::decorate_compaction_summary(summary, session_id, subagents).await;
+        Self::enforce_summary_budget(
+            decorated,
+            super::request_budget::compaction_summary_output_tokens() as usize,
+        )
     }
 
     /// Send the summariser request, walking `[providers.fallback]` when the
@@ -1392,7 +1475,7 @@ impl AgentService {
         ));
         if !documents.is_empty() {
             out.push_str(
-                "Documents re-injected on wake count against the same 5% retained-set budget.\n",
+                "Documents re-injected on wake take the retained-set leftover, with a floor of 10% of the context window.\n",
             );
         }
 
@@ -1617,9 +1700,10 @@ impl AgentService {
     /// its cost compounds with the session's own length.
     ///
     /// Trimming is at SECTION granularity and never inside a fence: a fenced
-    /// block is dropped whole or not at all. Four blocks are never candidates,
+    /// block is dropped whole or not at all. Five blocks are never candidates,
     /// because a woken agent cannot recover them from the document alone —
-    /// section 0 (the obligation), section 7 (recovery), section 8 (next step)
+    /// section 0 (the obligation), section 7 (recovery), section 8 (next step),
+    /// section 9 (the continuation message the user reads first on wake, #934)
     /// and the `context-manifest` fence — and the preamble before the first
     /// heading is kept rather than guessed at. If the must-keep set alone
     /// exceeds the budget the guard WARNs and ships it: that is a prompt
@@ -1892,6 +1976,34 @@ impl AgentService {
         // consolidation replaces the segment run, full window clears all.
         let applied_marker = Self::apply_scoped_compaction_summary(context, scope, summary);
 
+        // #943: the carried tail is bounded, oldest dropped first. It used to
+        // be unbounded — its size was whatever arrived while the summariser
+        // ran, so a busy lane (cron fires, sub-agent wakes) could re-inflate
+        // the window the summary had just cleared, with no token accounting
+        // anywhere in this function.
+        let tail_budget = context.verbatim_tail_tokens();
+        let mut carried = 0usize;
+        let mut keep_from = delta.len();
+        for msg in delta.iter().rev() {
+            let t = context.estimate_message_tokens(msg);
+            if carried.saturating_add(t) > tail_budget {
+                break;
+            }
+            carried += t;
+            keep_from -= 1;
+        }
+        if keep_from > 0 {
+            // WARN, not debug: these messages are work the summary was never
+            // computed against, so dropping them loses facts. It is still the
+            // right trade against an unbounded window, but it must be visible.
+            tracing::warn!(
+                "Compaction delta: dropping {keep_from} message(s) that arrived \
+                 during the summariser call and exceeded the {tail_budget}-token \
+                 verbatim tail — the summary predates them"
+            );
+            delta.drain(..keep_from);
+        }
+
         // The summary lands as a user message. A delta opening with tool
         // results has lost the assistant tool_use that authorised them, and
         // the provider rejects that shape outright.
@@ -1952,13 +2064,20 @@ impl AgentService {
             CompactionScope::FullWindow => {
                 // After compaction, the summary IS the conversation — it's
                 // prepended as a single user message and the agent picks up
-                // from there. We do NOT preserve a raw pre-compaction tail:
-                // the summary already embeds the recent-snapshot prose, so
-                // keeping the raw tail on top would just duplicate ~half the
-                // window and defeat the whole purpose of compacting. Pass 0
-                // so `compact_with_summary` clears everything and prepends
-                // just the summary.
-                context.compact_with_summary(marker_body, 0)
+                // from there. The pre-compaction tail is NOT preserved at
+                // full width: the summary already embeds the recent-snapshot
+                // prose, so keeping the whole raw tail on top would duplicate
+                // ~half the window and defeat the purpose of compacting.
+                //
+                // It is preserved at TAIL width (#943). This arm used to pass
+                // `0`, which keeps literally nothing (`available` saturates to
+                // zero, the reverse walk breaks on its first message, and the
+                // `max(2)` floor is gated on a non-zero budget). So the exact
+                // words the user is continuing from survived only as the
+                // summariser's prose quotation — and `enforce_summary_budget`
+                // then trims that quotation to the document budget.
+                let tail = context.verbatim_tail_tokens();
+                context.compact_with_verbatim_tail(marker_body, tail)
             }
             CompactionScope::DeltaSinceMarker => {
                 // The prior frozen segments stay in force verbatim; only the

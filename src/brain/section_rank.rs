@@ -210,6 +210,19 @@ impl Ranked {
         self.sections.len()
     }
 
+    /// The NAME of section `i`: its heading with the `#` markers stripped.
+    ///
+    /// The skill shortlist renders `/<name>`, so the stripping is part of what
+    /// a section is called rather than a formatting detail of one caller.
+    pub fn heading(&self, i: usize) -> String {
+        self.sections[i]
+            .heading
+            .trim()
+            .trim_start_matches('#')
+            .trim()
+            .to_string()
+    }
+
     /// Whether the content produced no sections at all.
     pub fn is_empty(&self) -> bool {
         self.sections.is_empty()
@@ -256,9 +269,27 @@ impl Ranked {
         max_chars: usize,
         min_score: f64,
     ) -> Vec<usize> {
+        self.ranked_indices(query, max_sections, max_chars, min_score)
+            .0
+    }
+
+    /// [`Self::find_relevant_indices`] plus how many sections cleared
+    /// `min_score` BEFORE the count and character caps — the number a recall
+    /// summary's `+K` marker names (#928).
+    ///
+    /// Both come out of ONE scoring pass, so the count can never describe a
+    /// ranking other than the one whose indices it travels with: a separate
+    /// recount would be a second BM25 pass that is free to disagree.
+    pub fn ranked_indices(
+        &self,
+        query: &str,
+        max_sections: usize,
+        max_chars: usize,
+        min_score: f64,
+    ) -> (Vec<usize>, usize) {
         let terms = query_terms(query);
         if terms.is_empty() {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
         let norm = terms.len() as f64;
 
@@ -276,6 +307,7 @@ impl Ranked {
                 .then(a.1.cmp(&b.1))
         });
 
+        let total = scored.len();
         let mut indices = Vec::new();
         let mut chars = 0usize;
         for (_, i) in scored {
@@ -291,7 +323,7 @@ impl Ranked {
             indices.push(i);
         }
 
-        indices
+        (indices, total)
     }
 
     /// Whether any section's RAW BM25 score clears `min_score`.
@@ -310,6 +342,97 @@ impl Ranked {
             return false;
         }
         (0..self.sections.len()).any(|i| self.score(&terms, i) >= min_score)
+    }
+
+    /// Indices a SELECTION rule admits, best first: the entry must agree on at
+    /// least `min_terms` distinct query terms, those terms must carry at least
+    /// `min_summed_idf` between them, and the entry must score at least
+    /// `ratio` of the best admitted entry (#939).
+    ///
+    /// [`Self::ranked_indices`] at floor `0.0` answers a different question —
+    /// "in what order" — and admits every section sharing one stemmed term. A
+    /// caller that reads its output as a SHORTLIST therefore lists the top N
+    /// sections that share a word, which on a skill index with generic
+    /// descriptions means a full list on almost every turn. Three predicates
+    /// fix that, each aimed at one way the list fills with noise:
+    ///
+    /// - `min_terms` — one incidental word is not a match. It takes two terms
+    ///   agreeing on the same section.
+    /// - `min_summed_idf` — the same requirement measured by WEIGHT instead of
+    ///   count, and the reason no stopword list is needed: on a skill index
+    ///   `the` carries an idf near 0.2, so a section matching only filler
+    ///   words cannot reach the sum, while two content words clear it. A
+    ///   hardcoded wordlist would have to be maintained per language; an idf
+    ///   sum is measured off the corpus the query is ranked against.
+    /// - `ratio` — the tail. Scores are not comparable across queries, so no
+    ///   fixed floor can separate "the two entries this message is about" from
+    ///   "the five that share a word"; a share of the best admitted score is
+    ///   query-relative by construction, and with `ratio <= 1.0` the best
+    ///   admitted entry always survives.
+    ///
+    /// The reference for `ratio` is the best entry that passes the two content
+    /// predicates, never the best raw score, so a section with a high score but
+    /// no term agreement cannot empty a list that had a genuine match.
+    ///
+    /// Order is score order with file order breaking ties — the same order
+    /// [`Self::ranked_indices`] produces.
+    pub fn admitted_indices(
+        &self,
+        query: &str,
+        max_sections: usize,
+        min_terms: usize,
+        min_summed_idf: f64,
+        ratio: f64,
+    ) -> Vec<usize> {
+        let terms = query_terms(query);
+        if terms.is_empty() || self.sections.is_empty() {
+            return Vec::new();
+        }
+        let norm = terms.len() as f64;
+
+        // Distinct STEMS. `query_terms` keeps duplicates, and counting
+        // agreement with them would let one repeated filler word ("the ... the
+        // ... the") read as three matching terms.
+        let mut distinct: Vec<String> = Vec::new();
+        for term in &terms {
+            let stemmed = stem(&fold_diacritics(term)).to_string();
+            if !distinct.contains(&stemmed) {
+                distinct.push(stemmed);
+            }
+        }
+
+        let mut admitted: Vec<(f64, usize)> = Vec::new();
+        for i in 0..self.sections.len() {
+            let matched: Vec<&String> = distinct
+                .iter()
+                .filter(|term| self.tf[i].contains_key(*term))
+                .collect();
+            if matched.len() < min_terms {
+                continue;
+            }
+            let summed_idf: f64 = matched.iter().map(|term| self.idf(term.as_str())).sum();
+            if summed_idf < min_summed_idf {
+                continue;
+            }
+            admitted.push((self.score(&terms, i) / norm, i));
+        }
+        if admitted.is_empty() {
+            return Vec::new();
+        }
+
+        admitted.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.1.cmp(&b.1))
+        });
+
+        let best = admitted[0].0;
+        admitted
+            .into_iter()
+            .filter(|(score, _)| *score >= ratio * best)
+            .take(max_sections)
+            .map(|(_, i)| i)
+            .collect()
     }
 
     /// Sections whose length-normalized BM25 score clears `min_score`, best
@@ -331,13 +454,7 @@ impl Ranked {
                 omitted: 0,
             };
         }
-        let norm = terms.len() as f64;
-
-        let total = (0..self.sections.len())
-            .filter(|&i| (self.score(&terms, i) / norm) >= min_score)
-            .count();
-
-        let indices = self.find_relevant_indices(query, max_sections, max_chars, min_score);
+        let (indices, total) = self.ranked_indices(query, max_sections, max_chars, min_score);
         let sections = indices
             .into_iter()
             .map(|i| self.sections[i].clone())

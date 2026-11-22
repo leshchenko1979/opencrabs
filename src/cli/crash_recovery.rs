@@ -9,6 +9,7 @@ use anyhow::Result;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
+use crate::utils::archive::{extract_member_tar_gz, extract_member_zip};
 use crate::utils::install::{InstallMethod, binary_name, platform_suffix};
 
 const GITHUB_RELEASES_API: &str = "https://api.github.com/repos/adolfousier/opencrabs/releases";
@@ -108,9 +109,9 @@ async fn download_and_install_binary(url: &str, version: &str) -> Result<()> {
     let bin_name = binary_name();
 
     let binary_data = if is_windows {
-        extract_from_zip(&archive_bytes, bin_name)?
+        extract_member_zip(&archive_bytes, bin_name)?
     } else {
-        extract_from_tar_gz(&archive_bytes, bin_name)?
+        extract_member_tar_gz(&archive_bytes, bin_name)?
     };
 
     swap_binary(&binary_data, version).await
@@ -263,45 +264,6 @@ async fn verify_binary(path: &Path) -> std::result::Result<(), String> {
         Ok(Err(e)) => Err(format!("failed to spawn: {}", e)),
         Err(_) => Err("timed out after 10s".into()),
     }
-}
-
-/// Extract a named file from a .tar.gz archive in memory.
-fn extract_from_tar_gz(data: &[u8], file_name: &str) -> Result<Vec<u8>> {
-    use std::io::Read;
-
-    let decoder = flate2::read::GzDecoder::new(data);
-    let mut archive = tar::Archive::new(decoder);
-
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?.to_path_buf();
-        if path.file_name().and_then(|n| n.to_str()) == Some(file_name) {
-            let mut buf = Vec::new();
-            entry.read_to_end(&mut buf)?;
-            return Ok(buf);
-        }
-    }
-
-    anyhow::bail!("'{}' not found in archive", file_name)
-}
-
-/// Extract a named file from a .zip archive in memory.
-fn extract_from_zip(data: &[u8], file_name: &str) -> Result<Vec<u8>> {
-    use std::io::Read;
-
-    let reader = std::io::Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(reader)?;
-
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        if file.name().ends_with(file_name) {
-            let mut buf = Vec::new();
-            file.read_to_end(&mut buf)?;
-            return Ok(buf);
-        }
-    }
-
-    anyhow::bail!("'{}' not found in zip", file_name)
 }
 
 /// Show the crash recovery dialog on the raw terminal.

@@ -875,6 +875,10 @@ async fn cmd_chat_inner(
                     session_id,
                     text: format!("⏳ Retry {}/{} — {}", attempt, max, reason),
                 }),
+                // Passive recall's receipt is a channel flow-roll line (#928);
+                // the TUI has no such surface, so it stays out of the
+                // transcript rather than inventing a second rendering.
+                ProgressEvent::RecallLine { .. } => return,
                 ProgressEvent::SuggestedOptions(options) => {
                     progress_sender.send(TuiEvent::SuggestedOptions {
                         session_id,

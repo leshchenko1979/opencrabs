@@ -568,6 +568,212 @@ impl RunEvidence {
             && self.output_out.is_none()
             && self.output_err.is_none()
     }
+
+    /// The capture that actually holds bytes, stdout first, as `(path, bytes)`.
+    ///
+    /// The one filesystem read this report makes, and it is a `stat` on the
+    /// run's OWN capture — the artifact whose contents the report is about, not
+    /// a guess about the process. A path is not a result: a recorded capture
+    /// that is empty and one that already holds the deploy's output are the
+    /// same `Option<String>` until somebody looks (#936).
+    fn captured_output(&self) -> Option<(&str, u64)> {
+        let candidates = [self.output_out.as_deref(), self.output_err.as_deref()];
+        candidates.into_iter().flatten().find_map(|path| {
+            let bytes = std::fs::metadata(path).ok()?.len();
+            (bytes > 0).then_some((path, bytes))
+        })
+    }
+
+    /// A recorded capture that exists and is measurably empty — a zero-byte
+    /// file, which is the only shape in which "no result" is an observation.
+    fn empty_capture(&self) -> Option<&str> {
+        let candidates = [self.output_out.as_deref(), self.output_err.as_deref()];
+        candidates
+            .into_iter()
+            .flatten()
+            .find(|path| std::fs::metadata(*path).is_ok_and(|m| m.len() == 0))
+    }
+
+    /// What the run left in its capture, phrased as a clause the report states.
+    ///
+    /// `produced no result` survives only where the absence was MEASURED — a
+    /// zero-byte capture. Where a capture holds bytes the report names the
+    /// count and the path, because the bytes are the result and a reader told
+    /// "no result" throws them away. Where no capture was recorded at all it
+    /// says it does not know: an absent file is not an absent result, since a
+    /// detached run writes its own captures and may still be writing them
+    /// (#936).
+    ///
+    /// No WHEN is stated: the count is what the file holds at report time, and
+    /// a detached run outlives the restart, so bytes present now may have been
+    /// written after it. "produced N bytes before the restart" would be one
+    /// more claim this path did not take (#936).
+    fn result_clause(&self) -> String {
+        if let Some((path, bytes)) = self.captured_output() {
+            return format!("its capture at {path} holds {bytes} bytes; read them there");
+        }
+        match self.empty_capture() {
+            Some(path) => format!("produced no result — its capture at {path} is empty"),
+            None => {
+                "no capture was recorded, so whether it produced output is not known".to_string()
+            }
+        }
+    }
+}
+
+/// The subjects a shell command names, read from its text alone (#936).
+///
+/// A boot row records the pid of the *spawned shell* — the watcher — not of
+/// whatever that shell was watching. Row `d594a148` ran `while kill -0
+/// 2349610; do sleep 30; done` and carried `pid: 2366240`; 2349610 was the
+/// chain that mattered, and no column in the row answered the only question a
+/// lane had. It re-derived the answer by hand four times, then started a
+/// second chain because it could not rule the first one out.
+///
+/// This names what the command references and stops there. A liveness probe
+/// would answer "alive at the moment of writing" — and the lane reads the
+/// report hours later, when that answer is a new fact rather than this one. So
+/// the report states what was not checked and leaves the check to the reader.
+///
+/// **Pure string scan.** No `/proc`, no `ps`, no `systemctl`, no subprocess:
+/// this runs on the boot path, where a probe would block a restart on the very
+/// processes it is reporting about.
+pub(crate) fn referenced_subjects(command: &str) -> Vec<String> {
+    // Shell punctuation is stripped from the ends of each word so `2349610;`,
+    // `"$pid"` and `$(pgrep -f foo)` yield their operands. Nothing is
+    // expanded: a variable cannot be resolved without the shell.
+    let words: Vec<String> = command
+        .split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| {
+                matches!(
+                    c,
+                    '\'' | '"' | '`' | '(' | ')' | ';' | '|' | '&' | '$' | '{' | '}' | '<' | '>'
+                )
+            })
+            .to_string()
+        })
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    let mut subjects: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        match words[i].as_str() {
+            // `kill -0 <pid>`: signal 0 IS a liveness check, so its operands
+            // are exactly the pids a reader will want to re-check.
+            "kill" => {
+                let mut j = i + 1;
+                let mut zero = false;
+                while j < words.len() {
+                    match words[j].as_str() {
+                        "-0" | "-s0" | "--signal=0" => {
+                            zero = true;
+                            j += 1;
+                        }
+                        "-s" => {
+                            if words.get(j + 1).is_some_and(|s| s.as_str() == "0") {
+                                zero = true;
+                                j += 2;
+                            } else {
+                                break;
+                            }
+                        }
+                        w if w.starts_with('-') => j += 1,
+                        _ => break,
+                    }
+                }
+                if zero {
+                    while j < words.len() && is_pid(&words[j]) {
+                        note_subject(&mut subjects, format!("pid {}", words[j]));
+                        j += 1;
+                    }
+                }
+                i = j;
+            }
+            // `ps -p <pid>`, `ps -p<pid>` and `ps --pid=<pid>`.
+            "ps" => {
+                let mut j = i + 1;
+                while j < words.len() {
+                    let w = words[j].as_str();
+                    if w == "-p" || w == "--pid" {
+                        j += 1;
+                        while j < words.len() && is_pid(&words[j]) {
+                            note_subject(&mut subjects, format!("pid {}", words[j]));
+                            j += 1;
+                        }
+                        continue;
+                    }
+                    if let Some(pid) = w.strip_prefix("--pid=")
+                        && is_pid(pid)
+                    {
+                        note_subject(&mut subjects, format!("pid {pid}"));
+                    } else if let Some(pid) = w.strip_prefix("-p")
+                        && is_pid(pid)
+                    {
+                        note_subject(&mut subjects, format!("pid {pid}"));
+                    } else if !w.starts_with('-') {
+                        // A bare operand is a process name, not a `-p` subject.
+                        break;
+                    }
+                    j += 1;
+                }
+                i = j;
+            }
+            // `pgrep ... <pattern>`: the pattern is the subject.
+            "pgrep" => {
+                let mut j = i + 1;
+                while j < words.len() {
+                    let w = words[j].as_str();
+                    if w.starts_with('-') {
+                        j += if PGREP_VALUE_FLAGS.contains(&w) { 2 } else { 1 };
+                        continue;
+                    }
+                    note_subject(&mut subjects, format!("pattern {w}"));
+                    break;
+                }
+                i = j;
+            }
+            w => {
+                // `systemd-run ... --unit=<name>`, wherever it appears.
+                if let Some(name) = w.strip_prefix("--unit=")
+                    && !name.is_empty()
+                {
+                    note_subject(&mut subjects, format!("unit {name}"));
+                } else if w == "--unit"
+                    && let Some(name) = words.get(i + 1)
+                {
+                    note_subject(&mut subjects, format!("unit {name}"));
+                }
+                i += 1;
+            }
+        }
+    }
+    subjects
+}
+
+/// `pgrep` flags that consume the following word, so it is not the pattern.
+const PGREP_VALUE_FLAGS: [&str; 8] = ["-u", "-U", "-g", "-G", "-P", "-t", "-d", "-F"];
+
+/// Record `subject` once, in the order the command names it.
+fn note_subject(subjects: &mut Vec<String>, subject: String) {
+    if !subjects.contains(&subject) {
+        subjects.push(subject);
+    }
+}
+
+/// Whether `word` is a bare process id. A shell variable (`$PID`) is not:
+/// resolving it would need the shell this scan deliberately does not run.
+fn is_pid(word: &str) -> bool {
+    !word.is_empty() && word.chars().all(|c| c.is_ascii_digit())
+}
+
+/// The pids among `subjects`, in the order they were named.
+fn referenced_pids(subjects: &[String]) -> Vec<u32> {
+    subjects
+        .iter()
+        .filter_map(|s| s.strip_prefix("pid ").and_then(|p| p.parse().ok()))
+        .collect()
 }
 
 /// What the agent is told about a command a restart interrupted. Deliberately
@@ -578,16 +784,49 @@ impl RunEvidence {
 /// Without any — the row is all the restart left — it reports the outcome as
 /// UNKNOWN and names what to check, because "was killed and produced no
 /// result" is a measurement this path never took (#913).
+///
+/// What it will NOT say is that the work died. The recorded pid belongs to the
+/// spawned shell, which is a watcher whenever the command itself watches a
+/// process (`while kill -0 …`) or waits on a unit, and those outlive the row:
+/// one lane was told "killed" about a `systemd-run --wait` gate that was still
+/// active 55.7 minutes later and exited rc=1 106 minutes after the row buried
+/// it, and another started a SECOND ship chain because it could not rule out
+/// that the first was running (#936). So the report names the subjects the
+/// command references, says their liveness was not checked, and states what
+/// the capture measured — and claims nothing else.
 pub(crate) fn interrupted_message(row: &crate::db::BackgroundTaskRow) -> QueuedUserMessage {
-    if RunEvidence::for_row(row).is_empty() {
+    let evidence = RunEvidence::for_row(row);
+    if evidence.is_empty() {
         return unknown_outcome_message(row);
     }
-    let context_text = format!(
-        "[BACKGROUND TASK INTERRUPTED] `{}` was still running when OpenCrabs restarted, so it \
-         was killed and produced no result. The command was:\n\n```\n{}\n```\n\nIt did NOT \
-         complete. Decide whether to run it again based on what you were doing; do not assume \
-         it passed or failed.",
+    let subjects = referenced_subjects(&row.command);
+    let mut context_text = format!(
+        "[BACKGROUND TASK INTERRUPTED] `{}` was in flight when OpenCrabs restarted. The command \
+         was:\n\n```\n{}\n```",
         row.label, row.command
+    );
+    if !subjects.is_empty() {
+        context_text.push_str(&format!(
+            "\n\ncommand references: {} — liveness not checked",
+            subjects.join(" · ")
+        ));
+    }
+    if let Some(pid) = evidence.pid {
+        let referenced = referenced_pids(&subjects);
+        // The row's pid is the spawned shell's. Where the command names other
+        // pids, that shell was watching them — and a reader who mistakes one
+        // for the other acts on the wrong process (#936).
+        if !referenced.is_empty() && !referenced.contains(&pid) {
+            context_text.push_str(&format!("\n\nrow pid {pid} is the watcher, not the work"));
+        }
+    }
+    context_text.push_str("\n\n");
+    context_text.push_str(&evidence.result_clause());
+    context_text.push_str(
+        "\n\nNothing here says whether the work finished, and nothing above was checked for \
+         liveness: the subjects named are what the command was watching or waiting on, and that \
+         check is yours to make. Decide whether to run it again based on what you were doing; do \
+         not assume it passed or failed, and do not re-run something that is still live.",
     );
     QueuedUserMessage {
         context_text,
@@ -607,7 +846,7 @@ pub(crate) fn interrupted_message(row: &crate::db::BackgroundTaskRow) -> QueuedU
 /// it does not know, names what is missing, and points at the checks that can
 /// answer.
 fn unknown_outcome_message(row: &crate::db::BackgroundTaskRow) -> QueuedUserMessage {
-    let context_text = format!(
+    let mut context_text = format!(
         "[BACKGROUND TASK OUTCOME UNKNOWN] `{}` was in flight when OpenCrabs restarted, and no \
          pid, no exit code and no captured output were recorded for it — so whether it is still \
          running, already finished, or died with the old process is NOT KNOWN. It was not \
@@ -621,6 +860,16 @@ fn unknown_outcome_message(row: &crate::db::BackgroundTaskRow) -> QueuedUserMess
          side-effecting step.",
         row.label, row.command
     );
+    // The row recorded nothing, so the command TEXT is the only place the
+    // subjects can come from — and they are what the checks above need to be
+    // pointed at (#936).
+    let subjects = referenced_subjects(&row.command);
+    if !subjects.is_empty() {
+        context_text.push_str(&format!(
+            "\n\ncommand references: {} — liveness not checked",
+            subjects.join(" · ")
+        ));
+    }
     QueuedUserMessage {
         context_text,
         display_text: format!(
@@ -771,6 +1020,29 @@ pub async fn recover(local: Option<MessageEnqueueCallback>) -> usize {
             "Boot notify queue: redelivered={redelivered}"
         );
     }
+
+    // ...and keep doing it (#931). The pass above is the only thing that
+    // enforces `MAX_ROW_AGE_SECS`, and it used to run exactly once per
+    // process, so a daemon that stayed up for days reaped nothing: measured
+    // live, rows 6.78h past the 72h ceiling on a host up 11.59h.
+    //
+    // The tick runs the WHOLE pass, never the bare age reap on its own. The
+    // reap is correct only as the pass's tail, where every row it sees has
+    // just been offered and re-parked; on a timer it would delete pushes for
+    // perfectly live sessions after any long downtime — the one outcome this
+    // module forbids. `run_periodic_pass` carries the single-flight guard so a
+    // slow pass cannot overlap the next tick.
+    let _periodic_notify_reap = tokio::spawn(async move {
+        loop {
+            // One full interval before the first tick: `recover` ran a pass
+            // microseconds ago, so an immediate one would only repeat it.
+            tokio::time::sleep(std::time::Duration::from_secs(
+                super::notify_queue::NOTIFY_REAP_INTERVAL_SECS,
+            ))
+            .await;
+            super::notify_queue::run_periodic_pass().await;
+        }
+    });
 
     if reported > 0 {
         tracing::info!(

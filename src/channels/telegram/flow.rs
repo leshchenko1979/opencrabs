@@ -1405,7 +1405,11 @@ fn breakdown_documents(
     }
     // The reasons are long (`not registered: <path> (not read in this
     // process)`), so the row states the count and the DISTINCT causes: a
-    // per-path dump would triple the card's height to say one thing.
+    // per-path dump would triple the card's height to say one thing. Since
+    // #952 the cause is the actual failed predicate — the longest being a
+    // skill body (`a skill body — skills are retained by slug, not as
+    // documents`) — and it is still the trailing parenthesised phrase, so the
+    // extraction below is unchanged.
     let mut causes: Vec<&str> = Vec::new();
     for reason in refusals {
         let cause = reason
@@ -1649,7 +1653,7 @@ impl FlowOutcome {
 /// round boundary whose output is ready to collect (`AwaitingInput`). The
 /// settle card distinguishes the two because they need different things from
 /// the user: working agents just need time, parked ones need a
-/// `wait_agent`/`send_input`/`close_agent` decision.
+/// `wait_agent`/`send_input`/`stop_agent` decision.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SubagentCounts {
     pub(crate) working: usize,
@@ -2004,7 +2008,7 @@ impl ToolClass {
                 ToolClass::Config
             }
             "cron_manage" => ToolClass::Cron,
-            "spawn_agent" | "wait_agent" | "send_input" | "close_agent" | "resume_agent"
+            "spawn_agent" | "wait_agent" | "send_input" | "stop_agent" | "resume_agent"
             | "team_create" | "team_delete" | "team_broadcast" => ToolClass::Agent,
             "suggest_options" => ToolClass::Suggest,
             _ => ToolClass::Other,

@@ -34,7 +34,7 @@ impl Tool for ResumeAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Resume a completed or failed sub-agent with a new prompt. \
+        "Resume a completed, failed or stopped sub-agent with a new prompt. \
          The agent continues in the same session, preserving its prior context. \
          \n\nProvider and model resolution follows the same precedence as spawn_agent: \
          (1) the optional `provider` / `model` parameters on THIS call, \
@@ -122,17 +122,15 @@ impl Tool for ResumeAgentTool {
             }
             Some(SubAgentState::Running) | Some(SubAgentState::AwaitingInput) => {
                 return Ok(ToolResult::error(format!(
-                    "Sub-agent {} is still running. Use wait_agent first or close_agent to cancel.",
+                    "Sub-agent {} is still running. Use wait_agent first or stop_agent to cancel.",
                     agent_id
                 )));
             }
-            Some(SubAgentState::Completed) | Some(SubAgentState::Failed(_)) => {}
-            Some(SubAgentState::Cancelled) => {
-                return Ok(ToolResult::error(format!(
-                    "Sub-agent {} was cancelled and cannot be resumed.",
-                    agent_id
-                )));
-            }
+            // #924: a stopped agent is resumable. The stop ended its work, not
+            // its identity — session, transcript and grant all survive.
+            Some(SubAgentState::Completed)
+            | Some(SubAgentState::Failed(_))
+            | Some(SubAgentState::Cancelled) => {}
         }
 
         let session_id = self.manager.get_session_id(agent_id).ok_or_else(|| {

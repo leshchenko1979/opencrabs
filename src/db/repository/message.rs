@@ -445,8 +445,8 @@ impl MessageRepository {
         query: &str,
         limit: usize,
     ) -> Result<Vec<Message>> {
-        let pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
-        let limit_i = limit as i64;
+        let phrase = format!("%{}%", escape_like(query));
+        let cap = limit as i64;
         let id_strs: Option<Vec<String>> =
             session_ids.map(|ids| ids.iter().map(|i| i.to_string()).collect());
 
@@ -454,39 +454,7 @@ impl MessageRepository {
             .get()
             .await
             .context("Failed to get connection")?
-            .interact(move |conn| {
-                if let Some(ids) = id_strs {
-                    if ids.is_empty() {
-                        return Ok::<Vec<Message>, rusqlite::Error>(Vec::new());
-                    }
-                    let placeholders = vec!["?"; ids.len()].join(",");
-                    let sql = format!(
-                        "SELECT * FROM messages \
-                         WHERE session_id IN ({}) AND content LIKE ? ESCAPE '\\' \
-                         COLLATE NOCASE \
-                         ORDER BY created_at DESC LIMIT ?",
-                        placeholders
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    let mut params_vec: Vec<&dyn rusqlite::ToSql> =
-                        Vec::with_capacity(ids.len() + 2);
-                    for id in &ids {
-                        params_vec.push(id);
-                    }
-                    params_vec.push(&pattern);
-                    params_vec.push(&limit_i);
-                    let rows = stmt.query_map(params_vec.as_slice(), Message::from_row)?;
-                    rows.collect::<std::result::Result<Vec<_>, _>>()
-                } else {
-                    let mut stmt = conn.prepare_cached(
-                        "SELECT * FROM messages \
-                         WHERE content LIKE ?1 ESCAPE '\\' COLLATE NOCASE \
-                         ORDER BY created_at DESC LIMIT ?2",
-                    )?;
-                    let rows = stmt.query_map(params![pattern, limit_i], Message::from_row)?;
-                    rows.collect::<std::result::Result<Vec<_>, _>>()
-                }
-            })
+            .interact(move |conn| contiguous_rows(conn, id_strs.as_deref(), phrase, cap))
             .await
             .map_err(interact_err)?
             .context("Failed to search messages by content")
@@ -495,10 +463,22 @@ impl MessageRepository {
     /// Tokenized companion to `search_by_content` (#1626): every
     /// whitespace-separated token must appear somewhere in the content (AND
     /// of substring matches) instead of one contiguous substring. Fetches a
-    /// recency-ordered pool (5x the limit, capped at 200), then re-ranks it
-    /// through [`crate::relevance::episodic::rank`] — total token hits first,
-    /// then a token's opening-position signal, then query-order adjacency,
-    /// with SQL recency kept inside a full tie (#911).
+    /// recency-ordered pool sized by
+    /// [`crate::relevance::episodic::tokenized_fetch_cap`] — wide enough that
+    /// the target is usually IN the pool (#941 measured the pool as a binding
+    /// constraint) — then re-ranks it through
+    /// [`crate::relevance::episodic::rank`] — query-term proximity span first
+    /// (#941), then total token hits, then a token's opening-position signal,
+    /// then query-order adjacency, with SQL recency kept inside a full tie
+    /// (#911).
+    ///
+    /// **This arm is no longer a fallback.** The shipped path is
+    /// [`Self::search_by_content_union`], which runs this arm ALWAYS, merges
+    /// it with the phrase arm, and ranks the union with the same function. A
+    /// caller that stops at this method measures half of what ships, which is
+    /// the #941 defect; it is kept because the single-arm shape is still the
+    /// clearest way to exercise the tokenized SQL and its ranking in
+    /// isolation.
     pub async fn search_by_content_tokenized(
         &self,
         session_ids: Option<&[Uuid]>,
@@ -516,13 +496,11 @@ impl MessageRepository {
             return Ok(Vec::new());
         }
 
-        let fetch_cap = (limit.saturating_mul(5)).clamp(1, 200) as i64;
+        let fetch_cap = crate::relevance::episodic::tokenized_fetch_cap(limit);
         let patterns: Vec<String> = tokens
             .iter()
-            .map(|t| format!("%{}%", t.replace('%', "\\%").replace('_', "\\_")))
+            .map(|t| format!("%{}%", escape_like(t)))
             .collect();
-        let like_arms =
-            vec!["content LIKE ? ESCAPE '\\' COLLATE NOCASE"; patterns.len()].join(" AND ");
         let id_strs: Option<Vec<String>> =
             session_ids.map(|ids| ids.iter().map(|i| i.to_string()).collect());
 
@@ -531,59 +509,107 @@ impl MessageRepository {
             .get()
             .await
             .context("Failed to get connection")?
-            .interact(move |conn| {
-                let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::new();
-                if let Some(ids) = &id_strs {
-                    if ids.is_empty() {
-                        return Ok::<Vec<Message>, rusqlite::Error>(Vec::new());
-                    }
-                    let placeholders = vec!["?"; ids.len()].join(",");
-                    let sql = format!(
-                        "SELECT * FROM messages \
-                         WHERE session_id IN ({}) AND {like_arms} \
-                         ORDER BY created_at DESC LIMIT ?",
-                        placeholders
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    for id in ids {
-                        params_vec.push(id);
-                    }
-                    for p in &patterns {
-                        params_vec.push(p);
-                    }
-                    params_vec.push(&fetch_cap);
-                    let rows = stmt.query_map(params_vec.as_slice(), Message::from_row)?;
-                    rows.collect::<std::result::Result<Vec<_>, _>>()
-                } else {
-                    let sql = format!(
-                        "SELECT * FROM messages \
-                         WHERE {like_arms} \
-                         ORDER BY created_at DESC LIMIT ?"
-                    );
-                    let mut stmt = conn.prepare(&sql)?;
-                    for p in &patterns {
-                        params_vec.push(p);
-                    }
-                    params_vec.push(&fetch_cap);
-                    let rows = stmt.query_map(params_vec.as_slice(), Message::from_row)?;
-                    rows.collect::<std::result::Result<Vec<_>, _>>()
-                }
-            })
+            .interact(move |conn| tokenized_rows(conn, id_strs.as_deref(), &patterns, fetch_cap))
             .await
             .map_err(interact_err)?
             .context("Failed to search messages by content (tokenized)")?;
 
         // ONE ranking rule, shared with the Track A harness (#911):
-        // `relevance::episodic::rank` scores by total token hits, then by the
-        // row's opening position, then by query-order adjacency, and keeps the
-        // SQL recency order inside a full tie. The harness calls the same
-        // function, so the eval leg measures the ranker this path ships.
+        // `relevance::episodic::rank` scores by query-term proximity span,
+        // then by total token hits, then by the row's opening position, then
+        // by query-order adjacency, and keeps the SQL recency order inside a
+        // full tie. The harness calls the same function, so the eval leg
+        // measures the ranker this path ships.
         Ok(
             crate::relevance::episodic::rank(rows, &terms, |m| m.content.as_str())
                 .into_iter()
                 .take(limit)
                 .collect(),
         )
+    }
+
+    /// The shipped search: BOTH arms, ONE candidate pool, ONE ranker (#941).
+    ///
+    /// [`Self::search_by_content`] matches the query as a single contiguous
+    /// phrase; [`Self::search_by_content_tokenized`] matches every query word
+    /// somewhere. They used to run in sequence — the tokenized arm only when
+    /// the phrase arm came back EMPTY — and that short-circuit was the #941
+    /// defect: one unrelated message holding the phrase verbatim discarded the
+    /// whole tokenized candidate set, including the row the query was actually
+    /// about. On the replica slice 16 of 40 positives hit that short-circuit,
+    /// and in those the tokenized arm holds the gold in its pool for 10 and in
+    /// its own top 10 for 2 — two cases out of forty thrown away by the branch
+    /// alone.
+    ///
+    /// So this method runs BOTH arms always, merges them into one pool
+    /// ([`crate::relevance::episodic::merge_arms`]) and ranks that pool with
+    /// [`crate::relevance::episodic::rank`] — the same single scorer the Track
+    /// A harness calls, so the two cannot diverge (#911). Both arms fetch
+    /// `tokenized_fetch_cap(limit)` rows newest-first: one pool rule, not two.
+    ///
+    /// The returned [`crate::relevance::episodic::Candidate`] keeps the arm
+    /// that found each row, so a caller can label a token-only row honestly
+    /// instead of claiming a contiguous match that does not exist.
+    ///
+    /// A single-token query is the one case where the two arms are the SAME
+    /// query — an AND of one token is the same substring as the phrase — so
+    /// the tokenized scan is skipped (it could only return rows the first scan
+    /// already has) and the phrase arm's rows are ranked. Still one ranker;
+    /// only the redundant scan is gone.
+    pub async fn search_by_content_union(
+        &self,
+        session_ids: Option<&[Uuid]>,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::relevance::episodic::Candidate<Message>>> {
+        use crate::relevance::episodic::{
+            merge_arms, query_terms, query_tokens, tokenized_fetch_cap,
+        };
+
+        let tokens = query_tokens(query);
+        if tokens.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let terms = query_terms(query);
+        let cap = tokenized_fetch_cap(limit);
+        let phrase = format!("%{}%", escape_like(query));
+        let patterns: Vec<String> = tokens
+            .iter()
+            .map(|t| format!("%{}%", escape_like(t)))
+            .collect();
+        let id_strs: Option<Vec<String>> =
+            session_ids.map(|ids| ids.iter().map(|i| i.to_string()).collect());
+
+        let (contiguous, tokenized) = self
+            .pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let contiguous = contiguous_rows(conn, id_strs.as_deref(), phrase, cap)?;
+                // One token: the AND clause IS the phrase arm's substring, so a
+                // second scan can only return rows the first one already has.
+                let tokenized = if patterns.len() < 2 {
+                    Vec::new()
+                } else {
+                    tokenized_rows(conn, id_strs.as_deref(), &patterns, cap)?
+                };
+                Ok::<(Vec<Message>, Vec<Message>), rusqlite::Error>((contiguous, tokenized))
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to search messages (phrase and tokenized union)")?;
+
+        Ok(merge_arms(
+            contiguous,
+            tokenized,
+            &terms,
+            |m: &Message| m.id.to_string(),
+            |m: &Message| m.content.as_str(),
+        )
+        .into_iter()
+        .take(limit)
+        .collect())
     }
 
     /// Count messages in a session
@@ -727,6 +753,112 @@ impl<T> OptionalExt<T> for rusqlite::Result<T> {
             Ok(v) => Ok(Some(v)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e),
+        }
+    }
+}
+
+/// Escape the `LIKE` metacharacters in `raw` so a query matches literally.
+fn escape_like(raw: &str) -> String {
+    raw.replace('%', "\\%").replace('_', "\\_")
+}
+
+/// The contiguous-phrase arm: rows whose content contains `phrase` (already
+/// `%`-wrapped and escaped) verbatim, newest first, at most `cap` rows.
+///
+/// ONE SQL string for every caller in this file. The shipped search and the
+/// union path must not grow two spellings of "contains the query" — a fetch
+/// that drifts from the other is the #911 defect one layer down.
+fn contiguous_rows(
+    conn: &rusqlite::Connection,
+    id_strs: Option<&[String]>,
+    phrase: String,
+    cap: i64,
+) -> rusqlite::Result<Vec<Message>> {
+    match id_strs {
+        // An explicit but empty session filter selects nothing — this is NOT
+        // the same as `None`, which means "no filter" and scans every session.
+        Some([]) => Ok(Vec::new()),
+        Some(ids) => {
+            let placeholders = vec!["?"; ids.len()].join(",");
+            let sql = format!(
+                "SELECT * FROM messages \
+                 WHERE session_id IN ({placeholders}) AND content LIKE ? ESCAPE '\\' \
+                 COLLATE NOCASE \
+                 ORDER BY created_at DESC LIMIT ?"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(ids.len() + 2);
+            for id in ids {
+                params_vec.push(id);
+            }
+            params_vec.push(&phrase);
+            params_vec.push(&cap);
+            let rows = stmt.query_map(params_vec.as_slice(), Message::from_row)?;
+            rows.collect()
+        }
+        None => {
+            let mut stmt = conn.prepare_cached(
+                "SELECT * FROM messages \
+                 WHERE content LIKE ?1 ESCAPE '\\' COLLATE NOCASE \
+                 ORDER BY created_at DESC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![phrase, cap], Message::from_row)?;
+            rows.collect()
+        }
+    }
+}
+
+/// The tokenized arm: rows containing EVERY `patterns` entry (AND of substring
+/// matches), newest first, at most `cap` rows — the recency pool the ranker
+/// then reorders. Same one-SQL-string rule as [`contiguous_rows`].
+fn tokenized_rows(
+    conn: &rusqlite::Connection,
+    id_strs: Option<&[String]>,
+    patterns: &[String],
+    cap: i64,
+) -> rusqlite::Result<Vec<Message>> {
+    if patterns.is_empty() {
+        return Ok(Vec::new());
+    }
+    let like_arms = vec!["content LIKE ? ESCAPE '\\' COLLATE NOCASE"; patterns.len()].join(" AND ");
+    match id_strs {
+        // An explicit but empty session filter selects nothing — this is NOT
+        // the same as `None`, which means "no filter" and scans every session.
+        Some([]) => Ok(Vec::new()),
+        Some(ids) => {
+            let placeholders = vec!["?"; ids.len()].join(",");
+            let sql = format!(
+                "SELECT * FROM messages \
+                 WHERE session_id IN ({placeholders}) AND {like_arms} \
+                 ORDER BY created_at DESC LIMIT ?"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut params_vec: Vec<&dyn rusqlite::ToSql> =
+                Vec::with_capacity(ids.len() + patterns.len() + 1);
+            for id in ids {
+                params_vec.push(id);
+            }
+            for p in patterns {
+                params_vec.push(p);
+            }
+            params_vec.push(&cap);
+            let rows = stmt.query_map(params_vec.as_slice(), Message::from_row)?;
+            rows.collect()
+        }
+        None => {
+            let sql = format!(
+                "SELECT * FROM messages \
+                 WHERE {like_arms} \
+                 ORDER BY created_at DESC LIMIT ?"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(patterns.len() + 1);
+            for p in patterns {
+                params_vec.push(p);
+            }
+            params_vec.push(&cap);
+            let rows = stmt.query_map(params_vec.as_slice(), Message::from_row)?;
+            rows.collect()
         }
     }
 }

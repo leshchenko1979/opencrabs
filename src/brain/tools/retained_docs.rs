@@ -5,8 +5,9 @@
 //! compaction, because the retention machinery knows only `skills/<slug>/`.
 //! This module is the retention half of the fix: it lists the candidates for
 //! the summariser and, once the summariser names them, renders their bodies
-//! back into the injected brain inside the same 5% retained-set budget that
-//! governs skills.
+//! back into the injected brain inside the retained-set budget that governs
+//! skills — floored at 10 % of the window, because the skills' charge otherwise
+//! leaves documents no room at all (#951).
 //!
 //! The tracking half lives in `read_state` (`mark_document_read` and friends);
 //! nothing here discovers paths on its own.
@@ -134,6 +135,9 @@ fn registered_registry() -> &'static RegisteredRegistry {
 /// it whole in this process. The second leg is what makes the field safe to
 /// hand a model: naming a path is not evidence of having read it, and a
 /// document the process never opened cannot be re-injected from a stale copy.
+/// A refusal names which leg failed and, for the candidate leg, WHICH predicate
+/// (#952) — the collapsed "not a project document" read as a scope bug when
+/// the real cause was a skill body, which is refused by construction.
 /// Order is newest-read first — independent of the manifest's own order, so the
 /// result is stable and a re-registration of the same list is idempotent.
 pub fn register(session_id: Uuid, requested: &[String]) -> (Vec<DocEntry>, Vec<String>) {
@@ -170,10 +174,8 @@ pub fn resolve(session_id: Uuid, requested: &[String]) -> (Vec<DocEntry>, Vec<St
             continue;
         }
         let path = PathBuf::from(trimmed);
-        if !read_state::is_document_candidate(&path) {
-            rejected.push(format!(
-                "not registered: {trimmed} (not a project document)"
-            ));
+        if let Some(reject) = read_state::document_rejection(&path) {
+            rejected.push(format!("not registered: {trimmed} ({})", reject.describe()));
             continue;
         }
         if !read_state::was_document_read(session_id, &path) {
@@ -233,12 +235,15 @@ pub fn has_retained_set(session_id: Uuid) -> bool {
         .is_some_and(|(entries, refusals)| !entries.is_empty() || !refusals.is_empty())
 }
 
-/// Re-inject the registered bodies, inside whatever budget the skills left.
+/// Re-inject the registered bodies, inside the budget the turn-start assembly
+/// computed.
 ///
-/// `budget_tokens` is the LEFTOVER of the retained-set budget, not a second
-/// allowance: skills and documents share one 5 % envelope, so a session that
-/// carries heavy skills gets proportionally less room for documents and no
-/// constant in this module can drift from that.
+/// `budget_tokens` is the LEFTOVER of the retained-set envelope, floored at
+/// [`crate::brain::skills::retained_doc_budget_floor`] (#951): skills and
+/// documents share one envelope, so a session carrying heavy skills would
+/// otherwise leave documents no room at all. The floor is the caller's
+/// arithmetic, not a second allowance, and no constant in this module can
+/// drift from it.
 ///
 /// Newest-read first, and the first document that does not fit STOPS the walk
 /// rather than being skipped over: the order is by recency, so a body that
@@ -346,9 +351,15 @@ pub fn render(session_id: Uuid, budget_tokens: usize) -> Option<String> {
     }
     if !missing.is_empty() {
         out.push_str("\n\n## Documents NOT retained\n");
+        // The read rule is stated once, here, rather than on every path line:
+        // the card prints those reasons and must stay short, while the model
+        // needs to know that only `read_file` registers a read — otherwise a
+        // path it read whole through `bash` reads as invalid and it never
+        // re-reads it the way that would count (#952).
         out.push_str(
             "These paths are NOT in your context — read them again if the pending work \
-             depends on them.\n",
+             depends on them. Only the `read_file` tool registers a read, so a file read \
+             through `bash` does not count.\n",
         );
         out.push_str(&missing);
     }

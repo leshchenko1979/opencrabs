@@ -177,7 +177,7 @@ impl Tool for WaitAgentTool {
                 };
                 return Ok(ToolResult::success(format!(
                     "Sub-agent {} still running after {}s. Call wait_agent again \
-                     with a longer timeout_secs to keep polling, or close_agent \
+                     with a longer timeout_secs to keep polling, or stop_agent \
                      to cancel.\n\n{}",
                     agent_id, timeout_secs, progress_hint
                 )));
@@ -293,7 +293,7 @@ impl WaitAgentTool {
                 Some(ToolResult::success(format!(
                     "Sub-agent {} finished a round and is paused for input.\n\n\
                      Round output:\n{}\n\n\
-                     Call send_input to continue, or close_agent if done.",
+                     Call send_input to continue, or stop_agent if done.",
                     agent_id, output
                 )))
             }
@@ -302,7 +302,7 @@ impl WaitAgentTool {
                 agent_id, err
             ))),
             SubAgentState::Cancelled => Some(ToolResult::error(format!(
-                "Sub-agent {} was cancelled",
+                "Sub-agent {} was stopped — resume_agent can continue it with a new prompt.",
                 agent_id
             ))),
             SubAgentState::Running => None,

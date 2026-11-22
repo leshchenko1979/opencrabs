@@ -3,7 +3,7 @@
 //! Compaction replaces the conversation with a summary. The summary carried the
 //! `spawn_agent` call but not the returned agent id in any form the model could
 //! use, so after compaction it could no longer `wait_agent`, `send_input`,
-//! `resume_agent` or `close_agent`. The children ran to completion and their
+//! `resume_agent` or `stop_agent`. The children ran to completion and their
 //! results were never collected.
 //!
 //! The fix appends a table of still-alive agents to the summary. These tests
@@ -128,7 +128,7 @@ fn the_block_names_the_tools_the_ids_are_for() {
     mgr.insert(agent("abc12345", "research-foo", SubAgentState::Running));
 
     let block = mgr.format_running_for_compaction().expect("block");
-    for tool in ["wait_agent", "send_input", "resume_agent", "close_agent"] {
+    for tool in ["wait_agent", "send_input", "resume_agent", "stop_agent"] {
         assert!(block.contains(tool), "must mention {tool}:\n{block}");
     }
     assert!(

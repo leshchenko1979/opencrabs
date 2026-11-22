@@ -123,6 +123,48 @@ fn test_compact_with_summary_keeps_recent() {
 }
 
 #[test]
+fn test_compact_with_verbatim_tail_charges_the_summary_on_top() {
+    // #943: `compact_with_summary` subtracts the summary's size from the
+    // budget, so passing a tail budget directly keeps only the 2-message
+    // structural floor whenever the summary is bigger than the tail — which it
+    // always is, because the summary budget is 3 000 tokens. The wrapper has to
+    // add the summary's own size back, and the discriminator is that it keeps
+    // far more than the floor.
+    let session_id = Uuid::new_v4();
+    let mut context = AgentContext::new(session_id, 200_000);
+    for i in 0..10 {
+        context.add_message(Message::user(format!("Message {}", i)));
+    }
+
+    // A summary far larger than the 2 000-token tail we ask for.
+    let big_summary = "s".repeat(12_000);
+    context.compact_with_verbatim_tail(big_summary, 2_000);
+
+    assert!(
+        context.messages.len() > 3,
+        "the tail collapsed to the 2-message floor because the summary ate the \
+         budget: {} messages kept",
+        context.messages.len()
+    );
+    if let Some(ContentBlock::Text { text }) = context.messages[0].content.first() {
+        assert!(
+            text.contains("CONTEXT COMPACTION"),
+            "summary is not the anchor"
+        );
+    } else {
+        panic!("First message should be a text compaction summary");
+    }
+    if let Some(ContentBlock::Text { text }) = context.messages.last().unwrap().content.first() {
+        assert!(
+            text.contains("Message 9"),
+            "the newest message was not kept: {text}"
+        );
+    } else {
+        panic!("Last message should be text");
+    }
+}
+
+#[test]
 fn test_compact_with_summary_recalculates_tokens() {
     let session_id = Uuid::new_v4();
     let mut context = AgentContext::new(session_id, 10000);

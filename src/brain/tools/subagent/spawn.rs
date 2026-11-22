@@ -4,6 +4,7 @@
 //! so the main orchestrator can track status without session_search.
 
 use super::manager::{SubAgent, SubAgentManager};
+use crate::brain::agent::error::AgentError;
 use crate::brain::agent::service::work_status::{AgentGrant, WorkState, WorkStatus};
 use crate::brain::tools::error::{Result, ToolError};
 use crate::brain::tools::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
@@ -224,6 +225,21 @@ pub(crate) fn push_attention(
              session {to}, which now owns its channel"
         ),
     }
+}
+
+/// Whether a cancelled token means the PARENT stopped this child, as opposed to
+/// the daemon going down under it (#924).
+///
+/// A `CancellationToken` cannot tell the two apart on its own: the stop path
+/// cancels the token and so does the shutdown path, and from inside the child
+/// they look identical. `shutdown::is_shutting_down()` is the only thing that
+/// separates them, and getting it wrong is expensive in both directions —
+/// reporting a stop as a failure tells the parent its own decision crashed,
+/// while reporting a shutdown as a deliberate stop marks `Cancelled` a child
+/// that was really interrupted mid-work, which is precisely the state
+/// `reconcile_with` exists to record.
+pub(crate) fn is_deliberate_stop(token: &CancellationToken) -> bool {
+    token.is_cancelled() && !crate::brain::agent::service::shutdown::is_shutting_down()
 }
 
 /// Tool that spawns a child agent to handle a sub-task.
@@ -693,8 +709,15 @@ impl Tool for SpawnAgentTool {
             let mut iteration: usize = 0;
             let total_tool_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-            // Run prompt → wait for input → run again loop
-            let final_output = loop {
+            // Run prompt → wait for input → run again loop.
+            //
+            // The loop yields an OUTCOME rather than a bare string (#924): a
+            // child can now end because it finished, because it failed, or
+            // because its parent stopped it, and those three must not be
+            // collapsed into one exit path. Collapsing them is exactly the bug
+            // — a cancelled child fell through to `mark_completed` and pushed
+            // a "finished" result to the parent that had just stopped it.
+            let outcome: std::result::Result<String, AgentError> = loop {
                 iteration += 1;
                 let agent_id_for_progress = agent_id_clone.clone();
                 let tool_count_counter = total_tool_count.clone();
@@ -772,7 +795,7 @@ impl Tool for SpawnAgentTool {
                                 agent_id_clone,
                                 iteration
                             );
-                            break response.content;
+                            break Ok(response.content);
                         }
                         // Genuinely gated (pending approval / cap): park so
                         // wait_agent can observe round-boundary progress and
@@ -835,11 +858,101 @@ impl Tool for SpawnAgentTool {
                                 );
                                 current_prompt = text;
                             }
-                            None => break response.content,
+                            // The select's cancel arm fires on a deliberate
+                            // stop AND on daemon shutdown; `is_deliberate_stop`
+                            // is what tells them apart at the exit block.
+                            None => break Ok(response.content),
                         }
                     }
                     Err(e) => {
+                        // The reporting moves to the exit block, which every
+                        // outcome now shares. `break` rather than `return` is
+                        // what lets it run at all: the old `return` here
+                        // skipped the worktree settle below, so a failed
+                        // child's isolation tree was never cleaned up (#924).
                         tracing::error!("Sub-agent {} failed: {}", agent_id_clone, e);
+                        break Err(e);
+                    }
+                }
+            };
+
+            // Every exit settles here, in ONE block (#924). Before this, the
+            // cancelled path fell through to `mark_completed` and pushed a
+            // "finished" result to the parent that had just stopped it, and the
+            // failure path `return`ed early, skipping the worktree settle
+            // entirely.
+            let stopped = is_deliberate_stop(&cancel_clone);
+
+            // Return the tree, unless the child left work in it. A tree with
+            // a commit or an uncommitted edit survives: discarding a child's
+            // work silently would be worse than the collisions the isolation
+            // exists to prevent. Settle this BEFORE reporting, so a kept tree
+            // is named in the result the parent reads rather than only in the
+            // log, where nobody would find it.
+            let settle_worktree = |outcome: String| -> String {
+                match &worktree_for_cleanup {
+                    Some(wt) => {
+                        let removed = wt.cleanup();
+                        match wt.parent_notice(removed) {
+                            Some(note) => format!("{outcome}{note}"),
+                            None => outcome,
+                        }
+                    }
+                    None => outcome,
+                }
+            };
+
+            if stopped {
+                // A stop is the parent's decision, not a failure. Record it as
+                // `Cancelled` and push NOTHING: the parent asked for this and
+                // is not waiting on a report, so a completion here would be a
+                // message about work it deliberately abandoned. `wait_agent`
+                // waiters are already released by `manager.cancel()`, which
+                // the stop path called before this.
+                tracing::info!(
+                    "Sub-agent {} stopped deliberately by its parent",
+                    agent_id_clone
+                );
+                if let Err(write_err) = status.mark_cancelled() {
+                    tracing::error!(
+                        "Sub-agent {} was stopped but its cancelled status could not be written, \
+                         so it will keep reading as running: {write_err}",
+                        agent_id_clone
+                    );
+                }
+                // The tree still settles: a stop is not a licence to throw away
+                // uncommitted work, so a dirty tree survives. The notice is
+                // logged rather than pushed, because silence is the point.
+                let notice = settle_worktree(String::new());
+                if !notice.is_empty() {
+                    tracing::info!(
+                        "Sub-agent {} stopped; worktree {}",
+                        agent_id_clone,
+                        notice.trim()
+                    );
+                }
+            } else {
+                match outcome {
+                    Ok(output) => {
+                        let output = settle_worktree(output);
+                        // #147: persist the COMPLETE output — the 200-char stub
+                        // lost every full report to restarts/compaction, and
+                        // nothing in production ever read the summary's content.
+                        if let Err(write_err) = status.mark_completed(output.clone()) {
+                            tracing::error!(
+                                "Sub-agent {} completed but its status could not be written, so \
+                                 it will keep reading as running: {write_err}",
+                                agent_id_clone
+                            );
+                        }
+                        manager.complete_and_deliver(
+                            &agent_id_clone,
+                            output,
+                            parent_session_id,
+                            &label_clone,
+                        );
+                    }
+                    Err(e) => {
                         // A dropped write here loses the record of a failure
                         // that already happened, and leaves the file reading
                         // `Running` forever. Proceed either way, but say so.
@@ -858,43 +971,9 @@ impl Tool for SpawnAgentTool {
                                 Err(&e.to_string()),
                             );
                         }
-                        return;
                     }
                 }
-            };
-
-            // #147: persist the COMPLETE output — the 200-char stub lost
-            // every full report to restarts/compaction, and nothing in
-            // production ever read the summary's content.
-            if let Err(write_err) = status.mark_completed(final_output.clone()) {
-                tracing::error!(
-                    "Sub-agent {} completed but its status could not be written, so it will keep \
-                     reading as running: {write_err}",
-                    agent_id_clone
-                );
             }
-            // Return the tree, unless the child left work in it. A tree with
-            // a commit or an uncommitted edit survives: discarding a child's
-            // work silently would be worse than the collisions the isolation
-            // exists to prevent. Settle this BEFORE reporting, so a kept tree
-            // is named in the result the parent reads rather than only in the
-            // log, where nobody would find it.
-            let final_output = match &worktree_for_cleanup {
-                Some(wt) => {
-                    let removed = wt.cleanup();
-                    match wt.parent_notice(removed) {
-                        Some(note) => format!("{final_output}{note}"),
-                        None => final_output,
-                    }
-                }
-                None => final_output,
-            };
-            manager.complete_and_deliver(
-                &agent_id_clone,
-                final_output,
-                parent_session_id,
-                &label_clone,
-            );
         });
 
         // Register in manager

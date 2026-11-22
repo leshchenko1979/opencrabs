@@ -833,6 +833,29 @@ pub fn retained_set_budget_tokens(max_tokens: usize) -> usize {
     ((max_tokens as f64) * RETAINED_SET_BUDGET_RATIO).round() as usize
 }
 
+/// #951: the floor under the RETAINED DOCUMENT budget, as a share of the
+/// window.
+///
+/// Documents are rendered inside the retained set's LEFTOVER, after skills are
+/// charged against the envelope, and in any session carrying a real skill tree
+/// the skills alone exceed that envelope — `saturating_sub` clamps the leftover
+/// to zero and every document body is refused on its first chunk. The path
+/// still prints, so the failure reads as a scope bug rather than as starvation.
+///
+/// A floor rather than a second independent envelope: the single-envelope
+/// invariant of #438 exists to stop SKILLS growing without bound, and a floor
+/// cannot grow at all — it is derived from the window and nothing else, so the
+/// retained set still has one bound and the model is still given one number.
+/// At 10 % a large `AGENTS.md` fits whole inside the token cost of
+/// `MAX_DOC_BODY_BYTES`, which the 5 % leftover never allowed.
+pub const RETAINED_DOC_BUDGET_FLOOR_RATIO: f64 = 0.10;
+
+/// The floor under the token budget documents may occupy, derived from the
+/// window. See [`RETAINED_DOC_BUDGET_FLOOR_RATIO`] for why the floor exists.
+pub fn retained_doc_budget_floor(max_tokens: usize) -> usize {
+    ((max_tokens as f64) * RETAINED_DOC_BUDGET_FLOOR_RATIO).round() as usize
+}
+
 /// The token cost of the retained set: exactly what [`active_skill_bodies`]
 /// would re-inject on the next turn, measured with the same tokenizer the
 /// request path uses.

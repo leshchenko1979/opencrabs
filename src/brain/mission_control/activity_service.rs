@@ -201,9 +201,11 @@ fn parse_date(s: &str) -> Option<DateTime<Utc>> {
 fn level_from_status(status_field: Option<&str>, header_status: &str) -> McActivityLevel {
     let status = status_field.unwrap_or(header_status).to_lowercase();
     match status.as_str() {
-        "applied" => McActivityLevel::Success,
+        "applied" | "success" => McActivityLevel::Success,
+        // #938: a tool run that returned non-zero did its job but is not clean
+        // (#763), so it is a warning — neither a success nor an error.
+        "nonzero" | "warn" | "warning" | "reverted" | "rolled-back" => McActivityLevel::Warn,
         "failed" | "error" => McActivityLevel::Error,
-        "warn" | "warning" | "reverted" | "rolled-back" => McActivityLevel::Warn,
         _ => McActivityLevel::Info,
     }
 }

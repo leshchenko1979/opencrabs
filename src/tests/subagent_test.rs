@@ -266,16 +266,34 @@ mod manager {
         assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Running));
     }
 
+    /// A stopped agent IS resumable — #924 narrowed `stop_agent` to "end the
+    /// work, keep the identity", so the record survives the stop and the
+    /// parent can pick the child back up.
+    ///
+    /// The mutant this kills: the pre-#924 arm
+    /// `Completed | Failed(_)` with `Cancelled` omitted. That is the shape this
+    /// test asserted before the contract changed, and it reads as correct
+    /// until someone tries to resume a child they deliberately stopped — which
+    /// is exactly the flow `stop_agent` exists for. The failure it produces is
+    /// silent: `resume_agent` returns "cannot be resumed" for an agent whose
+    /// session and transcript are both still on disk.
     #[test]
-    fn prepare_resume_from_cancelled_fails() {
+    fn prepare_resume_from_stopped_succeeds() {
+        // Kills the mutant that refuses to resume a Cancelled agent, which would make every stop a permanent loss of the child's context.
         let mgr = SubAgentManager::new();
         mgr.insert(make_agent("a1", "test"));
         mgr.cancel("a1");
+        assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Cancelled));
 
         let new_token = CancellationToken::new();
         let (new_tx, _rx) = mpsc::unbounded_channel::<String>();
 
-        assert!(!mgr.prepare_resume("a1", new_token, new_tx));
+        assert!(
+            mgr.prepare_resume("a1", new_token, new_tx),
+            "a stopped agent must stay resumable: the stop ended its work, not its identity"
+        );
+        assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Running));
+        assert!(mgr.get_input_tx("a1").is_some()); // new channel set
     }
 
     #[test]
@@ -292,23 +310,6 @@ mod manager {
         assert!(ids.contains(&"a1"));
         assert!(ids.contains(&"a2"));
         assert!(ids.contains(&"a3"));
-    }
-
-    #[test]
-    fn exists_returns_false_after_remove() {
-        let mgr = SubAgentManager::new();
-        mgr.insert(make_agent("a1", "test"));
-        assert!(mgr.exists("a1"));
-
-        let removed = mgr.remove("a1");
-        assert!(removed.is_some());
-        assert!(!mgr.exists("a1"));
-    }
-
-    #[test]
-    fn remove_nonexistent_returns_none() {
-        let mgr = SubAgentManager::new();
-        assert!(mgr.remove("ghost").is_none());
     }
 
     #[test]
@@ -623,10 +624,10 @@ mod send_input_tool {
     }
 }
 
-// ─── CloseAgentTool Tests ──────────────────────────────────────────────────
+// ─── StopAgentTool Tests ──────────────────────────────────────────────────
 
-mod close_agent_tool {
-    use crate::brain::tools::subagent::CloseAgentTool;
+mod stop_agent_tool {
+    use crate::brain::tools::subagent::StopAgentTool;
     use crate::brain::tools::subagent::{SubAgent, SubAgentManager, SubAgentState};
     use crate::brain::tools::{Tool, ToolExecutionContext};
     use serde_json::json;
@@ -634,8 +635,30 @@ mod close_agent_tool {
     use tokio::sync::mpsc;
     use uuid::Uuid;
 
+    /// The session these tests act as (#924). Fixed rather than random: the
+    /// ownership gate resolves only the caller's OWN children, so a fixture
+    /// parented to an independent `Uuid::new_v4()` is a stranger and
+    /// `stop_agent` correctly refuses to touch it.
+    fn parent_session() -> Uuid {
+        Uuid::from_u128(0x924)
+    }
+
+    /// Point the status-file layer at a throwaway dir (#924).
+    ///
+    /// `resolve()` falls back to reading `<detached>/<id>.json` when the map has
+    /// no entry, so a test asserting "this id is not found" is asserting against
+    /// the REAL directory unless it isolates — one leftover `ghost.json` from any
+    /// other run turns that assertion inside out. The override is thread-local
+    /// and the runner reuses threads, hence a per-test tag.
+    fn isolate(tag: &str) {
+        let dir =
+            std::env::temp_dir().join(format!("opencrabs-924-stop-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::brain::agent::service::work_status::test_override::set(dir.join("detached"));
+    }
+
     fn test_context() -> ToolExecutionContext {
-        let mut ctx = ToolExecutionContext::new(Uuid::new_v4())
+        let mut ctx = ToolExecutionContext::new(parent_session())
             .with_working_directory(std::path::PathBuf::from("/tmp"))
             .with_auto_approve(true);
         ctx.timeout_secs = 30;
@@ -650,7 +673,7 @@ mod close_agent_tool {
                 id.to_string(),
                 "test".to_string(),
                 Uuid::new_v4(),
-                Uuid::new_v4(),
+                parent_session(),
             )
         }
     }
@@ -658,7 +681,7 @@ mod close_agent_tool {
     #[tokio::test]
     async fn missing_agent_id_returns_error() {
         let mgr = Arc::new(SubAgentManager::new());
-        let tool = CloseAgentTool::new(mgr);
+        let tool = StopAgentTool::new(mgr);
         let ctx = test_context();
 
         let result = tool.execute(json!({}), &ctx).await;
@@ -666,9 +689,11 @@ mod close_agent_tool {
     }
 
     #[tokio::test]
-    async fn close_nonexistent_returns_error() {
+    async fn stop_nonexistent_returns_error() {
+        // Kills the mutant that stops any id it can see: a stop must be scoped to the caller's own children, so a foreign or absent id answers identically and says so.
+        isolate("nonexistent");
         let mgr = Arc::new(SubAgentManager::new());
-        let tool = CloseAgentTool::new(mgr);
+        let tool = StopAgentTool::new(mgr);
         let ctx = test_context();
 
         let result = tool
@@ -676,64 +701,61 @@ mod close_agent_tool {
             .await
             .unwrap();
         assert!(!result.success);
+        // The refusal names the OWNERSHIP boundary, not mere absence: an id
+        // that does not exist and another session's id answer identically on
+        // purpose, so this string is what tells the caller it was scoped.
         assert!(
             result
                 .error
                 .as_ref()
                 .unwrap()
-                .contains("No sub-agent found")
+                .contains("belongs to this session")
         );
     }
 
     #[tokio::test]
-    async fn close_running_agent_cancels() {
+    async fn stop_running_agent_cancels() {
+        // Kills the mutant that marks a stop without firing the token (the child keeps working) and the one that deletes the record instead of ending its work.
+        isolate("running");
         let mgr = Arc::new(SubAgentManager::new());
         let agent = make_running_agent("a1");
         let token = agent.cancel_token.clone();
         mgr.insert(agent);
 
-        let tool = CloseAgentTool::new(mgr.clone());
+        let tool = StopAgentTool::new(mgr.clone());
         let ctx = test_context();
 
         let result = tool.execute(json!({"agent_id": "a1"}), &ctx).await.unwrap();
         assert!(result.success);
-        assert!(result.output.contains("cancelled"));
+        // The BEHAVIOUR, not the wording: the token actually fires and the
+        // state actually moves.
         assert!(token.is_cancelled());
         assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Cancelled));
-        // Still tracked
+        // Still tracked — stopping is not deleting (#924).
         assert!(mgr.exists("a1"));
+        assert_eq!(
+            mgr.get_output("a1"),
+            None,
+            "a stop produces no output; writing one would let `wait_agent` hand the parent a result the child never finished"
+        );
     }
 
     #[tokio::test]
-    async fn close_with_remove_deletes_from_tracking() {
-        let mgr = Arc::new(SubAgentManager::new());
-        mgr.insert(make_running_agent("a1"));
-
-        let tool = CloseAgentTool::new(mgr.clone());
-        let ctx = test_context();
-
-        let result = tool
-            .execute(json!({"agent_id": "a1", "remove": true}), &ctx)
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("removed"));
-        assert!(!mgr.exists("a1"));
-    }
-
-    #[tokio::test]
-    async fn close_already_completed_agent() {
+    async fn stop_already_completed_agent() {
+        // Kills the mutant that rewrites a finished agent's outcome to Cancelled: a stop cannot retroactively change work that already landed.
+        isolate("completed");
         let mgr = Arc::new(SubAgentManager::new());
         mgr.insert(make_running_agent("a1"));
         mgr.mark_completed("a1", "done".to_string());
 
-        let tool = CloseAgentTool::new(mgr.clone());
+        let tool = StopAgentTool::new(mgr.clone());
         let ctx = test_context();
 
-        // Close on a completed agent should still succeed (just doesn't cancel)
         let result = tool.execute(json!({"agent_id": "a1"}), &ctx).await.unwrap();
         assert!(result.success);
-        // State stays Completed since cancel() returns false for non-running
+        assert!(result.output.contains("already finished"));
+        // State stays Completed: cancel() refuses anything not live, so a
+        // stop cannot retroactively rewrite a finished agent's outcome.
         assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Completed));
     }
 }
@@ -851,7 +873,13 @@ mod wait_agent_tool {
 
         let result = tool.execute(json!({"agent_id": "a1"}), &ctx).await.unwrap();
         assert!(!result.success);
-        assert!(result.error.as_ref().unwrap().contains("cancelled"));
+        // Kills the mutant that reports a stopped agent as a dead end: #924
+        // makes a stop end the WORK, not the agent, so the message has to
+        // name the stop AND point at resume_agent. The old wording said
+        // "was cancelled", which read as terminal and stranded the work.
+        let err = result.error.as_ref().unwrap();
+        assert!(err.contains("stopped"));
+        assert!(err.contains("resume_agent"));
     }
 
     #[tokio::test]
@@ -987,17 +1015,42 @@ mod lifecycle {
         assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Running));
     }
 
+    /// A stopped agent IS resumable (#924), and a live one is not.
+    ///
+    /// Before #924 a stop was a dead end: `cancel()` parked the agent in a state
+    /// `prepare_resume` refused, so the only way to continue the work was to
+    /// spawn a fresh child with none of the old context. Stopping was therefore
+    /// destructive in practice while claiming to be reversible.
+    ///
+    /// Two-sided on purpose: widening the gate must not let a caller hijack an
+    /// agent that is still working, so the Running arm is asserted to REFUSE.
     #[test]
-    fn cancelled_cannot_resume() {
+    fn stopped_agent_can_resume_but_a_live_one_cannot() {
+        // Kills the mutant that resumes a RUNNING agent, silently swapping its token and orphaning the task already holding the old one.
         let mgr = Arc::new(SubAgentManager::new());
         let (agent, _rx) = make_agent("a1");
         mgr.insert(agent);
+
+        // Control: a running agent refuses resumption — resuming it would
+        // silently swap its token and orphan the task already using the old one.
+        let (tok, tx) = (
+            CancellationToken::new(),
+            mpsc::unbounded_channel::<String>().0,
+        );
+        assert!(!mgr.prepare_resume("a1", tok, tx));
+        assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Running));
+
+        // The case under test: stop, then resume.
         mgr.cancel("a1");
+        assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Cancelled));
 
         let new_token = CancellationToken::new();
         let (new_tx, _rx2) = mpsc::unbounded_channel::<String>();
-        assert!(!mgr.prepare_resume("a1", new_token, new_tx));
-        assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Cancelled));
+        assert!(
+            mgr.prepare_resume("a1", new_token, new_tx),
+            "a stopped agent must be resumable — a stop is not a deletion (#924)"
+        );
+        assert_eq!(mgr.get_state("a1"), Some(SubAgentState::Running));
     }
 
     #[tokio::test]
@@ -1037,27 +1090,6 @@ mod lifecycle {
             Some(SubAgentState::Failed("error-2".to_string()))
         );
         assert_eq!(mgr.get_state("a3"), Some(SubAgentState::Running));
-    }
-
-    #[test]
-    fn remove_cleans_up_completely() {
-        let mgr = Arc::new(SubAgentManager::new());
-        let (agent, _rx) = make_agent("a1");
-        let sid = agent.session_id;
-        mgr.insert(agent);
-
-        assert!(mgr.exists("a1"));
-        assert_eq!(mgr.get_session_id("a1"), Some(sid));
-
-        let removed = mgr.remove("a1").unwrap();
-        assert_eq!(removed.id, "a1");
-        assert_eq!(removed.session_id, sid);
-
-        assert!(!mgr.exists("a1"));
-        assert_eq!(mgr.get_state("a1"), None);
-        assert_eq!(mgr.get_output("a1"), None);
-        assert_eq!(mgr.get_session_id("a1"), None);
-        assert!(mgr.get_input_tx("a1").is_none());
     }
 }
 
@@ -1580,5 +1612,88 @@ mod team_broadcast_tool {
         assert!(result.output.contains("1 skipped"));
 
         assert_eq!(rx1.try_recv().unwrap(), "update");
+    }
+}
+
+// ─── #924: a stop and a shutdown cancel the same token ─────────────────────
+//
+// The spawn loop has ONE cancel path and TWO reasons to take it: the parent
+// called `stop_agent`, or the daemon is going down. From inside the child they
+// are indistinguishable — a `CancellationToken` carries no reason — so the exit
+// branch asks `is_deliberate_stop`, which reads the shutdown flag to separate
+// them. Getting it wrong is expensive in both directions, which is why all
+// three cases are pinned rather than just the happy one:
+//
+//   * a stop read as a shutdown is recorded `Interrupted`, and the parent's own
+//     decision comes back as a crash report;
+//   * a shutdown read as a stop is recorded `Cancelled`, which is a TERMINAL
+//     state that `prepare_resume` accepts — so a child interrupted mid-work
+//     looks like one that was deliberately parked.
+mod deliberate_stop {
+    use crate::brain::agent::service::shutdown;
+    use crate::brain::tools::subagent::spawn::is_deliberate_stop;
+    use tokio_util::sync::CancellationToken;
+
+    /// The flag is process-global, so every case runs under the ONE lock the
+    /// shutdown module owns — see `shutdown::test_guard`.
+    fn with_clean_flag<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = shutdown::test_guard();
+        shutdown::reset_for_test();
+        let out = f();
+        shutdown::reset_for_test();
+        out
+    }
+
+    /// An untouched token is not a stop.
+    ///
+    /// The mutant this kills: `token.is_cancelled() || !is_shutting_down()`
+    /// (a plausible slip when writing the condition) — which reports every
+    /// running child as deliberately stopped the instant anything asks.
+    #[test]
+    fn an_uncancelled_token_is_not_a_stop() {
+        // Kills the mutant that treats every unfinished agent as a deliberate stop, regardless of whether its token ever fired.
+        with_clean_flag(|| {
+            let token = CancellationToken::new();
+            assert!(!is_deliberate_stop(&token));
+        });
+    }
+
+    /// A cancel with no shutdown in progress IS the parent's stop.
+    ///
+    /// The mutant this kills: dropping the shutdown half of the condition
+    /// (`token.is_cancelled()` alone). That reads correctly for this case and
+    /// only fails the next one, which is exactly why the pair exists.
+    #[test]
+    fn a_cancel_while_running_is_a_deliberate_stop() {
+        // Kills the mutant that records a parent's own stop as a failure, blaming the parent for a decision it made on purpose.
+        with_clean_flag(|| {
+            let token = CancellationToken::new();
+            token.cancel();
+            assert!(
+                is_deliberate_stop(&token),
+                "the parent stopped this child; recording it as a failure blames the parent's own decision"
+            );
+        });
+    }
+
+    /// The same cancel DURING a shutdown is not a stop.
+    ///
+    /// The mutant this kills: `token.is_cancelled()` alone, and any version
+    /// that reads the flag before the token (which would answer "stop" for a
+    /// child that was merely cancelled a moment earlier). Both would mark a
+    /// shutdown-interrupted child `Cancelled` — terminal, resumable, and a
+    /// silent lie about why it stopped.
+    #[test]
+    fn a_cancel_during_shutdown_is_not_a_deliberate_stop() {
+        // Kills the mutant that reads a shutdown-time cancel as a deliberate stop, marking resumable work as a decision nobody made.
+        with_clean_flag(|| {
+            let token = CancellationToken::new();
+            token.cancel();
+            shutdown::mark_shutting_down();
+            assert!(
+                !is_deliberate_stop(&token),
+                "a shutdown cancelled this child — calling it a stop marks a resumable record for work that was interrupted"
+            );
+        });
     }
 }

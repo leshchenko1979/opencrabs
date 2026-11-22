@@ -26,18 +26,15 @@
 use crate::brain::agent::error::AgentError;
 use crate::brain::agent::service::shutdown;
 
-/// Serialises the cases that touch the flag.
-///
-/// The flag is process-global by design (the tool loop reads it several layers
-/// below the TUI that sets it), and libtest runs these in parallel threads of
-/// one process — so without this lock one case's reset lands in the middle of
-/// another's assertion. Found the hard way: the shutdown case failed while the
-/// fix was correct.
-static FLAG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// Guard so a case cannot leak the process-global flag into its neighbours.
+///
+/// The lock itself lives in `shutdown`, beside the flag: #924 added a SECOND
+/// module that exercises it (`is_deliberate_stop`), and a per-module lock would
+/// not exclude the two sets from each other — the flag is one `AtomicBool` for
+/// the whole test binary, so one module's reset would land inside the other's
+/// assertion. Same failure this module already found the hard way, one level up.
 fn with_clean_flag<T>(f: impl FnOnce() -> T) -> T {
-    let _guard = FLAG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = shutdown::test_guard();
     shutdown::reset_for_test();
     let out = f();
     shutdown::reset_for_test();

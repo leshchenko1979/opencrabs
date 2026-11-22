@@ -24,7 +24,7 @@ You are creating a COMPREHENSIVE CONTINUATION DOCUMENT. After compaction, a fres
 
 Analyze the ENTIRE conversation chronologically and produce the following.
 
-OUTPUT ORDER — CRITICAL: write the sections below in THIS order, NOT in numeric order. The document can be CUT at the tail (the summariser may hit its output limit) and a cut removes whatever was written LAST — so the load-bearing blocks go FIRST: section 0 (obligation) -> the section 10 `context-manifest` fence -> section 7 (recovery playbook) -> section 8 (next step) -> sections 1-6 (the prose, compressed) -> section 9 (continuation message) LAST. Never place the manifest fence below the prose.
+OUTPUT ORDER — CRITICAL: write the sections below in THIS order, NOT in numeric order. The document can be CUT at the tail (the summariser may hit its output limit) and a cut removes whatever was written LAST — so the load-bearing blocks go FIRST and the most expendable prose goes LAST: section 0 (obligation) -> the section 10 `context-manifest` fence -> section 7 (recovery playbook) -> section 8 (next step) -> section 9 (continuation message) -> then the prose, most expendable last: section 2 (files) -> section 4 (errors) -> section 6 (pending) -> section 5 (user messages) -> section 3 (preferences) -> section 1 (chronological analysis). Never place the manifest fence below the prose. Never place section 9 below the prose: it is the message the user reads first on wake, and a cut that reaches it has already destroyed the thing it exists to deliver.
 
 ## 0. IMMEDIATE TASK (CRITICAL — MOST IMPORTANT SECTION)
 Look at the LAST 6-8 message pairs in the conversation. Extract EXACTLY:
@@ -93,45 +93,6 @@ The fresh agent has these tools available to recover any missing context:
 ## 8. Next Step
 {next_step_guidance}
 
-## 1. Chronological Analysis
-Walk through every task the user requested, in order. For each task include:
-- What was requested
-- What was done (with exact file paths and line numbers where relevant)
-- Exact code snippets for any changes made (show before/after when applicable)
-- Whether it was completed, committed, pushed, or still pending
-- RECEIPT: the message id, comment id, sha, run id or file state that proves it, and the command that produced that reading. A task with no receipt is NOT \"pending\" by default — it is \"unverified\", and section 0 must say so.
-
-## 2. Files Modified
-List EVERY file that was created, edited, read, or discussed. For each file include:
-- Full file path
-- What was changed and why
-- Key code snippets showing the current state of changes
-- Whether the change is committed or uncommitted
-
-## 3. User Preferences & Constraints
-List EVERY preference, constraint, or strong reaction from the user. Include:
-- Things the user explicitly said to NEVER do (with their exact words if they were emphatic)
-- Workflow preferences (commit style, release process, tool choices)
-- Technical constraints or architectural decisions
-- Any corrections the user made to your work
-
-## 4. Errors & Corrections
-Every error encountered, every mistake made, and how each was resolved. Include:
-- Exact error messages when available
-- What caused the error
-- The fix applied
-- User reactions to mistakes (so the agent avoids repeating them)
-
-## 5. All User Messages
-Summarize every user message in order, capturing their intent and exact wording for important instructions. This is critical for understanding the user's communication style and expectations.
-
-## 6. Pending Tasks
-List everything that is NOT yet done:
-- Uncommitted changes
-- Tasks mentioned but not started
-- Investigations in progress
-- Next steps the user expects
-
 ## 9. Continuation Message
 Write a SHORT, punchy message (2-4 sentences) that the agent will say to the user right after waking up from compaction. This message MUST:
 - Reference SPECIFIC things from the conversation (file names, user quotes, inside jokes, frustrations, wins) — prove the agent remembers everything
@@ -143,7 +104,46 @@ DO NOT be generic. DO NOT say \"I'm ready to continue.\" Reference actual conver
 
 Tool approval status: {tool_approval_status}
 
-{budget_directive}"""
+{budget_directive}
+## 2. Files Modified
+List EVERY file that was created, edited, read, or discussed. For each file include:
+- Full file path
+- What was changed and why
+- Key code snippets showing the current state of changes
+- Whether the change is committed or uncommitted
+
+## 4. Errors & Corrections
+Every error encountered, every mistake made, and how each was resolved. Include:
+- Exact error messages when available
+- What caused the error
+- The fix applied
+- User reactions to mistakes (so the agent avoids repeating them)
+
+## 6. Pending Tasks
+List everything that is NOT yet done:
+- Uncommitted changes
+- Tasks mentioned but not started
+- Investigations in progress
+- Next steps the user expects
+
+## 5. All User Messages
+Summarize every user message in order, capturing their intent and exact wording for important instructions. This is critical for understanding the user's communication style and expectations.
+
+## 3. User Preferences & Constraints
+List EVERY preference, constraint, or strong reaction from the user. Include:
+- Things the user explicitly said to NEVER do (with their exact words if they were emphatic)
+- Workflow preferences (commit style, release process, tool choices)
+- Technical constraints or architectural decisions
+- Any corrections the user made to your work
+
+## 1. Chronological Analysis
+Walk through every task the user requested, in order. For each task include:
+- What was requested
+- What was done (with exact file paths and line numbers where relevant)
+- Exact code snippets for any changes made (show before/after when applicable)
+- Whether it was completed, committed, pushed, or still pending
+- RECEIPT: the message id, comment id, sha, run id or file state that proves it, and the command that produced that reading. A task with no receipt is NOT \"pending\" by default — it is \"unverified\", and section 0 must say so.
+"""
 budget_directive = """BUDGET: the whole document MUST fit ~{summary_budget_tokens} tokens. A document that overruns is trimmed mechanically and loses whatever was written last, so spend the budget deliberately, in this order:
 1. MUST be complete — section 0 (obligation status + next action), the `context-manifest` fence in section 10, section 8 (next step), section 7 (recovery playbook).
 2. THEN exact paths, commands, identifiers and error strings — cheap and load-bearing.

@@ -340,6 +340,63 @@ fn capture_tail(path: &std::path::Path) -> String {
     crate::brain::agent::service::background_tasks::tail_lines(&text, HANDOVER_TAIL_LINES)
 }
 
+/// The notice a handed-over run returns to its caller (#752, #935).
+///
+/// Pure so the wording is testable without spawning anything — and the wording
+/// is the whole surface a caller gets, so it is worth pinning. It states the
+/// run's address (id, pgid, both capture paths), what the captures hold right
+/// now, and the two verbs that keep watching the run.
+///
+/// #935: the capture section used to be OMITTED when both tails were empty, so
+/// "this run has printed nothing yet" and "the notice forgot to mention output"
+/// were the same text. `capture_line` states the byte counts and both paths on
+/// every handover; the tails stay, but as evidence appended to that statement
+/// rather than as the only thing that could carry it.
+pub(crate) fn handover_notice(
+    label: &str,
+    waited: &str,
+    id: &str,
+    pid: Option<u32>,
+    output_out: &std::path::Path,
+    output_err: &std::path::Path,
+) -> String {
+    let out_tail = capture_tail(output_out);
+    let err_tail = capture_tail(output_err);
+    let capture =
+        crate::brain::agent::service::background_tasks::capture_line(output_out, output_err);
+    let out_block = if out_tail.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nstdout so far (last {HANDOVER_TAIL_LINES} lines):\n{out_tail}")
+    };
+    let err_block = if err_tail.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nstderr so far (last {HANDOVER_TAIL_LINES} lines):\n{err_tail}")
+    };
+    // The group id IS the stop mechanism: `setsid` made the child a leader, so
+    // signalling the group reaps the tree — including a descendant that
+    // re-parented to init. There is no cancel tool (owner directive
+    // 2026-09-29): the harness reports the number, the skill does the kill.
+    let (gid_line, stop) = match pid {
+        Some(p) => (
+            format!("\npgid: {p}"),
+            format!(
+                "To stop it, signal that process group: kill -TERM -- -{p} (the leading minus targets the group)."
+            ),
+        ),
+        None => (
+            String::new(),
+            "This run recorded no pgid, so signal it by pid if you need to stop it.".to_string(),
+        ),
+    };
+    format!(
+        "Still running {waited} — handed to the background manager instead of being killed: {label}\n\nrun id: {id}{gid_line}\nstdout: {out}\nstderr: {err}\n{capture}{out_block}{err_block}\n\nIt keeps running, and I'll be told when it finishes.\nTo watch it from here: task_wait with the run id (give a pattern and it returns the moment a matching line appears, or omit one to wait for it to finish). To read what it has said so far, live: task_output with the run id (the two paths above are its captures, if you would rather read them directly). {stop} tasks_list shows every run in this session.",
+        out = output_out.display(),
+        err = output_err.display(),
+    )
+}
+
 /// Bash execution tool
 pub struct BashTool;
 
@@ -1028,48 +1085,17 @@ impl Tool for BashTool {
                         // `grace` is always Some now: the deadline IS the
                         // handover trigger, not an opt-in (#752).
                         let waited = format!("after {effective_timeout}s");
-                        // A short tail of each capture, so the caller can often
-                        // act without spending a `task_output` call (issue item
-                        // 5, #752). Bounded read — see `capture_tail`.
-                        let out_tail = capture_tail(&output_out);
-                        let err_tail = capture_tail(&output_err);
-                        let out_block = if out_tail.trim().is_empty() {
-                            String::new()
-                        } else {
-                            format!(
-                                "\n\nstdout so far (last {HANDOVER_TAIL_LINES} lines):\n{out_tail}"
-                            )
-                        };
-                        let err_block = if err_tail.trim().is_empty() {
-                            String::new()
-                        } else {
-                            format!(
-                                "\n\nstderr so far (last {HANDOVER_TAIL_LINES} lines):\n{err_tail}"
-                            )
-                        };
-                        // The group id IS the stop mechanism: `setsid` made the
-                        // child a leader, so signalling the group reaps the tree
-                        // — including a descendant that re-parented to init.
-                        // There is no cancel tool (owner directive 2026-09-29):
-                        // the harness reports the number, the skill does the
-                        // kill.
-                        let (gid_line, stop) = match pid {
-                            Some(p) => (
-                                format!("\npgid: {p}"),
-                                format!(
-                                    "To stop it, signal that process group: kill -TERM -- -{p} (the leading minus targets the group)."
-                                ),
-                            ),
-                            None => (
-                                String::new(),
-                                "This run recorded no pgid, so signal it by pid if you need to stop it."
-                                    .to_string(),
-                            ),
-                        };
-                        let mut handed_over = ToolResult::success(format!(
-                            "Still running {waited} — handed to the background manager instead of being killed: {label}\n\nrun id: {id}{gid_line}\nstdout: {out}\nstderr: {err}{out_block}{err_block}\n\nIt keeps running, and I'll be told when it finishes.\nTo watch it from here: task_wait with the run id (give a pattern and it returns the moment a matching line appears, or omit one to wait for it to finish). To read what it has said so far, live: task_output with the run id (the two paths above are its captures, if you would rather read them directly). {stop} tasks_list shows every run in this session.",
-                            out = output_out.display(),
-                            err = output_err.display(),
+                        // #935: the notice is built by a pure function so its
+                        // wording — including the sentence that states an empty
+                        // capture instead of omitting it — is testable without
+                        // spawning a process.
+                        let mut handed_over = ToolResult::success(handover_notice(
+                            &label,
+                            &waited,
+                            &id,
+                            pid,
+                            &output_out,
+                            &output_err,
                         ));
                         // #787: keys this tool call's `tool_executions` row to
                         // the run, so the completion can write the real outcome

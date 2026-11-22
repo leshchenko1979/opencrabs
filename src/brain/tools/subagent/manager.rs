@@ -342,6 +342,11 @@ impl SubAgentManager {
         // `label` reads below.
         let state = match &status.state {
             WorkState::Completed => SubAgentState::Completed,
+            // #924: a stopped agent rehydrates as STOPPED, not failed. The
+            // distinction is the whole point of the state — `resume_agent`
+            // accepts both, but a caller reading the state would otherwise be
+            // told its own deliberate stop was a crash.
+            WorkState::Cancelled => SubAgentState::Cancelled,
             WorkState::Interrupted => SubAgentState::Failed("interrupted by restart".into()),
             _ => SubAgentState::Failed("stale after restart".into()),
         };
@@ -527,7 +532,14 @@ impl SubAgentManager {
         }
     }
 
-    /// Re-register a completed agent for resumption (new handle/token/channels).
+    /// Re-register a completed, failed or stopped agent for resumption (new
+    /// handle/token/channels).
+    ///
+    /// `Cancelled` is resumable (#924): a stop ends the WORK, not the agent.
+    /// Its session, transcript and grant all survive, so refusing to continue
+    /// one would strand exactly the context a parent is most likely to want
+    /// back — it stopped the child because the direction was wrong, not
+    /// because the child was worthless.
     pub fn prepare_resume(
         &self,
         id: &str,
@@ -538,7 +550,7 @@ impl SubAgentManager {
         if let Some(agent) = agents.get_mut(id)
             && matches!(
                 agent.state,
-                SubAgentState::Completed | SubAgentState::Failed(_)
+                SubAgentState::Completed | SubAgentState::Failed(_) | SubAgentState::Cancelled
             )
         {
             agent.state = SubAgentState::Running;
@@ -646,20 +658,12 @@ impl SubAgentManager {
             .map(|a| a.parent_session_id)
     }
 
-    /// Remove a terminated agent from tracking.
-    pub fn remove(&self, id: &str) -> Option<SubAgent> {
-        self.agents
-            .write()
-            .expect("subagent manager lock poisoned")
-            .remove(id)
-    }
-
     /// Format running/paused sub-agents as a compaction preamble block.
     ///
     /// Returns `None` when there are no non-terminal agents. The block is
     /// appended to the compaction summary so the post-compaction agent can
     /// still call `wait_agent`, `send_input`, `resume_agent`, and
-    /// `close_agent` on them (#936).
+    /// `stop_agent` on them (#936).
     pub fn format_running_for_compaction(&self) -> Option<String> {
         let active: Vec<(String, String, SubAgentState, Uuid)> = {
             let agents = self.agents.read().expect("subagent manager lock poisoned");
@@ -681,7 +685,7 @@ impl SubAgentManager {
             "## Running Sub-Agents\n\n\
              The following sub-agents were alive when compaction fired. \
              They are still running in the background. Use the IDs below with \
-             `wait_agent`, `send_input`, `resume_agent`, or `close_agent`. \
+             `wait_agent`, `send_input`, `resume_agent`, or `stop_agent`. \
              Do NOT spawn duplicates.\n\n\
              | Agent ID | Label | State | Session ID |\n\
              |----------|-------|-------|------------|\n",

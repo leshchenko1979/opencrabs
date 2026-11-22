@@ -116,6 +116,48 @@ pub(crate) fn resolve_recall_min_score() -> f64 {
 /// must stay silent.
 pub(crate) const SKILL_RECALL_RAW_FLOOR: f64 = 1.5;
 
+/// At least this many DISTINCT query terms must agree on an entry before it
+/// may be named in the skill shortlist (#939).
+///
+/// One shared word is a coincidence, not a match: a 15-word message shares some
+/// stemmed term with most of a 44-entry skill index, and that is precisely how
+/// the list used to fill all five slots. Two is the smallest number that
+/// requires agreement rather than a single coincidence.
+pub(crate) const SKILL_RECALL_MIN_TERMS: usize = 2;
+
+/// How much information, summed over the distinct matched terms, an entry must
+/// carry to be named (#939).
+///
+/// This is the weighting answer to `query_terms` having no stopword handling,
+/// and it deliberately is NOT a wordlist: idf is measured against the corpus
+/// being ranked, so a word that is filler HERE (`the`, `skill`, `fix` — idf
+/// 0.19, 0.49, 0.75 on the live index) contributes almost nothing, while a term
+/// carried by one entry contributes its full weight (1.0). `1.5` therefore
+/// means "two terms, at least one of them specific", which is what separates a
+/// message about a skill from a message that merely contains words the index
+/// also contains.
+pub(crate) const SKILL_RECALL_MIN_SUMMED_IDF: f64 = 1.5;
+
+/// How close to the best admitted entry's score another entry must be to be
+/// named alongside it (#939).
+///
+/// Absolute floors cannot do this job: scores are normalized by query length
+/// and are not comparable across messages, so a floor that trims a five-entry
+/// list on one turn silences a genuine match on another. A share of the best
+/// score is query-relative by construction.
+///
+/// Measured on the live 44-entry index (`opencrabs eval skills` reports 44
+/// entries, C1@5 0.657) for the message in #939: at `0.5` two entries survive
+/// and the second matches only `the`/`skill`/`get`; at `0.7` exactly one
+/// survives — the entry that shares the message's rare term — and the mean
+/// list length over the 35 labelled Track C positives drops from 5.00 to 1.40.
+/// The cost is real: the shortlist's own gold-recall moves 0.657 → 0.514
+/// (C1@5 as the scorecard computes it does not move, because `score()` still
+/// ranks at floor `0.0`), while false selection on the 12 negatives moves
+/// 1.000 → 0.083. Both figures, and the sweep that shows they trade against
+/// each other, are recorded in `src/eval/results/skill-shortlist-floor-939.md`.
+pub(crate) const SKILL_RECALL_RATIO: f64 = 0.7;
+
 /// Recall relevant to `user_message`, formatted for context, or `None`.
 ///
 /// Pure: takes the file content, so the decision is testable without a home
@@ -124,7 +166,7 @@ pub fn recall_from(memory: &str, user_message: &str) -> Option<String> {
     if !worth_reading_for(user_message) {
         return None;
     }
-    render_memory(Ranked::build(memory).find_relevant(
+    render_memory(&Ranked::build(memory).find_relevant(
         user_message,
         RECALL_MAX_SECTIONS,
         RECALL_MAX_CHARS,
@@ -169,6 +211,19 @@ fn touch_recalled(matches: &brain_sections::Matches) {
 /// `floor` is the resolved match threshold ([`resolve_recall_min_score`] at the
 /// runtime entry point, an explicit value when the eval harness sweeps it).
 pub async fn recall_for(user_message: &str, floor: f64) -> Option<String> {
+    memory_matches(user_message, floor)
+        .await
+        .and_then(|m| render_memory(&m))
+}
+
+/// The MEMORY.md matches for `user_message`, or `None` when nothing matched.
+///
+/// The ONE computation behind both the injected text and the recall summary
+/// (#928): `recall_for` renders it, `recall_for_session` also reads the
+/// headings and the omitted count off the very same [`Matches`].
+///
+/// [`Matches`]: brain_sections::Matches
+async fn memory_matches(user_message: &str, floor: f64) -> Option<brain_sections::Matches> {
     if !worth_reading_for(user_message) {
         return None;
     }
@@ -187,7 +242,7 @@ pub async fn recall_for(user_message: &str, floor: f64) -> Option<String> {
                 c.indexed
                     .find_relevant(user_message, RECALL_MAX_SECTIONS, RECALL_MAX_CHARS, floor);
             touch_recalled(&matches);
-            return render_memory(matches);
+            return Some(matches).filter(|m| !m.sections.is_empty());
         }
     }
 
@@ -205,11 +260,11 @@ pub async fn recall_for(user_message: &str, floor: f64) -> Option<String> {
     }
 
     touch_recalled(&matches);
-    render_memory(matches)
+    Some(matches).filter(|m| !m.sections.is_empty())
 }
 
 /// Format matches from MEMORY.md.
-fn render_memory(matches: brain_sections::Matches) -> Option<String> {
+fn render_memory(matches: &brain_sections::Matches) -> Option<String> {
     if matches.sections.is_empty() {
         return None;
     }
@@ -231,6 +286,20 @@ struct NamedSection {
     section: Section,
 }
 
+/// One source's contribution to a turn's recall: the text that rides along,
+/// plus what it was made of, for the turn-start flow line (#928).
+///
+/// The names and the omitted count are collected in the SAME loop that renders
+/// the blocks, so the summary cannot describe a ranking other than the one
+/// whose text was injected.
+struct SourceRecall {
+    text: String,
+    /// Display names in injection order, deduplicated.
+    names: Vec<String>,
+    /// Sections this source matched but did not inject.
+    omitted: usize,
+}
+
 /// Recall relevant sections from active skills (#285).
 /// Matches against active skills' auxiliary markdown files and body sections.
 pub fn recall_from_active_skills(
@@ -238,6 +307,15 @@ pub fn recall_from_active_skills(
     user_message: &str,
     floor: f64,
 ) -> Option<String> {
+    active_skill_recall(active_skills, user_message, floor).map(|r| r.text)
+}
+
+/// [`recall_from_active_skills`] plus the names and the dropped-match count.
+fn active_skill_recall(
+    active_skills: &HashSet<String>,
+    user_message: &str,
+    floor: f64,
+) -> Option<SourceRecall> {
     if !worth_reading_for(user_message) || active_skills.is_empty() {
         return None;
     }
@@ -286,14 +364,15 @@ pub fn recall_from_active_skills(
         .map(|ns| ns.section.clone())
         .collect::<Vec<_>>();
     let indexed = Ranked::from_sections(raw_sections);
-    let matched_indices =
-        indexed.find_relevant_indices(user_message, RECALL_MAX_SECTIONS, RECALL_MAX_CHARS, floor);
+    let (matched_indices, total) =
+        indexed.ranked_indices(user_message, RECALL_MAX_SECTIONS, RECALL_MAX_CHARS, floor);
 
     if matched_indices.is_empty() {
         return None;
     }
 
     let mut rendered_blocks = Vec::new();
+    let mut names: Vec<String> = Vec::new();
     for i in matched_indices {
         let ns = &named_sections[i];
         rendered_blocks.push(format!(
@@ -301,9 +380,22 @@ pub fn recall_from_active_skills(
             ns.source_name,
             ns.section.render()
         ));
+        let name = ns
+            .source_name
+            .strip_prefix("skill ")
+            .unwrap_or(&ns.source_name)
+            .to_string();
+        if !names.contains(&name) {
+            names.push(name);
+        }
     }
 
-    Some(rendered_blocks.join("\n\n"))
+    let omitted = total.saturating_sub(rendered_blocks.len());
+    Some(SourceRecall {
+        text: rendered_blocks.join("\n\n"),
+        names,
+        omitted,
+    })
 }
 
 /// Recall relevant sections from project directive files (#285).
@@ -314,6 +406,17 @@ pub async fn recall_from_project_directives(
     user_message: &str,
     floor: f64,
 ) -> Option<String> {
+    project_directive_recall(working_dir, user_message, floor)
+        .await
+        .map(|r| r.text)
+}
+
+/// [`recall_from_project_directives`] plus the names and the dropped-match count.
+async fn project_directive_recall(
+    working_dir: &Path,
+    user_message: &str,
+    floor: f64,
+) -> Option<SourceRecall> {
     if !worth_reading_for(user_message) {
         return None;
     }
@@ -359,14 +462,15 @@ pub async fn recall_from_project_directives(
         .map(|ns| ns.section.clone())
         .collect::<Vec<_>>();
     let indexed = Ranked::from_sections(raw_sections);
-    let matched_indices =
-        indexed.find_relevant_indices(user_message, RECALL_MAX_SECTIONS, RECALL_MAX_CHARS, floor);
+    let (matched_indices, total) =
+        indexed.ranked_indices(user_message, RECALL_MAX_SECTIONS, RECALL_MAX_CHARS, floor);
 
     if matched_indices.is_empty() {
         return None;
     }
 
     let mut rendered_blocks = Vec::new();
+    let mut names: Vec<String> = Vec::new();
     for i in matched_indices {
         let ns = &named_sections[i];
         rendered_blocks.push(format!(
@@ -374,9 +478,37 @@ pub async fn recall_from_project_directives(
             ns.source_name,
             ns.section.render()
         ));
+        let name = ns
+            .source_name
+            .strip_prefix("project directive ")
+            .unwrap_or(&ns.source_name)
+            .to_string();
+        if !names.contains(&name) {
+            names.push(name);
+        }
     }
 
-    Some(rendered_blocks.join("\n\n"))
+    let omitted = total.saturating_sub(rendered_blocks.len());
+    Some(SourceRecall {
+        text: rendered_blocks.join("\n\n"),
+        names,
+        omitted,
+    })
+}
+
+/// One turn's passive recall: the text injected into the prompt, plus what it
+/// was made of (#928).
+///
+/// Both halves come out of ONE ranking per source. The flow line reads
+/// [`summary`](Self::summary); nothing recomputes a match to describe the text
+/// it already has, because a second pass could name a section that was never
+/// injected.
+#[derive(Debug, Clone)]
+pub struct Recalled {
+    /// The recall text appended to the user message.
+    pub text: String,
+    /// Headings, skill names and the injected size, for the turn-start line.
+    pub summary: RecallSummary,
 }
 
 /// Unified passive recall for a session (#285):
@@ -385,7 +517,7 @@ pub async fn recall_for_session(
     session_id: uuid::Uuid,
     working_dir: Option<&Path>,
     user_message: &str,
-) -> Option<String> {
+) -> Option<Recalled> {
     if !worth_reading_for(user_message) {
         return None;
     }
@@ -396,38 +528,55 @@ pub async fn recall_for_session(
     let floor = resolve_recall_min_score();
 
     let mut parts: Vec<String> = Vec::new();
+    let mut summary = RecallSummary::default();
 
     // 0. Skill selection (#901) — "which skill applies" is the most actionable
     //    hint of the three, so it leads. The full index is still in the system
     //    prompt; this only ranks it against the message.
-    if let Some(shortlist) = recall_skills(user_message, floor) {
-        parts.push(shortlist);
+    if let Some(names) = skill_shortlist_names(&skill_index_markdown(), user_message, floor) {
+        parts.push(render_skill_shortlist(&names));
+        summary.skills = RecallSource { names, omitted: 0 };
     }
 
     // 1. MEMORY.md
-    if let Some(mem) = recall_for(user_message, floor).await {
-        parts.push(mem);
+    if let Some(matches) = memory_matches(user_message, floor).await
+        && let Some(text) = render_memory(&matches)
+    {
+        summary.memory = RecallSource {
+            names: headings(&matches.sections),
+            omitted: matches.omitted,
+        };
+        parts.push(text);
     }
 
     // 2. Active skills
     let active_skills = crate::brain::tools::seen_skills::active_for_session(session_id);
-    if let Some(skill_recall) = recall_from_active_skills(&active_skills, user_message, floor) {
-        parts.push(skill_recall);
+    if let Some(recall) = active_skill_recall(&active_skills, user_message, floor) {
+        summary.active_skills = RecallSource {
+            names: recall.names,
+            omitted: recall.omitted,
+        };
+        parts.push(recall.text);
     }
 
     // 3. Project directives
     if let Some(wd) = working_dir
-        && let Some(directive_recall) =
-            recall_from_project_directives(wd, user_message, floor).await
+        && let Some(recall) = project_directive_recall(wd, user_message, floor).await
     {
-        parts.push(directive_recall);
+        summary.directives = RecallSource {
+            names: recall.names,
+            omitted: recall.omitted,
+        };
+        parts.push(recall.text);
     }
 
     if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("\n\n"))
+        return None;
     }
+
+    let text = parts.join("\n\n");
+    summary.chars = text.chars().count();
+    Some(Recalled { text, summary })
 }
 
 // ── Skill SELECTION (#901) ────────────────────────────────────────────────
@@ -468,16 +617,29 @@ static SKILLS_CACHE: std::sync::RwLock<Option<CachedSkills>> = std::sync::RwLock
 ///
 /// Two decisions, kept separate on purpose:
 ///
-/// 1. **ORDER** — the whole index at floor `0.0`, exactly as the scorecard's
-///    C1@5 orders it. If this path used the shipped floor to build the list, a
-///    gold skill ranked third could vanish because nothing cleared the floor,
-///    and C1@5 would then be a number about the harness rather than about the
-///    product.
+/// 1. **ADMISSION** — which entries are allowed on the list at all, decided by
+///    [`Ranked::admitted_indices`] at the constants below (#939). This is
+///    deliberately NOT the scorecard's floor-`0.0` ordering: that ordering
+///    admits every entry sharing one stemmed term, so with a cap of
+///    [`SKILL_RECALL_MAX`] the list filled all five slots on almost every turn
+///    and named skills the message had nothing to do with.
 /// 2. **SILENCE** — whether to say anything at all, decided by the resolved
 ///    floor (#912: `[memory].recall_min_score`, defaulting to
 ///    [`RECALL_MIN_SCORE`]). A shortlist invented from a weak match is noise
 ///    paid on every turn, which is the same trade the memory recall makes.
+///
+/// The two used to disagree about what "matched" meant — the silence door
+/// accepted one rare term while the ordering door accepted anything at all —
+/// and that gap is what #939 measured. They still answer different questions
+/// (may I speak / what may I name), but the naming side is now a selection,
+/// not an ordering.
 pub fn recall_skills_from(index_md: &str, user_message: &str, floor: f64) -> Option<String> {
+    skill_shortlist_names(index_md, user_message, floor).map(|names| render_skill_shortlist(&names))
+}
+
+/// The ranked shortlist as NAMES, best first — the one ranking behind both the
+/// injected block and the recall line's `skills` segment (#928).
+fn skill_shortlist_names(index_md: &str, user_message: &str, floor: f64) -> Option<Vec<String>> {
     if !worth_reading_for(user_message) {
         return None;
     }
@@ -496,27 +658,39 @@ pub fn recall_skills_from(index_md: &str, user_message: &str, floor: f64) -> Opt
         return None;
     }
 
-    // `usize::MAX` chars: the shortlist is about ORDER, and truncating it by a
-    // character budget would drop entries by length rather than by score.
-    let ordered = ranked.find_relevant(user_message, SKILL_RECALL_MAX, usize::MAX, 0.0);
-    let names: Vec<String> = ordered
-        .sections
+    // ADMISSION, not ordering (#939). The character budget is irrelevant here:
+    // the list is capped by `SKILL_RECALL_MAX` entries and every admitted
+    // entry has already earned its place on content, so a length cut would
+    // drop entries by size rather than by evidence.
+    let admitted = ranked.admitted_indices(
+        user_message,
+        SKILL_RECALL_MAX,
+        SKILL_RECALL_MIN_TERMS,
+        SKILL_RECALL_MIN_SUMMED_IDF,
+        SKILL_RECALL_RATIO,
+    );
+    let names: Vec<String> = admitted
         .iter()
-        .map(|s| s.heading.trim().trim_start_matches('#').trim().to_string())
+        .map(|&i| ranked.heading(i))
         .filter(|n| !n.is_empty())
         .collect();
     if names.is_empty() {
         return None;
     }
+    Some(names)
+}
+
+/// Render the shortlist block that rides along in the prompt.
+fn render_skill_shortlist(names: &[String]) -> String {
     let listed = names
         .iter()
         .map(|n| format!("/{n}"))
         .collect::<Vec<_>>()
         .join(", ");
-    Some(format!(
+    format!(
         "─── skills matching this task, best first ───\n{listed}\n\
          [Ranked against your message; the full index is in the system prompt.]"
-    ))
+    )
 }
 
 /// The live skill index, re-read at most once per [`SKILLS_CACHE_TTL`].
@@ -551,4 +725,168 @@ pub fn recall_skills(user_message: &str, floor: f64) -> Option<String> {
         return None;
     }
     recall_skills_from(&skill_index_markdown(), user_message, floor)
+}
+
+// ── Recall summary (#928) ─────────────────────────────────────────────────
+//
+// Recall runs on every turn and used to leave no trace anyone could see: the
+// only record was a `Recalled N chars` log line. The owner reading the Telegram
+// flow roll could not tell that MEMORY.md had fired, let alone which section.
+// These types carry WHAT was recalled out of the same ranking that produced the
+// injected text, and render it as one chrome line.
+
+/// Longest the recall line may be, in chars.
+///
+/// It shares the flow roll with the turn's real chrome (tool rows, retry
+/// counters, the compaction notice), so it never gets to be a paragraph.
+pub(crate) const RECALL_LINE_MAX_CHARS: usize = 160;
+
+/// How many names a single source may show before the `+K` marker.
+pub(crate) const RECALL_LINE_NAMES: usize = 2;
+
+/// The prefix every recall line opens with.
+const RECALL_LINE_PREFIX: &str = "🧠 recall";
+
+/// One source's selected names, for the recall line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecallSource {
+    /// Display names, best first, in injection order.
+    pub names: Vec<String>,
+    /// Sections this source matched but did not inject.
+    pub omitted: usize,
+}
+
+impl RecallSource {
+    fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    /// `label /a, /b +K`, or `None` when the source did not fire.
+    fn segment(&self, label: &str, slash: bool) -> Option<String> {
+        if self.names.is_empty() {
+            return None;
+        }
+        let shown = self
+            .names
+            .iter()
+            .take(RECALL_LINE_NAMES)
+            .map(|n| {
+                if slash {
+                    format!("/{n}")
+                } else {
+                    format!("«{n}»")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut segment = format!("{label} {shown}");
+        let hidden = self.omitted + self.names.len().saturating_sub(RECALL_LINE_NAMES);
+        if hidden > 0 {
+            segment.push_str(&format!(" +{hidden}"));
+        }
+        Some(segment)
+    }
+}
+
+/// What a turn's passive recall injected (#928).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecallSummary {
+    /// Skills named by the index shortlist (#901), best first.
+    pub skills: RecallSource,
+    /// MEMORY.md section headings, best first.
+    pub memory: RecallSource,
+    /// Sources of the active-skill sections that rode along.
+    pub active_skills: RecallSource,
+    /// Project directive files whose sections rode along.
+    pub directives: RecallSource,
+    /// Characters of recall text injected.
+    pub chars: usize,
+}
+
+impl RecallSummary {
+    /// Whether any source fired. An empty summary renders NO line at all.
+    pub fn is_empty(&self) -> bool {
+        self.skills.is_empty()
+            && self.memory.is_empty()
+            && self.active_skills.is_empty()
+            && self.directives.is_empty()
+    }
+
+    /// The turn-start receipt: WHAT was recalled, never what it said.
+    ///
+    /// `None` when nothing was recalled — the flow roll must never carry an
+    /// empty chrome row.
+    pub fn render_line(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        let mut segments: Vec<String> = Vec::new();
+        for (label, source, slash) in [
+            ("skills", &self.skills, true),
+            ("memory", &self.memory, false),
+            ("active skills", &self.active_skills, false),
+            ("directives", &self.directives, false),
+        ] {
+            if let Some(segment) = source.segment(label, slash) {
+                segments.push(segment);
+            }
+        }
+
+        let suffix = format!("{}c", group_thousands(self.chars));
+        // Drop whole sources from the TAIL before cutting a name in half: a
+        // clipped «Open Questi…» reads as a section that does not exist, while
+        // a missing trailing source is visibly absent from the line.
+        loop {
+            let body = format!("{RECALL_LINE_PREFIX} · {}", segments.join(" · "));
+            let full = format!("{body} · {suffix}");
+            if full.chars().count() <= RECALL_LINE_MAX_CHARS || segments.len() <= 1 {
+                return Some(truncate_chars(&full, RECALL_LINE_MAX_CHARS));
+            }
+            segments.pop();
+        }
+    }
+}
+
+/// `1140` → `1,140`: the flow roll reads sizes at a glance.
+fn group_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Truncate to at most `max` chars.
+///
+/// Char-boundary safe BY CONSTRUCTION — the cut is taken over `chars()`, so a
+/// multi-byte heading can never be split into invalid UTF-8 — and marked with
+/// an ellipsis so a clipped name is not read as the whole name.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// Section headings as the line shows them: no `#`, no blanks, deduplicated.
+fn headings(sections: &[Section]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for section in sections {
+        let heading = section
+            .heading
+            .trim()
+            .trim_start_matches('#')
+            .trim()
+            .to_string();
+        if !heading.is_empty() && !out.contains(&heading) {
+            out.push(heading);
+        }
+    }
+    out
 }

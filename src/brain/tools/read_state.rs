@@ -63,6 +63,67 @@ pub fn was_fully_read(session_id: Uuid, path: &Path) -> bool {
         .contains(&(session_id, key_path(path)))
 }
 
+/// Why a path is not a document candidate (#952).
+///
+/// The predicate used to answer with a bare `bool`, so all four causes reached
+/// the reader as one string, `not a project document` — and a skill body is
+/// refused BY CONSTRUCTION (skills are their own retention class), so the
+/// refusal read as a scope bug rather than as the gate working as designed.
+/// Naming the cause is what tells the reader which of the four it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocReject {
+    /// Not a `.md` file (or not a UTF-8 file name).
+    NotMarkdown,
+    /// A skill body (`skills/<slug>/<file>.md`): retained by slug, not as a
+    /// document.
+    SkillBody,
+    /// Under the agent's own profile home: brain files are the prompt
+    /// builder's job, and the profile tree holds config and memory.
+    ProfileHome,
+    /// Matched the OC-08 confidential denylist: the document class must never
+    /// become a route around it.
+    Confidential,
+}
+
+impl DocReject {
+    /// The short cause phrase a refusal puts inside its parentheses.
+    pub fn describe(self) -> &'static str {
+        match self {
+            DocReject::NotMarkdown => "not .md",
+            DocReject::SkillBody => "a skill body — skills are retained by slug, not as documents",
+            DocReject::ProfileHome => "under the profile home",
+            DocReject::Confidential => "confidential",
+        }
+    }
+}
+
+/// Why `path` is not a document candidate, or `None` when it is one (#952).
+///
+/// The predicate order is the contract: a skill body under the profile home is
+/// reported as a skill body, because that is the cause the reader acts on. It
+/// is the single place the order lives — [`is_document_candidate`] delegates
+/// here, so the boolean and the cause can never disagree.
+pub fn document_rejection(path: &Path) -> Option<DocReject> {
+    let canonical = key_path(path);
+    let Some(name) = canonical.file_name().and_then(|n| n.to_str()) else {
+        return Some(DocReject::NotMarkdown);
+    };
+    if !name.ends_with(".md") {
+        return Some(DocReject::NotMarkdown);
+    }
+    if super::seen_skills::skill_slug_from_path(&canonical).is_some() {
+        return Some(DocReject::SkillBody);
+    }
+    // `resolve_profile_home`, not `opencrabs_home`: a predicate must not mkdir.
+    if canonical.starts_with(crate::config::profile::resolve_profile_home()) {
+        return Some(DocReject::ProfileHome);
+    }
+    if super::confidential::is_confidential(&canonical).is_some() {
+        return Some(DocReject::Confidential);
+    }
+    None
+}
+
 /// Whether `path` belongs in the document class at all (#831).
 ///
 /// Eligible: a `.md` file the session may be expected to obey as project law.
@@ -71,23 +132,9 @@ pub fn was_fully_read(session_id: Uuid, path: &Path) -> bool {
 /// (brain files are the prompt builder's job, and the profile tree holds
 /// config and memory that must not be re-injected by a summariser), and
 /// confidential paths (a document class must never become a route around the
-/// OC-08 denylist).
+/// OC-08 denylist). [`document_rejection`] names which of the four it was.
 pub fn is_document_candidate(path: &Path) -> bool {
-    let canonical = key_path(path);
-    let Some(name) = canonical.file_name().and_then(|n| n.to_str()) else {
-        return false;
-    };
-    if !name.ends_with(".md") {
-        return false;
-    }
-    if super::seen_skills::skill_slug_from_path(&canonical).is_some() {
-        return false;
-    }
-    // `resolve_profile_home`, not `opencrabs_home`: a predicate must not mkdir.
-    if canonical.starts_with(crate::config::profile::resolve_profile_home()) {
-        return false;
-    }
-    super::confidential::is_confidential(&canonical).is_none()
+    document_rejection(path).is_none()
 }
 
 /// Record that `session_id` read `path` whole (#831).

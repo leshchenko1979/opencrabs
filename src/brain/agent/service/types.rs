@@ -210,6 +210,17 @@ pub enum ProgressEvent {
         max: u32,
         reason: String,
     },
+    /// Passive recall injected context this turn (#928): one chrome line naming
+    /// WHAT was recalled — the skill shortlist, MEMORY.md sections, active-skill
+    /// sections, project directives — so a flow roll can show recall firing
+    /// without the owner reading the prompt.
+    ///
+    /// The line arrives RENDERED: the brain layer built it from the same
+    /// ranking that produced the injected text, so a channel folds it in as-is
+    /// rather than re-deriving it. Never emitted when recall fired nothing.
+    RecallLine {
+        line: String,
+    },
     /// Optional follow-up suggestions the user MAY accept or ignore, surfaced
     /// by the `suggest_options` tool (non-blocking). The TUI renders one
     /// option as ghost text in the input (Tab fills it) and several as a

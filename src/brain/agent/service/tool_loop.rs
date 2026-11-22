@@ -695,6 +695,21 @@ impl AgentService {
             // the resolver's WARN names what was substituted.
             let manifest =
                 crate::brain::agent::service::context::resolve_context_manifest(marker_text);
+            // #947: the marker just deleted every skill body this session had
+            // READ but never ACTIVATED, so re-injection (which reads ACTIVE
+            // only) had nothing to restore and the lane carried on without the
+            // instructions it believes it holds. Promote the read set FIRST,
+            // so the summariser's explicit decisions below still win: a
+            // `discard_skills` entry overrides the mechanical promotion.
+            let promoted = crate::brain::tools::seen_skills::promote_seen_to_active(session_id);
+            if !promoted.is_empty() {
+                tracing::info!(
+                    "compaction: promoted {} read skill(s) SEEN->ACTIVE so their bodies survive \
+                     the marker: {:?}",
+                    promoted.len(),
+                    promoted
+                );
+            }
             for discard_slug in manifest.discard_skills {
                 self.unregister_active_skill(session_id, &discard_slug);
             }
@@ -1441,27 +1456,41 @@ impl AgentService {
         // carries no skill can still have read project law, and that law is
         // exactly what a compaction is most likely to drop.
         //
-        // The budget is the retained set's LEFTOVER, so documents and skills
-        // share one envelope. The registered set is read first because
-        // computing the leftover loads every skill from disk — a session with
-        // no registered documents must not pay that.
+        // Documents and skills share one envelope, so the budget starts as the
+        // retained set's LEFTOVER — but skills are charged first and in a real
+        // skill tree they alone exceed the 5 % envelope, which clamps the
+        // leftover to zero and starves every document (#951). The leftover is
+        // therefore floored at 10 % of the window: one envelope, one number
+        // given to the model, and the floor cannot grow with anything the
+        // session registers. The registered set is read first because computing
+        // the leftover loads every skill from disk — a session with no
+        // registered documents must not pay that.
         if crate::brain::tools::retained_docs::has_retained_set(session_id) {
             let skills = crate::brain::skills::load_all_skills();
             let seen_aux = crate::brain::tools::seen_skills::aux_seen_for_session(session_id);
             let total = crate::brain::skills::retained_set_budget_tokens(context.max_tokens);
             let used =
                 crate::brain::skills::retained_set_tokens(&active_skills, &skills, &seen_aux);
-            if let Some(section) =
-                crate::brain::tools::retained_docs::render(session_id, total.saturating_sub(used))
+            let leftover = total.saturating_sub(used);
+            let budget = leftover.max(crate::brain::skills::retained_doc_budget_floor(
+                context.max_tokens,
+            ));
+            if let Some(section) = crate::brain::tools::retained_docs::render(session_id, budget)
                 && let Some(ref mut brain) = context.system_brain
             {
                 // The retained set is invisible to the user and to every surface
                 // except the model's own context, so this line IS the evidence
                 // that a compaction kept (or refused) a document (#831).
+                //
+                // `budget_tokens` is what the documents were actually allowed,
+                // while `leftover_tokens` is what the skills left of the 5 %
+                // envelope: when the two differ the floor applied, and the log
+                // must not be misread as "documents got the whole envelope".
                 tracing::info!(
                     target: "brain::retained_docs",
                     session_id = %session_id,
-                    budget_tokens = total.saturating_sub(used),
+                    budget_tokens = budget,
+                    leftover_tokens = leftover,
                     section_chars = section.len(),
                     injected = section.contains("## Retained documents"),
                     "retained documents re-injected on wake"
@@ -1517,13 +1546,22 @@ impl AgentService {
         // follow-up).
         let brain_dir = self.brain_workspace_path();
         let working_directory = self.get_working_directory_for_session(session_id);
-        let mut context_user_message = Self::augment_user_message(
+        let (mut context_user_message, recall) = Self::augment_user_message(
             session_id,
             &user_message,
             brain_dir.as_deref(),
             Some(&working_directory),
         )
         .await;
+        // Turn-start chrome (#928): name WHAT passive recall injected, so the
+        // flow roll shows recall firing without the owner reading the prompt.
+        // Silent when recall fired nothing — no empty chrome row — and carried
+        // as a progress event, so the brain layer never learns a channel type.
+        if let Some(line) = recall.as_ref().and_then(|s| s.render_line())
+            && let Some(cb) = progress_callback.as_ref()
+        {
+            cb(session_id, ProgressEvent::RecallLine { line });
+        }
         if !skill_update_hints.is_empty() {
             let hints_joined = skill_update_hints.join("\n");
             context_user_message = format!("{hints_joined}\n\n{context_user_message}");

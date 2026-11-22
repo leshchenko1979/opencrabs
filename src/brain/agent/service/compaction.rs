@@ -365,6 +365,52 @@ fn safety_truncate_to_80(context: &mut AgentContext, max_tokens: usize) -> bool 
     context.messages.len() < before_len
 }
 
+/// #805: describe what a Tier 2 truncation attempt actually did.
+///
+/// Split out of `enforce_context_budget` so both shapes can be pinned by a
+/// test. The pair of lines this replaces announced the attempt and then printed
+/// the **pre-cut** percentage under the words "Hard truncation complete", so a
+/// successful cut read as a failure (`158718 tokens (91%)` immediately after
+/// cutting to 80%) and a no-op was indistinguishable from a cut. On a live
+/// session that cost a day of diagnosis: 347 WARNs, 118 of which dropped
+/// literally nothing.
+///
+/// `cut` is false whenever no message was dropped, and the message then makes
+/// no claim that anything was truncated. A window pinned by a couple of outsized
+/// messages cannot be brought down this way, and announcing a truncation that
+/// did not happen is worse than announcing nothing.
+///
+/// Returns `(cut, message)`.
+fn describe_truncation(
+    before_messages: usize,
+    before_tokens: usize,
+    before_pct: f64,
+    context: &AgentContext,
+    max_tokens: usize,
+) -> (bool, String) {
+    let after_messages = context.messages.len();
+    let after_tokens = context.token_count;
+    let after_pct = if max_tokens > 0 {
+        context.effective_token_count() as f64 / max_tokens as f64 * 100.0
+    } else {
+        100.0
+    };
+    let cut = after_messages < before_messages;
+    let message = if cut {
+        format!(
+            "Hard truncation cut {before_messages} -> {after_messages} messages, \
+             {before_tokens} -> {after_tokens} tokens ({before_pct:.0}% -> {after_pct:.0}% of window)"
+        )
+    } else {
+        format!(
+            "Hard truncation freed nothing: still {after_messages} messages, \
+             {after_tokens} tokens ({after_pct:.0}% of window) — the 80% target is \
+             unreachable from here, the window is pinned by messages this path cannot drop"
+        )
+    };
+    (cut, message)
+}
+
 /// Whether this visit has to stop and wait for an in-flight summariser.
 ///
 /// Waiting, never cancelling. Two reasons to stop running ahead of it:
@@ -452,24 +498,37 @@ impl AgentService {
 
         // ── Tier 2: 90% hard floor — truncate to 80%, then fall through to Tier 1 compaction ──
         if usage_pct >= 90.0 {
-            tracing::warn!(
-                "Context at {:.0}% ({} tokens) — hard truncating to 80%",
-                usage_pct,
-                context.token_count,
-            );
+            // #805: measured around the attempt, and reported after it. The old
+            // shape announced "hard truncating" before knowing whether anything
+            // would be dropped, then printed the PRE-cut percentage under
+            // "Hard truncation complete" — a successful cut read as a failure
+            // and a no-op looked identical to a cut.
+            let before_messages = context.messages.len();
+            let before_tokens = context.token_count;
 
-            truncated |= safety_truncate_to_80(context, effective_max);
+            let dropped = safety_truncate_to_80(context, effective_max);
+            truncated |= dropped;
 
             if let Some(cb) = progress_callback {
                 cb(session_id, ProgressEvent::TokenCount(context.token_count));
             }
 
-            tracing::info!(
-                "Hard truncation complete: {} messages, {} tokens ({:.0}%)",
-                context.messages.len(),
-                context.token_count,
-                effective_tokens as f64 / effective_max as f64 * 100.0,
+            let (cut, report) = describe_truncation(
+                before_messages,
+                before_tokens,
+                usage_pct,
+                context,
+                effective_max,
             );
+            // One source of truth: the report derives `cut` from the message
+            // count it can see, and the cut reports what it dropped. If those
+            // two ever disagree, the report is describing a different event.
+            debug_assert_eq!(cut, dropped, "truncation report disagrees with the cut");
+            if cut {
+                tracing::info!("{}", report);
+            } else {
+                tracing::warn!("{}", report);
+            }
 
             let usage_pct_now = if effective_max > 0 {
                 (context.effective_token_count() as f64 / effective_max as f64) * 100.0
@@ -1159,7 +1218,7 @@ impl AgentService {
                 context_inventory,
             )
             .await?;
-            Ok(Self::decorate_compaction_summary(summary, session_id, subagents).await)
+            Ok(Self::finalize_continuation_document(summary, session_id, subagents).await)
         });
 
         if let Ok(mut map) = self.pending_compactions.lock() {
@@ -1334,5 +1393,109 @@ mod tests {
         let before = c.messages.len();
         assert!(!safety_truncate_to_80(&mut c, 100_000));
         assert_eq!(c.messages.len(), before);
+    }
+
+    /// #805: a successful cut reports where it ENDED, not where it started.
+    ///
+    /// The line this replaces printed the PRE-cut percentage under the words
+    /// "Hard truncation complete", so cutting 91% down to 80% logged
+    /// `158718 tokens (91%)` — a success that read as a failure.
+    #[test]
+    fn a_cut_reports_the_post_cut_percentage() {
+        let window = 100_000usize;
+        let mut c = context_with(window, 92_000);
+        let before_messages = c.messages.len();
+        let before_tokens = c.token_count;
+        let before_pct = c.effective_token_count() as f64 / window as f64 * 100.0;
+
+        assert!(
+            safety_truncate_to_80(&mut c, window),
+            "the fixture must cut"
+        );
+        let (cut, message) =
+            describe_truncation(before_messages, before_tokens, before_pct, &c, window);
+
+        assert!(cut, "the fixture dropped messages, so the report says so");
+        let after_pct = c.effective_token_count() as f64 / window as f64 * 100.0;
+        assert!(
+            message.contains(&format!("{after_pct:.0}%")),
+            "the report must carry the post-cut percentage {after_pct:.0}%, \
+             not the pre-cut {before_pct:.0}%: {message}"
+        );
+        assert!(
+            !message.contains(&format!("({before_pct:.0}%)")),
+            "the pre-cut percentage must never be presented as the result: {message}"
+        );
+        assert!(
+            message.contains(&format!("{before_messages} -> {}", c.messages.len())),
+            "and it must name the message count it moved: {message}"
+        );
+    }
+
+    /// #805: a no-op must say it freed nothing, never wear the success wording.
+    ///
+    /// The two-message floor makes `hard_truncate_to` refuse to drop anything
+    /// while the local count is still over the target, and the window is not
+    /// exceeded, so `trim_to_fit` finds nothing either. That is the shape that
+    /// logged "Hard truncation complete" 118 times on `359fe71b` without moving
+    /// a single token.
+    #[test]
+    fn a_no_op_does_not_claim_a_truncation() {
+        let window = 100_000usize;
+        let mut c = AgentContext::new(Uuid::new_v4(), window);
+
+        // Two messages only, and sized so the pair lands between 80% and 100%
+        // of the window. Measured rather than assumed: the tokenizer decides,
+        // and a fixture that guessed would pass for the wrong reason.
+        let mut per_message = filler();
+        while AgentContext::estimate_tokens(&per_message) * 2 <= window * 4 / 5 {
+            per_message.push_str(&filler());
+        }
+        c.add_message(Message::user(per_message.clone()));
+        c.add_message(Message::user(per_message));
+
+        assert_eq!(
+            c.messages.len(),
+            2,
+            "the two-message floor is the mechanism under test"
+        );
+        assert!(
+            c.token_count > window * 4 / 5,
+            "precondition: over the 80% target, or the early return fires and \
+             this proves nothing (local {})",
+            c.token_count
+        );
+        assert!(
+            c.token_count <= window,
+            "precondition: under the window, or trim_to_fit drops and this is \
+             not the no-op shape (local {})",
+            c.token_count
+        );
+
+        let before_messages = c.messages.len();
+        let before_tokens = c.token_count;
+        let before_pct = c.effective_token_count() as f64 / window as f64 * 100.0;
+        let dropped = safety_truncate_to_80(&mut c, window);
+        let (cut, message) =
+            describe_truncation(before_messages, before_tokens, before_pct, &c, window);
+
+        assert!(!dropped, "the two-message floor must block the cut");
+        assert_eq!(
+            c.messages.len(),
+            before_messages,
+            "and nothing else may drop them either, or this is not the no-op shape"
+        );
+        assert!(
+            !cut,
+            "nothing was dropped, so the report must not claim a cut"
+        );
+        assert!(
+            message.contains("freed nothing"),
+            "a no-op must say so plainly: {message}"
+        );
+        assert!(
+            !message.contains("Hard truncation cut"),
+            "a no-op must not wear the success wording: {message}"
+        );
     }
 }

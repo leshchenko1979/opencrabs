@@ -5,7 +5,6 @@
 use super::super::error::Result;
 use super::super::r#trait::ToolResult;
 use super::EvolveTool;
-use super::archive::{extract_from_tar_gz, extract_from_zip};
 use super::binary_health::{get_binary_migration_count, health_check_binary};
 use super::restart_status::RestartStatus;
 use super::systemd::{
@@ -13,6 +12,7 @@ use super::systemd::{
     build_systemd_restart_command, count_matching_systemd_units,
 };
 use crate::brain::agent::ProgressEvent;
+use crate::utils::archive::{extract_member_tar_gz, extract_member_zip};
 use crate::utils::install::{binary_name, platform_suffix};
 use serde_json::Value;
 
@@ -242,9 +242,9 @@ impl EvolveTool {
         // Extract
         let bin_name = binary_name();
         let binary_data = if is_windows {
-            extract_from_zip(&archive_bytes, bin_name)?
+            extract_member_zip(&archive_bytes, bin_name)?
         } else {
-            extract_from_tar_gz(&archive_bytes, bin_name)?
+            extract_member_tar_gz(&archive_bytes, bin_name)?
         };
 
         // Locate current executable. Use running_binary_path() (not raw
@@ -470,9 +470,9 @@ impl EvolveTool {
         // or extraction failures should not block the evolve.
         let rtk_bin_name = if is_windows { "rtk.exe" } else { "rtk" };
         let rtk_result = if is_windows {
-            extract_from_zip(&archive_bytes, rtk_bin_name)
+            extract_member_zip(&archive_bytes, rtk_bin_name)
         } else {
-            extract_from_tar_gz(&archive_bytes, rtk_bin_name)
+            extract_member_tar_gz(&archive_bytes, rtk_bin_name)
         };
         match rtk_result {
             Ok(rtk_data) => {

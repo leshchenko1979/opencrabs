@@ -309,6 +309,55 @@ def score_proposed_primary_only(content, tokens):
     return (sum(lower.count(t) for t in tokens),)
 
 
+# ------------------------------------------------------ #941: proximity primary
+#
+# The measurement in #941 is the reason the ORDER changed: `(hits, leading,
+# adjacency)` with an unlimited budget scores exactly what the budgeted ranker
+# scores (0.053 both) on the live store, so no reweighting of those three can
+# help. The new primary signal is the character span from the first query
+# term's first occurrence to the last one's, tightest first.
+#
+# It is modelled here for the same reason every other rule is: the instrument
+# must be able to say what a rule scores BEFORE a branch is built on it. On
+# THIS fixture the span is constant across every pool (see stage 3), so the
+# figure does not move — and that is the prediction, not a disappointment.
+
+NO_PROXIMITY = float("inf")
+
+
+def proximity_span(content, tokens):
+    """Character span between the first occurrences of the extreme query terms.
+
+    `None` (modelled as infinity) when a term is missing: a partial match has
+    no span, and scoring that as 0 would hand the tightest possible value to
+    every row that matches only half the query."""
+    lo = hi = None
+    seen = False
+    for t in tokens:
+        if not t:
+            continue
+        pos = content.find(t)
+        if pos < 0:
+            return NO_PROXIMITY
+        seen = True
+        lo = pos if lo is None else min(lo, pos)
+        hi = pos if hi is None else max(hi, pos)
+    return (hi - lo) if seen else NO_PROXIMITY
+
+
+def score_941(content, tokens):
+    """`(proximity ascending, hits, leading, adjacency)` — the shipped #941
+    rule, expressed as an ascending sort key so Python's stable sort reproduces
+    the Rust `Reverse<Score>` ordering (and keeps recency inside a full tie)."""
+    lower = content.lower()
+    return (
+        proximity_span(lower, tokens),
+        -sum(lower.count(t) for t in tokens),
+        -leading_hits(lower, tokens),
+        -adjacency_run(lower, tokens),
+    )
+
+
 def rank_with(rows, tokens, scorer):
     pool = like(rows, tokens)[: min(K * 5, 200)]
     scored = [(scorer(r["content"], tokens), r) for r in pool]
@@ -328,6 +377,25 @@ def search_proposed_primary_only(rows, query, k):
     if len(toks) < 2:
         return []
     return rank_with(rows, toks, score_proposed_primary_only)
+
+def rank_941(rows, tokens, k):
+    """The #941 rule. `score_941` already carries the polarity (ascending span,
+    negated counts), so this sorts ASCENDING — and Python's sort is stable, so
+    a full tie keeps the recency order, exactly as the Rust stable sort does."""
+    pool = like(rows, tokens)[: min(k * 5, 200)]
+    scored = [(score_941(r["content"], tokens), r) for r in pool]
+    scored.sort(key=lambda x: x[0])
+    return [r for _, r in scored[:k]]
+
+def search_941(rows, query, k):
+    """Mirror of `search_slice` with the #941 scorer: contiguous arm first."""
+    first = contiguous(rows, query, k)
+    if first:
+        return first
+    toks = tokenize(query)
+    if len(toks) < 2:
+        return []
+    return rank_941(rows, toks, k)
 
 
 def prove_ceiling(rows, dataset):
@@ -440,6 +508,30 @@ def main():
         f"MRR={primary_only['mrr']:.3f}"
     )
     print(f"\ndelta: recall {proposed['recall'] - base['recall']:+.3f}, MRR {proposed['mrr'] - base['mrr']:+.3f}")
+
+    # #941 — the shipped rule. The span is constant across every pool of this
+    # fixture, so the figure is PREDICTED to equal the control; a difference
+    # here would mean the model of the rule is wrong.
+    prox = evaluate(rows, dataset, search_941)
+    print("\n== stage 2c: SHIPPED #941 (proximity span, then hits, leading, adjacency) ==")
+    print(
+        f"recall@{K}={prox['recall']:.3f} ({prox['found']}/{len(dataset['positives'])}) "
+        f"MRR={prox['mrr']:.3f} FPR={prox['fpr']:.3f} ({prox['fp']}/{len(dataset['negatives'])})"
+    )
+    print("ranks:", sorted(prox["ranks"]))
+    varying = 0
+    for case in dataset["positives"]:
+        toks = tokenize(case["query"])
+        pool = like(rows, toks)[: min(K * 5, 200)]
+        if len({proximity_span(r["content"].lower(), toks) for r in pool}) > 1:
+            varying += 1
+    print(f"pools whose proximity span is NON-constant: {varying}/{len(dataset['positives'])}")
+    if (round(prox["recall"], 3), round(prox["mrr"], 3)) != (round(base["recall"], 3), round(base["mrr"], 3)):
+        print(
+            f"UNEXPECTED: #941 moved the fixture ({prox['recall']:.3f}/{prox['mrr']:.3f} vs "
+            f"{base['recall']:.3f}/{base['mrr']:.3f}) — the span is supposed to be constant here.",
+            file=sys.stderr,
+        )
 
     print("\n== stage 3: can this fixture measure a relevance term at all? ==")
     constant = prove_ceiling(rows, dataset)

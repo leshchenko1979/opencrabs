@@ -20,7 +20,7 @@ use super::send::{
 };
 use crate::brain::agent::AgentService;
 use crate::db::ChannelMessageRepository;
-use crate::db::models::ChannelMessage as DbChannelMessage;
+use crate::db::models::{ChannelMessage as DbChannelMessage, SHIP_PLANE_RICH_MD};
 use crate::utils::image::MediaSource;
 use crate::utils::sanitize::{redact_secrets, redact_secrets_scoped};
 use crate::utils::{LocalImageFailure, LocalImageFailureReason};
@@ -258,6 +258,78 @@ pub(crate) fn subagent_counts_for(
     };
     let (working, awaiting) = mgr.alive_counts_for(session_id);
     super::flow::SubagentCounts { working, awaiting }
+}
+
+/// Which wire a delivered final answer actually left on (#908), decided at the
+/// send site and stamped onto the row [`record_bot_reply`] persists.
+///
+/// Only [`ShipPlane::RichMd`] writes the ship-plane marker: it is the one
+/// plane whose stored body is the exact markdown a re-edit can re-send, which
+/// is what qualifies the row as a cross-turn glue target (#91). The classic
+/// ladder (`send_html_or_plain`, which itself degrades to plain text when
+/// Telegram rejects the markup) and the rich-HTML mermaid fallback leave the
+/// column NULL — their stored body is not re-sendable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShipPlane {
+    /// `sendRichMessage` from markdown — the bubble `last_bot_rich_md` serves.
+    RichMd,
+    /// Classic parse-mode HTML, its plain-text fallback, or rich-HTML.
+    Classic,
+}
+
+impl ShipPlane {
+    fn marker(self) -> Option<&'static str> {
+        match self {
+            ShipPlane::RichMd => Some(SHIP_PLANE_RICH_MD),
+            ShipPlane::Classic => None,
+        }
+    }
+}
+
+/// Persist one delivered bot answer into `channel_messages` (#908).
+///
+/// The single row shape both final-answer arms use — the rich fallback that
+/// replaces its intermediates, and the classic/plain reply at the end of the
+/// turn — so chat, thread, topic name and message id cannot drift between
+/// them. `plane` is the wire the answer ACTUALLY left on; it is what
+/// `last_bot_rich_md` filters on for cross-turn glue (#91), so a classic
+/// reply must never be stamped rich-markdown.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn record_bot_reply(
+    channel_msg_repo: &ChannelMessageRepository,
+    chat_id: i64,
+    chat_title: &str,
+    bot_display_name: &str,
+    content: &str,
+    platform_message_id: Option<i32>,
+    thread_id: Option<teloxide::types::ThreadId>,
+    plane: ShipPlane,
+) {
+    let chat_id_str = chat_id.to_string();
+    let thread_id_str = thread_id.map(|t| t.0.to_string());
+    let resolved_topic_name = match &thread_id_str {
+        Some(tid) => channel_msg_repo
+            .latest_topic_name("telegram", &chat_id_str, tid)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let cm = DbChannelMessage::new(
+        "telegram".to_string(),
+        chat_id_str,
+        Some(chat_title.to_string()),
+        "bot:opencrabs".to_string(),
+        bot_display_name.to_string(),
+        content.to_string(),
+        "text".to_string(),
+        platform_message_id.map(|m| m.to_string()),
+    )
+    .with_thread(thread_id_str, resolved_topic_name)
+    .with_ship_plane(plane.marker().map(str::to_string));
+    if let Err(e) = channel_msg_repo.insert(&cm).await {
+        tracing::warn!("Telegram: failed to record bot reply in channel_messages: {e}");
+    }
 }
 
 /// Applies the same sanitize/redact/dedup/split/send chain as the edit loop.
@@ -1215,32 +1287,22 @@ pub(crate) async fn deliver_final_response(
                                 .await
                                 .map(|u| format!("@{}", u))
                                 .unwrap_or_else(|| "OpenCrabs".to_string());
-                            let thread_id_str = thread_id.map(|t| t.0.to_string());
-                            let resolved_topic_name = match &thread_id_str {
-                                Some(tid) => channel_msg_repo
-                                    .latest_topic_name("telegram", &chat_id.0.to_string(), tid)
-                                    .await
-                                    .ok()
-                                    .flatten(),
-                                None => None,
-                            };
-                            let cm = DbChannelMessage::new(
-                                "telegram".to_string(),
-                                chat_id.0.to_string(),
-                                Some(chat_title.to_string()),
-                                "bot:opencrabs".to_string(),
-                                bot_display_name,
-                                pre_dedup_text.clone(),
-                                "text".to_string(),
-                                Some(rich_msg_id.to_string()),
+                            // #908: this arm IS the markdown plane
+                            // (`send_rich_with_mermaid_id` above). Its stored
+                            // body is `pre_dedup_text` — the markdown the wire
+                            // got, minus `link_file_markers`' wire-only link
+                            // targets — so it remains a legal glue target.
+                            record_bot_reply(
+                                channel_msg_repo,
+                                chat_id.0,
+                                chat_title,
+                                &bot_display_name,
+                                &pre_dedup_text,
+                                Some(rich_msg_id),
+                                thread_id,
+                                ShipPlane::RichMd,
                             )
-                            .with_thread(thread_id_str, resolved_topic_name);
-                            if let Err(e) = channel_msg_repo.insert(&cm).await {
-                                tracing::warn!(
-                                    "Telegram: rich fallback: failed to record bot reply: {}",
-                                    e
-                                );
-                            }
+                            .await;
                         }
                         text_only
                     }
@@ -1351,6 +1413,11 @@ pub(crate) async fn deliver_final_response(
             // persist it and later recover the EXACT message a user replies to,
             // instead of guessing "the most recent bot message" (#234 follow-up).
             let mut sent_reply_id: Option<i32> = None;
+            // #908: the plane the final answer ACTUALLY shipped on, decided by
+            // the arms below and stamped onto the persisted row by
+            // `record_bot_reply`. Defaults to classic (HTML / plain-text
+            // fallback); only a successful rich-markdown send promotes it.
+            let mut shipped_plane = ShipPlane::Classic;
             // Merge candidate (#tg-suggest-merge): id + exact HTML of the bubble
             // the classic HTML path delivered the final response in. Captured in
             // every success arm below; handed to StreamingState after delivery so
@@ -1508,6 +1575,16 @@ pub(crate) async fn deliver_final_response(
                                     // arm above may have recorded its own.
                                     sacrificed.extend(rich_sacrificed);
                                     sent_reply_id = Some(id);
+                                    // #908: this bubble left on the rich-MARKDOWN
+                                    // plane — but only mark it as a glue target
+                                    // when the body we persist below IS the body
+                                    // that shipped. A media-owning answer shipped
+                                    // `rich_md` (with `tg://` references the
+                                    // stored `text_only` does not carry), so a
+                                    // re-edit from storage would drop its media.
+                                    if rich_md == text_only {
+                                        shipped_plane = ShipPlane::RichMd;
+                                    }
                                     // Merge candidate (#tg-suggest-merge): the
                                     // controls can ride this bubble — table-bearing
                                     // answers included: the merge edit goes back out
@@ -1878,32 +1955,20 @@ pub(crate) async fn deliver_final_response(
                     .await
                     .map(|u| format!("@{}", u))
                     .unwrap_or_else(|| "OpenCrabs".to_string());
-                let thread_id_str = thread_id.map(|t| t.0.to_string());
-                let resolved_topic_name = match &thread_id_str {
-                    Some(tid) => channel_msg_repo
-                        .latest_topic_name("telegram", &chat_id.0.to_string(), tid)
-                        .await
-                        .ok()
-                        .flatten(),
-                    None => None,
-                };
-                let cm = DbChannelMessage::new(
-                    "telegram".to_string(),
-                    chat_id.0.to_string(),
-                    Some(chat_title.to_string()),
-                    "bot:opencrabs".to_string(),
-                    bot_display_name,
-                    text_only.clone(),
-                    "text".to_string(),
-                    pmid.clone(),
+                // #908: `shipped_plane` was decided by the delivery arms above
+                // (rich-markdown success promotes it, every fallback leaves it
+                // classic) — the row records what actually went on the wire.
+                record_bot_reply(
+                    channel_msg_repo,
+                    chat_id.0,
+                    chat_title,
+                    &bot_display_name,
+                    &text_only,
+                    sent_reply_id,
+                    thread_id,
+                    shipped_plane,
                 )
-                .with_thread(thread_id_str, resolved_topic_name);
-                if let Err(e) = channel_msg_repo.insert(&cm).await {
-                    tracing::warn!(
-                        "Telegram: failed to record bot reply in channel_messages: {}",
-                        e
-                    );
-                }
+                .await;
             }
 
             // If input was voice AND TTS is enabled, also send voice note after text

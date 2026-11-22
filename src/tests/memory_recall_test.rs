@@ -269,6 +269,14 @@ async fn recall_for_session_aggregates_sources() {
     .await
     .expect("should recall from directives");
 
-    assert!(recalled.contains("from project directive AGENTS.md"));
-    assert!(recalled.contains("host-diag"));
+    assert!(recalled.text.contains("from project directive AGENTS.md"));
+    assert!(recalled.text.contains("host-diag"));
+    // The summary comes off the SAME match (#928): the directive that was
+    // injected is the directive the line names.
+    assert_eq!(recalled.summary.directives.names, vec!["AGENTS.md"]);
+    assert_eq!(
+        recalled.summary.chars,
+        recalled.text.chars().count(),
+        "the receipt's size is the text it describes, not a re-measurement"
+    );
 }

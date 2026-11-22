@@ -122,3 +122,54 @@ fn malformed_header_without_brackets_still_parses_title() {
     assert_eq!(parsed.len(), 1);
     assert!(parsed[0].detail.starts_with("Plain title"));
 }
+
+/// #938: a tool execution that returned a non-zero code is a WARNING in the
+/// activity feed — not a success (the defect) and not an error (#763).
+///
+/// Driven through `parse_improvements_md`, the module's public entry, rather
+/// than the private `level_from_status`: a unit test on a private function
+/// needs the function made `pub(crate)`, which is a production change made
+/// only to reach the test — and on the pre-fix tree the test would then fail
+/// to COMPILE, proving nothing about the behaviour. Through the parser it
+/// fails on an ASSERTION, which is the evidence #938 asks for.
+///
+/// Fails pre-fix: `level_from_status` had no `nonzero` arm, so the value fell
+/// through to `_ => Info` and the warning never surfaced.
+#[test]
+fn nonzero_status_renders_as_a_warning() {
+    let raw = "## [Nonzero] Sweep ran with a non-zero exit\n\
+               \n\
+               **Date:** 2026-11-21 21:00 UTC\n\
+               **Target:** tools/audit.py\n\
+               **Status:** Nonzero\n";
+    let parsed = parse_improvements_md(raw, 50);
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(
+        parsed[0].level,
+        McActivityLevel::Warn,
+        "a non-zero exit is a warning, got {:?}",
+        parsed[0].level
+    );
+    assert_ne!(
+        parsed[0].level,
+        McActivityLevel::Success,
+        "a non-zero exit is not a success (#938)"
+    );
+    assert_ne!(
+        parsed[0].level,
+        McActivityLevel::Error,
+        "a non-zero exit is not a tool failure (#763)"
+    );
+
+    // The neighbours keep their mapping: the new arm must not swallow them.
+    for (status, expected) in [
+        ("Applied", McActivityLevel::Success),
+        ("Error", McActivityLevel::Error),
+        ("Warn", McActivityLevel::Warn),
+        ("Info", McActivityLevel::Info),
+    ] {
+        let raw = format!("## [x] t\n\n**Date:** 2026-11-21 21:00 UTC\n**Status:** {status}\n");
+        let parsed = parse_improvements_md(&raw, 50);
+        assert_eq!(parsed[0].level, expected, "status {status} regressed");
+    }
+}

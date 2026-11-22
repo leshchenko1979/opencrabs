@@ -378,6 +378,13 @@ pub struct ToolExecution {
     pub arguments: String,
     /// JSON
     pub result: Option<String>,
+    /// The tool-level outcome, derived by
+    /// [`tool_outcome_status`](crate::db::repository::tool_outcome_status):
+    /// `"success"` (ran clean, or no process and the tool succeeded),
+    /// `"nonzero"` (ran and returned a non-zero code, #938), or `"error"` (no
+    /// process outcome and the tool failed). Rows written before the #938
+    /// cutover may still read `"success"` beside a non-zero `exit_code` — they
+    /// are append-only and deliberately not backfilled.
     pub status: String,
     pub approved_at: Option<DateTime<Utc>>,
     pub executed_at: Option<DateTime<Utc>>,
@@ -407,6 +414,15 @@ impl ToolExecution {
 /// last topic message from anything else = interrupted turn; from this id =
 /// the bot already replied, log only.
 pub const BOT_SENDER_ID: &str = "bot:opencrabs";
+
+/// Ship-plane marker for a bot bubble delivered on the rich-MARKDOWN plane
+/// (#908): `sendRichMessage` with `rich_message.markdown`. It is the only
+/// plane whose stored content is the exact body a re-edit can re-send, which
+/// is what makes the row a legal cross-turn glue target (#91). Written by the
+/// Telegram delivery path at send time; read by
+/// `ChannelMessageRepository::last_bot_rich_md`. Both sides bind this constant
+/// so the literal cannot drift out of the lookup.
+pub const SHIP_PLANE_RICH_MD: &str = "rich-md";
 
 /// Channel message model — passive capture of messages from channel platforms
 #[derive(Debug, Clone, Serialize, Deserialize)]
