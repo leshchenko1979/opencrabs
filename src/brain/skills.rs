@@ -477,9 +477,54 @@ where
 /// bind the binary to the machine that built it, and a home-relative path would
 /// bind it to one profile; the executable's own directory is the one location
 /// that follows the install and serves every profile on the host.
+///
+/// A binary that was never installed — `cargo test`, and `cargo run` from a
+/// checkout — has no installer to lay the sidecar down, so `<exe_dir>/skills`
+/// cannot exist and the loader served ZERO built-ins. Every consumer of the
+/// live registry then silently lost the whole built-in tier at once (the
+/// breakdown card, the context inventory, `load_brain_file`'s filename form,
+/// the prompt builder — #949). For a test build only, fall back to the shipped
+/// source tree the archive is cut from, so the tier is present instead of
+/// absent. The fallback is `cfg(test)`-gated, so it never reaches a shipped
+/// binary: production still resolves the sidecar and nothing compiled-in,
+/// which is #946's rule.
 pub fn builtin_skills_dir() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.join("skills"))
+    let installed = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("skills")));
+
+    // An installed binary resolves the sidecar and nothing else.
+    if installed.as_ref().is_some_and(|dir| dir.is_dir()) {
+        return installed;
+    }
+
+    // A test binary is never installed (see the doc comment above).
+    #[cfg(test)]
+    {
+        if let Some(tree) = shipped_skills_source_tree() {
+            return Some(tree);
+        }
+    }
+
+    installed
+}
+
+/// The repo's built-in skill source of truth: the tree the release archive and
+/// the deploy artifact copy into `skills/` beside the binary.
+///
+/// Test builds only. It is a compile-time absolute path, which #946 forbids in
+/// a shipped artifact, and it exists only where the checkout does — so a test
+/// binary resolves the same bytes an install would, and a shipped binary never
+/// sees it.
+#[cfg(test)]
+fn shipped_skills_source_tree() -> Option<PathBuf> {
+    let tree = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("docs")
+        .join("reference")
+        .join("templates")
+        .join("skills");
+    tree.is_dir().then_some(tree)
 }
 
 /// Warn once per process when the built-in sidecar is missing.

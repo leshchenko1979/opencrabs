@@ -372,6 +372,69 @@ async fn clean_profile_loads_all_eight_builtins_from_the_sidecar() {
     );
 }
 
+/// #949: a binary that was never installed still serves the built-in tier.
+///
+/// `cargo test` produces its binary in a cargo target directory, so
+/// `<exe_dir>/skills` — the sidecar an install lays down — cannot exist there.
+/// The loader used to return that absent path and serve ZERO built-ins, so
+/// every consumer of the live registry lost the whole built-in tier at once
+/// (the breakdown card, the context inventory, `load_brain_file`'s filename
+/// form, the prompt builder). nextest's fail-fast then reported only the first
+/// victim it scheduled, so one deterministic defect looked like a test that
+/// alternated green/red.
+///
+/// This pins the invariant directly instead of the symptom: the resolved
+/// built-in directory EXISTS and carries every shipped skill, and the
+/// production entry point (`load_all_skills`) serves them from a clean profile.
+#[test]
+fn an_uninstalled_binary_still_serves_the_builtin_tier() {
+    let dir = crate::brain::skills::builtin_skills_dir()
+        .expect("a built-in skills dir must resolve for a test binary");
+    assert!(
+        dir.is_dir(),
+        "the resolved built-in dir must exist, got {} — a test binary has no \
+         installer, so the loader has to fall back to the shipped tree",
+        dir.display()
+    );
+
+    // The expected set is read from the tree the archive is cut from, so the
+    // guard cannot pass by enumerating its own constant.
+    let shipped = shipped_skills_dir();
+    let mut expected: Vec<String> = std::fs::read_dir(&shipped)
+        .expect("the shipped templates tree reads")
+        .flatten()
+        .filter(|entry| entry.path().join("SKILL.md").is_file())
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .collect();
+    expected.sort();
+    assert!(
+        !expected.is_empty(),
+        "no skills under {} — test is vacuous",
+        shipped.display()
+    );
+
+    for name in &expected {
+        assert!(
+            dir.join(name).join("SKILL.md").is_file(),
+            "the resolved built-in dir must carry `{name}`: {}",
+            dir.display()
+        );
+    }
+
+    // And the production entry point serves them under a clean profile — the
+    // exact read every failing test depended on.
+    let home = tempfile::TempDir::new().unwrap();
+    let loaded =
+        crate::config::profile::with_home_override(home.path().to_path_buf(), load_all_skills);
+    for name in &expected {
+        assert!(
+            loaded.iter().any(|skill| &skill.name == name),
+            "load_all_skills() lost the built-in `{name}`; loaded: {:?}",
+            loaded.iter().map(|skill| &skill.name).collect::<Vec<_>>()
+        );
+    }
+}
+
 // --- globs frontmatter (issue #150) ---
 
 #[test]
