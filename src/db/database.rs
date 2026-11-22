@@ -225,6 +225,18 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // `MIGRATION_EFFECTS` declaration is owed (that window is contiguous and
     // ends far below this entry).
     include_str!("../migrations/20261122000001_add_background_task_outcome.sql"),
+    // Safe auto-resume: `turn_id` and `arguments` on `tool_executions`, plus
+    // the `status` index the boot reconciler reads. `record()` runs after the
+    // tool returns, so a turn killed mid-flight used to leave no row; the
+    // journal writes `status = 'started'` BEFORE dispatch and finishes it via
+    // `update_outcome`. `arguments` is re-added because the table rebuild in
+    // `20260415000003` dropped the column the initial schema declared.
+    //
+    // Dated `…000002`, not `…000001`: `rusqlite_migration` tracks position via
+    // `PRAGMA user_version`, so an entry inserted before one main already
+    // carries would be read as ALREADY APPLIED on every box that has it. #964's
+    // `…000001` keeps its slot; this appends after it.
+    include_str!("../migrations/20261122000002_add_tool_executions_turn_journal.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

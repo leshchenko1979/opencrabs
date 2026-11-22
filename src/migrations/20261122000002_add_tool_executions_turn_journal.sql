@@ -1,0 +1,51 @@
+-- Safe auto-resume: the turn journal — `turn_id` and the call's `arguments`
+-- on the row that is written BEFORE dispatch.
+--
+-- `tool_executions` already records every call, but `ToolRepo::record` runs in
+-- a spawned task AFTER the tool returns. A turn killed mid-flight therefore
+-- leaves NO row at all, which is the exact case a journal exists for. The
+-- safe-auto-resume card inserts a `status = 'started'` row before dispatch and
+-- finishes it through `update_outcome`; this migration adds the two columns
+-- that row needs.
+--
+-- `turn_id` groups the calls of one turn, so boot can ask "what did the
+-- interrupted turn start that never reported?". The id is minted per turn and
+-- is also persisted on the `pending_requests` row, which is how the boot
+-- reconciler joins the two.
+--
+-- `arguments` is added here because the table lost it. The initial schema
+-- declared `arguments TEXT NOT NULL`, but
+-- `20260415000003_fix_tool_executions_schema.sql` rebuilt the table with
+-- `DROP TABLE` + a bare `CREATE TABLE` and did not carry the column over, so
+-- every database alive today has no `arguments` at all. Nullable on purpose:
+-- pre-existing rows have no stored arguments, and the journal row records
+-- what the caller supplied rather than inventing a value.
+--
+-- Indexes:
+--
+--   `status` — the boot reconciler's
+--   `UPDATE tool_executions SET status = 'unknown' WHERE status = 'started'`
+--   is the first query in the tree to filter on `status` alone (the reconciler
+--   lands in the next step of this card; no existing read does).
+--   `20261009000002_recreate_tool_executions_message_id_index.sql` and
+--   `20261120000001_add_tool_executions_session_created_indexes.sql` both
+--   deliberately skipped this index, and both said why: every then-live read
+--   folded `status` into a `SUM(CASE WHEN status = 'error' …)` over a
+--   `GROUP BY tool_name`, which no index on `status` serves. That premise no
+--   longer holds. On the ops profile the table is ~1.1 GB, so an unindexed
+--   reconcile scan at every boot is the same defect #916 fixed for
+--   `session_id`. This is the one read that makes the index earn its write
+--   amplification.
+--
+--   `turn_id` is deliberately NOT indexed. `unknown_for_turn` is
+--   `WHERE turn_id = ? AND status IN ('started', 'unknown')`, and the status
+--   index already narrows the candidate set to the handful of unresolved
+--   rows; a second index would be write amplification on every tool call for
+--   a read that touches only those rows.
+--
+-- Appended last per the list invariant. No `MIGRATION_EFFECTS` declaration is
+-- owed: that window is the contiguous replay-crash set ending far below this
+-- entry.
+ALTER TABLE tool_executions ADD COLUMN turn_id TEXT;
+ALTER TABLE tool_executions ADD COLUMN arguments TEXT;
+CREATE INDEX IF NOT EXISTS idx_tool_executions_status ON tool_executions(status);

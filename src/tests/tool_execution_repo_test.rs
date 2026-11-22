@@ -7,7 +7,7 @@
 //! refuses to insert empties.
 
 use crate::db::Database;
-use crate::db::repository::ToolExecutionRepository;
+use crate::db::repository::{STATUS_STARTED, ToolExecutionRepository};
 
 async fn make_db() -> Database {
     let db = Database::connect_in_memory().await.unwrap();
@@ -246,4 +246,276 @@ async fn update_outcome_on_a_missing_row_reports_zero() {
         .await
         .expect("a missing row is not an error");
     assert_eq!(touched, 0, "no row yet is reported, never invented");
+}
+
+// ── Safe auto-resume: the turn journal ──────────────────────────────────────
+//
+// `record()` runs in a spawned task AFTER the tool returns, so a turn killed
+// mid-call leaves no row at all. `record_started` opens the row BEFORE
+// dispatch; `update_outcome` closes it; `unknown_for_turn` is the boot read
+// that finds the rows nobody closed. These legs pin the round trip and the
+// retention boundary.
+
+/// Insert a row with an explicit `created_at` so the sweep's cutoff can be
+/// exercised without waiting on the clock.
+async fn insert_row(db: &Database, id: &str, status: &str, created_at: i64) {
+    let id = id.to_string();
+    let status = status.to_string();
+    db.pool()
+        .get()
+        .await
+        .unwrap()
+        .interact(move |conn| {
+            conn.execute(
+                "INSERT INTO tool_executions \
+                     (id, message_id, session_id, turn_id, tool_name, arguments, status, created_at) \
+                     VALUES (?1, 'msg-1', 'sess-1', 'turn-1', 'bash', '{}', ?2, ?3)",
+                rusqlite::params![id, status, created_at],
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// The round trip boot depends on: a row written BEFORE the tool runs is the
+/// only evidence an interrupted call leaves, and it must read back as unknown.
+#[tokio::test]
+async fn record_started_round_trips_into_unknown_for_turn() {
+    let db = make_db().await;
+    let repo = ToolExecutionRepository::new(db.pool().clone());
+    repo.record_started(
+        "call-1",
+        "msg-1",
+        "sess-1",
+        "turn-1",
+        "bash",
+        r#"{"command":"git push origin main"}"#,
+    )
+    .await
+    .unwrap();
+
+    let unknown = repo.unknown_for_turn("turn-1").await.unwrap();
+    assert_eq!(
+        unknown.len(),
+        1,
+        "the started row must be the one unknown call"
+    );
+    assert_eq!(unknown[0].id, "call-1");
+    assert_eq!(unknown[0].tool_name, "bash");
+    assert_eq!(
+        unknown[0].arguments.as_deref(),
+        Some(r#"{"command":"git push origin main"}"#),
+        "the digest needs the arguments, not just the tool name"
+    );
+
+    let status: String = db
+        .pool()
+        .get()
+        .await
+        .unwrap()
+        .interact(|conn| {
+            conn.query_row(
+                "SELECT status FROM tool_executions WHERE id = 'call-1'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        status, STATUS_STARTED,
+        "the journal marker is `started`, not an outcome"
+    );
+
+    assert!(
+        repo.unknown_for_turn("turn-2").await.unwrap().is_empty(),
+        "the read is scoped to one turn"
+    );
+}
+
+/// A row closed by `update_outcome` is NOT unknown, and a sibling turn's row
+/// never leaks into this turn's digest.
+#[tokio::test]
+async fn unknown_for_turn_excludes_calls_that_reported_an_outcome() {
+    let db = make_db().await;
+    let repo = ToolExecutionRepository::new(db.pool().clone());
+    repo.record_started(
+        "call-done",
+        "msg-1",
+        "sess-1",
+        "turn-1",
+        "write_opencrabs_file",
+        r#"{"path":"MEMORY.md"}"#,
+    )
+    .await
+    .unwrap();
+    let touched = repo
+        .update_outcome("call-done", None, "success")
+        .await
+        .unwrap();
+    assert_eq!(
+        touched, 1,
+        "update_outcome closes the journal row it opened"
+    );
+
+    repo.record_started("call-open", "msg-1", "sess-1", "turn-1", "bash", "{}")
+        .await
+        .unwrap();
+    repo.record_started("call-other", "msg-2", "sess-1", "turn-2", "bash", "{}")
+        .await
+        .unwrap();
+
+    let unknown = repo.unknown_for_turn("turn-1").await.unwrap();
+    assert_eq!(
+        unknown.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        vec!["call-open"],
+        "only the unfinished call of THIS turn is unknown"
+    );
+}
+
+/// The boot reconciler stamps `started` → `unknown`; the read must see both,
+/// so a resumed turn does not depend on whether the reconciler ran first.
+#[tokio::test]
+async fn unknown_for_turn_reads_a_row_the_reconciler_stamped_unknown() {
+    let db = make_db().await;
+    let repo = ToolExecutionRepository::new(db.pool().clone());
+    repo.record_started("call-1", "msg-1", "sess-1", "turn-1", "bash", "{}")
+        .await
+        .unwrap();
+
+    db.pool()
+        .get()
+        .await
+        .unwrap()
+        .interact(|conn| {
+            conn.execute(
+                "UPDATE tool_executions SET status = 'unknown' WHERE id = 'call-1'",
+                [],
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let unknown = repo.unknown_for_turn("turn-1").await.unwrap();
+    assert_eq!(
+        unknown.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        vec!["call-1"],
+        "a reconciled row is still unknown work"
+    );
+}
+
+/// `INSERT OR IGNORE`, not an upsert: a retried dispatch must not double the
+/// row or overwrite what the first attempt recorded.
+#[tokio::test]
+async fn record_started_is_idempotent_and_keeps_the_first_row() {
+    let db = make_db().await;
+    let repo = ToolExecutionRepository::new(db.pool().clone());
+    repo.record_started(
+        "call-1",
+        "msg-1",
+        "sess-1",
+        "turn-1",
+        "bash",
+        r#"{"command":"git status"}"#,
+    )
+    .await
+    .unwrap();
+    repo.record_started(
+        "call-1",
+        "msg-1",
+        "sess-1",
+        "turn-1",
+        "bash",
+        r#"{"command":"git push"}"#,
+    )
+    .await
+    .expect("a duplicate id is ignored, not an error");
+
+    let unknown = repo.unknown_for_turn("turn-1").await.unwrap();
+    assert_eq!(unknown.len(), 1, "one call id, one row");
+    assert_eq!(
+        unknown[0].arguments.as_deref(),
+        Some(r#"{"command":"git status"}"#),
+        "the first journal entry is authoritative; a replay must not rewrite it"
+    );
+}
+
+/// The name guard is shared with `record`: a journaled call whose name the
+/// analytics path rejects would be a row that can never be completed usefully.
+#[tokio::test]
+async fn record_started_refuses_blank_and_malformed_tool_names() {
+    let db = make_db().await;
+    let repo = ToolExecutionRepository::new(db.pool().clone());
+    repo.record_started("blank", "msg-1", "sess-1", "turn-1", "", "{}")
+        .await
+        .unwrap();
+    repo.record_started("upper", "msg-1", "sess-1", "turn-1", "Bash", "{}")
+        .await
+        .unwrap();
+
+    assert!(repo.unknown_for_turn("turn-1").await.unwrap().is_empty());
+    let count: i64 = db
+        .pool()
+        .get()
+        .await
+        .unwrap()
+        .interact(|conn| conn.query_row("SELECT COUNT(*) FROM tool_executions", [], |r| r.get(0)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(count, 0, "neither refused call may leave a row");
+}
+
+/// Retention for the journal's own debris: unresolved rows past the cutoff go,
+/// completed rows are analytics and stay (the message prune owns those).
+#[tokio::test]
+async fn sweep_older_than_deletes_only_stale_unresolved_rows() {
+    let db = make_db().await;
+    let repo = ToolExecutionRepository::new(db.pool().clone());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let stale = now - 86_400;
+
+    insert_row(&db, "stale-started", "started", stale).await;
+    insert_row(&db, "stale-unknown", "unknown", stale).await;
+    insert_row(&db, "stale-done", "success", stale).await;
+    insert_row(&db, "fresh-started", "started", now).await;
+
+    let deleted = repo.sweep_older_than(now - 3_600).await.unwrap();
+    assert_eq!(
+        deleted, 2,
+        "both stale unresolved rows are swept; the completed and fresh rows are not"
+    );
+
+    let ids: Vec<String> = db
+        .pool()
+        .get()
+        .await
+        .unwrap()
+        .interact(|conn| {
+            conn.prepare("SELECT id FROM tool_executions ORDER BY id")?
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ids,
+        vec!["fresh-started".to_owned(), "stale-done".to_owned()],
+        "completed rows are never the journal sweep's business"
+    );
+}
+
+#[tokio::test]
+async fn sweep_older_than_on_a_clean_table_reports_zero() {
+    let db = make_db().await;
+    let repo = ToolExecutionRepository::new(db.pool().clone());
+    let deleted = repo.sweep_older_than(4_000_000_000).await.unwrap();
+    assert_eq!(deleted, 0);
 }

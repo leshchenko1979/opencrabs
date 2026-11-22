@@ -307,6 +307,7 @@ pub mod db_repository_session_binding_await_test;
 pub mod db_repository_session_test;
 pub mod db_retry_test;
 pub mod db_thread_id_stamp_heal_test;
+pub mod db_tool_executions_turn_journal_migration_test;
 pub mod decide_cached_test;
 pub mod decision_cache_test;
 pub mod decisions_report_test;

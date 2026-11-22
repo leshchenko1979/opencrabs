@@ -25,6 +25,30 @@ pub struct ToolFailureStats {
     pub failures: i64,
 }
 
+/// Status of a row journaled BEFORE dispatch and not yet finished.
+///
+/// The row is opened by [`ToolExecutionRepository::record_started`] and closed
+/// by [`ToolExecutionRepository::update_outcome`]. A `started` row surviving a
+/// restart is work whose outcome nobody observed.
+pub const STATUS_STARTED: &str = "started";
+
+/// Status the boot reconciler writes over a `started` row that outlived its
+/// turn: the call was dispatched, the process died before the outcome landed,
+/// and whether the effect reached the world is unknown.
+pub const STATUS_UNKNOWN: &str = "unknown";
+
+/// A call journaled before dispatch that never reported an outcome.
+///
+/// `arguments` is the JSON the caller supplied when the row was opened; it is
+/// `None` for rows written before the column existed. The resume digest names
+/// the call from `tool_name` and shows the arguments when present.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownToolCall {
+    pub id: String,
+    pub tool_name: String,
+    pub arguments: Option<String>,
+}
+
 /// Repository for tool execution tracking
 #[derive(Clone)]
 pub struct ToolExecutionRepository {
@@ -68,7 +92,7 @@ impl ToolExecutionRepository {
         duration_ms: Option<i64>,
         exit_code: Option<i32>,
     ) -> Result<()> {
-        if tool_name.trim().is_empty() {
+        if is_blank_tool_name(tool_name) {
             tracing::warn!(
                 "ToolRepo::record skipped: empty tool_name (id={}, message_id={}, status={})",
                 id,
@@ -80,11 +104,7 @@ impl ToolExecutionRepository {
         // Defense-in-depth: reject garbage tool names that leak from
         // phantom tool calls (reasoning text + stray XML/JSON fragments).
         // Valid tool names are lowercase alphanumeric + underscores, ≤64 chars.
-        if tool_name.len() > 64
-            || !tool_name
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-        {
+        if is_malformed_tool_name(tool_name) {
             tracing::warn!(
                 "ToolRepo::record skipped: invalid tool_name {:?} (id={}, message_id={}, status={})",
                 &tool_name[..tool_name.len().min(80)],
@@ -125,6 +145,145 @@ impl ToolExecutionRepository {
         Ok(())
     }
 
+    /// Open the journal row for a side-effecting call BEFORE it is dispatched.
+    ///
+    /// This is the method the whole safe-auto-resume card hangs on. [`record`]
+    /// is written in a spawned task AFTER the tool returns, so a turn killed
+    /// mid-call leaves no row at all — the one case a journal exists for. This
+    /// row is written first, `status = 'started'`, and the outcome is written
+    /// over it by [`update_outcome`] when the call returns. A `started` row
+    /// that survives the process is therefore a call nobody saw finish.
+    ///
+    /// `arguments` is the call's JSON as the model emitted it; the resume
+    /// digest shows it so the resumed turn can tell a `git push` from a
+    /// `git status` without guessing. `turn_id` groups the calls of one turn
+    /// and is also persisted on the `pending_requests` row, which is how boot
+    /// joins an interrupted turn to its journal.
+    ///
+    /// `INSERT OR IGNORE` on purpose: journaling the same call id twice (a
+    /// retried dispatch, a replayed turn) must not clobber the row or double
+    /// it. The row is finished by an `UPDATE`, never by a second insert.
+    ///
+    /// Callers journal only `Mutating`/`Destructive` calls; read-only work is
+    /// deliberately not written (a DB write per read buys no safety).
+    pub async fn record_started(
+        &self,
+        id: &str,
+        message_id: &str,
+        session_id: &str,
+        turn_id: &str,
+        tool_name: &str,
+        arguments: &str,
+    ) -> Result<()> {
+        if is_blank_tool_name(tool_name) {
+            tracing::warn!(
+                "ToolRepo::record_started skipped: empty tool_name (id={}, message_id={}, turn_id={})",
+                id,
+                message_id,
+                turn_id
+            );
+            return Ok(());
+        }
+        if is_malformed_tool_name(tool_name) {
+            tracing::warn!(
+                "ToolRepo::record_started skipped: invalid tool_name {:?} (id={}, message_id={}, turn_id={})",
+                &tool_name[..tool_name.len().min(80)],
+                id,
+                message_id,
+                turn_id
+            );
+            return Ok(());
+        }
+        let id = id.to_string();
+        let message_id = message_id.to_string();
+        let session_id = session_id.to_string();
+        let turn_id = turn_id.to_string();
+        let tool_name = tool_name.to_string();
+        let arguments = arguments.to_string();
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO tool_executions \
+                     (id, message_id, session_id, turn_id, tool_name, arguments, status) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    id,
+                    message_id,
+                    session_id,
+                    turn_id,
+                    tool_name,
+                    arguments,
+                    STATUS_STARTED
+                ],
+            )
+        })
+        .await
+        .context("Failed to journal a started tool execution")?;
+        Ok(())
+    }
+
+    /// The calls of `turn_id` that were started and never reported an outcome.
+    ///
+    /// Both statuses count as unknown: `started` is a row the boot reconciler
+    /// has not reached yet, `unknown` is one it has already stamped. A resumed
+    /// turn must treat both the same — the call reached dispatch and its
+    /// effect is unobserved — so the read does not depend on whether the
+    /// reconciler ran first.
+    ///
+    /// Ordered by `created_at` so the digest lists the calls in the order the
+    /// interrupted turn attempted them. Rows finished through [`update_outcome`]
+    /// (`success`, `nonzero`, `error`) are excluded: those have an answer.
+    pub async fn unknown_for_turn(&self, turn_id: &str) -> Result<Vec<UnknownToolCall>> {
+        let turn_id = turn_id.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT id, tool_name, arguments FROM tool_executions \
+                     WHERE turn_id = ?1 AND status IN (?2, ?3) \
+                     ORDER BY created_at ASC, id ASC",
+                )?;
+                let rows =
+                    stmt.query_map(params![turn_id, STATUS_STARTED, STATUS_UNKNOWN], |r| {
+                        Ok(UnknownToolCall {
+                            id: r.get(0)?,
+                            tool_name: r.get(1)?,
+                            arguments: r.get(2)?,
+                        })
+                    })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to read a turn's unknown calls")
+    }
+
+    /// Delete unresolved journal rows older than `cutoff_epoch`.
+    ///
+    /// Only `started`/`unknown` rows are eligible. Completed rows are analytics
+    /// data and age out with their messages through the existing retention
+    /// prune ([`MessageRepository::prune_older_than`], which already deletes
+    /// `tool_executions` by `message_id`); deleting them here would be a second
+    /// retention policy on the same table. This sweep is the floor for the
+    /// journal's OWN debris: a turn whose message is kept forever must not keep
+    /// an unresolvable `unknown` row forever.
+    ///
+    /// Returns the number of rows deleted.
+    ///
+    /// [`MessageRepository::prune_older_than`]: crate::db::repository::MessageRepository::prune_older_than
+    pub async fn sweep_older_than(&self, cutoff_epoch: i64) -> Result<usize> {
+        write_with_retry(&self.pool, &write_retry_config(), move |conn| {
+            conn.execute(
+                "DELETE FROM tool_executions \
+                 WHERE created_at < ?1 AND status IN (?2, ?3)",
+                params![cutoff_epoch, STATUS_STARTED, STATUS_UNKNOWN],
+            )
+        })
+        .await
+        .context("Failed to sweep stale turn-journal rows")
+    }
+
     /// Write a detached run's terminal outcome back onto its row (#787).
     ///
     /// Returns the number of rows touched, and `0` is a MEANINGFUL answer: the
@@ -132,11 +291,15 @@ impl ToolExecutionRepository {
     /// returned, so a fast run can finish before its own row exists. The caller
     /// retries on `0`.
     ///
+    /// It is also how a journal row opened by [`record_started`] is CLOSED:
+    /// the `started` status is replaced by the call's real outcome, which is
+    /// what keeps an interrupted call distinguishable from a completed one.
+    ///
     /// It is deliberately an UPDATE and not an upsert. `tool_executions`
-    /// requires `message_id`, `arguments` and `created_at` NOT NULL, and the
-    /// completion site knows none of them — an INSERT there would have to
-    /// invent values, which is a worse defect than the one this fixes. The
-    /// status file remains the record of truth if the row never lands.
+    /// requires `message_id` and `created_at` NOT NULL, and the completion
+    /// site knows neither — an INSERT there would have to invent values, which
+    /// is a worse defect than the one this fixes. The status file remains the
+    /// record of truth if the row never lands.
     pub async fn update_outcome(
         &self,
         id: &str,
@@ -310,6 +473,28 @@ impl ToolExecutionRepository {
             .map_err(interact_err)?
             .context("Failed to query tool failure stats")
     }
+}
+
+/// True for an empty or whitespace-only tool name.
+///
+/// The name guard has one home because [`ToolExecutionRepository::record`] and
+/// [`ToolExecutionRepository::record_started`] must refuse the same names: a
+/// call journaled before dispatch for a name the analytics path rejects would
+/// create a row that can never be completed meaningfully.
+fn is_blank_tool_name(tool_name: &str) -> bool {
+    tool_name.trim().is_empty()
+}
+
+/// True for a name that is not a real tool name.
+///
+/// Defense-in-depth against garbage that leaks from phantom tool calls
+/// (reasoning text + stray XML/JSON fragments). Valid tool names are lowercase
+/// alphanumeric plus underscores, at most 64 bytes.
+fn is_malformed_tool_name(tool_name: &str) -> bool {
+    tool_name.len() > 64
+        || !tool_name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 /// The tool-level outcome for the execution record (#763, #938).
