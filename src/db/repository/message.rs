@@ -751,7 +751,9 @@ fn contiguous_rows(
     cap: i64,
 ) -> rusqlite::Result<Vec<Message>> {
     match id_strs {
-        Some(ids) if ids.is_empty() => Ok(Vec::new()),
+        // An explicit but empty session filter selects nothing — this is NOT
+        // the same as `None`, which means "no filter" and scans every session.
+        Some([]) => Ok(Vec::new()),
         Some(ids) => {
             let placeholders = vec!["?"; ids.len()].join(",");
             let sql = format!(
@@ -796,7 +798,9 @@ fn tokenized_rows(
     }
     let like_arms = vec!["content LIKE ? ESCAPE '\\' COLLATE NOCASE"; patterns.len()].join(" AND ");
     match id_strs {
-        Some(ids) if ids.is_empty() => Ok(Vec::new()),
+        // An explicit but empty session filter selects nothing — this is NOT
+        // the same as `None`, which means "no filter" and scans every session.
+        Some([]) => Ok(Vec::new()),
         Some(ids) => {
             let placeholders = vec!["?"; ids.len()].join(",");
             let sql = format!(
