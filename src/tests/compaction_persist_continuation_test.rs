@@ -55,9 +55,9 @@ fn every_compaction_site_persists_its_continuation() {
     }
 
     assert!(
-        sites.len() == 6,
-        "expected 6 compaction sites (Manual, Regular, MidLoop x2, Emergency, PostTool), \
-         found {}: {:?} — the guard is measuring the wrong surface",
+        sites.len() == 7,
+        "expected 7 compaction sites (Manual, Regular, MidLoop x2, Emergency, PostTool, \
+         agent-requested #955), found {}: {:?} — the guard is measuring the wrong surface",
         sites.len(),
         sites
     );
