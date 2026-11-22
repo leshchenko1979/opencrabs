@@ -58,6 +58,7 @@ pub mod await_external_tool_test;
 pub mod background_indicator_test;
 pub mod background_scope_test;
 pub mod background_session_test;
+pub mod background_task_outcome_test;
 pub mod background_task_persistence_test;
 pub mod background_task_route_test;
 pub mod background_tasks_test;

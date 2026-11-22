@@ -216,6 +216,15 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // list invariant; no `MIGRATION_EFFECTS` declaration is owed (that window
     // is contiguous and ends far below this entry).
     include_str!("../migrations/20261120000001_add_tool_executions_session_created_indexes.sql"),
+    // #964: the background-task row carries its own OUTCOME (status, exit_code,
+    // completed_at, both capture paths) instead of leaving it only in the
+    // per-run status JSON — and the completion path now UPDATES the row rather
+    // than deleting it, so the record that names the run can say how it ended.
+    // Five nullable columns, no backfill: a pre-migration row renders `unknown`,
+    // never `success`. Appended last per the list invariant; no
+    // `MIGRATION_EFFECTS` declaration is owed (that window is contiguous and
+    // ends far below this entry).
+    include_str!("../migrations/20261122000001_add_background_task_outcome.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
