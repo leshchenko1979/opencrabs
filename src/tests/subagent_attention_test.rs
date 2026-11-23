@@ -28,7 +28,15 @@ fn repo_path(rel: &str) -> String {
 
 #[test]
 fn a_blocker_reads_as_a_park_and_never_as_a_result() {
-    let msg = attention_message("pdf-worker", "abc12345", "blocker", "pdftoppm needs 2 GB");
+    // A child parked at a round boundary: still Running/AwaitingInput, so
+    // `send_input` is the verb that reaches it.
+    let msg = attention_message(
+        "pdf-worker",
+        "abc12345",
+        "blocker",
+        "pdftoppm needs 2 GB",
+        true,
+    );
 
     assert!(
         msg.context_text.contains("needs your input"),
@@ -70,11 +78,48 @@ fn a_blocker_reads_as_a_park_and_never_as_a_result() {
     );
 }
 
+/// The other half of #984, and the bug the old wording carried: a child that
+/// reports a blocker and ENDS ITS TURN has completed, and `send_input` refuses
+/// a completed agent outright. Naming it there sent the parent at the one verb
+/// that cannot work, so the two arms must not share a sentence.
+#[test]
+fn a_child_that_ended_its_turn_is_continued_with_resume_not_send_input() {
+    let msg = attention_message("pdf-worker", "abc12345", "question", "which bucket?", false);
+
+    assert!(
+        msg.context_text.contains("resume_agent abc12345"),
+        "a finished turn must be continued with resume_agent, got: {}",
+        msg.context_text
+    );
+    assert!(
+        !msg.context_text.contains("send_input abc12345"),
+        "send_input refuses a COMPLETED agent, so naming it here is a dead \
+         end for the parent: {}",
+        msg.context_text
+    );
+    assert!(
+        !msg.context_text.contains("parked, not finished"),
+        "it is not parked - it finished its turn: {}",
+        msg.context_text
+    );
+    // Still not a result: the work is unfinished either way.
+    assert!(
+        msg.context_text.contains("Do not report"),
+        "unfinished work must never read as done: {}",
+        msg.context_text
+    );
+    assert!(
+        msg.context_text.contains("agent_progress abc12345"),
+        "the read path still carries the real id: {}",
+        msg.context_text
+    );
+}
+
 #[test]
 fn the_display_tag_is_short_and_kind_specific() {
-    let question = attention_message("w", "id1", "question", "which env?");
-    let blocker = attention_message("w", "id1", "blocker", "no creds");
-    let other = attention_message("w", "id1", "note", "just so you know");
+    let question = attention_message("w", "id1", "question", "which env?", false);
+    let blocker = attention_message("w", "id1", "blocker", "no creds", true);
+    let other = attention_message("w", "id1", "note", "just so you know", true);
 
     // The display half is what a channel shows; it must not leak the full
     // framed block (#765: collapsing the two published system scaffolding as
@@ -126,7 +171,7 @@ fn report_progress_notifies_only_for_the_two_stuck_kinds() {
     assert!(
         src.contains("matches!(kind, LedgerKind::Blocker | LedgerKind::Question)"),
         "the notify guard must name exactly blocker and question - waking a \
-         parent for note/tool_call/decision is the noise that teaches it to \
+         parent for note/decision is the noise that teaches it to \
          ignore the channel"
     );
     assert!(

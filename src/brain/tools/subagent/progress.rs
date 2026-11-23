@@ -29,7 +29,6 @@ const MAX_LIMIT: usize = 200;
 fn kind_label(kind: LedgerKind) -> &'static str {
     match kind {
         LedgerKind::Note => "note     ",
-        LedgerKind::ToolCall => "tool_call",
         LedgerKind::Decision => "decision ",
         LedgerKind::Blocker => "blocker  ",
         LedgerKind::Question => "question ",
@@ -117,14 +116,16 @@ impl Tool for ReportProgressTool {
 
     fn description(&self) -> &str {
         "Record one line of progress for yourself, visible to the parent that \
-         spawned you while you are still working. Use it for findings, \
-         decisions, and especially blockers or questions — the parent reads \
-         them without waiting for you to finish. Keep each entry to one or two \
+         spawned you while you are still working. Write one when a stage \
+         lands, when you change approach (and why), and before you do \
+         something expensive or irreversible — a gate dispatch, a push, a \
+         build. If your last line is stale when you write your final message, \
+         add one first: the silent tail of a long run is the part a parent \
+         most needs and can least see. Keep each entry to one or two \
          sentences; this is a status line, not a report. A `blocker` or \
-         `question` ALSO notifies the parent that you are stuck, so it is the \
-         right call when you genuinely cannot continue without an answer: \
-         record it, then end your turn. The parent answers with `send_input`, \
-         which resumes you in this same context."
+         `question` ALSO notifies the parent that you are stuck: record it, \
+         then end your turn. The parent continues you with `resume_agent`, \
+         which picks up in this same context."
     }
 
     fn input_schema(&self) -> Value {
@@ -133,8 +134,8 @@ impl Tool for ReportProgressTool {
             "properties": {
                 "kind": {
                     "type": "string",
-                    "enum": ["note", "tool_call", "decision", "blocker", "question"],
-                    "description": "note = what you are doing/found; tool_call = a call worth recording on its own; decision = a choice and its reason; blocker = you cannot proceed until something changes; question = you need an answer to continue"
+                    "enum": ["note", "decision", "blocker", "question"],
+                    "description": "note = what you are doing or found; decision = a choice and its reason; blocker = you cannot proceed until something changes; question = you need an answer to continue"
                 },
                 "text": {
                     "type": "string",
@@ -175,7 +176,7 @@ impl Tool for ReportProgressTool {
         let kind: LedgerKind = serde_json::from_value(Value::String(raw_kind.to_string()))
             .map_err(|_| {
                 ToolError::InvalidInput(format!(
-                    "'kind' must be one of note, tool_call, decision, blocker, question \
+                    "'kind' must be one of note, decision, blocker, question \
                      (got '{raw_kind}')"
                 ))
             })?;
@@ -202,14 +203,18 @@ impl Tool for ReportProgressTool {
         // without the parent, and until now the ledger was write-only from its
         // side — the parent found out when it next happened to look, which for
         // a parked child is never. Notify on the two kinds that mean "stuck",
-        // never on note/tool_call/decision: those are progress, and waking a
-        // parent for progress is the noise that makes it stop reading.
+        // never on note/decision: those are progress, and waking a parent for
+        // progress is the noise that makes it stop reading.
         if matches!(kind, LedgerKind::Blocker | LedgerKind::Question)
             && let Some(parent) = self.manager.get_parent_session_id(&id)
             && self.manager.attention_allowed(&id)
         {
             let label = self.manager.get_label(&id).unwrap_or_else(|| id.clone());
-            super::spawn::push_attention(parent, &label, &id, kind.as_str(), text);
+            // `false`: this child is about to END its turn, so it completes
+            // rather than parking — the parent must be pointed at
+            // `resume_agent`, which is the only verb that accepts a completed
+            // agent (#984).
+            super::spawn::push_attention(parent, &label, &id, kind.as_str(), text, false);
         }
 
         Ok(ToolResult::success(format!(
@@ -242,7 +247,9 @@ impl Tool for AgentProgressTool {
          first. Use it to check on a long-running agent, or to see the blockers \
          and questions it recorded. This is the normal read-back while it works: \
          its completion reaches you as a fresh turn, so do not wait_agent for it. \
-         To answer a question it recorded, use send_input <id>."
+         To answer a question it recorded: `send_input <id>` while it is still \
+         running or parked mid-round, `resume_agent <id>` when it ended its turn \
+         to ask — a finished turn is COMPLETED, and send_input refuses those."
     }
 
     fn input_schema(&self) -> Value {

@@ -149,11 +149,19 @@ pub(crate) fn push_result(
 /// The closing line therefore says what is due and — just as importantly —
 /// that nothing is due this second, so a parent mid-turn can finish its
 /// thought instead of dropping everything.
+/// `parked` says which of the two situations this is, because the parent's next
+/// move differs and the old wording asserted the wrong one for half its callers
+/// (#984). A child that parks at a round boundary is still `Running`/
+/// `AwaitingInput` and takes `send_input`. A child that reports a blocker and
+/// ends its turn has COMPLETED — `send_input` refuses a completed agent with
+/// "use resume_agent to continue it", so naming `send_input` there sent the
+/// parent at the one verb that cannot work.
 pub(crate) fn attention_message(
     label: &str,
     agent_id: &str,
     kind: &str,
     text: &str,
+    parked: bool,
 ) -> crate::brain::agent::QueuedUserMessage {
     let what = match kind {
         "question" => "has a question it cannot answer on its own",
@@ -165,15 +173,27 @@ pub(crate) fn attention_message(
         "blocker" => format!("⛔ sub-agent blocked: {label}"),
         _ => format!("🔔 sub-agent needs you: {label}"),
     };
+    let next_move = if parked {
+        format!(
+            "Nothing is blocked on you reading this now — it is parked, not finished, and will \
+             wait. When you get to it, answer with `send_input {agent_id}` (it resumes from \
+             where it stopped) or read its full history with `agent_progress {agent_id}`. Do \
+             not report its work as done: it has not finished."
+        )
+    } else {
+        format!(
+            "Nothing is blocked on you reading this now. It ended its turn to tell you, so it \
+             is no longer running: continue it with `resume_agent {agent_id}` (same context, no \
+             re-brief) or read its history with `agent_progress {agent_id}`. Do not report its \
+             work as done: it has not finished."
+        )
+    };
     let context_text = format!(
         "[System: the sub-agent you spawned needs your input.\n\
          Agent: {label} (id {agent_id})\n\
          Status: {kind} — {what}\n\
          It said:\n{text}\n\n\
-         Nothing is blocked on you reading this now — it is parked, not finished, and will \
-         wait. When you get to it, answer with `send_input {agent_id}` (it resumes from where \
-         it stopped) or read its full history with `agent_progress {agent_id}`. Do not report \
-         its work as done: it has not finished.]"
+         {next_move}]"
     );
     crate::brain::agent::QueuedUserMessage {
         context_text,
@@ -199,10 +219,11 @@ pub(crate) fn push_attention(
     agent_id: &str,
     kind: &str,
     text: &str,
+    parked: bool,
 ) {
     use crate::brain::agent::service::session_routes::{Delivery, deliver_to_session};
 
-    let msg = attention_message(label, agent_id, kind, text);
+    let msg = attention_message(label, agent_id, kind, text, parked);
     match deliver_to_session(parent_session_id, msg, true) {
         Delivery::Delivered => tracing::info!(
             "Sub-agent {agent_id} reported a {kind}; session {parent_session_id} was told"
@@ -274,7 +295,8 @@ impl Tool for SpawnAgentTool {
          read, or a one-line edit — delegating costs more than doing. Independent items can \
          run in parallel. Returns an agent_id. Reading it back: the completion \
          wake is the normal path — you are woken with its result. Mid-run, the child reports \
-         via report_progress and you read agent_progress <id>; steer it with send_input <id>. \
+         via report_progress and you read agent_progress <id>; steer a running child \
+         with send_input <id>, and continue one that ended its turn with resume_agent <id>. \
          wait_agent is the EXCEPTION, for a genuine precondition such as before resume_agent \
          — never to wait for work you will be woken for. \
          \n\nProvider and model resolution (highest priority first): \
@@ -831,6 +853,7 @@ impl Tool for SpawnAgentTool {
                                 &agent_id_clone,
                                 "question",
                                 &response.content.chars().take(600).collect::<String>(),
+                                true,
                             );
                         }
 
@@ -996,11 +1019,13 @@ impl Tool for SpawnAgentTool {
         // reads the schema before it spawns and then gets a receipt that used
         // to forget everything it had just been told, at the exact moment the
         // id it needs first exists. One vocabulary, stated where it is used:
-        // send_input steers and answers, agent_progress reads, completion
-        // arrives as a new turn.
+        // send_input steers a live child, resume_agent continues one that
+        // ended its turn, agent_progress reads, completion arrives as a new
+        // turn.
         Ok(ToolResult::success(format!(
             "Spawned sub-agent '{}' with id: {}\nSession: {}\nAccess: {}\nBrain: {}\n\
-             Talk to it: `send_input {}` steers it or answers a question it parked on; \
+             Talk to it: `send_input {}` steers a running child or answers one parked \
+             mid-round; `resume_agent {}` continues one that ended its turn to ask; \
              `agent_progress {}` reads its progress without waiting; it wakes you with its \
              result when it finishes, so do not `wait_agent` for it.\nPrompt: {}{}",
             label,
@@ -1012,6 +1037,7 @@ impl Tool for SpawnAgentTool {
                 "full (minus recursive/dangerous tools)"
             },
             super::brain::brain_status_label(include_brain),
+            agent_id,
             agent_id,
             agent_id,
             prompt,

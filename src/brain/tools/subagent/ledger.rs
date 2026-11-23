@@ -24,13 +24,17 @@ const MAX_TEXT: usize = 400;
 /// `Blocker` and `Question` are the two a parent must not miss; the rest are
 /// narrative. The distinction lives in the kind, not in the text, so a reader
 /// can filter without parsing prose.
+///
+/// Four kinds, each with one job, because a dead option is worse than a
+/// missing one (#984): `tool_call` used to sit in this enum and was chosen
+/// zero times in 62 entries across 47 agents, so all it did was give the model
+/// a fifth way to pick something uninformative. Anything worth recording about
+/// a call is either narration (`Note`) or a choice (`Decision`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LedgerKind {
     /// Free-form narration: what the agent just did or found.
     Note,
-    /// A tool call worth recording on its own.
-    ToolCall,
     /// A decision taken, with its reason.
     Decision,
     /// The agent cannot proceed and needs something changed.
@@ -43,7 +47,6 @@ impl LedgerKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Note => "note",
-            Self::ToolCall => "tool_call",
             Self::Decision => "decision",
             Self::Blocker => "blocker",
             Self::Question => "question",
