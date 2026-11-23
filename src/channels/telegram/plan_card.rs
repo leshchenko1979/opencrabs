@@ -27,13 +27,14 @@ const CARD_PROSE_BUDGET: usize = 2400;
 
 /// Maximum prose sections rendered on the classic card (#983).
 ///
-/// 2400 / 200 — 200 chars is the minimum readable body, because
+/// 2400 / 200 — 200 chars is the minimum body worth showing. This is a
+/// readability bound, not an arithmetic consequence of the marker floor:
 /// `truncate_chars_tail_preserving` reserves 40 chars for its marker and
 /// silently degrades to a marker-less head-only cut below 80
-/// (`src/utils/string.rs:57-64`). Without the bound a 40-section document
-/// yields 40 sixty-char stubs, which is the silent cut this fix removes,
-/// returning by another door. The rich path renders everything (32K cap) and
-/// is not bounded.
+/// (`src/utils/string.rs:57-64`), which at 2400 chars would only bite past
+/// 29 sections. Without a bound at all, a 40-section document yields 40
+/// sixty-char stubs — the silent cut this fix removes, returning by another
+/// door. The rich path renders everything (32K cap) and is not bounded.
 const MAX_CARD_SECTIONS: usize = 12;
 
 /// Split `budget` across sections by fair share, so no single section can

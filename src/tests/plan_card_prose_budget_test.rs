@@ -192,10 +192,10 @@ async fn short_plan_renders_every_section_whole() {
     }
 }
 
-/// #983 step 2 — past `MAX_CARD_SECTIONS` (12) every fair share would fall
-/// under the minimum readable body, and `truncate_chars_tail_preserving`
-/// silently degrades to a marker-less cut below 80 chars. So the card bounds
-/// the count and ANNOUNCES the overflow instead of emitting 20 stubs.
+/// #983 step 2 — the card bounds how many sections it shows. Past
+/// `MAX_CARD_SECTIONS` (12) every fair share falls under the 200-char
+/// readable-body floor, so the card would carry twelve stubs instead of
+/// twelve sections. The overflow is ANNOUNCED rather than silently dropped.
 #[tokio::test]
 async fn section_count_is_bounded_and_overflow_is_announced() {
     let sections = many_sections(20);
