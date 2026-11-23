@@ -456,6 +456,49 @@ fn every_body_carries_the_obligation_status_rule() {
     }
 }
 
+// ---------------------------------------------------------------------
+// Issue #985 — a queued OWNER message must outrank the continuation.
+//
+// The continuation is appended last, so it is the last instruction the
+// model reads. Before this rule it said "IMMEDIATELY continue the
+// IMMEDIATE TASK" with no exception, so a message the owner typed after
+// the compaction was answered with a resumed stale task instead.
+// ---------------------------------------------------------------------
+
+/// Every body must state the precedence explicitly, in both emission
+/// modes: the rule lives in `[continuation.shared]`, so a variant that
+/// bypassed it would be a silent regression.
+#[test]
+fn every_body_states_that_a_later_user_message_outranks_the_task() {
+    for kind in ALL_KINDS {
+        for silent in [false, true] {
+            let body = build_continuation(kind, silent, true, PlanRecovery::Active);
+            assert!(
+                body.contains("PRECEDENCE"),
+                "{kind:?} silent={silent} must carry the user-message \
+                 precedence clause: {body}"
+            );
+            assert!(
+                body.contains("outranks the IMMEDIATE TASK"),
+                "{kind:?} silent={silent} must say the user message wins: {body}"
+            );
+        }
+    }
+}
+
+/// The clause must name the ordering fact it rests on, not merely assert
+/// an outcome: the continuation is read LAST but is not the NEWEST input.
+/// `PostTool` is pinned because it is the arm a real mid-loop compaction
+/// emits, which is the path the first receipt was observed on.
+#[test]
+fn precedence_clause_names_the_ordering_trap() {
+    let body = build_continuation(CompactionKind::PostTool, false, true, PlanRecovery::Active);
+    assert!(
+        body.contains("LAST instruction you read") && body.contains("NEWEST thing the user said"),
+        "the clause must name why the trap is invisible to the model: {body}"
+    );
+}
+
 /// The rule must name all three statuses, must forbid redoing DONE work,
 /// and must default an ABSENT status line to UNKNOWN — never to OPEN. An
 /// absent status read as OPEN is the original defect with a new coat of
