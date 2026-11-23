@@ -147,11 +147,15 @@ fn crowded_segments_consolidate_into_one_superseding_marker() {
     assert_eq!(scope, CompactionScope::SegmentConsolidation);
     assert_eq!(
         input.len(),
-        1,
-        "consolidation input is the joined segments as one message"
+        2,
+        "consolidation input is the joined segments, then the live tail verbatim"
     );
     let joined = text_of(&input[0]);
     assert!(joined.contains("FIRST") && joined.contains("SECOND"));
+    assert!(
+        text_of(&input[1]).contains("q3 live tail"),
+        "the live tail must reach the consolidation input — dropping it hides the newest instruction"
+    );
 
     AgentService::apply_scoped_compaction_summary(
         &mut c,

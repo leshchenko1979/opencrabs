@@ -595,8 +595,14 @@ impl AgentContext {
                 (scope, delta, tokens)
             }
             CompactionScope::SegmentConsolidation => {
+                // The frozen segments merge into one message, and the live
+                // tail after the last marker rides along verbatim. Dropping
+                // the tail left the summariser blind to the newest owner
+                // instructions (C12: a correction at seq 1740 sat after the
+                // last marker and never reached the consolidation input).
                 let joined = self.segment_marker_texts().join("\n\n---\n\n");
-                let messages = vec![Message::user(joined)];
+                let mut messages = vec![Message::user(joined)];
+                messages.extend(self.delta_since_last_marker());
                 let tokens = messages
                     .iter()
                     .map(AgentContext::estimate_tokens_static)
