@@ -133,11 +133,9 @@ async fn a_session_with_only_a_delta_banner_loads_its_whole_history() {
 
 #[tokio::test]
 async fn a_reused_sequence_before_the_boundary_is_not_swept_into_the_tail() {
-    // `MessageService::get_next_sequence` is `count(*) + 1`, so a delete in the
-    // middle of a session lets a later insert reuse an earlier sequence. Here
-    // row A holds the SAME sequence as the boundary row B and sorts before it.
-    // A `sequence >= boundary` tail would drag A into the window; the keyset on
-    // `(sequence, rowid)` must not.
+    // A delete can leave two rows sharing a `sequence` but different `rowid`s.
+    // The tail is `rowid >= boundary`, so the older same-sequence row must not
+    // be swept in when it sorts before the boundary by insertion order.
     let marker = format!("{COMPACTION_MARKER_PREFIX}] summary");
     let (pool, session_id) = seed(&[
         ("user", "before the boundary, same sequence", 2),

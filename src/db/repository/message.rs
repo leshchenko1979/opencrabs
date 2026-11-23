@@ -48,7 +48,7 @@ impl MessageRepository {
             .context("Failed to get connection")?
             .interact(move |conn| {
                 let mut stmt = conn.prepare_cached(
-                    "SELECT * FROM messages WHERE session_id = ?1 ORDER BY sequence ASC",
+                    "SELECT * FROM messages WHERE session_id = ?1 ORDER BY rowid ASC",
                 )?;
                 let rows = stmt.query_map(params![sid], Message::from_row)?;
                 rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -103,13 +103,14 @@ impl MessageRepository {
     /// (the agent service) and this stays a generic "rows since the last
     /// anchored-prefix row" primitive.
     ///
-    /// The boundary is the last matching row in `(sequence, rowid)` order —
-    /// precisely the row `rposition` would pick over [`Self::find_by_session`]'s
-    /// output — and the tail is a keyset on that pair rather than a bare
-    /// `sequence >= boundary`. The keyset matters: sequence numbers come from
-    /// `count(*) + 1` (`MessageService::get_next_sequence`), so a delete in the
-    /// middle of a session lets a later insert reuse an earlier sequence, and
-    /// `>=` would then pull in rows that sort BEFORE the boundary.
+    /// The boundary is the matching row with the largest `rowid` — insertion
+    /// order — and the tail is every row with `rowid >= boundary`. Sequence
+    /// numbers are not authoritative: `MessageService::get_next_sequence` used
+    /// to assign `count(*) + 1`, so deletes let a later insert reuse an earlier
+    /// `sequence` and an `ORDER BY sequence DESC` boundary picked a stale marker
+    /// while the tail predicate `sequence > boundary` dropped every newer row
+    /// (`rowid` larger but `sequence` smaller). [`Self::find_by_session`] is
+    /// `ORDER BY rowid ASC` so the in-memory `rposition` trim agrees with SQL.
     ///
     /// `instr(content, prefix) = 1` is the anchored test, matching Rust's
     /// `starts_with`. It is used instead of `substr(content, 1, len)` because
@@ -139,16 +140,16 @@ impl MessageRepository {
             // `rusqlite_migration`), so an unannotated `Ok(..)` leaves `E`
             // ambiguous at the tail.
             .interact(move |conn| -> rusqlite::Result<(Vec<Message>, usize)> {
-                let boundary: Option<(i64, i64)> = conn
+                let boundary_rowid: Option<i64> = conn
                     .prepare_cached(
-                        "SELECT sequence, rowid FROM messages \
+                        "SELECT rowid FROM messages \
                          WHERE session_id = ?1 AND role = ?2 \
                            AND instr(content, ?3) = 1 \
                            AND instr(content, ?4) <> 1 \
-                         ORDER BY sequence DESC, rowid DESC LIMIT 1",
+                         ORDER BY rowid DESC LIMIT 1",
                     )?
                     .query_row(params![sid, role, marker_prefix, excluded_prefix], |r| {
-                        Ok((r.get(0)?, r.get(1)?))
+                        r.get(0)
                     })
                     .optional()?;
 
@@ -156,22 +157,22 @@ impl MessageRepository {
                     .prepare_cached("SELECT COUNT(*) FROM messages WHERE session_id = ?1")?
                     .query_row(params![sid], |r| r.get(0))?;
 
-                let rows = match boundary {
+                let rows = match boundary_rowid {
                     // No boundary: the whole session is the window.
                     None => {
                         let mut stmt = conn.prepare_cached(
-                            "SELECT * FROM messages WHERE session_id = ?1 ORDER BY sequence ASC",
+                            "SELECT * FROM messages WHERE session_id = ?1 ORDER BY rowid ASC",
                         )?;
                         let rows = stmt.query_map(params![sid], Message::from_row)?;
                         rows.collect::<std::result::Result<Vec<_>, _>>()?
                     }
-                    Some((seq, rowid)) => {
+                    Some(rowid) => {
                         let mut stmt = conn.prepare_cached(
                             "SELECT * FROM messages WHERE session_id = ?1 \
-                               AND (sequence > ?2 OR (sequence = ?2 AND rowid >= ?3)) \
-                             ORDER BY sequence ASC",
+                               AND rowid >= ?2 \
+                             ORDER BY rowid ASC",
                         )?;
-                        let rows = stmt.query_map(params![sid, seq, rowid], Message::from_row)?;
+                        let rows = stmt.query_map(params![sid, rowid], Message::from_row)?;
                         rows.collect::<std::result::Result<Vec<_>, _>>()?
                     }
                 };
@@ -395,6 +396,25 @@ impl MessageRepository {
     /// List all messages for a session
     pub async fn list_by_session(&self, session_id: Uuid) -> Result<Vec<Message>> {
         self.find_by_session(session_id).await
+    }
+
+    /// Next `sequence` for a new row: one above the session's current max.
+    pub async fn next_sequence_for_session(&self, session_id: Uuid) -> Result<i32> {
+        let sid = session_id.to_string();
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(move |conn| {
+                conn.query_row(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM messages WHERE session_id = ?1",
+                    params![sid],
+                    |r| r.get(0),
+                )
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to compute next message sequence")
     }
 
     /// Remove a trailing unanswered user query and its empty assistant

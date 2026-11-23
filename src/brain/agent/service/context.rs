@@ -686,6 +686,8 @@ impl AgentService {
         // Walk backward to the last marker that RESTARTS history. Segment
         // markers (delta-bannered, #175 anchored prefix) are skipped: the
         // boundary they extend from is what the reload anchors on.
+        // `all_messages` is rowid-ordered (`find_by_session`); `rposition` is
+        // therefore the newest full marker by insertion time, not by `sequence`.
         let boundary_idx = all_messages.iter().rposition(|msg| {
             msg.role == "user"
                 && msg.content.starts_with(COMPACTION_MARKER_PREFIX)

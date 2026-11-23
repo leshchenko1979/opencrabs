@@ -76,7 +76,9 @@ async fn compaction_boundary_must_follow_newest_marker_not_highest_sequence() {
         "boundary must be the newest full marker, not the stale seq=500 row"
     );
     assert!(
-        loaded.iter().any(|m| m.content == "visible after fresh marker"),
+        loaded
+            .iter()
+            .any(|m| m.content == "visible after fresh marker"),
         "tail after the fresh marker must survive the reload"
     );
 }
@@ -91,13 +93,9 @@ async fn compaction_tail_must_not_drop_newer_rows_after_sequence_reuse() {
     let svc = MessageService::new(ServiceContext::new(pool.clone()));
     let excluded = 328usize;
     for i in 0..excluded {
-        svc.create_message(
-            session_id,
-            "user".to_string(),
-            format!("newer message {i}"),
-        )
-        .await
-        .unwrap();
+        svc.create_message(session_id, "user".to_string(), format!("newer message {i}"))
+            .await
+            .unwrap();
     }
     svc.create_message(
         session_id,
@@ -120,12 +118,7 @@ async fn compaction_tail_must_not_drop_newer_rows_after_sequence_reuse() {
         let repo = MessageRepository::new(pool.clone());
         let delta_banner = format!("{COMPACTION_MARKER_PREFIX} — {SEGMENT_SENTINEL}");
         let (tail, total) = repo
-            .find_since_last_marker(
-                session_id,
-                "user",
-                COMPACTION_MARKER_PREFIX,
-                &delta_banner,
-            )
+            .find_since_last_marker(session_id, "user", COMPACTION_MARKER_PREFIX, &delta_banner)
             .await
             .unwrap();
         (tail, total)

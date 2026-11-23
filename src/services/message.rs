@@ -246,8 +246,10 @@ impl MessageService {
 
     /// Get the next sequence number for a session
     async fn get_next_sequence(&self, session_id: Uuid) -> Result<i32> {
-        let count = self.count_messages_in_session(session_id).await?;
-        Ok((count + 1) as i32)
+        let repo = MessageRepository::new(self.context.pool());
+        repo.next_sequence_for_session(session_id)
+            .await
+            .context("Failed to get next message sequence")
     }
 
     /// Get the last message in a session
