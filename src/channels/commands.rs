@@ -2732,13 +2732,17 @@ pub(crate) fn render_tasks_rows(args: &str, session: &str, live: &[(String, Task
         if rows.len() >= want {
             break;
         }
-        if live.iter().any(|(live_id, _)| live_id == &id) {
-            continue;
-        }
         let Some(status) = WorkStatus::read(&id) else {
             continue;
         };
         if status.kind != WorkKind::Command || status.session_id != session {
+            continue;
+        }
+        // Dedupe on the RECORD's id, never on the file stem: since #991 a
+        // command file is `<session>__<id>.json`, so its stem is not the run id
+        // and comparing it to a live handle's id would list a live run twice —
+        // once from the manager, once from its own spawn-time record.
+        if live.iter().any(|(live_id, _)| live_id == &status.id) {
             continue;
         }
         rows.push(task_row(&status));
