@@ -1,0 +1,28 @@
+-- Split a cron job's send permission from harness auto-delivery (#969).
+--
+-- Before this column, `deliver_to` fed TWO independent decisions:
+--
+--   1. send permission — `cron_job_scope_async(pool, deliver_to)` yields
+--      `SendScope::Permitted` only when the target list is non-empty, else
+--      `Nowhere(Undeclared)`, and `telegram_send` is refused under `Nowhere`;
+--   2. harness auto-delivery — the scheduler posts the turn's final text (and
+--      an agent error) to every `deliver_to` target, wrapped in the
+--      `⏰ **Cron: <name>**` envelope.
+--
+-- So a declared job both could send AND was posted unconditionally (spam on
+-- quiet days), and an undeclared job had no permission at all.
+--
+-- `deliver_mode` splits them:
+--
+--   'always' (default) — today's behaviour, byte for byte.
+--   'silent'           — the scheduler posts nothing on its own; the turn keeps
+--                        its `deliver_to` send scope and posts only what it
+--                        chooses to send.
+--
+-- `NOT NULL DEFAULT 'always'` is what keeps every pre-existing row posting
+-- exactly as it did. Appended last per the list invariant (a new entry must not
+-- shift any existing index, or a `user_version` stamp would map to a different
+-- migration — the #1401 class); covered after `to_latest` by
+-- `heal_cron_deliver_mode`, because a database stamped past this index by a
+-- pre-merge list would otherwise skip the column in silence.
+ALTER TABLE cron_jobs ADD COLUMN deliver_mode TEXT NOT NULL DEFAULT 'always';

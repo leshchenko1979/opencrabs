@@ -72,6 +72,9 @@ pub struct CronJobPatch {
     pub set_goal: Option<bool>,
     pub goal_template: Option<Option<String>>,
     pub run_once: Option<bool>,
+    /// #969 — `"always"` / `"silent"`. Tri-state like the rest: `None` keeps
+    /// the current mode, `Some(mode)` sets it.
+    pub deliver_mode: Option<String>,
 }
 
 impl CronJobPatch {
@@ -95,6 +98,7 @@ impl CronJobPatch {
             && self.set_goal.is_none()
             && self.goal_template.is_none()
             && self.run_once.is_none()
+            && self.deliver_mode.is_none()
     }
 }
 
@@ -116,8 +120,8 @@ impl CronJobRepository {
             .context("Failed to get connection")?
             .interact(move |conn| {
                 conn.execute(
-                    "INSERT INTO cron_jobs (id, name, cron_expr, timezone, prompt, provider, model, thinking, auto_approve, deliver_to, deliver_api_key, enabled, next_run_at, created_at, updated_at, profile_name, trigger_cmd, trigger_on, set_goal, goal_template, run_once)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                    "INSERT INTO cron_jobs (id, name, cron_expr, timezone, prompt, provider, model, thinking, auto_approve, deliver_to, deliver_api_key, enabled, next_run_at, created_at, updated_at, profile_name, trigger_cmd, trigger_on, set_goal, goal_template, run_once, deliver_mode)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                     params![
                         j.id.to_string(),
                         j.name,
@@ -140,6 +144,7 @@ impl CronJobRepository {
                         j.set_goal as i32,
                         j.goal_template,
                         j.run_once as i32,
+                        j.deliver_mode,
                     ],
                 )
             })
@@ -386,6 +391,9 @@ impl CronJobRepository {
                 push_opt(&mut sets, &mut vals, "goal_template", patch.goal_template);
                 if let Some(v) = patch.run_once {
                     push(&mut sets, &mut vals, "run_once", SqlVal::Int(i32::from(v)));
+                }
+                if let Some(v) = patch.deliver_mode {
+                    push(&mut sets, &mut vals, "deliver_mode", SqlVal::Text(v));
                 }
                 match patch.next_run_at {
                     Some(Some(dt)) => {

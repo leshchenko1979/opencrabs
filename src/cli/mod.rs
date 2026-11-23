@@ -5,7 +5,7 @@
 mod args;
 pub(crate) mod commands;
 pub(crate) mod crash_recovery;
-mod cron;
+pub(crate) mod cron;
 pub(crate) mod daemon_health;
 pub(crate) mod doctor_fix;
 #[cfg(any(test, feature = "eval"))]

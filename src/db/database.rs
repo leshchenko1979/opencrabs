@@ -225,6 +225,14 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // `MIGRATION_EFFECTS` declaration is owed (that window is contiguous and
     // ends far below this entry).
     include_str!("../migrations/20261122000001_add_background_task_outcome.sql"),
+    // #969: `cron_jobs.deliver_mode` splits a cron job's send permission from
+    // harness auto-delivery. `always` is the DEFAULT so every pre-existing row
+    // keeps posting exactly as it did. Appended last per the list invariant; no
+    // `MIGRATION_EFFECTS` declaration is owed — that window is the contiguous
+    // replay-crash set ending at HEAD 59, and the contiguity test forbids
+    // declaring anything above it. A database stamped past this index gains the
+    // column from `heal_cron_deliver_mode` after `to_latest` (#1401 class).
+    include_str!("../migrations/20261123000001_add_cron_deliver_mode.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
@@ -1033,6 +1041,7 @@ impl Database {
                     crate::db::migration_heal::heal_project_repo_remote(conn)?;
                     crate::db::migration_heal::heal_session_seen_skills_loaded_mtime(conn)?;
                     crate::db::migration_heal::heal_tool_executions_exit_code(conn)?;
+                    crate::db::migration_heal::heal_cron_deliver_mode(conn)?;
                     Ok(())
                 },
             )
