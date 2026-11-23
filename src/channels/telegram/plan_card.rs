@@ -24,6 +24,51 @@ use uuid::Uuid;
 /// /show-plan). The rich path (`sendRichMessage`, 32K chars) needs no budget.
 const CARD_PROSE_BUDGET: usize = 2400;
 
+/// Split `budget` across sections by fair share, so no single section can
+/// starve the rest (#983).
+///
+/// Water-filling: each round offers every still-unfilled section
+/// `remaining / still_unfilled`. A section whose body fits inside that offer
+/// takes its whole length and returns the surplus to the pool, so the next
+/// round can offer the rest more. When nothing fits under the fair share, the
+/// remainder splits evenly and the odd chars go to the earliest sections.
+///
+/// Pure arithmetic — no IO, no async — so the allocation is unit-testable on
+/// its own, independent of rendering.
+fn allocate_prose_budget(lens: &[usize], budget: usize) -> Vec<usize> {
+    let mut alloc = vec![0usize; lens.len()];
+    let mut remaining = budget;
+    let mut open: Vec<usize> = (0..lens.len()).collect();
+
+    while !open.is_empty() && remaining > 0 {
+        let share = remaining / open.len();
+        let mut fits: Vec<usize> = Vec::new();
+        let mut still_open: Vec<usize> = Vec::new();
+        for &i in &open {
+            if lens[i] <= share {
+                fits.push(i);
+            } else {
+                still_open.push(i);
+            }
+        }
+        if fits.is_empty() {
+            // Nothing fits under the fair share: hand out the remainder
+            // evenly, the odd chars going to the earliest sections.
+            let odd = remaining % open.len();
+            for (k, &i) in open.iter().enumerate() {
+                alloc[i] = share + usize::from(k < odd);
+            }
+            return alloc;
+        }
+        for &i in &fits {
+            alloc[i] = lens[i];
+            remaining -= lens[i];
+        }
+        open = still_open;
+    }
+    alloc
+}
+
 /// Goal text budget (chars) on the classic card. The goal renders as a
 /// collapsed expandable (ADR 0005 Decision 12), so the cap only trims the
 /// expanded body, never the visible chrome.
@@ -1890,5 +1935,65 @@ mod char_boundary_regression_tests {
     #[test]
     fn well_formed_header_still_parses() {
         assert_eq!(parse_section_header("DELTA: body", "DELTA"), Some("body"));
+    }
+}
+
+#[cfg(test)]
+mod prose_budget_tests {
+    use super::allocate_prose_budget;
+
+    /// #983 — the live fixture, measured on the *Fix CI Ship Process* plan:
+    /// Context 3171 · 100 · Design diagram 705 · 100 · 100 against the 2400
+    /// budget. Before the fix Context alone took the whole budget and the four
+    /// following sections vanished. Now the three short sections survive WHOLE
+    /// and the two long ones each get a real share.
+    #[test]
+    fn water_filling_keeps_short_sections_whole() {
+        let alloc = allocate_prose_budget(&[3171, 100, 705, 100, 100], 2400);
+        assert!(
+            alloc.iter().sum::<usize>() <= 2400,
+            "allocation must fit the budget, got {}",
+            alloc.iter().sum::<usize>()
+        );
+        assert_eq!(
+            [alloc[1], alloc[3], alloc[4]],
+            [100, 100, 100],
+            "a section shorter than its fair share must render whole"
+        );
+        assert!(
+            alloc[0] > 600 && alloc[2] > 600,
+            "the two long sections must each get a real share, got {} and {}",
+            alloc[0],
+            alloc[2]
+        );
+        // The surplus the short sections returned rolls into Context, which is
+        // the only section left open in the final round.
+        assert_eq!(alloc, vec![1395, 100, 705, 100, 100]);
+    }
+
+    /// A document that already fits is untouched: every section gets its full
+    /// length, so the whole-prose fast path and the allocator agree.
+    #[test]
+    fn sections_that_fit_are_allocated_whole() {
+        assert_eq!(
+            allocate_prose_budget(&[300, 400, 500], 2400),
+            vec![300, 400, 500]
+        );
+    }
+
+    /// Degenerate budgets still terminate and never exceed the budget — the
+    /// `share == 0` round hands out one char each to the earliest sections.
+    #[test]
+    fn tiny_budget_never_exceeds_the_pool() {
+        let alloc = allocate_prose_budget(&[10, 10, 10], 2);
+        assert_eq!(alloc, vec![1, 1, 0]);
+        assert_eq!(alloc.iter().sum::<usize>(), 2);
+    }
+
+    /// No sections, no allocation — the caller's empty-prose path stays a
+    /// no-op rather than a panic on an empty vector.
+    #[test]
+    fn empty_input_allocates_nothing() {
+        assert!(allocate_prose_budget(&[], 2400).is_empty());
     }
 }
