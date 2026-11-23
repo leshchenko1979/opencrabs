@@ -88,6 +88,13 @@ async fn compaction_boundary_must_follow_newest_marker_not_highest_sequence() {
 
 /// Failure mode 2: rows after the boundary with reused `sequence` values must
 /// not be dropped when the boundary row used a higher sequence number.
+///
+/// The failure this pins is the SEQUENCE-keyed tail predicate: anchoring on the
+/// stale `seq=500` marker and keeping `sequence > 500` dropped every row the
+/// reuse made numerically smaller — the 328 rows between the two markers plus
+/// the fresh marker and the row after it. Anchored on `rowid` the tail is those
+/// last two rows, and the 329 rows BEFORE the boundary are excluded on purpose,
+/// which is what `total_rows - tail` measures (#987).
 #[tokio::test]
 async fn compaction_tail_must_not_drop_newer_rows_after_sequence_reuse() {
     let stale = format!("{COMPACTION_MARKER_PREFIX} — stale anchor");
@@ -125,15 +132,28 @@ async fn compaction_tail_must_not_drop_newer_rows_after_sequence_reuse() {
     };
     let (loaded, total) = (window.messages, window.total_rows);
 
-    let skipped = total.saturating_sub(loaded.len());
+    // The window is exactly the newest marker and the row after it. `excluded`
+    // rows sit BEFORE the boundary and are supposed to be skipped; the bug this
+    // pins was the tail being empty because the SEQUENCE predicate dropped them.
     assert_eq!(
-        skipped, 0,
-        "expected zero rows skipped after the newest marker, but loader excluded {skipped} \
-         (production sample excluded 328)"
+        loaded.len(),
+        2,
+        "the window must be the newest marker plus the assistant row after it — a \
+         sequence-keyed tail drops both"
     );
     assert!(
-        loaded.iter().any(|m| m.content == "must stay visible"),
-        "assistant tail after the newest marker must be in the loaded window"
+        loaded[0].content.starts_with(COMPACTION_MARKER_PREFIX),
+        "the window must OPEN on the newest marker, got {:?}",
+        loaded[0].content
+    );
+    assert_eq!(
+        loaded[1].content, "must stay visible",
+        "the row after the newest marker must be the assistant tail"
+    );
+    assert_eq!(
+        total.saturating_sub(loaded.len()),
+        excluded + 1,
+        "only the {excluded} pre-boundary rows and the stale marker may be skipped"
     );
 }
 
