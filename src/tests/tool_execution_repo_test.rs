@@ -469,6 +469,39 @@ async fn record_started_refuses_blank_and_malformed_tool_names() {
     assert_eq!(count, 0, "neither refused call may leave a row");
 }
 
+/// A HYPHENATED name is a real tool name and must journal (#974).
+///
+/// The name guard used to accept only `[a-z0-9_]`, so every `oc-*` tool was
+/// silently dropped — while `classify::classify_call` classes `oc-ship-chain`
+/// and `oc-deploy` as DESTRUCTIVE. The two disagreed exactly where it costs
+/// most: the destructive calls the restart park gate exists to catch were the
+/// ones that never got a journal row, so a restart mid-ship could not park.
+/// This leg is the mutant-killer for that guard: restore the underscore-only
+/// set and it goes red.
+#[tokio::test]
+async fn record_started_journals_a_hyphenated_oc_tool_name() {
+    let db = make_db().await;
+    let repo = ToolExecutionRepository::new(db.pool().clone());
+    repo.record_started(
+        "ship",
+        "msg-1",
+        "sess-1",
+        "turn-1",
+        "oc-ship-chain",
+        r#"{"sha":"deadbeef"}"#,
+    )
+    .await
+    .unwrap();
+
+    let unknown = repo.unknown_for_turn("turn-1").await.unwrap();
+    assert_eq!(
+        unknown.len(),
+        1,
+        "an oc-* name must journal — the park gate reads these rows"
+    );
+    assert_eq!(unknown[0].tool_name, "oc-ship-chain");
+}
+
 /// Retention for the journal's own debris: unresolved rows past the cutoff go,
 /// completed rows are analytics and stay (the message prune owns those).
 #[tokio::test]

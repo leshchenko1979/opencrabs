@@ -52,7 +52,7 @@ async fn a_destructive_unknown_parks_the_turn() {
         "the notice must name the call: {notice}"
     );
     assert!(
-        notice.contains(&&session.simple().to_string()[..8]),
+        notice.contains(&session.simple().to_string()[..8]),
         "the notice must carry the session: {notice}"
     );
 }

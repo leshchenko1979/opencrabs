@@ -611,12 +611,19 @@ fn is_blank_tool_name(tool_name: &str) -> bool {
 ///
 /// Defense-in-depth against garbage that leaks from phantom tool calls
 /// (reasoning text + stray XML/JSON fragments). Valid tool names are lowercase
-/// alphanumeric plus underscores, at most 64 bytes.
+/// alphanumeric plus underscores and hyphens, at most 64 bytes.
+///
+/// The hyphen is load-bearing (#974): `classify::classify_call` treats `oc-*`
+/// as a first-class tool namespace and classes `oc-ship-chain` / `oc-deploy`
+/// as DESTRUCTIVE, but this guard used to reject every hyphenated name — so
+/// exactly the calls the park gate exists to catch were silently refused a
+/// journal row and could never park a turn. A guard that drops the case its
+/// own feature needs is worse than no guard: the row's absence is invisible.
 fn is_malformed_tool_name(tool_name: &str) -> bool {
     tool_name.len() > 64
         || !tool_name
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
 /// The tool-level outcome for the execution record (#763, #938).
